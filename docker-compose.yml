@@ -1,0 +1,66 @@
+# Stand-alone compose file for the mock STS: `docker compose up --build`.
+#
+# In the project this was extracted from the STS is one service among nine
+# (local-tests.yml), all on host networking so that Keycloak, the api, the client
+# and this share one loopback. Here it is alone, so the two things that came from
+# that file are the ones that are about the STS itself: the image/build pair and
+# the healthcheck probe.
+#
+# Compose format 2.4, matching the parent project's files. Nothing here uses
+# `depends_on: condition: service_healthy` — there is only one service — but the
+# version is kept the same so this file can be read beside those and so
+# docker-compose v1, which treats a file with no `version:` as the v1 format that
+# has no `healthcheck` at all, still parses it. Docker Compose v2 and later print
+# "the attribute `version` is obsolete" and then ignore the line — that warning is
+# the whole cost, and it is not a reason to drop the v1 compatibility.
+version: '2.4'
+services:
+  sts:
+    container_name: sts
+    hostname: sts
+    # Same image name the parent project builds, so a local `docker compose up`
+    # here and the suite there produce the one image rather than two that drift.
+    image: rcbj/sts
+    build:
+      # Repo root, and the default ./Dockerfile. The parent passes
+      # `dockerfile: sts/Dockerfile` with a root context because its COPY paths
+      # are repo-root-relative there; in this repo the Dockerfile's paths
+      # (`COPY *.js`, `COPY contexts`, `COPY env`) are relative to this directory,
+      # which is what let the file be copied across unchanged.
+      context: .
+    # A published port rather than the parent's `network_mode: "host"`. Host
+    # networking is what that stack needs and is Linux-only; publishing works on
+    # Docker Desktop too, and nothing in this repo has to share a loopback with
+    # anything else. The container port is fixed at 8081 because that is what the
+    # Dockerfile EXPOSEs and what the service defaults to — to move the host side,
+    # change the left number only; the STS derives its own did:web and every
+    # published URL from the Host header of the request, so it does not need to be
+    # told which address it was reached at.
+    ports:
+      - "8081:8081"
+    environment:
+      # The log level, and nothing else. debug is the point of a mock: every
+      # endpoint call, and every assertion, JWT and SD-JWT VC both before and
+      # after signing. Swap to ./env/test.js for a quiet run.
+      - CONFIG_FILE=./env/local.js
+      # The base URL the BROWSER uses for the wallet, not one this container
+      # dials. The Credential Offer and presentation pages hand the End-User back
+      # by appending /vc-issuance-1.html or /vc-presentation-1.html to it, so its
+      # default of http://localhost:3000 is right when the wallet runs on the
+      # host, and wrong in a way that looks like an unrelated timeout otherwise
+      # (the URL still contains the wallet page, so a urlContains wait passes).
+      # Uncomment and set it if the wallet is somewhere else.
+      # - OID4VCI_WALLET_URL=http://localhost:3000
+    # Liveness only — /healthcheck answers 200 and a JSON message. The probe is
+    # the parent project's verbatim: `node -e` rather than the curl the image also
+    # has, because it depends on nothing but the runtime the service already needs
+    # and it fails on a non-200 instead of merely on a closed port. It matters
+    # more than it looks: this service is eleven modules and server.js only
+    # requires them, so a module missing from the image is not a lost feature but
+    # a MODULE_NOT_FOUND before anything listens.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8081/healthcheck',function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

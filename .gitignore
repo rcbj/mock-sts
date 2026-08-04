@@ -1,0 +1,8 @@
+# Installed dependencies. package-lock.json IS committed, so `npm ci` reproduces.
+node_modules/
+
+# Generated at runtime, never committed: the signing keys are regenerated on every
+# start by design (see README.md — a per-run kid is what stops a stale instance and
+# a fresh one both claiming the same kid over different keys).
+*.pem
+*.log
