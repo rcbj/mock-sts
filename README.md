@@ -48,6 +48,11 @@ docker build -t mock-sts .
 docker run --rm -p 8081:8081 mock-sts
 ```
 
+The OIDC Discovery Metadata Endpoint:
+```
+http://localhost:8081/server001/.well-known/openid-configuration
+```
+
 Via Docker-Compose:
 ```bash
 docker-compose up
@@ -109,8 +114,6 @@ scope — so a missing one is not a degraded feature, the service does not start
 all. They are vendored rather than fetched because a signature is computed over
 canonicalized statements: a one-byte difference in a context fails every signature
 later, which looks like a crypto bug and is not one.
-
-
 
 ### Two discovery documents, built from one object
 
