@@ -1,0 +1,26 @@
+# What is NOT sent to the daemon as build context.
+#
+# Nothing here changes what ends up in the image: the Dockerfile copies four
+# things — package*.json, *.js, contexts and env — and no rule below touches any
+# of them. What it changes is what is UPLOADED before the first instruction runs.
+#
+# node_modules is the whole reason this file exists. It is tens of megabytes, it
+# is re-sent on every build, and it is usually PRESENT: `npm ci` here is the
+# normal way to run the service outside a container, and the project this was
+# extracted from installs these dependencies in its checkout of this repository
+# as well — its compose files build with `context: .` pointed at that checkout,
+# and four of its host-run tests load bbs2023.js in place, so they need the
+# dependencies on disk. Without this file every one of those builds pays for it.
+**/node_modules
+
+# The checkout's own history. When this repository is consumed as a git
+# submodule its .git is a small FILE rather than a directory; either way it is
+# not something a build needs.
+.git
+.gitignore
+
+# The runtime artefacts .gitignore already keeps out of commits: the signing keys
+# are regenerated on every start by design, so a stray copy is stale as well as
+# private.
+*.pem
+*.log
