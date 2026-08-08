@@ -389,6 +389,20 @@ const sessions = new Map();         // session id -> the signed-in user
 
 const pendingLogins = new Map();    // login id -> the authorization request being interrupted
 
+// WebAuthn as a second factor. The verifier is ./webauthn — written from the
+// specification and sharing no code with the debugger's own decoder, which is
+// what makes tests/webauthn_cross_impl.js over there a real check rather than
+// an implementation agreeing with itself.
+//
+// This lives in oauth2.js rather than a module of its own because it is a step
+// IN THE LOGIN FLOW: it needs pendingLogins and sessions, both of which this
+// module owns, and reaching for them from elsewhere is the import cycle this
+// service's split exists to avoid.
+const webauthnVerifier = require('./webauthn');
+const webauthnCredentials = new Map();  // username -> { credentialId, publicKeyJwk, signCount }
+const pendingMfa = new Map();           // mfa id -> { login, username, challenge, expires }
+const MFA_TTL_MS = 5 * 60 * 1000;
+
 const revokedJtis = new Set();      // tokens revoked via /oauth2/revoke
 
 const registeredClients = new Map();// client_id -> { metadata, registrationAccessToken }
@@ -485,6 +499,13 @@ function idToken(base, opts) {
     preferred_username: user.preferred_username, email: user.email,
     email_verified: user.email_verified
   };
+  // How the End-User authenticated, and to what level. RFC 8176 for amr; `hwk`
+  // is proof of possession of a hardware key, which is what a WebAuthn
+  // assertion demonstrates. A relying party that asked for a second factor
+  // through acr_values checks these — so they are emitted whenever the session
+  // recorded them, and their absence is then meaningful rather than ambiguous.
+  if (opts.amr) payload.amr = opts.amr;
+  if (opts.acr) payload.acr = opts.acr;
   if (opts.nonce) payload.nonce = opts.nonce;
   if (opts.access_token) payload.at_hash = halfHash(opts.access_token);
   if (opts.code) payload.c_hash = halfHash(opts.code);
@@ -608,6 +629,9 @@ function loginPage(base, login, error) {
     ' value="' + xmlEscape(q.login_hint || '') + '">' +
     '<label for="password">Password</label>' +
     '<input type="password" id="password" name="password" autocomplete="current-password">' +
+    '<label class="chk"><input type="checkbox" id="use_webauthn" name="use_webauthn" value="1"' +
+    (login.forceMfa ? ' checked disabled' : '') + '> Use a security key (WebAuthn)</label>' +
+    (login.forceMfa ? '<input type="hidden" name="use_webauthn" value="1">' : '') +
     '<div class="row"><button type="submit" id="kc-login" name="action" value="login">Sign In</button>' +
     '<button type="submit" id="kc-cancel" name="action" value="cancel" class="secondary">Cancel</button></div>' +
     '</form><div class="meta">' +
@@ -666,7 +690,9 @@ function parseAuthorizationDetails(raw) {
   return { details: wanted.length ? wanted : null };
 }
 
-function issueAuthorizationResponse(req, res, query, user, authTime) {
+function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
+  const amr = (authInfo && authInfo.amr) || null;
+  const acr = (authInfo && authInfo.acr) || null;
   log.debug("Entering issueAuthorizationResponse(). response_type=" + (query.response_type || '(none)') +
             ", user=" + user.username);
   const base = baseUrlOf(req);
@@ -690,7 +716,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime) {
     const code = randomId(24);
     authzCodes.set(code, {
       client_id: String(query.client_id), redirect_uri: redirectUri, scope: scope,
-      nonce: query.nonce, user: user, auth_time: authTime,
+      nonce: query.nonce, user: user, auth_time: authTime, amr: amr, acr: acr,
       code_challenge: query.code_challenge, code_challenge_method: query.code_challenge_method || 'plain',
       // RFC 9449 section 10: the JWK Thumbprint of the DPoP key the client
       // intends to use, taken at the authorization request so the code itself is
@@ -714,6 +740,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime) {
   if (types.indexOf('id_token') >= 0) {
     out.id_token = idToken(base, {
       user: user, client_id: String(query.client_id), nonce: query.nonce, auth_time: authTime,
+      amr: amr, acr: acr,
       access_token: out.access_token, code: out.code
     });
   }
@@ -779,7 +806,7 @@ app.get('/oauth2/authorize', function (req, res) {
   const forcePrompt = String(q.prompt || '').split(/\s+/).indexOf('login') >= 0;
   if (session && !forcePrompt) {
     log.debug("Leaving the authorization endpoint. The session stands, so the response goes out now.");
-    return issueAuthorizationResponse(req, res, q, session.user, session.authTime);
+    return issueAuthorizationResponse(req, res, q, session.user, session.authTime, session);
   }
   if (String(q.prompt || '').split(/\s+/).indexOf('none') >= 0) {
     // OIDC: prompt=none must not show any UI.
@@ -793,6 +820,10 @@ app.get('/oauth2/authorize', function (req, res) {
     query: JSON.parse(JSON.stringify(q)),
     expires: Date.now() + LOGIN_TTL_MS
   };
+  // acr_values is how a relying party demands a second factor. Anything naming
+  // mfa or a hardware key forces the WebAuthn step and disables the opt-out, so
+  // the checkbox cannot be used to answer a request for step-up with a password.
+  login.forceMfa = /\b(mfa|hwk|phr|phrh)\b/i.test(String(login.query.acr_values || ''));
   pendingLogins.set(login.id, login);
   pendingLogins.forEach(function (v, k) { if (v.expires < Date.now()) pendingLogins.delete(k); });
   res.status(200).type('text/html').set('Cache-Control', 'no-store').send(loginPage(base, login, ''));
@@ -834,10 +865,34 @@ app.post('/oauth2/login', function (req, res) {
       .send(loginPage(base, login, 'Authentication failed for ' + username + '.'));
   }
 
+  // The second factor, if this request asked for one. The password step has
+  // succeeded; the session is NOT created yet, because a session created here
+  // and upgraded later would be a valid single-factor session in the window
+  // between — and an authorization request arriving in that window would be
+  // answered with tokens that claim one factor's worth of assurance and carry
+  // none of the second's.
+  if (String(body.use_webauthn || '') === '1') {
+    pendingLogins.delete(login.id);
+    const mfaId = randomId(24);
+    pendingMfa.set(mfaId, {
+      login: login, username: username,
+      challenge: crypto.randomBytes(32).toString('base64url'),
+      expires: Date.now() + MFA_TTL_MS
+    });
+    pendingMfa.forEach(function (v, k) { if (v.expires < Date.now()) pendingMfa.delete(k); });
+    log.debug("Leaving the login endpoint. " + username + " passed the password step; asking for " +
+              "the security key.");
+    return sendWebauthnPage(res, webauthnPage(base, mfaId, username, ''));
+  }
+
   pendingLogins.delete(login.id);
   const sessionId = randomId(24);
   sessions.set(sessionId, {
-    user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS
+    user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
+    // One factor. amr and acr are stated rather than omitted, because a relying
+    // party that asked for a second factor needs to be able to see that it did
+    // not get one.
+    amr: ['pwd'], acr: '1'
   });
   res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
 
@@ -845,6 +900,254 @@ app.post('/oauth2/login', function (req, res) {
   // prompt, which has now been honoured and would otherwise prompt forever.
   res.redirect(302, base + '/oauth2/authorize?' + queryString(login.query, ['prompt']));
   log.debug("Leaving the login endpoint. " + username + " is signed in; back to the authorization endpoint.");
+});
+
+
+// The second-factor screen. It performs the ceremony in the browser against
+// THIS origin — the RP ID is the STS's own host, because WebAuthn binds a
+// ceremony to the calling origin and no amount of configuration changes that.
+//
+// Registration on first use, assertion afterwards: a mock authorization server
+// that demanded an already-enrolled key would be untestable without a manual
+// enrolment step, and the interesting artifacts are the same either way.
+function webauthnPage(base, mfaId, username, error) {
+  log.debug("Entering webauthnPage(). username=" + username);
+  const known = webauthnCredentials.get(username);
+  const mode = known ? 'get' : 'create';
+  const pending = pendingMfa.get(mfaId);
+  const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
+    '<title>Security key — mock authorization server</title><style>' +
+    'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
+    'display:flex;align-items:center;justify-content:center;min-height:100vh;color:#222}' +
+    '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:28px 32px;width:420px;' +
+    'box-shadow:0 6px 24px rgba(0,0,0,.08)}h1{font-size:1.25em;margin:0 0 4px}' +
+    'p.sub{color:#666;font-size:.85em;margin:0 0 18px}button{padding:9px 12px;border-radius:5px;' +
+    'border:1px solid #12107c;background:#12107c;color:#fff;font-size:.95em;cursor:pointer;width:100%}' +
+    '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
+    'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
+    'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}' +
+    'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}</style></head><body>' +
+    '<div class="card"><h1>' + (mode === 'create' ? 'Enrol a security key' : 'Use your security key') + '</h1>' +
+    '<p class="sub">Second factor for <code>' + xmlEscape(username) + '</code></p>' +
+    (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
+    '<button id="wa-go" type="button">' +
+    (mode === 'create' ? 'Enrol security key' : 'Authenticate with security key') + '</button>' +
+    '<form method="post" action="/oauth2/webauthn" id="wa-form">' +
+    '<input type="hidden" name="mfa_id" value="' + xmlEscape(mfaId) + '">' +
+    '<input type="hidden" name="mode" value="' + mode + '">' +
+    '<input type="hidden" name="credential" id="wa-credential">' +
+    '</form>' +
+    // The ceremony's parameters travel as data attributes and the script is a
+    // separate resource, so this page needs no inline script. That is not
+    // fastidiousness: this service sets `script-src 'none'` on everything by
+    // design (see app.js), and an inline script here would simply not run —
+    // silently, with the button doing nothing. One page relaxes it to 'self',
+    // which is the smallest exception that works.
+    '<div id="wa-data"' +
+    ' data-challenge="' + xmlEscape(pending ? pending.challenge : '') + '"' +
+    ' data-rpid="' + xmlEscape(rpIdOf(base)) + '"' +
+    ' data-user="' + xmlEscape(username) + '"' +
+    ' data-allow="' + xmlEscape(known ? known.credentialId : '') + '"' +
+    ' data-mode="' + mode + '"></div>' +
+    '<div class="meta">' +
+    '<div>RP ID: <code>' + xmlEscape(rpIdOf(base)) + '</code> — the ceremony is bound to this origin.</div>' +
+    '<div>challenge: <code>' + xmlEscape(pending ? pending.challenge : '') + '</code></div>' +
+    '<div>' + (mode === 'create'
+      ? 'No key is enrolled for this user yet, so this step registers one.'
+      : 'A key is already enrolled for this user, so this step is an assertion.') + '</div>' +
+    '</div></div>' +
+    '<script src="/oauth2/webauthn.js"></script></body></html>\n';
+  log.debug("Leaving webauthnPage(). mode=" + mode);
+  return html;
+}
+
+// The ceremony script, as its own resource. Written with split/join rather than
+// regular expressions on purpose: this string passes through a JavaScript string
+// literal on the way out, where `\+` collapses to `+` and `\/` to `/`, which
+// silently produced `/+/g` and `///g` in the delivered script the first time
+// this was written inline. split/join has nothing to escape.
+const WEBAUTHN_SCRIPT = [
+  '(function () {',
+  '  var d = document.getElementById("wa-data");',
+  '  var b64u = function (b) {',
+  '    var s = btoa(String.fromCharCode.apply(null, new Uint8Array(b)));',
+  '    return s.split("+").join("-").split("/").join("_").split("=").join("");',
+  '  };',
+  '  var bytes = function (s) {',
+  '    var t = s.split("-").join("+").split("_").join("/");',
+  '    while (t.length % 4) { t += "="; }',
+  '    var bin = atob(t), out = new Uint8Array(bin.length);',
+  '    for (var i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }',
+  '    return out;',
+  '  };',
+  '  var send = function (payload) {',
+  '    document.getElementById("wa-credential").value = JSON.stringify(payload);',
+  '    document.getElementById("wa-form").submit();',
+  '  };',
+  '  document.getElementById("wa-go").addEventListener("click", function () {',
+  '    var challenge = bytes(d.getAttribute("data-challenge"));',
+  '    var rpId = d.getAttribute("data-rpid");',
+  '    var user = d.getAttribute("data-user");',
+  '    var allow = d.getAttribute("data-allow");',
+  '    var p;',
+  '    if (d.getAttribute("data-mode") === "create") {',
+  '      p = navigator.credentials.create({ publicKey: {',
+  '        rp: { name: "Mock authorization server", id: rpId },',
+  '        user: { id: new TextEncoder().encode(user), name: user, displayName: user },',
+  '        challenge: challenge,',
+  '        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],',
+  '        authenticatorSelection: { userVerification: "preferred" },',
+  '        attestation: "direct", timeout: 60000 } })',
+  '        .then(function (c) { return { id: c.id, rawId: b64u(c.rawId), type: c.type, response: {',
+  '          clientDataJSON: b64u(c.response.clientDataJSON),',
+  '          attestationObject: b64u(c.response.attestationObject) } }; });',
+  '    } else {',
+  '      p = navigator.credentials.get({ publicKey: {',
+  '        challenge: challenge, rpId: rpId,',
+  '        allowCredentials: allow ? [{ type: "public-key", id: bytes(allow) }] : undefined,',
+  '        userVerification: "preferred", timeout: 60000 } })',
+  '        .then(function (a) { return { id: a.id, rawId: b64u(a.rawId), type: a.type, response: {',
+  '          clientDataJSON: b64u(a.response.clientDataJSON),',
+  '          authenticatorData: b64u(a.response.authenticatorData),',
+  '          signature: b64u(a.response.signature),',
+  '          userHandle: a.response.userHandle ? b64u(a.response.userHandle) : null } }; });',
+  '    }',
+  '    p.then(send).catch(function (e) { send({ error: e.name, message: e.message }); });',
+  '  });',
+  '})();',
+  ''
+].join('\n');
+
+// The one page in this service that runs a script, and the one response that
+// relaxes the policy for it — to 'self', not 'unsafe-inline', so the exception
+// is a named resource rather than a hole. app.js sets script-src 'none' on
+// everything by default and that default is worth keeping.
+function sendWebauthnPage(res, html) {
+  res.set('Content-Security-Policy',
+          "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
+          "base-uri 'none'; frame-ancestors 'none'");
+  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(html);
+}
+
+app.get('/oauth2/webauthn.js', function (req, res) {
+  log.debug("Serving the WebAuthn ceremony script.");
+  res.set('Content-Security-Policy', "default-src 'none'");
+  res.type('application/javascript').set('Cache-Control', 'no-store').send(WEBAUTHN_SCRIPT);
+});
+
+// The RP ID is the origin's HOST, never anything configurable. A mock that let
+// you set it to something else would be teaching the one lesson WebAuthn exists
+// to prevent.
+function rpIdOf(base) {
+  try {
+    return new URL(base).hostname;
+  } catch (e) {
+    // A base that will not parse is a misconfiguration of this service rather
+    // than of the ceremony; fall back to the literal so the page still says
+    // something true about what it will send.
+    return String(base).replace(/^https?:\/\//, '').split(':')[0];
+  }
+}
+
+app.post('/oauth2/webauthn', function (req, res) {
+  log.debug("Entering the WebAuthn second-factor endpoint.");
+  const base = baseUrlOf(req);
+  const body = parseBody(req);
+  const pending = pendingMfa.get(String(body.mfa_id || ''));
+  if (!pending || pending.expires < Date.now()) {
+    pendingMfa.delete(String(body.mfa_id || ''));
+    log.debug("Leaving the WebAuthn endpoint. The step had expired.");
+    return oauthError(res, 400, 'invalid_request',
+      'This second-factor step has expired. Start the authorization request again.');
+  }
+
+  let credential;
+  try {
+    credential = JSON.parse(String(body.credential || '{}'));
+  } catch (e) {
+    log.debug("Leaving the WebAuthn endpoint. The posted credential was not JSON.");
+    return sendWebauthnPage(res, webauthnPage(base, pending.login && String(body.mfa_id), pending.username,
+                         'The browser returned something this server could not read.'));
+  }
+  if (credential.error) {
+    // The browser refused the ceremony. Its error is deliberately ambiguous —
+    // no credential, declined, and timed out are one error — so report it as
+    // given rather than guessing which happened.
+    log.debug("Leaving the WebAuthn endpoint. The browser refused: " + credential.error);
+    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
+        credential.error + ': ' + (credential.message || '') +
+        '  (WebAuthn reports one error for several situations, so this does not say which.)'));
+  }
+
+  const expectedOrigin = base;
+  const expectedRpId = rpIdOf(base);
+  let verdict;
+  try {
+    if (String(body.mode || '') === 'create') {
+      verdict = webauthnVerifier.verifyRegistration({
+        attestationObject: credential.response.attestationObject,
+        clientDataJSON: credential.response.clientDataJSON,
+        expectedChallenge: pending.challenge,
+        expectedOrigin: expectedOrigin,
+        expectedRpId: expectedRpId,
+        requireUserVerification: false
+      });
+      if (verdict.ok) {
+        webauthnCredentials.set(pending.username, {
+          credentialId: verdict.credentialId,
+          publicKeyJwk: verdict.publicKeyJwk,
+          signCount: verdict.signCount
+        });
+      }
+    } else {
+      const known = webauthnCredentials.get(pending.username);
+      if (!known) {
+        throw new Error('no key is enrolled for ' + pending.username);
+      }
+      verdict = webauthnVerifier.verifyAssertion({
+        authenticatorData: credential.response.authenticatorData,
+        clientDataJSON: credential.response.clientDataJSON,
+        signature: credential.response.signature,
+        publicKeyJwk: known.publicKeyJwk,
+        expectedChallenge: pending.challenge,
+        expectedOrigin: expectedOrigin,
+        expectedRpId: expectedRpId,
+        requireUserVerification: false,
+        previousSignCount: known.signCount
+      });
+      if (verdict.ok) {
+        known.signCount = verdict.signCount;
+        webauthnCredentials.set(pending.username, known);
+      }
+    }
+  } catch (e) {
+    log.debug("Leaving the WebAuthn endpoint. Verification threw: " + e.message);
+    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
+                         'The second factor could not be checked: ' + e.message));
+  }
+
+  logArtifact('WebAuthn ' + (String(body.mode) === 'create' ? 'registration' : 'assertion'),
+              'as verified by this server', { ok: verdict.ok, checks: verdict.checks });
+
+  if (!verdict.ok) {
+    // Name the check that failed. "Authentication failed" would be true and
+    // useless, and this is a debugging service.
+    log.debug("Leaving the WebAuthn endpoint. Refused: " + verdict.failed.join('; '));
+    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
+                         'The second factor did not verify — ' + verdict.failed.join('; ') + '.'));
+  }
+
+  pendingMfa.delete(String(body.mfa_id));
+  const sessionId = randomId(24);
+  sessions.set(sessionId, {
+    user: userFor(pending.username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
+    // Two factors, and the tokens say so. `hwk` is the RFC 8176 value for proof
+    // of possession of a hardware key, which is what a WebAuthn assertion is.
+    amr: ['pwd', 'hwk'], acr: 'mfa'
+  });
+  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  res.redirect(302, base + '/oauth2/authorize?' + queryString(pending.login.query, ['prompt']));
+  log.debug("Leaving the WebAuthn endpoint. " + pending.username + " completed the second factor.");
 });
 
 // Ends the session, so the next authorization request prompts again.
@@ -1210,7 +1513,7 @@ app.post('/oauth2/token', function (req, res) {
     return respond(tokenSet(base, {
       jkt: dpopJkt,
       user: record.user, client_id: record.client_id, scope: record.scope,
-      nonce: record.nonce, auth_time: record.auth_time,
+      nonce: record.nonce, auth_time: record.auth_time, amr: record.amr, acr: record.acr,
       authorization_details: grantIdentifiers(record.authorization_details, record.user)
     }));
   }
