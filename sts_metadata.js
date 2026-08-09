@@ -136,6 +136,17 @@ const SPECS = [
     coverage: 'full: every authorization response carries iss, errors included, and both discovery ' +
               'documents advertise authorization_response_iss_parameter_supported so a client knows ' +
               'it may require it.' },
+  { id: 'webauthn', name: 'Web Authentication (WebAuthn) Level 3',
+    where: 'W3C',
+    url: 'https://www.w3.org/TR/webauthn-3/',
+    coverage: 'partial, relying-party side: registration (section 7.1) and assertion (section 7.2) ' +
+              'are verified — challenge, origin, RP ID hash, user presence and verification flags, ' +
+              'the signature counter, and the signature over authenticatorData || ' +
+              'SHA-256(clientDataJSON), for ES256, RS256 and EdDSA keys. Attestation statements are ' +
+              'decoded but NOT validated and no metadata service is consulted: this is a mock, and ' +
+              'attesting to an authenticator\'s provenance is the one thing it must not pretend to ' +
+              'do. Written independently of the debugger\'s own decoder so the two can be checked ' +
+              'against each other (tests/webauthn_cross_impl.js).' },
   { id: 'oidc', name: 'OpenID Connect Core 1.0',
     where: 'OpenID Foundation', url: 'https://openid.net/specs/openid-connect-core-1_0.html',
     coverage: 'partial: id_token with nonce, at_hash and c_hash, the three authentication flows, and ' +
@@ -281,6 +292,25 @@ const ENDPOINTS = [
     specs: ['oidc'],
     what: 'Where the login screen posts. No password is checked; the username typed becomes the ' +
           'identity in every token that follows.' },
+  { path: '/oauth2/webauthn', group: 'OAuth 2.0 / OIDC', name: 'WebAuthn second factor',
+    specs: ['oidc', 'webauthn'],
+    effect: 'enrols or asserts a security key, then completes the sign-in',
+    what: 'The second-factor step of the login flow, reached when the authorization request named ' +
+          'mfa in acr_values or the user ticked the box. First use ENROLS a key for that username; ' +
+          'later sign-ins ASSERT with it. The ceremony is verified here — challenge, origin, RP ID ' +
+          'hash, flags and the signature over authenticatorData || SHA-256(clientDataJSON) — by an ' +
+          'implementation written independently of the debugger\'s own, so the two can be checked ' +
+          'against each other. On success the session records amr ["pwd","hwk"] and acr "mfa", which ' +
+          'is how the tokens show that a hardware key was used; a password-only sign-in records ' +
+          'amr ["pwd"] and acr "1" instead. The RP ID is this origin\'s host and is not ' +
+          'configurable: WebAuthn binds a ceremony to the calling origin, and that is the whole of ' +
+          'its phishing resistance.' },
+  { path: '/oauth2/webauthn.js', group: 'OAuth 2.0 / OIDC', name: 'WebAuthn ceremony script',
+    specs: ['webauthn'],
+    what: 'The script the second-factor page runs. It is a separate resource rather than an inline ' +
+          'script because this service sets script-src \'none\' on every response by default; that ' +
+          'one page relaxes it to \'self\', which is the smallest exception that works. An inline ' +
+          'script there would simply not run, with the button doing nothing and no error anywhere.' },
   { path: '/oauth2/logout', group: 'OAuth 2.0 / OIDC', name: 'Session end (end_session_endpoint)',
     specs: ['oidc', 'oidc-logout'], effect: 'drops the mock session cookie',
     what: 'What end_session_endpoint in the OIDC discovery document points at. Drops the session ' +
