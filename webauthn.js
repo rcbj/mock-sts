@@ -31,7 +31,20 @@
 'use strict';
 
 const crypto = require('crypto');
-const { log } = require('./helpers');
+// The service's shared logger when this module is loaded inside the service, and
+// a silent fallback when it is loaded ON ITS OWN — which the debugger's
+// cross-implementation test does, copying this one file next to its own scripts.
+// `./helpers` is not there, and it could not usefully be: it reads
+// process.env.CONFIG_FILE relative to its own directory and pulls in the
+// service's dependencies. A verifier written to be checked by somebody else's
+// test has no business dragging the whole service in behind it.
+let log;
+try {
+  log = require('./helpers').log;
+} catch (e) {
+  const noop = function () {};
+  log = { debug: noop, info: noop, warn: noop, error: noop };
+}
 
 // --- CBOR, enough of it, decode only -----------------------------------------
 //
