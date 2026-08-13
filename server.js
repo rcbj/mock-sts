@@ -78,6 +78,11 @@ require('./vc_offers');
 require('./vc_did');
 require('./vc_issuer');
 require('./vc_verifier');
+// The Kerberos KDC. Requiring it registers /KdcProxy and /krb5/principals like
+// every other module here — but NOT the raw TCP/UDP listeners on port 88, which
+// are started by krb5.listen() below. Binding a privileged port can fail, and a
+// require that throws takes the whole service down; a route cannot.
+const krb5 = require('./krb5_kdc');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -95,4 +100,18 @@ app.listen(PORT, '0.0.0.0', function () {
            'is written to this log at debug level.');
   log.info('Every endpoint and every specification this service implements is listed at ' +
            '/sts-metadata (add ?format=json for the machine-readable form).');
+  // The KDC's sockets are started here rather than at require time so that a
+  // failure to bind (port 88 is privileged) is reported by a running service
+  // instead of preventing it from starting at all. GET /krb5/principals says what
+  // this KDC knows; GET /sts-metadata cannot see a raw socket, so the listener has
+  // its own entry there.
+  const kdcListeners = krb5.listen();
+  kdcListeners.whenReady.then(function (ready) {
+    log.info('krb5: the KDC is reachable on TCP and UDP ' + ready.port + '; MS-KKDCP at /KdcProxy; ' +
+             'GET /krb5/principals lists what it knows.');
+  }).catch(function (err) {
+    // Reported rather than thrown: the rest of this service is still useful, and a
+    // silent failure to bind would surface later as a KDC that never answers.
+    log.error('krb5: the KDC could not start: ' + err.message);
+  });
 });
