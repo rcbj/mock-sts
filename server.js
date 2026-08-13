@@ -83,6 +83,9 @@ require('./vc_verifier');
 // are started by krb5.listen() below. Binding a privileged port can fail, and a
 // require that throws takes the whole service down; a route cannot.
 const krb5 = require('./krb5_kdc');
+// The Kerberos-protected service. Like the KDC it registers its HTTP view at
+// require time and starts its socket from listen(), for the same reason.
+const krb5Service = require('./krb5_service');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -114,4 +117,5 @@ app.listen(PORT, '0.0.0.0', function () {
     // silent failure to bind would surface later as a KDC that never answers.
     log.error('krb5: the KDC could not start: ' + err.message);
   });
+  krb5Service.listen();
 });
