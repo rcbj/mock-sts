@@ -45,7 +45,9 @@
 // bad password, and a clock outside the tolerance. Those refusals are the product
 // here. It does NOT check request signatures, does not implement FAST, and issues
 // no PAC yet — phase 4 adds the PAC, and this file says so rather than leaving a
-// reader to wonder why a Windows service rejects its tickets.
+// reader to wonder why a Windows service rejects its tickets. The AS and TGS
+// exchanges are both served; the AP exchange belongs to a SERVICE rather than to a
+// KDC and lives in krb5_service.js.
 // ---------------------------------------------------------------------------
 
 const net = require('net');
@@ -327,6 +329,231 @@ async function handleAsReq(request) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// The TGS exchange: trade a TGT for a service ticket.
+//
+// The structure is what surprises people. A TGS-REQ carries the TGT as
+// PRE-AUTHENTICATION — a PA-TGS-REQ whose value is an entire AP-REQ — and that
+// AP-REQ's Authenticator carries a checksum over the encoded KDC-REQ-BODY. So the
+// KDC does, in order:
+//
+//   1. decrypt the ticket inside the AP-REQ with the krbtgt key (key usage 2), to
+//      learn the session key and who the client is;
+//   2. decrypt the Authenticator with that SESSION key (key usage 7);
+//   3. verify the Authenticator's checksum over the request body (key usage 6) —
+//      against the body's ORIGINAL bytes, not a re-encoding of them;
+//   4. and only then look at what was actually asked for.
+//
+// Three checks in there are the ones a mock is tempted to skip and a debugger needs
+// most: that the checksum covers the body actually sent (otherwise the body could be
+// swapped after signing), that the Authenticator's cname matches the ticket's
+// (otherwise one client's TGT authenticates another), and that the ticket is inside
+// its validity window.
+// ---------------------------------------------------------------------------
+async function handleTgsReq(request) {
+  log.debug('Entering handleTgsReq().');
+  const body = request.reqBody;
+
+  const paTgs = (request.padata || []).filter(function (pa) {
+    return pa.type === msgs.PA_TYPE.TGS_REQ;
+  })[0];
+  if (!paTgs) {
+    // Without the TGT there is nothing to verify. This is not a policy refusal but a
+    // structural one, and saying which is useful.
+    return errorReply(25, {
+      realm: REALM, sname: body.sname,
+      eText: 'a TGS-REQ must carry the TGT in a PA-TGS-REQ; this request carries none'
+    });
+  }
+
+  let apReq;
+  try {
+    apReq = msgs.readApReq(paTgs.value);
+  } catch (e) {
+    return errorReply(60, { realm: REALM, sname: body.sname,
+      eText: 'the PA-TGS-REQ does not contain a readable AP-REQ: ' + e.message });
+  }
+
+  // 1. The ticket, under the krbtgt key. A ticket for anything else presented here
+  // is a different error, and worth distinguishing: it means the client asked the
+  // wrong server.
+  const ticketService = principals.find(apReq.ticket.sname.name);
+  if (!ticketService) {
+    return errorReply(7, { realm: REALM, sname: apReq.ticket.sname,
+      eText: 'the ticket presented is for ' + apReq.ticket.sname.name.join('/') +
+             ', which this KDC does not know' });
+  }
+  const ticketProfile = kcrypto.etypeById(apReq.ticket.encPart.etype);
+  let ticketPart;
+  try {
+    ticketPart = msgs.readEncTicketPart(await ticketProfile.decrypt(
+      await principals.longTermKey(ticketService, apReq.ticket.encPart.etype),
+      kcrypto.KEY_USAGE.KDC_REP_TICKET, apReq.ticket.encPart.cipher));
+  } catch (e) {
+    log.info('krb5: the presented ticket will not decrypt: ' + e.message);
+    return errorReply(31, { realm: REALM, sname: body.sname,
+      eText: 'the ticket does not decrypt with this KDC\'s key for ' +
+             apReq.ticket.sname.name.join('/') });
+  }
+
+  // 2. The Authenticator, under the ticket's SESSION key at key usage 7.
+  const sessionKey = ticketPart.key.key;
+  const authProfile = kcrypto.etypeById(apReq.authenticator.etype);
+  let authenticator;
+  try {
+    authenticator = msgs.readAuthenticator(await authProfile.decrypt(
+      sessionKey, kcrypto.KEY_USAGE.TGS_REQ_AUTH, apReq.authenticator.cipher));
+  } catch (e) {
+    log.info('krb5: the TGS-REQ Authenticator will not decrypt: ' + e.message);
+    return errorReply(31, { realm: REALM, sname: body.sname,
+      eText: 'the Authenticator does not decrypt with the ticket\'s session key at key usage 7' });
+  }
+
+  // The Authenticator's cname must match the ticket's, or one client's TGT would
+  // authenticate a request naming another.
+  if (authenticator.cname.name.join('/') !== ticketPart.cname.name.join('/') ||
+      authenticator.crealm !== ticketPart.crealm) {
+    log.warn('krb5: the Authenticator names ' + authenticator.cname.name.join('/') +
+             ' but the ticket names ' + ticketPart.cname.name.join('/'));
+    return errorReply(36, { realm: REALM, sname: body.sname,
+      eText: 'the Authenticator and the ticket name different clients' });
+  }
+
+  // The ticket's own validity window, and the Authenticator's freshness.
+  const at = now();
+  if (ticketPart.endtime <= at) {
+    return errorReply(32, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: REALM, sname: body.sname,
+      eText: 'the ticket expired at ' + ticketPart.endtime.toISOString() });
+  }
+  if (ticketPart.starttime && ticketPart.starttime > new Date(at.getTime() + CLOCK_SKEW_SECONDS * 1000)) {
+    return errorReply(33, { realm: REALM, sname: body.sname, eText: 'the ticket is not yet valid' });
+  }
+  const authSkew = Math.abs(at.getTime() - authenticator.ctime.getTime()) / 1000;
+  if (authSkew > CLOCK_SKEW_SECONDS) {
+    return errorReply(37, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: REALM, sname: body.sname,
+      eText: 'the Authenticator\'s clock is ' + Math.round(authSkew) + ' seconds out' });
+  }
+
+  // 3. The checksum, over the body's ORIGINAL bytes. body.raw is kept by the reader
+  // for exactly this: a re-encoding could differ and the checksum would then cover
+  // something else, which is indistinguishable from tampering.
+  if (!authenticator.cksum) {
+    return errorReply(50, { realm: REALM, sname: body.sname,
+      eText: 'the TGS-REQ Authenticator carries no checksum over the request body' });
+  }
+  let checksumOk = false;
+  try {
+    checksumOk = await authProfile.verifyChecksum(sessionKey, kcrypto.KEY_USAGE.TGS_REQ_AUTH_CKSUM,
+      body.raw, authenticator.cksum.checksum);
+  } catch (e) {
+    log.warn('krb5: could not verify the request-body checksum: ' + e.message);
+  }
+  if (!checksumOk) {
+    log.info('krb5: the Authenticator\'s checksum does not cover this request body');
+    return errorReply(50, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: REALM, sname: body.sname,
+      eText: 'the Authenticator\'s checksum does not match the request body (checksum type ' +
+             authenticator.cksum.type + ', key usage 6)' });
+  }
+
+  // Now the request itself.
+  const service = principals.find((body.sname || {}).name || []);
+  if (!service) {
+    return errorReply(7, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: REALM, sname: body.sname,
+      eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/') +
+             '. On Active Directory this is an SPN that is not registered, or registered on a ' +
+             'different account.' });
+  }
+  const etype = principals.chooseEtype(service, body.etypes);
+  if (etype === null) {
+    return errorReply(14, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: REALM, sname: body.sname,
+      eText: 'no common encryption type for ' + service.name.join('/') + ': it supports ' +
+             principals.supportedEtypes(service).map(kcrypto.etypeName).join(', ') });
+  }
+  const profile = kcrypto.etypeById(etype);
+
+  // Issue. The new ticket inherits the TGT's flags minus `initial` — only the AS
+  // exchange issues an initial ticket, and a service may rely on that distinction.
+  const inherited = ticketPart.flags.filter(function (f) {
+    return f !== msgs.TICKET_FLAG.INITIAL;
+  });
+  const flags = inherited.slice();
+  if (service.okAsDelegate && flags.indexOf(msgs.TICKET_FLAG.OK_AS_DELEGATE) === -1) {
+    flags.push(msgs.TICKET_FLAG.OK_AS_DELEGATE);
+  }
+
+  const newSessionKey = kcrypto.randomBytes(profile.keyBytes);
+  const authtime = ticketPart.authtime;
+  const requestedTill = body.till && body.till > at ? body.till : kdcTime(TICKET_LIFETIME_SECONDS);
+  // A service ticket cannot outlive the TGT that bought it.
+  const endtime = new Date(Math.min(requestedTill.getTime(), ticketPart.endtime.getTime()));
+
+  const serviceKey = await principals.longTermKey(service, etype);
+  const encTicketPart = msgs.encEncTicketPart({
+    flags: flags,
+    key: { etype: etype, key: newSessionKey },
+    crealm: ticketPart.crealm,
+    cname: ticketPart.cname,
+    authtime: authtime,
+    starttime: at,
+    endtime: endtime,
+    renewTill: ticketPart.renewTill
+  });
+
+  // The reply's enc-part: key usage 9 under the Authenticator's subkey when one was
+  // sent, 8 under the TGT's session key otherwise. A client that always tries one
+  // fails whenever the other applies, so which was used is logged.
+  const useSubkey = !!authenticator.subkey;
+  const replyKey = useSubkey ? authenticator.subkey.key : sessionKey;
+  const replyEtype = useSubkey ? authenticator.subkey.etype : apReq.ticket.encPart.etype;
+  const replyProfile = kcrypto.etypeById(replyEtype);
+  const replyUsage = useSubkey
+    ? kcrypto.KEY_USAGE.TGS_REP_ENCPART_SUBKEY
+    : kcrypto.KEY_USAGE.TGS_REP_ENCPART_SESSKEY;
+
+  const encRepPart = msgs.encEncKdcRepPart({
+    key: { etype: etype, key: newSessionKey },
+    lastReq: [{ type: 0, value: authtime }],
+    nonce: body.nonce,
+    flags: flags,
+    authtime: authtime,
+    starttime: at,
+    endtime: endtime,
+    renewTill: ticketPart.renewTill,
+    srealm: REALM,
+    sname: body.sname
+  }, msgs.APPLICATION.ENC_TGS_REP_PART);
+
+  log.info('krb5: issued a service ticket for ' + ticketPart.cname.name.join('/') + '@' +
+    ticketPart.crealm + ' to ' + body.sname.name.join('/') + ' using ' + profile.name +
+    ', flags [' + msgs.ticketFlagNames(flags).join(', ') + '], enc-part at key usage ' + replyUsage +
+    (useSubkey ? ' (the Authenticator carried a subkey)' : ' (no subkey was sent)'));
+
+  log.debug('Leaving handleTgsReq().');
+  return msgs.encKdcRep({
+    msgType: msgs.MSG_TYPE.TGS_REP,
+    crealm: ticketPart.crealm,
+    cname: ticketPart.cname,
+    ticket: {
+      realm: REALM,
+      sname: body.sname,
+      encPart: {
+        etype: etype,
+        kvno: service.kvno,
+        cipher: await profile.encrypt(serviceKey, kcrypto.KEY_USAGE.KDC_REP_TICKET, encTicketPart)
+      }
+    },
+    encPart: {
+      etype: replyEtype,
+      cipher: await replyProfile.encrypt(replyKey, replyUsage, encRepPart)
+    }
+  });
+}
+
 // The dispatcher. Anything that is not a request this KDC serves gets an error
 // rather than silence: a client waiting for a reply that never comes learns
 // nothing, and "I do not do that yet" is information.
@@ -341,9 +568,8 @@ async function handleMessage(bytes) {
       return await handleAsReq(request);
     }
     if (identified.applicationNumber === msgs.APPLICATION.TGS_REQ) {
-      // Phase 3. Answered honestly rather than dropped.
-      log.info('krb5: a TGS-REQ arrived; this mock does not serve the TGS exchange yet');
-      return errorReply(60, { eText: 'this mock KDC does not implement the TGS exchange yet' });
+      const request = msgs.readKdcReq(bytes);
+      return await handleTgsReq(request);
     }
     log.info('krb5: received ' + identified.name + ', which is not a request a KDC answers');
     return errorReply(40, { eText: identified.name + ' is not a request this KDC answers' });
@@ -517,8 +743,8 @@ app.get('/krb5/principals', function (req, res) {
     clockSkewSeconds: CLOCK_SKEW_SECONDS,
     clockOffsetSeconds: CLOCK_OFFSET_SECONDS,
     ticketLifetimeSeconds: TICKET_LIFETIME_SECONDS,
-    implemented: ['AS exchange'],
-    notImplementedYet: ['TGS exchange', 'AP exchange', 'PAC', 'FAST', 'PKINIT', 'cross-realm referrals'],
+    implemented: ['AS exchange', 'TGS exchange'],
+    notImplementedYet: ['PAC', 'FAST', 'PKINIT', 'cross-realm referrals', 'S4U2Self', 'S4U2Proxy'],
     principals: list
   });
 });
