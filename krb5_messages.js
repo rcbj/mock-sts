@@ -359,8 +359,10 @@ function readHostAddress(t) {
 }
 
 // AuthorizationData ::= SEQUENCE OF SEQUENCE { ad-type [0] Int32, ad-data [1] OCTET STRING }
-// The PAC arrives in here, wrapped in AD-IF-RELEVANT. Kept as raw bytes: phase 4
-// decodes it.
+// The PAC arrives in here, wrapped in AD-IF-RELEVANT. Kept as raw bytes on purpose — it is
+// not DER inside, so decoding it belongs to krb5_pac.js and not to this module. Use
+// kpac.findPacs() to get at it: looking for ad-type 128 at the top level finds nothing on
+// a ticket that has one, because AD-IF-RELEVANT is a container.
 function readAuthorizationData(t) {
   return asn1.decSequenceOf(t).map(function (a) {
     var f = asn1.readTaggedSequence(a.value);
