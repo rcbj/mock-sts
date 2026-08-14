@@ -43,11 +43,48 @@
 // It checks what a KDC checks, and refuses in the KDC's own vocabulary: an unknown
 // principal, a locked account, an expired password, no common encryption type, a
 // bad password, and a clock outside the tolerance. Those refusals are the product
-// here. It does NOT check request signatures, does not implement FAST, and issues
-// no PAC yet — phase 4 adds the PAC, and this file says so rather than leaving a
-// reader to wonder why a Windows service rejects its tickets. The AS and TGS
-// exchanges are both served; the AP exchange belongs to a SERVICE rather than to a
-// KDC and lives in krb5_service.js.
+// here.
+//
+// Every ticket it issues now carries a **PAC** ([MS-PAC]) — the account's SID, its
+// groups and its UserAccountControl flags, signed. That is what a Windows service
+// actually authorizes on, and each principal in krb5_principals.js carries the identity
+// to fill one, including the deliberately misconfigured accounts: `locked`'s PAC says
+// ACCOUNT_DISABLED, `noreauth`'s says DONT_REQUIRE_PREAUTH, and the computer account's
+// says WORKSTATION_TRUST_ACCOUNT with Domain Computers as its primary group. See
+// buildPacFor() below for the two things about it that are silent when wrong.
+//
+// ---------------------------------------------------------------------------
+// TWO REALMS, and one shared key between them.
+//
+// This KDC answers for EXAMPLE.COM **and** PARTNER.COM, which a real one never does —
+// the simplification hides finding the other realm's KDC (DNS and SRV records) and none
+// of the protocol. What it buys is that the whole cross-realm referral can be walked
+// without a second container.
+//
+// A trust is not a setting: it is one principal, krbtgt/PARTNER.COM@EXAMPLE.COM, whose
+// key both KDCs hold. Ask this KDC for a service in the other realm and it does not
+// refuse — it issues a ticket-granting ticket for that realm, sealed with the trust key,
+// and expects the client to notice and go and ask there. The reply is an ordinary,
+// successful TGS-REP; the only signal is that its `sname` is not what was asked for. See
+// issueReferral().
+//
+// Three consequences run through the code below, and each is silent when wrong:
+//
+//  * **Every principal lookup carries a REALM.** krbtgt/PARTNER.COM exists in BOTH
+//    databases — the trust in one, that realm's own ticket-granting service in the other,
+//    with different keys. A lookup that defaults to the local realm finds the wrong one
+//    and the failure is an integrity check, which names the crypto.
+//  * **The realm being answered AS comes from the request**, not from a constant, and
+//    every field of the reply follows it.
+//  * **A PAC arriving across a trust is RE-SIGNED, not rebuilt.** The target realm has no
+//    copy of the client's account. It carries the buffers across and signs them with its
+//    own keys. **SID filtering is not implemented** — that is the control which stops the
+//    other realm asserting membership of groups in this one, and its absence is stated
+//    rather than left as a silence.
+//
+// It does NOT check request signatures, does not implement FAST, and does not do S4U —
+// phase 5 adds delegation. The AS and TGS exchanges are both served; the AP exchange
+// belongs to a SERVICE rather than to a KDC and lives in krb5_service.js.
 // ---------------------------------------------------------------------------
 
 const net = require('net');
@@ -59,6 +96,7 @@ const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
 const prim = require('./krb5_primitives.js');
 const principals = require('./krb5_principals.js');
+const kpac = require('./krb5_pac.js');
 
 const KDC_PORT = parseInt(process.env.KRB5_KDC_PORT || '88', 10);
 const REALM = principals.REALM;
@@ -84,6 +122,244 @@ function now() {
 
 function kdcTime(offsetSeconds) {
   return new Date(now().getTime() + (offsetSeconds || 0) * 1000);
+}
+
+// Is the ticket being asked for a ticket-granting ticket? It decides which of the
+// four PAC signatures belong in it ([MS-PAC] sections 2.8.2 and 2.8.3), so it is a
+// question about the SNAME rather than about which exchange we are in — a TGS-REQ for
+// krbtgt is a renewal or a referral and still yields a TGT.
+function isTgtRequest(sname) {
+  const parts = (sname || {}).name || [];
+  return parts.length > 0 && parts[0] === 'krbtgt';
+}
+
+// ---------------------------------------------------------------------------
+// The PAC.
+//
+// A Kerberos ticket proves who the client is. A Windows service decides what the
+// client may DO from the PAC inside it — the account's SID, its groups, its account
+// flags — so a KDC that issues tickets without one is not exercising the half of the
+// protocol most questions are actually about. See krb5_pac.js for the wire format and
+// for why the four signatures are not interchangeable.
+//
+// TWO THINGS HERE ARE EASY TO GET WRONG AND SILENT WHEN WRONG.
+//
+// **Which key signs the server signature.** It is the key the TICKET is encrypted
+// with, not the krbtgt key — that is what lets the service verify it alone. For a TGT
+// those are the same key, which is exactly why testing only with a TGT would not
+// reveal a mix-up.
+//
+// **Which signatures belong in which ticket.** [MS-PAC] sections 2.8.2 and 2.8.3 say
+// the ticket signature and the extended KDC signature SHOULD be present in tickets
+// NOT encrypted to the krbtgt account. So a service ticket carries all four and a TGT
+// carries two, and this KDC reproduces that rather than always emitting four — a
+// client that only ever saw four would happily require them and then fail against a
+// real domain the moment it looked at a TGT.
+// ---------------------------------------------------------------------------
+async function buildPacFor(client, opts) {
+  log.debug('Entering buildPacFor(). client=' + client.name.join('/'));
+  const options = opts || {};
+  const identity = client.pac;
+  const clientRealm = options.clientRealm || client.realm || REALM;
+  const serverKey = options.serverKey;
+  const kdcKey = options.kdcKey;
+
+  const spec = {
+    serverKey: serverKey,
+    kdcKey: kdcKey,
+    includeExtendedKdcSignature: !options.isTgt,
+    includeTicketSignature: false,
+    logonInfo: {
+      logonTime: options.authtime,
+      passwordLastSet: new Date(options.authtime.getTime() - 30 * 24 * 3600 * 1000),
+      passwordMustChange: identity.passwordMustChange || undefined,
+      effectiveName: client.name[0],
+      fullName: identity.fullName,
+      logonServer: 'DC01',
+      // The CLIENT's domain, not the KDC's. They differ for a client of the other realm,
+      // and the domain SID is what a service authorizes on — a PAC that named the
+      // resource domain would describe an account that does not exist.
+      logonDomainName: clientRealm.split('.')[0],
+      logonDomainId: principals.domainSidFor(clientRealm),
+      userId: identity.rid,
+      primaryGroupId: identity.primaryGroupRid,
+      groups: identity.groups.map(function (rid) { return { relativeId: rid }; }),
+      extraSids: identity.extraSids.map(function (sid) { return { sid: sid }; }),
+      userAccountControl: identity.userAccountControl,
+      logonCount: 1
+    },
+    clientInfo: {
+      // The INITIAL authentication time, which is the same in every service ticket
+      // derived from one TGT. A service compares it with the ticket's own authtime.
+      name: client.name[0],
+      clientId: options.authtime
+    },
+    upnDns: {
+      upn: client.name[0] + '@' + clientRealm.toLowerCase(),
+      dnsDomainName: clientRealm,
+      samName: client.name[0],
+      sid: principals.domainSidFor(clientRealm) + '-' + identity.rid
+    },
+    // PAC_WAS_REQUESTED when the client asked via PA-PAC-REQUEST, and
+    // PAC_WAS_GIVEN_IMPLICITLY when it neither asked nor declined. Reproducing that
+    // distinction is the only way the workflow can show what the flag means.
+    attributes: options.pacRequested ? 0x00000001 : 0x00000002,
+    requestorSid: principals.domainSidFor(clientRealm) + '-' + identity.rid
+  };
+
+  if (options.isTgt) {
+    log.debug('Leaving buildPacFor(). a TGT, so no ticket or extended KDC signature.');
+    return kpac.buildPac(spec);
+  }
+
+  // A service ticket needs the ticket signature, and that is a two-pass build: the
+  // signature covers the EncTicketPart's DER with THIS PAC's ad-data replaced by a
+  // single zero byte. The PAC's own length therefore does not enter into it, which is
+  // what makes the two passes possible at all — build the ticket around a one-byte
+  // placeholder, checksum that, then build the real PAC and put it in the real ticket.
+  const placeholderTicket = options.encodeTicketPart(
+    kpac.wrapPacAsAuthorizationData(new Uint8Array([0])));
+  spec.includeTicketSignature = true;
+  spec.ticketBytes = placeholderTicket;
+  const pacBytes = await kpac.buildPac(spec);
+  log.debug('Leaving buildPacFor(). a service ticket, all four signatures, ' +
+    pacBytes.length + ' bytes.');
+  return pacBytes;
+}
+
+// ---------------------------------------------------------------------------
+// The referral.
+//
+// A client asks for HTTP/app.partner.com. Its own KDC has no such principal — and the
+// interesting part is what it does NOT do: it does not refuse. It issues a
+// ticket-granting ticket for **krbtgt/PARTNER.COM**, sealed with the trust key, and the
+// client is expected to notice and go ask that realm's KDC instead.
+//
+// THE TRAP IS ON THE CLIENT SIDE, and it is why this is worth being able to produce.
+// The reply is a perfectly ordinary TGS-REP. Its `sname` is krbtgt/PARTNER.COM rather
+// than the HTTP service that was asked for, and that difference is the ONLY signal that
+// a referral happened. A client that assumes a successful TGS-REP contains the ticket it
+// asked for will hand a ticket-granting ticket to a web server, and the web server will
+// report that the ticket does not decrypt — a message about a ticket, for a problem
+// about a realm. See readTgsRep() in krb5_client.js, which reports it explicitly.
+//
+// Three details that are real and easy to miss:
+//
+//  * **The etype is negotiated against the TRUST, not the service.** The ticket is
+//    sealed with the trust key, so the trust's supported etypes decide. A trust with
+//    only an RC4 key is why referrals fail on a hardened domain while tickets inside
+//    each realm keep working.
+//  * **`transited` stays empty for a direct trust.** RFC 4120 section 3.3.3.2 records
+//    the realms traversed EXCLUDING the client's and the server's own, so a single hop
+//    across a direct trust transits nothing. It is only a multi-hop path that fills the
+//    field — and it is the field a service is supposed to apply policy to.
+//  * **The PAC is not re-signed here and is not stripped either.** The referral ticket
+//    carries the client's PAC from the issuing realm; the TARGET realm's KDC is what
+//    re-signs it with its own keys. That is also where Windows applies SID filtering,
+//    which this mock does NOT implement — a note rather than a silence, because SID
+//    filtering is the control that stops the other realm asserting membership of groups
+//    in this one.
+// ---------------------------------------------------------------------------
+async function issueReferral(ctx) {
+  log.debug('Entering issueReferral(). target=' + ctx.targetRealm);
+  const body = ctx.body;
+  const trust = ctx.trust;
+
+  const etype = principals.chooseEtype(trust, body.etypes);
+  if (etype === null) {
+    // Distinguished from an ordinary etype failure on purpose: the account that could
+    // not agree is the TRUST, which is not the principal the client named.
+    log.info('krb5: no common etype with the trust ' + trust.name.join('/') + ' — it offers [' +
+      principals.supportedEtypes(trust).join(', ') + '] and the client offered [' +
+      (body.etypes || []).join(', ') + ']');
+    return errorReply(14, {
+      crealm: ctx.ticketPart.crealm, cname: ctx.ticketPart.cname,
+      realm: ctx.answeringRealm, sname: body.sname,
+      eText: 'a referral to ' + ctx.targetRealm + ' would be sealed with the trust key, and the ' +
+             'trust account offers [' + principals.supportedEtypes(trust).join(', ') + '] while ' +
+             'the client offered [' + (body.etypes || []).join(', ') + ']. The trust, not the ' +
+             'service, is what has to agree here.'
+    });
+  }
+  const profile = kcrypto.etypeById(etype);
+  const trustKey = await principals.longTermKey(trust, etype);
+  const referralSname = { type: msgs.NAME_TYPE.SRV_INST, name: ['krbtgt', ctx.targetRealm] };
+
+  // The referral ticket inherits the presented TGT's flags and lifetime, minus `initial`
+  // — it was not obtained with a password — and carries the client's authorization data
+  // forward unchanged.
+  const flags = ticketFlagsForReferral(ctx.ticketPart.flags);
+  const sessionKey = kcrypto.randomBytes(profile.keyBytes);
+  const endtime = new Date(Math.min(
+    (body.till && body.till > ctx.at ? body.till : kdcTime(TICKET_LIFETIME_SECONDS)).getTime(),
+    ctx.ticketPart.endtime.getTime()));
+
+  const encTicketPart = msgs.encEncTicketPart({
+    flags: flags,
+    key: { etype: etype, key: sessionKey },
+    crealm: ctx.ticketPart.crealm,
+    cname: ctx.ticketPart.cname,
+    // Empty: a direct trust transits no intermediate realm. See above.
+    transited: { type: 1, contents: new Uint8Array(0) },
+    authtime: ctx.ticketPart.authtime,
+    starttime: ctx.at,
+    endtime: endtime,
+    renewTill: ctx.ticketPart.renewTill,
+    authorizationData: ctx.ticketPart.authorizationData
+  });
+
+  const useSubkey = !!ctx.authenticator.subkey;
+  const replyKey = useSubkey ? ctx.authenticator.subkey.key : ctx.sessionKey;
+  const replyEtype = useSubkey ? ctx.authenticator.subkey.etype : ctx.apReq.ticket.encPart.etype;
+  const replyProfile = kcrypto.etypeById(replyEtype);
+  const replyUsage = useSubkey
+    ? kcrypto.KEY_USAGE.TGS_REP_ENCPART_SUBKEY
+    : kcrypto.KEY_USAGE.TGS_REP_ENCPART_SESSKEY;
+
+  const encRepPart = msgs.encEncKdcRepPart({
+    key: { etype: etype, key: sessionKey },
+    lastReq: [{ type: 0, value: ctx.ticketPart.authtime }],
+    nonce: body.nonce,
+    flags: flags,
+    authtime: ctx.ticketPart.authtime,
+    starttime: ctx.at,
+    endtime: endtime,
+    renewTill: ctx.ticketPart.renewTill,
+    srealm: ctx.answeringRealm,
+    // The reply's sname is the REFERRAL, not what was asked for. A client compares this
+    // with its own request to discover that it was referred.
+    sname: referralSname
+  }, msgs.APPLICATION.ENC_TGS_REP_PART);
+
+  log.info('krb5: ' + ctx.answeringRealm + ' has no ' + body.sname.name.join('/') +
+    ' and REFERRED ' + ctx.ticketPart.cname.name.join('/') + '@' + ctx.ticketPart.crealm +
+    ' to ' + ctx.targetRealm + ' — a TGT for ' + referralSname.name.join('/') + ' sealed with ' +
+    'the trust key using ' + profile.name);
+  log.debug('Leaving issueReferral().');
+  return msgs.encKdcRep({
+    msgType: msgs.MSG_TYPE.TGS_REP,
+    crealm: ctx.ticketPart.crealm,
+    cname: ctx.ticketPart.cname,
+    ticket: {
+      realm: ctx.answeringRealm,
+      sname: referralSname,
+      encPart: {
+        etype: etype,
+        kvno: trust.kvno,
+        cipher: await profile.encrypt(trustKey, kcrypto.KEY_USAGE.KDC_REP_TICKET, encTicketPart)
+      }
+    },
+    encPart: {
+      etype: replyEtype,
+      cipher: await replyProfile.encrypt(replyKey, replyUsage, encRepPart)
+    }
+  });
+}
+
+// `initial` never survives: it means the ticket came from an AS exchange with a
+// password, and a referral did not.
+function ticketFlagsForReferral(presented) {
+  return (presented || []).filter(function (f) { return f !== msgs.TICKET_FLAG.INITIAL; });
 }
 
 // Every refusal goes through here, so every one of them carries the KDC's own
@@ -184,31 +460,72 @@ async function handleAsReq(request) {
   log.debug('Entering handleAsReq().');
   const body = request.reqBody;
 
-  if (body.realm !== REALM) {
-    log.info('krb5: wrong realm ' + JSON.stringify(body.realm) + '; this KDC serves ' + REALM);
+  // Either realm this process answers for. KDC_ERR_WRONG_REALM for anything else, which
+  // is a distinct and useful refusal: it means the client asked the wrong KDC rather
+  // than that the account does not exist.
+  if (principals.realmsServed().indexOf(body.realm) === -1) {
+    log.info('krb5: wrong realm ' + JSON.stringify(body.realm) + '; this KDC serves ' +
+      principals.realmsServed().join(' and '));
     return errorReply(68, {
+      // This KDC's OWN realm, not the one asked for: `asRealm` does not exist yet, and
+      // could not — the request named a realm we do not serve, so there is no answering
+      // realm to speak of. A KRB-ERROR's `realm` is the sender's identity.
       realm: REALM, sname: body.sname,
-      eText: 'this KDC serves ' + REALM + ', not ' + body.realm
+      eText: 'this KDC serves ' + principals.realmsServed().join(' and ') + ', not ' + body.realm
     });
   }
+  const asRealm = body.realm;
   if (!body.cname) {
     return errorReply(6, { realm: REALM, sname: body.sname, eText: 'no client name in the request' });
   }
 
-  const client = principals.find(body.cname.name);
+  const client = principals.find(body.cname.name, asRealm);
   if (!client) {
     return errorReply(6, {
       crealm: body.realm, cname: body.cname, sname: body.sname,
       eText: 'no such principal: ' + body.cname.name.join('/')
     });
   }
-  const service = principals.find((body.sname || {}).name || []);
+  const service = principals.find((body.sname || {}).name || [], asRealm);
   if (!service) {
     return errorReply(7, {
       crealm: body.realm, cname: body.cname, sname: body.sname,
-      eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/')
+      eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/') +
+             ' in ' + asRealm
     });
   }
+  // The krbtgt key signs three of the PAC's four signatures whatever service the
+  // ticket is for, so it is needed even when the ticket is not a TGT.
+  const krbtgt = principals.find(['krbtgt', asRealm], asRealm);
+  if (!krbtgt) {
+    // Not reachable with the shipped principal table, and worth saying rather than
+    // failing later inside the PAC builder with something about a missing key.
+    log.error('krb5: there is no krbtgt principal, so no ticket can be signed');
+    return errorReply(7, { crealm: body.realm, cname: body.cname, sname: body.sname,
+      eText: 'this KDC has no krbtgt principal' });
+  }
+  // MS-KILE's PA-PAC-REQUEST: the client may ask for a PAC or ask for none. Which of
+  // those happened goes into PAC_ATTRIBUTES_INFO, and a client that declines is
+  // honoured — a service reading groups out of a PAC that is not there is a case worth
+  // being able to produce on purpose.
+  let pacRequested = false;
+  let pacDeclined = false;
+  (request.padata || []).forEach(function (pa) {
+    if (pa.type !== msgs.PA_TYPE.PAC_REQUEST) return;
+    try {
+      // readPaPacRequest returns an OBJECT, not a boolean — `{ includePac: … }`. A
+      // strict comparison against true/false is therefore always false and BOTH states
+      // stay unset, which reads as "the client said nothing" and quietly grants a PAC
+      // to a client that explicitly declined one.
+      const asked = msgs.readPaPacRequest(pa.value).includePac;
+      pacRequested = asked === true;
+      pacDeclined = asked === false;
+    } catch (e) {
+      // A malformed PA-PAC-REQUEST is not worth refusing the whole request over: AD
+      // ignores padata it cannot read, and so does this. Logged so it is not silent.
+      log.info('krb5: could not read PA-PAC-REQUEST, ignoring it: ' + e.message);
+    }
+  });
   if (client.revoked) {
     return errorReply(18, { crealm: body.realm, cname: body.cname, sname: body.sname,
       eText: 'the account is disabled or locked out' });
@@ -277,18 +594,47 @@ async function handleAsReq(request) {
   const renewTill = wantsRenewable ? kdcTime(RENEW_LIFETIME_SECONDS) : null;
 
   const serviceKey = await principals.longTermKey(service, etype);
-  const encTicketPart = msgs.encEncTicketPart({
-    flags: flags,
-    key: { etype: etype, key: sessionKey },
-    crealm: REALM,
-    cname: body.cname,
-    authtime: authtime,
-    starttime: authtime,
-    endtime: endtime,
-    renewTill: renewTill
-  });
+
+  // The PAC. `encodeTicketPart` is passed as a function because the ticket signature
+  // has to be computed over the ticket the PAC is going INTO, which does not exist
+  // until the PAC does — see buildPacFor().
+  const encodeTicketPart = function (authorizationData) {
+    return msgs.encEncTicketPart({
+      flags: flags,
+      key: { etype: etype, key: sessionKey },
+      crealm: asRealm,
+      cname: body.cname,
+      authtime: authtime,
+      starttime: authtime,
+      endtime: endtime,
+      renewTill: renewTill,
+      authorizationData: authorizationData
+    });
+  };
+  // A client that DECLINED a PAC gets none. That is not a curiosity: it is the only
+  // way to see what a Windows service does when the groups it authorizes on are not
+  // there, and the request page offers it as a checkbox — so honouring it is what makes
+  // that checkbox mean something rather than being a control that quietly does nothing.
+  let encTicketPart;
+  if (pacDeclined) {
+    log.info('krb5: the client asked for NO PAC (PA-PAC-REQUEST include=false), so this ticket ' +
+      'carries none. A Windows service reading group memberships from it will find nothing.');
+    encTicketPart = encodeTicketPart(null);
+  } else {
+    const pacBytes = await buildPacFor(client, {
+      authtime: authtime,
+      clientRealm: asRealm,
+      serverKey: { etype: etype, key: serviceKey },
+      kdcKey: { etype: etype, key: await principals.longTermKey(krbtgt, etype) },
+      // Whether the ticket is a TGT decides which two of the four signatures go in.
+      isTgt: isTgtRequest(body.sname),
+      pacRequested: pacRequested,
+      encodeTicketPart: encodeTicketPart
+    });
+    encTicketPart = encodeTicketPart(kpac.wrapPacAsAuthorizationData(pacBytes));
+  }
   const ticket = {
-    realm: REALM,
+    realm: asRealm,
     sname: body.sname,
     encPart: {
       etype: etype,
@@ -309,17 +655,17 @@ async function handleAsReq(request) {
     starttime: authtime,
     endtime: endtime,
     renewTill: renewTill,
-    srealm: REALM,
+    srealm: asRealm,
     sname: body.sname
   }, msgs.APPLICATION.ENC_AS_REP_PART);
 
-  log.info('krb5: issued a TGT for ' + body.cname.name.join('/') + '@' + REALM + ' to ' +
+  log.info('krb5: issued a TGT for ' + body.cname.name.join('/') + '@' + asRealm + ' to ' +
     body.sname.name.join('/') + ' using ' + profile.name + ', flags [' +
     msgs.ticketFlagNames(flags).join(', ') + '], expiring ' + endtime.toISOString());
 
   return msgs.encKdcRep({
     msgType: msgs.MSG_TYPE.AS_REP,
-    crealm: REALM,
+    crealm: asRealm,
     cname: body.cname,
     ticket: ticket,
     encPart: {
@@ -377,7 +723,14 @@ async function handleTgsReq(request) {
   // 1. The ticket, under the krbtgt key. A ticket for anything else presented here
   // is a different error, and worth distinguishing: it means the client asked the
   // wrong server.
-  const ticketService = principals.find(apReq.ticket.sname.name);
+  // Looked up in the TICKET'S OWN REALM, not in ours. A cross-realm ticket-granting
+  // ticket is named krbtgt/OUR-REALM but was ISSUED BY the other realm, so its `realm`
+  // field says EXAMPLE.COM while we are answering as PARTNER.COM — and the key that
+  // opens it is the trust key held under that realm's entry. Looking it up in the local
+  // realm finds this realm's own krbtgt instead, whose key is a different secret, and
+  // the failure is "the ticket does not decrypt": a message about the ticket, for a
+  // problem about which of two identically-named principals was consulted.
+  const ticketService = principals.find(apReq.ticket.sname.name, apReq.ticket.realm);
   if (!ticketService) {
     return errorReply(7, { realm: REALM, sname: apReq.ticket.sname,
       eText: 'the ticket presented is for ' + apReq.ticket.sname.name.join('/') +
@@ -458,19 +811,57 @@ async function handleTgsReq(request) {
              authenticator.cksum.type + ', key usage 6)' });
   }
 
+  // Which realm this request is being answered AS. It comes from the request body, not
+  // from a constant, because this process serves both realms: a TGS-REQ whose realm is
+  // PARTNER.COM is one the trusted realm's KDC is being asked to answer, and every
+  // principal lookup and every field of the reply below has to follow that.
+  const answeringRealm = principals.realmsServed().indexOf(body.realm) !== -1
+    ? body.realm : REALM;
+
   // Now the request itself.
-  const service = principals.find((body.sname || {}).name || []);
+  const service = principals.find((body.sname || {}).name || [], answeringRealm);
   if (!service) {
+    // Before refusing: is this a service in a realm we have a TRUST with? If so the
+    // answer is not an error at all but a REFERRAL — a ticket-granting ticket for the
+    // other realm, which the client presents to that realm's KDC. See issueReferral().
+    const targetRealm = principals.realmForService((body.sname || {}).name || []);
+    if (targetRealm && targetRealm !== answeringRealm) {
+      const trust = principals.find(['krbtgt', targetRealm], answeringRealm);
+      if (trust) {
+        return issueReferral({
+          request: request, body: body, ticketPart: ticketPart, trust: trust,
+          targetRealm: targetRealm, answeringRealm: answeringRealm, at: at,
+          sessionKey: sessionKey, apReq: apReq, authenticator: authenticator
+        });
+      }
+      log.info('krb5: ' + ((body.sname || {}).name || []).join('/') + ' looks like it belongs to ' +
+        targetRealm + ', but there is no trust with that realm from ' + answeringRealm);
+    }
     return errorReply(7, { crealm: ticketPart.crealm, cname: ticketPart.cname,
-      realm: REALM, sname: body.sname,
+      realm: answeringRealm, sname: body.sname,
       eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/') +
              '. On Active Directory this is an SPN that is not registered, or registered on a ' +
-             'different account.' });
+             'different account' +
+             (targetRealm ? ', or a trust with ' + targetRealm + ' that does not exist' : '') +
+             '.' });
+  }
+  // Looked up by name rather than reused from the presented ticket's sname: three of
+  // the PAC's four signatures are made with the KRBTGT key specifically, and while the
+  // ticket presented here is normally a TGT, saying so explicitly is what keeps this
+  // correct once cross-realm referrals arrive and the presented ticket is somebody
+  // else's krbtgt.
+  const krbtgt = principals.find(['krbtgt', answeringRealm], answeringRealm);
+  if (!krbtgt) {
+    log.error('krb5: there is no krbtgt principal for ' + answeringRealm + ', so no ticket can ' +
+      'be signed');
+    return errorReply(7, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+      realm: answeringRealm, sname: body.sname,
+      eText: 'this KDC has no krbtgt principal for ' + answeringRealm });
   }
   const etype = principals.chooseEtype(service, body.etypes);
   if (etype === null) {
     return errorReply(14, { crealm: ticketPart.crealm, cname: ticketPart.cname,
-      realm: REALM, sname: body.sname,
+      realm: answeringRealm, sname: body.sname,
       eText: 'no common encryption type for ' + service.name.join('/') + ': it supports ' +
              principals.supportedEtypes(service).map(kcrypto.etypeName).join(', ') });
   }
@@ -493,16 +884,86 @@ async function handleTgsReq(request) {
   const endtime = new Date(Math.min(requestedTill.getTime(), ticketPart.endtime.getTime()));
 
   const serviceKey = await principals.longTermKey(service, etype);
-  const encTicketPart = msgs.encEncTicketPart({
-    flags: flags,
-    key: { etype: etype, key: newSessionKey },
-    crealm: ticketPart.crealm,
-    cname: ticketPart.cname,
-    authtime: authtime,
-    starttime: at,
-    endtime: endtime,
-    renewTill: ticketPart.renewTill
-  });
+
+  // The PAC again, and here the two keys are genuinely DIFFERENT: the server signature
+  // is made with this service's key so the service can check it alone, and the other
+  // three with the krbtgt key. On a TGT they coincide, which is why a mix-up between
+  // them only shows up on a service ticket.
+  //
+  // A real KDC copies the client's groups out of the TGT's PAC rather than looking the
+  // account up again. This one re-reads the principal table, which is a simplification
+  // worth naming: it means a change to a principal takes effect on the next service
+  // ticket rather than on the next TGT, where AD would keep serving the groups the TGT
+  // was minted with until it expired.
+  const encodeTicketPart = function (authorizationData) {
+    return msgs.encEncTicketPart({
+      flags: flags,
+      key: { etype: etype, key: newSessionKey },
+      crealm: ticketPart.crealm,
+      cname: ticketPart.cname,
+      authtime: authtime,
+      starttime: at,
+      endtime: endtime,
+      renewTill: ticketPart.renewTill,
+      authorizationData: authorizationData
+    });
+  };
+  // The client's account lives in the realm the TICKET came from, not necessarily in the
+  // one being answered — after a referral those differ, and that is the whole point.
+  const ticketClient = principals.find(ticketPart.cname.name, ticketPart.crealm);
+  const crossRealm = ticketPart.crealm !== answeringRealm;
+  // Whether the TGT itself carries a PAC. A real KDC propagates the client's
+  // authorization data from the TGT into the service ticket, so a client that declined
+  // a PAC at the AS exchange does not acquire one by asking for a service ticket — and
+  // a workflow where unticking the box only affected the TGT would be misleading in a
+  // way that is hard to notice, since the TGT is the ticket nobody looks inside.
+  const tgtHadPac = kpac.findPacs(ticketPart.authorizationData || []).length > 0;
+  let encTicketPart;
+  if (!tgtHadPac) {
+    log.info('krb5: the presented TGT carries no PAC, so neither does the service ticket issued ' +
+      'from it');
+    encTicketPart = encodeTicketPart(null);
+  } else if (crossRealm) {
+    // A referral has arrived. This realm has no copy of the client's account — it lives
+    // in ticketPart.crealm — so the PAC is carried across and RE-SIGNED with this realm's
+    // keys rather than rebuilt. The signatures it came with were made with the other
+    // realm's krbtgt key and the trust key, neither of which the service being issued to
+    // holds.
+    const carried = kpac.findPacs(ticketPart.authorizationData || []);
+    const placeholder = encodeTicketPart(kpac.wrapPacAsAuthorizationData(new Uint8Array([0])));
+    const resigned = await kpac.resignPac(carried[0].bytes, {
+      serverKey: { etype: etype, key: serviceKey },
+      kdcKey: { etype: etype, key: await principals.longTermKey(krbtgt, etype) },
+      includeTicketSignature: !isTgtRequest(body.sname),
+      includeExtendedKdcSignature: !isTgtRequest(body.sname),
+      ticketBytes: placeholder
+    });
+    log.info('krb5: ' + answeringRealm + ' re-signed the PAC that ' + ticketPart.crealm +
+      ' issued for ' + ticketPart.cname.name.join('/') + ' — its contents are carried across ' +
+      'unchanged (SID filtering is NOT implemented here) and all of its signatures are new');
+    encTicketPart = encodeTicketPart(kpac.wrapPacAsAuthorizationData(resigned));
+  } else if (!ticketClient) {
+    // The TGT names a principal this KDC no longer has. The ticket is still issuable —
+    // the TGT's signature is what authorized it — so it is issued without a PAC rather
+    // than refused, and said out loud, because a service ticket with no PAC is a
+    // situation worth being able to reach on purpose.
+    log.info('krb5: the TGT names ' + ticketPart.cname.name.join('/') + ', which is not in the ' +
+      'principal table; issuing a service ticket with NO PAC');
+    encTicketPart = encodeTicketPart(null);
+  } else {
+    const pacBytes = await buildPacFor(ticketClient, {
+      authtime: authtime,
+      clientRealm: ticketPart.crealm,
+      serverKey: { etype: etype, key: serviceKey },
+      kdcKey: { etype: etype, key: await principals.longTermKey(krbtgt, etype) },
+      isTgt: isTgtRequest(body.sname),
+      // In a TGS exchange the client asked for its PAC back when it got the TGT, so
+      // the attribute records that it was requested rather than given implicitly.
+      pacRequested: true,
+      encodeTicketPart: encodeTicketPart
+    });
+    encTicketPart = encodeTicketPart(kpac.wrapPacAsAuthorizationData(pacBytes));
+  }
 
   // The reply's enc-part: key usage 9 under the Authenticator's subkey when one was
   // sent, 8 under the TGT's session key otherwise. A client that always tries one
@@ -524,12 +985,13 @@ async function handleTgsReq(request) {
     starttime: at,
     endtime: endtime,
     renewTill: ticketPart.renewTill,
-    srealm: REALM,
+    srealm: answeringRealm,
     sname: body.sname
   }, msgs.APPLICATION.ENC_TGS_REP_PART);
 
-  log.info('krb5: issued a service ticket for ' + ticketPart.cname.name.join('/') + '@' +
-    ticketPart.crealm + ' to ' + body.sname.name.join('/') + ' using ' + profile.name +
+  log.info('krb5: ' + answeringRealm + ' issued a service ticket for ' +
+    ticketPart.cname.name.join('/') + '@' + ticketPart.crealm + ' to ' +
+    body.sname.name.join('/') + ' using ' + profile.name +
     ', flags [' + msgs.ticketFlagNames(flags).join(', ') + '], enc-part at key usage ' + replyUsage +
     (useSubkey ? ' (the Authenticator carried a subkey)' : ' (no subkey was sent)'));
 
@@ -539,7 +1001,7 @@ async function handleTgsReq(request) {
     crealm: ticketPart.crealm,
     cname: ticketPart.cname,
     ticket: {
-      realm: REALM,
+      realm: answeringRealm,
       sname: body.sname,
       encPart: {
         etype: etype,

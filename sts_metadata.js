@@ -48,6 +48,33 @@ const { log, xmlEscape, baseUrlOf, ISSUER, PORT } = require('./helpers');
 // test double is for.
 // ---------------------------------------------------------------------------
 const SPECS = [
+  { id: 'rfc4120', name: 'Kerberos v5 (RFC 4120)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4120',
+    coverage: 'partial: the AS and TGS exchanges over TCP, UDP and MS-KKDCP, with ' +
+              'pre-authentication (PA-ENC-TIMESTAMP), PA-ETYPE-INFO2 carrying the salt, ticket ' +
+              'flags, clock-skew enforcement and the error catalogue. Two realms with a trust ' +
+              'between them, so cross-realm referrals work. No FAST, no request signatures, no ' +
+              'S4U, no kpasswd. The AP exchange belongs to the protected service, not here.' },
+  { id: 'rfc3961', name: 'Kerberos encryption framework (RFC 3961/3962/8009, RFC 4757)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc3961',
+    coverage: 'full for the etypes offered: aes128/256-cts-hmac-sha1-96 (17, 18), ' +
+              'aes128/256-cts-hmac-sha256/384 (19, 20) and arcfour-hmac-md5 (23). DES is ' +
+              'decode-only and not offered. The same codec runs in the browser.' },
+  { id: 'ms-pac', name: '[MS-PAC] Privilege Attribute Certificate',
+    where: 'Microsoft Open Specifications',
+    url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-pac/',
+    coverage: 'partial: every ticket carries a signed PAC — logon information ' +
+              '(KERB_VALIDATION_INFO, NDR), client info, UPN/DNS info, attributes and the ' +
+              'requestor SID. A TGT gets two signatures and a service ticket four, per sections ' +
+              '2.8.2/2.8.3. Claims and device info are not produced, and SID FILTERING across a ' +
+              'trust is NOT implemented — a re-signed PAC keeps every SID it arrived with.' },
+  { id: 'ms-kkdcp', name: '[MS-KKDCP] Kerberos KDC Proxy Protocol',
+    where: 'Microsoft Open Specifications',
+    url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kkdcp/',
+    coverage: 'mock: POST /KdcProxy accepts a KDC-PROXY-MESSAGE and relays it to the KDC in ' +
+              'this process. Exists because a browser cannot open a raw socket to port 88.' },
   { id: 'ws-trust', name: 'WS-Trust 1.4 (and 1.0-1.3)',
     where: 'OASIS ws-sx',
     url: 'https://docs.oasis-open.org/ws-sx/ws-trust/v1.4/ws-trust.html',
@@ -222,6 +249,31 @@ const SPECS = [
 // reported on the page rather than silently dropping the link.
 // ---------------------------------------------------------------------------
 const ENDPOINTS = [
+  // --- Kerberos ---
+  //
+  // Note what is NOT on this page and cannot be: the KDC's own listeners are RAW SOCKETS
+  // on TCP and UDP port 88, and the protected service is a raw TCP socket of its own.
+  // This page is built by walking the live Express router, which is exactly why it cannot
+  // go stale — and a protocol that registers no route is the one blind spot that design
+  // has. The three HTTP endpoints below are the only Kerberos surfaces the walk can see;
+  // the sockets are described in their rows' text so a reader is not left thinking port
+  // 88 does not exist.
+  { path: '/KdcProxy', group: 'Kerberos', name: 'KDC Proxy (MS-KKDCP)',
+    specs: ['ms-kkdcp', 'rfc4120'],
+    what: 'Relays a KDC-PROXY-MESSAGE to the KDC listening on TCP and UDP port 88 in this ' +
+          'process. A browser cannot open a raw socket, so this is how the in-browser client ' +
+          'reaches a KDC without the api relay.' },
+  { path: '/krb5/principals', group: 'Kerberos', name: 'What the KDC knows',
+    specs: ['rfc4120', 'ms-pac'],
+    what: 'The principal database of both realms: names, salts (which are NOT derivable from ' +
+          'the principal name, which is why PA-ETYPE-INFO2 exists), offered etypes, the ' +
+          'deliberate misconfigurations, and the PAC identity each account carries. Not a real ' +
+          'Kerberos endpoint — a KDC publishes none of this.' },
+  { path: '/krb5/service', group: 'Kerberos', name: 'The protected service',
+    specs: ['rfc4120'],
+    what: 'What the AP-REQ acceptor is, where its raw TCP socket is listening, and the ordered ' +
+          'checks it applies to a ticket. Not a real Kerberos endpoint either.' },
+
   // --- service ---
   { path: '/healthcheck', group: 'Service', name: 'Health check',
     specs: [], what: 'Liveness only. Answers 200 with a JSON message; used by the compose healthcheck.' },
