@@ -82,9 +82,18 @@
 //    other realm asserting membership of groups in this one, and its absence is stated
 //    rather than left as a silence.
 //
-// It does NOT check request signatures, does not implement FAST, and does not do S4U —
-// phase 5 adds delegation. The AS and TGS exchanges are both served; the AP exchange
-// belongs to a SERVICE rather than to a KDC and lives in krb5_service.js.
+// ---------------------------------------------------------------------------
+// DELEGATION is served too, all four ways, and the mock draws the distinctions on purpose:
+// S4U2Self (PA-FOR-USER), S4U2Proxy authorized by EITHER msDS-AllowedToDelegateTo on the
+// front end or msDS-AllowedToActOnBehalfOfOtherIdentity on the back end, FORWARDED tickets
+// for unconstrained delegation, and RENEWALS. See resolveS4u() for the asymmetries between
+// the two S4U2Proxy routes, which are the whole security story of resource-based
+// delegation, and the FORWARDED block in handleTgsReq() for the one control that limits
+// unconstrained delegation at all.
+//
+// It does NOT check request signatures, does not implement FAST, does not implement kpasswd,
+// and does not apply SID filtering across a trust. The AS and TGS exchanges are both served;
+// the AP exchange belongs to a SERVICE rather than to a KDC and lives in krb5_service.js.
 // ---------------------------------------------------------------------------
 
 const net = require('net');
@@ -362,6 +371,280 @@ function ticketFlagsForReferral(presented) {
   return (presented || []).filter(function (f) { return f !== msgs.TICKET_FLAG.INITIAL; });
 }
 
+// ---------------------------------------------------------------------------
+// S4U — the two halves of "on behalf of somebody else" ([MS-SFU]).
+//
+// Ordinarily a TGS-REQ produces a ticket for whoever presented the TGT. These two
+// extensions change that, and the whole of delegation is the KDC's decision about
+// whether to allow it:
+//
+//   **S4U2Self** (padata PA-FOR-USER). A service asks for a ticket to ITSELF naming a
+//   user who is not involved at all — no password, no ticket, no consent. It is how a
+//   service that authenticated somebody by other means gets a Kerberos identity for
+//   them. Anyone with a service account can do this; it is not a privilege, because the
+//   ticket is to yourself.
+//
+//   **S4U2Proxy** (option cname-in-addl-tkt, evidence in additional-tickets). The service
+//   then asks for a ticket to ANOTHER service as that user. THIS is the privilege, and
+//   what authorizes it is one of two attributes on two different accounts:
+//
+//     * CLASSIC constrained delegation — `msDS-AllowedToDelegateTo` on the FRONT-END
+//       account, listing the services it may reach. Only a domain admin can set it.
+//     * RESOURCE-BASED (RBCD) — `msDS-AllowedToActOnBehalfOfOtherIdentity` on the
+//       BACK-END account, listing who may act on its behalf. Whoever controls that
+//       object can set it, which is why RBCD turns "I can write to this computer
+//       account" into "I can reach this service as anybody".
+//
+// Two more asymmetries that matter and are easy to miss:
+//
+//   * **Classic requires the evidence ticket to be FORWARDABLE; RBCD does not.** And a
+//     forwardable ticket out of S4U2Self is granted only to an account with
+//     TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION. So classic delegation needs that flag and
+//     RBCD does not need it either — one of the reasons RBCD is the easier path.
+//   * **RBCD additionally requires PA-PAC-OPTIONS with the RBCD bit**, and [MS-SFU] says
+//     a KDC MUST answer KDC_ERR_BADOPTION without it. That error mentions nothing about
+//     padata, so it is refused here with an explanation.
+//
+// Returns { mode, clientName, clientRealm, evidencePart, transited, error }.
+// ---------------------------------------------------------------------------
+async function resolveS4u(ctx) {
+  log.debug('Entering resolveS4u().');
+  const body = ctx.body;
+  const ticketPart = ctx.ticketPart;
+  const plain = {
+    mode: 'none',
+    clientName: ticketPart.cname,
+    clientRealm: ticketPart.crealm,
+    evidencePart: null,
+    transited: []
+  };
+
+  const forUserPa = (ctx.request.padata || []).filter(function (pa) {
+    return pa.type === msgs.PA_TYPE.FOR_USER;
+  })[0];
+  const wantsProxy = (body.kdcOptions || []).indexOf(msgs.KDC_OPTION.CNAME_IN_ADDL_TKT) !== -1;
+
+  if (!forUserPa && !wantsProxy) {
+    log.debug('Leaving resolveS4u(). an ordinary TGS request.');
+    return plain;
+  }
+
+  // The account that is ASKING. For S4U it is a service acting for somebody else, and
+  // its own attributes are what decide whether it may.
+  const requester = principals.find(ticketPart.cname.name, ticketPart.crealm);
+  const requesterName = ticketPart.cname.name.join('/');
+
+  // ----- S4U2Self -----
+  if (forUserPa) {
+    if (wantsProxy) {
+      return { error: errorReply(13, {
+        crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+        sname: body.sname,
+        eText: 'PA-FOR-USER and cname-in-addl-tkt were BOTH sent. Those are the two halves of ' +
+               'S4U and they are separate requests: S4U2Self obtains the evidence ticket, and ' +
+               'S4U2Proxy then presents it.'
+      }) };
+    }
+    let forUser;
+    try {
+      forUser = msgs.readPaForUser(forUserPa.value);
+    } catch (e) {
+      return { error: errorReply(13, {
+        crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+        sname: body.sname, eText: 'PA-FOR-USER does not decode: ' + e.message
+      }) };
+    }
+
+    // The checksum is what stops a service naming a user it did not authenticate... and
+    // note exactly what it proves: only that whoever built this padata holds the TGT's
+    // session key. It is integrity, not authorization. [MS-SFU] section 2.2.1 fixes the
+    // algorithm as HMAC-MD5 at key usage 17 whatever the session key's etype.
+    const arcfour = kcrypto.etypeById(23);
+    const expected = await arcfour.checksum(ctx.sessionKey, kcrypto.KEY_USAGE.PA_FOR_USER_CKSUM,
+      s4uByteArray(forUser.userName, forUser.userRealm, forUser.authPackage));
+    if (!prim.equalConstantTime(expected, forUser.cksum.checksum)) {
+      log.info('krb5: the PA-FOR-USER checksum does not verify for ' + requesterName);
+      return { error: errorReply(13, {
+        crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+        sname: body.sname,
+        eText: 'the PA-FOR-USER checksum does not verify. It is HMAC-MD5 (not the session key\'s ' +
+               'own checksum type) at key usage 17, over the name type as four little-endian ' +
+               'bytes then the name components, the realm and the auth-package concatenated.'
+      }) };
+    }
+    if (forUser.cksum.type !== arcfour.checksumType) {
+      log.info('krb5: PA-FOR-USER carries cksumtype ' + forUser.cksum.type + ' rather than -138');
+    }
+
+    const user = principals.find(forUser.userName.name, forUser.userRealm);
+    if (!user) {
+      return { error: errorReply(6, {
+        crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+        sname: body.sname,
+        eText: 'S4U2Self named ' + forUser.userName.name.join('/') + '@' + forUser.userRealm +
+               ', which this KDC does not know'
+      }) };
+    }
+    // A service may only ask for a ticket to ITSELF this way.
+    if (body.sname.name.join('/') !== requesterName) {
+      return { error: errorReply(13, {
+        crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+        sname: body.sname,
+        eText: 'S4U2Self is a request for a ticket to YOURSELF: ' + requesterName + ' asked for ' +
+               body.sname.name.join('/') + '. Reaching another service on a user\'s behalf is ' +
+               'S4U2Proxy, which needs the evidence ticket and an authorization to match.'
+      }) };
+    }
+    log.info('krb5: S4U2Self — ' + requesterName + ' is asking for a ticket to itself on behalf ' +
+      'of ' + forUser.userName.name.join('/') + '@' + forUser.userRealm + ' (no involvement from ' +
+      'that account at all)');
+    log.debug('Leaving resolveS4u(). mode=self');
+    return {
+      mode: 'self',
+      clientName: { type: user.type, name: user.name },
+      clientRealm: forUser.userRealm,
+      impersonated: user,
+      requester: requester,
+      evidencePart: null,
+      transited: []
+    };
+  }
+
+  // ----- S4U2Proxy -----
+  const additional = body.additionalTickets || [];
+  if (!additional.length) {
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: 'cname-in-addl-tkt was set but additional-tickets is empty. That option means "read ' +
+             'the client\'s identity out of the ticket I am also sending", and there is none.'
+    }) };
+  }
+
+  // The evidence ticket is a service ticket FOR THE REQUESTER, so the requester's own key
+  // opens it. That is the check: a service can only present evidence addressed to itself.
+  const evidence = additional[0];
+  const evidenceService = principals.find(evidence.sname.name, evidence.realm);
+  if (!evidenceService || evidence.sname.name.join('/') !== requesterName) {
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: 'the evidence ticket is for ' + evidence.sname.name.join('/') + ' but the request ' +
+             'comes from ' + requesterName + '. A service may only present evidence addressed to ' +
+             'itself — otherwise anyone holding any service ticket could delegate with it.'
+    }) };
+  }
+  let evidencePart;
+  try {
+    const evidenceProfile = kcrypto.etypeById(evidence.encPart.etype);
+    evidencePart = msgs.readEncTicketPart(await evidenceProfile.decrypt(
+      await principals.longTermKey(evidenceService, evidence.encPart.etype),
+      kcrypto.KEY_USAGE.KDC_REP_TICKET, evidence.encPart.cipher));
+  } catch (e) {
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: 'the evidence ticket does not decrypt with ' + requesterName + '\'s key: ' + e.message
+    }) };
+  }
+
+  const target = principals.find(body.sname.name, ctx.answeringRealm);
+  const targetName = (body.sname.name || []).join('/');
+  const resourceBased = (ctx.request.padata || []).some(function (pa) {
+    if (pa.type !== msgs.PA_TYPE.PAC_OPTIONS) return false;
+    try {
+      return msgs.readPaPacOptions(pa.value).flags
+        .indexOf(msgs.PAC_OPTION.RESOURCE_BASED_CONSTRAINED_DELEGATION) !== -1;
+    } catch (e) {
+      // Unreadable padata is ignored rather than fatal, as AD ignores padata it cannot
+      // read — but logged, because silently treating it as absent changes the answer.
+      log.info('krb5: could not read PA-PAC-OPTIONS, treating RBCD as not requested: ' + e.message);
+      return false;
+    }
+  });
+
+  const classicAllowed = !!requester &&
+    requester.allowedToDelegateTo.indexOf(targetName) !== -1;
+  const rbcdAllowed = !!target &&
+    target.allowedToActOnBehalfOf.indexOf(requesterName) !== -1;
+
+  if (!classicAllowed && !rbcdAllowed) {
+    log.info('krb5: REFUSING S4U2Proxy — ' + requesterName + ' may not delegate to ' + targetName +
+      '. Neither its own msDS-AllowedToDelegateTo nor that target\'s ' +
+      'msDS-AllowedToActOnBehalfOfOtherIdentity permits it.');
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: requesterName + ' is not authorized to reach ' + targetName + ' on anybody\'s ' +
+             'behalf. Two attributes could permit it and neither does: ' +
+             'msDS-AllowedToDelegateTo on ' + requesterName + ' (classic constrained delegation, ' +
+             'currently [' + (requester ? requester.allowedToDelegateTo.join(', ') : '') + ']), ' +
+             'or msDS-AllowedToActOnBehalfOfOtherIdentity on ' + targetName + ' (resource-based, ' +
+             'currently [' + (target ? target.allowedToActOnBehalfOf.join(', ') : '') + ']).'
+    }) };
+  }
+
+  // RBCD is the only thing permitting it, so the padata is mandatory ([MS-SFU]).
+  if (!classicAllowed && rbcdAllowed && !resourceBased) {
+    log.info('krb5: REFUSING S4U2Proxy — only RBCD permits this and PA-PAC-OPTIONS is missing');
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: 'this delegation is permitted only by resource-based constrained delegation, and ' +
+             '[MS-SFU] requires PA-PAC-OPTIONS carrying the resource-based bit for that. ' +
+             'Without it the answer is KDC_ERR_BADOPTION — which says nothing about padata, ' +
+             'so: send PA-PAC-OPTIONS (padata type 167) with bit 3 set.'
+    }) };
+  }
+
+  // Classic needs FORWARDABLE evidence; RBCD does not, and that asymmetry is real.
+  const evidenceForwardable =
+    (evidencePart.flags || []).indexOf(msgs.TICKET_FLAG.FORWARDABLE) !== -1;
+  if (classicAllowed && !rbcdAllowed && !evidenceForwardable) {
+    log.info('krb5: REFUSING S4U2Proxy — the evidence ticket is not forwardable');
+    return { error: errorReply(13, {
+      crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
+      sname: body.sname,
+      eText: 'the evidence ticket is not forwardable, which classic constrained delegation ' +
+             'requires. A ticket from S4U2Self is forwardable only when the requesting account ' +
+             'has TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION set, so this usually means that flag is ' +
+             'missing on ' + requesterName + ' — note that resource-based delegation would not ' +
+             'have needed either.'
+    }) };
+  }
+
+  log.info('krb5: S4U2Proxy — ' + requesterName + ' is reaching ' + targetName + ' as ' +
+    evidencePart.cname.name.join('/') + '@' + evidencePart.crealm + ', authorized by ' +
+    (classicAllowed ? 'msDS-AllowedToDelegateTo on ' + requesterName + ' (classic)'
+                    : 'msDS-AllowedToActOnBehalfOfOtherIdentity on ' + targetName + ' (RBCD)'));
+  log.debug('Leaving resolveS4u(). mode=proxy');
+  return {
+    mode: 'proxy',
+    clientName: evidencePart.cname,
+    clientRealm: evidencePart.crealm,
+    evidencePart: evidencePart,
+    requester: requester,
+    resourceBased: resourceBased,
+    classic: classicAllowed,
+    // The audit trail that goes into the PAC: this service is now one of the services the
+    // client has been delegated through.
+    transited: [requesterName]
+  };
+}
+
+// [MS-SFU] section 2.2.1's S4UByteArray. Duplicated deliberately from the client's copy —
+// the two ends have to agree, and tests/krb5_codec_sync.js compares them.
+function s4uByteArray(userName, userRealm, authPackage) {
+  const parts = [Uint8Array.from([
+    userName.type & 0xff, (userName.type >>> 8) & 0xff,
+    (userName.type >>> 16) & 0xff, (userName.type >>> 24) & 0xff
+  ])];
+  (userName.name || []).forEach(function (c) { parts.push(prim.utf8(c)); });
+  parts.push(prim.utf8(userRealm));
+  parts.push(prim.utf8(authPackage || 'Kerberos'));
+  return prim.concat(parts);
+}
+
 // Every refusal goes through here, so every one of them carries the KDC's own
 // clock (which is how a client measures skew) and names the principals involved.
 function errorReply(code, options) {
@@ -584,7 +867,17 @@ async function handleAsReq(request) {
   const wantsForwardable = (body.kdcOptions || []).indexOf(msgs.KDC_OPTION.FORWARDABLE) !== -1;
   const wantsRenewable = (body.kdcOptions || []).indexOf(msgs.KDC_OPTION.RENEWABLE) !== -1;
   const flags = [msgs.TICKET_FLAG.INITIAL];
-  if (wantsForwardable) flags.push(msgs.TICKET_FLAG.FORWARDABLE);
+  // "Account is sensitive and cannot be delegated". The refusal is not an error — the
+  // ticket is issued, simply WITHOUT the forwardable flag — and that is the design: it
+  // works no matter which service the user visits, because a ticket that was never
+  // forwardable cannot be forwarded by anybody. An error here would break the user's
+  // logon instead of protecting it.
+  if (wantsForwardable && client.notDelegated) {
+    log.info('krb5: ' + client.name.join('/') + ' is flagged NOT_DELEGATED (account is sensitive ' +
+      'and cannot be delegated), so its TGT is NOT forwardable however it was asked for');
+  } else if (wantsForwardable) {
+    flags.push(msgs.TICKET_FLAG.FORWARDABLE);
+  }
   if (wantsRenewable) flags.push(msgs.TICKET_FLAG.RENEWABLE);
   // pre-authent is set only if pre-authentication actually happened. A service can
   // read this flag and insist on it, so setting it unconditionally would be a lie
@@ -867,21 +1160,141 @@ async function handleTgsReq(request) {
   }
   const profile = kcrypto.etypeById(etype);
 
+  // ---------------------------------------------------------------------------
+  // A RENEWAL. The RENEW option means "give me the same ticket again, later" rather than
+  // "issue me a new one", and three rules make it that rather than a fresh authentication:
+  //
+  //   * the presented ticket must be flagged RENEWABLE and carry a renew-till;
+  //   * the new endtime is capped at renew-till, which does NOT move — that cap is the
+  //     whole point of a renewable ticket, since otherwise it would be immortal;
+  //   * **authtime is preserved.** A renewed ticket must not look freshly authenticated: a
+  //     service reading authtime to decide how recently the user proved themselves would
+  //     otherwise be told a lie that grows more wrong with every renewal.
+  // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // FORWARDED — UNCONSTRAINED delegation, and the one the KDC cannot police afterwards.
+  //
+  // The client is asking for another ticket-granting ticket, flagged `forwarded`, to hand
+  // to a service inside a KRB-CRED. Once it has it, that service can obtain tickets to
+  // ANYTHING as this client until the ticket expires, and the KDC is never asked about it
+  // again — there is no list of permitted targets, because there is no constraint. So the
+  // only place a limit can be applied is HERE, at issue time, and it rests on two things:
+  //
+  //   * the presented ticket must itself be FORWARDABLE — which the AS exchange refuses to
+  //     an account flagged NOT_DELEGATED, so a sensitive account can never reach this point;
+  //   * the account is re-checked anyway, because a forwardable ticket issued before the
+  //     flag was set would otherwise still work.
+  // ---------------------------------------------------------------------------
+  const wantsForwarded = (body.kdcOptions || []).indexOf(msgs.KDC_OPTION.FORWARDED) !== -1;
+  if (wantsForwarded) {
+    if ((ticketPart.flags || []).indexOf(msgs.TICKET_FLAG.FORWARDABLE) === -1) {
+      log.info('krb5: REFUSING to forward — the presented ticket is not forwardable');
+      return errorReply(13, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'the FORWARDED option needs a FORWARDABLE ticket to forward, and this one is not. ' +
+               'An account flagged NOT_DELEGATED ("sensitive and cannot be delegated") is never ' +
+               'issued one, which is how that flag protects it from every service at once.' });
+    }
+    const forwardingClient = principals.find(ticketPart.cname.name, ticketPart.crealm);
+    if (forwardingClient && forwardingClient.notDelegated) {
+      log.info('krb5: REFUSING to forward — ' + ticketPart.cname.name.join('/') + ' is sensitive');
+      return errorReply(13, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: ticketPart.cname.name.join('/') + ' is flagged NOT_DELEGATED, so its credentials ' +
+               'may not be forwarded. Re-checked here as well as at the AS exchange, because a ' +
+               'forwardable ticket issued before the flag was set would otherwise still work.' });
+    }
+    log.info('krb5: forwarding ' + ticketPart.cname.name.join('/') + '@' + ticketPart.crealm +
+      "'s credentials — the ticket issued is flagged `forwarded` and whoever receives it can act " +
+      'as that client anywhere, with no further reference to this KDC');
+  }
+
+  const wantsRenew = (body.kdcOptions || []).indexOf(msgs.KDC_OPTION.RENEW) !== -1;
+  if (wantsRenew) {
+    if ((ticketPart.flags || []).indexOf(msgs.TICKET_FLAG.RENEWABLE) === -1) {
+      return errorReply(13, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'the RENEW option was set but this ticket is not renewable. Renewability is asked ' +
+               'for when the ticket is FIRST obtained (the RENEWABLE option on the AS-REQ) and ' +
+               'cannot be added afterwards.' });
+    }
+    if (!ticketPart.renewTill) {
+      return errorReply(13, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'the ticket is flagged renewable but carries no renew-till, so there is no limit ' +
+               'to renew it up to' });
+    }
+    if (ticketPart.renewTill <= at) {
+      return errorReply(32, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'renew-till passed at ' + ticketPart.renewTill.toISOString() + '. A renewable ' +
+               'ticket can be renewed repeatedly but only up to that instant, which does not ' +
+               'move — otherwise it would never expire.' });
+    }
+    if (body.sname.name.join('/') !== apReq.ticket.sname.name.join('/')) {
+      return errorReply(13, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'a renewal must name the SAME service as the ticket being renewed (' +
+               apReq.ticket.sname.name.join('/') + '), not ' + body.sname.name.join('/') });
+    }
+    log.info('krb5: renewing ' + ticketPart.cname.name.join('/') + '@' + ticketPart.crealm +
+      "'s ticket for " + body.sname.name.join('/') + ' — authtime stays at ' +
+      ticketPart.authtime.toISOString() + ', capped at renew-till ' +
+      ticketPart.renewTill.toISOString());
+  }
+
+  // WHO is this ticket for? Ordinarily whoever presented the TGT — but S4U changes it,
+  // and the KDC's decision about whether to allow that is the whole of delegation.
+  const s4u = await resolveS4u({
+    request: request, body: body, ticketPart: ticketPart, service: service,
+    answeringRealm: answeringRealm, sessionKey: sessionKey, apReq: apReq
+  });
+  if (s4u.error) return s4u.error;
+  const clientName = s4u.clientName;
+  const clientRealm = s4u.clientRealm;
+
   // Issue. The new ticket inherits the TGT's flags minus `initial` — only the AS
   // exchange issues an initial ticket, and a service may rely on that distinction.
   const inherited = ticketPart.flags.filter(function (f) {
     return f !== msgs.TICKET_FLAG.INITIAL;
   });
-  const flags = inherited.slice();
+  let flags = inherited.slice();
   if (service.okAsDelegate && flags.indexOf(msgs.TICKET_FLAG.OK_AS_DELEGATE) === -1) {
     flags.push(msgs.TICKET_FLAG.OK_AS_DELEGATE);
+  }
+
+  if (s4u.mode === 'self') {
+    // The flags come from the SERVICE's own configuration, not from the TGT: a ticket out
+    // of S4U2Self is forwardable only if the requesting account has
+    // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION. Without it S4U2Self still succeeds and
+    // returns a ticket that cannot be used as evidence for classic S4U2Proxy — which
+    // then fails several steps later for a reason that looks nothing like this flag.
+    flags = flags.filter(function (f) { return f !== msgs.TICKET_FLAG.FORWARDABLE; });
+    if (s4u.requester && s4u.requester.trustedToAuthenticateForDelegation) {
+      flags.push(msgs.TICKET_FLAG.FORWARDABLE);
+    } else {
+      log.info('krb5: ' + ticketPart.cname.name.join('/') + ' does not have ' +
+        'TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION, so its S4U2Self ticket is NOT forwardable and ' +
+        'cannot be used as evidence for classic constrained delegation');
+    }
+  } else if (s4u.mode === 'proxy' && flags.indexOf(msgs.TICKET_FLAG.FORWARDABLE) === -1) {
+    flags.push(msgs.TICKET_FLAG.FORWARDABLE);
+  }
+  if (wantsForwarded && flags.indexOf(msgs.TICKET_FLAG.FORWARDED) === -1) {
+    // The flag is the RECORD that this happened: a service receiving a ticket can see the
+    // credentials were forwarded rather than presented by their owner, and can refuse.
+    flags.push(msgs.TICKET_FLAG.FORWARDED);
   }
 
   const newSessionKey = kcrypto.randomBytes(profile.keyBytes);
   const authtime = ticketPart.authtime;
   const requestedTill = body.till && body.till > at ? body.till : kdcTime(TICKET_LIFETIME_SECONDS);
-  // A service ticket cannot outlive the TGT that bought it.
-  const endtime = new Date(Math.min(requestedTill.getTime(), ticketPart.endtime.getTime()));
+  // A service ticket cannot outlive the TGT that bought it — EXCEPT on a renewal, where
+  // the presented ticket's own endtime is the thing being extended and capping against it
+  // would make every renewal a no-op. There the cap is renew-till.
+  const endtime = wantsRenew
+    ? new Date(Math.min(requestedTill.getTime(), ticketPart.renewTill.getTime()))
+    : new Date(Math.min(requestedTill.getTime(), ticketPart.endtime.getTime()));
 
   const serviceKey = await principals.longTermKey(service, etype);
 
@@ -899,8 +1312,12 @@ async function handleTgsReq(request) {
     return msgs.encEncTicketPart({
       flags: flags,
       key: { etype: etype, key: newSessionKey },
-      crealm: ticketPart.crealm,
-      cname: ticketPart.cname,
+      // The IMPERSONATED client under S4U, and the presenter otherwise. This one field
+      // is what makes a delegated ticket a delegated ticket: the service that asked is
+      // nowhere in it, and the only record that delegation happened at all is the PAC's
+      // S4U_DELEGATION_INFO.
+      crealm: clientRealm,
+      cname: clientName,
       authtime: authtime,
       starttime: at,
       endtime: endtime,
@@ -910,8 +1327,32 @@ async function handleTgsReq(request) {
   };
   // The client's account lives in the realm the TICKET came from, not necessarily in the
   // one being answered — after a referral those differ, and that is the whole point.
-  const ticketClient = principals.find(ticketPart.cname.name, ticketPart.crealm);
-  const crossRealm = ticketPart.crealm !== answeringRealm;
+  // Under S4U it is the IMPERSONATED user's account, which is the point there.
+  const ticketClient = principals.find(clientName.name, clientRealm);
+  const crossRealm = clientRealm !== answeringRealm;
+
+  // The delegation audit trail, if this hop is one. It names the target and every service
+  // the client has already been delegated through — appended to rather than replaced, so
+  // a chain of hops is visible.
+  const delegationInfo = s4u.mode === 'proxy' ? {
+    s4u2proxyTarget: (body.sname.name || []).join('/'),
+    transitedServices: (function () {
+      const already = kpac.findPacs(s4u.evidencePart.authorizationData || []);
+      let previous = [];
+      if (already.length) {
+        try {
+          const entry = kpac.bufferOfType(kpac.parsePac(already[0].bytes),
+            kpac.TYPE.DELEGATION_INFO);
+          if (entry && entry.parsed) previous = entry.parsed.transitedServices || [];
+        } catch (e) {
+          // A malformed delegation buffer must not stop the ticket being issued: the
+          // audit trail is evidence, not a gate. Logged so it is not lost.
+          log.info('krb5: could not read the evidence ticket\'s delegation info: ' + e.message);
+        }
+      }
+      return previous.concat(s4u.transited);
+    })()
+  } : null;
   // Whether the TGT itself carries a PAC. A real KDC propagates the client's
   // authorization data from the TGT into the service ticket, so a client that declined
   // a PAC at the AS exchange does not acquire one by asking for a service ticket — and
@@ -919,7 +1360,28 @@ async function handleTgsReq(request) {
   // way that is hard to notice, since the TGT is the ticket nobody looks inside.
   const tgtHadPac = kpac.findPacs(ticketPart.authorizationData || []).length > 0;
   let encTicketPart;
-  if (!tgtHadPac) {
+  if (s4u.mode === 'proxy') {
+    // The user's PAC comes from the EVIDENCE ticket — the requester never had the user's
+    // credentials, and this KDC must not invent authorization data for an account on the
+    // strength of a service asking nicely. It is re-signed for the target service and the
+    // delegation trail is added.
+    const carried = kpac.findPacs(s4u.evidencePart.authorizationData || []);
+    if (!carried.length) {
+      log.info('krb5: the evidence ticket carries no PAC, so the delegated ticket has none either');
+      encTicketPart = encodeTicketPart(null);
+    } else {
+      const placeholder = encodeTicketPart(kpac.wrapPacAsAuthorizationData(new Uint8Array([0])));
+      const resigned = await kpac.resignPac(carried[0].bytes, {
+        serverKey: { etype: etype, key: serviceKey },
+        kdcKey: { etype: etype, key: await principals.longTermKey(krbtgt, etype) },
+        includeTicketSignature: !isTgtRequest(body.sname),
+        includeExtendedKdcSignature: !isTgtRequest(body.sname),
+        ticketBytes: placeholder,
+        delegationInfo: delegationInfo
+      });
+      encTicketPart = encodeTicketPart(kpac.wrapPacAsAuthorizationData(resigned));
+    }
+  } else if (!tgtHadPac) {
     log.info('krb5: the presented TGT carries no PAC, so neither does the service ticket issued ' +
       'from it');
     encTicketPart = encodeTicketPart(null);
@@ -953,7 +1415,7 @@ async function handleTgsReq(request) {
   } else {
     const pacBytes = await buildPacFor(ticketClient, {
       authtime: authtime,
-      clientRealm: ticketPart.crealm,
+      clientRealm: clientRealm,
       serverKey: { etype: etype, key: serviceKey },
       kdcKey: { etype: etype, key: await principals.longTermKey(krbtgt, etype) },
       isTgt: isTgtRequest(body.sname),
@@ -989,8 +1451,12 @@ async function handleTgsReq(request) {
     sname: body.sname
   }, msgs.APPLICATION.ENC_TGS_REP_PART);
 
+  const s4uNote = s4u.mode === 'none' ? ''
+    : ' [S4U2' + s4u.mode + ', requested by ' + ticketPart.cname.name.join('/') +
+      (s4u.mode === 'proxy' ? ', via ' + (s4u.classic ? 'classic' : 'resource-based') +
+        ' constrained delegation' : '') + ']';
   log.info('krb5: ' + answeringRealm + ' issued a service ticket for ' +
-    ticketPart.cname.name.join('/') + '@' + ticketPart.crealm + ' to ' +
+    clientName.name.join('/') + '@' + clientRealm + s4uNote + ' to ' +
     body.sname.name.join('/') + ' using ' + profile.name +
     ', flags [' + msgs.ticketFlagNames(flags).join(', ') + '], enc-part at key usage ' + replyUsage +
     (useSubkey ? ' (the Authenticator carried a subkey)' : ' (no subkey was sent)'));
@@ -998,8 +1464,12 @@ async function handleTgsReq(request) {
   log.debug('Leaving handleTgsReq().');
   return msgs.encKdcRep({
     msgType: msgs.MSG_TYPE.TGS_REP,
-    crealm: ticketPart.crealm,
-    cname: ticketPart.cname,
+    // The reply names the client the TICKET is for, which under S4U is the impersonated
+    // user rather than the service that asked. Leaving the requester here would make the
+    // reply disagree with the ticket inside it — and a client reads its own identity off
+    // the reply, so it would believe it had a ticket for itself.
+    crealm: clientRealm,
+    cname: clientName,
     ticket: {
       realm: answeringRealm,
       sname: body.sname,
