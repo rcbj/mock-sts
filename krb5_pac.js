@@ -590,6 +590,7 @@ function parseBuffer(type, bytes) {
     case TYPE.ATTRIBUTES_INFO: return parseAttributesInfo(bytes);
     case TYPE.REQUESTOR_SID: return parseRequestorSid(bytes);
     case TYPE.REQUESTOR_GUID: return parseRequestorGuid(bytes);
+    case TYPE.DELEGATION_INFO: return parseDelegationInfo(bytes);
     case TYPE.SERVER_CHECKSUM:
     case TYPE.KDC_CHECKSUM:
     case TYPE.TICKET_CHECKSUM:
@@ -761,6 +762,80 @@ function parseRequestorGuid(bytes) {
     guid: hex(le(0, 4), 8) + "-" + hex(le(4, 2), 4) + "-" + hex(le(6, 2), 4) + "-" +
       tail.slice(0, 4) + "-" + tail.slice(4)
   };
+}
+
+// S4U_DELEGATION_INFO, [MS-PAC] section 2.9 — NDR, like the logon information.
+//
+// The AUDIT TRAIL of a constrained-delegation chain: the service the ticket may be
+// forwarded to, and every service it has already been delegated through. A KDC appends
+// to it on each S4U2proxy hop, so this is where "who actually asked for this, on whose
+// behalf, via what" is answered — and it is the buffer to read first when a delegation
+// works from one host and not another.
+//
+// Its transited list is an array of POINTERS to RPC_UNICODE_STRINGs, which means two
+// levels of deferral: the array's element pointers come first, then each string's own
+// header, and only then the characters. Reading it as an array of inline strings gets
+// the first element right and everything after it wrong.
+function parseDelegationInfo(bytes) {
+  var r = ndr.createReader(bytes);
+  var headers = ndr.readTypeMarshallingHeaders(r);
+  if (!r.pointer()) {
+    throw new Error("krb5: the delegation information's top-level pointer is NULL");
+  }
+  var target = ndr.readUnicodeStringHeader(r);
+  var listSize = r.u32();
+  var listPresent = r.pointer();
+
+  ndr.readUnicodeStringValue(r, target);
+
+  var services = [];
+  if (listPresent) {
+    var declared = r.arrayCount("transited service(s)");
+    if (declared !== listSize) {
+      throw new Error("krb5: TransitedListSize is " + listSize + " but the array's own conformant " +
+        "count is " + declared);
+    }
+    // Every element's RPC_UNICODE_STRING HEADER first — the headers are the array's
+    // elements — and only then each one's characters, in the same order.
+    var headersList = [];
+    for (var i = 0; i < declared; i++) headersList.push(ndr.readUnicodeStringHeader(r));
+    headersList.forEach(function (h) {
+      ndr.readUnicodeStringValue(r, h);
+      services.push(h.value);
+    });
+  } else if (listSize !== 0) {
+    throw new Error("krb5: TransitedListSize is " + listSize + " but the array pointer is NULL");
+  }
+
+  return {
+    ndr: headers,
+    s4u2proxyTarget: target.value,
+    transitedServices: services,
+    bytesUnread: r.remaining
+  };
+}
+
+function encodeDelegationInfo(spec) {
+  var w = ndr.createWriter();
+  var lengthOffset = ndr.writeTypeMarshallingHeaders(w);
+  var bodyStart = w.offset;
+  w.pointer(true);
+
+  var services = spec.transitedServices || [];
+  ndr.writeUnicodeStringHeader(w, spec.s4u2proxyTarget);
+  w.u32(services.length);
+  w.pointer(services.length > 0);
+
+  ndr.writeUnicodeStringValue(w, spec.s4u2proxyTarget);
+  if (services.length) {
+    w.u32(services.length);
+    // Headers for every element first, then every element's characters — see the reader.
+    services.forEach(function (name) { ndr.writeUnicodeStringHeader(w, name); });
+    services.forEach(function (name) { ndr.writeUnicodeStringValue(w, name); });
+  }
+
+  w.align(8);
+  return w.patchU32(lengthOffset, w.offset - bodyStart).build();
 }
 
 // KERB_VALIDATION_INFO, [MS-PAC] section 2.5 — the one that is NDR, and the one that
@@ -1452,6 +1527,12 @@ async function buildPac(spec) {
   if (spec.requestorSid) {
     entries.push({ type: TYPE.REQUESTOR_SID, bytes: encodeRequestorSid(spec.requestorSid) });
   }
+  if (spec.delegationInfo) {
+    entries.push({
+      type: TYPE.DELEGATION_INFO,
+      bytes: encodeDelegationInfo(spec.delegationInfo)
+    });
+  }
   if (spec.includeTicketSignature) {
     entries.push({
       type: TYPE.TICKET_CHECKSUM,
@@ -1564,6 +1645,16 @@ async function resignPac(pacBytes, spec) {
     throw new Error("krb5: this PAC has no content buffers to re-sign");
   }
 
+  // An S4U2proxy hop ADDS or REPLACES the delegation information while carrying everything
+  // else across, so re-signing has to be able to do that rather than only preserve.
+  if (spec.delegationInfo) {
+    entries = entries.filter(function (e) { return e.type !== TYPE.DELEGATION_INFO; });
+    entries.push({
+      type: TYPE.DELEGATION_INFO,
+      bytes: encodeDelegationInfo(spec.delegationInfo)
+    });
+  }
+
   if (spec.includeTicketSignature) {
     entries.push({
       type: TYPE.TICKET_CHECKSUM,
@@ -1646,5 +1737,7 @@ module.exports = {
   encodeUpnDnsInfo: encodeUpnDnsInfo,
   encodeAttributesInfo: encodeAttributesInfo,
   encodeRequestorSid: encodeRequestorSid,
+  encodeDelegationInfo: encodeDelegationInfo,
+  parseDelegationInfo: parseDelegationInfo,
   wrapPacAsAuthorizationData: wrapPacAsAuthorizationData
 };

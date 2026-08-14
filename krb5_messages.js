@@ -343,6 +343,21 @@ function readHostAddresses(t) {
   });
 }
 
+// A SINGLE HostAddress rather than the SEQUENCE OF. KRB-CRED's s-address and r-address are
+// one address each, not a list — encoding them with the plural wraps them in an extra
+// SEQUENCE, which decodes as a HostAddress whose type field is a whole structure.
+function encHostAddress(a) {
+  return asn1.encTaggedSequence([
+    { tag: 0, value: asn1.encInteger(a.type) },
+    { tag: 1, value: asn1.encOctetString(a.address) }
+  ]);
+}
+
+function readHostAddress(t) {
+  var f = asn1.readTaggedSequence(t.value);
+  return { type: asn1.decInteger(f[0]), address: asn1.decOctetString(f[1]) };
+}
+
 // AuthorizationData ::= SEQUENCE OF SEQUENCE { ad-type [0] Int32, ad-data [1] OCTET STRING }
 // The PAC arrives in here, wrapped in AD-IF-RELEVANT. Kept as raw bytes: phase 4
 // decodes it.
@@ -858,6 +873,145 @@ function encPaForUser(u) {
   ]);
 }
 
+// ---------------------------------------------------------------------------
+// KRB-CRED — RFC 4120 section 5.8.1. **Unconstrained delegation.**
+//
+// This is how a client hands its own ticket-granting ticket to a service so that the
+// service can go and get tickets to anything, as the client. Not "as the client for one
+// named service" — that is constrained delegation and the KDC polices it. This is
+// everything, everywhere, for the ticket's lifetime, and the KDC never sees it happen.
+//
+// Which is why the interesting parts of this structure are the ones people forget:
+//
+//  * **It travels in the AP-REQ Authenticator's 0x8003 checksum**, in the Deleg field,
+//    when GSS_C_DELEG_FLAG is set — not as a message of its own. See krb5_gss.js, which
+//    already carries that field.
+//  * **Its enc-part is encrypted at key usage 14** under the AP exchange's subkey (or the
+//    session key when there is none), so only the service the client chose can open it.
+//  * **The tickets and their session keys are separated.** `tickets` holds the opaque
+//    Tickets and the encrypted `ticket-info` holds each one's session key — because a
+//    ticket is useless without its key, and that separation is what makes the whole
+//    structure safe to put in a checksum field.
+//
+// Nearly every field of KrbCredInfo is OPTIONAL, and a sender that omits the session key
+// has forwarded something unusable. That is checked on read rather than assumed.
+// ---------------------------------------------------------------------------
+function encKrbCredInfo(info) {
+  return asn1.encTaggedSequence([
+    { tag: 0, value: encEncryptionKey(info.key) },
+    { tag: 1, value: info.prealm ? asn1.encGeneralString(info.prealm) : null },
+    { tag: 2, value: info.pname ? encPrincipalName(info.pname) : null },
+    { tag: 3, value: info.flags ? asn1.encFlags(info.flags) : null },
+    { tag: 4, value: info.authtime ? asn1.encKerberosTime(info.authtime) : null },
+    { tag: 5, value: info.starttime ? asn1.encKerberosTime(info.starttime) : null },
+    { tag: 6, value: info.endtime ? asn1.encKerberosTime(info.endtime) : null },
+    { tag: 7, value: info.renewTill ? asn1.encKerberosTime(info.renewTill) : null },
+    { tag: 8, value: info.srealm ? asn1.encGeneralString(info.srealm) : null },
+    { tag: 9, value: info.sname ? encPrincipalName(info.sname) : null },
+    { tag: 10, value: (info.caddr && info.caddr.length) ? encHostAddresses(info.caddr) : null }
+  ]);
+}
+
+function readKrbCredInfo(t) {
+  var f = asn1.readTaggedSequence(t.value);
+  if (!f[0]) {
+    throw new Error("krb5: a KrbCredInfo with no session key. Every other field is optional but " +
+      "that one is not — a forwarded ticket without its key cannot be used for anything.");
+  }
+  return {
+    key: readEncryptionKey(f[0]),
+    prealm: f[1] ? asn1.decGeneralString(f[1]) : null,
+    pname: f[2] ? readPrincipalName(f[2]) : null,
+    flags: f[3] ? asn1.bitsFromFlags(asn1.decFlags(f[3])) : null,
+    authtime: f[4] ? asn1.decKerberosTime(f[4]) : null,
+    starttime: f[5] ? asn1.decKerberosTime(f[5]) : null,
+    endtime: f[6] ? asn1.decKerberosTime(f[6]) : null,
+    renewTill: f[7] ? asn1.decKerberosTime(f[7]) : null,
+    srealm: f[8] ? asn1.decGeneralString(f[8]) : null,
+    sname: f[9] ? readPrincipalName(f[9]) : null,
+    caddr: f[10] ? readHostAddresses(f[10]) : null
+  };
+}
+
+function encEncKrbCredPart(p) {
+  return asn1.encApplication(APPLICATION.ENC_KRB_CRED_PART, asn1.encTaggedSequence([
+    { tag: 0, value: asn1.encSequenceOf((p.ticketInfo || []).map(encKrbCredInfo)) },
+    { tag: 1, value: p.nonce === undefined || p.nonce === null ? null : asn1.encInteger(p.nonce) },
+    { tag: 2, value: p.timestamp ? asn1.encKerberosTime(p.timestamp) : null },
+    { tag: 3, value: p.usec === undefined || p.usec === null ? null : asn1.encInteger(p.usec) },
+    { tag: 4, value: p.sAddress ? encHostAddress(p.sAddress) : null },
+    { tag: 5, value: p.rAddress ? encHostAddress(p.rAddress) : null }
+  ]));
+}
+
+function readEncKrbCredPart(bytes) {
+  var app = asn1.readApplication(bytes, APPLICATION.ENC_KRB_CRED_PART);
+  var f = asn1.readTaggedSequence(app.sequence.value);
+  return {
+    ticketInfo: asn1.decSequenceOf(f[0]).map(readKrbCredInfo),
+    nonce: f[1] ? asn1.decInteger(f[1]) : null,
+    timestamp: f[2] ? asn1.decKerberosTime(f[2]) : null,
+    usec: f[3] ? asn1.decInteger(f[3]) : null,
+    sAddress: f[4] ? readHostAddress(f[4]) : null,
+    rAddress: f[5] ? readHostAddress(f[5]) : null
+  };
+}
+
+function encKrbCred(c) {
+  return asn1.encApplication(APPLICATION.KRB_CRED, asn1.encTaggedSequence([
+    { tag: 0, value: asn1.encInteger(PVNO) },
+    { tag: 1, value: asn1.encInteger(MSG_TYPE.CRED) },
+    { tag: 2, value: asn1.encSequenceOf((c.tickets || []).map(encTicket)) },
+    { tag: 3, value: encEncryptedData(c.encPart) }
+  ]));
+}
+
+function readKrbCred(bytes) {
+  var app = asn1.readApplication(bytes, APPLICATION.KRB_CRED);
+  var f = asn1.readTaggedSequence(app.sequence.value);
+  var msgType = asn1.decInteger(f[1]);
+  if (msgType !== MSG_TYPE.CRED) {
+    throw new Error("krb5: this is tagged [APPLICATION 22] but its msg-type is " + msgType +
+      ", not 22");
+  }
+  var tickets = asn1.decSequenceOf(f[2]).map(readTicket);
+  if (!tickets.length) {
+    throw new Error("krb5: a KRB-CRED carrying no tickets. There is nothing to delegate.");
+  }
+  return {
+    pvno: asn1.decInteger(f[0]),
+    msgType: msgType,
+    tickets: tickets,
+    encPart: readEncryptedData(f[3])
+  };
+}
+
+// PA-PAC-OPTIONS ([MS-KILE] section 2.2.10, extended by [MS-SFU] section 2.2.5).
+//
+// A SEQUENCE around a KerberosFlags, and the bit that matters here is number 3:
+// **resource-based constrained delegation**. It is not decoration. [MS-SFU] requires a
+// KDC to answer an S4U2proxy request with KDC_ERR_BADOPTION when RBCD is what would
+// authorize it and this bit is absent — so a client that knows how to do RBCD but omits
+// the padata gets refused for a reason that says nothing about the padata.
+//
+// Bit order is KerberosFlags order: bit 0 is the MOST significant bit of the FIRST
+// octet, so bit 3 is 0x10 of byte 0 rather than 0x08 of anything.
+var PAC_OPTION = {
+  CLAIMS: 0,
+  BRANCH_AWARE: 1,
+  FORWARD_TO_FULL_DC: 2,
+  RESOURCE_BASED_CONSTRAINED_DELEGATION: 3
+};
+
+function encPaPacOptions(bits) {
+  return asn1.encTaggedSequence([{ tag: 0, value: asn1.encFlags(bits || []) }]);
+}
+
+function readPaPacOptions(bytes) {
+  var f = asn1.readTaggedSequence(asn1.readTlv(prim.toBytes(bytes), 0).value);
+  return { flags: asn1.bitsFromFlags(asn1.decFlags(f[0])) };
+}
+
 function readPaForUser(bytes) {
   var t = asn1.readTlv(bytes, 0);
   var f = asn1.readTaggedSequence(t.value);
@@ -947,6 +1101,8 @@ module.exports = {
   encAuthorizationData: encAuthorizationData,
   readAuthorizationData: readAuthorizationData,
   encHostAddresses: encHostAddresses,
+  encHostAddress: encHostAddress,
+  readHostAddress: readHostAddress,
   readHostAddresses: readHostAddresses,
   // tickets
   encTicket: encTicket,
@@ -983,6 +1139,15 @@ module.exports = {
   readEtypeInfo: readEtypeInfo,
   encPaPacRequest: encPaPacRequest,
   readPaPacRequest: readPaPacRequest,
+  encKrbCred: encKrbCred,
+  readKrbCred: readKrbCred,
+  encEncKrbCredPart: encEncKrbCredPart,
+  readEncKrbCredPart: readEncKrbCredPart,
+  encKrbCredInfo: encKrbCredInfo,
+  readKrbCredInfo: readKrbCredInfo,
+  PAC_OPTION: PAC_OPTION,
+  encPaPacOptions: encPaPacOptions,
+  readPaPacOptions: readPaPacOptions,
   encPaForUser: encPaForUser,
   readPaForUser: readPaForUser,
   // display

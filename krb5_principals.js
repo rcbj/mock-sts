@@ -248,6 +248,26 @@ const DEFINITIONS = [
     }
   },
   {
+    // "Account is sensitive and cannot be delegated" — [MS-SAMR]'s USER_ACCOUNT code
+    // NOT_DELEGATED (0x4000). It is the ONE control that stops unconstrained delegation
+    // taking a privileged account's ticket-granting ticket, and it lives on the account
+    // being protected rather than on any service. A KDC must refuse to issue this account
+    // a forwardable ticket at all, which is what makes the protection work no matter which
+    // service the user visits.
+    name: ['sensitive'],
+    type: 1,
+    password: 'do-not-delegate-me',
+    salt: userSalt(REALM, 'sensitive'),
+    notDelegated: true,
+    description: 'flagged sensitive and cannot be delegated — the KDC refuses it a forwardable ' +
+                 'ticket, so no service can forward its TGT',
+    pac: {
+      rid: 1130,
+      groups: [RID.DOMAIN_USERS, RID.DOMAIN_ADMINS, RID.PROTECTED_USERS],
+      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.NOT_DELEGATED
+    }
+  },
+  {
     // A computer account, present so the host-shaped salt is exercised by
     // something rather than only described.
     name: ['host', 'ws01.' + DOMAIN],
@@ -266,13 +286,90 @@ const DEFINITIONS = [
     }
   },
   {
-    // The service a ticket gets requested FOR in phase 3.
+    // The ordinary service a ticket gets requested for — the AP exchange's target, and the
+    // one used as an UNAUTHORIZED delegation target by the tests, since nothing permits
+    // the front end to reach it.
     name: ['HTTP', 'web.' + DOMAIN],
     type: 3,
     password: 'service-account-password',
     salt: userSalt(REALM, 'HTTPweb'),
     okAsDelegate: true,
     description: 'an HTTP service principal, flagged ok-as-delegate'
+  },
+  {
+    // ---------------------------------------------------------------------------
+    // DELEGATION, configured two DIFFERENT WAYS on purpose.
+    //
+    // `frontend` is trusted for CLASSIC constrained delegation: the permission lives on
+    // the FRONT-END account, as msDS-AllowedToDelegateTo, and only a domain admin can set
+    // it. `backend-rbcd` authorizes RESOURCE-BASED constrained delegation: the permission
+    // lives on the BACK-END account, as msDS-AllowedToActOnBehalfOfOtherIdentity, and
+    // whoever controls that object can set it themselves.
+    //
+    // That difference is the entire security story of RBCD, and it is why both are here.
+    // Same protocol messages, same KDC options, opposite direction of trust — and the
+    // second one turns "I can write to this computer object" into "I can reach this
+    // service as anybody".
+    // ---------------------------------------------------------------------------
+    name: ['HTTP', 'frontend.' + DOMAIN],
+    type: 3,
+    password: 'frontend-service-password',
+    salt: userSalt(REALM, 'HTTPfrontend'),
+    okAsDelegate: true,
+    // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION is what lets it get a FORWARDABLE ticket out
+    // of S4U2Self — the protocol-transition half. Without it S4U2Self still works and
+    // returns a ticket that is not forwardable, so classic S4U2Proxy then fails for a
+    // reason that looks nothing like a missing flag on the front-end account.
+    trustedToAuthenticateForDelegation: true,
+    // Classic constrained delegation: the list of services this one may reach as anybody.
+    // Note it names a SERVICE, not an account — and the SPN has to match exactly.
+    allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
+    description: 'a front-end service trusted for CLASSIC constrained delegation (S4U2Self + ' +
+                 'S4U2Proxy to HTTP/backend), and for protocol transition',
+    pac: {
+      rid: 1120,
+      groups: [RID.DOMAIN_USERS],
+      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION |
+        UAC.DONT_EXPIRE_PASSWORD
+    }
+  },
+  {
+    name: ['HTTP', 'backend.' + DOMAIN],
+    type: 3,
+    password: 'backend-service-password',
+    salt: userSalt(REALM, 'HTTPbackend'),
+    description: 'the back-end reached by CLASSIC constrained delegation — it authorizes ' +
+                 'nothing itself; the permission is on the front end',
+    pac: { rid: 1121, groups: [RID.DOMAIN_USERS], userAccountControl: UAC.NORMAL_ACCOUNT }
+  },
+  {
+    // The same classic configuration as `frontend` MINUS
+    // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION. This account exists because that flag's
+    // absence is invisible where it is set: S4U2Self still succeeds and returns a ticket
+    // that simply is not forwardable, and classic S4U2Proxy then fails a step later
+    // complaining about the evidence. Two accounts differing in exactly one attribute is
+    // the only way to show which attribute did it.
+    name: ['HTTP', 'notrusted.' + DOMAIN],
+    type: 3,
+    password: 'notrusted-service-password',
+    salt: userSalt(REALM, 'HTTPnotrusted'),
+    trustedToAuthenticateForDelegation: false,
+    allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
+    description: 'allowed to delegate to HTTP/backend but NOT trusted for protocol transition, ' +
+                 'so its S4U2Self ticket is not forwardable and classic S4U2Proxy fails',
+    pac: { rid: 1123, groups: [RID.DOMAIN_USERS], userAccountControl: UAC.NORMAL_ACCOUNT }
+  },
+  {
+    name: ['HTTP', 'rbcd.' + DOMAIN],
+    type: 3,
+    password: 'rbcd-service-password',
+    salt: userSalt(REALM, 'HTTPrbcd'),
+    // RESOURCE-based: this account names who may act on ITS behalf. The list is on the
+    // TARGET, which is the inversion that matters.
+    allowedToActOnBehalfOf: ['HTTP/frontend.' + DOMAIN],
+    description: 'a back-end that authorizes RESOURCE-BASED constrained delegation itself, ' +
+                 'naming HTTP/frontend as permitted to act on its behalf',
+    pac: { rid: 1122, groups: [RID.DOMAIN_USERS], userAccountControl: UAC.NORMAL_ACCOUNT }
   },
   {
     // ---------------------------------------------------------------------------
@@ -428,6 +525,12 @@ function register(def) {
     revoked: !!def.revoked,
     passwordExpired: !!def.passwordExpired,
     okAsDelegate: !!def.okAsDelegate,
+    // Delegation, kept as two SEPARATE lists because they are configured on opposite
+    // accounts and conflating them would hide the only thing about RBCD worth knowing.
+    trustedToAuthenticateForDelegation: !!def.trustedToAuthenticateForDelegation,
+    notDelegated: !!def.notDelegated,
+    allowedToDelegateTo: def.allowedToDelegateTo || [],
+    allowedToActOnBehalfOf: def.allowedToActOnBehalfOf || [],
     description: def.description,
     // The PAC identity, with the parts every account shares defaulted here rather
     // than repeated nine times. An account with no `pac` block still gets one, so a
