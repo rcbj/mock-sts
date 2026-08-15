@@ -5,15 +5,18 @@ this repository.
 
 ## Overview
 
-A mock identity service that speaks ten protocol families — Kerberos v5 (a KDC on raw
-TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service), WS-Trust 1.0–1.4,
-SAML 2.0, OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the
-relying party's half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, and
-W3C DID Core with DIF domain linkage. It exists to exercise *clients*: it
-authenticates nobody, checks no password and validates no access token.
+A mock identity service that speaks eleven protocol families — Kerberos v5 (a KDC on
+raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service), WS-Trust
+1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
+OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
+half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, and W3C DID Core with
+DIF domain linkage. It exists to exercise *clients*: it authenticates nobody, checks no
+password and validates no access token.
 
-**WS-Federation is deliberately absent** — see the note in README.md rather than
-inferring from the gap beside WS-Trust and SAML 2.0 that it was overlooked.
+**There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
+Response. That is now the gap beside WS-Trust and WS-Federation, and it is deliberate;
+see README.md rather than inferring from the absence that it was overlooked. It is also
+why the federation metadata publishes no IDPSSODescriptor.
 
 `README.md` is the substantive document — it explains why each piece is the way it
 is, and most of those explanations are the record of something having gone wrong
@@ -34,12 +37,13 @@ CONFIG_FILE=./env/local.js node server.js      # 8081; STS_PORT overrides
 At the default `debug` every endpoint call and every artifact before and after
 signing is logged — that is the point of a mock, so do not quieten it by default.
 
-## Architecture, and the three rules that hold it together
+## Architecture, and the four rules that hold it together
 
 `server.js` is a shell: it requires the modules and listens. The modules are
 `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
-middleware), `saml2.js`, `wstrust.js`, `oauth2.js`, `webauthn.js`, `vc_configs.js`,
-`vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`,
+middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
+`webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
+`vc_verifier.js`, `krb5_kdc.js`,
 `krb5_service.js` and the `krb5_*` files they rest on (ASN.1, crypto, messages,
 principals, NDR, PAC, GSS), `sts_metadata.js`, and `dpop.js`.
 
@@ -67,9 +71,22 @@ everything else, but their **raw socket listeners are started from `listen()` in
    share — lives there rather than in `vc_issuer.js` where it was written: the
    fourth caller is in `oauth2.js`, which vc_issuer.js cannot be required from
    without building a cycle or moving OID4VCI ahead of OAuth2 in the route order.
+4. **`wsfed.js` must stay after `oauth2.js` in the require order**, and that is a
+   dependency rather than a preference: it signs users in to the browser session
+   `oauth2.js` owns, through the `startSession` / `sessionOf` / `endSession` it
+   exports, so that single sign-on works across the two protocols. The dependency is
+   one-way — `oauth2.js` knows nothing about WS-Federation — which is what keeps it
+   out of the cycles rule 2 exists to avoid. Do not give WS-Federation a session store
+   of its own to "decouple" them: two stores would each look correct alone and never
+   see each other, and the symptom is a sign-on that silently is not single.
 
-`userFor`, `parseBody`, `oauthError`, `vciError` and `signJwt` are in `helpers.js`
-because more than one protocol needs them, not because they are especially general.
+`userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
+`firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
+them, not because they are especially general. The last two are read by three parsers
+— the WS-Trust RST, WS-Federation's `wreq`, and the `wresult` the mock relying party
+is POSTed — and they match on **local name with the namespace ignored** because the
+trust namespace alone has four versions in use. That is what lets one parser answer
+WS-Trust 1.0 through 1.4 instead of four.
 
 ## Adding an endpoint costs one entry in `sts_metadata.js`
 
@@ -83,7 +100,7 @@ invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are.
 have to be described by hand or they go unlisted with nothing failing.
 
 Coverage notes in that file **must start `full`, `partial` or `mock`** and say what is
-missing. A list of thirty-six specifications that did not mention that this service
+missing. A list of thirty-eight specifications that did not mention that this service
 checks no passwords and validates no access tokens would be the most misleading thing
 in the repository.
 
@@ -140,12 +157,22 @@ property when porting.
 Until they are here, the drift checks README.md describes are documentation rather
 than enforcement.
 
+**WS-Federation has no test in either repository.** The mock relying party at
+`/wsfed/rp` makes it look covered — it verifies a sign-in response check by check —
+but a person has to click it and read the page. What a test would add is the
+negatives, which is where this profile's value is: an altered `wctx`, `wauth`
+demanding a factor the session never had, `wfresh` read as seconds rather than
+minutes, a SAML 1.1 signature whose reference does not resolve because `AssertionID`
+was not named. A passive requestor that issues a good token to a working relying party
+looks finished and proves almost nothing.
+
 ## Things this service deliberately does not do
 
 Worth knowing before "fixing" one of them:
 
-* **It checks no password.** The username typed at `/oauth2/login` becomes the
-  identity in every token.
+* **It checks no password.** The username typed at `/oauth2/login` — or at
+  `/wsfed/login`, which creates the same session — becomes the identity in every
+  token and every assertion.
 * **It does not verify access tokens it did not issue — except at UserInfo.**
   OID4VCI lets the authorization server be somebody else, so at the three
   credential endpoints a foreign token is accepted as-is. The consequence for DPoP
@@ -159,5 +186,13 @@ Worth knowing before "fixing" one of them:
   mandatory; a request with no `DPoP` header is a Bearer request and is answered as
   one, so turning nonce mode on cannot break the Bearer clients this service also
   exists to exercise.
-* **One password is rejected** — the literal string `invalid` on the password grant
-  and on WS-Trust — so a negative test has something to fail on.
+* **One password is rejected** — the literal string `invalid` on the password grant,
+  on WS-Trust and at the WS-Federation sign-in screen — so a negative test has
+  something to fail on in every protocol here.
+* **WS-Federation's `wauth` is refused rather than faked.** A relying party demanding
+  multi-factor against a password-only session gets an error and two ways forward, not
+  an assertion claiming a second factor that did not happen. It is the one thing in
+  this profile that could trivially have been faked, and faking it would have taught a
+  relying party something false about how a person signed in. Likewise `wreqptr` is
+  never dereferenced: fetching a URL handed over in a query parameter is a
+  server-side request forgery with a specification citation attached.

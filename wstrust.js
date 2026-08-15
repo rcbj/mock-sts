@@ -28,7 +28,12 @@
 const jwt = require('jsonwebtoken');
 const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const app = require('./app');
-const { log, logArtifact, ISSUER, STS, xmlEscape, iso } = require('./helpers');
+// firstByLocal/textByLocal were written here and now live in helpers.js: WS-Federation
+// reads the same shapes (a `wreq` RST, and a `wresult` at its mock relying party), and a
+// second copy of a reader that has to cope with four trust namespaces is a second copy
+// that gets one of them wrong.
+const { log, logArtifact, ISSUER, STS, xmlEscape, iso,
+        firstByLocal, textByLocal } = require('./helpers');
 const { buildSamlAssertion, encryptAssertion } = require('./saml2');
 const WST_NS = 'http://docs.oasis-open.org/ws-sx/ws-trust/200512';
 
@@ -45,16 +50,6 @@ const STATUS_TOKEN_TYPE = WST_NS + '/RSTR/Status';
 const STATUS_VALID = WST_NS + '/status/valid';
 
 const STATUS_INVALID = WST_NS + '/status/invalid';
-
-function firstByLocal(root, name) {
-  const els = root.getElementsByTagNameNS('*', name);
-  return els && els.length ? els[0] : null;
-}
-
-function textByLocal(root, name) {
-  const e = firstByLocal(root, name);
-  return e ? (e.textContent || '').trim() : '';
-}
 
 function soapNsFor(version) { return version === '1.1' ? SOAP11_NS : SOAP12_NS; }
 

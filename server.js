@@ -49,8 +49,11 @@
 //   app.js           the express app and every middleware, which must be installed
 //                    before any route module loads
 //   saml2.js         SAML 2.0 assertions: build, sign, encrypt
+//   saml11.js        SAML 1.1 assertions, which is what WS-Federation RPs expect
 //   wstrust.js       WS-Trust 1.4 RST/RSTR and the /sts endpoints
 //   oauth2.js        RFC 8414 metadata, JWKS, and the mock authorization server
+//   wsfed.js         WS-Federation 1.2 passive requestor: /wsfed, its metadata,
+//                    and a mock relying party to verify what it sends
 //   vc_configs.js    the credential configurations this issuer offers
 //   vc_offers.js     Credential Offers, pre-authorized codes, deferred state
 //   vc_did.js        the did:web document and the DIF domain linkage credential
@@ -74,6 +77,12 @@ const { log, PORT, ISSUER } = require('./helpers');
 
 require('./wstrust');
 require('./oauth2');
+// WS-Federation's passive requestor profile. It must come AFTER oauth2.js and the
+// order is a dependency and not a preference: it signs users in to the session
+// oauth2.js owns (startSession/sessionOf), so that single sign-on works across the
+// two protocols. The dependency is one-way — oauth2.js knows nothing about this
+// module — which is what keeps it out of the cycles the split exists to avoid.
+require('./wsfed');
 require('./vc_offers');
 require('./vc_did');
 require('./vc_issuer');
@@ -99,6 +108,9 @@ app.listen(PORT, '0.0.0.0', function () {
   log.info('Mock authorization server endpoints: /oauth2/authorize (login screen), /oauth2/login, ' +
            '/oauth2/token, /oauth2/userinfo, /oauth2/introspect, /oauth2/revoke, /oauth2/register, ' +
            '/oauth2/logout');
+  log.info('WS-Federation passive requestor at /wsfed (wsignin1.0 / wsignout1.0); metadata at ' +
+           '/FederationMetadata/2007-06/FederationMetadata.xml; a mock relying party that verifies ' +
+           'the sign-in response is at /wsfed/rp.');
   log.info('Every endpoint call, and every token or assertion before and after it was signed, ' +
            'is written to this log at debug level.');
   log.info('Every endpoint and every specification this service implements is listed at ' +

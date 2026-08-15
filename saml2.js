@@ -49,14 +49,39 @@ function signAssertion(xml) {
   return signed;
 }
 
-function buildSamlAssertion(subject, audience, lifetimeMin) {
+// The optional fourth argument is what WS-Federation needs and WS-Trust does not,
+// and it is an argument rather than a second builder on purpose: one assertion
+// writer means one place where the element order, the namespace and the signature
+// location are decided, and those are what a relying party's parser is strict
+// about. Omit it and this produces exactly what it always did.
+//
+//   authnContextClassRef  how the End-User authenticated. WS-Federation's `wauth`
+//                         asks for a method and the session records which one was
+//                         actually performed, so the assertion has to be able to
+//                         say something other than the default.
+//   attributes            [{ name, nameFormat, value }] replacing the default two.
+//                         A WS-Federation relying party keys off the claim URIs
+//                         from the Microsoft claim namespaces, not off `name`.
+function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   log.debug("Entering buildSamlAssertion().");
+  opts = opts || {};
   const id = genId();
   const now = iso(0);
   const exp = iso(lifetimeMin > 0 ? lifetimeMin : 60);
   const audienceEl = audience
     ? '<saml:AudienceRestriction><saml:Audience>' + xmlEscape(audience) + '</saml:Audience></saml:AudienceRestriction>'
     : '';
+  const authnContextClassRef = opts.authnContextClassRef ||
+    'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport';
+  const attributes = (opts.attributes && opts.attributes.length) ? opts.attributes : [
+    { name: 'name', value: subject },
+    { name: 'issuedBy', value: ISSUER }
+  ];
+  const attributeEls = attributes.map(function (a) {
+    return '<saml:Attribute Name="' + xmlEscape(a.name) + '"' +
+      (a.nameFormat ? ' NameFormat="' + xmlEscape(a.nameFormat) + '"' : '') + '>' +
+      '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';
+  }).join('');
   const xml =
     '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"' +
       ' ID="' + id + '" Version="2.0" IssueInstant="' + now + '">' +
@@ -67,12 +92,9 @@ function buildSamlAssertion(subject, audience, lifetimeMin) {
       '<saml:Conditions NotBefore="' + now + '" NotOnOrAfter="' + exp + '">' + audienceEl + '</saml:Conditions>' +
       '<saml:AuthnStatement AuthnInstant="' + now + '" SessionIndex="' + id + '">' +
       '<saml:AuthnContext><saml:AuthnContextClassRef>' +
-        'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport' +
+        xmlEscape(authnContextClassRef) +
       '</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>' +
-      '<saml:AttributeStatement>' +
-        '<saml:Attribute Name="name"><saml:AttributeValue>' + xmlEscape(subject) + '</saml:AttributeValue></saml:Attribute>' +
-      '<saml:Attribute Name="issuedBy"><saml:AttributeValue>' + xmlEscape(ISSUER) + '</saml:AttributeValue></saml:Attribute>' +
-      '</saml:AttributeStatement>' +
+      '<saml:AttributeStatement>' + attributeEls + '</saml:AttributeStatement>' +
     '</saml:Assertion>';
   try { 
     log.debug("Leaving buildSamlAssertion().");
