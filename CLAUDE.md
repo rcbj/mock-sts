@@ -5,10 +5,15 @@ this repository.
 
 ## Overview
 
-A mock identity service that speaks eight protocol families — WS-Trust 1.0–1.4, SAML
-2.0, OAuth 2.0 / OIDC (a full authorization server), DPoP, OpenID4VCI 1.0,
-OpenID4VP 1.0, and W3C DID Core with DIF domain linkage. It exists to exercise
-*clients*: it authenticates nobody, checks no password and validates no access token.
+A mock identity service that speaks ten protocol families — Kerberos v5 (a KDC on raw
+TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service), WS-Trust 1.0–1.4,
+SAML 2.0, OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the
+relying party's half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, and
+W3C DID Core with DIF domain linkage. It exists to exercise *clients*: it
+authenticates nobody, checks no password and validates no access token.
+
+**WS-Federation is deliberately absent** — see the note in README.md rather than
+inferring from the gap beside WS-Trust and SAML 2.0 that it was overlooked.
 
 `README.md` is the substantive document — it explains why each piece is the way it
 is, and most of those explanations are the record of something having gone wrong
@@ -33,8 +38,16 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 
 `server.js` is a shell: it requires the modules and listens. The modules are
 `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
-middleware), `saml2.js`, `wstrust.js`, `oauth2.js`, `vc_configs.js`, `vc_offers.js`,
-`vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `sts_metadata.js`, and `dpop.js`.
+middleware), `saml2.js`, `wstrust.js`, `oauth2.js`, `webauthn.js`, `vc_configs.js`,
+`vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`,
+`krb5_service.js` and the `krb5_*` files they rest on (ASN.1, crypto, messages,
+principals, NDR, PAC, GSS), `sts_metadata.js`, and `dpop.js`.
+
+The two Kerberos modules are the exception to rule 1 below in one direction only:
+requiring them registers their HTTP views (`/KdcProxy`, `/krb5/principals`) like
+everything else, but their **raw socket listeners are started from `listen()` in
+`server.js`, not at require time** — binding a privileged port can fail, and a
+`require` that throws takes the whole service down where a route cannot.
 
 1. **Requiring a module registers its endpoints.** Each calls `app.get(...)` at its
    top level against the shared app from `app.js`, rather than exporting a
@@ -65,8 +78,12 @@ it cannot go stale — but it reports two kinds of drift and the parent project'
 `tests/sts_metadata.js` fails on both: a route registered and undescribed, and a
 description whose path is not registered (what a rename produces). See README.md.
 
+Reading the router has one blind spot: **a protocol that registers no route is
+invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are. Those
+have to be described by hand or they go unlisted with nothing failing.
+
 Coverage notes in that file **must start `full`, `partial` or `mock`** and say what is
-missing. A list of thirty-one specifications that did not mention that this service
+missing. A list of thirty-six specifications that did not mention that this service
 checks no passwords and validates no access tokens would be the most misleading thing
 in the repository.
 

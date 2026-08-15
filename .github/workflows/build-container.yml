@@ -80,8 +80,13 @@ jobs:
       # once every protocol module has registered its routes — a module that
       # loaded but registered nothing, or a require order that changed, shows up
       # here and not in the liveness probe.
+      #
+      # A block scalar rather than `run: curl ...` on one line: the -w format
+      # contains ": ", which a plain YAML scalar may not — the parser reads it as
+      # a nested mapping and rejects the file before the job ever runs.
       - name: Check /sts-metadata answers
-        run: curl -fsS -o /dev/null -w 'sts-metadata: %{http_code}\n' http://localhost:8081/sts-metadata
+        run: |
+          curl -fsS -o /dev/null -w 'sts-metadata: %{http_code}\n' http://localhost:8081/sts-metadata
 
       # if: always() — when a step above fails, the container's log is the only
       # place the reason exists (a MODULE_NOT_FOUND, a context file that was not
