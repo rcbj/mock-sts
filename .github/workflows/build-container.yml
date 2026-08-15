@@ -1,0 +1,95 @@
+# Builds the mock STS container image.
+#
+# On every push to main (which is what a merged pull request is) and on demand
+# from the Actions tab. It does not publish: nothing here logs in to a registry,
+# so the image exists only for the life of the job. Pushing to rcbj/sts is the
+# parent project's business, and adding it here would need credentials this
+# repository does not have.
+#
+# The build alone is worth running. This service is a shell — server.js requires
+# the other modules and listens — so a module that never reaches the image is not
+# a missing feature but a MODULE_NOT_FOUND before anything binds the port. The
+# Dockerfile copies with wildcards for exactly that reason, and the same class of
+# mistake (a new sibling directory that no COPY line mentions, a context file
+# bbs2023.js reads at module scope) still gets through a successful build. So the
+# job does not stop at `docker build` — it starts the image and waits for
+# /healthcheck, which is the cheapest thing that proves every require resolved.
+name: Build container
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # buildx, for the GitHub Actions layer cache below. The Dockerfile installs
+      # nvm and a Node toolchain from the network on every layer miss, which is
+      # the slow part by a wide margin and the part most worth caching.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # load: true puts the result in the local daemon under the name compose
+      # uses, so the smoke test below can run it. Without it buildx leaves the
+      # image in its own cache and `docker run rcbj/sts` would pull from Docker
+      # Hub instead — a stale published image passing for the one just built.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: rcbj/sts:ci
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Publishing to the host rather than reusing the compose file: this needs
+      # one container and a port, and compose would add a second thing that can
+      # fail. The container port is fixed at 8081 — the Dockerfile EXPOSEs it and
+      # the service defaults to it — and the STS derives every published URL from
+      # the Host header, so it does not have to be told where it was reached.
+      - name: Start the container
+        run: docker run -d --name sts-ci -p 8081:8081 rcbj/sts:ci
+
+      # The compose healthcheck's probe, in a shell loop instead of Docker's
+      # retry schedule so the failure is visible in the log rather than in a
+      # container's health state. Roughly 60 seconds: the image is a full apt
+      # layer and the signing key is generated at startup, so first listen is not
+      # instant, and a fixed sleep would either be too short on a slow runner or
+      # waste time on a fast one.
+      - name: Wait for /healthcheck
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8081/healthcheck; then
+              echo
+              echo "STS answered /healthcheck after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "STS never answered /healthcheck." >&2
+          exit 1
+
+      # A second, sharper check on the same running container. /sts-metadata
+      # reads the endpoint list from the live Express router, so it answers only
+      # once every protocol module has registered its routes — a module that
+      # loaded but registered nothing, or a require order that changed, shows up
+      # here and not in the liveness probe.
+      - name: Check /sts-metadata answers
+        run: curl -fsS -o /dev/null -w 'sts-metadata: %{http_code}\n' http://localhost:8081/sts-metadata
+
+      # if: always() — when a step above fails, the container's log is the only
+      # place the reason exists (a MODULE_NOT_FOUND, a context file that was not
+      # copied), and it is gone as soon as the runner is reclaimed.
+      - name: Container log
+        if: always()
+        run: docker logs sts-ci || true
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f sts-ci || true
