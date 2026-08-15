@@ -89,8 +89,30 @@ const SPECS = [
     where: 'OASIS saml-core-2.0-os',
     url: 'https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf',
     coverage: 'partial: issues signed Assertions (AuthnStatement, AttributeStatement, ' +
-              'SubjectConfirmation, Conditions). It is an assertion ISSUER, not an IdP — there is no ' +
-              'Web SSO profile here.' },
+              'SubjectConfirmation, Conditions), carried by WS-Trust and by WS-Federation. There is ' +
+              'no SAML 2.0 WEB SSO profile — no SingleSignOnService, no AuthnRequest, no Response — ' +
+              'so the federation metadata deliberately publishes no IDPSSODescriptor. The browser ' +
+              'SSO profile this service does have is WS-Federation\'s.' },
+  { id: 'saml11', name: 'SAML 1.1 Core',
+    where: 'OASIS oasis-sstc-saml-core-1.1',
+    url: 'https://www.oasis-open.org/committees/download.php/3406/oasis-sstc-saml-core-1.1.pdf',
+    coverage: 'partial: issues signed Assertions with an AuthenticationStatement and an ' +
+              'AttributeStatement, which is the DEFAULT token of the WS-Federation profile here ' +
+              'because it is what AD FS issues. No SAML 1.1 request/response protocol and no ' +
+              'browser artifact profile — the assertion only ever travels in a wresult.' },
+  { id: 'ws-federation', name: 'WS-Federation 1.2',
+    where: 'OASIS wsfed',
+    url: 'https://docs.oasis-open.org/wsfed/federation/v1.2/os/ws-federation-1.2-spec-os.html',
+    coverage: 'partial: the Web (Passive) Requestor Profile of section 13 — wsignin1.0 with wtrealm, ' +
+              'wreply, wctx, wct, wfresh, wauth, whr and wreq, the sign-in response as a form POST, ' +
+              'and wsignout1.0/wsignoutcleanup1.0 with front-channel cleanup requests. Signed ' +
+              'federation metadata (section 3.1) at the AD FS path. NOT implemented, and each is ' +
+              'named rather than left silent: the active (SOAP) requestor profile beyond what /sts ' +
+              'already answers, wresultptr, the attribute service (wattr1.0) and the pseudonym ' +
+              'service (wpseudo1.0) which both answer 501, wreqptr (refused — dereferencing a URL ' +
+              'from a query parameter is a server-side request forgery), token encryption in this ' +
+              'profile (a passive request carries no recipient certificate), and any authorization ' +
+              'or policy enforcement.' },
   { id: 'xmldsig', name: 'XML Signature and XML Encryption',
     where: 'W3C',
     url: 'https://www.w3.org/TR/xmldsig-core1/',
@@ -310,6 +332,52 @@ const ENDPOINTS = [
   { path: '/sts/cert', group: 'WS-Trust', name: 'STS certificate',
     specs: ['ws-trust'], what: 'The PEM certificate whose key signs the assertions, so a relying ' +
                                'party can verify them.' },
+
+  // --- WS-Federation ---
+  { path: '/wsfed', group: 'WS-Federation', name: 'Passive requestor endpoint',
+    specs: ['ws-federation', 'saml11', 'saml2', 'xmldsig', 'ws-trust'],
+    effect: 'with no wa it describes itself; wa=wsignin1.0 shows the sign-in screen, or POSTs a token ' +
+            'to wreply when a session already exists',
+    what: 'GET or POST, dispatching on wa: wsignin1.0 signs in and POSTs an RSTR to wreply (section ' +
+          '13.2.2 — a form POST, never a redirect, so the token is not length-limited and never ' +
+          'reaches a URL or a Referer header); wsignout1.0 ends the session and sends a cleanup ' +
+          'request to every relying party it signed into; wsignoutcleanup1.0 ends it without fanning ' +
+          'out. Reads wtrealm (required, and the audience), wreply (optional — defaults to /wsfed/rp), ' +
+          'wctx (echoed byte for byte), wct, wfresh (MINUTES), wauth, whr and a wreq RST by value. ' +
+          'The token is a SAML 1.1 assertion by default because that is what AD FS issues; ' +
+          '?tokenType=saml2 and ?trust=1.3 are NON-SPEC switches for the other token type and the ' +
+          'ws-sx RSTR Collection wrapper. wattr1.0 and wpseudo1.0 answer 501; wreqptr is refused.' },
+  { path: '/wsfed/login', group: 'WS-Federation', name: 'Sign-in form target',
+    specs: ['ws-federation'],
+    what: 'Where the WS-Federation sign-in screen posts. No password is checked — the username typed ' +
+          'becomes the subject of the assertion — except that the literal "invalid" fails, as it does ' +
+          'in every other protocol here. It creates the SAME session the OAuth 2.0 / OIDC login ' +
+          'screen creates, which is what makes single sign-on work across the two: sign in there with ' +
+          'a security key and the assertion issued here says a hardware key was used.' },
+  { path: '/wsfed/autopost.js', group: 'WS-Federation', name: 'Sign-in response auto-post script',
+    specs: ['ws-federation'],
+    what: 'Submits the section 13.2.2 form. A separate resource rather than an inline script for the ' +
+          'reason the WebAuthn one is: this service sets script-src \'none\' on every response and ' +
+          'that page relaxes it to \'self\'. With scripting off the page\'s submit button is the ' +
+          'whole mechanism, which is why it is labelled for a person rather than hidden.' },
+  { path: '/FederationMetadata/2007-06/FederationMetadata.xml', group: 'WS-Federation',
+    name: 'Federation metadata', specs: ['ws-federation', 'xmldsig', 'saml11', 'saml2'],
+    what: 'A SIGNED EntityDescriptor with a fed:SecurityTokenServiceType role: the signing ' +
+          'certificate, fed:TokenTypesOffered (SAML 1.1 and 2.0), fed:ClaimTypesOffered, and both the ' +
+          'PassiveRequestorEndpoint and the SecurityTokenServiceEndpoint. At AD FS\'s path because ' +
+          'WS-Federation names none and that is where relying parties look. The signature is the ' +
+          'FIRST child of EntityDescriptor, where the SAML metadata schema requires it. There is ' +
+          'deliberately no IDPSSODescriptor: this service has no SAML 2.0 Web SSO profile, and ' +
+          'advertising one would be a relying party\'s first configuration attempt and its first 404.' },
+  { path: '/wsfed/rp', group: 'WS-Federation', name: 'Mock relying party (not a spec endpoint)',
+    specs: ['ws-federation', 'saml11', 'saml2', 'xmldsig'],
+    effect: 'mints a wctx and offers a complete sign-in request for each shape the endpoint can issue',
+    what: 'NON-SPEC — a relying party is not part of an identity provider. It is here because it is ' +
+          'the default wreply, and because it VERIFIES the sign-in response check by check: the ' +
+          'assertion signature against /sts/cert, the issuer, the audience against its own realm, the ' +
+          'validity window, and the wctx round trip (an identity provider that re-encoded it produces ' +
+          'the same symptom as a lost session). Also answers wa=wsignoutcleanup1.0, which is the ' +
+          'direction that message is really defined for.' },
 
   // --- OAuth 2.0 / OIDC ---
   { path: '/.well-known/oauth-authorization-server', group: 'OAuth 2.0 / OIDC',
@@ -565,7 +633,7 @@ function describeEndpoints() {
   return { rows: rows, undocumented: undocumented, stale: stale, unknownSpecs: unknownSpecs };
 }
 
-const GROUP_ORDER = ['Service', 'WS-Trust', 'OAuth 2.0 / OIDC', 'VC Issuance (OID4VCI)',
+const GROUP_ORDER = ['Service', 'WS-Trust', 'WS-Federation', 'OAuth 2.0 / OIDC', 'VC Issuance (OID4VCI)',
                      'Decentralized Identifiers', 'VC Presentation (OID4VP)', 'Undocumented'];
 
 function groupsOf(rows) {

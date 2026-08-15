@@ -1,6 +1,6 @@
 # Mock STS
 
-A deliberately permissive **mock identity service** that speaks ten protocol
+A deliberately permissive **mock identity service** that speaks eleven protocol
 families — one of which, Kerberos, is not HTTP at all — for exercising clients. It
 authenticates nobody, checks no passwords and validates no access tokens (UserInfo
 excepted, deliberately, and there is a section on why below): it exists so that a
@@ -21,7 +21,8 @@ are — most of it is the record of something having gone wrong once.
 |---|---|
 | **Kerberos v5 (RFC 4120)** | a KDC, on **raw TCP and UDP port 88** and over MS-KKDCP: the AS and TGS exchanges, pre-authentication carrying the salt in PA-ETYPE-INFO2, a signed [MS-PAC] in every ticket, two realms with a trust between them so cross-realm referrals work, and delegation all four ways ([MS-SFU] S4U2Self, S4U2Proxy under either authorization, forwarded tickets, renewals) — plus a **service** that decrypts an RFC 4121 GSS token, checks the ticket eight ways and proves itself back |
 | **WS-Trust 1.0–1.4** | Issue / Renew / Validate / Cancel, WS-Security, WS-Addressing, optional XML-DSIG and XML-Enc |
-| **SAML 2.0** | assertions, and the metadata a relying party needs |
+| **SAML 2.0 and SAML 1.1** | signed assertions of both vintages, and the metadata a relying party needs. 1.1 is here because it is what a WS-Federation relying party expects by default |
+| **WS-Federation 1.2** | the Web (Passive) Requestor Profile of section 13 — `wsignin1.0` with `wtrealm`, `wreply`, `wctx`, `wct`, `wfresh`, `wauth`, `whr` and `wreq`, the response as a **form POST**, `wsignout1.0` with front-channel cleanup, signed federation metadata at AD FS's path, and a mock relying party that verifies the response check by check |
 | **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (with a login screen), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
 | **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
 | **WebAuthn Level 3** | the relying party's half of a second factor on the login screen: registration and assertion both verified, and `amr` / `acr` in the tokens that follow saying a hardware key was used |
@@ -31,18 +32,23 @@ are — most of it is the record of something having gone wrong once.
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
-router, so it cannot go stale, and thirty-six specifications with how far each one
+router, so it cannot go stale, and thirty-eight specifications with how far each one
 goes. See *The index of itself* below, including the one blind spot that design has:
 a protocol that registers no route, which is exactly what Kerberos is.
 
-**WS-Federation is not implemented.** It is the obvious gap beside WS-Trust and
-SAML 2.0 and it is worth being explicit about rather than leaving a reader to infer
-it from the absence: there is no `wsignin1.0` / `wsignout1.0` passive-requestor
-endpoint, nothing reads `wtrealm`, `wctx` or `whr`, and the SAML side here issues
-assertions without ever POSTing one to a relying party — this service is an
-assertion *issuer*, not an IdP with a browser-facing SSO profile. The pieces a
-passive-requestor profile needs (the assertion builder, the signer, the login
-screen) all exist; the profile that joins them does not.
+**WS-Federation used to be the gap here, and this note used to say so.** Until
+`wsfed.js` existed, the pieces a passive-requestor profile needs — the assertion
+builder, the signer, the login screen — were all present and the profile that joins
+them was not, which made this an assertion *issuer* rather than an identity provider
+with a browser-facing SSO profile. It now has one; see *WS-Federation* below. What
+is still absent is named there rather than left to be inferred, which is the point
+this paragraph was making in the first place.
+
+**There is still no SAML 2.0 Web SSO profile**, and that is the gap that remains
+beside it: no `SingleSignOnService`, no `AuthnRequest`, no `Response`. The browser
+SSO profile this service has is WS-Federation's, and the federation metadata
+deliberately publishes no `IDPSSODescriptor` for exactly that reason — advertising
+one would be a relying party's first configuration attempt and its first 404.
 
 ## Running it
 
@@ -114,7 +120,7 @@ And for Kerberos, none of which needs setting for the defaults to work:
 
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across twenty-four modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the nine modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `sts_metadata.js`. The other thirteen are reached through those rather than named there — `saml2.js`, `vc_configs.js`, `dpop.js`, `bbs2023.js`, `webauthn.js` and the eight `krb5_*.js` files under the KDC — which is not a hierarchy so much as the consequence of the rule below.
+A mock Security Token Service used by the test suite, **split across twenty-six modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the ten modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `sts_metadata.js`. The other fourteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `bbs2023.js`, `webauthn.js` and the eight `krb5_*.js` files under the KDC — which is not a hierarchy so much as the consequence of the rule below.
 
 The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
 (what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
@@ -355,9 +361,133 @@ What comes out the other side is the point: a hardware-key sign-in records
 session recorded them — so their *absence* means something too, which is why they are
 not emitted unconditionally.
 
+### WS-Federation — the profile that joins the pieces
+
+`wsfed.js` is the Web (Passive) Requestor Profile of WS-Federation 1.2 section 13,
+and it is the browser-facing SSO profile this service went without for a long time.
+Everything it needs already existed — an assertion builder, a signer, a login screen,
+a session — and what was missing was the thing that hands an assertion to a relying
+party *through a browser*. Five endpoints:
+
+| | |
+|---|---|
+| `GET`/`POST` `/wsfed` | the passive requestor endpoint, dispatching on `wa`. With no `wa` at all it describes itself, the way `GET /sts` does |
+| `POST /wsfed/login` | where the sign-in screen posts |
+| `GET /wsfed/autopost.js` | the one script the sign-in response page runs |
+| `GET /FederationMetadata/2007-06/FederationMetadata.xml` | signed federation metadata |
+| `GET`/`POST` `/wsfed/rp` | a **mock relying party** — non-spec, and the default `wreply` |
+
+**The sign-in response is a form POST, never a redirect** (13.2.2), and that single
+fact is what makes this profile shaped differently from everything else here: the
+token travels in a body, so it is not length-limited and never lands in a URL, a log
+or a `Referer` header. Three things follow from it. The page needs a script to submit
+itself, so it is the second response in this service to relax `script-src` to
+`'self'` naming a real resource (`/wsfed/autopost.js`) — an inline script would not
+run at all, silently, leaving a page that looks like it is working and never posts,
+which is the identical trap the WebAuthn ceremony script above records. Its submit
+button is therefore labelled for a person rather than hidden: with scripting off, the
+button *is* the mechanism. And **`form-action` stays out of the policy**, here as
+everywhere — the form posts to `wreply`, which is by definition another origin, and
+`form-action 'self'` would block the response from ever reaching the relying party
+while the sign-in still appeared to succeed.
+
+**SAML 1.1 is the default token, not SAML 2.0**, which is why `saml11.js` exists.
+WS-Federation is token-type agnostic and this service has issued SAML 2.0 for years,
+so 2.0 looks like the obvious default — but AD FS issues **1.1** to a WS-Federation
+relying party unless told otherwise, and the RP libraries written against it (WIF,
+`Microsoft.Owin.Security.WsFederation`) read 1.1 first. A mock whose default was the
+rarer of the two would be exercising the wrong half of those clients. Both are
+offered, and `fed:TokenTypesOffered` advertises exactly these two. SAML 1.1 is a
+different specification and not a dialect of 2.0: the id attribute is `AssertionID`,
+the version is two attributes, the Issuer is an attribute rather than an element, the
+Subject sits inside *each* statement, `ds:Signature` is the **last** child rather than
+the second, an attribute is `AttributeName` + `AttributeNamespace` rather than one
+`Name`, and the condition is `AudienceRestrictionCondition`. Each of those is a
+plausible thing to get wrong by writing 2.0 out of habit, so each is commented where
+it happens.
+
+Two things about the token that took a debugging session each. **`ds:Signature` lands
+in three different positions in three documents here** — last in a SAML 1.1
+assertion, second (after `Issuer`) in a SAML 2.0 one, and first in the federation
+metadata's `EntityDescriptor` — and all three are schema-mandated rather than
+stylistic. And **xml-crypto has to be told about `AssertionID` and must *not* be told
+about `ID`**: it resolves a reference URI by looking for attributes named Id/ID/id, so
+SAML 1.1's unusual name has to be added or a perfectly good signature reports as
+broken, while passing `idAttribute: 'ID'` for SAML 2.0 unshifts a *duplicate* onto
+that list and the library then refuses the document with a signature-wrapping-attack
+error naming a document that has nothing wrong with it. Symmetry between the two call
+sites is what produced the second one.
+
+**The session is the one `oauth2.js` owns.** `wsfed.js` is required after it in
+`server.js`, so the dependency is one-way and no cycle exists, and `startSession` /
+`endSession` are functions rather than four repeated lines precisely so the cookie's
+name, path and `SameSite` cannot drift apart between the two protocols — two sessions
+that each looked fine alone and never saw each other would be a debugging session with
+no error message in it. Single sign-on across the two is the interesting behaviour:
+sign in at the OIDC screen with a security key and arrive at `wsignin1.0`, and the
+assertion's `AuthenticationMethod` says multiple factors *because the session recorded
+`amr: ["hwk"]`*. Signing out of either signs out of both. The one consequence worth
+knowing is that the cookie is `SameSite=Lax`, so a sign-in request that arrives as a
+cross-site form POST — which 13.2.1 permits — carries no cookie and is shown the login
+screen even though a session exists; the alternative is `SameSite=None`, which
+requires `Secure`, which this service cannot be over `http://localhost`. The screen
+says so rather than leaving it to look like a broken session.
+
+`wauth` is the one thing this profile **refuses** that it could easily have faked. A
+relying party asking for multi-factor against a password-only session is answered with
+an error and two ways forward, not with an assertion claiming a second factor that did
+not happen — `wauth` is how a relying party *demands* a method, and an identity
+provider that ignored it would let the demand appear to have been met. In the same
+spirit `wreqptr` is refused outright: it names a URL for the identity provider to
+fetch the request from, and dereferencing an arbitrary URL handed over in a query
+parameter is a server-side request forgery with a specification citation attached.
+Send `wreq` by value instead. `wfresh` is read as **minutes** — the one place this
+profile and OIDC's `max_age` differ in unit, and reading it as seconds makes every
+request look fresh — and it is dropped on the way back from the login screen for the
+same reason `prompt=login` is, or it would demand a fresh authentication forever.
+
+The **mock relying party** at `/wsfed/rp` is non-spec and earns its place twice: it
+is the default `wreply`, so a request that names no return address has somewhere real
+to go, and it makes the profile testable from one service. It verifies the response
+check by check — the assertion signature against `/sts/cert`, the issuer, the audience
+against its own realm, the validity window, and the **`wctx` round trip** — and shows
+every verdict rather than one boolean, on the same argument the OID4VP verifier makes.
+`wctx` gets its own check because it is the relying party's own state and the
+commonest thing for an identity provider to mangle by decoding and re-encoding it or
+dropping it for being long, and an RP whose `wctx` comes back altered cannot tell that
+from a lost session.
+
+`wsignout1.0` ends the session and sends a `wsignoutcleanup1.0` request to every
+relying party the session signed into, as `<img>` loads — which is what front-channel
+logout is, and which is why that one response widens `img-src` to `*`: a cleanup ping
+is by definition a third-party origin. It is the feature and not a leak, since the
+URLs are ones the relying parties themselves supplied as `wreply`. They are listed
+visibly on the page as links too, because a silent `<img>` that failed would leave a
+person with no way to see that the cleanup did not happen, and the return to `wreply`
+is a link rather than a 302 for the same reason — a redirect would abandon the pings
+before they were sent. A cleanup arriving *at* this endpoint ends the session and
+stops there: an identity provider that fanned out on receipt of a cleanup would loop
+with whatever sent it.
+
+The metadata is at **AD FS's path** because WS-Federation names none and that is where
+every relying party in this ecosystem looks first, and it is signed, and it carries
+`fed:SecurityTokenServiceType` with both the `PassiveRequestorEndpoint` and the
+`SecurityTokenServiceEndpoint` — the latter pointing at `/sts`, which is the same
+service answering the active profile. What it deliberately does **not** carry is an
+`IDPSSODescriptor`, per the note near the top of this file.
+
+Not implemented, and named here rather than left to be discovered: the attribute
+service (`wattr1.0`) and the pseudonym service (`wpseudo1.0`), which both answer 501
+with an explanation of what they would have done; `wresultptr` (the response is always
+by value); token encryption in this profile, because a passive request carries no
+recipient certificate to encrypt to, where `/sts?encrypt=1` has one because a
+WS-Security signature carries it; the WS-Federation metadata exchange over SOAP; and
+any authorization or policy enforcement — `wp` and `wencoding` are logged and nothing
+more.
+
 ### The mock STS's index of itself
 
-`GET /sts-metadata` answers "what can I call, what may I call it with, and which specification is it pretending to implement" — a page the service needed once it had grown to ten protocol families across twenty-four modules. `?format=json` gives the same document machine-readably.
+`GET /sts-metadata` answers "what can I call, what may I call it with, and which specification is it pretending to implement" — a page the service needed once it had grown to eleven protocol families across twenty-six modules. `?format=json` gives the same document machine-readably.
 
 **The endpoint list is read from the running Express router, not written down.** That is the whole design: a hand-kept list of endpoints in a file beside the endpoints goes stale the first time somebody adds a route, and the failure is silent in the worst direction — the page still looks complete. `app._router.stack` is walked **per request** (not at require time, where the answer would depend on module load order) and the table in `sts_metadata.js` only supplies the *name* and the *description* for a path the router reports. Both kinds of drift are then reported on the page itself and fail the parent project's `tests/sts_metadata.js`:
 
@@ -368,7 +498,7 @@ The drift check earned its keep immediately: on first run it caught the `OPTIONS
 
 Each path is a **link to that path** — but only where that is honest, which is about half of them. A link is issued as a GET, so a path the router answers only for POST would land the reader on Express's own `Cannot GET /oauth2/token` (reads as a broken service), and a route pattern carrying a `:parameter` or a `*` is not the address of anything. Those are listed unlinked with the reason shown — "POST only", "takes :id", "wildcard" — because that reason is the most useful thing on the row. The five followable endpoints that *do* something when clicked (`/oauth2/authorize`, `/oauth2/logout`, `/oauth2/userinfo`, `/issuer/offer`, `/oid4vp/start`) carry an `effect` note; the first answers **400** when followed bare since it needs `client_id` and `redirect_uri`, and userinfo answers **401** since it is a protected resource. Links are root-relative so they follow whichever host the page was reached at, and open in a new tab so the index survives the click. That test **follows every link** and fails if one does not reach a handler, which is what stops the page advertising a dead one.
 
-Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of thirty-six specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
+Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of thirty-eight specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
 
 **Kerberos is the one blind spot in the whole design, and it is structural.** The page is built by walking the live Express router, which is precisely why it cannot go stale — and the KDC's listeners are raw TCP and UDP sockets, as is the protected service's. A protocol family that registers no route is invisible to a router walk. Three HTTP surfaces are all the walk can see (`/KdcProxy`, `/krb5/principals`, `/krb5/service`), so the sockets are described in the text of those rows rather than left to be inferred from silence — the alternative, a described entry with no route behind it, is the *stale* half of the drift check and would have to be exempted from it by hand. Anything added later that speaks a protocol over a socket needs the same treatment.
 
@@ -549,6 +679,16 @@ the AS exchange, and `webauthn_cross_impl.js` runs `webauthn.js` and the debugge
 independent decoder over the same real ceremonies and requires the same verdict from
 both. That last one is the reason `webauthn.js` must stay loadable on its own, with no
 `./helpers` in reach.
+
+**WS-Federation has no test in either repository**, which is worth saying plainly
+because the mock relying party makes it *look* covered: `/wsfed/rp` verifies a sign-in
+response check by check and shows every verdict, but a person has to click it and read
+the page. What a real test would add is the negatives, which is where this profile's
+value is — a `wctx` that came back altered, `wauth` demanding a factor the session
+never had, `wfresh` read as seconds, an assertion whose signature reference does not
+resolve because the SAML 1.1 id attribute was not named. A passive requestor that
+issues a good token and posts it to a working relying party looks finished and proves
+almost nothing, which is the same argument `sts_dpop.js` makes over there.
 
 ## Licence
 

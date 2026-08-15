@@ -133,6 +133,34 @@ function genId() {
   return '_' + forge.util.bytesToHex(forge.random.getBytesSync(16));
 }
 
+// --- reading XML somebody else wrote ---------------------------------------
+// An element, or its text, found by LOCAL NAME with the namespace ignored.
+//
+// Shared rather than owned because three readers need exactly this: WS-Trust
+// parses an RST, WS-Federation parses the `wreq` RST that may ride on a sign-in
+// request, and the mock relying party parses the `wresult` it is POSTed. All
+// three are given XML written by somebody else, so the prefix is not knowable in
+// advance and neither is the namespace: the trust namespace alone has four
+// versions in use (2004/04, 2005/02, ws-sx 200512 and whatever a client invents),
+// and WS-Federation's own responses are usually written with `t:` where this
+// service writes `wst:`. Matching the local name is what lets one parser answer
+// WS-Trust 1.0 through 1.4 instead of four, and it is the reason these are here
+// and not in wstrust.js where they were written.
+//
+// getElementsByTagNameNS('*', name) searches DESCENDANTS ONLY, which is what
+// every caller wants (find the UsernameToken anywhere in the SOAP envelope) but
+// is worth stating: firstByLocal(el, 'Assertion') will not return `el` itself
+// even when `el` IS the Assertion.
+function firstByLocal(root, name) {
+  const els = root.getElementsByTagNameNS('*', name);
+  return els && els.length ? els[0] : null;
+}
+
+function textByLocal(root, name) {
+  const e = firstByLocal(root, name);
+  return e ? (e.textContent || '').trim() : '';
+}
+
 function iso(offsetMin) {
   return new Date(Date.now() + (offsetMin || 0) * 60000).toISOString();
 }
@@ -258,6 +286,8 @@ module.exports = {
   STS: STS,
   xmlEscape: xmlEscape,
   genId: genId,
+  firstByLocal: firstByLocal,
+  textByLocal: textByLocal,
   iso: iso,
   baseUrlOf: baseUrlOf,
   b64u: b64u,

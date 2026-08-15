@@ -586,6 +586,58 @@ function sessionOf(req) {
   return session;
 }
 
+// --- starting and ending a session -----------------------------------------
+// Both are functions rather than four lines repeated at each call site, and the
+// reason is WS-Federation. `wsfed.js` signs a user in at its own login screen and
+// must land them in THE SAME session this module reads, because the two protocols
+// share the browser and single sign-on between them is the interesting behaviour:
+// sign in at the OIDC screen with a security key, arrive at `wsignin1.0`, and the
+// assertion says a hardware key was used because the session recorded it.
+//
+// The cookie's attributes are the part that must not be written twice. Sharing a
+// session across protocols means the cookie NAME, PATH and SameSite have to agree
+// exactly; a second copy that set Path=/oauth2 or omitted SameSite would produce
+// two sessions that each looked fine on its own and never saw each other, which is
+// a debugging session with no error message anywhere in it.
+//
+// **SameSite=Lax is deliberate and it has one consequence worth knowing.** It is
+// sent on a top-level GET navigation, which is how a relying party sends a browser
+// here in both protocols — but NOT on a cross-site POST, and WS-Federation section
+// 13.2.1 permits the sign-in request to arrive as a form POST. Such a request
+// therefore sees no session and is shown the login screen even though one exists.
+// The alternative is SameSite=None, which requires Secure, which this service
+// cannot be over http://localhost — so the quirk stays, and wsfed.js says so on
+// the screen rather than leaving it to look like a broken session.
+function startSession(res, username, amr, acr) {
+  log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
+  const sessionId = randomId(24);
+  const session = {
+    user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
+    // Stated rather than omitted: a relying party that asked for a second factor
+    // needs to be able to see that it did not get one.
+    amr: amr, acr: acr
+  };
+  sessions.set(sessionId, session);
+  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
+  return session;
+}
+
+// Ends the session the request carries, and returns it — the caller needs what it
+// was, not merely that it is gone: WS-Federation's sign-out has to send a cleanup
+// request to each relying party the session signed into, and that list lives on
+// the session object it is about to discard.
+function endSession(req, res) {
+  log.debug("Entering endSession().");
+  const id = cookiesOf(req)[SESSION_COOKIE];
+  const session = id ? sessions.get(id) : null;
+  if (id) sessions.delete(id);
+  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0');
+  log.debug("Leaving endSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
+                                               : 'There was no session to drop.'));
+  return session || null;
+}
+
 // The authorization request, as the query string it arrived as. Kept whole so
 // the redirect back after login is the same request over again.
 function queryString(query, omit) {
@@ -886,15 +938,8 @@ app.post('/oauth2/login', function (req, res) {
   }
 
   pendingLogins.delete(login.id);
-  const sessionId = randomId(24);
-  sessions.set(sessionId, {
-    user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
-    // One factor. amr and acr are stated rather than omitted, because a relying
-    // party that asked for a second factor needs to be able to see that it did
-    // not get one.
-    amr: ['pwd'], acr: '1'
-  });
-  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  // One factor, and the tokens will say so.
+  startSession(res, username, ['pwd'], '1');
 
   // Back to the authorization endpoint with the original request — minus
   // prompt, which has now been honoured and would otherwise prompt forever.
@@ -1138,14 +1183,9 @@ app.post('/oauth2/webauthn', function (req, res) {
   }
 
   pendingMfa.delete(String(body.mfa_id));
-  const sessionId = randomId(24);
-  sessions.set(sessionId, {
-    user: userFor(pending.username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
-    // Two factors, and the tokens say so. `hwk` is the RFC 8176 value for proof
-    // of possession of a hardware key, which is what a WebAuthn assertion is.
-    amr: ['pwd', 'hwk'], acr: 'mfa'
-  });
-  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  // Two factors, and the tokens say so. `hwk` is the RFC 8176 value for proof of
+  // possession of a hardware key, which is what a WebAuthn assertion is.
+  startSession(res, pending.username, ['pwd', 'hwk'], 'mfa');
   res.redirect(302, base + '/oauth2/authorize?' + queryString(pending.login.query, ['prompt']));
   log.debug("Leaving the WebAuthn endpoint. " + pending.username + " completed the second factor.");
 });
@@ -1153,9 +1193,10 @@ app.post('/oauth2/webauthn', function (req, res) {
 // Ends the session, so the next authorization request prompts again.
 app.get('/oauth2/logout', function (req, res) {
   log.debug("Entering the logout endpoint.");
-  const id = cookiesOf(req)[SESSION_COOKIE];
-  if (id) sessions.delete(id);
-  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0');
+  // The same session WS-Federation's wsignout1.0 ends, through the same function —
+  // one browser session shared by both protocols means signing out of either signs
+  // out of both, which is what a person testing them together expects.
+  endSession(req, res);
   const target = req.query.post_logout_redirect_uri;
   if (target && /^https?:\/\//i.test(String(target))) {
     log.debug("Leaving the logout endpoint. Redirecting to " + target + ".");
@@ -1844,5 +1885,14 @@ module.exports = {
   accessToken: accessToken,
   tokenSet: tokenSet,
   sessions: sessions,
-  registeredClients: registeredClients
+  registeredClients: registeredClients,
+  // The browser session, shared with wsfed.js. It is exported from here rather
+  // than moved to helpers.js because this module owns the login flow the session
+  // comes out of (pendingLogins, the WebAuthn step), and wsfed.js is required
+  // AFTER this one in server.js — a one-way dependency, so no cycle.
+  SESSION_COOKIE: SESSION_COOKIE,
+  cookiesOf: cookiesOf,
+  sessionOf: sessionOf,
+  startSession: startSession,
+  endSession: endSession
 };
