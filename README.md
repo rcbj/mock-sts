@@ -1,9 +1,11 @@
 # Mock STS
 
-A deliberately permissive **mock identity service** that speaks eight protocol
-families, for exercising clients. It authenticates nobody, checks no passwords and
-validates no access tokens: it exists so that a client can be driven through a
-complete protocol exchange without standing up a real identity provider.
+A deliberately permissive **mock identity service** that speaks ten protocol
+families — one of which, Kerberos, is not HTTP at all — for exercising clients. It
+authenticates nobody, checks no passwords and validates no access tokens (UserInfo
+excepted, deliberately, and there is a section on why below): it exists so that a
+client can be driven through a complete protocol exchange without standing up a real
+identity provider.
 
 Extracted from the [OAuth2/OIDC Debugger](https://idptools.com), where it is the
 fallback identity service for the test suite. The documentation below is carried over
@@ -17,16 +19,30 @@ are — most of it is the record of something having gone wrong once.
 
 | | |
 |---|---|
+| **Kerberos v5 (RFC 4120)** | a KDC, on **raw TCP and UDP port 88** and over MS-KKDCP: the AS and TGS exchanges, pre-authentication carrying the salt in PA-ETYPE-INFO2, a signed [MS-PAC] in every ticket, two realms with a trust between them so cross-realm referrals work, and delegation all four ways ([MS-SFU] S4U2Self, S4U2Proxy under either authorization, forwarded tickets, renewals) — plus a **service** that decrypts an RFC 4121 GSS token, checks the ticket eight ways and proves itself back |
 | **WS-Trust 1.0–1.4** | Issue / Renew / Validate / Cancel, WS-Security, WS-Addressing, optional XML-DSIG and XML-Enc |
 | **SAML 2.0** | assertions, and the metadata a relying party needs |
-| **OAuth 2.0 / OIDC** | a full authorization server: RFC 8414 metadata *and* the OpenID Provider Configuration, plus every endpoint they advertise — authorize (with a login screen), token, userinfo, introspect, revoke, register, jwks, end-session |
+| **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (with a login screen), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
+| **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
+| **WebAuthn Level 3** | the relying party's half of a second factor on the login screen: registration and assertion both verified, and `amr` / `acr` in the tokens that follow saying a hardware key was used |
 | **DPoP (RFC 9449)** | all twelve section 4.3 proof checks, `cnf.jkt` on access *and* refresh tokens, `dpop_jkt`, replay detection, the nonce handshake |
 | **OpenID4VCI 1.0** | a Credential Issuer: SD-JWT VC (RFC 9901), `jwt_vc_json`, `ldp_vc` with bbs-2023; Credential Offers, the pre-authorized code grant with `tx_code`, `authorization_details`, batch issuance, response encryption, deferred issuance, the Notification Endpoint |
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 
-`GET /sts-metadata` is the authoritative list — read from the running router, so it
-cannot go stale. See *The index of itself* below.
+`GET /sts-metadata` is the authoritative list — every endpoint read from the running
+router, so it cannot go stale, and thirty-six specifications with how far each one
+goes. See *The index of itself* below, including the one blind spot that design has:
+a protocol that registers no route, which is exactly what Kerberos is.
+
+**WS-Federation is not implemented.** It is the obvious gap beside WS-Trust and
+SAML 2.0 and it is worth being explicit about rather than leaving a reader to infer
+it from the absence: there is no `wsignin1.0` / `wsignout1.0` passive-requestor
+endpoint, nothing reads `wtrealm`, `wctx` or `whr`, and the SAML side here issues
+assertions without ever POSTing one to a relying party — this service is an
+assertion *issuer*, not an IdP with a browser-facing SSO profile. The pieces a
+passive-requestor profile needs (the assertion builder, the signer, the login
+screen) all exist; the profile that joins them does not.
 
 ## Running it
 
@@ -41,12 +57,28 @@ service logs every endpoint call (path, request and response headers and bodies,
 status, elapsed time) and every assertion, JWT and SD-JWT VC both before and after
 signing or encryption, which is the point of a mock.
 
+**Three listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
+UDP 88**, and the Kerberos-protected service a TCP socket of its own (8888). The two
+Kerberos listeners are started from an exported `listen()` that `server.js` calls
+*after* the HTTP server is up, and a failure to bind is logged rather than thrown —
+port 88 is privileged, a host
+run is usually not root, and a require that throws would take the whole service down
+over a protocol family the caller may not be using. Set `KRB5_KDC_PORT` to something
+unprivileged for a host run.
+
 In Docker:
 
 ```bash
 docker build -t mock-sts .
 docker run --rm -p 8081:8081 mock-sts
 ```
+
+That publishes the HTTP port only, which is enough for everything except a raw
+Kerberos client: in the container this process is root, so the KDC does bind 88, but
+nothing forwards it. `-p 88:88/tcp -p 88:88/udp -p 8888:8888` adds it. The
+`docker-compose.yml` here publishes 8081 alone for the same reason — an in-browser
+Kerberos client reaches the KDC through `POST /KdcProxy` (MS-KKDCP) on the HTTP port,
+which is the whole reason that endpoint exists.
 
 The OIDC Discovery Metadata Endpoint:
 ```
@@ -68,9 +100,31 @@ docker-compose up
 | `OID4VCI_AUTHORIZATION_SERVER` | point the issuer metadata at a *different* authorization server (a real IdP) while the credential endpoint stays here |
 | `OID4VCI_SD_JWT_ISSUER_DID` / `OID4VCI_LDP_VC_ISSUER_DID` | switch the **plain** credential configurations over to naming the issuer by DID. Off by default — see *The issuer named by a DID* |
 
+And for Kerberos, none of which needs setting for the defaults to work:
+
+| Variable | What it does |
+|---|---|
+| `KRB5_KDC_PORT` | the KDC's TCP **and** UDP port (default `88`). Both transports are bound to the *same* number on purpose — a client that fails over from UDP after `KRB_ERR_RESPONSE_TOO_BIG` retries at the address it already had. If the parent project's api is relaying to this KDC, its `krb5AllowedPorts` has to allow whatever this becomes |
+| `KRB5_REALM` / `KRB5_TRUSTED_REALM` | the two realms (`EXAMPLE.COM`, `PARTNER.COM`). One KDC answering for both is the one simplification here — it hides finding the other realm's KDC and none of the protocol |
+| `KRB5_TRUST_PASSWORD`, `KRB5_KRBTGT_PASSWORD`, `KRB5_TRUSTED_KRBTGT_PASSWORD` | the long-term keys behind `krbtgt/<realm>` and the trust principal. A trust is not a setting: it is one principal whose key both realms hold |
+| `KRB5_DOMAIN_SID` / `KRB5_TRUSTED_DOMAIN_SID` | the domain SIDs the PACs are built from. Fixed made-up values; what matters is that they are the same in every ticket, since a service compares SIDs and not names |
+| `KRB5_CLOCK_SKEW` | the tolerance, in seconds (default `300` — AD's) |
+| `KRB5_CLOCK_OFFSET` | **make the KDC lie about its clock**, in seconds (default `0`), so a client's `KRB_AP_ERR_SKEW` handling can be driven deliberately instead of by breaking a machine's time |
+| `KRB5_SERVICE_PORT` / `KRB5_SERVICE_PRINCIPAL` | the ticket-protected service's TCP port (`8888`) and the principal whose key it holds (`HTTP/web.example.com`) |
+
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across eleven modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires the modules and listens: `helpers.js` (the log, the keys, and the helpers more than one protocol needs), `app.js` (the express app and every middleware), `saml2.js`, `wstrust.js`, `oauth2.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `sts_metadata.js`.
+A mock Security Token Service used by the test suite, **split across twenty-four modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the nine modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `sts_metadata.js`. The other thirteen are reached through those rather than named there — `saml2.js`, `vc_configs.js`, `dpop.js`, `bbs2023.js`, `webauthn.js` and the eight `krb5_*.js` files under the KDC — which is not a hierarchy so much as the consequence of the rule below.
+
+The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
+(what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
+framework and the five etypes), `krb5_asn1.js` (DER for RFC 4120's ASN.1),
+`krb5_messages.js` (the messages, the pre-authentication and the [MS-SFU] structures),
+`krb5_ndr.js` and `krb5_pac.js` (the PAC, which arrives in Windows' RPC marshalling
+rather than in ASN.1), `krb5_principals.js` (the principal database, salts and PAC
+identities), `krb5_gss.js` (the RFC 4121 framing a real service is handed),
+`krb5_kdc.js` (the KDC) and `krb5_service.js` (the acceptor). Only the last two
+register anything.
 
 Three things about that split are load-bearing. **Requiring a module registers its
 endpoints** — each does `app.get(...)` at its top level against the shared app from
@@ -91,7 +145,30 @@ for the same reason** and not because they are especially general.
 `dpop.js` is the exception to the rule above: it registers nothing. It is a library
 — there is no `app.get` in it — so its position in `server.js`'s require order does
 not matter, and it requires `helpers.js` and nothing else, so it cannot be part of a
-cycle.
+cycle. `webauthn.js` is a library in the same sense, and it goes one step further: it
+falls back to a silent logger when `./helpers` is not resolvable, because the parent
+project's cross-implementation test copies *that one file* next to its own scripts and
+a verifier written to be checked by somebody else has no business dragging the service
+in behind it.
+
+**Kerberos bends the require rule in one direction and the dependency rule in
+another.** `krb5_kdc.js` and `krb5_service.js` register their HTTP views at require
+time like everything else, but their **sockets are started by an exported `listen()`**
+that `server.js` calls: a route cannot fail to register, and binding a privileged port
+can. And the seven of those files that **also run in the browser** — everything except
+`krb5_principals.js`, `krb5_kdc.js` and `krb5_service.js`, which reach for `./helpers`,
+`net` and `dgram` — must not `require("crypto")` at all. They are staged into the
+parent project's client tree and bundled by browserify, which
+substitutes a bare `require("crypto")` with crypto-browserify and ships `elliptic`
+(GHSA-848j-6mx2-7j84, no patched version) into the bundle. So the codec is written
+against `globalThis.crypto.subtle`, which is why every function in `krb5_crypto.js` is
+async, and why MD5 and RC4 are written out by hand in `krb5_primitives.js` even though
+node has both: Web Crypto does not, and one module that behaves differently in the two
+places is worse than one that is slower in both. Note that this sharing is the opposite
+arrangement from `webauthn.js` and `bbs2023.js`, deliberately: a codec has to produce
+the same bytes wherever it runs, so the tests over it are a **round-trip oracle**
+(`tests/krb5_codec.js` re-encodes what it read) and byte-level pinning
+(`tests/krb5_gss_tokens.js`) rather than two implementations agreeing with each other.
 
 ### The signing key is regenerated on every start
 
@@ -168,6 +245,33 @@ unadvertised — `iss` is on every authorization response, errors included, but 
 may only *require* it, and so refuse a mix-up attacker's response without it, if the
 metadata says the server sends it.
 
+### Token Exchange (RFC 8693), and what it deliberately does not check
+
+`grant_type=urn:ietf:params:oauth:grant-type:token-exchange` at the token endpoint
+trades one token for another: `subject_token` is who the new token is *about*, the
+authenticated client is who is asking, and the exchanged token comes back with
+`issued_token_type: urn:ietf:params:oauth:token-type:access_token`.
+
+Two decisions in it are the ones worth reading. **The subject token is verified if this
+server signed it and merely *read* if it did not** — `jwt.verify` first, and on failure
+the payload is base64url-decoded without any signature check and the log says so in as
+many words. That is the same posture as the credential endpoints and for the same
+reason: the interesting exchange is the federated one, where the subject token came
+from a real IdP this mock has no key for, and refusing it would make the grant
+untestable. It is also exactly the behaviour that would be a critical vulnerability in
+a real authorization server, which is why it is written down here rather than left as an
+implementation detail. **The exchanged token carries no refresh token**, because there
+is no end-user session behind it to refresh against, and `actor_token` becomes the
+RFC 8693 `act` claim — the delegation record saying *this* client is acting for *that*
+subject, which is the only part of the response a downstream resource server can
+reason about.
+
+The consequence shows up one endpoint over: an exchanged token is issued with whatever
+scope was asked for, so unless that includes `openid` it gets a 403
+`insufficient_scope` at UserInfo, which says in its error description that a
+token-exchange or `client_credentials` token has no end-user behind it and therefore no
+profile to return. Missing scopes are the usual reason a working exchange looks broken.
+
 ### UserInfo is the one endpoint that refuses a token it did not issue
 
 `GET`/`POST /oauth2/userinfo` (OIDC Core 5.3) is a protected resource: present the
@@ -209,9 +313,51 @@ place in the service for one, since the exception replaces the very message that
 explaining what went wrong. The header copy is now folded to ASCII; the body keeps the
 real text.
 
+### WebAuthn as the second factor a mock is allowed to have
+
+The login screen carries a "use a security key" checkbox, and an authorization request
+whose `acr_values` names `mfa`, `hwk`, `phr` or `phrh` ticks it and disables it — that
+parameter is how a relying party *demands* a second factor, and a mock that ignored it
+would let a client's step-up request appear to work while proving nothing. The step
+itself is `POST /oauth2/webauthn`: first use for a username **enrols** a credential
+(section 7.1), every later sign-in **asserts** with it (section 7.2), against a
+challenge minted server-side and held for five minutes with the interrupted
+authorization request.
+
+**This is a relying party, and the ceremony is genuinely verified**: the challenge, the
+origin, the RP ID hash, the user-presence and user-verification flags, a signature
+counter that must strictly advance — with the one exemption the specification asks for,
+an authenticator that reports zero and always will — and the signature over
+`authenticatorData ‖ SHA-256(clientDataJSON)` for ES256, RS256 and EdDSA keys. What is
+*not* verified is the attestation statement — `packed`, `none` and `fido-u2f` are
+decoded and no metadata service is consulted — and that line is where the "mock" in this
+service's name has to stop. Everything else here is a shape without enforcement on
+purpose; attesting to an authenticator's provenance is the one thing that cannot be
+faked usefully, because a client that believed this service's word on it would have
+learned something false about a real device.
+
+Three details are the ones that cost time. **`webauthn.js` shares no code with the
+parent project's own decoder** — not the CBOR reader, not the COSE mapping, not the
+signature check — which is what makes `tests/webauthn_cross_impl.js` over there a real
+result rather than an implementation agreeing with itself; the independence is not
+cosmetic, since this side verifies ECDSA through node's `crypto.verify` in its native
+**DER** form while the browser has to convert DER to raw `r‖s` because Web Crypto will
+not. **The ceremony script is a separate resource** (`/oauth2/webauthn.js`) rather than
+an inline `<script>`, because `app.js` sets `script-src 'none'` on every response and
+that one page relaxes it to `'self'`: an inline script there simply would not run, with
+the button doing nothing and no error anywhere. And **the RP ID is this origin's host
+and is not configurable** — WebAuthn binds a ceremony to the calling origin, and that is
+the whole of its phishing resistance.
+
+What comes out the other side is the point: a hardware-key sign-in records
+`amr: ["pwd","hwk"]` and `acr: "mfa"` on the session, a password-only one
+`amr: ["pwd"]` and `acr: "1"`, and those (RFC 8176) go into the id_token whenever the
+session recorded them — so their *absence* means something too, which is why they are
+not emitted unconditionally.
+
 ### The mock STS's index of itself
 
-`GET /sts-metadata` answers "what can I call, what may I call it with, and which specification is it pretending to implement" — a page the service needed once it had grown to eight protocol families across eleven modules. `?format=json` gives the same document machine-readably.
+`GET /sts-metadata` answers "what can I call, what may I call it with, and which specification is it pretending to implement" — a page the service needed once it had grown to ten protocol families across twenty-four modules. `?format=json` gives the same document machine-readably.
 
 **The endpoint list is read from the running Express router, not written down.** That is the whole design: a hand-kept list of endpoints in a file beside the endpoints goes stale the first time somebody adds a route, and the failure is silent in the worst direction — the page still looks complete. `app._router.stack` is walked **per request** (not at require time, where the answer would depend on module load order) and the table in `sts_metadata.js` only supplies the *name* and the *description* for a path the router reports. Both kinds of drift are then reported on the page itself and fail the parent project's `tests/sts_metadata.js`:
 
@@ -222,7 +368,9 @@ The drift check earned its keep immediately: on first run it caught the `OPTIONS
 
 Each path is a **link to that path** — but only where that is honest, which is about half of them. A link is issued as a GET, so a path the router answers only for POST would land the reader on Express's own `Cannot GET /oauth2/token` (reads as a broken service), and a route pattern carrying a `:parameter` or a `*` is not the address of anything. Those are listed unlinked with the reason shown — "POST only", "takes :id", "wildcard" — because that reason is the most useful thing on the row. The five followable endpoints that *do* something when clicked (`/oauth2/authorize`, `/oauth2/logout`, `/oauth2/userinfo`, `/issuer/offer`, `/oid4vp/start`) carry an `effect` note; the first answers **400** when followed bare since it needs `client_id` and `redirect_uri`, and userinfo answers **401** since it is a protected resource. Links are root-relative so they follow whichever host the page was reached at, and open in a new tab so the index survives the click. That test **follows every link** and fails if one does not reach a handler, which is what stops the page advertising a dead one.
 
-Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of thirty-one specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
+Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of thirty-six specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
+
+**Kerberos is the one blind spot in the whole design, and it is structural.** The page is built by walking the live Express router, which is precisely why it cannot go stale — and the KDC's listeners are raw TCP and UDP sockets, as is the protected service's. A protocol family that registers no route is invisible to a router walk. Three HTTP surfaces are all the walk can see (`/KdcProxy`, `/krb5/principals`, `/krb5/service`), so the sockets are described in the text of those rows rather than left to be inferred from silence — the alternative, a described entry with no route behind it, is the *stale* half of the drift check and would have to be exempted from it by hand. Anything added later that speaks a protocol over a socket needs the same treatment.
 
 ### DPoP — sender-constrained access tokens (RFC 9449)
 
@@ -231,6 +379,131 @@ A Bearer access token (RFC 6750) is a password: whatever can read the bytes can 
 **Where it applies, and where it deliberately does not.** OID4VCI 1.0 names DPoP exactly three times: its Security Considerations say the use of DPoP is **RECOMMENDED** for sender-constrained access tokens (mTLS being impractical for a native-app wallet), and its Nonce Response section says the Credential Issuer **MAY** return a `DPoP-Nonce` for use "when presenting an access token at the Credential Endpoint". So it covers the Token Endpoint and every protected endpoint the issuer publishes — Credential, Deferred Credential, Notification. **OID4VP 1.0 names it zero times**, and that is structural rather than an omission: in its own words "the result of an OpenID4VP interaction is one or more Verifiable Presentations … *instead of an Access Token*". There is no token in that exchange to sender-constrain, and the presentation's own proof of possession is the Key Binding JWT. A wallet is therefore right to offer no DPoP switch on its presentation pages; the parent project's carry a pane explaining why instead, with a table comparing the two proofs side by side (`typ`, what possession is proved of, where freshness comes from, `htu` vs `aud`, `ath` vs `sd_hash`). DPoP is also **indifferent to the credential format** — it binds an OAuth token, not a credential — so it works unchanged for `dc+sd-jwt`, `jwt_vc_json` and `ldp_vc`, and nothing in the implementation reads the format.
 
 **On the server.** `dpop.js` implements all twelve RFC 9449 section 4.3 checks, labelled by number, plus `jti` replay detection; `oauth2.js` binds the access **and refresh** tokens (section 5 — a wallet is a public client, so an unbound refresh token would be a bearer credential that mints bound access tokens for whoever holds it, which is worse than not binding because `token_type` would claim a guarantee nothing checked), advertises `dpop_signing_alg_values_supported` (section 5.1 — the *only* signal that DPoP is on offer, so a server that supports it silently is never asked), honours `dpop_jkt` on the authorization request (section 10, which closes the window PKCE does not: a thief holding the code *and* the `code_verifier` still cannot sign for the key), and reports `DPoP` rather than `Bearer` from introspection. The protected endpoints had three copies of a Bearer-only check and now share **one** `presentedAccessToken()`, because a per-endpoint copy is how one of three ends up not demanding the proof — and the one that forgot is the one an attacker would use. There are **four** of them since UserInfo, which is why that function now lives in `dpop.js` rather than in `vc_issuer.js` where it was written: the fourth caller is in `oauth2.js`, and requiring vc_issuer.js from there would either build a cycle or move OID4VCI ahead of OAuth2 in the route order, while copying the check into the OAuth2 module is exactly the mistake this paragraph records having been made once already. `dpop.js` registers no routes and requires only `helpers.js`, so it is the one place both callers can reach. Note a limitation stated in that function: this issuer accepts tokens from a foreign authorization server and cannot verify them, so for such a token `cnf.jkt` is a claim anyone could have written; the binding is real only for tokens this service issued — and `verified` in what it returns is how UserInfo, which cannot live with that, tells the difference. There is deliberately **no "DPoP required" mode** — nonce mode makes proofs fresher, not mandatory — and the two nonce-request shapes are *not* shared code, because an authorization server asks with a 400 JSON body while a resource server asks with a 401 `WWW-Authenticate`, and getting that wrong leaves a conforming wallet with no way forward. `POST /dpop/nonce-mode` is a non-spec runtime switch so the handshake can be exercised without a restart; it is listed as non-spec on `/sts-metadata`.
+
+### Kerberos v5 — the protocol here that is not HTTP
+
+Everything else in this service answers a request over HTTP. Kerberos speaks DER over
+TCP and UDP port 88, so the KDC's listeners are **raw sockets**, and that one fact is
+behind most of the design notes above: `listen()` instead of a require-time bind,
+`/KdcProxy` for a browser that cannot open a socket at all, and a `/sts-metadata` page
+that cannot see any of it.
+
+**The two-message dance is the interesting part, not the ticket.** A client's first
+AS-REQ usually carries no pre-authentication, and a real KDC does not treat that as an
+error to be logged and forgotten: it answers `KDC_ERR_PREAUTH_REQUIRED` **carrying
+PA-ETYPE-INFO2**, which is where the client learns the **salt** and iteration count it
+needs to turn a password into a key. A client that treats that error as a failure cannot
+authenticate to Active Directory at all. Both halves are implemented, and a principal
+(`noreauth`) is configured the other way so the one-message case can be seen too.
+
+The salt is why this matters and why it is a database rather than a formula. AD's salt
+for a **user** is the realm followed by the sAMAccountName with no separator —
+`EXAMPLE.COMalice` — and for a **computer account** it is a different shape entirely:
+`EXAMPLE.COMhostws01.example.com`. An implementation that derives the salt from the
+principal name works right up to the first machine account, which is exactly the point
+at which somebody is debugging a service rather than a user.
+
+**The misconfigured principals are the product, not padding.** `GET /krb5/principals`
+lists the whole database — names, salts, offered etypes, kvno, the
+pre-auth/revoked/expired/ok-as-delegate flags and a sentence on what each account is
+*for* — and no keys and no passwords, since it publishes nothing a client could not
+already learn from PA-ETYPE-INFO2. Among them: `locked` (a disabled account), `expired` (a stale password),
+`aesonly` and `rc4only` (whose etype sets are chosen so that a negotiation can be made
+to fail on purpose, which in 2026 is what RC4 being switched off looks like),
+`sensitive` (NOT_DELEGATED, the one control that stops unconstrained delegation), a
+computer account, and a set of service accounts wired for the delegation cases below. A
+debugger is judged on how it renders failure, and these are the failures a real
+deployment produces — each drivable deliberately instead of by breaking something. So
+is the clock: `KRB5_CLOCK_OFFSET` makes the KDC lie about its own time, because
+`KRB_AP_ERR_SKEW` is one of the most common Kerberos failures in the field and the error
+carries the KDC's time so a client can *measure* the difference rather than guess it.
+
+**Every ticket carries a signed PAC** ([MS-PAC]), which is the half of Kerberos that
+Windows added and that RFC 4120 knows nothing about. A ticket proves *who* you are and
+says nothing about your groups; a Windows service authorizes on the groups. So
+"authentication succeeded but access was denied" is nearly always a question about this
+structure, and a debugger that decodes a ticket and stops at `cname` has shown the less
+interesting half. Two things about it are silent when wrong and are why `krb5_ndr.js`
+exists as its own module: the PAC's logon information arrives in **NDR**, Windows' RPC
+marshalling, which is little-endian in a protocol whose every other integer is
+big-endian and aligned from the start of the stream — miss one pad byte and every field
+after it reads in range and false. It also sits three layers deep, inside
+`AD-IF-RELEVANT`, so a reader that looks for ad-type 128 at the top level finds nothing.
+A TGT gets two signatures and a service ticket four (sections 2.8.2/2.8.3). Claims and
+device info are not produced, and **SID filtering across a trust is not implemented** —
+a re-signed PAC keeps every SID it arrived with, which is the one place this mock is
+more permissive than a real KDC in a way that matters.
+
+**Two realms, one shared key, and a referral that looks like success.** This KDC answers
+for both `EXAMPLE.COM` and `PARTNER.COM`, which a real one never does — the
+simplification hides finding the other realm's KDC (DNS and SRV records) and none of the
+protocol. A trust is not a setting: it is one principal, `krbtgt/PARTNER.COM@EXAMPLE.COM`,
+whose key both realms hold. Ask for a service in the other realm and this KDC does not
+refuse; it issues a ticket-granting ticket for that realm sealed with the trust key and
+expects the client to notice. The trap is on the client side, which is why it is worth
+being able to produce: the reply is a perfectly ordinary, successful TGS-REP, and the
+*only* signal that it is a referral is that its `sname` is not what was asked for.
+
+**Delegation, all four ways, with the distinctions drawn on purpose** ([MS-SFU]):
+S4U2Self (`PA-FOR-USER`), S4U2Proxy under *either* authorization, forwarded tickets for
+unconstrained delegation, and renewals. The asymmetry between the two S4U2Proxy routes is
+the entire security story of resource-based constrained delegation, so both accounts
+exist here rather than one: classic delegation is authorized by
+`msDS-AllowedToDelegateTo` on the **front-end** account, which only a domain admin can
+set, while RBCD is authorized by `msDS-AllowedToActOnBehalfOfOtherIdentity` on the
+**back-end** account (`HTTP/rbcd.example.com`, naming `HTTP/frontend.example.com` as
+permitted to act on its behalf) — so whoever controls that object can turn "I can write
+to this computer account" into "I can reach this service as anybody". Same messages, same
+KDC options, opposite direction of trust. Classic additionally
+requires the evidence ticket to be forwardable, which S4U2Self grants only to an account
+holding TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION — so `HTTP/frontend.example.com` and
+`HTTP/notrusted.example.com` differ in exactly that one attribute and nothing else,
+because that flag's absence is invisible where it is set: S4U2Self still succeeds and
+returns a ticket that simply is not forwardable, and classic S4U2Proxy then fails a step
+later complaining about the evidence. RBCD needs
+neither, but does need `PA-PAC-OPTIONS` with the RBCD bit, without which [MS-SFU] says a
+KDC MUST answer `KDC_ERR_BADOPTION` — an error mentioning nothing about padata, so it is
+refused here with an explanation.
+
+**A service that will not talk to you without a ticket** is what the whole workflow is
+for: until something decrypts a ticket and proves its own identity back, "the ticket
+looks right" is the strongest claim available. `krb5_service.js` is a raw TCP acceptor —
+deliberately, because that is the shape of the Windows services people actually debug —
+and `GET /krb5/service` describes it and the ordered checks it applies: the GSS wrapper,
+the ticket decrypting under *its own* key at the kvno named, the ticket being for *it*
+(a ticket for another service that happens to decrypt because two accounts share a
+password must still be refused), the Authenticator under the ticket's session key, the
+Authenticator's `cname` matching the ticket's, the clock, **the replay cache** (the check
+a mock is most tempted to skip, and the only thing between a captured AP-REQ and a free
+impersonation), and the 0x8003 checksum. If mutual authentication was asked for, the
+AP-REP echoes the Authenticator's `ctime` under the session key, and that echo *is* the
+proof — only something holding the service's long-term key could have learned the session
+key to produce it.
+
+**The 0x8003 checksum is not a checksum**, and it is the single most commonly botched
+field in Kerberos. It is a structure carrying channel bindings and the GSS flags, and
+`krb5_gss.js` writes it out explicitly because it fails in the least helpful way
+available: a service answers `KRB_AP_ERR_INAPP_CKSUM` and nothing anywhere says "your
+flags word is in the wrong byte order". Its fields are **little-endian**, alone in a
+protocol whose every other integer is not, so a mistake there produces `0x02000000` where
+`0x00000002` was meant — a request for delegation where mutual authentication was
+intended. The `Bnd` field is sixteen **zero** bytes when there are no channel bindings,
+not absent. And per-message tokens are keyed by who is speaking: an initiator signs with
+key usage 25 and seals with 24, an acceptor 23 and 22, and the wrong pair produces a token
+the far end cannot verify with an error naming the checksum rather than the direction.
+
+The encryption framework (RFC 3961) covers the etypes Kerberos actually meets now:
+aes128/256-cts-hmac-sha1-96 (17, 18 — the AD workhorses), aes128/256-cts-hmac-sha256/384
+(19, 20 — RFC 8009) and arcfour-hmac-md5 (23), which is included because a debugger whose
+only story about RC4 is "that is deprecated" cannot help anybody still running it. DES
+decodes and is never produced: Windows Server 2025 removed it and it is not coming back.
+
+**Not implemented, and each for a reason worth knowing:** FAST (RFC 6113), PKINIT,
+kpasswd, SPNEGO (`krb5_gss.js` recognises the SPNEGO OID and says it is not implemented
+rather than failing opaquely — the GSS layer is separate from the AP-REQ precisely so
+that this is a wrapper to add and not a rewrite), request signatures, and the SID
+filtering noted above. The **AP exchange** is not missing from the KDC — it belongs to a
+service rather than to a KDC, and it lives in `krb5_service.js`.
 
 ### The issuer named by a DID
 
@@ -266,6 +539,16 @@ checks described above), `sts_dpop.js` (the RFC 9449 negatives), and
 `oauth2_sts_endpoints.js` and `vc_did.js`. Porting those is the obvious next step;
 without them the drift checks this README describes are documentation rather than
 enforcement.
+
+The protocols added since then bring more of them into that category, and the Kerberos
+and WebAuthn ones are the interesting cases because of *how* they check rather than what:
+`krb5_codec.js` and `krb5_codec_sync.js` use the codec's own symmetry as a round-trip
+oracle, `krb5_gss_tokens.js` pins every byte of the 0x8003 checksum, `krb5_crypto.js`
+covers the RFC 3961 etypes against published test vectors, `krb5_as_exchange.js` drives
+the AS exchange, and `webauthn_cross_impl.js` runs `webauthn.js` and the debugger's own
+independent decoder over the same real ceremonies and requires the same verdict from
+both. That last one is the reason `webauthn.js` must stay loadable on its own, with no
+`./helpers` in reach.
 
 ## Licence
 
