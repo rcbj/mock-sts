@@ -259,12 +259,18 @@ const ENDPOINTS = [
   // the sockets are described in their rows' text so a reader is not left thinking port
   // 88 does not exist.
   { path: '/KdcProxy', group: 'Kerberos', name: 'KDC Proxy (MS-KKDCP)',
-    specs: ['ms-kkdcp', 'rfc4120'],
+    // rfc3961 belongs here because every message this relays has enc-parts encrypted under
+    // that framework by the KDC behind it — and because a specification nothing links to is
+    // an IDLE CLAIM, which tests/sts_metadata.js fails the page for. It was listed and
+    // unlinked when the Kerberos rows were first added.
+    specs: ['ms-kkdcp', 'rfc4120', 'rfc3961'],
     what: 'Relays a KDC-PROXY-MESSAGE to the KDC listening on TCP and UDP port 88 in this ' +
           'process. A browser cannot open a raw socket, so this is how the in-browser client ' +
           'reaches a KDC without the api relay.' },
   { path: '/krb5/principals', group: 'Kerberos', name: 'What the KDC knows',
-    specs: ['rfc4120', 'ms-pac'],
+    // The salts and the offered etypes ARE the RFC 3961/3962 surface: string-to-key takes
+    // the salt, and etype negotiation is what the list decides.
+    specs: ['rfc4120', 'ms-pac', 'rfc3961'],
     what: 'The principal database of both realms: names, salts (which are NOT derivable from ' +
           'the principal name, which is why PA-ETYPE-INFO2 exists), offered etypes, the ' +
           'deliberate misconfigurations, and the PAC identity each account carries. Not a real ' +
