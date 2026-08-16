@@ -673,7 +673,11 @@ function preAuthRequiredReply(client, request) {
   const entries = principals.etypeInfo2For(client);
   log.info('krb5: ' + client.name.join('/') + ' needs pre-authentication; sending ETYPE-INFO2 with ' +
     entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies') + ', salt ' +
-    JSON.stringify(client.salt));
+    JSON.stringify(client.salt) + ', s2kparams ' +
+    (principals.S2KPARAMS_MODE === 'send'
+      ? 'SENT (explicit 4096, the pre-2026-08 behaviour of this mock)'
+      : 'OMITTED (as Active Directory does; the client must apply the RFC ' +
+        '3962 default). Set KRB5_S2KPARAMS=send to advertise it explicitly.'));
   return errorReply(25, {
     crealm: request.reqBody.realm,
     cname: request.reqBody.cname,
