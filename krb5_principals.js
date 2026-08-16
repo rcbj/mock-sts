@@ -596,9 +596,45 @@ function chooseEtype(principal, requested) {
 // The ETYPE-INFO2 entries for a principal: one per supported etype, each with the
 // salt the client must use. arcfour carries NO salt, and that absence is
 // meaningful — its string-to-key ignores the salt entirely.
+// ---------------------------------------------------------------------------
+// Whether PA-ETYPE-INFO2 carries s2kparams, and why this is a switch rather
+// than a constant.
+//
+// s2kparams is OPTIONAL (RFC 4120 section 5.2.7.5). When it is absent the
+// client applies the etype's own default, which for the AES profiles is the
+// 4096 iterations RFC 3962 section 4 specifies.
+//
+// This mock used to send it always. Real Active Directory does not: a capture
+// from Windows Server 2025 on 2026-08-16 shows the field omitted entirely
+// (tests/captures/windows-server-2025.json in the debugger repository). That
+// difference matters more than it looks, because it is the direction that
+// hides a bug: a client which REQUIRES s2kparams -- dereferences it, or
+// refuses an entry without one -- passed every test against this mock and
+// would then fail against every real domain in the world, reporting a wrong
+// password. The mock was teaching the client a habit no real KDC supports.
+//
+// So the default is now AD's behaviour, and the old behaviour is one env var
+// away so that both paths stay covered:
+//
+//   KRB5_S2KPARAMS=omit   (default) no s2kparams, as Active Directory does
+//   KRB5_S2KPARAMS=send             an explicit 4096, as this mock used to
+//
+// The KEY DERIVATION is unaffected either way: longTermKey() above passes null
+// s2kparams and therefore already uses the profile default, so what changes is
+// only what the KDC advertises.
+// ---------------------------------------------------------------------------
+const S2KPARAMS_MODE =
+  String(process.env.KRB5_S2KPARAMS || 'omit').toLowerCase() === 'send'
+    ? 'send' : 'omit';
+
 function etypeInfo2For(principal) {
   return supportedEtypes(principal).map(function (id) {
+    // arcfour ignores the salt entirely, so its entry carries neither a salt
+    // nor s2kparams whatever the mode.
     if (id === 23) return { etype: id, salt: null, s2kparams: null };
+    if (S2KPARAMS_MODE === 'omit') {
+      return { etype: id, salt: principal.salt, s2kparams: null };
+    }
     const profile = kcrypto.etypeById(id);
     const iterations = profile.defaultIterations;
     return {
@@ -621,6 +657,7 @@ module.exports = {
   supportedEtypes: supportedEtypes,
   chooseEtype: chooseEtype,
   etypeInfo2For: etypeInfo2For,
+  S2KPARAMS_MODE: S2KPARAMS_MODE,
   userSalt: userSalt,
   hostSalt: hostSalt,
   DOMAIN_SID: DOMAIN_SID,
