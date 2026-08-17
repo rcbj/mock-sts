@@ -74,6 +74,12 @@ const MAX_ROWS = 300;
 // the rest of the list is.
 const DEFAULT_PER_PAGE = 50;
 
+// How many subjects the metrics page names in one "Who" cell before it says how
+// many more there are. A separate cap from MAX_ROWS because it bounds a cell rather
+// than a list: the ceiling that matters here is the width of one row, and the full
+// list is on /admin/users and in `?format=json` either way.
+const MAX_WHO = 12;
+
 // ---------------------------------------------------------------------------
 // The page shell.
 //
@@ -153,6 +159,12 @@ function page(title, active, inner) {
     'th,td{border:1px solid #e2e2ea;padding:.3rem .5rem;text-align:left;vertical-align:top}' +
     'th{background:#f0f0f5;font-weight:600}tr:nth-child(even) td{background:#fafafc}' +
     'td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}' +
+    // A cell holding a list of opaque identifiers. `overflow-wrap:anywhere` is the
+    // one that also shrinks the cell's MINIMUM width, which is the property that
+    // matters: break-all alone wraps the text and still lets one unbreakable
+    // did:jwk widen the whole table past the card it sits in.
+    'td.who{overflow-wrap:anywhere;line-height:1.9}' +
+    'td.who code{white-space:normal}' +
     '.state-valid{color:#0b6b4f;font-weight:600}.state-expired{color:#8a6d00}' +
     '.state-revoked{color:#b00020;font-weight:600}.state-none{color:#666}' +
     'form.inline{display:inline;margin:0}' +
@@ -757,10 +769,23 @@ app.get('/admin/metrics', function (req, res) {
   const signOn = signOnSessionRows();
   const liveSignOn = signOn.filter(function (s) { return !s.expired; });
 
+  // The Who column holds SUBJECTS, and one family's are not names in any readable
+  // sense: an OID4VCI credential's subject is a `did:jwk:` — a couple of hundred
+  // characters of base64url with not one place in it a browser will break a line.
+  // Emitted as plain text that made the cell's minimum width wider than the card,
+  // so the table overflowed and took the OAuth 2.0 / OIDC row's column with it,
+  // even though `urn:sts-mock:user:alice` is short and never the problem. So each
+  // subject is drawn the way the tokens page draws a jti — shortened, with the
+  // whole string in the title so it is still recoverable by hovering — and inside
+  // <code>, which the stylesheet already lets break mid-string.
   const sessionFamilyRows = snap.sessions.families.map(function (row) {
+    const shown = row.who.slice(0, MAX_WHO).map(function (subject) {
+      return shortened(subject, 28);
+    }).join(' ');
     return '<tr><td>' + esc(row.family) + '</td><td class="num">' + row.subjects + '</td>' +
-      '<td>' + esc(row.who.slice(0, 12).join(', ')) +
-      (row.who.length > 12 ? ' &hellip; and ' + (row.who.length - 12) + ' more' : '') + '</td></tr>';
+      '<td class="who">' + shown +
+      (row.who.length > MAX_WHO ? ' &hellip; and ' + (row.who.length - MAX_WHO) + ' more' : '') +
+      '</td></tr>';
   }).join('');
 
   const signOnRows = signOn.slice(0, MAX_ROWS).map(function (s) {
