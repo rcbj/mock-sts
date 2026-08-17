@@ -367,6 +367,51 @@ const ENDPOINTS = [
                      'Access-Control-Allow-Private-Network so a page on an https origin can call ' +
                      'this service on loopback (Chrome Private Network Access).' },
 
+  // --- Admin ---
+  //
+  // NON-SPEC, all of it: no specification describes an operator console, and none of
+  // these paths is something a client should ever be pointed at. They are listed
+  // because this page's first duty is to be a true list of what is callable, and
+  // because two of them CHANGE WHAT THE PROTOCOL ENDPOINTS DO — which is the single
+  // most surprising thing about this service and the last thing that should be
+  // discoverable only by reading server.js.
+  { path: '/admin', group: 'Admin', name: 'Admin console',
+    specs: [],
+    what: 'NON-SPEC. What the console is, what it can change about this service, and what it ' +
+          'deliberately cannot (it does not revoke assertions, tickets or credentials, because ' +
+          'nothing consults this service about those; it does not end a sign-on session, because ' +
+          'wsignout1.0 has cleanup to fan out and a third way to end one is a third way to get it ' +
+          'wrong). NOT PROTECTED — nothing in this service checks a credential.' },
+  { path: '/admin/metrics', group: 'Admin', name: 'Metrics',
+    specs: [],
+    what: 'NON-SPEC. Every endpoint call by matched route and status class, every token by typ ' +
+          'with how many are valid, expired, revoked and DPoP-bound, every assertion, ticket and ' +
+          'credential the same way, and sessions counted BOTH ways: the browser sign-on sessions ' +
+          'this service really holds, and the sessions implied by what it has issued. The two ' +
+          'disagree on purpose and the page says why. Add ?format=json.' },
+  { path: '/admin/tokens', group: 'Admin', name: 'Invalidate tokens',
+    // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
+    // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
+    // reports the token dead.
+    specs: ['rfc7009', 'rfc7662', 'oidc'],
+    effect: 'lists every token issued; POST revokes one, a whole kind, or everything for a subject',
+    what: 'NON-SPEC page over an RFC 7009 operation. GET lists what was issued (claims only — never ' +
+          'the signed tokens, which would make the page a credential dump) with filters; POST ' +
+          'revokes by jti or by pasted token, by kind, by subject, or everything. It is the SAME ' +
+          'revocation set /oauth2/revoke writes to, so introspection, UserInfo and the refresh ' +
+          'grant all honour it immediately. Restore is offered and is NON-SPEC: no authorization ' +
+          'server can undo a revocation, and it is here so that getting back to a working token ' +
+          'does not mean restarting the service.' },
+  { path: '/admin/claims', group: 'Admin', name: 'Custom claims',
+    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
+    effect: 'changes what every FUTURE access token, ID Token and SAML assertion contains',
+    what: 'NON-SPEC. Four claim sets — OAuth 2.0 access token, OIDC ID Token, SAML 2.0 Attribute, ' +
+          'SAML 1.1 Attribute — added to every artifact of that kind issued from then on. ADDITIVE ' +
+          'only: a claim this service sets itself is refused rather than overridden, because every ' +
+          'one of those is load-bearing (a settable exp would produce tokens that fail to verify ' +
+          'with nothing pointing back at the page). Values may carry ${username}-style ' +
+          'placeholders. Add ?format=json; POST the same JSON to set a set.' },
+
   // --- WS-Trust ---
   { path: '/sts', group: 'WS-Trust', name: 'Security Token Service',
     specs: ['ws-trust', 'wss-username', 'saml2', 'xmldsig'],
@@ -677,8 +722,11 @@ function describeEndpoints() {
   return { rows: rows, undocumented: undocumented, stale: stale, unknownSpecs: unknownSpecs };
 }
 
+// 'Admin' sits last of the real groups, before 'Undocumented': it is the only group
+// that is not a protocol, and a reader looking for what this service SPEAKS should
+// not have to scroll past an operator console to find it.
 const GROUP_ORDER = ['Service', 'WS-Trust', 'WS-Federation', 'OAuth 2.0 / OIDC', 'VC Issuance (OID4VCI)',
-                     'Decentralized Identifiers', 'VC Presentation (OID4VP)', 'Undocumented'];
+                     'Decentralized Identifiers', 'VC Presentation (OID4VP)', 'Admin', 'Undocumented'];
 
 function groupsOf(rows) {
   const seen = [];

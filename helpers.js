@@ -76,6 +76,34 @@ function bodyOf(value) {
   return (typeof value === 'string') ? value : JSON.stringify(value);
 }
 
+// ---------------------------------------------------------------------------
+// The one hook admin_stats.js needs, and the reason it is a hook rather than a
+// require.
+//
+// The admin console has to know about every JWT this service issues, and
+// signJwt() below is the single place all of them are minted — so counting them
+// anywhere else would mean counting them at five call sites and forgetting the
+// sixth. But `admin_stats.js` requires THIS file (it needs the log), so this file
+// cannot require it back: a cycle in node hands back a half-initialised module
+// whose exports are undefined, and the symptom arrives later as something that is
+// not a function.
+//
+// So the direction is inverted. This file, the leaf, offers a slot; admin_stats.js
+// installs itself in it at ITS require time. app.js requires admin_stats.js — which
+// is not a trick to make the ordering work but a genuine dependency, since the call
+// log in app.js is where the per-endpoint statistics are collected — and every
+// protocol module requires app.js, so the recorder is installed before any route
+// exists and therefore before any token can be minted.
+//
+// The recorder is called for its side effect only and its return value is ignored:
+// statistics must never be able to stop a token being issued.
+let jwtRecorder = null;
+
+function setJwtRecorder(fn) {
+  jwtRecorder = fn;
+  log.debug("A JWT recorder was installed; every token this service signs will now be counted.");
+}
+
 const PORT = parseInt(process.env.STS_PORT, 10) || 8081;
 
 const ISSUER = process.env.STS_ISSUER || 'urn:wstrust:mock:sts';
@@ -232,6 +260,17 @@ function signJwt(payload) {
               { header: { alg: 'RS256', kid: STS.kid }, payload: payload });
   const signed = jwt.sign(payload, STS.privateKeyPem, { algorithm: 'RS256', keyid: STS.kid });
   logArtifact('OAuth token (' + (payload.typ || 'unknown') + ')', 'after signing', signed);
+  // Every token this service issues passes through here, which is what makes the
+  // admin console's count a count and not an estimate. Wrapped because a throw in
+  // the statistics would otherwise fail the request that was issuing the token —
+  // the tail wagging the dog.
+  if (jwtRecorder) {
+    try {
+      jwtRecorder(payload, signed);
+    } catch (e) {
+      log.error('the JWT recorder threw and was ignored; the token itself is unaffected: ' + e.message);
+    }
+  }
   log.debug("Leaving signJwt().");
   return signed;
 }
@@ -301,5 +340,6 @@ module.exports = {
   oauthError: oauthError,
   vciError: vciError,
   signJwt: signJwt,
+  setJwtRecorder: setJwtRecorder,
   userFor: userFor
 };
