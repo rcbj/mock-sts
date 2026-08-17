@@ -180,6 +180,17 @@ app.get('/spnego', function (req, res) {
     return res.status(200).json({
       protectedResource: '/spnego/protected',
       servicePrincipalName: principal,
+      // The SPN a client DERIVES from this URL's host is usually not the
+      // canonical one above — RFC 4559 clients guess `HTTP/<url host>`, so
+      // reaching this mock at localhost or by its compose name produces
+      // HTTP/localhost or HTTP/sts. This service holds a key for any SPN whose
+      // host matches one of these, and the KDC registers it on first sight, so a
+      // client's own guess works. NOTHING IN SPNEGO CARRIES THIS: it is an
+      // affordance of the mock, published so a debugger can show what a real
+      // deployment would make you look up in DNS and in the account's keytab.
+      acceptsAnySpnForHosts: principals.SERVICE_DOMAINS,
+      spnHostRule: 'a host matches when it IS one of acceptsAnySpnForHosts or ' +
+        'ends with a dot and one of them',
       mechanisms: SUPPORTED_MECHS.map(function (oid) {
         return { oid: oid, name: spnego.mechName(oid) };
       }),

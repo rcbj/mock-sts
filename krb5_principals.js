@@ -100,6 +100,60 @@ const RESERVED_UNKNOWN = String(process.env.KRB5_UNKNOWN_USERS || 'nosuchuser,no
   .filter(function (name) { return name.length > 0; });
 
 // ---------------------------------------------------------------------------
+// THE HOSTS THIS MOCK WILL BE A SERVICE FOR, and why services are created on
+// demand here when findOrCreateUser()'s own header argues they must not be.
+//
+// That argument stands and is not being overturned: a KDC that invents a service
+// hands back a ticket sealed with a key the service does not hold, and the
+// failure then surfaces at the AP exchange as "decrypt integrity check failed" —
+// the same message a genuinely wrong key gives, pointing nowhere near the missing
+// SPN. What removes it is that the invented key is NOT unknown to the service
+// here: this process is both the KDC and the acceptor, krb5_service.js looks the
+// presented SPN up in this same table, and so a ticket for a host created on
+// demand opens with the key that sealed it. The objection was never to creating
+// the principal; it was to creating one nobody can decrypt.
+//
+// WHY IT IS NEEDED. A client derives the SPN from the URL's host — that is what
+// RFC 4559 clients do, browsers included — so it asks for HTTP/localhost,
+// HTTP/sts or HTTP/127.0.0.1 depending on how this stack was reached, while the
+// configured account is HTTP/web.example.com. Every one of those was
+// KDC_ERR_S_PRINCIPAL_UNKNOWN, which is a real error with a real cause and
+// exactly the wrong first experience of a workflow that is trying to teach the
+// protocol rather than this mock's principal table.
+//
+// WHAT STAYS REFUSED, because the error has to remain reachable on purpose:
+// anything whose host matches none of these entries. `HTTP/app.elsewhere.invalid`
+// is the case tests/krb5_tgs_ap.js relies on as the control for its cross-realm
+// referrals, and it must keep failing. So must a name in the TRUSTED realm's
+// domain, which is answered with a REFERRAL long before this is reached — see
+// realmForService() and handleTgsReq().
+//
+// The matching rule is one list with one rule: a host matches an entry when it IS
+// that entry or ends with a dot and that entry. So `example.com` covers
+// `web.example.com` and `anything.example.com`, and a bare `localhost` or `sts`
+// covers only itself. The default list is the realm's own domain plus the three
+// names this project's own defaults reach the mock by; KRB5_SERVICE_DOMAINS
+// replaces it entirely, and setting it to an empty string restores the old
+// behaviour of creating nothing.
+// ---------------------------------------------------------------------------
+const SERVICE_DOMAINS = String(process.env.KRB5_SERVICE_DOMAINS === undefined
+    ? DOMAIN + ',localhost,sts,127.0.0.1' : process.env.KRB5_SERVICE_DOMAINS)
+  .split(',')
+  .map(function (name) { return name.trim().toLowerCase(); })
+  .filter(function (name) { return name.length > 0; });
+
+// One password for every service created on demand, and it is PUBLISHED by
+// GET /krb5/principals for the same reason USER_PASSWORD is: a debugger whose
+// accounts are unusable without reading the source is worse than one that says
+// what they are. It is what lets a reader decrypt a service ticket this mock
+// issued — the ticket's own EncTicketPart, the PAC inside it, the four signatures
+// — which is otherwise the one thing a client can never see. The CONFIGURED
+// service accounts keep their own separate passwords, so nothing about this
+// weakens an assertion about which key sealed which ticket.
+const AUTO_SERVICE_PASSWORD = process.env.KRB5_AUTO_SERVICE_PASSWORD ||
+    'auto-service-password';
+
+// ---------------------------------------------------------------------------
 // The domain SID, and the account data that goes into the PAC.
 //
 // A Kerberos ticket says WHO you are; a Windows service authorizes on the groups in
@@ -698,6 +752,76 @@ function findOrCreateUser(nameComponents, realm) {
   return created;
 }
 
+// ---------------------------------------------------------------------------
+// The service account for a host this mock is willing to be, created on first
+// sight. See SERVICE_DOMAINS above for why this exists and what it must not do.
+//
+// Called only AFTER the referral path has had its say, so a name in the trusted
+// realm's domain has already been answered with a ticket-granting ticket for that
+// realm rather than created here. Returns null for everything it declines, and
+// every caller treats null as KDC_ERR_S_PRINCIPAL_UNKNOWN exactly as before.
+// ---------------------------------------------------------------------------
+function findOrCreateService(nameComponents, realm) {
+  log.debug('Entering findOrCreateService().');
+  const inRealm = realm || REALM;
+  const existing = find(nameComponents, inRealm);
+  if (existing) {
+    log.debug('Leaving findOrCreateService(). ' + keyOf(existing) + ' was known.');
+    return existing;
+  }
+  if (realmsServed().indexOf(inRealm) === -1) {
+    log.debug('Leaving findOrCreateService(). ' + inRealm + ' is not served here.');
+    return null;
+  }
+  if (!nameComponents || nameComponents.length < 2 ||
+      !nameComponents.every(function (part) { return part && String(part).length; })) {
+    // One component is a user (findOrCreateUser's job), and an empty component is
+    // not a name at all.
+    log.debug('Leaving findOrCreateService(). Not service-shaped.');
+    return null;
+  }
+  const host = String(nameComponents[nameComponents.length - 1]).toLowerCase();
+  const matched = SERVICE_DOMAINS.filter(function (entry) {
+    return host === entry || host.endsWith('.' + entry);
+  })[0];
+  if (!matched) {
+    log.info('krb5: ' + nameComponents.join('/') + ' names a host this service is ' +
+      'not willing to be (' + host + ' matches none of ' +
+      (SERVICE_DOMAINS.join(', ') || '(nothing configured)') + '), so it stays ' +
+      'KDC_ERR_S_PRINCIPAL_UNKNOWN');
+    log.debug('Leaving findOrCreateService(). Host not covered.');
+    return null;
+  }
+  // The salt is AD's for a service account: realm + sAMAccountName, and the
+  // sAMAccountName of a service is not its SPN. Real deployments make it the
+  // account's own name, which nothing in the SPN reveals — so this is a
+  // convention of the mock's, published like every other salt in
+  // GET /krb5/principals and in ETYPE-INFO2, and NOT something a client should
+  // ever try to derive. Same shape as the configured HTTP/web.example.com entry,
+  // which salts as REALM + "HTTPweb".
+  const short = String(nameComponents[nameComponents.length - 1]).split('.')[0];
+  const created = register({
+    name: nameComponents.map(String),
+    type: 3,                                   // NT-SRV-HST
+    realm: inRealm,
+    password: AUTO_SERVICE_PASSWORD,
+    salt: userSalt(inRealm, nameComponents.slice(0, -1).join('') + short),
+    autoCreated: true,
+    description: 'created on first sight because ' + host + ' matches ' + matched +
+                 ' — the shared auto-service password, published by this endpoint',
+    pac: {
+      rid: autoRidNext++,
+      groups: [RID.DOMAIN_COMPUTERS],
+      userAccountControl: UAC.WORKSTATION_TRUST_ACCOUNT
+    }
+  });
+  log.info('krb5: created the service ' + keyOf(created) + ' on demand — salt ' +
+    JSON.stringify(created.salt) + ', the shared auto-service password. This ' +
+    'process is also the acceptor, so the ticket it seals is one it can open.');
+  log.debug('Leaving findOrCreateService(). created.');
+  return created;
+}
+
 // The long-term key for one etype. Derived on demand and cached.
 async function longTermKey(principal, etype) {
   if (principal.keys.has(etype)) return principal.keys.get(etype);
@@ -786,7 +910,10 @@ module.exports = {
   KDC_ETYPES: KDC_ETYPES,
   find: find,
   findOrCreateUser: findOrCreateUser,
+  findOrCreateService: findOrCreateService,
   USER_PASSWORD: USER_PASSWORD,
+  AUTO_SERVICE_PASSWORD: AUTO_SERVICE_PASSWORD,
+  SERVICE_DOMAINS: SERVICE_DOMAINS,
   RESERVED_UNKNOWN: RESERVED_UNKNOWN,
   all: function () { return Array.from(principals.values()); },
   longTermKey: longTermKey,

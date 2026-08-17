@@ -7,7 +7,8 @@
 //
 //   GET  /admin           what the console is, and what it can do to this service
 //   GET  /admin/metrics   every call, every artifact, and both kinds of session
-//   GET  /admin/tokens    what was issued, and the buttons that invalidate it
+//   GET  /admin/tokens    what was issued (filtered and paged), and the buttons that
+//                         invalidate it
 //   POST /admin/tokens    revoke / restore, one token or a whole class of them
 //   GET  /admin/claims    the custom claims every new token will carry
 //   POST /admin/claims    add, remove, clear, or replace a whole set
@@ -58,7 +59,17 @@ const { sessions } = require('./oauth2');
 // How many rows of a list a page will draw. A cap is needed — 5,000 token rows is
 // a page no browser enjoys — and what it hid is always stated underneath, because a
 // truncated table that does not say it was truncated reads as the whole truth.
+//
+// On the tokens page this is now the ceiling on ONE PAGE rather than on the whole
+// list: everything held is reachable by paging, so nothing is hidden any more. The
+// cap stays because the reason for it never went away — `?per=` is a number a caller
+// types, and without a ceiling `?per=5000` is the page the cap existed to prevent.
 const MAX_ROWS = 300;
+
+// Rows per page when nobody said. Small enough that the table is the first thing on
+// screen rather than the last, and the paging controls above and below it say what
+// the rest of the list is.
+const DEFAULT_PER_PAGE = 50;
 
 // ---------------------------------------------------------------------------
 // The page shell.
@@ -154,6 +165,12 @@ function page(title, active, inner) {
     '.note{font-size:.78em;color:#666;margin:.3em 0 1em}' +
     '.meta{margin-top:22px;padding-top:12px;border-top:1px solid #eee;font-size:.76em;color:#666}' +
     '.meta div{margin:3px 0}ul{margin:.3em 0;padding-left:1.2em}li{margin:.25em 0;font-size:.85em}' +
+    '.pagenav{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:.5em 0;font-size:.8em}' +
+    '.pagenav a,.pagenav .here,.pagenav .off{display:inline-block;padding:3px 8px;border-radius:5px;' +
+    'border:1px solid #d5d5dd;background:#fff;text-decoration:none;min-width:1.6em;text-align:center}' +
+    '.pagenav .here{background:#12107c;border-color:#12107c;color:#fff;font-weight:700}' +
+    '.pagenav .off{color:#aaa;background:#f7f7fa}' +
+    '.pagenav .where{border:0;background:none;color:#666;padding-left:.4em}' +
     '</style></head><body><div class="card">' +
     '<h1>' + esc(title) + '</h1>' +
     '<p class="sub">Mock STS admin console — issuer <code>' + esc(ISSUER) + '</code></p>' +
@@ -201,8 +218,14 @@ function respondToAction(req, res, target, result) {
   }
   const key = result.ok ? 'notice' : 'error';
   const message = result.ok ? result.message : (result.errors || []).join(' ');
+  // `&` when the target already carries a query string, `?` when it does not. The
+  // tokens page sends the reader back to the page and filter the button was on, so
+  // this is no longer always a bare path — and a second `?` does not start a second
+  // query string, it becomes part of the previous parameter's value, which loses the
+  // message and corrupts the parameter it landed on in one go.
+  const joiner = target.indexOf('?') < 0 ? '?' : '&';
   res.set('Cache-Control', 'no-store')
-     .redirect(303, target + '?' + key + '=' + encodeURIComponent(String(message).slice(0, 500)));
+     .redirect(303, target + joiner + key + '=' + encodeURIComponent(String(message).slice(0, 500)));
   log.debug("Leaving respondToAction(). Redirected to " + target + ".");
 }
 
@@ -254,6 +277,99 @@ function shortened(value, keep) {
   const text = String(value || '');
   if (text.length <= (keep || 18)) return '<code title="' + esc(text) + '">' + esc(text || '—') + '</code>';
   return '<code title="' + esc(text) + '">' + esc(text.slice(0, keep || 18)) + '&hellip;</code>';
+}
+
+// ---------------------------------------------------------------------------
+// Paging.
+//
+// There is no script on these pages — `script-src 'none'`, see the shell above — so
+// paging is links and a query parameter and nothing else. That is also why every
+// number is settled server-side before the markup is built: a page that renders
+// "page 4 of 2" and leaves the browser to sort it out has nothing to sort it out
+// with.
+//
+// Both parameters are read defensively. `?page=abc`, `?page=-3` and `?page=999` all
+// have to land somewhere sensible, because they arrive from hand-edited URLs and
+// from a stale bookmark taken when the list was longer — a revocation sweep can
+// shorten it between two clicks, and an out-of-range page must be the last page
+// rather than an empty table that reads as "nothing matched".
+// ---------------------------------------------------------------------------
+function pagingOf(query, total) {
+  log.debug("Entering pagingOf(). total=" + total);
+  const askedPer = parseInt(String(query.per || ''), 10);
+  const perPage = (isFinite(askedPer) && askedPer > 0) ? Math.min(askedPer, MAX_ROWS) : DEFAULT_PER_PAGE;
+  // At least one page even when nothing matched, so "page 1 of 1" is what an empty
+  // list says rather than "page 1 of 0".
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  const askedPage = parseInt(String(query.page || ''), 10);
+  const page = Math.min(Math.max(isFinite(askedPage) ? askedPage : 1, 1), pages);
+  const offset = (page - 1) * perPage;
+  log.debug("Leaving pagingOf(). page=" + page + " of " + pages + ", perPage=" + perPage + ".");
+  return {
+    page: page, perPage: perPage, pages: pages, offset: offset, total: total,
+    // 1-based and inclusive, for the "rows 51–100 of 312" line. Zero and zero when
+    // nothing matched, which is what the line then has to say.
+    firstRow: total ? offset + 1 : 0,
+    lastRow: Math.min(offset + perPage, total)
+  };
+}
+
+// A query string built from what the caller is already looking at plus an override.
+// Every paging link goes through this, because a "next" that dropped `?kind=` would
+// be page 2 of a different list — the bug this exists to make impossible rather than
+// merely avoidable. Empty values are omitted so the URL of the unfiltered first page
+// is the bare path.
+function queryWith(params, overrides) {
+  const merged = Object.assign({}, params, overrides);
+  const parts = [];
+  Object.keys(merged).forEach(function (key) {
+    const value = merged[key];
+    if (value === '' || value === null || value === undefined) {
+      return;
+    }
+    parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(value)));
+  });
+  return parts.length ? '?' + parts.join('&') : '';
+}
+
+// The paging control. Drawn above and below the table both, because the reason to
+// want the next page is usually that you have just read to the bottom of this one.
+//
+// The numbered links are a WINDOW around the current page rather than one per page:
+// 5,000 tokens at 50 a page is 100 links, which is a worse navigation aid than none.
+// First and last are always offered so the ends stay one click away.
+function pageNav(path, params, pg) {
+  log.debug("Entering pageNav(). pages=" + pg.pages);
+  if (pg.pages <= 1) {
+    log.debug("Leaving pageNav(). One page; no control drawn.");
+    return '';
+  }
+  function link(page, label, title) {
+    return '<a href="' + esc(path + queryWith(params, { page: page })) + '"' +
+           (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</a>';
+  }
+  const out = [];
+  if (pg.page > 1) {
+    out.push(link(1, '&laquo; first', 'The newest tokens'));
+    out.push(link(pg.page - 1, '&lsaquo; prev'));
+  } else {
+    out.push('<span class="off">&laquo; first</span><span class="off">&lsaquo; prev</span>');
+  }
+  const from = Math.max(1, Math.min(pg.page - 3, pg.pages - 6));
+  const to = Math.min(pg.pages, Math.max(pg.page + 3, 7));
+  for (let n = from; n <= to; n++) {
+    out.push(n === pg.page ? '<span class="here">' + n + '</span>' : link(n, String(n)));
+  }
+  if (pg.page < pg.pages) {
+    out.push(link(pg.page + 1, 'next &rsaquo;'));
+    out.push(link(pg.pages, 'last &raquo;', 'The oldest tokens still held'));
+  } else {
+    out.push('<span class="off">next &rsaquo;</span><span class="off">last &raquo;</span>');
+  }
+  out.push('<span class="where">page ' + pg.page + ' of ' + pg.pages + ' — rows ' +
+           pg.firstRow + '&ndash;' + pg.lastRow + ' of ' + pg.total + '</span>');
+  log.debug("Leaving pageNav(). Drew " + out.length + " element(s).");
+  return '<div class="pagenav">' + out.join('') + '</div>';
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +425,9 @@ app.get('/admin', function (req, res) {
     '<p class="note">Every page answers <code>?format=json</code>:</p>' +
     '<ul>' +
     '<li><code>GET ' + esc(base) + '/admin/metrics?format=json</code></li>' +
-    '<li><code>GET ' + esc(base) + '/admin/tokens?format=json</code></li>' +
+    '<li><code>GET ' + esc(base) + '/admin/tokens?format=json&amp;page=1&amp;per=100</code> — the ' +
+    'reply carries <code>page</code>, <code>pages</code> and <code>matched</code>, so walking the ' +
+    'whole list needs no guess about where it ends</li>' +
     '<li><code>POST ' + esc(base) + '/admin/tokens</code> with ' +
     '<code>{"action":"revoke","target":"&lt;jti or token&gt;"}</code></li>' +
     '<li><code>POST ' + esc(base) + '/admin/claims</code> with ' +
@@ -628,11 +746,41 @@ function tokenAction(body) {
                                'revoke-kind, revoke-subject, revoke-all.'] };
 }
 
+// Where a form POST sends the browser back to. Revoking the token on page 4 and
+// landing on page 1 of an unfiltered list is the paging bug everybody has met, so
+// the row forms carry the view they were rendered in as a `back` field.
+//
+// It is REBUILT rather than echoed, and that is the whole point of doing it here: a
+// redirect target taken from a request body is an open redirect, and one carrying a
+// newline is a header injection. Only the three parameters this page understands
+// survive, each of them re-encoded, so the worst a hand-written `back` can produce is
+// a different page of this same table.
+function backTo(body) {
+  log.debug("Entering backTo().");
+  let params = null;
+  try {
+    params = new URLSearchParams(String(body.back || '').replace(/^\?/, ''));
+  } catch (e) {
+    // Unparseable; the bare page is the right answer and is what the forms that
+    // carry no `back` at all get anyway.
+    log.debug("Leaving backTo(). Unparseable back field: " + e.message);
+    return '/admin/tokens';
+  }
+  const target = '/admin/tokens' + queryWith({
+    kind: params.get('kind') || '',
+    state: params.get('state') || '',
+    per: params.get('per') || '',
+    page: params.get('page') || ''
+  }, {});
+  log.debug("Leaving backTo(). " + target);
+  return target;
+}
+
 app.post('/admin/tokens', function (req, res) {
   log.debug("Entering the admin token action endpoint.");
   const body = parseBody(req);
   const result = tokenAction(body);
-  respondToAction(req, res, '/admin/tokens', result);
+  respondToAction(req, res, backTo(body), result);
   log.debug("Leaving the admin token action endpoint.");
 });
 
@@ -646,13 +794,28 @@ app.get('/admin/tokens', function (req, res) {
     if (wantedState && record.state !== wantedState) return false;
     return true;
   });
-  const shown = filtered.slice(0, MAX_ROWS);
+  // Filter first, then page: paging a list and then filtering it would give a page 2
+  // whose length depends on what page 1 happened to contain.
+  const paging = pagingOf(req.query, filtered.length);
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  // What every paging link has to carry with it. The page number is not in here —
+  // pageNav() supplies that per link — and neither is `format`, because JSON has no
+  // links in it and a caller asking for JSON passes its own parameters anyway.
+  const filterParams = { kind: wantedKind, state: wantedState, per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/tokens', filterParams, paging);
+  // What the POST handler sends the browser back to. A row button returns to THIS
+  // page of THIS filter; the bulk buttons below keep the filter but not the page,
+  // because after "revoke everything" the list they were looking at is a different
+  // list and page 7 of it means nothing.
+  const backRow = queryWith(filterParams, { page: paging.page });
+  const backFilter = queryWith(filterParams, {});
 
   const rows = shown.map(function (record) {
     const revokeButton = record.revocable
       ? '<form method="post" action="/admin/tokens" class="inline">' +
         '<input type="hidden" name="action" value="' + (record.revoked ? 'restore' : 'revoke') + '">' +
         '<input type="hidden" name="target" value="' + esc(record.jti) + '">' +
+        '<input type="hidden" name="back" value="' + esc(backRow) + '">' +
         '<button class="' + (record.revoked ? 'secondary' : 'danger') + '">' +
         (record.revoked ? 'Restore' : 'Revoke') + '</button></form>'
       : '<span class="state-none" title="Only access tokens, ID Tokens and refresh tokens can be ' +
@@ -680,6 +843,22 @@ app.get('/admin/tokens', function (req, res) {
       return '<option value="' + esc(s) + '"' + (s === wantedState ? ' selected' : '') + '>' +
              esc(s || 'any state') + '</option>';
     }).join('');
+  // MAX_ROWS is offered as the largest choice so the old behaviour — everything on
+  // one page, up to the cap — is still one click away for anyone who wants to search
+  // the table with the browser's own find.
+  //
+  // A hand-typed `?per=7` is added to the list rather than ignored, or the select
+  // would show a size that is not the one being used and would silently change it on
+  // the next Filter.
+  const perChoices = [25, DEFAULT_PER_PAGE, 100, MAX_ROWS];
+  if (perChoices.indexOf(paging.perPage) < 0) {
+    perChoices.push(paging.perPage);
+    perChoices.sort(function (a, b) { return a - b; });
+  }
+  const perOptions = perChoices.map(function (n) {
+    return '<option value="' + n + '"' + (n === paging.perPage ? ' selected' : '') + '>' +
+           n + ' rows</option>';
+  }).join('');
 
   const inner = messagesOf(req) +
     '<p class="note">Revoking a token here is the SAME operation RFC 7009\'s ' +
@@ -693,6 +872,7 @@ app.get('/admin/tokens', function (req, res) {
     '<h2>Invalidate</h2>' +
     '<form method="post" action="/admin/tokens">' +
       '<input type="hidden" name="action" value="revoke">' +
+      '<input type="hidden" name="back" value="' + esc(backFilter) + '">' +
       '<div class="formrow"><label for="target">A jti, or paste the whole token</label>' +
       '<input type="text" id="target" name="target" size="60" placeholder="jti, or eyJhbGciOi...">' +
       '<button class="danger">Revoke</button></div></form>' +
@@ -706,37 +886,59 @@ app.get('/admin/tokens', function (req, res) {
         return '<form method="post" action="/admin/tokens" class="inline">' +
           '<input type="hidden" name="action" value="revoke-kind">' +
           '<input type="hidden" name="kind" value="' + esc(kind) + '">' +
+          '<input type="hidden" name="back" value="' + esc(backFilter) + '">' +
           '<button class="danger">Revoke every ' + esc(kind) + '</button></form>';
       }).join(' ') +
       '<form method="post" action="/admin/tokens" class="inline">' +
       '<input type="hidden" name="action" value="revoke-all">' +
+      '<input type="hidden" name="back" value="' + esc(backFilter) + '">' +
       '<button class="danger">Revoke everything</button></form>' +
     '</div>' +
     '<form method="post" action="/admin/tokens">' +
       '<input type="hidden" name="action" value="revoke-subject">' +
+      '<input type="hidden" name="back" value="' + esc(backFilter) + '">' +
       '<div class="formrow"><label for="subject">Everything for one subject or username</label>' +
       '<input type="text" id="subject" name="subject" size="40" placeholder="alice, or urn:sts-mock:user:alice">' +
       '<button class="danger">Revoke</button></div></form>' +
 
     '<h2>What has been issued</h2>' +
+    // No `page` input in this form, and that is the point: changing the filter or the
+    // page size sends the reader back to page 1. Carrying the old page number over
+    // would land somebody on page 6 of a two-page result, and the clamp in pagingOf()
+    // would then quietly move them again.
     '<form method="get" action="/admin/tokens"><div class="formrow">' +
       '<label for="kind">Kind</label><select id="kind" name="kind">' + kindOptions + '</select>' +
       '<label for="state">State</label><select id="state" name="state">' + stateOptions + '</select>' +
+      '<label for="per">Per page</label><select id="per" name="per">' + perOptions + '</select>' +
       '<button class="secondary">Filter</button>' +
       (wantedKind || wantedState ? ' <a href="/admin/tokens">clear</a>' : '') +
     '</div></form>' +
+    nav +
     '<table><tr><th>Kind</th><th>State</th><th>User</th><th>Subject</th><th>Client</th><th>Scope</th>' +
     '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti</th><th></th></tr>' +
     (rows || '<tr><td colspan="11">No token matches.</td></tr>') + '</table>' +
+    nav +
     '<p class="note">' + filtered.length + ' token(s) match' +
-    (filtered.length > shown.length ? ', of which the ' + shown.length + ' most recent are shown' : '') +
-    '; ' + all.length + ' held in total. Only the claims are kept, never the signed token itself: a ' +
-    'page rendering a thousand live bearer credentials is a page that leaks them, and the ' +
-    '<code>jti</code> is all any button here needs.</p>';
+    (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
+                        ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
+    '; ' + all.length + ' held in total. Newest first, so page 1 is the token somebody is most ' +
+    'likely to be debugging. Only the claims are kept, never the signed token itself: a page ' +
+    'rendering a thousand live bearer credentials is a page that leaks them, and the ' +
+    '<code>jti</code> is all any button here needs.</p>' +
+    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' + MAX_ROWS +
+    ' rows a page), and both work with <code>?format=json</code> — where the reply carries ' +
+    '<code>page</code>, <code>pages</code> and <code>matched</code>, so a test can walk the whole ' +
+    'list without guessing when it has reached the end. Every button on this page acts on a ' +
+    '<code>jti</code> and never on a row number, so a revocation between two clicks cannot make ' +
+    'the wrong token the target — the most it can do is shift a row onto another page.</p>';
 
   respond(req, res, {
     held: all.length, matched: filtered.length, shown: shown.length,
     filter: { kind: wantedKind || null, state: wantedState || null },
+    // The clamped values, not what was asked for: `?page=999` on a two-page list
+    // reports page 2, which is the page whose tokens are in the reply.
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
     revocableKinds: stats.REVOCABLE_KINDS,
     revokedCount: stats.revokedCount(),
     tokens: shown
