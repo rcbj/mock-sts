@@ -35,6 +35,7 @@ const app = require('./app');
 const { log, logArtifact, ISSUER, STS, xmlEscape, iso,
         firstByLocal, textByLocal } = require('./helpers');
 const { buildSamlAssertion, encryptAssertion } = require('./saml2');
+const stats = require('./admin_stats');
 const WST_NS = 'http://docs.oasis-open.org/ws-sx/ws-trust/200512';
 
 const SOAP12_NS = 'http://www.w3.org/2003/05/soap-envelope';
@@ -131,8 +132,18 @@ function authenticate(doc) {
   const obo = firstByLocal(doc, 'OnBehalfOf') || firstByLocal(doc, 'ActAs');
   if (obo) {
     const nameId = firstByLocal(obo, 'NameID') || firstByLocal(obo, 'NameIdentifier');
+    const delegated = (nameId && (nameId.textContent || '').trim()) || 'delegated-subject';
+    // Recorded, with what it is said plainly: the subject named in an OnBehalfOf
+    // presented no credential of their own here. Something else asked for a token
+    // about them, and this service — which checks nothing — agreed. The users page
+    // prints the method, so the row is not mistaken for a sign-in.
+    stats.recordAuthentication({
+      presented: delegated, protocol: 'WS-Trust', method: 'OnBehalfOf / ActAs (delegated)',
+      note: 'The requester named this subject; the subject presented nothing. This service ' +
+            'accepts any delegation without checking who may perform it.'
+    });
     log.debug("Leaving authenticate(). Delegated request (OnBehalfOf/ActAs).");
-    return { ok: true, subject: (nameId && (nameId.textContent || '').trim()) || 'delegated-subject' };
+    return { ok: true, subject: delegated };
   }
   const ut = firstByLocal(doc, 'UsernameToken');
   if (ut) {
@@ -146,6 +157,10 @@ function authenticate(doc) {
       log.debug("Leaving authenticate(). The reserved password was used, so this is a failure.");
       return { ok: false, reason: 'Authentication failed for user ' + user + '.' };
     }
+    stats.recordAuthentication({
+      presented: user, protocol: 'WS-Trust', method: 'WS-Security UsernameToken',
+      note: 'The password is not checked, except for the reserved string "invalid".'
+    });
     log.debug("Leaving authenticate(). UsernameToken accepted for " + user + ".");
     return { ok: true, subject: user };
   }
@@ -153,10 +168,21 @@ function authenticate(doc) {
   const assertion = firstByLocal(doc, 'Assertion');
   if (assertion) {
     const nameId = firstByLocal(assertion, 'NameID') || firstByLocal(assertion, 'NameIdentifier');
+    const named = (nameId && (nameId.textContent || '').trim()) || 'saml-subject';
+    stats.recordAuthentication({
+      presented: named, protocol: 'WS-Trust', method: 'a SAML assertion as the credential',
+      note: 'The assertion\'s signature and Conditions are not checked; the NameID is read and ' +
+            'believed.'
+    });
     log.debug("Leaving authenticate(). A SAML assertion was presented as the credential.");
-    return { ok: true, subject: (nameId && (nameId.textContent || '').trim()) || 'saml-subject' };
+    return { ok: true, subject: named };
   }
   // No credential — lenient (anonymous), so a "None" credential still issues.
+  //
+  // Deliberately NOT recorded as an authentication: no userid was presented, so
+  // there is nothing to record. The assertion this issues names `anonymous`, and the
+  // users page picks that up from the assertion instead — as a subject something was
+  // issued to and who never authenticated, which is exactly what happened.
   log.debug("Leaving authenticate(). No credential was presented; treating as anonymous.");
   return { ok: true, subject: 'anonymous' };
 }

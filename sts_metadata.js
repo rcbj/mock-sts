@@ -389,21 +389,41 @@ const ENDPOINTS = [
           'credential the same way, and sessions counted BOTH ways: the browser sign-on sessions ' +
           'this service really holds, and the sessions implied by what it has issued. The two ' +
           'disagree on purpose and the page says why. Add ?format=json.' },
-  { path: '/admin/tokens', group: 'Admin', name: 'Invalidate tokens',
+  { path: '/admin/users', group: 'Admin', name: 'Users',
+    specs: [],
+    what: 'NON-SPEC. Every userid presented to this service as part of an interaction that ' +
+          'SUCCEEDED, across every protocol family here: either sign-in screen, the password grant, ' +
+          'a WS-Security UsernameToken, a Kerberos AS-REQ or an accepted AP-REQ, a token exchange. ' +
+          'A refused request records nothing. ?user=<name> drills into one: the names they were ' +
+          'seen under, how they authenticated each time, every sign-on session they hold and the ' +
+          'tokens issued ON each of those sessions, and the assertions, tickets and credentials ' +
+          'issued to them. One row is one local name across all protocols — alice, ' +
+          'urn:sts-mock:user:alice and alice@REALM are one identity — and subjects that never ' +
+          'authenticated at all (an exchanged foreign token, OnBehalfOf, S4U) are listed and ' +
+          'marked as such. Add ?format=json.' },
+  { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
-    // reports the token dead.
-    specs: ['rfc7009', 'rfc7662', 'oidc'],
-    effect: 'lists every token issued; POST revokes one, a whole kind, or everything for a subject',
-    what: 'NON-SPEC page over an RFC 7009 operation. GET lists what was issued (claims only — never ' +
-          'the signed tokens, which would make the page a credential dump), filtered by kind and ' +
-          'state and paged with ?page= and ?per= — newest first, and both parameters work with ' +
-          '?format=json, whose reply carries page, pages and matched. POST ' +
-          'revokes by jti or by pasted token, by kind, by subject, or everything. It is the SAME ' +
-          'revocation set /oauth2/revoke writes to, so introspection, UserInfo and the refresh ' +
-          'grant all honour it immediately. Restore is offered and is NON-SPEC: no authorization ' +
-          'server can undo a revocation, and it is here so that getting back to a working token ' +
-          'does not mean restarting the service.' },
+    // reports the token dead. saml2 and saml11 because the page now lists those assertions
+    // too, and rfc4120 because it lists the KDC's tickets.
+    specs: ['rfc7009', 'rfc7662', 'oidc', 'saml2', 'saml11', 'rfc4120'],
+    effect: 'lists every JWT, SAML assertion and Kerberos ticket issued; POST revokes one token, a ' +
+            'whole kind, or everything for a subject',
+    what: 'NON-SPEC page over an RFC 7009 operation. GET lists what was issued in ONE table, newest ' +
+          'first: every JWT, every SAML 2.0 and SAML 1.1 assertion (WS-Trust\'s and WS-Federation\'s ' +
+          'alike) and every Kerberos TGT and service ticket. Claims and facts only — never the ' +
+          'signed token, the assertion XML or the ticket, which would make the page a credential ' +
+          'dump. Filtered by family, kind and state and paged with ?page= and ?per=; both work with ' +
+          '?format=json, whose reply carries page, pages, matched and the rows in `issued`, each ' +
+          'naming its family. POST revokes by jti or by pasted token, by kind, by subject, or ' +
+          'everything. It is the SAME revocation set /oauth2/revoke writes to, so introspection, ' +
+          'UserInfo and the refresh grant all honour it immediately. ONLY THE JWTs CAN BE REVOKED: ' +
+          'nothing consults this service about an assertion or a ticket, so those rows are listed ' +
+          'with the reason there is no button rather than with a button that would change a number ' +
+          'here and nothing out there. Restore is offered and is NON-SPEC: no authorization server ' +
+          'can undo a revocation, and it is here so that getting back to a working token does not ' +
+          'mean restarting the service. OID4VCI credentials are counted on /admin/metrics and are ' +
+          'not in this table.' },
   { path: '/admin/claims', group: 'Admin', name: 'Custom claims',
     specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
     effect: 'changes what every FUTURE access token, ID Token and SAML assertion contains',

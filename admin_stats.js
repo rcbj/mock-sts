@@ -42,7 +42,7 @@
 // introspection, UserInfo, the refresh grant and this console all consult it.
 // ---------------------------------------------------------------------------
 
-const { log, setJwtRecorder } = require('./helpers');
+const { log, setJwtRecorder, userFor } = require('./helpers');
 
 // When this process started answering. Everything on the metrics page is "since"
 // this instant, and the page prints it, because a rate with no window is a number
@@ -60,6 +60,14 @@ const STARTED_AT = Date.now();
 const MAX_TOKENS = 5000;
 const MAX_ARTIFACTS = 5000;
 const MAX_CALL_PATHS = 500;
+const MAX_USERS = 2000;
+
+// How many authentication events one user keeps. The users page shows a person's
+// history and a person signing in repeatedly is the normal case here — a test loop
+// can sign the same name in a thousand times — so the events are capped per user
+// rather than in total, and what was dropped is counted on the record so the page
+// can say "the most recent 50 of 1,204" instead of implying there were 50.
+const MAX_EVENTS_PER_USER = 50;
 
 // ---------------------------------------------------------------------------
 // Endpoint call statistics.
@@ -150,6 +158,12 @@ const KIND_BY_TYP = {
 // credential, and revoking one would mean nothing.
 const REVOCABLE_KINDS = ['access_token', 'id_token', 'refresh_token'];
 
+// Every kind a JWT can be recorded under, read off the table above rather than
+// written out again — the tokens page's filter offers exactly these, and a filter
+// listing a kind that can no longer be issued (or missing one that can) is a filter
+// that quietly returns nothing.
+const TOKEN_KINDS = Object.keys(KIND_BY_TYP).map(function (typ) { return KIND_BY_TYP[typ]; });
+
 function kindOfTyp(typ) {
   return KIND_BY_TYP[String(typ || '')] || ('other (typ=' + (typ || 'none') + ')');
 }
@@ -157,8 +171,18 @@ function kindOfTyp(typ) {
 // Installed into helpers.js at require time — see the comment on setJwtRecorder
 // there for why the direction is inverted. The signed token is passed in and
 // deliberately not kept.
-function recordJwt(payload, signed) {
+//
+// `context` is the third parameter signJwt() offers and is what ties a token to the
+// browser session it was issued under. It cannot be read off the payload, and that
+// is the whole reason it exists: no token this service issues carries a session
+// identifier — OIDC's `sid` claim is for front-channel logout and inventing one here
+// would change what every client receives to make a console page easier to write. So
+// the issuer states it out of band instead. A caller that says nothing (the
+// credential issuer, WS-Trust's JWT) leaves both fields empty, which the users page
+// reports as "not through a browser session" rather than as unknown.
+function recordJwt(payload, signed, context) {
   log.debug("Entering recordJwt(). typ=" + (payload.typ || '(none)'));
+  const issuedUnder = context || {};
   const kind = kindOfTyp(payload.typ);
   // A token with no jti cannot be revoked and cannot be looked up, so it gets a
   // synthetic key that sorts with the others and is marked unrevocable on the page.
@@ -188,6 +212,12 @@ function recordJwt(payload, signed) {
     iat: payload.iat || 0,
     nbf: payload.nbf || 0,
     exp: payload.exp || 0,
+    // The browser sign-on session this token was issued under, and the grant that
+    // issued it. Empty for everything that had no session behind it — the two
+    // direct grants, the pre-authorized code, a token exchange — which is a fact
+    // about the token rather than a gap in the recording.
+    sessionId: issuedUnder.sessionId || '',
+    grant: issuedUnder.grant || '',
     issuedAt: Date.now(),
     revoked: false,
     revokedAt: 0,
@@ -331,6 +361,162 @@ function recordCredential(format, detail) {
     expiresAt: detail.expiresAt || 0
   });
   log.debug("Leaving recordCredential(). " + artifacts.length + " artifact(s) held.");
+  return record;
+}
+
+// ---------------------------------------------------------------------------
+// The people this service has authenticated.
+//
+// Every userid presented to it as part of a correct protocol interaction lands here:
+// the name typed at either sign-in screen, the one on a password grant, the subject
+// of a UsernameToken, the client principal in a Kerberos AS-REQ or an accepted
+// AP-REQ, and the subject of an exchanged token. "Correct" is doing work in that
+// sentence — a request that was refused records nothing, so this registry is a list
+// of identities that got somewhere rather than of names that were tried. The one
+// deliberate inclusion that is not a person is `client_credentials`, which is
+// recorded and flagged as a CLIENT: it produces tokens with a subject and no human,
+// and leaving it out would make the users page disagree with the tokens page.
+//
+// **Identity is keyed on the LOCAL NAME, and that is a decision with a visible
+// consequence.** The same person reaches this service under four spellings —
+// `alice` at the login screen, `urn:sts-mock:user:alice` as the `sub` of every token,
+// `alice` as a SAML subject, `alice@STS.MOCK` as a Kerberos principal — and a page
+// showing four rows for one name would be a worse answer than one row, since the
+// whole premise of this mock is that the name you type is who you are in every
+// protocol at once. So the prefix and the realm are stripped for the key and KEPT on
+// the record, and every form seen is listed on the page. What that costs: two
+// genuinely different people called `alice` in two Kerberos realms are one row here.
+// The realms column is what makes that visible rather than silent, and no such
+// collapse happens across case — `Alice` and `alice` stay two, because nothing in
+// this service treats them as one.
+//
+// Kept in memory and dropped with the process, like everything else here.
+// ---------------------------------------------------------------------------
+
+// The prefix helpers.userFor() puts in front of a subject, derived rather than
+// written down again: a change to that function must not leave this file stripping a
+// prefix nothing produces any more, which would silently split every user into two
+// rows (one seen through a token, one through a sign-in).
+const SUBJECT_PREFIX = (function () {
+  const probe = 'probe';
+  const sample = userFor(probe).sub;
+  return sample.slice(0, sample.length - probe.length);
+})();
+
+const users = new Map();       // local name -> the record below
+
+let usersForgotten = 0;
+
+// A presented identity, split into the part that identifies a person here and the
+// parts that merely say where it was presented. Without entering/leaving logs: it is
+// called for every token and artifact on every users page view, so a pair of lines
+// here would be most of the log.
+function identityOf(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return { key: '', name: '', realm: '', form: '' };
+  let rest = text;
+  let realm = '';
+  if (rest.indexOf(SUBJECT_PREFIX) === 0) rest = rest.slice(SUBJECT_PREFIX.length);
+  // A Kerberos principal. The LAST '@' splits it, because a principal name may
+  // itself contain one (a UPN-shaped account name is ordinary in a Windows realm)
+  // and the realm never does.
+  //
+  // This applies to every identity and not only to Kerberos ones, which has one
+  // consequence to know about rather than discover: a person who types an e-mail
+  // address at the login screen is filed under the part before the '@', with the
+  // domain shown in the Realms column. On this service that is usually what was
+  // meant — the same person's Kerberos principal would land in the same row — and
+  // where it is not, the column says which domains have been folded together.
+  const at = rest.lastIndexOf('@');
+  if (at > 0) {
+    realm = rest.slice(at + 1);
+    rest = rest.slice(0, at);
+  }
+  return { key: rest, name: rest, realm: realm, form: text };
+}
+
+// Just the key, for the many places that only need to ask "is this the same person".
+function identityKeyOf(value) {
+  return identityOf(value).key;
+}
+
+function userRecord(identity) {
+  let record = users.get(identity.key);
+  if (record) return record;
+  if (users.size >= MAX_USERS) {
+    // Map iterates in insertion order, so the first key is the least recently
+    // FIRST SEEN — not the least recently active. Chosen because it needs no sweep
+    // and because a registry of 2,000 distinct usernames on a mock is already a
+    // load generator rather than a person, and the page says how many went.
+    const oldest = users.keys().next().value;
+    users.delete(oldest);
+    usersForgotten++;
+  }
+  record = {
+    key: identity.key, name: identity.name,
+    forms: {}, realms: {}, protocols: {},
+    events: [], eventsForgotten: 0,
+    authentications: 0, firstAt: 0, lastAt: 0,
+    // Set by the one call site that knows it is not a person; see the note above.
+    isClient: false
+  };
+  users.set(identity.key, record);
+  return record;
+}
+
+// One successful authentication. `detail` says what happened in the vocabulary the
+// page prints:
+//
+//   presented   the identity exactly as it arrived (the key is derived from it)
+//   protocol    the family, which is what the page groups by
+//   method      how, within that family — "the sign-in screen (password + a
+//               security key)", "AS-REQ with PA-ENC-TIMESTAMP", "UsernameToken"
+//   sessionId   the browser sign-on session this created or ran on, when there is
+//               one. It is what lets the drill-down put tokens under a session.
+//   amr/acr, client_id, note, isClient — all optional, all shown where present.
+//
+// It returns the record so a caller can log what it now knows, and it NEVER throws
+// on a missing field: a statistics call that could fail an authentication would be
+// the tail wagging the dog, the same rule signJwt()'s recorder follows.
+function recordAuthentication(detail) {
+  const info = detail || {};
+  log.debug("Entering recordAuthentication(). protocol=" + (info.protocol || '?') +
+            ", presented=" + (info.presented || '?'));
+  const identity = identityOf(info.presented);
+  if (!identity.key) {
+    log.debug("Leaving recordAuthentication(). There was no identity to record.");
+    return null;
+  }
+  const now = Date.now();
+  const record = userRecord(identity);
+  record.forms[identity.form] = (record.forms[identity.form] || 0) + 1;
+  if (identity.realm) record.realms[identity.realm] = (record.realms[identity.realm] || 0) + 1;
+  if (info.isClient) record.isClient = true;
+  const protocol = String(info.protocol || 'unstated');
+  if (!record.protocols[protocol]) {
+    record.protocols[protocol] = { protocol: protocol, count: 0, methods: {}, firstAt: now, lastAt: 0 };
+  }
+  const family = record.protocols[protocol];
+  const method = String(info.method || 'unstated');
+  family.count++;
+  family.methods[method] = (family.methods[method] || 0) + 1;
+  family.lastAt = now;
+  record.authentications++;
+  record.firstAt = record.firstAt || now;
+  record.lastAt = now;
+  record.events.push({
+    at: now, protocol: protocol, method: method, presented: identity.form,
+    realm: identity.realm || '', sub: info.sub || '', client_id: info.client_id || '',
+    amr: (info.amr || []).join(', '), acr: info.acr || '',
+    sessionId: info.sessionId || '', note: info.note || ''
+  });
+  if (record.events.length > MAX_EVENTS_PER_USER) {
+    record.events.shift();
+    record.eventsForgotten++;
+  }
+  log.info('admin: ' + identity.key + ' authenticated through ' + protocol + ' (' + method +
+           '). ' + record.authentications + ' time(s) so far; ' + users.size + ' user(s) known.');
+  log.debug("Leaving recordAuthentication(). " + users.size + " user(s) known.");
   return record;
 }
 
@@ -536,17 +722,273 @@ function tokenList() {
   return out;
 }
 
+// The same three answers for an artifact, and there are only three: nothing that is
+// not a JWT can be revoked here, so 'revoked' is not among them. Written as a
+// function beside tokenStateOf() because both are read by the merged list below and
+// two definitions of "expired" in one table is the kind of disagreement nobody
+// notices until the two rows are next to each other.
+function artifactStateOf(record, nowMs) {
+  if (!record.expiresAt) return 'no expiry stated';
+  return record.expiresAt <= nowMs ? 'expired' : 'valid';
+}
+
 function artifactList() {
   log.debug("Entering artifactList().");
   const nowMs = Date.now();
   const out = artifacts.map(function (record) {
-    return Object.assign({
-      state: (record.expiresAt && record.expiresAt <= nowMs) ? 'expired'
-           : (record.expiresAt ? 'valid' : 'no expiry stated')
-    }, record);
+    return Object.assign({ state: artifactStateOf(record, nowMs) }, record);
   }).sort(function (a, b) { return b.issuedAt - a.issuedAt; });
   log.debug("Leaving artifactList(). " + out.length + " artifact(s).");
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Everything issued, in one list.
+//
+// The tokens page draws JWTs, SAML assertions and Kerberos tickets in a single
+// table, and the merge happens HERE rather than there: which artifact belongs
+// beside a token, and what "still valid" means for each, are statements about the
+// state this file holds. admin.js renders what it is handed.
+//
+// The families keep their own fields — a ticket has an enc-type and no scope, an
+// assertion has an audience and no client_id — and gain four in common, which are
+// the four every row of that table needs whatever it is:
+//
+//   family        'token', 'assertion' or 'ticket'
+//   state         against the same clock, from the two functions above
+//   expiresAtMs   MILLISECONDS. A JWT's `exp` is seconds and an artifact's
+//                 `expiresAt` is already milliseconds, and a single table cannot
+//                 sort or compare two units. Getting this wrong reads as every
+//                 token having expired in 1970.
+//   identifier    the jti or the AssertionID — and the empty string for a Kerberos
+//                 ticket, which genuinely has none to quote; see the page.
+//
+// OID4VCI credentials are recorded here too and are deliberately NOT in this list:
+// they are counted on the metrics page and listed nowhere. That is a gap rather
+// than a principle — a credential is as much an issued artifact as an assertion is
+// — and closing it means adding a fourth entry to ISSUED_FAMILIES below and a
+// column mapping in admin.js, not anything harder.
+// ---------------------------------------------------------------------------
+const ISSUED_FAMILIES = [
+  { family: 'token', label: 'JWTs', kinds: TOKEN_KINDS,
+    what: 'every JWT this service signs: access tokens, ID Tokens, refresh tokens, ' +
+          'the signed UserInfo response and the OID4VP Request Object' },
+  { family: 'assertion', label: 'SAML assertions', kinds: ['SAML 2.0', 'SAML 1.1'],
+    what: 'issued through WS-Trust (SAML 2.0 and SAML 1.1 token types) and through ' +
+          'WS-Federation sign-in' },
+  { family: 'ticket', label: 'Kerberos tickets', kinds: ['Kerberos TGT', 'Kerberos service ticket'],
+    what: 'issued by the KDC over raw TCP and UDP 88 and over MS-KKDCP, and used by ' +
+          'the Kerberos-protected service and by SPNEGO' }
+];
+
+// kind -> family, for the artifacts. One map built from the structure above rather
+// than a prefix test on the kind string, so the filter's list of kinds and the list
+// this function admits cannot drift apart: a kind the filter offers and this map
+// does not know would be a dropdown entry that always matches nothing.
+const FAMILY_BY_ARTIFACT_KIND = {};
+ISSUED_FAMILIES.forEach(function (entry) {
+  if (entry.family === 'token') return;
+  entry.kinds.forEach(function (kind) { FAMILY_BY_ARTIFACT_KIND[kind] = entry.family; });
+});
+
+function issuedList() {
+  log.debug("Entering issuedList().");
+  const nowMs = Date.now();
+  const out = [];
+  tokens.forEach(function (record) {
+    out.push(Object.assign({}, record, {
+      family: 'token',
+      state: tokenStateOf(record, nowMs),
+      expiresAtMs: record.exp ? record.exp * 1000 : 0,
+      identifier: record.jti || ''
+    }));
+  });
+  artifacts.forEach(function (record) {
+    const family = FAMILY_BY_ARTIFACT_KIND[record.kind];
+    // A credential, or a kind added to the registry and not to the structure above.
+    // Skipped rather than shown under a family nothing can filter by.
+    if (!family) return;
+    out.push(Object.assign({}, record, {
+      family: family,
+      state: artifactStateOf(record, nowMs),
+      expiresAtMs: record.expiresAt || 0,
+      identifier: record.id || '',
+      // Carried explicitly rather than left undefined: the page's button column
+      // reads this one field for all three families, so an assertion says why it
+      // has no button in the same place a UserInfo response does.
+      revocable: false
+    }));
+  });
+  // Newest first, across all three families together — the point of one table is
+  // that a sign-in which produced an ID Token and a SAML assertion shows both,
+  // next to each other, in the order they happened.
+  out.sort(function (a, b) { return b.issuedAt - a.issuedAt; });
+  log.debug("Leaving issuedList(). " + out.length + " row(s) across " +
+            ISSUED_FAMILIES.length + " family/families.");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Reading the users back.
+//
+// The list is built from THREE sources and not one, which is the part worth
+// understanding before changing it:
+//
+//   1. the authentication registry above — everyone who presented a credential;
+//   2. every token's `sub`/`username`;
+//   3. every artifact's subject.
+//
+// Sources 2 and 3 exist because an identity can be issued something here without
+// ever having authenticated here: a token exchange presents somebody else's token,
+// WS-Trust's OnBehalfOf names a delegated subject, and a Kerberos S4U2Self ticket is
+// for a user who has not been near this KDC. Building the page from source 1 alone
+// would list a subject in the tokens table and deny they exist on the users page,
+// which is the kind of disagreement between two pages of one console that costs an
+// afternoon. Such a row is marked `authenticated: false` and the page says what that
+// means rather than leaving the reader to assume the recording is broken.
+// ---------------------------------------------------------------------------
+
+// A {name: count} object as the sorted array the page wants, commonest first.
+function countedRows(counts, nameKey) {
+  return Object.keys(counts || {}).map(function (name) {
+    const row = { count: counts[name] };
+    row[nameKey] = name;
+    return row;
+  }).sort(function (a, b) { return b.count - a.count; });
+}
+
+// The empty shell every row starts as, whether it came from a real authentication or
+// only from something issued. One function so that a row from source 2 has exactly
+// the fields a row from source 1 has — a page that reads `row.protocols.length` must
+// not have to ask where the row came from first.
+function blankUserRow(identity) {
+  return {
+    key: identity.key, name: identity.name, forms: {}, realms: {}, protocols: {},
+    authentications: 0, firstAt: 0, lastAt: 0, isClient: false,
+    authenticated: false, events: [], eventsForgotten: 0,
+    tokens: { issued: 0, valid: 0, expired: 0, revoked: 0, other: 0 },
+    artifactKinds: {}, artifacts: 0, lastActivityAt: 0
+  };
+}
+
+function userRows() {
+  log.debug("Entering userRows().");
+  const nowMs = Date.now();
+  const rows = new Map();
+  const rowFor = function (value) {
+    const identity = identityOf(value);
+    if (!identity.key) return null;
+    if (!rows.has(identity.key)) rows.set(identity.key, blankUserRow(identity));
+    const row = rows.get(identity.key);
+    row.forms[identity.form] = (row.forms[identity.form] || 0) + 1;
+    if (identity.realm) row.realms[identity.realm] = (row.realms[identity.realm] || 0) + 1;
+    return row;
+  };
+
+  users.forEach(function (record) {
+    const row = blankUserRow(record);
+    // The registry's own counts win over anything reconstructed below: they count
+    // authentications, and the forms map there was built one presentation at a time.
+    row.forms = Object.assign({}, record.forms);
+    row.realms = Object.assign({}, record.realms);
+    row.protocols = record.protocols;
+    row.authentications = record.authentications;
+    row.firstAt = record.firstAt;
+    row.lastAt = record.lastAt;
+    row.isClient = record.isClient;
+    row.authenticated = true;
+    // A copy: the page and the JSON reply both read this, and handing out the live
+    // array would let a caller's sort or splice edit the registry.
+    row.events = record.events.slice();
+    row.eventsForgotten = record.eventsForgotten;
+    row.lastActivityAt = record.lastAt;
+    rows.set(record.key, row);
+  });
+
+  tokens.forEach(function (record) {
+    // `username` first: it is the local name, and falling back to `sub` costs
+    // nothing because identityOf() strips the prefix off it anyway.
+    const row = rowFor(record.username || record.sub);
+    if (!row) return;
+    // Both spellings are recorded as forms when they differ, so the page can show
+    // that this row's `sub` is what the tokens say.
+    if (record.sub && record.username) {
+      row.forms[record.sub] = (row.forms[record.sub] || 0) + 1;
+    }
+    row.tokens.issued++;
+    const state = tokenStateOf(record, nowMs);
+    if (state === 'valid') row.tokens.valid++;
+    else if (state === 'expired') row.tokens.expired++;
+    else if (state === 'revoked') row.tokens.revoked++;
+    else row.tokens.other++;
+    if (record.issuedAt > row.lastActivityAt) row.lastActivityAt = record.issuedAt;
+  });
+
+  artifacts.forEach(function (record) {
+    const row = rowFor(record.subject);
+    if (!row) return;
+    row.artifacts++;
+    row.artifactKinds[record.kind] = (row.artifactKinds[record.kind] || 0) + 1;
+    if (record.issuedAt > row.lastActivityAt) row.lastActivityAt = record.issuedAt;
+  });
+
+  const out = Array.from(rows.values()).map(function (row) {
+    return Object.assign({}, row, {
+      forms: countedRows(row.forms, 'form'),
+      realms: countedRows(row.realms, 'realm'),
+      artifactKinds: countedRows(row.artifactKinds, 'kind'),
+      protocols: Object.keys(row.protocols).map(function (name) {
+        const family = row.protocols[name];
+        return { protocol: family.protocol, count: family.count, lastAt: family.lastAt,
+                 methods: countedRows(family.methods, 'method') };
+      }).sort(function (a, b) { return b.lastAt - a.lastAt; })
+    });
+  });
+  // Most recently active first, which on a mock is nearly always the person being
+  // debugged right now.
+  out.sort(function (a, b) { return b.lastActivityAt - a.lastActivityAt; });
+  log.debug("Leaving userRows(). " + out.length + " user(s), " +
+            out.filter(function (r) { return r.authenticated; }).length + " authenticated here.");
+  return out;
+}
+
+// One user, with everything issued to them. The tokens keep their session id, which
+// is what the drill-down groups by; the artifacts keep their own fields, because a
+// ticket has an enc-type and an assertion has an audience and flattening the two
+// would lose the half of each that is worth reading.
+function userDetail(key) {
+  log.debug("Entering userDetail(). key=" + key);
+  const wanted = String(key || '');
+  const row = userRows().filter(function (r) { return r.key === wanted; })[0] || null;
+  if (!row) {
+    log.debug("Leaving userDetail(). No such user.");
+    return null;
+  }
+  const nowMs = Date.now();
+  const theirTokens = [];
+  tokens.forEach(function (record) {
+    if (identityKeyOf(record.username || record.sub) !== wanted) return;
+    theirTokens.push(Object.assign({ state: tokenStateOf(record, nowMs) }, record));
+  });
+  theirTokens.sort(function (a, b) { return b.issuedAt - a.issuedAt; });
+  const theirArtifacts = artifacts.filter(function (record) {
+    return identityKeyOf(record.subject) === wanted;
+  }).map(function (record) {
+    return Object.assign({ state: artifactStateOf(record, nowMs) }, record);
+  }).sort(function (a, b) { return b.issuedAt - a.issuedAt; });
+  log.debug("Leaving userDetail(). " + theirTokens.length + " token(s), " +
+            theirArtifacts.length + " artifact(s).");
+  return { user: row, tokens: theirTokens, artifacts: theirArtifacts };
+}
+
+// The session a token was issued under, by jti. The refresh grant is what needs it:
+// a refreshed token belongs to the same sign-on session as the refresh token that
+// bought it, and that link exists nowhere on the wire — the refresh token carries no
+// session identifier, so without this the second generation of every token would
+// appear under "no session" and a session's token list would quietly stop growing.
+function sessionIdOfJti(jti) {
+  const record = jti ? tokens.get(jti) : null;
+  return (record && record.sessionId) || '';
 }
 
 // Revoke every token matching a predicate, and say how many. Used by the console's
@@ -659,6 +1101,8 @@ function snapshot() {
     else row.expired++;
   });
 
+  const knownUsers = userRows();
+
   const callRows = Array.from(calls.values()).sort(function (a, b) { return b.count - a.count; });
   const statusTotals = {};
   callRows.forEach(function (row) {
@@ -677,6 +1121,13 @@ function snapshot() {
               revoked: revokedJtis.size, byKind: Array.from(byKind.values()) },
     artifacts: { held: artifacts.length, forgotten: artifactsForgotten, cap: MAX_ARTIFACTS,
                  byKind: Array.from(artifactKinds.values()) },
+    // Counted, not listed: the whole list is what /admin/users is for, and repeating
+    // it inside every metrics reply would make the two disagree the first time one
+    // of them changed.
+    users: { known: knownUsers.length, cap: MAX_USERS, forgotten: usersForgotten,
+             authenticatedHere: knownUsers.filter(function (r) { return r.authenticated; }).length,
+             clients: knownUsers.filter(function (r) { return r.isClient; }).length,
+             authentications: knownUsers.reduce(function (n, r) { return n + r.authentications; }, 0) },
     sessions: sessionsFromArtifacts(),
     claims: CLAIM_SET_IDS.map(function (id) {
       return { id: id, label: CLAIM_SETS[id].label, count: CLAIM_SETS[id].claims.length,
@@ -692,13 +1143,23 @@ module.exports = {
   STARTED_AT: STARTED_AT,
   MAX_TOKENS: MAX_TOKENS,
   MAX_ARTIFACTS: MAX_ARTIFACTS,
+  MAX_USERS: MAX_USERS,
+  MAX_EVENTS_PER_USER: MAX_EVENTS_PER_USER,
   CLAIM_SET_IDS: CLAIM_SET_IDS,
   CLAIM_SETS: CLAIM_SETS,
   RESERVED_JWT_CLAIMS: RESERVED_JWT_CLAIMS,
   PLACEHOLDERS: PLACEHOLDERS,
   DEFAULT_SAML11_NAMESPACE: DEFAULT_SAML11_NAMESPACE,
   REVOCABLE_KINDS: REVOCABLE_KINDS,
+  TOKEN_KINDS: TOKEN_KINDS,
+  ISSUED_FAMILIES: ISSUED_FAMILIES,
   recordCall: recordCall,
+  recordAuthentication: recordAuthentication,
+  identityOf: identityOf,
+  identityKeyOf: identityKeyOf,
+  userRows: userRows,
+  userDetail: userDetail,
+  sessionIdOfJti: sessionIdOfJti,
   recordAssertion: recordAssertion,
   recordTicket: recordTicket,
   recordCredential: recordCredential,
@@ -714,5 +1175,6 @@ module.exports = {
   expandValue: expandValue,
   tokenList: tokenList,
   artifactList: artifactList,
+  issuedList: issuedList,
   snapshot: snapshot
 };

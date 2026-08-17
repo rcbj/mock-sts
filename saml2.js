@@ -111,12 +111,18 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   // every one somebody remembered to count. `exp` is the Conditions/NotOnOrAfter
   // already computed above, which is what makes the console able to say how many
   // are still valid without re-parsing anything.
-  stats.recordAssertion('2.0', { id: id, subject: subject, audience: audience,
-                                 expiresAt: Date.parse(exp) || 0 });
+  const record = stats.recordAssertion('2.0', { id: id, subject: subject, audience: audience,
+                                                expiresAt: Date.parse(exp) || 0 });
   try {
     log.debug("Leaving buildSamlAssertion().");
     return signAssertion(xml);
   } catch (e) {
+    // The record is corrected rather than left as it was, because the console now
+    // SHOWS whether an assertion was signed and an unsigned one is the single most
+    // useful thing that column can say. Counting it as signed because it was
+    // counted before the attempt would be a page that agrees with itself and not
+    // with what went out.
+    record.signed = false;
     log.error('sign failed, returning unsigned: ' + e.message);
     return xml;
   }

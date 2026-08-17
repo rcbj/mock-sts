@@ -52,6 +52,7 @@ const kcrypto = require('./krb5_crypto.js');
 const prim = require('./krb5_primitives.js');
 const gss = require('./krb5_gss.js');
 const principals = require('./krb5_principals.js');
+const stats = require('./admin_stats');
 
 const SERVICE_PORT = parseInt(process.env.KRB5_SERVICE_PORT || '8888', 10);
 const SERVICE_PRINCIPAL = (process.env.KRB5_SERVICE_PRINCIPAL || 'HTTP/web.example.com').split('/');
@@ -97,8 +98,15 @@ function errorReply(code, eText) {
 
 // The acceptor. Takes the bytes a client sent and returns the bytes to send back,
 // plus a per-check verdict a test (or a human) can read.
-async function accept(tokenBytes) {
+//
+// `opts.via` names the transport the AP-REQ arrived over, and it exists because this
+// function is the ONE place a ticket is accepted: the raw socket below and SPNEGO
+// over HTTP both come through here, which was the point of the split. The
+// authentication is recorded here for the same reason — recording it in the two
+// callers instead would be two call sites and, before long, a third that forgot.
+async function accept(tokenBytes, opts) {
   log.debug('Entering accept(). bytes=' + tokenBytes.length);
+  const via = (opts && opts.via) || 'AP-REQ over raw TCP';
   const checks = [];
   function check(name, ok, detail) {
     checks.push({ name: name, ok: !!ok, detail: detail });
@@ -296,6 +304,18 @@ async function accept(tokenBytes) {
     !!(gssInfo && (gssInfo.flags & gss.GSS_FLAG.MUTUAL));
 
   const clientName = ticketPart.cname.name.join('/') + '@' + ticketPart.crealm;
+  // Every check above has passed, which is what makes this the moment the client is
+  // authenticated: the ticket decrypted under this service's key, the Authenticator
+  // decrypted under the ticket's session key, both name the same client, the clock
+  // holds and it is not a replay. Nine checks, and the console records what they
+  // amount to rather than that a request arrived.
+  stats.recordAuthentication({
+    presented: clientName, protocol: 'Kerberos v5', method: via,
+    note: 'The ticket was for ' + wanted + ' and decrypted under this service\'s own key ' +
+          '(' + ticketProfile.name + ').' +
+          (mutualWanted ? '' : ' Mutual authentication was not requested, so the client has no ' +
+                               'proof it reached the real service.')
+  });
   log.info('krb5-service: ACCEPTED ' + clientName + ' for ' + wanted + ' (' + ticketProfile.name +
     ', flags [' + msgs.ticketFlagNames(ticketPart.flags).join(', ') + ']' +
     (mutualWanted ? ', mutual authentication requested' : '') + ')');
@@ -465,8 +485,8 @@ function listen(port) {
 
 // Record the last exchange for the HTTP view. Wrapped rather than inlined so the
 // acceptor itself stays free of presentation concerns.
-const acceptAndRecord = async function (bytes) {
-  const result = await accept(bytes);
+const acceptAndRecord = async function (bytes, opts) {
+  const result = await accept(bytes, opts);
   lastExchange = {
     at: new Date().toISOString(),
     ok: result.ok,

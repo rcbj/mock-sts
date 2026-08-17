@@ -269,11 +269,41 @@ function record(outcome) {
   log.debug('Leaving record().');
 }
 
+// ---------------------------------------------------------------------------
+// WHAT THIS MOCK VOLUNTEERS THAT NO REAL SERVER DOES, and why it is two headers.
+//
+// RFC 4559's challenge is `WWW-Authenticate: Negotiate` and nothing else. It does
+// not say the realm, the KDC or the SPN — so a client guesses `HTTP/<url host>`,
+// and when that guess is wrong the whole exchange fails at the KDC with an error
+// that names nothing about HTTP. That silence is the protocol's, it is the single
+// commonest cause of a SPNEGO failure in the field, and this mock cannot fix it
+// for the world. What it CAN do is stop being another instance of it.
+//
+// So the challenge carries two extra headers, on every 401 this resource sends:
+//
+//   X-Krb5-Service-Principal   the SPN this service holds a key for, canonically
+//   X-Krb5-Accepts-Spn-Hosts   every host it will answer for, comma-separated
+//
+// They are inert to every real client (an unknown header is ignored), they cost
+// nothing, and they are what lets the debugger say "your derived SPN will work
+// here" or "this service says it is X" BEFORE sending somebody to the KDC for a
+// ticket that cannot be issued. `X-` because they are nobody's standard: they are
+// this mock talking to this debugger, and the page labels them as such rather than
+// presenting them as something it learned from the protocol.
+// ---------------------------------------------------------------------------
+function volunteerTheSpn(res) {
+  log.debug('Entering volunteerTheSpn().');
+  res.set('X-Krb5-Service-Principal', SPN + '@' + principals.REALM);
+  res.set('X-Krb5-Accepts-Spn-Hosts', principals.SERVICE_DOMAINS.join(','));
+  log.debug('Leaving volunteerTheSpn().');
+}
+
 // The bare challenge. No token: RFC 4559 section 4 — the server says only that
 // it will negotiate, and everything else is the client's problem.
 function challenge(res, body, status) {
   log.debug('Entering challenge().');
   res.set('WWW-Authenticate', 'Negotiate');
+  volunteerTheSpn(res);
   res.status(status || 401).type('html').send(body);
   log.debug('Leaving challenge().');
 }
@@ -283,6 +313,7 @@ function challengeWith(res, token, body, status) {
   log.debug('Entering challengeWith().');
   res.set('WWW-Authenticate', 'Negotiate ' +
     Buffer.from(token).toString('base64'));
+  volunteerTheSpn(res);
   res.status(status || 401).type('html').send(body);
   log.debug('Leaving challengeWith().');
 }
@@ -467,7 +498,11 @@ async function handleProtected(req, res) {
   // was the design promise the split was made for.
   let result;
   try {
-    result = await krb5Service.accept(mechToken);
+    // `via` only names the transport for the console: every Kerberos check is that
+    // module's, and this one adds none. Without it a SPNEGO sign-in would be filed
+    // as a raw-socket one, which is the difference between "a browser did this" and
+    // "something on port 8888 did".
+    result = await krb5Service.accept(mechToken, { via: 'SPNEGO over HTTP (RFC 4559)' });
   } catch (e) {
     log.error('krb5-spnego: the acceptor threw: ' + (e.stack || e.message));
     refusal(res, 'the Kerberos acceptor failed: ' + e.message, null);

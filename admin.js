@@ -3,12 +3,15 @@
 // File: admin.js
 //
 // ---------------------------------------------------------------------------
-// The admin console: three pages over the state admin_stats.js holds.
+// The admin console: four pages over the state admin_stats.js holds.
 //
 //   GET  /admin           what the console is, and what it can do to this service
 //   GET  /admin/metrics   every call, every artifact, and both kinds of session
-//   GET  /admin/tokens    what was issued (filtered and paged), and the buttons that
-//                         invalidate it
+//   GET  /admin/users     everyone this service has authenticated; with ?user= it is
+//                         one of them, their sessions, and what was issued on each
+//   GET  /admin/tokens    what was issued — every JWT, every SAML assertion and every
+//                         Kerberos ticket, filtered and paged — and the buttons that
+//                         invalidate the ones that can be
 //   POST /admin/tokens    revoke / restore, one token or a whole class of them
 //   GET  /admin/claims    the custom claims every new token will carry
 //   POST /admin/claims    add, remove, clear, or replace a whole set
@@ -74,7 +77,7 @@ const DEFAULT_PER_PAGE = 50;
 // ---------------------------------------------------------------------------
 // The page shell.
 //
-// One for all four pages, with the nav in it, so a page cannot be added without a
+// One for all five pages, with the nav in it, so a page cannot be added without a
 // way back. The CSS is inline because app.js sets `default-src 'none'` with
 // `style-src 'unsafe-inline'`: a stylesheet as its own resource would need its own
 // exception and would buy nothing.
@@ -88,6 +91,7 @@ const DEFAULT_PER_PAGE = 50;
 const NAV = [
   { path: '/admin', label: 'Console' },
   { path: '/admin/metrics', label: 'Metrics' },
+  { path: '/admin/users', label: 'Users' },
   { path: '/admin/tokens', label: 'Tokens' },
   { path: '/admin/claims', label: 'Custom claims' },
   { path: '/sts-metadata', label: 'Service metadata' }
@@ -280,6 +284,196 @@ function shortened(value, keep) {
 }
 
 // ---------------------------------------------------------------------------
+// One table, three families.
+//
+// The tokens page lists JWTs, SAML assertions and Kerberos tickets together and
+// newest first, because that is the order they happened in: a WS-Federation
+// sign-in that produced an ID Token and a SAML 1.1 assertion is one event, and a
+// page that showed the two halves of it in two places would be a page somebody has
+// to correlate by timestamp by hand.
+//
+// What that costs is that most columns mean something slightly different depending
+// on which family the row belongs to, and the way a table like that goes wrong is a
+// column that quietly means two things. So the mapping is written down twice over:
+// once here as ONE FUNCTION PER COLUMN answering for all three families — which is
+// what makes a header like "Client, audience or service" checkable against the
+// three answers underneath it — and once on the page itself as a legend, for the
+// reader, who cannot see this comment.
+//
+// Which families exist and what is in them is decided in admin_stats.js. Nothing
+// here chooses what the list contains; these functions only say how a row is drawn.
+// ---------------------------------------------------------------------------
+
+// A JWT has two names for one person — the `username` that was typed at the login
+// screen and the `sub` derived from it — and seeing both is how you tell those two
+// apart. A SAML NameID and a Kerberos client principal are ONE name each, so they
+// fill the Subject column and leave this one empty rather than being printed twice
+// to avoid an empty cell.
+function userCell(record) {
+  if (record.family === 'token') return esc(record.username || '—');
+  return '<span class="state-none" title="' +
+    esc('A SAML assertion names a Subject and a Kerberos ticket names a client principal. ' +
+        'Neither carries a second, human-readable name beside it the way a JWT carries ' +
+        'username beside sub, so the one name it has is in the Subject column.') +
+    '">—</span>';
+}
+
+function subjectCell(record) {
+  if (record.family === 'token') return shortened(record.sub, 30);
+  return shortened(record.subject, 30);
+}
+
+// Who it was issued FOR: the party meant to accept it.
+function partyCell(record) {
+  if (record.family === 'assertion') {
+    if (record.audience) return shortened(record.audience, 30);
+    return '<span class="state-none" title="' +
+      esc('This assertion carries no AudienceRestriction — WS-Trust was asked to Issue with no ' +
+          'AppliesTo. Any relying party may accept it, which is the thing an audience restriction ' +
+          'exists to prevent, so it is named here rather than shown as a dash.') +
+      '">unrestricted</span>';
+  }
+  if (record.family === 'ticket') {
+    // The realm recorded with a ticket is the realm that ANSWERED, which under a
+    // cross-realm referral is not the service's own realm. So it is stated as the
+    // issuer in the tooltip rather than appended to the service name as though it
+    // were part of the principal — which is what it would look like, since a
+    // Kerberos principal is written service/host@REALM.
+    return '<code title="' + esc(String(record.service || '') +
+      (record.realm ? ' — issued by the ' + record.realm + ' KDC' : '')) + '">' +
+      esc(record.service || '—') + '</code>';
+  }
+  return esc(record.client_id || '—');
+}
+
+// The one extra fact each family has that no other column has room for. It is
+// headed Detail rather than Scope, because the three are not answers to the same
+// question — a scope says what an access token authorises, an enc-type says which
+// cipher sealed a ticket — and a header naming one of them would make the other two
+// rows look like answers to it.
+function detailCell(record) {
+  if (record.family === 'assertion') {
+    if (record.signed === false) {
+      return '<span class="state-revoked" title="' +
+        esc('Signing threw and the assertion went out unsigned rather than not at all, so that a ' +
+            'relying party can reject it for the right reason. The log line says what failed.') +
+        '">unsigned</span>';
+    }
+    return '<span title="' +
+      esc('An enveloped XML signature over the assertion, its reference naming the ID (SAML 2.0) ' +
+          'or the AssertionID (SAML 1.1).') + '">signed</span>';
+  }
+  if (record.family === 'ticket') {
+    return '<code title="' + esc('The enc-type the ticket and its session key were sealed with.') +
+      '">' + esc(record.etype || '—') + '</code>';
+  }
+  return esc(record.scope || '—');
+}
+
+// How the holder gets to use it, which is the question the DPoP column was already
+// asking and which the other two families have their own answers to.
+function presentedCell(record) {
+  if (record.family === 'assertion') {
+    return '<span title="' +
+      esc('Both builders write a bearer SubjectConfirmation: whoever holds the assertion may ' +
+          'present it. There is no holder-of-key confirmation here, so there is nothing for this ' +
+          'column to distinguish between.') + '">bearer</span>';
+  }
+  if (record.family === 'ticket') {
+    if (record.kind === 'Kerberos TGT') {
+      return '<span title="' +
+        esc('A TGT goes back to the KDC in a TGS-REQ to get a service ticket. It is never ' +
+            'presented to a service, which is why it is the Kerberos session rather than one use ' +
+            'of one.') + '">TGS-REQ</span>';
+    }
+    return '<span title="' +
+      esc('A service ticket is presented to the service it names, in an AP-REQ — over raw ' +
+          'Kerberos, or wrapped in SPNEGO over HTTP.') + '">AP-REQ</span>';
+  }
+  if (record.jkt) {
+    return '<span title="' +
+      esc('Bound to a key: cnf.jkt is in the token and a DPoP proof over that key has to ' +
+          'accompany it.') + '">DPoP</span>';
+  }
+  return 'Bearer';
+}
+
+// The handle the row can be quoted by — and for one family there is none, which is
+// worth saying rather than leaving as a bare dash beside two columns full of them.
+function identifierCell(record) {
+  if (record.family === 'ticket') {
+    return '<span class="state-none" title="' +
+      esc('A Kerberos ticket carries no identifier anybody can quote: no jti, no ID. It is named ' +
+          'by its client, its service and when it was issued — the columns to the left — and the ' +
+          'KDC keeps no handle on it either, because the KDC is stateless and the ticket is the ' +
+          'state.') + '">—</span>';
+  }
+  return shortened(record.identifier, 12);
+}
+
+// The button, or why there is not one. Two different reasons, and they are not
+// interchangeable: a signed UserInfo response has no jti to act on, and a SAML
+// assertion has an identifier and still cannot be revoked because nothing out there
+// would ask this service about it.
+function actionCell(record, backRow) {
+  if (record.family !== 'token') {
+    return '<span class="state-none" title="' +
+      esc('Nothing consults this service about a SAML assertion or a Kerberos ticket. An ' +
+          'assertion is valid because its signature verifies and its Conditions hold; a ticket is ' +
+          'valid because the service it names can decrypt it with a key it already has. A button ' +
+          'here would change a number on this page and nothing at all out there.') + '">—</span>';
+  }
+  if (!record.revocable) {
+    return '<span class="state-none" title="' +
+      esc('Only access tokens, ID Tokens and refresh tokens can be revoked — the others are ' +
+          'replies rather than credentials, or carry no jti to act on.') + '">—</span>';
+  }
+  return '<form method="post" action="/admin/tokens" class="inline">' +
+    '<input type="hidden" name="action" value="' + (record.revoked ? 'restore' : 'revoke') + '">' +
+    '<input type="hidden" name="target" value="' + esc(record.jti) + '">' +
+    '<input type="hidden" name="back" value="' + esc(backRow) + '">' +
+    '<button class="' + (record.revoked ? 'secondary' : 'danger') + '">' +
+    (record.revoked ? 'Restore' : 'Revoke') + '</button></form>';
+}
+
+function issuedRow(record, backRow) {
+  return '<tr><td>' + esc(record.kind) + '</td>' +
+    '<td class="' + stateClass(record.state) + '">' + esc(record.state) + '</td>' +
+    '<td>' + userCell(record) + '</td>' +
+    '<td>' + subjectCell(record) + '</td>' +
+    '<td>' + partyCell(record) + '</td>' +
+    '<td>' + detailCell(record) + '</td>' +
+    '<td>' + presentedCell(record) + '</td>' +
+    '<td>' + esc(whenText(record.issuedAt)) + '</td>' +
+    '<td>' + esc(record.expiresAtMs ? whenText(record.expiresAtMs) : '—') + '</td>' +
+    '<td>' + identifierCell(record) + '</td>' +
+    '<td>' + actionCell(record, backRow) + '</td></tr>';
+}
+
+// The legend for the above, on the page, because a reader cannot see the comment
+// this file opens the section with and a table whose columns shift meaning between
+// rows has to say so where the rows are.
+const COLUMN_LEGEND =
+  '<table><tr><th>Column</th><th>A JWT</th><th>A SAML assertion</th><th>A Kerberos ticket</th></tr>' +
+  '<tr><td>User</td><td><code>username</code>, as typed at the sign-in screen</td>' +
+    '<td colspan="2">nothing: each of these has one name, and it is in Subject</td></tr>' +
+  '<tr><td>Subject</td><td><code>sub</code></td><td>the <code>NameID</code></td>' +
+    '<td>the client principal, <code>name@REALM</code></td></tr>' +
+  '<tr><td>Client, audience or service</td><td><code>client_id</code> (or <code>azp</code>, or the ' +
+    '<code>aud</code>)</td><td>the <code>AudienceRestriction</code>, or <em>unrestricted</em> when ' +
+    'WS-Trust was given no <code>AppliesTo</code></td><td>the service the ticket is for; hover for ' +
+    'the realm that issued it</td></tr>' +
+  '<tr><td>Detail</td><td><code>scope</code></td><td>whether the signature was written — an ' +
+    'assertion that failed to sign still went out</td><td>the enc-type it was sealed with</td></tr>' +
+  '<tr><td>Presented as</td><td>Bearer, or DPoP when <code>cnf.jkt</code> binds it to a key</td>' +
+    '<td>bearer <code>SubjectConfirmation</code>; there is no holder-of-key form here</td>' +
+    '<td>in a TGS-REQ (a TGT) or an AP-REQ (a service ticket)</td></tr>' +
+  '<tr><td>jti or ID</td><td>the <code>jti</code>, which is what every button acts on</td>' +
+    '<td>the <code>ID</code> / <code>AssertionID</code></td>' +
+    '<td>none exists — a ticket has no identifier to quote, and the KDC keeps no handle on ' +
+    'one</td></tr></table>';
+
+// ---------------------------------------------------------------------------
 // Paging.
 //
 // There is no script on these pages — `script-src 'none'`, see the shell above — so
@@ -350,7 +544,7 @@ function pageNav(path, params, pg) {
   }
   const out = [];
   if (pg.page > 1) {
-    out.push(link(1, '&laquo; first', 'The newest tokens'));
+    out.push(link(1, '&laquo; first', 'The newest rows'));
     out.push(link(pg.page - 1, '&lsaquo; prev'));
   } else {
     out.push('<span class="off">&laquo; first</span><span class="off">&lsaquo; prev</span>');
@@ -362,7 +556,7 @@ function pageNav(path, params, pg) {
   }
   if (pg.page < pg.pages) {
     out.push(link(pg.page + 1, 'next &rsaquo;'));
-    out.push(link(pg.pages, 'last &raquo;', 'The oldest tokens still held'));
+    out.push(link(pg.pages, 'last &raquo;', 'The oldest rows still held'));
   } else {
     out.push('<span class="off">next &rsaquo;</span><span class="off">last &raquo;</span>');
   }
@@ -385,11 +579,12 @@ app.get('/admin', function (req, res) {
       tile(snap.tokens.held, 'tokens issued') +
       tile(snap.tokens.revoked, 'tokens revoked') +
       tile(snap.artifacts.held, 'other artifacts') +
+      tile(snap.users.known, 'users known') +
       tile(sessions.size, 'sign-on sessions') +
       tile(durationText(snap.uptimeMs), 'uptime') +
     '</div>' +
     '<h2>What this console is</h2>' +
-    '<p class="note">This service exists to exercise clients, and the three pages here exist to ' +
+    '<p class="note">This service exists to exercise clients, and the pages here exist to ' +
     'exercise the parts of a client that only show themselves when something changes underneath it: ' +
     'what happens when a token it holds stops being valid, and what happens when a token it reads ' +
     'grows a claim it was not expecting.</p>' +
@@ -398,10 +593,18 @@ app.get('/admin', function (req, res) {
     'token and artifact this service has issued with how many are still valid, and sessions ' +
     'counted both ways: the browser sign-on sessions this service really holds, and the sessions ' +
     'implied by what it has issued.</li>' +
-    '<li><a href="/admin/tokens">Tokens</a> — what was issued, and the buttons that invalidate it. ' +
-    'One access token, one ID Token, one refresh token, everything for one subject, or everything ' +
-    'of one kind. Revocation here is the SAME revocation RFC 7009\'s <code>/oauth2/revoke</code> ' +
-    'performs, so introspection, UserInfo and the refresh grant all honour it.</li>' +
+    '<li><a href="/admin/users">Users</a> — every userid this service has been given as part of an ' +
+    'interaction that succeeded, across all twelve protocol families, with what each one holds. ' +
+    'Click a name for the sessions they are signed in on, the tokens issued on each of those ' +
+    'sessions, and the assertions, tickets and credentials issued to them. It also lists the ' +
+    'subjects that were never here at all — an exchanged token names one, so does a WS-Trust ' +
+    '<code>OnBehalfOf</code> and a Kerberos S4U request — and says so on the row.</li>' +
+    '<li><a href="/admin/tokens">Tokens</a> — everything issued, in one table: every JWT, every ' +
+    'SAML assertion (WS-Trust\'s and WS-Federation\'s alike) and every Kerberos ticket, newest ' +
+    'first. And the buttons that invalidate the ones that can be — one access token, one ID Token, ' +
+    'one refresh token, everything for one subject, or everything of one kind. Revocation here is ' +
+    'the SAME revocation RFC 7009\'s <code>/oauth2/revoke</code> performs, so introspection, ' +
+    'UserInfo and the refresh grant all honour it.</li>' +
     '<li><a href="/admin/claims">Custom claims</a> — what to add to every OAuth 2.0 access token, ' +
     'every OIDC ID Token, and every SAML 2.0 and SAML 1.1 assertion this service issues from now ' +
     'on. Additive only: a custom claim is never allowed to displace one the protocol defines.</li>' +
@@ -409,10 +612,12 @@ app.get('/admin', function (req, res) {
     '<h2>What it deliberately does not do</h2>' +
     '<ul>' +
     '<li><strong>It does not invalidate a SAML assertion, a Kerberos ticket or a credential.</strong> ' +
-    'It counts them, and it says when each expires, but none of those has a revocation mechanism a ' +
-    'relying party consults — a SAML assertion is valid because its signature verifies and its ' +
-    'Conditions hold, and nothing about this service is asked. A button claiming to revoke one ' +
-    'would change a number here and nothing at all out there.</li>' +
+    'It counts them, it lists the first two on the tokens page beside the JWTs, and it says when ' +
+    'each expires — but none of those has a revocation mechanism a relying party consults. A SAML ' +
+    'assertion is valid because its signature verifies and its Conditions hold, and a Kerberos ' +
+    'ticket because the service it names can decrypt it; nothing about this service is asked in ' +
+    'either case. A button claiming to revoke one would change a number here and nothing at all ' +
+    'out there, which is why those rows carry a dash and the reason for it.</li>' +
     '<li><strong>It does not end a sign-on session.</strong> <code>/oauth2/logout</code> and ' +
     'WS-Federation\'s <code>wsignout1.0</code> already do, and the second of those has to fan a ' +
     'cleanup request out to every relying party the session signed into. A third way to end one ' +
@@ -425,6 +630,10 @@ app.get('/admin', function (req, res) {
     '<p class="note">Every page answers <code>?format=json</code>:</p>' +
     '<ul>' +
     '<li><code>GET ' + esc(base) + '/admin/metrics?format=json</code></li>' +
+    '<li><code>GET ' + esc(base) + '/admin/users?format=json</code>, and ' +
+    '<code>GET ' + esc(base) + '/admin/users?user=alice&amp;format=json</code> — the second carries ' +
+    '<code>sessions</code>, each with the tokens issued on it, plus the tokens that belong to no ' +
+    'session and the artifacts</li>' +
     '<li><code>GET ' + esc(base) + '/admin/tokens?format=json&amp;page=1&amp;per=100</code> — the ' +
     'reply carries <code>page</code>, <code>pages</code> and <code>matched</code>, so walking the ' +
     'whole list needs no guess about where it ends</li>' +
@@ -437,6 +646,7 @@ app.get('/admin', function (req, res) {
     issuer: ISSUER, startedAt: new Date(snap.startedAt).toISOString(), uptimeMs: snap.uptimeMs,
     calls: snap.calls.total, tokensHeld: snap.tokens.held, tokensRevoked: snap.tokens.revoked,
     artifactsHeld: snap.artifacts.held, signOnSessions: sessions.size,
+    usersKnown: snap.users.known, usersAuthenticatedHere: snap.users.authenticatedHere,
     pages: NAV.map(function (n) { return n.path; })
   }, 'Admin console', '/admin', inner);
   log.debug("Leaving the admin console index.");
@@ -588,7 +798,8 @@ app.get('/admin/metrics', function (req, res) {
     '<h2>Tokens</h2>' +
     '<p class="note">Every JWT this service signs, by <code>typ</code> — which is the only thing ' +
     'that tells them apart, since all of them are RS256 and signed with the same key. ' +
-    '<a href="/admin/tokens">The tokens page</a> lists them one by one and can invalidate them.</p>' +
+    '<a href="/admin/tokens">The tokens page</a> lists them one by one — beside the SAML ' +
+    'assertions and Kerberos tickets, which it also lists — and can invalidate these.</p>' +
     tokenKindTable(snap) +
     (snap.tokens.forgotten > 0
       ? '<p class="note">' + snap.tokens.forgotten + ' older token(s) have been forgotten: the ' +
@@ -600,7 +811,9 @@ app.get('/admin/metrics', function (req, res) {
     '<h2>Assertions, tickets and credentials</h2>' +
     '<p class="note">The artifacts that are not JWTs. None of them can be revoked and the console ' +
     'does not pretend otherwise — see the index for why — so the only distinction here is whether ' +
-    'the validity window has closed.</p>' +
+    'the validity window has closed. The assertions and the tickets are listed one by one on ' +
+    '<a href="/admin/tokens">the tokens page</a>, beside the JWTs and in the order they were all ' +
+    'issued; the credentials are counted here and nowhere else.</p>' +
     artifactKindTable(snap) +
     (snap.artifacts.forgotten > 0
       ? '<p class="note">' + snap.artifacts.forgotten + ' older artifact(s) have been forgotten; the ' +
@@ -616,7 +829,9 @@ app.get('/admin/metrics', function (req, res) {
     'artifact from that protocol family which is still valid. A <code>client_credentials</code> ' +
     'token is the second and not the first (there is no human and no browser behind it); a browser ' +
     'that has signed in but been issued nothing yet is the first and not the second; a Kerberos ' +
-    'client is never the first at all.</p>' +
+    'client is never the first at all. Both are counted here per family; ' +
+    '<a href="/admin/users">the users page</a> is where one person\'s sessions and the tokens ' +
+    'issued on each of them are.</p>' +
     '<h3>Sign-on sessions (' + liveSignOn.length + ' active of ' + signOn.length + ' held)</h3>' +
     '<table><tr><th>User</th><th>State</th><th>amr</th><th>acr</th><th>Signed in</th>' +
     '<th>Expires</th><th>WS-Fed relying parties signed into</th></tr>' +
@@ -733,6 +948,28 @@ function tokenAction(body) {
              message: 'Revoked ' + count + ' token(s) for ' + subject + '.' };
   }
 
+  // The users page's button. It is not the same thing as revoke-subject above, and
+  // the difference is the reason it exists: that one matches a `sub` or a `username`
+  // EXACTLY, which is what somebody typing into the box on the tokens page means,
+  // while a user on the users page is an identity that has been seen under several
+  // spellings — `alice`, `urn:sts-mock:user:alice`, `alice@STS.MOCK`. Revoking "for
+  // alice" from that page has to mean all of them, or the page would offer a button
+  // that visibly missed half of its own table.
+  if (action === 'revoke-user') {
+    const key = String(body.user || '').trim();
+    if (!key) {
+      log.debug("Leaving tokenAction(). No user was given.");
+      return { ok: false, errors: ['Give a user, as the users page names them.'] };
+    }
+    const count = stats.revokeWhere(function (record) {
+      return stats.identityKeyOf(record.username || record.sub) === key;
+    }, 'the admin console (everything for the user ' + key + ')');
+    log.debug("Leaving tokenAction(). Revoked " + count + " for a user.");
+    return { ok: true, revoked: count, user: key,
+             message: 'Revoked ' + count + ' token(s) for ' + key + ' — every spelling of that ' +
+                      'identity, not just the one the row showed.' };
+  }
+
   if (action === 'revoke-all') {
     const count = stats.revokeWhere(function () { return true; }, 'the admin console (everything)');
     log.debug("Leaving tokenAction(). Revoked everything: " + count + ".");
@@ -742,8 +979,8 @@ function tokenAction(body) {
   }
 
   log.debug("Leaving tokenAction(). Unknown action.");
-  return { ok: false, errors: ['Unknown action "' + action + '". The five are: revoke, restore, ' +
-                               'revoke-kind, revoke-subject, revoke-all.'] };
+  return { ok: false, errors: ['Unknown action "' + action + '". The six are: revoke, restore, ' +
+                               'revoke-kind, revoke-subject, revoke-user, revoke-all.'] };
 }
 
 // Where a form POST sends the browser back to. Revoking the token on page 4 and
@@ -752,9 +989,21 @@ function tokenAction(body) {
 //
 // It is REBUILT rather than echoed, and that is the whole point of doing it here: a
 // redirect target taken from a request body is an open redirect, and one carrying a
-// newline is a header injection. Only the three parameters this page understands
-// survive, each of them re-encoded, so the worst a hand-written `back` can produce is
-// a different page of this same table.
+// newline is a header injection. Only the parameters this page understands survive,
+// each of them re-encoded, so the worst a hand-written `back` can produce is a
+// different page of this same table.
+//
+// The list below has to be kept in step with the filter form. A parameter the form
+// offers and this function drops is a filter that silently resets itself the moment
+// somebody revokes a token — which looks like the console losing your place rather
+// than like a missing line here.
+//
+// The users page posts to this same endpoint, so `from` says which of the two pages
+// a button was on. It is read as an ENUM and never as a path: the two paths below
+// are written here, and a `from` naming anything else falls through to the tokens
+// page. That is what keeps the open-redirect property while letting a second page
+// share the handler — a `back` field carrying `//evil.example` would otherwise become
+// a redirect off this service the moment a path came from the body.
 function backTo(body) {
   log.debug("Entering backTo().");
   let params = null;
@@ -766,7 +1015,19 @@ function backTo(body) {
     log.debug("Leaving backTo(). Unparseable back field: " + e.message);
     return '/admin/tokens';
   }
+  if (String(body.from || '') === 'users') {
+    const usersTarget = '/admin/users' + queryWith({
+      user: params.get('user') || '',
+      q: params.get('q') || '',
+      protocol: params.get('protocol') || '',
+      per: params.get('per') || '',
+      page: params.get('page') || ''
+    }, {});
+    log.debug("Leaving backTo(). " + usersTarget);
+    return usersTarget;
+  }
   const target = '/admin/tokens' + queryWith({
+    family: params.get('family') || '',
     kind: params.get('kind') || '',
     state: params.get('state') || '',
     per: params.get('per') || '',
@@ -786,10 +1047,15 @@ app.post('/admin/tokens', function (req, res) {
 
 app.get('/admin/tokens', function (req, res) {
   log.debug("Entering the admin tokens page.");
+  const wantedFamily = String(req.query.family || '');
   const wantedKind = String(req.query.kind || '');
   const wantedState = String(req.query.state || '');
-  const all = stats.tokenList();
+  // Not tokenList(): this page lists every JWT, every SAML assertion (whether
+  // WS-Trust or WS-Federation issued it) and every Kerberos ticket, in one table in
+  // the order they were issued.
+  const all = stats.issuedList();
   const filtered = all.filter(function (record) {
+    if (wantedFamily && record.family !== wantedFamily) return false;
     if (wantedKind && record.kind !== wantedKind) return false;
     if (wantedState && record.state !== wantedState) return false;
     return true;
@@ -798,10 +1064,19 @@ app.get('/admin/tokens', function (req, res) {
   // whose length depends on what page 1 happened to contain.
   const paging = pagingOf(req.query, filtered.length);
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  // How much of each family is held, for the line under the table. Counted from this
+  // list rather than taken from the snapshot, because the snapshot's artifact count
+  // includes the OID4VCI credentials this page does not list — two totals on one
+  // page differing by a number of credentials is a page nobody can check.
+  const heldByFamily = {};
+  all.forEach(function (record) {
+    heldByFamily[record.family] = (heldByFamily[record.family] || 0) + 1;
+  });
   // What every paging link has to carry with it. The page number is not in here —
   // pageNav() supplies that per link — and neither is `format`, because JSON has no
   // links in it and a caller asking for JSON passes its own parameters anyway.
-  const filterParams = { kind: wantedKind, state: wantedState, per: req.query.per ? paging.perPage : '' };
+  const filterParams = { family: wantedFamily, kind: wantedKind, state: wantedState,
+                         per: req.query.per ? paging.perPage : '' };
   const nav = pageNav('/admin/tokens', filterParams, paging);
   // What the POST handler sends the browser back to. A row button returns to THIS
   // page of THIS filter; the bulk buttons below keep the filter but not the page,
@@ -811,33 +1086,27 @@ app.get('/admin/tokens', function (req, res) {
   const backFilter = queryWith(filterParams, {});
 
   const rows = shown.map(function (record) {
-    const revokeButton = record.revocable
-      ? '<form method="post" action="/admin/tokens" class="inline">' +
-        '<input type="hidden" name="action" value="' + (record.revoked ? 'restore' : 'revoke') + '">' +
-        '<input type="hidden" name="target" value="' + esc(record.jti) + '">' +
-        '<input type="hidden" name="back" value="' + esc(backRow) + '">' +
-        '<button class="' + (record.revoked ? 'secondary' : 'danger') + '">' +
-        (record.revoked ? 'Restore' : 'Revoke') + '</button></form>'
-      : '<span class="state-none" title="Only access tokens, ID Tokens and refresh tokens can be ' +
-        'revoked — the others are replies rather than credentials, or carry no jti to act on.">—</span>';
-    return '<tr><td>' + esc(record.kind) + '</td>' +
-      '<td class="' + stateClass(record.state) + '">' + esc(record.state) + '</td>' +
-      '<td>' + esc(record.username || '—') + '</td>' +
-      '<td>' + shortened(record.sub, 30) + '</td>' +
-      '<td>' + esc(record.client_id || '—') + '</td>' +
-      '<td>' + esc(record.scope || '—') + '</td>' +
-      '<td>' + (record.jkt ? 'DPoP' : 'Bearer') + '</td>' +
-      '<td>' + esc(whenText(record.issuedAt)) + '</td>' +
-      '<td>' + esc(record.exp ? whenText(record.exp * 1000) : '—') + '</td>' +
-      '<td>' + shortened(record.jti, 12) + '</td>' +
-      '<td>' + revokeButton + '</td></tr>';
+    return issuedRow(record, backRow);
   }).join('');
 
-  const kindOptions = ['', 'access_token', 'id_token', 'refresh_token', 'userinfo_response',
-                       'request_object'].map(function (k) {
-    return '<option value="' + esc(k) + '"' + (k === wantedKind ? ' selected' : '') + '>' +
-           esc(k || 'any kind') + '</option>';
-  }).join('');
+  const familyOptions = ['<option value=""' + (wantedFamily ? '' : ' selected') + '>any family</option>']
+    .concat(stats.ISSUED_FAMILIES.map(function (entry) {
+      return '<option value="' + esc(entry.family) + '"' +
+             (entry.family === wantedFamily ? ' selected' : '') + '>' + esc(entry.label) + '</option>';
+    })).join('');
+
+  // Grouped by family rather than flat, because "SAML 2.0" and "id_token" in one
+  // list of nine reads as nine unrelated things. Both this and the family select are
+  // built from the same structure in admin_stats.js, so the two cannot come to
+  // disagree about which kind belongs to which family — which they would, being two
+  // hand-written lists of the same nine strings.
+  const kindOptions = '<option value=""' + (wantedKind ? '' : ' selected') + '>any kind</option>' +
+    stats.ISSUED_FAMILIES.map(function (entry) {
+      return '<optgroup label="' + esc(entry.label) + '">' + entry.kinds.map(function (k) {
+        return '<option value="' + esc(k) + '"' + (k === wantedKind ? ' selected' : '') + '>' +
+               esc(k) + '</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
   const stateOptions = ['', 'valid', 'expired', 'revoked', 'not yet valid', 'no expiry stated']
     .map(function (s) {
       return '<option value="' + esc(s) + '"' + (s === wantedState ? ' selected' : '') + '>' +
@@ -861,13 +1130,24 @@ app.get('/admin/tokens', function (req, res) {
   }).join('');
 
   const inner = messagesOf(req) +
-    '<p class="note">Revoking a token here is the SAME operation RFC 7009\'s ' +
-    '<code>/oauth2/revoke</code> performs — there is one set of revoked <code>jti</code>s in this ' +
-    'service, not one per page. So a token revoked here immediately introspects as inactive at ' +
-    '<code>/oauth2/introspect</code>, is refused by <code>/oauth2/userinfo</code> with ' +
-    '<code>invalid_token</code>, and fails the refresh grant with <code>invalid_grant</code>. Two ' +
-    'sets would each look correct on their own and never see each other, which is a debugging ' +
-    'session with no error message anywhere in it.</p>' +
+    '<p class="note">Everything this service has issued and still remembers: every JWT, every SAML ' +
+    'assertion — whether WS-Trust issued it or a WS-Federation sign-in did — and every Kerberos ' +
+    'ticket the KDC minted, in one table, newest first. One table rather than three because a ' +
+    'WS-Federation sign-in that produced an ID Token and a SAML 1.1 assertion is <em>one event</em>, ' +
+    'and three tables would leave it to be reassembled by comparing timestamps.</p>' +
+    '<p class="note">Only the JWTs can be invalidated. Revoking one here is the SAME operation ' +
+    'RFC 7009\'s <code>/oauth2/revoke</code> performs — there is one set of revoked ' +
+    '<code>jti</code>s in this service, not one per page. So a token revoked here immediately ' +
+    'introspects as inactive at <code>/oauth2/introspect</code>, is refused by ' +
+    '<code>/oauth2/userinfo</code> with <code>invalid_token</code>, and fails the refresh grant ' +
+    'with <code>invalid_grant</code>. Two sets would each look correct on their own and never see ' +
+    'each other, which is a debugging session with no error message anywhere in it.</p>' +
+    '<p class="note">An assertion and a ticket have no button and are listed anyway, which is the ' +
+    'point of listing them: <strong>nothing consults this service about either</strong>. An ' +
+    'assertion is valid because its signature verifies and its <code>Conditions</code> hold, and a ' +
+    'ticket because the service it names can decrypt it with a key it already has. So the only ' +
+    'thing that ends one is its own expiry, and the only way to see when that is — or to see that ' +
+    'a sign-in produced one at all — is a page that shows it.</p>' +
 
     '<h2>Invalidate</h2>' +
     '<form method="post" action="/admin/tokens">' +
@@ -907,43 +1187,558 @@ app.get('/admin/tokens', function (req, res) {
     // would land somebody on page 6 of a two-page result, and the clamp in pagingOf()
     // would then quietly move them again.
     '<form method="get" action="/admin/tokens"><div class="formrow">' +
+      '<label for="family">Family</label><select id="family" name="family">' + familyOptions +
+      '</select>' +
       '<label for="kind">Kind</label><select id="kind" name="kind">' + kindOptions + '</select>' +
       '<label for="state">State</label><select id="state" name="state">' + stateOptions + '</select>' +
       '<label for="per">Per page</label><select id="per" name="per">' + perOptions + '</select>' +
       '<button class="secondary">Filter</button>' +
-      (wantedKind || wantedState ? ' <a href="/admin/tokens">clear</a>' : '') +
+      (wantedFamily || wantedKind || wantedState ? ' <a href="/admin/tokens">clear</a>' : '') +
     '</div></form>' +
+    // Family and Kind are ANDed, like any two filters, so a contradictory pair
+    // (Kerberos tickets, id_token) matches nothing. Said here rather than prevented,
+    // because the alternative is a page that silently ignores one of the two
+    // selects the reader can see it obeying.
+    '<p class="note">Family and Kind narrow together: choosing a family and a kind from a ' +
+    'different one matches nothing, which is what an empty table below then means.</p>' +
     nav +
-    '<table><tr><th>Kind</th><th>State</th><th>User</th><th>Subject</th><th>Client</th><th>Scope</th>' +
-    '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti</th><th></th></tr>' +
-    (rows || '<tr><td colspan="11">No token matches.</td></tr>') + '</table>' +
+    '<table><tr><th>Kind</th><th>State</th><th>User</th><th>Subject</th>' +
+    '<th>Client, audience or service</th><th>Detail</th>' +
+    '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti or ID</th><th></th></tr>' +
+    (rows || '<tr><td colspan="11">Nothing matches.</td></tr>') + '</table>' +
     nav +
-    '<p class="note">' + filtered.length + ' token(s) match' +
+    '<p class="note">' + filtered.length + ' row(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
                         ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
-    '; ' + all.length + ' held in total. Newest first, so page 1 is the token somebody is most ' +
-    'likely to be debugging. Only the claims are kept, never the signed token itself: a page ' +
-    'rendering a thousand live bearer credentials is a page that leaks them, and the ' +
-    '<code>jti</code> is all any button here needs.</p>' +
+    '; ' + all.length + ' held in total — ' +
+    stats.ISSUED_FAMILIES.map(function (entry) {
+      return (heldByFamily[entry.family] || 0) + ' ' + esc(entry.label);
+    }).join(', ') +
+    '. Newest first, so page 1 is what somebody is most likely to be debugging. Only the claims ' +
+    'and the facts below are kept, never the signed token, the assertion XML or the ticket: a page ' +
+    'rendering a thousand live credentials in a form a browser will display is a page that leaks ' +
+    'them, and the <code>jti</code> is all any button here needs.</p>' +
+
+    '<h3>What each column means</h3>' +
+    '<p class="note">Three families in one table, so most columns answer a slightly different ' +
+    'question depending on the row. Rather than leave that to be inferred:</p>' +
+    COLUMN_LEGEND +
+    '<p class="note">OID4VCI credentials are <strong>not</strong> in this table. They are recorded ' +
+    'and counted on <a href="/admin/metrics">the metrics page</a> and listed nowhere. That is a ' +
+    'gap rather than a principle — a credential is as much an issued artifact as an assertion is — ' +
+    'and it is named here so that "everything this service has issued" above is read as the three ' +
+    'families it says and not as four.</p>' +
+
     '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' + MAX_ROWS +
     ' rows a page), and both work with <code>?format=json</code> — where the reply carries ' +
     '<code>page</code>, <code>pages</code> and <code>matched</code>, so a test can walk the whole ' +
-    'list without guessing when it has reached the end. Every button on this page acts on a ' +
-    '<code>jti</code> and never on a row number, so a revocation between two clicks cannot make ' +
-    'the wrong token the target — the most it can do is shift a row onto another page.</p>';
+    'list without guessing when it has reached the end. The rows are in <code>issued</code> there, ' +
+    'each carrying its <code>family</code>; it was <code>tokens</code> when this page listed only ' +
+    'JWTs. Every button on this page acts on a <code>jti</code> and never on a row number, so a ' +
+    'revocation between two clicks cannot make the wrong token the target — the most it can do is ' +
+    'shift a row onto another page.</p>';
 
   respond(req, res, {
     held: all.length, matched: filtered.length, shown: shown.length,
-    filter: { kind: wantedKind || null, state: wantedState || null },
+    heldByFamily: stats.ISSUED_FAMILIES.reduce(function (out, entry) {
+      out[entry.family] = heldByFamily[entry.family] || 0;
+      return out;
+    }, {}),
+    filter: { family: wantedFamily || null, kind: wantedKind || null, state: wantedState || null },
     // The clamped values, not what was asked for: `?page=999` on a two-page list
-    // reports page 2, which is the page whose tokens are in the reply.
+    // reports page 2, which is the page whose rows are in the reply.
     page: paging.page, pages: paging.pages, perPage: paging.perPage,
     firstRow: paging.firstRow, lastRow: paging.lastRow,
+    families: stats.ISSUED_FAMILIES,
     revocableKinds: stats.REVOCABLE_KINDS,
     revokedCount: stats.revokedCount(),
-    tokens: shown
+    // `issued` rather than `tokens`, because the array is no longer only tokens and
+    // a key that says otherwise is the kind of thing a test asserts against once and
+    // then trusts. Nothing outside this repository read the old name.
+    issued: shown
   }, 'Tokens', '/admin/tokens', inner);
   log.debug("Leaving the admin tokens page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/users — who this service has authenticated, and one of them in full.
+//
+// One route and two pages: without `?user=` it is the list, with it the drill-down.
+// That is deliberate rather than lazy. A path parameter would have been the obvious
+// shape and cannot be used here, because the identities this service holds contain
+// the characters a path is made of — a Kerberos service principal is `HTTP/host` and
+// a subject is a `urn:` — so `/admin/users/HTTP/web.example.com` is a two-segment
+// path naming nobody. A query parameter carries any of them unaltered and keeps the
+// console to one row in the metrics table for the whole feature.
+//
+// **What "a user" means here, and the two ways it can surprise you.** The list is
+// built in admin_stats.js from the authentications this service recorded, PLUS every
+// subject that appears on something it issued — so a subject that never authenticated
+// here (an exchanged foreign token, a WS-Trust OnBehalfOf, a Kerberos S4U2Self) is
+// listed and marked as such, rather than being absent from a page whose whole job is
+// to answer "who has this service seen". And the identity is keyed on the local name,
+// so one row covers `alice`, `urn:sts-mock:user:alice` and `alice@STS.MOCK`, which is
+// right on a mock where the name you type is who you are everywhere — and would be
+// wrong on a real system with two realms. The Realms column exists so that collapse
+// is visible.
+// ---------------------------------------------------------------------------
+
+// The live sign-on sessions belonging to one user. Sessions are keyed by an opaque
+// id and hold a user object, so the match is on the identity rather than the string:
+// the session says `alice` and the tokens say `urn:sts-mock:user:alice`, and these
+// have to end up on the same page.
+function sessionRowsFor(key) {
+  log.debug("Entering sessionRowsFor(). key=" + key);
+  const rows = signOnSessionRows().filter(function (session) {
+    return stats.identityKeyOf(session.username || session.sub) === key;
+  });
+  log.debug("Leaving sessionRowsFor(). " + rows.length + " session(s).");
+  return rows;
+}
+
+// The tokens of one user, split by the session they were issued on.
+//
+// Three buckets, and the third is the one worth explaining. A token whose record
+// names a session that is no longer held is not an error: sessions expire and are
+// swept, and the token outlives the sign-on it came from — that is exactly the state
+// an OIDC client is in when its ID Token still verifies and the browser would be
+// asked to sign in again. Showing those under "no session" would say something false
+// about how they were issued.
+function tokensBySession(tokens, sessionRows) {
+  log.debug("Entering tokensBySession(). " + tokens.length + " token(s).");
+  const held = {};
+  sessionRows.forEach(function (session) { held[session.id] = []; });
+  const ended = [];
+  const sessionless = [];
+  tokens.forEach(function (record) {
+    if (!record.sessionId) {
+      sessionless.push(record);
+      return;
+    }
+    if (held[record.sessionId]) {
+      held[record.sessionId].push(record);
+      return;
+    }
+    ended.push(record);
+  });
+  log.debug("Leaving tokensBySession(). " + Object.keys(held).length + " session(s), " +
+            ended.length + " on an ended session, " + sessionless.length + " with none.");
+  return { held: held, ended: ended, sessionless: sessionless };
+}
+
+// One user's tokens as a table. The columns are the ones that differ WITHIN a user:
+// their name and subject are the same on every row by construction and are stated
+// once above the table instead of repeated down it.
+function userTokenTable(records, back, empty) {
+  log.debug("Entering userTokenTable(). " + records.length + " row(s).");
+  const rows = records.map(function (record) {
+    const button = record.revocable
+      ? '<form method="post" action="/admin/tokens" class="inline">' +
+        '<input type="hidden" name="action" value="' + (record.revoked ? 'restore' : 'revoke') + '">' +
+        '<input type="hidden" name="target" value="' + esc(record.jti) + '">' +
+        '<input type="hidden" name="from" value="users">' +
+        '<input type="hidden" name="back" value="' + esc(back) + '">' +
+        '<button class="' + (record.revoked ? 'secondary' : 'danger') + '">' +
+        (record.revoked ? 'Restore' : 'Revoke') + '</button></form>'
+      : '<span class="state-none" title="Only access tokens, ID Tokens and refresh tokens can be ' +
+        'revoked — the others are replies rather than credentials, or carry no jti to act on.">—</span>';
+    return '<tr><td>' + esc(record.kind) + '</td>' +
+      '<td class="' + stateClass(record.state) + '">' + esc(record.state) + '</td>' +
+      '<td>' + esc(record.grant || '—') + '</td>' +
+      '<td>' + esc(record.client_id || '—') + '</td>' +
+      '<td>' + esc(record.scope || '—') + '</td>' +
+      '<td>' + (record.jkt ? 'DPoP' : 'Bearer') + '</td>' +
+      '<td>' + esc(whenText(record.issuedAt)) + '</td>' +
+      '<td>' + esc(record.exp ? whenText(record.exp * 1000) : '—') + '</td>' +
+      '<td>' + shortened(record.jti, 12) + '</td>' +
+      '<td>' + button + '</td></tr>';
+  }).join('');
+  log.debug("Leaving userTokenTable().");
+  return '<table><tr><th>Token</th><th>State</th><th>Grant</th><th>Client</th><th>Scope</th>' +
+    '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti</th><th></th></tr>' +
+    (rows || '<tr><td colspan="10">' + esc(empty) + '</td></tr>') + '</table>';
+}
+
+// The artifacts that are not JWTs. One table for all three kinds, with a single
+// Detail column, because an assertion's audience, a ticket's service and enc-type
+// and a credential's configuration id are each the one thing worth reading about
+// that row and giving each its own column would leave two thirds of the table empty.
+function userArtifactTable(records) {
+  log.debug("Entering userArtifactTable(). " + records.length + " row(s).");
+  const rows = records.map(function (record) {
+    const detail = record.service
+      ? 'service ' + record.service + (record.etype ? ', ' + record.etype : '') +
+        (record.realm ? ', realm ' + record.realm : '')
+      : (record.audience ? 'audience ' + record.audience
+                         : (record.configId ? 'configuration ' + record.configId : ''));
+    return '<tr><td>' + esc(record.kind) + '</td>' +
+      '<td class="' + stateClass(record.state) + '">' + esc(record.state) + '</td>' +
+      '<td>' + esc(detail || '—') + '</td>' +
+      '<td>' + (record.id ? shortened(record.id, 20) : '<span class="state-none" ' +
+        'title="A Kerberos ticket has no identifier to quote: it is named by the client and ' +
+        'service it is for.">—</span>') + '</td>' +
+      '<td>' + esc(whenText(record.issuedAt)) + '</td>' +
+      '<td>' + esc(record.expiresAt ? whenText(record.expiresAt) : '—') + '</td></tr>';
+  }).join('');
+  log.debug("Leaving userArtifactTable().");
+  return '<table><tr><th>Artifact</th><th>State</th><th>Detail</th><th>Identifier</th>' +
+    '<th>Issued</th><th>Expires</th></tr>' +
+    (rows || '<tr><td colspan="6">Nothing that is not a JWT has been issued to this user.</td></tr>') +
+    '</table>';
+}
+
+// How they authenticated, most recent first. The whole point of the table is the
+// Method column: "sign-in screen (password)" and "AS-REQ with PA-ENC-TIMESTAMP" are
+// both authentications and only one of them checked anything.
+function authenticationTable(row) {
+  log.debug("Entering authenticationTable(). " + row.events.length + " event(s).");
+  const rows = row.events.slice().reverse().map(function (event) {
+    return '<tr><td>' + esc(whenText(event.at)) + '</td>' +
+      '<td>' + esc(event.protocol) + '</td>' +
+      '<td>' + esc(event.method) + '</td>' +
+      '<td>' + esc(event.presented) + '</td>' +
+      '<td>' + esc(event.amr || '—') + '</td>' +
+      '<td>' + esc(event.acr || '—') + '</td>' +
+      '<td>' + esc(event.client_id || '—') + '</td>' +
+      '<td>' + (event.sessionId ? shortened(event.sessionId, 10) : '—') + '</td>' +
+      '<td>' + esc(event.note || '') + '</td></tr>';
+  }).join('');
+  log.debug("Leaving authenticationTable().");
+  return '<table><tr><th>When</th><th>Protocol</th><th>Method</th><th>Presented as</th>' +
+    '<th>amr</th><th>acr</th><th>Client</th><th>Session</th><th>Note</th></tr>' +
+    (rows || '<tr><td colspan="9">No authentication was recorded for this identity. See above: ' +
+             'they are known here only as the subject of something that was issued.</td></tr>') +
+    '</table>' +
+    (row.eventsForgotten > 0
+      ? '<p class="note">The most recent ' + stats.MAX_EVENTS_PER_USER + ' of ' +
+        (row.eventsForgotten + row.events.length) + ' authentication(s); the rest have been ' +
+        'forgotten. The counts above them are of all of them and are not capped.</p>'
+      : '');
+}
+
+// One session and everything issued on it. This is the answer to the question the
+// page exists for — "what does this person hold right now, and where did it come
+// from" — so the session's own facts and its tokens are drawn as one block rather
+// than as two tables somebody has to join by eye.
+function sessionBlock(session, tokens, back) {
+  log.debug("Entering sessionBlock(). id=" + session.id);
+  const html = '<h3>Session ' + shortened(session.id, 12) + ' &mdash; ' +
+    '<span class="' + (session.expired ? 'state-expired' : 'state-valid') + '">' +
+    (session.expired ? 'expired, not yet swept' : 'active') + '</span></h3>' +
+    '<table><tr><th>Signed in</th><th>Expires</th><th>amr</th><th>acr</th>' +
+    '<th>WS-Fed relying parties signed into</th></tr>' +
+    '<tr><td>' + esc(whenText(session.authTime)) + '</td>' +
+    '<td>' + esc(whenText(session.expires)) + '</td>' +
+    '<td>' + esc(session.amr || '—') + '</td>' +
+    '<td>' + esc(session.acr || '—') + '</td>' +
+    '<td>' + (session.wsfedRealms.length ? esc(session.wsfedRealms.join(', ')) : '—') + '</td></tr></table>' +
+    userTokenTable(tokens, back,
+      'Nothing has been issued on this session yet. A browser can hold a sign-on session and have ' +
+      'been given no token at all — it is what the authorization endpoint reads before it issues ' +
+      'anything.');
+  log.debug("Leaving sessionBlock().");
+  return html;
+}
+
+// The drill-down. Returns null when the identity is not one this service knows,
+// which the route below turns into an honest empty page rather than a 404: a user
+// can genuinely be forgotten to the cap between the click and the page.
+function userDetailPage(req, key) {
+  log.debug("Entering userDetailPage(). key=" + key);
+  const detail = stats.userDetail(key);
+  if (!detail) {
+    log.debug("Leaving userDetailPage(). No such user.");
+    return null;
+  }
+  const row = detail.user;
+  const sessionRows = sessionRowsFor(key);
+  const live = sessionRows.filter(function (s) { return !s.expired; });
+  const split = tokensBySession(detail.tokens, sessionRows);
+  // Where a revoke button on this page returns to: this user's page, which is the
+  // only sensible answer — the reader is looking at one person and wants to see the
+  // effect on that person.
+  const back = queryWith({ user: key }, {});
+  const valid = detail.tokens.filter(function (t) { return t.state === 'valid'; }).length;
+
+  const sessionBlocks = sessionRows.map(function (session) {
+    return sessionBlock(session, split.held[session.id] || [], back);
+  }).join('');
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+      tile(row.authentications, 'authentications') +
+      tile(row.protocols.length, 'protocols') +
+      tile(live.length, 'active sessions') +
+      tile(detail.tokens.length, 'tokens issued') +
+      tile(valid, 'tokens still valid') +
+      tile(detail.artifacts.length, 'assertions, tickets, credentials') +
+    '</div>' +
+    '<p class="note">Everything below is about the identity <code>' + esc(row.name) + '</code>, ' +
+    'which is <a href="/admin/users">one row of the users list</a>. ' +
+    (row.authenticated
+      ? 'They have presented a credential to this service ' + row.authentications + ' time(s).'
+      : '<strong>They have never authenticated here.</strong> This identity is known only because ' +
+        'something was issued naming them as its subject — an exchanged token from another issuer, ' +
+        'a WS-Trust <code>OnBehalfOf</code>, or a Kerberos S4U request made by a service. Nothing ' +
+        'about this row says the person was ever present.') +
+    (row.isClient
+      ? ' <strong>This is a client, not a person</strong>: it appears here because ' +
+        '<code>client_credentials</code> produces tokens with a subject and no human behind them.'
+      : '') + '</p>' +
+
+    '<h2>Names this identity has been seen under</h2>' +
+    '<p class="note">One person reaches this service under several spellings and they are the same ' +
+    'row here — see the note at the top of the users list for what that costs.</p>' +
+    '<table><tr><th>As presented</th><th class="num">Times</th></tr>' +
+    (row.forms.map(function (form) {
+      return '<tr><td><code>' + esc(form.form) + '</code></td><td class="num">' + form.count + '</td></tr>';
+    }).join('') || '<tr><td colspan="2">—</td></tr>') + '</table>' +
+    (row.realms.length
+      ? '<p class="note">Kerberos realm(s): ' +
+        codeList(row.realms.map(function (r) { return r.realm; })) + '.</p>'
+      : '') +
+
+    '<h2>How they authenticated</h2>' +
+    '<table><tr><th>Protocol</th><th class="num">Times</th><th>Methods</th><th>Last</th></tr>' +
+    (row.protocols.map(function (family) {
+      return '<tr><td>' + esc(family.protocol) + '</td>' +
+        '<td class="num">' + family.count + '</td>' +
+        '<td>' + esc(family.methods.map(function (m) {
+          return m.method + ' ×' + m.count;
+        }).join('; ')) + '</td>' +
+        '<td>' + esc(whenText(family.lastAt)) + '</td></tr>';
+    }).join('') || '<tr><td colspan="4">Never, here.</td></tr>') + '</table>' +
+    authenticationTable(row) +
+
+    '<h2>Sessions, and what was issued on each</h2>' +
+    '<p class="note">A <strong>sign-on session</strong> is a browser holding the ' +
+    '<code>sts_mock_session</code> cookie, shared between the OAuth 2.0 / OIDC login screen and ' +
+    'WS-Federation. A token is placed under a session because the issuance said so — no token ' +
+    'this service issues carries a session identifier, and OIDC\'s <code>sid</code> claim is for ' +
+    'front-channel logout, so inventing one to make this page easier would change what every ' +
+    'client receives. The link is recorded out of band at issuance instead, and it survives a ' +
+    'refresh: a refreshed token is looked up by the refresh token\'s <code>jti</code> and lands ' +
+    'under the same session.</p>' +
+    (sessionBlocks || '<p class="note">This user holds no sign-on session. That is the normal state ' +
+      'for every identity that never used a browser here — a password grant, a Kerberos client, a ' +
+      'WS-Trust requester — and for anyone whose session has expired and been swept.</p>') +
+
+    (split.ended.length
+      ? '<h3>Issued on a session that has since ended</h3>' +
+        '<p class="note">These name a session this service no longer holds. It is not an error and ' +
+        'it is the ordinary end state: the session expired or was signed out, and the tokens it ' +
+        'produced outlived it — which is exactly the position a client is in when its access token ' +
+        'still verifies and the browser would be asked to sign in again.</p>' +
+        userTokenTable(split.ended, back, '')
+      : '') +
+
+    (split.sessionless.length
+      ? '<h3>Issued with no browser session at all</h3>' +
+        '<p class="note">The grants that never involve a browser: <code>password</code>, ' +
+        '<code>client_credentials</code>, OID4VCI\'s pre-authorized code, and token exchange. The ' +
+        'Grant column says which. An empty Grant means the token was minted somewhere that states ' +
+        'nothing about how — WS-Trust\'s JWT and the credential issuer both sign directly.</p>' +
+        userTokenTable(split.sessionless, back, '')
+      : '') +
+
+    '<h2>Assertions, tickets and credentials</h2>' +
+    '<p class="note">None of these can be revoked here and the console does not pretend otherwise: ' +
+    'nothing consults this service about a SAML assertion, a Kerberos ticket or a credential, so a ' +
+    'button would change a number on this page and nothing at all out there. The only distinction ' +
+    'is whether the validity window has closed.</p>' +
+    userArtifactTable(detail.artifacts) +
+
+    '<h2>Invalidate everything for this user</h2>' +
+    '<p class="note">Every access token, ID Token and refresh token held for this identity under ' +
+    'any of its spellings, revoked through the same set <code>/oauth2/revoke</code> writes to. ' +
+    'Assertions and tickets are untouched, for the reason above.</p>' +
+    '<form method="post" action="/admin/tokens">' +
+      '<input type="hidden" name="action" value="revoke-user">' +
+      '<input type="hidden" name="user" value="' + esc(key) + '">' +
+      '<input type="hidden" name="from" value="users">' +
+      '<input type="hidden" name="back" value="' + esc(back) + '">' +
+      '<div class="formrow"><button class="danger">Revoke everything for ' + esc(row.name) +
+      '</button></div></form>';
+
+  log.debug("Leaving userDetailPage(). " + detail.tokens.length + " token(s) shown.");
+  return {
+    inner: inner,
+    json: {
+      user: row,
+      sessions: sessionRows.map(function (session) {
+        return Object.assign({}, session, { tokens: split.held[session.id] || [] });
+      }),
+      tokensOnEndedSessions: split.ended,
+      tokensWithNoSession: split.sessionless,
+      artifacts: detail.artifacts
+    }
+  };
+}
+
+// The list. Filtered by a name fragment and by protocol, and paged with the same
+// controls the tokens page uses.
+function usersListPage(req) {
+  log.debug("Entering usersListPage().");
+  const wantedText = String(req.query.q || '').trim();
+  const wantedProtocol = String(req.query.protocol || '');
+  const all = stats.userRows();
+  // Every protocol any known user authenticated through, for the filter. Read off the
+  // data rather than written down, so a protocol that starts recording authentications
+  // appears in the dropdown by itself and one that never has cannot offer a filter
+  // that matches nothing.
+  const protocolsSeen = {};
+  all.forEach(function (row) {
+    row.protocols.forEach(function (family) { protocolsSeen[family.protocol] = true; });
+  });
+  const filtered = all.filter(function (row) {
+    if (wantedText && row.key.toLowerCase().indexOf(wantedText.toLowerCase()) < 0) return false;
+    if (wantedProtocol && !row.protocols.some(function (f) { return f.protocol === wantedProtocol; })) {
+      return false;
+    }
+    return true;
+  });
+  const paging = pagingOf(req.query, filtered.length);
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const filterParams = { q: wantedText, protocol: wantedProtocol,
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/users', filterParams, paging);
+
+  // Sessions are counted per user here rather than fetched per row inside the loop:
+  // one pass over the session map instead of one per user, and more importantly one
+  // definition of "active" for the list and the drill-down both.
+  const liveByUser = {};
+  signOnSessionRows().forEach(function (session) {
+    if (session.expired) return;
+    const key = stats.identityKeyOf(session.username || session.sub);
+    liveByUser[key] = (liveByUser[key] || 0) + 1;
+  });
+
+  const rows = shown.map(function (row) {
+    const href = '/admin/users' + queryWith({ user: row.key }, {});
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.name) + '</code></a></td>' +
+      '<td>' + (row.isClient ? 'client' : 'user') + '</td>' +
+      '<td class="' + (row.authenticated ? 'state-valid' : 'state-none') + '">' +
+        (row.authenticated ? row.authentications + '&times;' : 'never') + '</td>' +
+      '<td>' + esc(row.protocols.map(function (f) { return f.protocol; }).join(', ') || '—') + '</td>' +
+      '<td>' + esc(row.realms.map(function (r) { return r.realm; }).join(', ') || '—') + '</td>' +
+      '<td class="num">' + (liveByUser[row.key] || 0) + '</td>' +
+      '<td class="num">' + row.tokens.issued + '</td>' +
+      '<td class="num state-valid">' + row.tokens.valid + '</td>' +
+      '<td class="num state-revoked">' + row.tokens.revoked + '</td>' +
+      '<td class="num">' + row.artifacts + '</td>' +
+      '<td>' + esc(row.firstAt ? whenText(row.firstAt) : '—') + '</td>' +
+      '<td>' + esc(whenText(row.lastActivityAt)) + '</td>' +
+      '<td><a href="' + esc(href) + '">sessions and tokens &rsaquo;</a></td></tr>';
+  }).join('');
+
+  const protocolOptions = [''].concat(Object.keys(protocolsSeen).sort()).map(function (p) {
+    return '<option value="' + esc(p) + '"' + (p === wantedProtocol ? ' selected' : '') + '>' +
+           esc(p || 'any protocol') + '</option>';
+  }).join('');
+  const perChoices = [25, DEFAULT_PER_PAGE, 100, MAX_ROWS];
+  if (perChoices.indexOf(paging.perPage) < 0) {
+    perChoices.push(paging.perPage);
+    perChoices.sort(function (a, b) { return a - b; });
+  }
+  const perOptions = perChoices.map(function (n) {
+    return '<option value="' + n + '"' + (n === paging.perPage ? ' selected' : '') + '>' +
+           n + ' rows</option>';
+  }).join('');
+
+  const authenticatedHere = all.filter(function (row) { return row.authenticated; }).length;
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+      tile(all.length, 'identities known') +
+      tile(authenticatedHere, 'authenticated here') +
+      tile(all.length - authenticatedHere, 'seen only as a subject') +
+      tile(all.filter(function (row) { return row.isClient; }).length, 'clients, not people') +
+      tile(Object.keys(liveByUser).length, 'with an active session') +
+    '</div>' +
+    '<p class="note">Every userid this service has been given as part of an interaction that ' +
+    'succeeded — the name typed at either sign-in screen, the one on a password grant, the subject ' +
+    'of a WS-Security <code>UsernameToken</code>, the client principal in a Kerberos AS-REQ or an ' +
+    'accepted AP-REQ, and the subject of an exchanged token. A request that was REFUSED records ' +
+    'nothing, so this is a list of identities that got somewhere rather than of names that were ' +
+    'tried. Click a name for its sessions and everything issued to it.</p>' +
+    '<div class="warn"><strong>One row is one local name, across every protocol.</strong> The same ' +
+    'person arrives here as <code>alice</code> at the login screen, ' +
+    '<code>urn:sts-mock:user:alice</code> in every token and <code>alice@STS.MOCK</code> as a ' +
+    'Kerberos principal, and showing three rows for that would be a worse answer than one — the ' +
+    'premise of this service is that the name you type is who you are in every protocol at once. ' +
+    'What it costs: two different people called <code>alice</code> in two Kerberos realms are one ' +
+    'row here. The Realms column is what makes that visible. Case is never collapsed, because ' +
+    'nothing in this service treats <code>Alice</code> and <code>alice</code> as one.</div>' +
+
+    '<form method="get" action="/admin/users"><div class="formrow">' +
+      '<label for="q">Name contains</label>' +
+      '<input type="text" id="q" name="q" size="20" value="' + esc(wantedText) + '">' +
+      '<label for="protocol">Authenticated through</label>' +
+      '<select id="protocol" name="protocol">' + protocolOptions + '</select>' +
+      '<label for="per">Per page</label><select id="per" name="per">' + perOptions + '</select>' +
+      '<button class="secondary">Filter</button>' +
+      (wantedText || wantedProtocol ? ' <a href="/admin/users">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    '<table><tr><th>User</th><th>Kind</th><th>Authenticated</th><th>Protocols</th><th>Realms</th>' +
+    '<th class="num">Sessions</th><th class="num">Tokens</th><th class="num">Valid</th>' +
+    '<th class="num">Revoked</th><th class="num">Artifacts</th><th>First seen</th>' +
+    '<th>Last activity</th><th></th></tr>' +
+    (rows || '<tr><td colspan="13">Nobody matches. Nothing has authenticated here yet unless a ' +
+             'filter above is hiding it.</td></tr>') + '</table>' +
+    nav +
+    '<p class="note">' + filtered.length + ' identit' + (filtered.length === 1 ? 'y' : 'ies') +
+    ' match; ' + all.length + ' known in total, most recently active first. An identity marked ' +
+    '<em>never</em> under Authenticated has been issued something without ever presenting a ' +
+    'credential here: an exchanged token from another issuer, a WS-Trust <code>OnBehalfOf</code>, ' +
+    'or a Kerberos S4U request that a service made in their name. Listing them is the point — a ' +
+    'users page that showed only the sign-ins would deny the existence of subjects the tokens ' +
+    'page is showing at the same moment.</p>' +
+    '<p class="note">All of it is in memory and dies with the process, and the registry holds the ' +
+    'most recent ' + stats.MAX_USERS + ' identities.' +
+    '</p>';
+
+  log.debug("Leaving usersListPage(). " + shown.length + " row(s) drawn.");
+  return {
+    inner: inner,
+    json: {
+      known: all.length, matched: filtered.length, shown: shown.length,
+      authenticatedHere: authenticatedHere,
+      filter: { q: wantedText || null, protocol: wantedProtocol || null },
+      protocols: Object.keys(protocolsSeen).sort(),
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      users: shown
+    }
+  };
+}
+
+app.get('/admin/users', function (req, res) {
+  log.debug("Entering the admin users page.");
+  const wantedUser = String(req.query.user || '').trim();
+  if (wantedUser) {
+    const detail = userDetailPage(req, wantedUser);
+    if (!detail) {
+      // Not a 404: this service has simply never seen the name, or has forgotten it
+      // to the cap since the link was drawn. Both are answers rather than errors, and
+      // a 404 here would send a test looking for a routing problem.
+      const inner = messagesOf(req) +
+        '<p class="note">Nothing here has authenticated as <code>' + esc(wantedUser) + '</code>, ' +
+        'and nothing has been issued naming them. Either the name is not one this service has ' +
+        'seen, or it has been forgotten — the registry holds the most recent ' + stats.MAX_USERS +
+        ' identities, and everything in it dies with the process.</p>' +
+        '<p class="note"><a href="/admin/users">Back to the list</a>.</p>';
+      respond(req, res, { user: wantedUser, known: false }, 'User', '/admin/users', inner);
+      log.debug("Leaving the admin users page. No such user.");
+      return;
+    }
+    respond(req, res, Object.assign({ known: true }, detail.json),
+            'User ' + wantedUser, '/admin/users', detail.inner);
+    log.debug("Leaving the admin users page. Drew the drill-down.");
+    return;
+  }
+  const list = usersListPage(req);
+  respond(req, res, list.json, 'Users', '/admin/users', list.inner);
+  log.debug("Leaving the admin users page. Drew the list.");
 });
 
 // ---------------------------------------------------------------------------

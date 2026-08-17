@@ -159,8 +159,8 @@ function buildSaml11Assertion(opts) {
   // Counted before the signing attempt, not after: an assertion that failed to sign
   // was still built and still went out (unsigned — see the catch), so counting it
   // only on success would leave the console reporting fewer than actually left.
-  stats.recordAssertion('1.1', { id: id, subject: opts.subject, audience: opts.audience,
-                                 expiresAt: Date.parse(exp) || 0 });
+  const record = stats.recordAssertion('1.1', { id: id, subject: opts.subject, audience: opts.audience,
+                                                expiresAt: Date.parse(exp) || 0 });
   try {
     const signed = signSaml11Assertion(xml);
     log.debug("Leaving buildSaml11Assertion(). AssertionID " + id + ".");
@@ -169,7 +169,9 @@ function buildSaml11Assertion(opts) {
     // Returned unsigned rather than not at all, exactly as saml2.js does: an
     // unsigned assertion in the response is something a relying party can look at
     // and reject for the right reason, where a 500 here would say nothing about
-    // what failed. The log line is the record of which it was.
+    // what failed. The log line is the record of which it was — and so, now, is the
+    // console's Signed column, which is why the record is corrected here.
+    record.signed = false;
     log.error('SAML 1.1 signing failed, returning the assertion unsigned: ' + e.message);
     log.debug("Leaving buildSaml11Assertion(). Unsigned.");
     return xml;

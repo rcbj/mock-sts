@@ -994,6 +994,20 @@ async function handleAsReq(request) {
     expiresAt: endtime.getTime()
   });
 
+  // An AS-REP is the one authentication in this whole service that a wrong password
+  // really does fail: the pre-authentication timestamp had to decrypt under the
+  // client's long-term key to get this far, and the reply is sealed with it. So this
+  // is recorded as the strongest thing here, and the method says which of the two
+  // shapes it was — a KDC that accepts an AS-REQ with no padata is the interesting
+  // misconfiguration, not the ordinary case.
+  stats.recordAuthentication({
+    presented: body.cname.name.join('/') + '@' + asRealm,
+    protocol: 'Kerberos v5',
+    method: encTimestamp ? 'AS-REQ with PA-ENC-TIMESTAMP' : 'AS-REQ without pre-authentication',
+    note: 'Encryption type ' + profile.name + '. The client proved possession of its long-term key, ' +
+          'which is the only credential this service genuinely checks.'
+  });
+
   return msgs.encKdcRep({
     msgType: msgs.MSG_TYPE.AS_REP,
     crealm: asRealm,
@@ -1525,6 +1539,23 @@ async function handleTgsReq(request) {
     service: body.sname.name.join('/'),
     etype: profile.name,
     expiresAt: endtime.getTime()
+  });
+
+  // A TGS-REQ presents a TGT rather than a password, so it is an authentication of a
+  // different kind and the method says so. **Under S4U it is not an authentication of
+  // the named client at all** — the impersonated user presented nothing, a service
+  // asked on their behalf — and recording that as if they had signed in would be the
+  // one place this console could libel somebody. So the requester is named in the
+  // note and the method says which of the three this was.
+  stats.recordAuthentication({
+    presented: clientName.name.join('/') + '@' + clientRealm,
+    protocol: 'Kerberos v5',
+    method: s4u.mode === 'none' ? 'TGS-REQ with a TGT (PA-TGS-REQ)'
+                                : 'S4U2' + s4u.mode + ' (impersonated; presented nothing)',
+    note: s4u.mode === 'none'
+      ? 'Asked ' + answeringRealm + ' for ' + body.sname.name.join('/') + '.'
+      : 'Requested by ' + ticketPart.cname.name.join('/') + ', which asked for a ticket in this ' +
+        'user\'s name. The user was not here.'
   });
 
   log.debug('Leaving handleTgsReq().');
