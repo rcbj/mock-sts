@@ -77,6 +77,26 @@ const SPECS = [
               'requestor SID. A TGT gets two signatures and a service ticket four, per sections ' +
               '2.8.2/2.8.3. Claims and device info are not produced, and SID FILTERING across a ' +
               'trust is NOT implemented — a re-signed PAC keeps every SID it arrived with.' },
+  { id: 'rfc4178', name: 'SPNEGO (RFC 4178)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4178',
+    coverage: 'full for one mechanism: NegTokenInit (with the optimistic mechToken) and ' +
+              'NegTokenResp in all four negStates, the mechListMIC in both directions with ' +
+              'section 5\'s rule for when it is mandatory, and [MS-SPNG]\'s NegTokenInit2 ' +
+              'decoded. Only Kerberos is actually offered — NTLM is recognised in a client\'s ' +
+              'mechTypes list and never selected, because offering a mechanism this service ' +
+              'cannot perform would be a lie a client would act on. A mechListMIC that does ' +
+              'not verify is a REJECT, not a warning: it is the whole of the downgrade defence.' },
+  { id: 'rfc4559', name: 'SPNEGO-based HTTP authentication (RFC 4559)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4559',
+    coverage: 'full: the bare "WWW-Authenticate: Negotiate" challenge, the token in ' +
+              'Authorization, and the mutual-authentication token returned in ' +
+              'WWW-Authenticate on the 200. One difference from a real server is stated ' +
+              'rather than hidden: a half-finished negotiation is held against the client ' +
+              'address rather than the CONNECTION, because Express offers no stable ' +
+              'connection identity — which is also why real SPNEGO breaks behind ' +
+              'connection-pooling proxies.' },
   { id: 'ms-kkdcp', name: '[MS-KKDCP] Kerberos KDC Proxy Protocol',
     where: 'Microsoft Open Specifications',
     url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kkdcp/',
@@ -310,6 +330,21 @@ const ENDPOINTS = [
     specs: ['rfc4120'],
     what: 'What the AP-REQ acceptor is, where its raw TCP socket is listening, and the ordered ' +
           'checks it applies to a ticket. Not a real Kerberos endpoint either.' },
+  { path: '/spnego', group: 'Kerberos', name: 'A SPNEGO-protected page is advertised here',
+    specs: ['rfc4559', 'rfc4178', 'rfc4120'],
+    what: 'Says that /spnego/protected exists, which service principal name is behind it, ' +
+          'which mechanisms are accepted, and which query knobs make the negotiation fail in ' +
+          'one specific way. None of that is in the protocol exchange itself — a client has to ' +
+          'derive the SPN from the URL and find the KDC from its own configuration, which is ' +
+          'why so many SPNEGO failures leave no evidence on the wire. Add ?format=json.' },
+  { path: '/spnego/protected', group: 'Kerberos', name: 'The protected resource',
+    // rfc3961 is linked because the AP-REQ inside the mechToken, its Authenticator and the
+    // AP-REP returned for mutual authentication are all encrypted under that framework.
+    specs: ['rfc4559', 'rfc4178', 'rfc4120', 'rfc3961', 'ms-pac'],
+    what: 'Answers 401 with a bare "WWW-Authenticate: Negotiate" to an unauthenticated ' +
+          'request, and 200 with an AP-REP in that header to a valid one. The Kerberos checks ' +
+          'are krb5_service.js\'s, unchanged — this endpoint adds the negotiation and the ' +
+          'HTTP that carries it and no protocol code of its own.' },
 
   // --- service ---
   { path: '/healthcheck', group: 'Service', name: 'Health check',

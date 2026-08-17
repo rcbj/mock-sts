@@ -5,8 +5,9 @@ this repository.
 
 ## Overview
 
-A mock identity service that speaks eleven protocol families — Kerberos v5 (a KDC on
-raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service), WS-Trust
+A mock identity service that speaks twelve protocol families — Kerberos v5 (a KDC on
+raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service and the same
+acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
 1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
 OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
 half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, and W3C DID Core with
@@ -44,8 +45,17 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
 `vc_verifier.js`, `krb5_kdc.js`,
-`krb5_service.js` and the `krb5_*` files they rest on (ASN.1, crypto, messages,
-principals, NDR, PAC, GSS), `sts_metadata.js`, and `dpop.js`.
+`krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
+messages, principals, NDR, PAC, GSS, SPNEGO), `sts_metadata.js`, and `dpop.js`.
+
+**`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
+dependency rather than a preference: it calls that module's `accept()` for every
+Kerberos check and adds none of its own. It is also the one Kerberos module that
+starts NOTHING — it is HTTP all the way down, so requiring it is the whole of its
+installation. Note the naming: `krb5_spnego.js` beside it is the VENDORED RFC 4178
+codec (a byte-identical copy of the parent project's `common/krb5/krb5_spnego.js`,
+kept honest by `tests/krb5_codec_sync.js` there), and `spnego.js` is this repo's own.
+Do not merge the two — one of them is somebody else's file.
 
 The two Kerberos modules are the exception to rule 1 below in one direction only:
 requiring them registers their HTTP views (`/KdcProxy`, `/krb5/principals`) like
