@@ -139,20 +139,50 @@ async function accept(tokenBytes) {
 
   // 3. The ticket is for me. Checked BEFORE decrypting, because the answer is more
   // specific: a ticket for another service is a client mistake, not a key problem.
+  //
+  // "Me" is more than one name, and the line between the names that are mine and
+  // the names that are not is the whole of this check.
+  //
+  // A real service account carries several SPNs — the short name, the FQDN, an
+  // alias, a load balancer's name — and one keytab holds a key for each, so what
+  // makes a ticket acceptable is that this service HOLDS THE KEY the ticket names
+  // rather than that the name equals one configured string. This acceptor
+  // therefore answers for two kinds of name:
+  //
+  //   * its CANONICAL SPN, KRB5_SERVICE_PRINCIPAL; and
+  //   * any SPN the KDC registered ON DEMAND for a host it is willing to be —
+  //     HTTP/localhost, HTTP/sts, HTTP/127.0.0.1, HTTP/anything.example.com. Those
+  //     are names no other account has claimed, created because a client derives
+  //     `HTTP/<url host>` and cannot know this table.
+  //
+  // And it answers for nothing else — in particular NOT for another CONFIGURED
+  // account's SPN. `HTTP/frontend.example.com` and `HTTP/backend.example.com` exist
+  // to be separate identities with separate keys and separate delegation
+  // attributes; accepting a ticket for one of them here would make this service
+  // every service in the realm, which would quietly destroy the meaning of
+  // KRB_AP_ERR_NOT_US, of the delegation tests, and of "a ticket for one service
+  // proves nothing to another" — the sentence the whole workflow rests on. Two
+  // tests caught exactly that when this check was first widened, which is why the
+  // distinction is spelled out here rather than left to the code.
   const wanted = SERVICE_PRINCIPAL.join('/');
   const presented = apReq.ticket.sname.name.join('/');
-  if (presented !== wanted) {
-    check('the ticket is for this service', false, 'it is for ' + presented + ', not ' + wanted);
-    return { reply: errorReply(35, 'this ticket is for ' + presented + '; this service is ' + wanted),
-             checks: checks, ok: false };
-  }
-  check('the ticket is for this service', true, wanted);
-
-  const me = principals.find(SERVICE_PRINCIPAL);
+  const found = principals.findOrCreateService(apReq.ticket.sname.name,
+      apReq.ticket.realm);
+  const mine = !!found && (presented === wanted || found.autoCreated);
+  const me = mine ? found : null;
   if (!me) {
-    return { reply: errorReply(45, 'this service has no key of its own configured'),
-             checks: checks, ok: false };
+    const why = found
+      ? 'that is another account\'s SPN, configured in this realm with its own key'
+      : 'this service answers only on ' +
+        (principals.SERVICE_DOMAINS.join(', ') || '(nothing configured)');
+    check('the ticket is for this service', false, 'it is for ' + presented +
+      ', not ' + wanted + ' — ' + why);
+    return { reply: errorReply(35, 'this ticket is for ' + presented +
+      '; this service is ' + wanted + ' — ' + why), checks: checks, ok: false };
   }
+  check('the ticket is for this service', true, presented +
+    (presented === wanted ? '' : ' (registered on demand for a host this ' +
+      'service answers on; its canonical name is ' + wanted + ')'));
 
   // 2. The ticket decrypts with my key.
   if (apReq.ticket.encPart.kvno !== null && apReq.ticket.encPart.kvno !== me.kvno) {
@@ -404,13 +434,18 @@ app.get('/krb5/service', function (req, res) {
   log.debug('Entering GET /krb5/service.');
   res.status(200).json({
     principal: SERVICE_PRINCIPAL.join('/') + '@' + principals.REALM,
+    // Every SPN this service will answer for, not just the canonical one: a real
+    // service account carries several and one keytab holds a key for each. See the
+    // identity check in accept().
+    acceptsAnySpnForHosts: principals.SERVICE_DOMAINS,
     port: SERVICE_PORT,
     clockSkewSeconds: CLOCK_SKEW_SECONDS,
     replayCacheEntries: replayCache.size,
     checksThisServicePerforms: [
       'the GSS InitialContextToken wrapper and its mechanism OID',
       'the ticket decrypts with this service\'s own key at key usage 2',
-      'the ticket names this service',
+      'the ticket names a principal this service holds a key for (its own ' +
+        'name, or any SPN whose host matches acceptsAnySpnForHosts)',
       'the key version the ticket names matches the one held',
       'the Authenticator decrypts with the ticket session key at key usage 11',
       'the Authenticator and the ticket name the same client',

@@ -1150,7 +1150,9 @@ async function handleTgsReq(request) {
     ? body.realm : REALM;
 
   // Now the request itself.
-  const service = principals.find((body.sname || {}).name || [], answeringRealm);
+  // `let`, not `const`: findOrCreateService() below may fill it in for a host this
+  // mock is willing to be, which is the whole of the on-demand registration.
+  let service = principals.find((body.sname || {}).name || [], answeringRealm);
   if (!service) {
     // Before refusing: is this a service in a realm we have a TRUST with? If so the
     // answer is not an error at all but a REFERRAL — a ticket-granting ticket for the
@@ -1168,13 +1170,27 @@ async function handleTgsReq(request) {
       log.info('krb5: ' + ((body.sname || {}).name || []).join('/') + ' looks like it belongs to ' +
         targetRealm + ', but there is no trust with that realm from ' + answeringRealm);
     }
-    return errorReply(7, { crealm: ticketPart.crealm, cname: ticketPart.cname,
-      realm: answeringRealm, sname: body.sname,
-      eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/') +
-             '. On Active Directory this is an SPN that is not registered, or registered on a ' +
-             'different account' +
-             (targetRealm ? ', or a trust with ' + targetRealm + ' that does not exist' : '') +
-             '.' });
+    // AFTER the referral, and only for a host this mock is willing to be a service
+    // for: an SPN in one of KRB5_SERVICE_DOMAINS is registered on first sight. The
+    // order matters — a name in the trusted realm's domain has already been
+    // answered with a referral above, and creating it locally instead would answer
+    // a cross-realm question with a local ticket that the other realm's service
+    // could not open. See findOrCreateService() for why creating a service is safe
+    // HERE and is not in general.
+    const created = principals.findOrCreateService((body.sname || {}).name || [],
+        answeringRealm);
+    if (!created) {
+      return errorReply(7, { crealm: ticketPart.crealm, cname: ticketPart.cname,
+        realm: answeringRealm, sname: body.sname,
+        eText: 'no such service principal: ' + ((body.sname || {}).name || []).join('/') +
+               '. On Active Directory this is an SPN that is not registered, or registered on a ' +
+               'different account' +
+               (targetRealm ? ', or a trust with ' + targetRealm + ' that does not exist' : '') +
+               '. This mock registers a service on first sight when its host matches ' +
+               (principals.SERVICE_DOMAINS.join(', ') || '(nothing configured)') +
+               ', and this one does not — GET /krb5/principals lists what it knows.' });
+    }
+    service = created;
   }
   // Looked up by name rather than reused from the presented ticket's sname: three of
   // the PAC's four signatures are made with the KRBTGT key specifically, and while the
@@ -1746,11 +1762,26 @@ app.get('/krb5/principals', function (req, res) {
       // The names that are refused instead, so KDC_ERR_C_PRINCIPAL_UNKNOWN stays
       // reachable, plus the shape rule that keeps a missing SPN an error.
       neverCreated: principals.RESERVED_UNKNOWN,
+      // SERVICES are created on first sight too, but only for the hosts this mock
+      // is willing to be — a client derives `HTTP/<url host>` and cannot be
+      // expected to know this table. Their password is shared and published for
+      // the same reason the user one is: it is what lets a debugger open a service
+      // ticket's own EncTicketPart and read the PAC inside it, which is the one
+      // structure a client can otherwise never see. Configured service accounts
+      // keep their own separate passwords.
+      serviceHosts: principals.SERVICE_DOMAINS,
+      serviceHostRule: 'an SPN\'s host matches when it IS one of serviceHosts ' +
+        'or ends with a dot and one of them; anything else stays ' +
+        'KDC_ERR_S_PRINCIPAL_UNKNOWN',
+      autoServicePassword: principals.AUTO_SERVICE_PASSWORD,
       note: 'A username not in this table is created on first sight as an ordinary user, ' +
             'with the salt Active Directory would use (realm + name) and this password. ' +
-            'Multi-component names are service principals and are NOT created — an ' +
-            'unregistered SPN is still KDC_ERR_S_PRINCIPAL_UNKNOWN. Service, computer and ' +
-            'krbtgt accounts keep their own passwords, which are not published here.'
+            'A multi-component name is a SERVICE, and one is created on first sight too ' +
+            'when its host matches serviceHosts above — with autoServicePassword, so a ' +
+            'reader can open the ticket. An SPN outside those hosts is still ' +
+            'KDC_ERR_S_PRINCIPAL_UNKNOWN, which is how that error stays reachable on ' +
+            'purpose (try HTTP/app.elsewhere.invalid). The CONFIGURED service, computer ' +
+            'and krbtgt accounts keep their own passwords, which are not published here.'
     },
     implemented: ['AS exchange', 'TGS exchange'],
     notImplementedYet: ['PAC', 'FAST', 'PKINIT', 'cross-realm referrals', 'S4U2Self', 'S4U2Proxy'],

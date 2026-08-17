@@ -396,7 +396,9 @@ const ENDPOINTS = [
     specs: ['rfc7009', 'rfc7662', 'oidc'],
     effect: 'lists every token issued; POST revokes one, a whole kind, or everything for a subject',
     what: 'NON-SPEC page over an RFC 7009 operation. GET lists what was issued (claims only — never ' +
-          'the signed tokens, which would make the page a credential dump) with filters; POST ' +
+          'the signed tokens, which would make the page a credential dump), filtered by kind and ' +
+          'state and paged with ?page= and ?per= — newest first, and both parameters work with ' +
+          '?format=json, whose reply carries page, pages and matched. POST ' +
           'revokes by jti or by pasted token, by kind, by subject, or everything. It is the SAME ' +
           'revocation set /oauth2/revoke writes to, so introspection, UserInfo and the refresh ' +
           'grant all honour it immediately. Restore is offered and is NON-SPEC: no authorization ' +
