@@ -173,6 +173,19 @@ Worth knowing before "fixing" one of them:
 * **It checks no password.** The username typed at `/oauth2/login` — or at
   `/wsfed/login`, which creates the same session — becomes the identity in every
   token and every assertion.
+* **Kerberos is the exception, and cannot not be.** The password there *is* the key:
+  pre-authentication and the AS-REP's enc-part are both encrypted under it, so a KDC
+  accepting anything would still have to pick a key the client could not guess. So it
+  does the permissive equivalent — **any username authenticates and every user account
+  shares one password** (`password!`, `KRB5_USER_PASSWORD`), with a name nobody
+  configured created on first sight by `findOrCreateUser()`. Three things stay
+  refusals on purpose: a **service**-shaped (multi-component) name is never created,
+  or a missing SPN would become a ticket sealed with a key the service does not hold;
+  the names in `KRB5_UNKNOWN_USERS` stay unknown so `KDC_ERR_C_PRINCIPAL_UNKNOWN` is
+  still reachable; and a wrong password is still `KDC_ERR_PREAUTH_FAILED`. Service,
+  computer and `krbtgt` accounts keep their own distinct passwords — the two krbtgts
+  and the trust must be three different secrets or assertions about which key sealed
+  what pass for the wrong reason.
 * **It does not verify access tokens it did not issue — except at UserInfo.**
   OID4VCI lets the authorization server be somebody else, so at the three
   credential endpoints a foreign token is accepted as-is. The consequence for DPoP

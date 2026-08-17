@@ -33,6 +33,11 @@
 //
 // Both are produced here, and the KDC hands whichever applies to the client in
 // PA-ETYPE-INFO2. That is the only way a client can know it.
+//
+// **Anybody can authenticate, and everybody's password is the same.** See
+// USER_PASSWORD below for why Kerberos cannot simply check no password the way the
+// rest of this service does not, and findOrCreateUser() for the accounts that are
+// not in the table until somebody asks for one.
 // ---------------------------------------------------------------------------
 
 const kcrypto = require('./krb5_crypto.js');
@@ -52,6 +57,47 @@ const KDC_ETYPES = [18, 17, 20, 19, 23];
 function userSalt(realm, name) {
   return realm + name;
 }
+
+// ---------------------------------------------------------------------------
+// One password, and an account for anybody who asks.
+//
+// Everything else in this service checks no password at all — the username typed at
+// /oauth2/login becomes the identity and that is the end of it. Kerberos cannot be
+// made to work that way, and the reason is structural rather than a decision: the
+// password IS the key. Pre-authentication is a timestamp encrypted under it, and the
+// AS-REP's enc-part is encrypted under it too, so a KDC that accepted any password
+// would still have to pick one to encrypt the reply with, and a client that used a
+// different one could not read the ticket it was sent.
+//
+// So the nearest thing the protocol allows is what happens here: ONE password, shared
+// by every user account, and an account for every username that turns up.
+//
+//  * Every USER principal in the table below has this password. None of them carries a
+//    secret of its own any more — the accounts differ in the BEHAVIOUR they exist to
+//    drive (locked, expired, aesonly, rc4only, sensitive, noreauth), which is what they
+//    were ever for, and a test no longer has to look a password up before it can drive
+//    one.
+//  * A username that is not in the table at all is created on first sight by
+//    findOrCreateUser(), with AD's user-shaped salt and a PAC identity of its own.
+//
+// SERVICE, computer and krbtgt principals keep their own distinct passwords, and that
+// is deliberate: nobody types them, and krbtgt/EXAMPLE.COM, krbtgt/PARTNER.COM and the
+// trust have to hold three DIFFERENT secrets or every assertion about which key sealed
+// which ticket would pass for the wrong reason.
+// ---------------------------------------------------------------------------
+const USER_PASSWORD = process.env.KRB5_USER_PASSWORD || 'password!';
+
+// The usernames that stay unknown, so KDC_ERR_C_PRINCIPAL_UNKNOWN is still reachable.
+//
+// Creating an account for whoever asks removes the obvious way to produce that error —
+// name somebody who does not exist — and it is one of the errors most worth being able
+// to produce on purpose, because a client that renders it as "wrong password" sends a
+// person off to reset a password that was never the problem. These names are therefore
+// refused rather than created, and they are configurable so a test can name its own.
+const RESERVED_UNKNOWN = String(process.env.KRB5_UNKNOWN_USERS || 'nosuchuser,nobody')
+  .split(',')
+  .map(function (name) { return name.trim().toLowerCase(); })
+  .filter(function (name) { return name.length > 0; });
 
 // ---------------------------------------------------------------------------
 // The domain SID, and the account data that goes into the PAC.
@@ -126,6 +172,9 @@ function hostSalt(realm, shortName, dnsDomain) {
 
 // The table. `name` is the principal's components; everything else is the
 // behaviour a test may want to drive.
+//
+// A USER entry carries no `password`: register() gives it USER_PASSWORD, the one every
+// user here shares. A service, computer or krbtgt entry names its own.
 const DEFINITIONS = [
   {
     name: ['krbtgt', REALM],
@@ -137,7 +186,6 @@ const DEFINITIONS = [
   {
     name: ['alice'],
     type: 1,                                   // NT-PRINCIPAL
-    password: 'hunter2',
     salt: userSalt(REALM, 'alice'),
     description: 'an ordinary user; pre-authentication required, as Active Directory requires it',
     pac: {
@@ -155,7 +203,6 @@ const DEFINITIONS = [
   {
     name: ['bob'],
     type: 1,
-    password: 'correct horse battery staple',
     salt: userSalt(REALM, 'bob'),
     description: 'a second user, for impersonation and delegation cases',
     pac: {
@@ -173,7 +220,6 @@ const DEFINITIONS = [
     // the one-message one, and a client has to handle both.
     name: ['noreauth'],
     type: 1,
-    password: 'no-preauth-here',
     salt: userSalt(REALM, 'noreauth'),
     requiresPreAuth: false,
     description: 'pre-authentication NOT required, so the AS-REQ is answered directly',
@@ -191,7 +237,6 @@ const DEFINITIONS = [
   {
     name: ['locked'],
     type: 1,
-    password: 'irrelevant',
     salt: userSalt(REALM, 'locked'),
     revoked: true,
     description: 'a disabled or locked-out account (KDC_ERR_CLIENT_REVOKED)',
@@ -204,7 +249,6 @@ const DEFINITIONS = [
   {
     name: ['expired'],
     type: 1,
-    password: 'stale-password',
     salt: userSalt(REALM, 'expired'),
     passwordExpired: true,
     description: 'a password past its expiry (KDC_ERR_KEY_EXPIRED)',
@@ -222,7 +266,6 @@ const DEFINITIONS = [
     // what it means.
     name: ['aesonly'],
     type: 1,
-    password: 'aes-please',
     salt: userSalt(REALM, 'aesonly'),
     etypes: [18, 17],
     description: 'AES only — offers no RC4, which is what a hardened AD account looks like',
@@ -237,7 +280,6 @@ const DEFINITIONS = [
     // Windows Server 2025 domain controller this is the one that stops working.
     name: ['rc4only'],
     type: 1,
-    password: 'legacy',
     salt: userSalt(REALM, 'rc4only'),
     etypes: [23],
     description: 'arcfour-hmac-md5 only — the legacy account that a 2025 baseline breaks',
@@ -256,7 +298,6 @@ const DEFINITIONS = [
     // service the user visits.
     name: ['sensitive'],
     type: 1,
-    password: 'do-not-delegate-me',
     salt: userSalt(REALM, 'sensitive'),
     notDelegated: true,
     description: 'flagged sensitive and cannot be delegated — the KDC refuses it a forwardable ' +
@@ -442,7 +483,6 @@ const TRUSTED_DEFINITIONS = [
     // and the default happen to agree.
     name: ['carol'],
     type: 1,
-    password: 'partner-user-password',
     salt: userSalt(TRUSTED_REALM, 'carol'),
     realm: TRUSTED_REALM,
     description: 'a user in ' + TRUSTED_REALM + ', so that realm is a realm and not just a target',
@@ -504,6 +544,13 @@ function realmForService(nameComponents) {
 // service slow to start for keys most runs never use.
 const principals = new Map();
 
+// RIDs for the accounts findOrCreateUser() makes, from 5000 up. Well clear of the
+// configured ones (the 1100s here, the 2100s in PARTNER.COM) on purpose: a service
+// authorizing on the PAC sees a SID and nothing else, so the range is the only way to
+// tell an account that was configured from one that turned up at runtime.
+const AUTO_RID_BASE = 5000;
+let autoRidNext = AUTO_RID_BASE;
+
 // The map key carries the REALM, because two realms are served here and
 // krbtgt/PARTNER.COM exists in BOTH of them with different meanings — in EXAMPLE.COM it
 // is the trust, and in PARTNER.COM it is that realm's own ticket-granting service. Keyed
@@ -518,7 +565,9 @@ function register(def) {
     name: def.name,
     type: def.type,
     realm: def.realm || REALM,
-    password: def.password,
+    // A user entry names no password; it gets the one every user shares. A service,
+    // computer or krbtgt entry names its own and keeps it — see USER_PASSWORD.
+    password: def.password || USER_PASSWORD,
     salt: def.salt,
     etypes: def.etypes || KDC_ETYPES.slice(),
     requiresPreAuth: def.requiresPreAuth !== false,
@@ -532,6 +581,10 @@ function register(def) {
     allowedToDelegateTo: def.allowedToDelegateTo || [],
     allowedToActOnBehalfOf: def.allowedToActOnBehalfOf || [],
     description: def.description,
+    // Whether findOrCreateUser() made this one at runtime rather than it being
+    // configured. Reported by GET /krb5/principals, because a table that grows while a
+    // person is reading it is confusing unless it says which entries did that.
+    autoCreated: !!def.autoCreated,
     // The PAC identity, with the parts every account shares defaulted here rather
     // than repeated nine times. An account with no `pac` block still gets one, so a
     // principal added later cannot silently produce PAC-less tickets.
@@ -563,6 +616,86 @@ log.info('krb5: principal database for realm ' + REALM + ' — ' +
 function find(nameComponents, realm) {
   if (!nameComponents || !nameComponents.length) return null;
   return principals.get(nameComponents.join('/') + '@' + (realm || REALM)) || null;
+}
+
+// ---------------------------------------------------------------------------
+// The account for whoever asks: find(), and create the user if there is nothing there.
+//
+// This is what makes "any username authenticates" true, and it is deliberately NOT what
+// find() does, because the difference between the two is the difference between a user
+// and a service:
+//
+//  * A CLIENT principal is created. That is the AS exchange's cname, and the user
+//    S4U2Self names — the two places where a person or a front-end says who somebody is.
+//  * A SERVICE principal is not, and must not be. KDC_ERR_S_PRINCIPAL_UNKNOWN for a
+//    service nobody registered is the most common Kerberos failure there is (a missing
+//    or misspelled SPN), and a KDC that invented the service instead would hand back a
+//    ticket sealed with a key the service does not hold — a failure that then surfaces
+//    at the AP exchange as "decrypt integrity check failed", which is the same message a
+//    genuinely wrong key gives and points nowhere near the missing SPN.
+//
+// The shape of the name is what tells them apart, which is exactly how Kerberos itself
+// distinguishes them: one component is a user, two or more is service/host. So only a
+// single-component name is created here.
+//
+// Names are compared exactly, so `Alice` and `alice` are two accounts with two salts.
+// That is MIT's behaviour rather than AD's (AD folds case on the sAMAccountName), and it
+// is left alone because a case-sensitive mock cannot teach a client the habit of
+// assuming case folding that MIT realms will then not honour.
+//
+// The map grows by one entry per distinct username seen, and nothing evicts. Bounded in
+// practice by a process that is restarted for every test run, and each entry is a name,
+// a salt and lazily-derived keys.
+// ---------------------------------------------------------------------------
+function findOrCreateUser(nameComponents, realm) {
+  log.debug('Entering findOrCreateUser().');
+  const inRealm = realm || REALM;
+  const existing = find(nameComponents, inRealm);
+  if (existing) {
+    log.debug('Leaving findOrCreateUser(). ' + keyOf(existing) + ' was already known.');
+    return existing;
+  }
+  if (realmsServed().indexOf(inRealm) === -1) {
+    // Not our realm, so not our account to invent. handleAsReq refuses a foreign realm
+    // before it gets here; this is for any caller that does not.
+    log.debug('Leaving findOrCreateUser(). ' + inRealm + ' is not a realm this KDC serves.');
+    return null;
+  }
+  if (!nameComponents || nameComponents.length !== 1 || !nameComponents[0]) {
+    log.debug('Leaving findOrCreateUser(). ' + (nameComponents || []).join('/') +
+      ' is service-shaped, and services are not created on demand.');
+    return null;
+  }
+  const name = String(nameComponents[0]);
+  if (RESERVED_UNKNOWN.indexOf(name.toLowerCase()) !== -1) {
+    log.info('krb5: ' + name + ' is a reserved name and stays unknown, so ' +
+      'KDC_ERR_C_PRINCIPAL_UNKNOWN can still be produced on purpose');
+    log.debug('Leaving findOrCreateUser(). reserved.');
+    return null;
+  }
+  const created = register({
+    name: [name],
+    type: 1,                                   // NT-PRINCIPAL
+    realm: inRealm,
+    salt: userSalt(inRealm, name),
+    autoCreated: true,
+    description: 'created on first sight — every username authenticates here, with the ' +
+                 'one password every user shares',
+    pac: {
+      rid: autoRidNext++,
+      groups: [RID.DOMAIN_USERS],
+      userAccountControl: UAC.NORMAL_ACCOUNT,
+      // The same two well-known SIDs the configured users carry: S-1-18-1 says the
+      // identity came from a password logon rather than being asserted, and S-1-5-11 is
+      // Authenticated Users. An account created here went through the same AS exchange
+      // as alice, so it would be wrong for its PAC to say otherwise.
+      extraSids: ['S-1-18-1', 'S-1-5-11']
+    }
+  });
+  log.info('krb5: created ' + keyOf(created) + ' on demand — RID ' + created.pac.rid +
+    ', salt ' + JSON.stringify(created.salt) + ', the shared user password');
+  log.debug('Leaving findOrCreateUser(). created.');
+  return created;
 }
 
 // The long-term key for one etype. Derived on demand and cached.
@@ -652,6 +785,9 @@ module.exports = {
   DOMAIN: DOMAIN,
   KDC_ETYPES: KDC_ETYPES,
   find: find,
+  findOrCreateUser: findOrCreateUser,
+  USER_PASSWORD: USER_PASSWORD,
+  RESERVED_UNKNOWN: RESERVED_UNKNOWN,
   all: function () { return Array.from(principals.values()); },
   longTermKey: longTermKey,
   supportedEtypes: supportedEtypes,

@@ -55,7 +55,14 @@ const SPECS = [
               'pre-authentication (PA-ENC-TIMESTAMP), PA-ETYPE-INFO2 carrying the salt, ticket ' +
               'flags, clock-skew enforcement and the error catalogue. Two realms with a trust ' +
               'between them, so cross-realm referrals work. No FAST, no request signatures, no ' +
-              'S4U, no kpasswd. The AP exchange belongs to the protected service, not here.' },
+              'S4U, no kpasswd. The AP exchange belongs to the protected service, not here. ' +
+              // The rule for these notes is that they say what would mislead somebody who
+              // believed the row. "Pre-authentication is implemented" is true and, on its own,
+              // implies an account database with per-account secrets in it.
+              'ANY username authenticates and every user account shares ONE password, which ' +
+              'GET /krb5/principals publishes: pre-authentication is verified for real (the ' +
+              'password is the key, so it has to be), but it is the same password for ' +
+              'everybody and an unknown username is created on the spot rather than refused.' },
   { id: 'rfc3961', name: 'Kerberos encryption framework (RFC 3961/3962/8009, RFC 4757)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc3961',
@@ -295,7 +302,9 @@ const ENDPOINTS = [
     specs: ['rfc4120', 'ms-pac', 'rfc3961'],
     what: 'The principal database of both realms: names, salts (which are NOT derivable from ' +
           'the principal name, which is why PA-ETYPE-INFO2 exists), offered etypes, the ' +
-          'deliberate misconfigurations, and the PAC identity each account carries. Not a real ' +
+          'deliberate misconfigurations, and the PAC identity each account carries. Also the ' +
+          'account policy — any username authenticates, every user shares one password, and ' +
+          'this is where that password is written down. Not a real ' +
           'Kerberos endpoint — a KDC publishes none of this.' },
   { path: '/krb5/service', group: 'Kerberos', name: 'The protected service',
     specs: ['rfc4120'],

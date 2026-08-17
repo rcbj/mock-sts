@@ -476,13 +476,19 @@ async function resolveS4u(ctx) {
       log.info('krb5: PA-FOR-USER carries cksumtype ' + forUser.cksum.type + ' rather than -138');
     }
 
-    const user = principals.find(forUser.userName.name, forUser.userRealm);
+    // Created on demand, exactly as at the AS exchange: a front-end may name any user,
+    // and the whole point of S4U2Self is that the named account is not involved and
+    // never proves anything. A reserved name still fails, which is the only way to see
+    // what a service gets back when it impersonates somebody who does not exist.
+    const user = principals.findOrCreateUser(forUser.userName.name, forUser.userRealm);
     if (!user) {
       return { error: errorReply(6, {
         crealm: ticketPart.crealm, cname: ticketPart.cname, realm: ctx.answeringRealm,
         sname: body.sname,
         eText: 'S4U2Self named ' + forUser.userName.name.join('/') + '@' + forUser.userRealm +
-               ', which this KDC does not know'
+               ', which this KDC does not know and will not create. The name is either ' +
+               'reserved (' + principals.RESERVED_UNKNOWN.join(', ') + '), service-shaped, ' +
+               'or in a realm this KDC does not serve'
       }) };
     }
     // A service may only ask for a ticket to ITSELF this way.
@@ -766,11 +772,22 @@ async function handleAsReq(request) {
     return errorReply(6, { realm: REALM, sname: body.sname, eText: 'no client name in the request' });
   }
 
-  const client = principals.find(body.cname.name, asRealm);
+  // Any username authenticates here, so a name that is not in the table gets an account
+  // rather than KDC_ERR_C_PRINCIPAL_UNKNOWN — see findOrCreateUser() in
+  // krb5_principals.js. It still returns null for the two cases that must keep failing:
+  // a reserved name (so this error stays reachable on purpose) and a service-shaped
+  // multi-component name, which is not a user and is nobody's to invent.
+  const client = principals.findOrCreateUser(body.cname.name, asRealm);
   if (!client) {
     return errorReply(6, {
       crealm: body.realm, cname: body.cname, sname: body.sname,
-      eText: 'no such principal: ' + body.cname.name.join('/')
+      // No em dash and no other non-ASCII in an eText: KerberosString is a GeneralString,
+      // and a client that decodes it as Latin-1 renders the UTF-8 bytes as mojibake in the
+      // one field whose whole job is to be read by a person.
+      eText: 'no such principal: ' + body.cname.name.join('/') + '. Every other username ' +
+             'would have been created on the spot; this one is either reserved (' +
+             principals.RESERVED_UNKNOWN.join(', ') + ') or has more than one component, ' +
+             'which makes it a service name rather than a user'
     });
   }
   const service = principals.find((body.sname || {}).name || [], asRealm);
@@ -1651,9 +1668,14 @@ app.post('/KdcProxy', function (req, res) {
 });
 
 // A non-spec convenience so a test (and a curious human) can see what this KDC
-// knows without decrypting anything. It publishes NO keys and no passwords —
-// only the principals, their supported etypes and their salts, which is exactly
-// what a client can already learn from PA-ETYPE-INFO2.
+// knows without decrypting anything. It publishes NO keys and no SERVICE
+// passwords — only the principals, their supported etypes and their salts, which
+// is exactly what a client can already learn from PA-ETYPE-INFO2.
+//
+// The one exception is `accountPolicy` below: the password every USER account
+// shares. That one is not a secret to keep — it is the same for everybody, the
+// README states it, and it is the only fact about this KDC a client cannot learn
+// from the protocol.
 app.get('/krb5/principals', function (req, res) {
   log.debug('Entering GET /krb5/principals.');
   const list = principals.all().map(function (p) {
@@ -1669,6 +1691,10 @@ app.get('/krb5/principals', function (req, res) {
       passwordExpired: p.passwordExpired,
       okAsDelegate: p.okAsDelegate,
       kvno: p.kvno,
+      // An account that was not configured but turned up: somebody authenticated as a
+      // name nobody registered. Flagged so a reader is not left wondering why the table
+      // has entries the documentation does not describe.
+      autoCreated: p.autoCreated,
       description: p.description
     };
   });
@@ -1679,6 +1705,24 @@ app.get('/krb5/principals', function (req, res) {
     clockSkewSeconds: CLOCK_SKEW_SECONDS,
     clockOffsetSeconds: CLOCK_OFFSET_SECONDS,
     ticketLifetimeSeconds: TICKET_LIFETIME_SECONDS,
+    // The one thing about this KDC a client cannot discover from the protocol, and the
+    // one that stops somebody guessing at passwords: any username authenticates, and
+    // they all share one. Publishing it is not the leak it would be elsewhere on this
+    // page — a password every account holds and the README states is a POLICY of the
+    // mock, not a secret, and a debugger whose accounts are unusable without reading the
+    // source is worse than one that says so here.
+    accountPolicy: {
+      anyUsernameAuthenticates: true,
+      userPassword: principals.USER_PASSWORD,
+      // The names that are refused instead, so KDC_ERR_C_PRINCIPAL_UNKNOWN stays
+      // reachable, plus the shape rule that keeps a missing SPN an error.
+      neverCreated: principals.RESERVED_UNKNOWN,
+      note: 'A username not in this table is created on first sight as an ordinary user, ' +
+            'with the salt Active Directory would use (realm + name) and this password. ' +
+            'Multi-component names are service principals and are NOT created — an ' +
+            'unregistered SPN is still KDC_ERR_S_PRINCIPAL_UNKNOWN. Service, computer and ' +
+            'krbtgt accounts keep their own passwords, which are not published here.'
+    },
     implemented: ['AS exchange', 'TGS exchange'],
     notImplementedYet: ['PAC', 'FAST', 'PKINIT', 'cross-realm referrals', 'S4U2Self', 'S4U2Proxy'],
     principals: list

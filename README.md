@@ -5,7 +5,9 @@ families — one of which, Kerberos, is not HTTP at all — for exercising clien
 authenticates nobody, checks no passwords and validates no access tokens (UserInfo
 excepted, deliberately, and there is a section on why below): it exists so that a
 client can be driven through a complete protocol exchange without standing up a real
-identity provider.
+identity provider. Kerberos is the one place a password is checked, because there the
+password *is* the encryption key — so it takes the nearest permissive equivalent
+instead: any username at all, and `password!` for every one of them.
 
 Extracted from the [OAuth2/OIDC Debugger](https://idptools.com), where it is the
 fallback identity service for the test suite. The documentation below is carried over
@@ -113,6 +115,8 @@ And for Kerberos, none of which needs setting for the defaults to work:
 | `KRB5_KDC_PORT` | the KDC's TCP **and** UDP port (default `88`). Both transports are bound to the *same* number on purpose — a client that fails over from UDP after `KRB_ERR_RESPONSE_TOO_BIG` retries at the address it already had. If the parent project's api is relaying to this KDC, its `krb5AllowedPorts` has to allow whatever this becomes |
 | `KRB5_REALM` / `KRB5_TRUSTED_REALM` | the two realms (`EXAMPLE.COM`, `PARTNER.COM`). One KDC answering for both is the one simplification here — it hides finding the other realm's KDC and none of the protocol |
 | `KRB5_TRUST_PASSWORD`, `KRB5_KRBTGT_PASSWORD`, `KRB5_TRUSTED_KRBTGT_PASSWORD` | the long-term keys behind `krbtgt/<realm>` and the trust principal. A trust is not a setting: it is one principal whose key both realms hold |
+| `KRB5_USER_PASSWORD` | **the password every user account shares** (default `password!`). Not per-account, because there are no per-account secrets here — see *Any username, one password* |
+| `KRB5_UNKNOWN_USERS` | the usernames that are refused rather than created (default `nosuchuser,nobody`), so `KDC_ERR_C_PRINCIPAL_UNKNOWN` is still something a test can produce on purpose |
 | `KRB5_DOMAIN_SID` / `KRB5_TRUSTED_DOMAIN_SID` | the domain SIDs the PACs are built from. Fixed made-up values; what matters is that they are the same in every ticket, since a service compares SIDs and not names |
 | `KRB5_CLOCK_SKEW` | the tolerance, in seconds (default `300` — AD's) |
 | `KRB5_CLOCK_OFFSET` | **make the KDC lie about its clock**, in seconds (default `0`), so a client's `KRB_AP_ERR_SKEW` handling can be driven deliberately instead of by breaking a machine's time |
@@ -533,11 +537,48 @@ for a **user** is the realm followed by the sAMAccountName with no separator —
 principal name works right up to the first machine account, which is exactly the point
 at which somebody is debugging a service rather than a user.
 
+**Any username, one password.** Everything else in this service checks no password at
+all: the name typed at `/oauth2/login` becomes the identity and that is the end of it.
+Kerberos cannot work that way, and the reason is structural rather than a decision — the
+password *is* the key. Pre-authentication is a timestamp encrypted under it and the
+AS-REP's enc-part is encrypted under it too, so a KDC that accepted any password would
+still have to choose one to encrypt the reply with, and a client that used a different
+one could not read the ticket it was sent. So the nearest thing the protocol allows is
+what happens here: **one password, `password!`, shared by every user account, and an
+account for every username that turns up.** A name nobody configured is created on first
+sight with AD's user-shaped salt (`EXAMPLE.COMzaphod`) and a PAC identity of its own,
+RIDs from 5000 up so a runtime account can be told from a configured one by its SID
+alone. This applies to the second realm too, with *its* realm in the salt.
+
+Three things are deliberately *not* included in that, and each is a failure worth
+keeping:
+
+* **A service principal is never created.** Only a single-component name — a user — is,
+  which is how Kerberos itself tells the two apart. `KDC_ERR_S_PRINCIPAL_UNKNOWN` for a
+  missing or misspelled SPN is the most common Kerberos failure there is, and a KDC that
+  invented the service would instead hand back a ticket sealed with a key the service
+  does not hold. That surfaces at the AP exchange as *decrypt integrity check failed* —
+  the same message a genuinely wrong key gives, pointing nowhere near the real cause.
+* **The reserved names stay unknown** (`nosuchuser`, `nobody`, or whatever
+  `KRB5_UNKNOWN_USERS` says), so `KDC_ERR_C_PRINCIPAL_UNKNOWN` is still reachable. A
+  client that renders it as "wrong password" sends a person off to reset a password that
+  was never the problem, which is exactly the misreading a debugger exists to correct.
+* **A wrong password still fails**, with `KDC_ERR_PREAUTH_FAILED` and a re-sent
+  PA-ETYPE-INFO2, because the client may simply have used the wrong salt.
+
+Service, computer and `krbtgt` accounts keep their own distinct passwords. Nobody types
+those, and `krbtgt/EXAMPLE.COM`, `krbtgt/PARTNER.COM` and the trust have to hold three
+*different* secrets or every assertion about which key sealed which ticket would pass for
+the wrong reason.
+
 **The misconfigured principals are the product, not padding.** `GET /krb5/principals`
 lists the whole database — names, salts, offered etypes, kvno, the
-pre-auth/revoked/expired/ok-as-delegate flags and a sentence on what each account is
-*for* — and no keys and no passwords, since it publishes nothing a client could not
-already learn from PA-ETYPE-INFO2. Among them: `locked` (a disabled account), `expired` (a stale password),
+pre-auth/revoked/expired/ok-as-delegate flags, which entries were created at runtime, and
+a sentence on what each account is *for*. It publishes no keys and no *service*
+passwords; the one user password it does publish, in `accountPolicy`, is a policy of this
+mock rather than a secret — every account holds it and this paragraph states it anyway,
+and a debugger whose accounts cannot be used without reading the source is worse than one
+that says so on the page. Among the configured accounts: `locked` (a disabled account), `expired` (a stale password),
 `aesonly` and `rc4only` (whose etype sets are chosen so that a negotiation can be made
 to fail on purpose, which in 2026 is what RC4 being switched off looks like),
 `sensitive` (NOT_DELEGATED, the one control that stops unconstrained delegation), a
