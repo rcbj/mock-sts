@@ -211,10 +211,17 @@ Worth knowing before "fixing" one of them:
   does the permissive equivalent — **any username authenticates and every user account
   shares one password** (`password!`, `KRB5_USER_PASSWORD`), with a name nobody
   configured created on first sight by `findOrCreateUser()`. Three things stay
-  refusals on purpose: a **service**-shaped (multi-component) name is never created,
-  or a missing SPN would become a ticket sealed with a key the service does not hold;
-  the names in `KRB5_UNKNOWN_USERS` stay unknown so `KDC_ERR_C_PRINCIPAL_UNKNOWN` is
-  still reachable; and a wrong password is still `KDC_ERR_PREAUTH_FAILED`. Service,
+  refusals on purpose: a **service**-shaped (multi-component) name is created only
+  for a host this service is willing to BE — `KRB5_SERVICE_DOMAINS`, the realm's own
+  domain plus `localhost`, `sts` and `127.0.0.1` — and anything else stays
+  `KDC_ERR_S_PRINCIPAL_UNKNOWN`; the names in `KRB5_UNKNOWN_USERS` stay unknown so
+  `KDC_ERR_C_PRINCIPAL_UNKNOWN` is still reachable; and a wrong password is still
+  `KDC_ERR_PREAUTH_FAILED`. That service exception is new (2026-08-17) and it is not
+  a softening of the argument against inventing services: this process is both the
+  KDC and the acceptor, `krb5_service.js` looks the presented SPN up in the same
+  table, so a name created on demand is one the service can decrypt — which was the
+  whole objection. It exists because a client derives `HTTP/<url host>` and every
+  way of reaching this stack produced an SPN nobody had configured. Service,
   computer and `krbtgt` accounts keep their own distinct passwords — the two krbtgts
   and the trust must be three different secrets or assertions about which key sealed
   what pass for the wrong reason.
@@ -243,7 +250,17 @@ Worth knowing before "fixing" one of them:
   pointing back at the page. It deliberately does not invalidate assertions, tickets
   or credentials (nothing consults this service about those, so the button would be a
   lie), does not end sign-on sessions (`wsignout1.0` has cleanup to fan out), and does
-  not touch refresh tokens' claims. See README.md.
+  not touch refresh tokens' claims. Its `/admin/users` page lists every userid
+  presented to this service in an interaction that SUCCEEDED, across all twelve
+  families, and drills into one's sessions and the tokens issued on each. Two rules
+  hold it up and both are easy to break by accident: **one row is one local name**
+  (`alice`, `urn:sts-mock:user:alice` and `alice@REALM` are one identity — the prefix
+  is derived from `userFor()` rather than written down, so changing that function
+  cannot silently split every user in two), and **a token is placed under a session by
+  the optional third argument to `signJwt()`**, never by a claim — no token here
+  carries a session identifier and adding one would change what every client receives.
+  A new authentication point needs one `stats.recordAuthentication()` call at the
+  moment the credential is ACCEPTED, not when the request arrives. See README.md.
 * **WS-Federation's `wauth` is refused rather than faked.** A relying party demanding
   multi-factor against a password-only session gets an error and two ways forward, not
   an assertion claiming a second factor that did not happen. It is the one thing in

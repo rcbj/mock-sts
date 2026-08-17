@@ -254,7 +254,15 @@ function oauthError(res, status, error, description) {
 // --- token minting ----------------------------------------------------------
 // Every OAuth token this server issues goes through here, so this is where each
 // one is recorded: the claim set before it is signed, and the JWT after.
-function signJwt(payload) {
+//
+// `context` is optional and is NOT part of the token: nothing in it is signed, read
+// back or sent anywhere. It is how a caller states what the payload cannot say — at
+// present the browser sign-on session the token was issued under and the grant that
+// issued it, neither of which appears in any claim, because OIDC's `sid` is for
+// front-channel logout and adding claims to every token to make an admin page easier
+// to draw would change what every client receives. A caller that passes nothing is
+// unaffected, which is why the parameter is at the end and optional.
+function signJwt(payload, context) {
   log.debug("Entering signJwt(). typ=" + (payload.typ || '(none)'));
   logArtifact('OAuth token (' + (payload.typ || 'unknown') + ')', 'before signing',
               { header: { alg: 'RS256', kid: STS.kid }, payload: payload });
@@ -266,7 +274,7 @@ function signJwt(payload) {
   // the tail wagging the dog.
   if (jwtRecorder) {
     try {
-      jwtRecorder(payload, signed);
+      jwtRecorder(payload, signed, context || null);
     } catch (e) {
       log.error('the JWT recorder threw and was ignored; the token itself is unaffected: ' + e.message);
     }

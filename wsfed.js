@@ -744,7 +744,11 @@ app.post('/wsfed/login', function (req, res) {
   }
 
   pendingSignIns.delete(signInState.id);
-  startSession(res, username, ['pwd'], '1');
+  // The fifth argument names the screen: the session store is shared with OIDC by
+  // design, so nothing about the session itself says which of the two screens made
+  // it, and the admin console would otherwise file every WS-Federation sign-in under
+  // OAuth 2.0 / OIDC.
+  startSession(res, username, ['pwd'], '1', 'WS-Federation');
   // Back to the passive endpoint with the request as it arrived — minus wfresh,
   // which has now been honoured and would otherwise demand a fresh authentication
   // on every pass, forever.

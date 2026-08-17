@@ -462,6 +462,16 @@ function customClaimContext(base, payload, user) {
   };
 }
 
+// What the token registry is told that the token itself does not say: which browser
+// sign-on session this issuance ran on, and which grant produced it. Neither is a
+// claim — see the note on signJwt() — and both are what let the admin console's user
+// drill-down put a token under the session it belongs to. A call site that leaves
+// `session_id` out is stating that there was no session, which is true of every
+// direct grant, and the console prints that rather than "unknown".
+function issuanceContext(opts) {
+  return { sessionId: (opts && opts.session_id) || '', grant: (opts && opts.grant) || '' };
+}
+
 function accessToken(base, opts) {
   log.debug("Entering accessToken().");
   const iat = nowSec();
@@ -493,7 +503,7 @@ function accessToken(base, opts) {
   // to verify with nothing anywhere pointing back at the form.
   const payloadWithCustom = Object.assign(
     stats.jwtClaims('access_token', customClaimContext(base, payload, user)), payload);
-  const token = signJwt(payloadWithCustom);
+  const token = signJwt(payloadWithCustom, issuanceContext(opts));
   log.debug("Leaving accessToken().");
   return token;
 }
@@ -515,7 +525,7 @@ function refreshToken(base, opts) {
     // half would buy very little. The refresh grant enforces it, which is what
     // makes the OID4VCI section 14.5 refresh on step 4 carry a proof of its own.
     cnf: opts.jkt ? { jkt: opts.jkt } : undefined
-  });
+  }, issuanceContext(opts));
   log.debug("Leaving refreshToken().");
   return token;
 }
@@ -557,7 +567,7 @@ function idToken(base, opts) {
   // test that a claim reached one and not the other.
   const payloadWithCustom = Object.assign(
     stats.jwtClaims('id_token', customClaimContext(base, payload, user)), payload);
-  const token = signJwt(payloadWithCustom);
+  const token = signJwt(payloadWithCustom, issuanceContext(opts));
   log.debug("Leaving idToken().");
   return token;
 }
@@ -656,10 +666,23 @@ function sessionOf(req) {
 // The alternative is SameSite=None, which requires Secure, which this service
 // cannot be over http://localhost — so the quirk stays, and wsfed.js says so on
 // the screen rather than leaving it to look like a broken session.
-function startSession(res, username, amr, acr) {
+//
+// `via` names the screen the person actually used, and it is a parameter rather than
+// something derived here because this function cannot tell: WS-Federation's sign-in
+// screen calls it too, and a session started there is indistinguishable afterwards
+// from one started at the OIDC login screen — which is the point of sharing the
+// store, and is exactly why the admin console would otherwise report every
+// WS-Federation sign-in as an OIDC one. It defaults to the OIDC screen, so the
+// existing call sites keep saying what they always meant.
+function startSession(res, username, amr, acr, via) {
   log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
   const sessionId = randomId(24);
   const session = {
+    // The id is on the session as well as being the map key, because everything that
+    // is handed a session gets the object and not the key — the authorization
+    // endpoint, WS-Federation, the console — and without it the tokens issued on a
+    // session could not name the session they were issued on.
+    id: sessionId,
     user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
     // Stated rather than omitted: a relying party that asked for a second factor
     // needs to be able to see that it did not get one.
@@ -667,6 +690,15 @@ function startSession(res, username, amr, acr) {
   };
   sessions.set(sessionId, session);
   res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  // One of the two places a person is authenticated by typing a name at a screen —
+  // this one covers both, since WS-Federation signs in through here.
+  stats.recordAuthentication({
+    presented: username, protocol: via || 'OAuth 2.0 / OIDC',
+    method: (amr || []).indexOf('hwk') >= 0 ? 'sign-in screen (password and a security key)'
+                                            : 'sign-in screen (password)',
+    sub: session.user.sub, amr: amr, acr: acr, sessionId: sessionId,
+    note: 'No password was checked; the name typed is the identity.'
+  });
   log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
   return session;
 }
@@ -793,6 +825,11 @@ function parseAuthorizationDetails(raw) {
 function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   const amr = (authInfo && authInfo.amr) || null;
   const acr = (authInfo && authInfo.acr) || null;
+  // The session this response is being issued ON. Every path into this function has
+  // one — an unauthenticated request is shown the login screen instead — so an empty
+  // id here would mean a session object arrived from somewhere that did not make it,
+  // which is worth seeing on the console rather than defaulting quietly.
+  const sessionId = (authInfo && authInfo.id) || '';
   log.debug("Entering issueAuthorizationResponse(). response_type=" + (query.response_type || '(none)') +
             ", user=" + user.username);
   const base = baseUrlOf(req);
@@ -817,6 +854,11 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     authzCodes.set(code, {
       client_id: String(query.client_id), redirect_uri: redirectUri, scope: scope,
       nonce: query.nonce, user: user, auth_time: authTime, amr: amr, acr: acr,
+      // Carried on the code so that the tokens the code is redeemed for can name the
+      // session it was issued on. It is the only route between the two: the code
+      // arrives at the token endpoint with no cookie behind it, and a browser session
+      // cannot be inferred from a back-channel request.
+      session_id: sessionId,
       code_challenge: query.code_challenge, code_challenge_method: query.code_challenge_method || 'plain',
       // RFC 9449 section 10: the JWK Thumbprint of the DPoP key the client
       // intends to use, taken at the authorization request so the code itself is
@@ -831,8 +873,14 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     });
     out.code = code;
   }
+  // Which grant the console will say issued these. A response carrying a code AND a
+  // token is the hybrid flow rather than the implicit one, and the distinction is
+  // worth keeping: it is the difference between a token that came back through the
+  // browser and one that will come back through the token endpoint.
+  const flow = types.indexOf('code') >= 0 ? 'hybrid (authorization endpoint)' : 'implicit';
   if (types.indexOf('token') >= 0) {
-    out.access_token = accessToken(base, { user: user, client_id: String(query.client_id), scope: scope });
+    out.access_token = accessToken(base, { user: user, client_id: String(query.client_id), scope: scope,
+                                           session_id: sessionId, grant: flow });
     out.token_type = 'Bearer';
     out.expires_in = ACCESS_TOKEN_TTL;
     out.scope = scope;
@@ -840,7 +888,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   if (types.indexOf('id_token') >= 0) {
     out.id_token = idToken(base, {
       user: user, client_id: String(query.client_id), nonce: query.nonce, auth_time: authTime,
-      amr: amr, acr: acr,
+      amr: amr, acr: acr, session_id: sessionId, grant: flow,
       access_token: out.access_token, code: out.code
     });
   }
@@ -1603,6 +1651,10 @@ app.post('/oauth2/token', function (req, res) {
       jkt: dpopJkt,
       user: record.user, client_id: record.client_id, scope: record.scope,
       nonce: record.nonce, auth_time: record.auth_time, amr: record.amr, acr: record.acr,
+      // Off the code, which carried it from the authorization endpoint. This is the
+      // ordinary case: most tokens this service issues belong to a sign-on session
+      // and only arrive at the console as belonging to one because of this line.
+      session_id: record.session_id || '', grant: 'authorization_code',
       authorization_details: grantIdentifiers(record.authorization_details, record.user)
     }));
   }
@@ -1639,9 +1691,19 @@ app.post('/oauth2/token', function (req, res) {
     }
     // Single use, like an authorization code.
     preAuthorizedCodes.delete(code);
+    // The End-User was identified out of band, so there is a subject and no sign-on
+    // session — and the users page has to be able to say that difference rather than
+    // report a missing session as an unknown one.
+    stats.recordAuthentication({
+      presented: (record.user && record.user.username) || '',
+      protocol: 'OpenID4VCI', method: 'pre-authorized code' + (record.txCode ? ' with a Transaction Code' : ''),
+      sub: (record.user && record.user.sub) || '', client_id: client.client_id,
+      note: 'Identified out of band when the Credential Offer was made; no browser session exists.'
+    });
     const issued = tokenSet(base, {
       jkt: dpopJkt,
-      user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false
+      user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false,
+      grant: 'pre-authorized code'
     });
     // Remember which access token belongs to a deferred issuance, so the
     // credential endpoint knows to answer 202 rather than a credential.
@@ -1688,16 +1750,34 @@ app.post('/oauth2/token', function (req, res) {
       // laundered into one bound to the thief's key.
       jkt: boundTo || dpopJkt,
       user: userFor(claims.username), client_id: claims.client_id,
-      scope: body.scope ? String(body.scope) : claims.scope
+      scope: body.scope ? String(body.scope) : claims.scope,
+      // The session the REFRESHED token came from, looked up by the refresh token's
+      // own jti. Nothing on the wire carries it — a refresh token names no session —
+      // so without this every second-generation token would show as sessionless and a
+      // session's token list would stop growing the moment a client refreshed.
+      session_id: stats.sessionIdOfJti(claims.jti), grant: 'refresh_token'
     }));
   }
 
   if (grant === 'client_credentials') {
     // No user is involved, so no refresh token and no ID token.
+    //
+    // It is recorded on the users page all the same, flagged as a CLIENT rather than
+    // a person. Leaving it out would be tidier and wrong: these tokens have a subject
+    // and appear in the tokens table, so a users page that did not know the name
+    // would be a second page of one console contradicting the first.
+    stats.recordAuthentication({
+      presented: client.client_id || 'unknown-client',
+      protocol: 'OAuth 2.0', method: 'client_credentials', isClient: true,
+      sub: client.client_id || 'unknown-client', client_id: client.client_id,
+      note: 'A client authenticating as itself. No human and no browser is behind this token, ' +
+            'and no secret was checked.'
+    });
     return respond(tokenSet(base, {
       jkt: dpopJkt,
       sub: client.client_id || 'unknown-client', username: client.client_id,
       client_id: client.client_id, scope: String(body.scope || ''), withRefresh: false,
+      grant: 'client_credentials',
       user: Object.assign(userFor(client.client_id), { sub: client.client_id || 'unknown-client' })
     }));
   }
@@ -1714,9 +1794,20 @@ app.post('/oauth2/token', function (req, res) {
       log.debug("Leaving the token endpoint. The grant was refused.");
       return oauthError(res, 400, 'invalid_grant', 'Authentication failed for user ' + username + '.');
     }
+    // A password grant is an authentication: the credential was presented here, to
+    // this endpoint, and this is where it succeeded. No session is created — the
+    // grant exists for clients that cannot open a browser — so the tokens below
+    // belong to a person and to no session, which is a shape the users page shows.
+    stats.recordAuthentication({
+      presented: username, protocol: 'OAuth 2.0', method: 'password grant (RFC 6749 section 4.3)',
+      sub: userFor(username).sub, client_id: client.client_id,
+      note: 'No password is checked here either, except the reserved string "invalid". ' +
+            'A password grant creates no browser session.'
+    });
     return respond(tokenSet(base, {
       jkt: dpopJkt,
-      user: userFor(username), client_id: client.client_id, scope: String(body.scope || 'openid')
+      user: userFor(username), client_id: client.client_id, scope: String(body.scope || 'openid'),
+      grant: 'password'
     }));
   }
 
@@ -1724,11 +1815,18 @@ app.post('/oauth2/token', function (req, res) {
     const subjectToken = String(body.subject_token || '');
     if (!subjectToken) return oauthError(res, 400, 'invalid_request', 'subject_token is required.');
     let subject = {};
+    // Whether this service is the one that authenticated the subject, or is merely
+    // reading a name off somebody else's token. The users page has to say which: a
+    // subject that arrived on an unverified token was never authenticated HERE, and
+    // a console that listed the two the same way would be claiming an authentication
+    // that never happened.
+    let subjectVerified = true;
     try {
       subject = jwt.verify(subjectToken, STS.certPem, { algorithms: ['RS256'] });
     } catch (e) {
       // A token from somewhere else: exchange it anyway, but say who it was for
       // as best it can be read.
+      subjectVerified = false;
       log.debug("The subject_token was not signed by this server; reading it without verifying.");
       try {
         subject = jsonFromB64u(subjectToken.split('.')[1]) || {};
@@ -1746,12 +1844,24 @@ app.post('/oauth2/token', function (req, res) {
         act = undefined;
       }
     }
+    stats.recordAuthentication({
+      presented: subject.username || subject.sub || 'urn:sts-mock:exchanged',
+      protocol: 'OAuth 2.0', method: 'token exchange (RFC 8693)',
+      sub: subject.sub || '', client_id: client.client_id,
+      note: subjectVerified
+        ? 'The subject_token was signed by this service and verified, so this subject was ' +
+          'authenticated here — earlier, by whatever grant produced that token.'
+        : 'The subject_token was NOT signed by this service. The name was read out of it without ' +
+          'verifying anything, so this is a subject this service has been TOLD about rather than ' +
+          'one it authenticated.'
+    });
     const exchanged = tokenSet(base, {
       jkt: dpopJkt,
       sub: subject.sub || 'urn:sts-mock:exchanged',
       user: Object.assign(userFor(subject.username), subject.sub ? { sub: subject.sub } : {}),
       client_id: client.client_id, scope: String(body.scope || subject.scope || ''),
-      audience: body.audience || body.resource, act: act, withRefresh: false
+      audience: body.audience || body.resource, act: act, withRefresh: false,
+      grant: 'token exchange'
     });
     exchanged.issued_token_type = 'urn:ietf:params:oauth:token-type:access_token';
     return respond(exchanged);
