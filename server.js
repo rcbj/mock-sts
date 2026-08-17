@@ -95,6 +95,12 @@ const krb5 = require('./krb5_kdc');
 // The Kerberos-protected service. Like the KDC it registers its HTTP view at
 // require time and starts its socket from listen(), for the same reason.
 const krb5Service = require('./krb5_service');
+// The same acceptor over HTTP: SPNEGO. It must come AFTER krb5_service.js and
+// the order is a dependency rather than a preference — it calls that module's
+// accept() for every Kerberos check and adds none of its own. Unlike the two
+// above it starts nothing: it is HTTP all the way down, so requiring it is the
+// whole of its installation.
+require('./spnego');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -113,6 +119,9 @@ app.listen(PORT, '0.0.0.0', function () {
            'the sign-in response is at /wsfed/rp.');
   log.info('Every endpoint call, and every token or assertion before and after it was signed, ' +
            'is written to this log at debug level.');
+  log.info('A SPNEGO-protected page (RFC 4559 over RFC 4178) is advertised at /spnego and ' +
+           'lives at /spnego/protected; ?mic=require, ?mech=none and ?mutual=off make the ' +
+           'negotiation fail in one specific way each.');
   log.info('Every endpoint and every specification this service implements is listed at ' +
            '/sts-metadata (add ?format=json for the machine-readable form).');
   // The KDC's sockets are started here rather than at require time so that a

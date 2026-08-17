@@ -281,6 +281,16 @@ async function accept(tokenBytes) {
       client: clientName,
       ticketFlags: msgs.ticketFlagNames(ticketPart.flags),
       gss: gssInfo,
+      // The INITIATOR's subkey, and the etype of the session key it falls back
+      // to. Neither is used over the raw socket, and both are needed by
+      // spnego.js: SPNEGO's mechListMIC is signed by the client with the key
+      // established by its own Authenticator, which is this subkey when it
+      // sent one and the ticket's session key when it did not. Returned rather
+      // than re-derived there, because there is only one right answer and it
+      // is known here.
+      initiatorSubkey: authenticator.subkey || null,
+      sessionKey: sessionKey,
+      sessionKeyEtype: ticketPart.key.etype,
       mutual: false,
       note: 'mutual authentication was not requested, so this service sends nothing back and the ' +
             'client has no proof it reached the real service'
@@ -313,7 +323,13 @@ async function accept(tokenBytes) {
     gss: gssInfo,
     mutual: true,
     acceptorSubkey: acceptorSubkey,
-    sessionKey: sessionKey
+    // See the note on the no-mutual return above: spnego.js verifies the
+    // client's mechListMIC with the initiator subkey and signs its own with
+    // the acceptor subkey, and the asymmetry is forced by when each MIC is
+    // computed rather than chosen.
+    initiatorSubkey: authenticator.subkey || null,
+    sessionKey: sessionKey,
+    sessionKeyEtype: ticketPart.key.etype
   };
 }
 
