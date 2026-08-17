@@ -9,6 +9,16 @@ identity provider. Kerberos is the one place a password is checked, because ther
 password *is* the encryption key — so it takes the nearest permissive equivalent
 instead: any username at all, and `password!` for every one of them.
 
+**Authentication is intentionally fake. Protocol behavior is not.**
+
+Mock STS exists to test identity protocol integrations, not identity security. It 
+accepts essentially any identity and produces protocol-correct tokens, assertions,
+tickets, and credentials. It is deliberately unsuitable for production.
+
+If you're testing whether your application correctly speaks OAuth, OIDC, SAML, WS-Federation,
+WS-Trust, WebAuthn, DPoP, OpenID4VC, or other supported protocols, Mock STS gives you a real
+protocol endpoint without requiring you to deploy or configure a real identity provider.
+
 Extracted from the [OAuth2/OIDC Debugger](https://idptools.com), where it is the
 fallback identity service for the test suite. The documentation below is carried over
 from that project's engineering notes, so it explains *why* things are the way they
