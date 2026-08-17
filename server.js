@@ -109,6 +109,19 @@ require('./spnego');
 // and is required by app.js, so the counting is already running by the time this
 // line is reached.
 require('./admin');
+// The embedded LDAPv3 directory (RFC 4511), built on the node-ldapjs submodule.
+// Like the two Kerberos modules it registers its HTTP views at require time
+// (/ldap, /ldap/directory) and starts its TCP listener from listen() below, for
+// the same reason: binding port 389 is privileged and can fail, and a require
+// that throws takes the whole service down where a route cannot.
+//
+// It must come AFTER admin.js, and that is a dependency rather than a
+// preference: it installs itself as admin_stats.js's user observer, which is how
+// an entry appears under ou=users for anybody who authenticates through ANY
+// protocol here. Requiring it earlier would work too — nothing authenticates
+// during require — but keeping it beside the console is what makes the pairing
+// visible to the next reader.
+const ldapServer = require('./ldap_server');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -152,4 +165,20 @@ app.listen(PORT, '0.0.0.0', function () {
     log.error('krb5: the KDC could not start: ' + err.message);
   });
   krb5Service.listen();
+  // The LDAP directory's socket, started here for the same reason the KDC's is.
+  // GET /ldap says what it is and GET /ldap/directory shows every entry in it;
+  // GET /sts-metadata cannot see a raw socket, so the listener has its own entry
+  // there beside the KDC's.
+  const ldapListener = ldapServer.listen();
+  ldapListener.whenReady.then(function (ready) {
+    log.info('ldap: the directory is reachable on TCP ' + ready.port +
+             ' with base DN ' + ready.baseDn + '. Every bind succeeds except ' +
+             'the password "invalid"; GET /ldap describes it and ' +
+             'GET /ldap/directory lists every entry.');
+  }).catch(function (err) {
+    // Reported rather than thrown, exactly as the KDC's failure is: the rest of
+    // this service is still useful, and a silent failure to bind would surface
+    // later as a directory that never answers.
+    log.error('ldap: the directory could not start: ' + err.message);
+  });
 });

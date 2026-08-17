@@ -102,6 +102,52 @@ const SPECS = [
     url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kkdcp/',
     coverage: 'mock: POST /KdcProxy accepts a KDC-PROXY-MESSAGE and relays it to the KDC in ' +
               'this process. Exists because a browser cannot open a raw socket to port 88.' },
+  { id: 'rfc4511', name: 'LDAP v3: the protocol (RFC 4511)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4511',
+    coverage: 'partial: bind (simple), unbind, add, delete, modify, modifyDN, compare and ' +
+              'search over plain TCP, with the root DSE and result codes 0 (success), 2 ' +
+              '(protocolError), 4 (sizeLimitExceeded), 11 (adminLimitExceeded), 16 ' +
+              '(noSuchAttribute), 32 (noSuchObject), 49 (invalidCredentials), 66 ' +
+              '(notAllowedOnNonLeaf) and 68 (entryAlreadyExists) all reachable. ' +
+              'No SASL, no LDAPS, no StartTLS, no controls ' +
+              '(so no paged results and no sorting), no extended operations and no ' +
+              'referrals. ' +
+              // The rule these notes follow: say what would mislead somebody who believed
+              // the row. "Bind is implemented" is true and, alone, implies credentials.
+              'EVERY BIND SUCCEEDS — any DN, any password, anonymous included — with the ' +
+              'single exception of the literal password "invalid", which is refused with ' +
+              'LDAP_INVALID_CREDENTIALS so a negative test has something to fail on. It is ' +
+              'the ldapjs 3.0.7 library, pinned as a submodule and used unmodified; what is ' +
+              'written here is the handlers.' },
+  { id: 'rfc4512', name: 'LDAP v3: directory information models (RFC 4512)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4512',
+    coverage: 'mock: the tree, the root DSE and namingContexts are real; THE SCHEMA IS NOT ' +
+              'THERE AT ALL. No objectClass is enforced, no attribute is checked against a ' +
+              'syntax or a matching rule, and there is no subschema subentry — so an entry ' +
+              'may carry any attribute a client cares to send, which a real directory would ' +
+              'refuse. Three structural rules are still enforced, because their absence ' +
+              'would teach a client something false: an add needs its parent, a delete needs ' +
+              'a leaf, and an attribute with no values does not exist.' },
+  { id: 'rfc4514', name: 'LDAP v3: string representation of distinguished names (RFC 4514)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4514',
+    coverage: 'partial: DNs are parsed and rendered by @ldapjs/dn, which implements this ' +
+              'document. What this service adds — comparing two DNs for equality — is a ' +
+              'simplification and says so: it case-folds and strips the whitespace around ' +
+              'each comma, and does NOT do RFC 4518 string preparation, so a DN carrying an ' +
+              'escaped comma inside a value is compared byte-wise.' },
+  { id: 'rfc4515', name: 'LDAP v3: string representation of search filters (RFC 4515)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4515',
+    coverage: 'full for what @ldapjs/filter implements: presence, equality, substrings, ' +
+              'greater-or-equal, less-or-equal, approximate, and the and/or/not composites. ' +
+              'Matching is case-insensitive on both the attribute description and the value, ' +
+              'because there is no schema to choose a matching rule from. An extensible ' +
+              'match is not evaluated; the attempt is logged rather than silently treated as ' +
+              'no match, since an unsupported filter and an empty directory look identical ' +
+              'from the client.' },
   { id: 'ws-trust', name: 'WS-Trust 1.4 (and 1.0-1.3)',
     where: 'OASIS ws-sx',
     url: 'https://docs.oasis-open.org/ws-sx/ws-trust/v1.4/ws-trust.html',
@@ -345,6 +391,32 @@ const ENDPOINTS = [
           'request, and 200 with an AP-REP in that header to a valid one. The Kerberos checks ' +
           'are krb5_service.js\'s, unchanged — this endpoint adds the negotiation and the ' +
           'HTTP that carries it and no protocol code of its own.' },
+
+  // --- LDAP ---
+  //
+  // The same blind spot the Kerberos rows above describe, and for the same reason: the
+  // directory is a RAW TCP SOCKET on port 389, this page is built by walking the Express
+  // router, and the walk cannot see a socket. The two rows below are the only LDAP
+  // surfaces that are HTTP, and NEITHER OF THEM IS LDAP — they are this service
+  // describing its own directory, which is what lets a reader tell an empty directory
+  // from a search filter that matched nothing. The listener is described in their text.
+  { path: '/ldap', group: 'LDAP', name: 'What the directory is',
+    specs: ['rfc4511', 'rfc4512', 'rfc4514', 'rfc4515'],
+    what: 'The embedded LDAPv3 directory: its URL and port (TCP 389 by default, a RAW ' +
+          'SOCKET this page cannot see), its base DN, the bind policy — every bind ' +
+          'succeeds, any DN and any password, except the literal "invalid" — and the fact ' +
+          'that it has NO SCHEMA. Also the structural rules it does still enforce and the ' +
+          'one it deliberately does not (referential integrity: deleting a user leaves its ' +
+          'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
+          'the machine-readable half of it. Add ?format=json.' },
+  { path: '/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
+    specs: ['rfc4511', 'rfc4514'],
+    what: 'The whole store, DN by DN, with where each entry came from — seeded, added over ' +
+          'LDAP, or created because somebody authenticated. That last column is the point: ' +
+          'LDAP_AUTOCREATE_USERS (ON by default) grows an entry under ou=users for anybody ' +
+          'who authenticates through ANY of the twelve protocol families here, through one ' +
+          'hook on the funnel they all already pass. Not an LDAP operation. Add ' +
+          '?format=json.' },
 
   // --- service ---
   { path: '/healthcheck', group: 'Service', name: 'Health check',

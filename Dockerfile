@@ -44,6 +44,26 @@ RUN npm -v
 # Install dependencies (package-lock.json is optional; wildcard copies it when
 # present so `npm ci`-style reproducibility works once a lock is committed).
 COPY package*.json ./
+# The LDAP server's library is `"ldapjs": "file:node-ldapjs"` — the git SUBMODULE,
+# not a registry package — so it has to be in the build context BEFORE npm runs or
+# the install fails with EUNSUPPORTEDPROTOCOL/ENOENT naming a path rather than a
+# submodule. It is copied here, ahead of the source, so that editing this service
+# does not invalidate the install layer.
+#
+# An UNINITIALISED SUBMODULE IS AN EMPTY DIRECTORY, and this is where that shows
+# up: the COPY succeeds, npm installs a package with no main, and the failure
+# arrives at runtime as `Cannot find module 'ldapjs'` from ldap_server.js. Run
+# `git submodule update --init --recursive` — --recursive because this repository
+# is itself a submodule of the parent project, and a plain --init there stops one
+# level short of this one.
+#
+# .npmrc carries `omit=dev`, and it is load-bearing rather than tidiness: npm
+# installs the devDependencies of a `file:` dependency, and ldapjs's are tap and
+# eslint — some 200 packages and a dozen advisories that have nothing to do with
+# this service. The flag below says the same thing twice on purpose, so that a
+# build which loses the .npmrc does not quietly start shipping them.
+COPY .npmrc ./
+COPY node-ldapjs ./node-ldapjs
 RUN npm install --omit=dev && npm cache clean --force
 
 # The service is eleven modules, and server.js is only the shell that requires the
