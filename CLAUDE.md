@@ -46,7 +46,8 @@ middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
 `vc_verifier.js`, `krb5_kdc.js`,
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
-messages, principals, NDR, PAC, GSS, SPNEGO), `sts_metadata.js`, and `dpop.js`.
+messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `sts_metadata.js`, and the
+two libraries that register nothing, `dpop.js` and `admin_stats.js`.
 
 **`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
 dependency rather than a preference: it calls that module's `accept()` for every
@@ -81,6 +82,20 @@ everything else, but their **raw socket listeners are started from `listen()` in
    share — lives there rather than in `vc_issuer.js` where it was written: the
    fourth caller is in `oauth2.js`, which vc_issuer.js cannot be required from
    without building a cycle or moving OID4VCI ahead of OAuth2 in the route order.
+3b. **`admin_stats.js` is a library like `dpop.js`, and one dependency into it is
+   INVERTED.** It registers nothing and requires only `helpers.js`, which it needs to
+   stay that way more than `dpop.js` does: it is called from `app.js`'s call log,
+   `helpers.js`'s `signJwt()`, both assertion builders, the KDC and the credential
+   issuer. Because `helpers.js` cannot require it back (that is the cycle rule 2
+   exists for), `helpers.js` offers a slot — `setJwtRecorder()` — and `admin_stats.js`
+   installs itself in it at require time. **`app.js` is what requires
+   `admin_stats.js`**, which is a real dependency (the call log is there) and also
+   what makes the ordering safe: every protocol module requires `app.js`, so the
+   recorder is installed before any route exists. Do not "simplify" that into a
+   require in the other direction, and do not count tokens at their call sites
+   instead — `signJwt()` is the single funnel, and five counted call sites means a
+   sixth that is not.
+
 4. **`wsfed.js` must stay after `oauth2.js` in the require order**, and that is a
    dependency rather than a preference: it signs users in to the browser session
    `oauth2.js` owns, through the `startSession` / `sessionOf` / `endSession` it
@@ -89,6 +104,13 @@ everything else, but their **raw socket listeners are started from `listen()` in
    out of the cycles rule 2 exists to avoid. Do not give WS-Federation a session store
    of its own to "decouple" them: two stores would each look correct alone and never
    see each other, and the symptom is a sign-on that silently is not single.
+
+5. **`admin.js` must stay after `oauth2.js` too, for the same reason**: it reads that
+   `sessions` map so the metrics page can report real sign-on sessions. And the same
+   one-store rule applies to REVOCATION — the set of revoked jtis lives in
+   `admin_stats.js` and serves both the console and RFC 7009's `/oauth2/revoke`. Two
+   sets would each look correct alone and never see each other, and a token revoked
+   from the console would keep introspecting as active with no error to point at.
 
 `userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
@@ -212,6 +234,16 @@ Worth knowing before "fixing" one of them:
 * **One password is rejected** — the literal string `invalid` on the password grant,
   on WS-Trust and at the WS-Federation sign-in screen — so a negative test has
   something to fail on in every protocol here.
+* **The admin console at `/admin` is not protected and holds nothing on disk.** It is
+  the one surface that can change what the protocol endpoints do — it revokes tokens
+  through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
+  future access token, ID Token and SAML assertion. Custom claims are **additive**:
+  the names this service sets itself are refused at configuration time, because an
+  `exp` settable from a web form would produce tokens that fail to verify with nothing
+  pointing back at the page. It deliberately does not invalidate assertions, tickets
+  or credentials (nothing consults this service about those, so the button would be a
+  lie), does not end sign-on sessions (`wsignout1.0` has cleanup to fan out), and does
+  not touch refresh tokens' claims. See README.md.
 * **WS-Federation's `wauth` is refused rather than faked.** A relying party demanding
   multi-factor against a password-only session gets an error and two ways forward, not
   an assertion claiming a second factor that did not happen. It is the one thing in

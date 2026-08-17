@@ -52,6 +52,11 @@ const app = require('./app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
         xmlEscape, parseBody, oauthError, signJwt, userFor } = require('./helpers');
 const dpop = require('./dpop');
+// The service's statistics and its ONE set of revoked jtis. It is a library like
+// dpop.js — it registers nothing and requires only helpers.js — so requiring it
+// here cannot create a cycle. The revocation set used to be a Set in this file;
+// see the comment where it was, below.
+const stats = require('./admin_stats');
 const { VCI_CONFIGS, VCI_CONFIG_ID, VCI_SCOPE } = require('./vc_configs');
 const { deferredAccessTokens, issuerStates, preAuthorizedCodes } = require('./vc_offers');
 // ---------------------------------------------------------------------------
@@ -403,7 +408,15 @@ const webauthnCredentials = new Map();  // username -> { credentialId, publicKey
 const pendingMfa = new Map();           // mfa id -> { login, username, challenge, expires }
 const MFA_TTL_MS = 5 * 60 * 1000;
 
-const revokedJtis = new Set();      // tokens revoked via /oauth2/revoke
+// Which tokens are no longer valid. This was a `new Set()` here, and it moved into
+// admin_stats.js when the admin console gained a page that revokes tokens too:
+// there must be exactly ONE set, because two would each look correct alone and
+// never see each other — a token revoked from the console would keep introspecting
+// as active, and there would be no error anywhere to point at. It is the same
+// reasoning that keeps WS-Federation out of a session store of its own.
+//
+// Read in four places (UserInfo, introspection, the refresh grant, and the console)
+// and written in two (RFC 7009's /oauth2/revoke below, and the console).
 
 const registeredClients = new Map();// client_id -> { metadata, registrationAccessToken }
 
@@ -426,6 +439,27 @@ function clientFrom(req, body) {
   }
   log.debug("Leaving clientFrom(). client_id from the body: " + (body.client_id || '(none)'));
   return { client_id: body.client_id || '' };
+}
+
+// What a custom claim's ${placeholders} may refer to. Built from the payload that
+// is about to be signed rather than from the request, so a claim reading
+// "${sub}" says what the token itself says — including under token exchange,
+// where the subject is not the person who signed in.
+//
+// Refresh tokens get no custom claims and that is deliberate: a refresh token is
+// presented back to this server and to nothing else, so a claim in one reaches no
+// relying party and would only make the two halves of a grant disagree.
+function customClaimContext(base, payload, user) {
+  return {
+    username: (user && user.username) || payload.username || '',
+    sub: payload.sub || '',
+    email: (user && user.email) || '',
+    name: (user && user.name) || '',
+    given_name: (user && user.given_name) || '',
+    family_name: (user && user.family_name) || '',
+    client_id: payload.client_id || payload.azp || '',
+    audience: Array.isArray(payload.aud) ? payload.aud.join(' ') : (payload.aud || base || '')
+  };
 }
 
 function accessToken(base, opts) {
@@ -451,7 +485,15 @@ function accessToken(base, opts) {
   // so the credential endpoint can verify one without consulting any state — the
   // token is signed, so the wallet cannot award itself an identifier.
   if (opts.authorization_details) payload.authorization_details = opts.authorization_details;
-  const token = signJwt(payload);
+  // Whatever the admin console was told to add — see admin_stats.js. The merge is
+  // this way round, custom claims UNDER the protocol's own, so that a claim the
+  // console somehow accepted which collides with one of these loses. The console
+  // refuses the reserved names outright, so this is the second of two defences
+  // rather than the only one; a token whose `exp` came from a web form would fail
+  // to verify with nothing anywhere pointing back at the form.
+  const payloadWithCustom = Object.assign(
+    stats.jwtClaims('access_token', customClaimContext(base, payload, user)), payload);
+  const token = signJwt(payloadWithCustom);
   log.debug("Leaving accessToken().");
   return token;
 }
@@ -509,7 +551,13 @@ function idToken(base, opts) {
   if (opts.nonce) payload.nonce = opts.nonce;
   if (opts.access_token) payload.at_hash = halfHash(opts.access_token);
   if (opts.code) payload.c_hash = halfHash(opts.code);
-  const token = signJwt(payload);
+  // The ID Token's own custom claim set, separate from the access token's: the two
+  // go to different readers (a client reads the ID Token, a resource server reads
+  // the access token) and configuring them together would mean never being able to
+  // test that a claim reached one and not the other.
+  const payloadWithCustom = Object.assign(
+    stats.jwtClaims('id_token', customClaimContext(base, payload, user)), payload);
+  const token = signJwt(payloadWithCustom);
   log.debug("Leaving idToken().");
   return token;
 }
@@ -1341,7 +1389,7 @@ function userinfoResponse(req, res) {
       'server issues is an RS256 JWT signed with the same key, so the typ claim is the only thing ' +
       'that tells a refresh token or an id_token apart from the access token UserInfo needs.');
   }
-  if (claims.jti && revokedJtis.has(claims.jti)) {
+  if (stats.isRevoked(claims.jti)) {
     return challenge(401, 'invalid_token',
       'This access token was revoked at /oauth2/revoke. Introspection reports it inactive, and ' +
       'UserInfo answers the same way — a revocation that only some endpoints honoured would be ' +
@@ -1613,7 +1661,7 @@ app.post('/oauth2/token', function (req, res) {
       log.debug("Leaving the token endpoint. The grant was refused.");
       return oauthError(res, 400, 'invalid_grant', 'The refresh token is not valid: ' + e.message);
     }
-    if (revokedJtis.has(claims.jti)) return oauthError(res, 400, 'invalid_grant', 'The refresh token was revoked.');
+    if (stats.isRevoked(claims.jti)) return oauthError(res, 400, 'invalid_grant', 'The refresh token was revoked.');
     // RFC 9449 section 5: a bound refresh token may only be redeemed by its own
     // key. Without this the refresh token would be a bearer credential that
     // mints bound access tokens for whoever holds it — which is worse than not
@@ -1733,7 +1781,7 @@ app.post('/oauth2/introspect', function (req, res) {
     log.debug("Introspection: the token does not verify (" + e.message + "), so it is inactive.");
     return inactive();
   }
-  if (revokedJtis.has(claims.jti)) return inactive();
+  if (stats.isRevoked(claims.jti)) return inactive();
   res.status(200).type('application/json').send(JSON.stringify({
     active: true,
     scope: claims.scope || '',
@@ -1763,14 +1811,14 @@ app.post('/oauth2/revoke', function (req, res) {
   if (token) {
     try {
       const claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'] });
-      if (claims.jti) revokedJtis.add(claims.jti);
+      if (claims.jti) stats.revoke(claims.jti, 'the RFC 7009 revocation endpoint');
     } catch (e) {
       // RFC 7009: an invalid token is still a successful revocation.
       log.debug("Revocation: the token does not verify (" + e.message + "), so there is nothing to revoke.");
     }
   }
   res.status(200).set('Cache-Control', 'no-store').end();
-  log.debug("Leaving the revocation endpoint. " + revokedJtis.size + " token(s) revoked so far.");
+  log.debug("Leaving the revocation endpoint. " + stats.revokedCount() + " token(s) revoked so far.");
 });
 
 // --- dynamic client registration (RFC 7591) + management (RFC 7592) ----------

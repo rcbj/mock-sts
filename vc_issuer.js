@@ -43,6 +43,11 @@ const bbs2023 = require('./bbs2023.js');
 const { log, logArtifact, STS, baseUrlOf, b64u, b64uDecode, jsonFromB64u, randomId,
         bbsKeyPair, vciError } = require('./helpers');
 const dpop = require('./dpop');
+// The register the admin console counts credentials in. The three builders below
+// sign with jsonwebtoken (or with BBS) directly rather than through
+// helpers.signJwt(), so they are not counted by the recorder that catches every
+// OAuth token — buildCredentialFor(), which all three go through, says so instead.
+const stats = require('./admin_stats');
 const { VCI_AS, VCI_BATCH_SIZE, VCI_CONFIGS, VCI_CONFIG_ID, VCI_JWT_CONFIG_ID,
         VCI_JWT_SCOPE, VCI_JWT_TYPES, VCI_LDP_CONFIG_ID, VCI_LDP_SCOPE, VCI_SCOPE,
         VCI_VCT, VC_CONTEXT, configIdOfIdentifier, vciConfigIds, vciFormatOf,
@@ -569,10 +574,27 @@ async function buildLdpVc(subjectClaims, holderJwk, credentialIssuer, issuerDid)
 
 // Mint whichever format the requested configuration names.
 async function buildCredentialFor(configId, subjectClaims, holderJwk, credentialIssuer, issuerDid) {
+  log.debug("Entering buildCredentialFor(). configId=" + configId);
   const format = vciFormatOf(configId);
-  if (format === 'ldp_vc') return buildLdpVc(subjectClaims, holderJwk, credentialIssuer, issuerDid);
-  if (format === 'jwt_vc_json') return buildJwtVcJson(subjectClaims, holderJwk, credentialIssuer, issuerDid);
-  return buildSdJwtVc(subjectClaims, holderJwk, credentialIssuer, issuerDid);
+  let built;
+  if (format === 'ldp_vc') built = await buildLdpVc(subjectClaims, holderJwk, credentialIssuer, issuerDid);
+  else if (format === 'jwt_vc_json') built = await buildJwtVcJson(subjectClaims, holderJwk, credentialIssuer, issuerDid);
+  else built = await buildSdJwtVc(subjectClaims, holderJwk, credentialIssuer, issuerDid);
+  // Counted here, at the one point all three formats meet. The expiry is read from
+  // whichever member the format uses to state it — `exp` in the two JWT forms,
+  // `validUntil` in the Data Integrity one — because the console's "still valid"
+  // column has to mean the same thing across all three or it means nothing.
+  const payload = built.payload || {};
+  const expiresAt = payload.exp ? payload.exp * 1000
+                                : (Date.parse((built.credential && built.credential.validUntil) || '') || 0);
+  stats.recordCredential(format, {
+    configId: configId,
+    subject: payload.sub || (payload.credentialSubject && payload.credentialSubject.id) ||
+             subjectClaims.sub || '',
+    expiresAt: expiresAt
+  });
+  log.debug("Leaving buildCredentialFor(). Minted one " + format + " credential.");
+  return built;
 }
 
 // The claims the credential asserts. Lifted from the access token when it is a

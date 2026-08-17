@@ -26,6 +26,14 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const { log, headersOf, bodyOf } = require('./helpers');
+// The service's own record of what it has done. Required HERE, and the position is
+// load-bearing twice over: the call log below is where the per-endpoint statistics
+// are collected, so this is a real dependency — and because every protocol module
+// requires this file, requiring it here means admin_stats.js has installed its JWT
+// recorder into helpers.js before any route exists and therefore before any token
+// can be minted. See the comment on setJwtRecorder in helpers.js for why that
+// installation is a hook rather than a require in the other direction.
+const stats = require('./admin_stats');
 // --- express app -----------------------------------------------------------
 const app = express();
 
@@ -158,6 +166,23 @@ app.use(function (req, res, next) {
   };
 
   res.on('finish', function () {
+    // Counted here rather than at the top of the middleware because the two things
+    // worth counting — the status code and how long it took — do not exist until
+    // the response has gone out. `req.route` is set by Express when it dispatches
+    // into a route, so by now it holds the PATTERN that matched
+    // ("/oauth2/register/:client_id") rather than the URL that was requested; the
+    // metrics table is keyed on it so that one row means one endpoint instead of
+    // one row per client id. A request that matched nothing has no pattern, which
+    // is what `matched` records: those are 404s, and they are the ones the table's
+    // cap collapses when a scanner starts inventing paths.
+    const matchedPath = (req.route && req.route.path) || '';
+    stats.recordCall({
+      method: req.method,
+      path: matchedPath || String(req.originalUrl || '/').split('?')[0],
+      matched: !!matchedPath,
+      status: res.statusCode,
+      durationMs: Date.now() - started
+    });
     log.debug({ response: { path: req.originalUrl,
                             method: req.method,
                             status: res.statusCode,

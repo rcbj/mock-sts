@@ -22,6 +22,10 @@ const forge = require('node-forge');
 const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const { SignedXml } = require('xml-crypto');
 const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso } = require('./helpers');
+// The custom attributes an admin configured, and the register every assertion is
+// counted in. A library like dpop.js: it registers no route and requires only
+// helpers.js, so it cannot join a cycle with this file.
+const stats = require('./admin_stats');
 // Sign a SAML assertion enveloped (signature after Issuer), like api/server.js.
 function signAssertion(xml) {
   log.debug("Entering signAssertion().");
@@ -77,7 +81,13 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
     { name: 'name', value: subject },
     { name: 'issuedBy', value: ISSUER }
   ];
-  const attributeEls = attributes.map(function (a) {
+  // Whatever the admin console was told to add, APPENDED to the above rather than
+  // replacing it — and appended in both branches, so a WS-Federation sign-in
+  // (which passes its own claim list) and a WS-Trust Issue (which does not) both
+  // carry them. A configured attribute that displaced the claim a relying party
+  // keys off would break the sign-in and look like a bug in the relying party.
+  const custom = stats.samlAttributes('saml2', { subject: subject, audience: audience });
+  const attributeEls = attributes.concat(custom).map(function (a) {
     return '<saml:Attribute Name="' + xmlEscape(a.name) + '"' +
       (a.nameFormat ? ' NameFormat="' + xmlEscape(a.nameFormat) + '"' : '') + '>' +
       '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';
@@ -96,12 +106,19 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
       '</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>' +
       '<saml:AttributeStatement>' + attributeEls + '</saml:AttributeStatement>' +
     '</saml:Assertion>';
-  try { 
+  // Counted here rather than at the call sites: WS-Trust and WS-Federation both
+  // come through this function, so this counts every SAML 2.0 assertion instead of
+  // every one somebody remembered to count. `exp` is the Conditions/NotOnOrAfter
+  // already computed above, which is what makes the console able to say how many
+  // are still valid without re-parsing anything.
+  stats.recordAssertion('2.0', { id: id, subject: subject, audience: audience,
+                                 expiresAt: Date.parse(exp) || 0 });
+  try {
     log.debug("Leaving buildSamlAssertion().");
-    return signAssertion(xml); 
-  } catch (e) { 
-    log.error('sign failed, returning unsigned: ' + e.message); 
-    return xml; 
+    return signAssertion(xml);
+  } catch (e) {
+    log.error('sign failed, returning unsigned: ' + e.message);
+    return xml;
   }
 }
 

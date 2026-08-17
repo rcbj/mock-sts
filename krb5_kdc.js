@@ -100,6 +100,11 @@ const net = require('net');
 const dgram = require('dgram');
 const app = require('./app');
 const { log } = require('./helpers');
+// The register the admin console counts tickets in. Kerberos is the one protocol
+// family here whose artifacts do not pass through signJwt() or an assertion
+// builder, so the two places a ticket is minted say so explicitly — and there are
+// exactly two, the end of handleAsReq() and the end of handleTgsReq().
+const stats = require('./admin_stats');
 const asn1 = require('./krb5_asn1.js');
 const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
@@ -977,6 +982,18 @@ async function handleAsReq(request) {
     body.sname.name.join('/') + ' using ' + profile.name + ', flags [' +
     msgs.ticketFlagNames(flags).join(', ') + '], expiring ' + endtime.toISOString());
 
+  // A TGT is what the console counts as a Kerberos session, because that is what
+  // it is: the credential the session consists of. Service tickets are counted
+  // separately below for the same reason — they are uses of a session, not
+  // sessions, and adding the two would report the wrong number twice.
+  stats.recordTicket('TGT', {
+    client: body.cname.name.join('/') + '@' + asRealm,
+    realm: asRealm,
+    service: body.sname.name.join('/'),
+    etype: profile.name,
+    expiresAt: endtime.getTime()
+  });
+
   return msgs.encKdcRep({
     msgType: msgs.MSG_TYPE.AS_REP,
     crealm: asRealm,
@@ -1481,6 +1498,18 @@ async function handleTgsReq(request) {
     body.sname.name.join('/') + ' using ' + profile.name +
     ', flags [' + msgs.ticketFlagNames(flags).join(', ') + '], enc-part at key usage ' + replyUsage +
     (useSubkey ? ' (the Authenticator carried a subkey)' : ' (no subkey was sent)'));
+
+  // The ticket is named by the client it is FOR, which under S4U is the
+  // impersonated user rather than the service that asked — the same distinction
+  // the reply itself makes just below, and getting it the other way round here
+  // would make the console's session count describe the wrong people.
+  stats.recordTicket(isTgtRequest(body.sname) ? 'TGT' : 'service ticket', {
+    client: clientName.name.join('/') + '@' + clientRealm,
+    realm: answeringRealm,
+    service: body.sname.name.join('/'),
+    etype: profile.name,
+    expiresAt: endtime.getTime()
+  });
 
   log.debug('Leaving handleTgsReq().');
   return msgs.encKdcRep({

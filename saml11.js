@@ -49,6 +49,9 @@
 
 const { SignedXml } = require('xml-crypto');
 const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso } = require('./helpers');
+// As in saml2.js: the custom attributes an admin configured, and the register every
+// assertion is counted in.
+const stats = require('./admin_stats');
 
 const SAML11_NS = 'urn:oasis:names:tc:SAML:1.0:assertion';
 
@@ -124,7 +127,14 @@ function buildSaml11Assertion(opts) {
     ? '<saml:AudienceRestrictionCondition><saml:Audience>' + xmlEscape(opts.audience) +
       '</saml:Audience></saml:AudienceRestrictionCondition>'
     : '';
-  const attributeEls = (opts.attributes || []).map(function (a) {
+  // Appended to what the caller asked for, never substituted for it — the same
+  // rule as SAML 2.0, and it matters more here: a WS-Federation relying party keys
+  // off the claim URIs in claimsFor(), and displacing one of those would break the
+  // sign-in somewhere that looks nothing like this page. An attribute configured
+  // with no namespace gets the identity claims namespace, which is where a relying
+  // party is already looking.
+  const custom = stats.samlAttributes('saml11', { subject: opts.subject, audience: opts.audience });
+  const attributeEls = (opts.attributes || []).concat(custom).map(function (a) {
     return '<saml:Attribute AttributeName="' + xmlEscape(a.name) + '"' +
       ' AttributeNamespace="' + xmlEscape(a.namespace) + '">' +
       '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';
@@ -146,6 +156,11 @@ function buildSaml11Assertion(opts) {
         ? '<saml:AttributeStatement>' + subjectEl + attributeEls + '</saml:AttributeStatement>'
         : '') +
     '</saml:Assertion>';
+  // Counted before the signing attempt, not after: an assertion that failed to sign
+  // was still built and still went out (unsigned — see the catch), so counting it
+  // only on success would leave the console reporting fewer than actually left.
+  stats.recordAssertion('1.1', { id: id, subject: opts.subject, audience: opts.audience,
+                                 expiresAt: Date.parse(exp) || 0 });
   try {
     const signed = signSaml11Assertion(xml);
     log.debug("Leaving buildSaml11Assertion(). AssertionID " + id + ".");

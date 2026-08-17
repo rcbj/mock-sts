@@ -101,6 +101,14 @@ const krb5Service = require('./krb5_service');
 // above it starts nothing: it is HTTP all the way down, so requiring it is the
 // whole of its installation.
 require('./spnego');
+// The admin console. It must come AFTER oauth2.js and, like wsfed.js, the order is a
+// dependency rather than a preference: its metrics page reports the browser sign-on
+// sessions oauth2.js owns, read through the `sessions` map that module exports. The
+// dependency is one way — oauth2.js knows nothing about the console — so it is not a
+// cycle. What holds the STATE it renders is admin_stats.js, which registers no route
+// and is required by app.js, so the counting is already running by the time this
+// line is reached.
+require('./admin');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -124,6 +132,10 @@ app.listen(PORT, '0.0.0.0', function () {
            'negotiation fail in one specific way each.');
   log.info('Every endpoint and every specification this service implements is listed at ' +
            '/sts-metadata (add ?format=json for the machine-readable form).');
+  log.info('The admin console is at /admin: /admin/metrics counts every call, token, assertion, ' +
+           'ticket and session; /admin/tokens invalidates access tokens, ID Tokens and refresh ' +
+           'tokens; /admin/claims adds custom claims to future tokens and assertions. It is NOT ' +
+           'protected — nothing in this service is — so do not put this port on a public address.');
   // The KDC's sockets are started here rather than at require time so that a
   // failure to bind (port 88 is privileged) is reported by a running service
   // instead of preventing it from starting at all. GET /krb5/principals says what
