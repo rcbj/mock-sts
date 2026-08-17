@@ -1,0 +1,4 @@
+[submodule "node-ldapjs"]
+	path = node-ldapjs
+	url = https://github.com/rcbj/node-ldapjs.git
+	branch = master

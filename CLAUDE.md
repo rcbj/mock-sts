@@ -5,13 +5,14 @@ this repository.
 
 ## Overview
 
-A mock identity service that speaks twelve protocol families — Kerberos v5 (a KDC on
+A mock identity service that speaks thirteen protocol families — Kerberos v5 (a KDC on
 raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service and the same
 acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
 1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
 OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
-half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, and W3C DID Core with
-DIF domain linkage. It exists to exercise *clients*: it authenticates nobody, checks no
+half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, W3C DID Core with
+DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw TCP 389,
+built on the node-ldapjs SUBMODULE and used unmodified). It exists to exercise *clients*: it authenticates nobody, checks no
 password and validates no access token.
 
 **There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
@@ -44,7 +45,7 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
 middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
-`vc_verifier.js`, `krb5_kdc.js`,
+`vc_verifier.js`, `ldap_server.js`, `krb5_kdc.js`,
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
 messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `sts_metadata.js`, and the
 two libraries that register nothing, `dpop.js` and `admin_stats.js`.
@@ -58,11 +59,15 @@ codec (a byte-identical copy of the parent project's `common/krb5/krb5_spnego.js
 kept honest by `tests/krb5_codec_sync.js` there), and `spnego.js` is this repo's own.
 Do not merge the two — one of them is somebody else's file.
 
-The two Kerberos modules are the exception to rule 1 below in one direction only:
-requiring them registers their HTTP views (`/KdcProxy`, `/krb5/principals`) like
-everything else, but their **raw socket listeners are started from `listen()` in
-`server.js`, not at require time** — binding a privileged port can fail, and a
-`require` that throws takes the whole service down where a route cannot.
+The two Kerberos modules AND `ldap_server.js` are the exception to rule 1 below in
+one direction only: requiring them registers their HTTP views (`/KdcProxy`,
+`/krb5/principals`, `/ldap`) like everything else, but their **raw socket listeners
+are started from `listen()` in `server.js`, not at require time** — binding a
+privileged port can fail, and a `require` that throws takes the whole service down
+where a route cannot. A failure to bind is RECORDED rather than thrown, and
+`ldap_server.js` publishes it (`listening` / `listenError` on `GET /ldap`), because
+the HTTP view answers 200 either way and there is otherwise no way to tell a running
+directory from one whose listener lost a race with the host's own slapd.
 
 1. **Requiring a module registers its endpoints.** Each calls `app.get(...)` at its
    top level against the shared app from `app.js`, rather than exporting a
@@ -112,6 +117,21 @@ everything else, but their **raw socket listeners are started from `listen()` in
    sets would each look correct alone and never see each other, and a token revoked
    from the console would keep introspecting as active with no error to point at.
 
+6. **`ldap_server.js` must stay after `admin.js`, and it INVERTS a dependency the
+   same way `helpers.js` does.** Its embedded directory grows an entry under
+   `ou=users` for anybody who authenticates through any of the thirteen families
+   here, and `admin_stats.recordAuthentication()` is already the single funnel all
+   of them pass at the moment a credential is ACCEPTED — so one observer there is
+   one place and not thirteen. But this module requires `admin_stats.js` (it needs
+   `identityOf`'s normalisation, so `alice`, `urn:sts-mock:user:alice` and
+   `alice@REALM` seed ONE entry), which means `admin_stats.js` cannot require it
+   back: that is the cycle rule 2 exists for. So `admin_stats.js` offers
+   `setUserObserver()` and this module fills it at require time. The observer's
+   return value is ignored and a throw from it is caught — a directory must never
+   be able to fail an authentication. Do not "simplify" that into a require in the
+   other direction, and do not seed the entry at each authentication site instead:
+   thirteen call sites means a fourteenth that is not.
+
 `userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
 them, not because they are especially general. The last two are read by three parsers
@@ -146,6 +166,40 @@ in the repository.
   is what gets shown" is a reason. An empty block is not.
 * Comments carry the *reasoning*, especially where something went wrong once. The
   density in this codebase is deliberate; match it rather than trimming it.
+
+## node-ldapjs is a SUBMODULE, it is nested, and it is not modified
+
+`ldap_server.js` is built on `ldapjs` 3.0.7, which resolves to `./node-ldapjs` —
+a git submodule pinned to [`rcbj/node-ldapjs`](https://github.com/rcbj/node-ldapjs)
+(`"ldapjs": "file:node-ldapjs"` in package.json). Four things follow, and three of
+them have already cost something:
+
+* **This repository is itself a submodule of the parent project, so this one is
+  NESTED.** `git submodule update --init sts` over there stops one level short of
+  it; `--recursive` is required, and the parent's launchers and CI workflows pass
+  it. An uninitialised submodule is an EMPTY DIRECTORY, so the COPY succeeds, npm
+  installs a package with no `main`, and the failure arrives at runtime as
+  `Cannot find module 'ldapjs'` — which names a package.
+* **It has to sit inside this package root.** npm installs a `file:` dependency as
+  a symlink and node resolves that package's own requires by walking up from where
+  the REAL directory lives, so a copy one level up never reaches `node_modules`
+  here. The failure is `Cannot find module 'abstract-logging'` from inside ldapjs.
+* **`npm install` brings its devDependencies.** ldapjs's are tap and eslint —
+  about 200 packages and a dozen advisories that have nothing to do with this
+  service. `.npmrc` carries `omit=dev` and the Dockerfile passes `--omit=dev` as
+  well; the duplication is deliberate.
+* **The library is NOT patched.** Everything in `ldap_server.js` is handlers
+  registered against its public API, so the submodule stays a usable copy of
+  ldapjs rather than a fork nobody else can consume — and the api on the other
+  side of the exchange runs the same code. Two of its defects are routed around
+  rather than fixed, both in `SearchResponse.send()`: a second, case-sensitive
+  attribute filter that silently drops every attribute whose conventional spelling
+  has a capital in it from a SELECTIVE search (and which `nofiltering` does not
+  disable, contrary to its documentation), and a `messageId` that defaults to 1 so
+  the early branch which avoids that filter throws on every search after the first
+  on a connection. `toSearchEntry()` builds a `SearchResultEntry` instance with the
+  response's `messageId`, which sidesteps both. The comments there explain it;
+  read them before "simplifying" that function back to a plain object.
 
 ## The JSON-LD contexts are load-bearing
 
@@ -205,6 +259,17 @@ Worth knowing before "fixing" one of them:
 * **It checks no password.** The username typed at `/oauth2/login` — or at
   `/wsfed/login`, which creates the same session — becomes the identity in every
   token and every assertion.
+* **The LDAP directory takes that further: EVERY BIND SUCCEEDS**, any DN and any
+  password, anonymous included — with the single exception of the literal password
+  `invalid`, which is refused with `LDAP_INVALID_CREDENTIALS` (49). That exception
+  is not a softening; it is what keeps result code 49 reachable, and 49 is the code
+  an LDAP client's error handling is built around. The directory is also
+  SCHEMALESS on purpose, and `GET /ldap` says so rather than leaving a reader to
+  infer a schema that is not there. Four structural rules are still enforced (an
+  add needs its parent, a delete needs a leaf, a modify `delete` of an absent
+  attribute is 16, and an attribute's last value takes the attribute with it), and
+  one is deliberately NOT: deleting a user leaves its DN in every group that lists
+  it, because referential integrity is a directory feature and not a protocol rule.
 * **Kerberos is the exception, and cannot not be.** The password there *is* the key:
   pre-authentication and the AS-REP's enc-part are both encrypted under it, so a KDC
   accepting anything would still have to pick a key the client could not guess. So it

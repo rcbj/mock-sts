@@ -440,6 +440,36 @@ function identityKeyOf(value) {
   return identityOf(value).key;
 }
 
+// ---------------------------------------------------------------------------
+// The one hook ldap_server.js needs, and the reason it is a hook rather than a
+// require.
+//
+// The embedded LDAP directory grows an entry for every person who authenticates
+// to this service, through any of the twelve protocol families —
+// recordAuthentication() below is the single funnel all of them already go
+// through at the moment the credential is ACCEPTED, so one observer here is one
+// place and not twelve.
+//
+// But ldap_server.js requires THIS file (it needs identityOf's normalisation, so
+// that `alice`, `urn:sts-mock:user:alice` and `alice@REALM` seed one entry and
+// not three), so this file cannot require it back: a cycle in node hands back a
+// half-initialised module whose exports are undefined, and the symptom arrives
+// later as something that is not a function. So the direction is inverted, the
+// same way helpers.js's setJwtRecorder is — this file offers a slot, and
+// ldap_server.js installs itself in it at ITS require time.
+//
+// The observer is called for its side effect only and its return value is
+// ignored: a directory must never be able to stop an authentication being
+// recorded, still less to fail the authentication itself.
+// ---------------------------------------------------------------------------
+let userObserver = null;
+
+function setUserObserver(fn) {
+  userObserver = fn;
+  log.debug("A user observer was installed; every identity that authenticates " +
+            "will now be offered to it.");
+}
+
 function userRecord(identity) {
   let record = users.get(identity.key);
   if (record) return record;
@@ -516,6 +546,23 @@ function recordAuthentication(detail) {
   }
   log.info('admin: ' + identity.key + ' authenticated through ' + protocol + ' (' + method +
            '). ' + record.authentications + ' time(s) so far; ' + users.size + ' user(s) known.');
+  // The embedded LDAP directory, if it is loaded. Wrapped for the same reason the
+  // JWT recorder is: a throw out here would fail the request that was accepting a
+  // credential, which is the tail wagging the dog. It is given the NORMALISED
+  // identity rather than `presented`, so that the three spellings of one person
+  // seed one entry.
+  if (userObserver) {
+    try {
+      userObserver({
+        key: identity.key, name: identity.name, realm: identity.realm,
+        presented: identity.form, protocol: protocol, method: method,
+        isClient: record.isClient, sub: info.sub || ''
+      });
+    } catch (e) {
+      log.error('the user observer threw and was ignored; the authentication ' +
+                'itself is unaffected: ' + e.message);
+    }
+  }
   log.debug("Leaving recordAuthentication(). " + users.size + " user(s) known.");
   return record;
 }
@@ -1155,6 +1202,7 @@ module.exports = {
   ISSUED_FAMILIES: ISSUED_FAMILIES,
   recordCall: recordCall,
   recordAuthentication: recordAuthentication,
+  setUserObserver: setUserObserver,
   identityOf: identityOf,
   identityKeyOf: identityKeyOf,
   userRows: userRows,

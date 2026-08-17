@@ -1,7 +1,8 @@
 # Mock STS
 
-A deliberately permissive **mock identity service** that speaks twelve protocol
-families — one of which, Kerberos, is not HTTP at all — for exercising clients. It
+A deliberately permissive **mock identity service** that speaks thirteen protocol
+families — two of which, Kerberos and LDAP, are not HTTP at all — for exercising
+clients. It
 authenticates nobody, checks no passwords and validates no access tokens (UserInfo
 excepted, deliberately, and there is a section on why below): it exists so that a
 client can be driven through a complete protocol exchange without standing up a real
@@ -43,11 +44,12 @@ are — most of it is the record of something having gone wrong once.
 | **OpenID4VCI 1.0** | a Credential Issuer: SD-JWT VC (RFC 9901), `jwt_vc_json`, `ldp_vc` with bbs-2023; Credential Offers, the pre-authorized code grant with `tx_code`, `authorization_details`, batch issuance, response encryption, deferred issuance, the Notification Endpoint |
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
+| **LDAP v3 (RFC 4511)** | an embedded **directory on raw TCP port 389**: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — one hook on the single funnel they all already pass |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
 router, so it cannot go stale, and thirty-eight specifications with how far each one
 goes. See *The index of itself* below, including the one blind spot that design has:
-a protocol that registers no route, which is exactly what Kerberos is.
+a protocol that registers no route, which is exactly what Kerberos and LDAP are.
 
 **WS-Federation used to be the gap here, and this note used to say so.** Until
 `wsfed.js` existed, the pieces a passive-requestor profile needs — the assertion
@@ -66,9 +68,25 @@ one would be a relying party's first configuration attempt and its first 404.
 ## Running it
 
 ```bash
-npm install
-CONFIG_FILE=./env/local.js node server.js      # listens on 8081
+# Once per checkout: the LDAP directory is built on node-ldapjs, which is a
+# SUBMODULE. An uninitialised submodule is an empty directory, so without this
+# the install succeeds and the service dies at startup with
+# "Cannot find module 'ldapjs'" — a message that names a package.
+git submodule update --init
+
+# --omit=dev is not tidiness. npm installs a `file:` dependency's OWN
+# devDependencies, and ldapjs's are tap and eslint: ~200 packages and a dozen
+# advisories against a test runner this service never loads. .npmrc says the
+# same thing, so a bare `npm install` here behaves too.
+npm install --omit=dev
+
+CONFIG_FILE=./env/local.js node server.js      # listens on 8081, LDAP on 389
 ```
+
+**Port 389 is privileged**, so a host run that is not root will fail to bind it —
+which is reported and is not fatal, the rest of the service being unaffected. Set
+`LDAP_PORT` to something unprivileged for a host run, and remember that the parent
+project's api has to allow the new port in `ldapAllowedPorts`.
 
 `STS_PORT` overrides the port. `CONFIG_FILE` selects a configuration from `env/`,
 the only setting in which is the bunyan log level — at the default `debug` the
@@ -135,9 +153,19 @@ And for Kerberos, none of which needs setting for the defaults to work:
 | `KRB5_SERVICE_DOMAINS` | the hosts a **service principal is created on demand** for (default: the realm's domain, `localhost`, `sts`, `127.0.0.1`). An entry matches a host that is it or ends with a dot and it; an SPN outside them stays `KDC_ERR_S_PRINCIPAL_UNKNOWN`. Set it to an empty string to create nothing, which is the behaviour before 2026-08-17 |
 | `KRB5_AUTO_SERVICE_PASSWORD` | the password shared by every service created that way (default `auto-service-password`), **published** by `GET /krb5/principals` like the user one — it is what lets a debugger open such a ticket and read the PAC inside it. Configured service accounts keep their own |
 
+And LDAP's, which is the other protocol here that is not HTTP:
+
+| Variable | What it does |
+|---|---|
+| `LDAP_PORT` | the directory's TCP port (default `389`). It is privileged, so the container binds it as root and a host run usually cannot — that is what this is for. If the parent project's api is opening this directory, its `ldapAllowedPorts` has to allow whatever this becomes; the same coupling `KRB5_KDC_PORT` has, and for the same reason |
+| `LDAP_BASE_DN` | the naming context (default `dc=example,dc=com`). `ou=users` and `ou=groups` are derived from it rather than configured, because two variables that could disagree with it would put entries in a tree nobody is searching |
+| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client |
+| `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
+| `LDAP_SIZE_LIMIT` | the largest result this server will return from one search (default `500`), on top of whatever the client asks for. A search of a directory this small will never reach it — but a client that has never seen `LDAP_SIZE_LIMIT_EXCEEDED` has never handled a paged result either |
+
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across thirty modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the twelve modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `sts_metadata.js`. The other sixteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below.
+A mock Security Token Service used by the test suite, **split across thirty-one modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the thirteen modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `ldap_server.js`, `sts_metadata.js`. The other sixteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below.
 
 The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
 (what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
@@ -742,6 +770,126 @@ rather than failing opaquely — the GSS layer is separate from the AP-REQ preci
 that this is a wrapper to add and not a rewrite), request signatures, and the SID
 filtering noted above. The **AP exchange** is not missing from the KDC — it belongs to a
 service rather than to a KDC, and it lives in `krb5_service.js`.
+
+### LDAP v3 — the other protocol here that is not HTTP
+
+RFC 4511 is BER over a TCP socket, so `ldap_server.js` opens a raw one on port 389 and
+everything in this section is invisible to the HTTP half of this service. Four things
+follow, and three of them are the same ones the KDC's section records.
+
+**Requiring the module does not start the listener.** Every other module here registers
+its endpoints at require time, and for a route that is harmless; binding a privileged
+port is not, because it can fail and a require that throws takes the whole service down.
+So `server.js` calls an exported `listen()` and reports its failure, and the service
+still starts without a directory rather than not starting at all. A failure to bind is
+also **published** — `listening` and `listenError` on `GET /ldap` — because that page is
+HTTP and answers 200 either way, so without those fields there is no way to tell a
+running directory from one whose listener lost a race with the host's own `slapd`.
+
+**`GET /sts-metadata` cannot see a raw socket.** The two LDAP rows it does carry, `/ldap`
+and `/ldap/directory`, are this service describing its own store; neither is LDAP. The
+second is the more useful of the two: it lists every entry with **where it came from** —
+seeded, added over LDAP, or created because somebody authenticated — which is what lets a
+reader tell an empty directory from a search filter that matched nothing.
+
+**The library is a SUBMODULE and it is not modified.** `"ldapjs": "file:node-ldapjs"`
+points at [`rcbj/node-ldapjs`](https://github.com/rcbj/node-ldapjs), pinned by commit.
+Since this repository is itself a submodule of the parent project, that makes it a
+submodule of a submodule: `git submodule update --init sts` over there stops one level
+short, and **`--recursive` is required**. An uninitialised submodule is an *empty
+directory*, so the image builds, npm installs a package with no `main`, and the container
+dies at startup with `Cannot find module 'ldapjs'` — naming a package rather than a
+submodule. Two smaller consequences: it has to sit inside this package root, because npm
+installs a `file:` dependency as a symlink and node resolves that package's own requires
+from where the real directory lives; and `npm install` brings its devDependencies (tap,
+eslint, ~200 packages, a dozen advisories), which is why `.npmrc` carries `omit=dev`.
+
+**Every bind succeeds**, any DN and any password, anonymous included — with the single
+exception of the literal password `invalid`, which is `LDAP_INVALID_CREDENTIALS` (49).
+That is the same convention the password grant, WS-Trust and the WS-Federation sign-in
+screen already follow, and it is what keeps 49 reachable: a directory that could not
+produce one would make "the bind failed" untestable, and 49 is the code an LDAP client's
+error handling is built around.
+
+#### What it enforces, and the one thing it deliberately does not
+
+It is **schemaless on purpose** — no objectClass is enforced, no attribute is checked
+against a syntax, no `must`/`may` is consulted — and `GET /ldap` says so rather than
+leaving a reader to infer a schema that is not there. A real directory would refuse most
+of what this one accepts, and where that matters it is a difference somebody should be
+told about rather than one a mock should hide by inventing a schema of its own.
+
+Four rules are enforced anyway, because each is real and its absence would teach a client
+something false:
+
+* an add whose **parent does not exist** is `noSuchObject` (32). A directory is a tree,
+  and a client that has never seen this refusal will write its first entry into a real
+  directory and not understand the error;
+* a delete of an entry that **has children** is `notAllowedOnNonLeaf` (66);
+* a modify `delete` naming an **absent attribute** is `noSuchAttribute` (16);
+* **deleting an attribute's last value deletes the attribute**, since an LDAP attribute
+  always has at least one value (RFC 4511 section 4.1.7) — which is why a second delete of
+  the same attribute is a 16 rather than a no-op.
+
+A modify is **atomic**: the changes are applied to a copy and the copy replaces the stored
+attributes only once every one of them has been accepted. Applying them in place and
+rolling back on failure is the same thing written so that a bug leaves half a change
+behind.
+
+And one rule is deliberately **not** enforced, stated here rather than discovered:
+**deleting a user does not remove its DN from the groups that list it as a `member`.**
+Referential integrity is a feature of some directories and not of the protocol — OpenLDAP
+needs an overlay for it and Active Directory does it in the DSA — so the dangling member
+is the honest result, and it is what a `member`-based group search should then show.
+
+#### An LDAP object for every user who authenticates
+
+`LDAP_AUTOCREATE_USERS`, on by default, grows an entry at
+`uid=<name>,ou=users,<base>` the first time anybody authenticates through **any** of the
+other twelve families here — the OAuth2 login screen, WS-Trust, WS-Federation, a Kerberos
+AS-REQ, a WebAuthn assertion.
+
+That is **one hook and not twelve**, because `admin_stats.recordAuthentication()` is
+already the single funnel every one of those call sites goes through at the moment a
+credential is ACCEPTED. The hook is **inverted**, exactly as `helpers.js`'s
+`setJwtRecorder` is: `ldap_server.js` requires `admin_stats.js` — it needs `identityOf`'s
+normalisation, so that `alice`, `urn:sts-mock:user:alice` and `alice@REALM` seed one entry
+and not three — so `admin_stats.js` cannot require it back without a cycle. It offers a
+slot instead, and `ldap_server.js` fills it at require time. The observer's return value is
+ignored and a throw from it is caught: a directory must never be able to fail an
+authentication.
+
+Two identities are skipped, and both are deliberate. **An LDAP bind** does not seed one,
+because the identity a bind presents is a DN — it already names an object in this very
+directory, so `uid=cn=admin\,dc=example…` would be nonsense and this service's own binds
+would grow the directory without bound. **An OAuth client** does not either: a client is
+not a person and `ou=users` is for people, a distinction the admin console already makes
+with its `isClient` flag, which is what this reads.
+
+#### Two ldapjs defects this code routes around
+
+Both are in `SearchResponse.prototype.send()`, and both are worked around here rather than
+patched in the submodule — the point of pinning a fork is to have a *usable* copy of
+ldapjs, and a defect a real client would also hit is worth leaving visible.
+
+The first is a **second, case-sensitive attribute filter** that runs after the handler has
+already chosen what to send. It compares the entry's attribute name *lower-cased* against
+the requested list held *exactly as the client sent it*, so a client asking for
+`telephoneNumber` gets back everything it asked for except `telephoneNumber`. Every
+attribute whose conventional spelling has a capital in it is silently dropped from a
+*selective* search and from nothing else, which is why a search asking for everything looks
+perfect. The trap inside the trap is that `send()`'s `nofiltering` argument does **not**
+turn it off: that flag guards the two branches above this one, and this one has no guard
+at all, while its documentation reads as though it covers everything.
+
+What does turn it off is passing a `SearchResultEntry` **instance** rather than a plain
+`{dn, attributes}` object — `send()` takes an early branch for one and writes it untouched.
+Which leads to the second defect: **`messageId` defaults to 1**, so `send()`'s
+`if (!entry.messageId)` never fires (1 is truthy) and the very next line throws
+`SearchEntry messageId mismatch` for every search after the first on a connection. The
+symptom is an uncaught exception in this log and a search that returns *zero entries and
+then ends successfully*, which reads as an empty directory. `toSearchEntry()` builds the
+instance with `res.messageId` and sidesteps both.
 
 ### The issuer named by a DID
 
