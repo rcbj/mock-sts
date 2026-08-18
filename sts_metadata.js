@@ -317,7 +317,10 @@ const SPECS = [
   { id: 'rfc9396', name: 'RFC 9396 — Rich Authorization Requests',
     where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc9396',
     coverage: 'partial: authorization_details of type openid_credential, which is how OID4VCI asks ' +
-              'for a credential without a scope. Granted details come back on the token response.' },
+              'for a credential without a scope, with its optional claims member (a subset of the ' +
+              'claims the metadata advertises) honoured by the credential endpoint. Accepted at the ' +
+              'token endpoint too, which is the only place the pre-authorized code flow can ask. ' +
+              'Granted details come back on the token response.' },
   { id: 'rfc9207', name: 'RFC 9207 — Authorization Server Issuer Identification',
     where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc9207',
     coverage: 'full: every authorization response carries iss, errors included, and both discovery ' +

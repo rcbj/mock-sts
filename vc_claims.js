@@ -641,13 +641,18 @@ function valueFor(row, name, tokenClaims, attributes, persona) {
 //
 // `report` rides along for the console: same values, but flat and annotated with
 // where each came from.
-function subjectClaimsFor(name, tokenClaims) {
-  log.debug("Entering subjectClaimsFor(). name=" + name);
+// `rows` is which of the selected rows to build, and it exists for one caller:
+// a wallet that asked for a SUBSET of the claims in its authorization_details
+// (OID4VCI section 5.1.1). Absent means all of them, which is what every other
+// caller wants and what an authorization carrying no `claims` member means.
+function subjectClaimsFor(name, tokenClaims, rows) {
+  log.debug("Entering subjectClaimsFor(). name=" + name +
+            (rows ? ", restricted to " + rows.length + " requested claim(s)." : "."));
   const persona = personaFor(name);
   const attributes = directoryAttributes(name);
   const claims = {};
   const report = [];
-  selectedRows().forEach(function (row) {
+  (rows || selectedRows()).forEach(function (row) {
     const found = valueFor(row, name, tokenClaims, attributes, persona);
     if (!found) {
       return;
@@ -694,6 +699,83 @@ function ldpMetadataClaims() {
              display: [{ locale: 'en-US', name: row.label }] };
   });
   log.debug("Leaving ldpMetadataClaims(). " + out.length + " claim(s) advertised.");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// THE CLAIM PATHS THIS ISSUER PUBLISHES FOR ONE FORMAT, and the rows a wallet's
+// request selects out of them.
+//
+// OID4VCI section 5.1.1 lets the Wallet put a `claims` member in its
+// authorization_details, an array of claims description objects (Appendix A.1)
+// each carrying a claims path pointer (Appendix B) into the credential. So the
+// wallet asks in the vocabulary the METADATA published — which is why the
+// validation and the filtering below both go through advertisedClaims() rather
+// than through the catalogue directly. A path that is not one this issuer
+// advertises selects nothing, and the authorization endpoint refuses it rather
+// than issuing a credential quietly missing a claim somebody asked for.
+//
+// The prefix is the format's, exactly as the metadata builder needs it: an
+// SD-JWT VC keeps its claims at the top level of the payload, the two W3C
+// formats keep them under credentialSubject, and ldp_vc is additionally FLAT and
+// limited to the terms the vendored context defines.
+// ---------------------------------------------------------------------------
+function advertisedClaims(format) {
+  log.debug("Entering advertisedClaims(). format=" + format);
+  if (format === 'ldp_vc') {
+    log.debug("Leaving advertisedClaims(). The ldp_vc list.");
+    return ldpMetadataClaims();
+  }
+  log.debug("Leaving advertisedClaims().");
+  return metadataClaims(format === 'jwt_vc_json' ? ['credentialSubject'] : []);
+}
+
+// Where one catalogue row's claim sits in a credential of this format, or null
+// when this format cannot carry it at all (ldp_vc, whose context defines no term
+// for it). The mirror image of advertisedClaims(), and the two must agree: a row
+// whose path here is absent from the metadata would be requestable and never
+// issued.
+function pathOfRow(row, format) {
+  log.debug("Entering pathOfRow(). " + row.ldap);
+  if (format === 'ldp_vc') {
+    log.debug("Leaving pathOfRow().");
+    return ldpTermFor(row) ? ['credentialSubject', ldpTermFor(row)] : null;
+  }
+  log.debug("Leaving pathOfRow().");
+  return (format === 'jwt_vc_json' ? ['credentialSubject'] : []).concat(row.claim);
+}
+
+// A claims path pointer as one comparable string. JSON rather than a join,
+// because a pointer may hold nulls and integers as well as strings (Appendix B)
+// and "a.0.b" would not tell those apart from the strings "0" and "b".
+function pathKey(path) {
+  log.debug("Entering pathKey().");
+  log.debug("Leaving pathKey().");
+  return JSON.stringify(path);
+}
+
+// The selected rows a set of requested paths names, in CATALOGUE order rather
+// than request order: the order claims appear in a credential is this issuer's,
+// and section A.3 makes request order a display concern of the wallet's.
+function rowsForPaths(paths, format) {
+  log.debug("Entering rowsForPaths(). " + (paths || []).length + " path(s), format=" + format);
+  const wanted = new Set((paths || []).map(pathKey));
+  const out = selectedRows().filter(function (row) {
+    const path = pathOfRow(row, format);
+    return path && wanted.has(pathKey(path));
+  });
+  log.debug("Leaving rowsForPaths(). " + out.length + " row(s) selected.");
+  return out;
+}
+
+// Which of the requested paths this issuer does not advertise for this format.
+// Returned rather than thrown: the caller is the authorization endpoint, which
+// has to name all of them in one error_description.
+function unknownPaths(paths, format) {
+  log.debug("Entering unknownPaths(). format=" + format);
+  const advertised = new Set(advertisedClaims(format).map(function (c) { return pathKey(c.path); }));
+  const out = (paths || []).filter(function (path) { return !advertised.has(pathKey(path)); });
+  log.debug("Leaving unknownPaths(). " + out.length + " unknown.");
   return out;
 }
 
@@ -748,6 +830,11 @@ module.exports = {
   subjectClaimsFor: subjectClaimsFor,
   metadataClaims: metadataClaims,
   ldpMetadataClaims: ldpMetadataClaims,
+  advertisedClaims: advertisedClaims,
+  pathOfRow: pathOfRow,
+  pathKey: pathKey,
+  rowsForPaths: rowsForPaths,
+  unknownPaths: unknownPaths,
   ldpSubjectFrom: ldpSubjectFrom,
   ldpOmitted: ldpOmitted
 };

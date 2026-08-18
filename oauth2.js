@@ -57,7 +57,11 @@ const dpop = require('./dpop');
 // here cannot create a cycle. The revocation set used to be a Set in this file;
 // see the comment where it was, below.
 const stats = require('./admin_stats');
-const { VCI_CONFIGS, VCI_CONFIG_ID, VCI_SCOPE } = require('./vc_configs');
+const { VCI_CONFIGS, VCI_CONFIG_ID, VCI_SCOPE, vciFormatOf } = require('./vc_configs');
+// For one thing: checking a wallet's requested claim paths against the ones this
+// issuer's metadata advertises for that credential's format. A library that
+// registers no route, so this adds nothing to the require order.
+const vcClaims = require('./vc_claims');
 const { deferredAccessTokens, issuerStates, preAuthorizedCodes } = require('./vc_offers');
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
@@ -558,7 +562,14 @@ function refreshToken(base, opts) {
     // of the grant would stay a bearer credential and binding the short-lived
     // half would buy very little. The refresh grant enforces it, which is what
     // makes the OID4VCI section 14.5 refresh on step 4 carry a proof of its own.
-    cnf: opts.jkt ? { jkt: opts.jkt } : undefined
+    cnf: opts.jkt ? { jkt: opts.jkt } : undefined,
+    // What this grant authorized in OID4VCI terms — the Credential Dataset
+    // identifiers and, where the wallet asked for one, its claims selection.
+    // Carried here because the refresh grant reads it back off this token: the
+    // access token it mints has to authorize the same credential, or a section
+    // 14.5 refresh would be refused by the credential endpoint for naming an
+    // identifier "that was not granted".
+    authorization_details: opts.authorization_details || undefined
   }, issuanceContext(opts));
   log.debug("Leaving refreshToken().");
   return token;
@@ -820,6 +831,91 @@ function loginPage(base, login, error) {
 // authorization_details (RFC 9396) as OID4VCI uses it: an array of objects of
 // type openid_credential, each naming a credential_configuration_id. Unreadable
 // JSON is not silently dropped — a wallet that sent nonsense should be told.
+// The OPTIONAL `claims` member of an openid_credential authorization detail
+// (OID4VCI section 5.1.1): which claims the Wallet wants the issued Credential
+// to carry, as claims description objects (Appendix A.1) holding claims path
+// pointers (Appendix B).
+//
+// Three kinds of refusal, and each is a refusal rather than a silent drop for
+// the same reason the type check above is: a wallet whose selection was quietly
+// ignored gets a credential carrying claims it did not ask for and no way to
+// discover why.
+//
+//   * a shape Appendix A.1 does not allow — a path that is not a non-empty array
+//     of strings, nulls and integers;
+//   * a repeated claim, which Appendix A.3 says MUST abort the processing;
+//   * a path this issuer does not advertise for that credential's format, which
+//     is the one check that is this issuer's own. Its metadata says what it can
+//     put in a credential; honouring a request for anything else would mean
+//     issuing a credential the wallet was told was impossible, or (more likely)
+//     issuing one silently missing the claim.
+//
+// Absent is not empty: `{ claims: null }` means the wallet expressed no
+// preference and gets everything, which is what every authorization made before
+// this member existed did.
+function parseClaimsDescriptions(raw, configId) {
+  log.debug("Entering parseClaimsDescriptions(). configId=" + configId);
+  if (raw === undefined || raw === null) {
+    log.debug("Leaving parseClaimsDescriptions(). No claims member.");
+    return { claims: null };
+  }
+  if (!Array.isArray(raw) || !raw.length) {
+    log.debug("Leaving parseClaimsDescriptions(). Not a non-empty array.");
+    return { error: 'the claims member of an authorization detail must be a non-empty array of ' +
+                    'claims description objects (OID4VCI Appendix A.1).' };
+  }
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      log.debug("Leaving parseClaimsDescriptions(). Entry " + i + " is not an object.");
+      return { error: 'claims[' + i + '] is not a claims description object.' };
+    }
+    const path = c.path;
+    if (!Array.isArray(path) || !path.length) {
+      log.debug("Leaving parseClaimsDescriptions(). Entry " + i + " has no usable path.");
+      return { error: 'claims[' + i + '].path must be a non-empty claims path pointer array ' +
+                      '(OID4VCI Appendix B).' };
+    }
+    const badPart = path.findIndex(function (part) {
+      return !(typeof part === 'string' || part === null || Number.isInteger(part));
+    });
+    if (badPart >= 0) {
+      log.debug("Leaving parseClaimsDescriptions(). Entry " + i + " has a bad path component.");
+      return { error: 'claims[' + i + '].path[' + badPart + '] must be a string, null or an ' +
+                      'integer (OID4VCI Appendix B).' };
+    }
+    const key = vcClaims.pathKey(path);
+    if (seen.has(key)) {
+      log.debug("Leaving parseClaimsDescriptions(). Entry " + i + " repeats a claim.");
+      return { error: 'the claim ' + key + ' is described twice; OID4VCI Appendix A.3 says a ' +
+                      'repeated claims description MUST abort the processing.' };
+    }
+    seen.add(key);
+    const entry = { path: path.slice() };
+    if (c.mandatory !== undefined) {
+      if (typeof c.mandatory !== 'boolean') {
+        log.debug("Leaving parseClaimsDescriptions(). Entry " + i + " has a non-boolean mandatory.");
+        return { error: 'claims[' + i + '].mandatory must be a boolean.' };
+      }
+      entry.mandatory = c.mandatory;
+    }
+    out.push(entry);
+  }
+  const unknown = vcClaims.unknownPaths(out.map(function (c) { return c.path; }),
+                                        vciFormatOf(configId));
+  if (unknown.length) {
+    log.debug("Leaving parseClaimsDescriptions(). " + unknown.length + " unadvertised path(s).");
+    return { error: 'this issuer does not advertise ' +
+                    unknown.map(vcClaims.pathKey).join(', ') + ' for credential_configuration_id "' +
+                    configId + '". Its metadata lists the claims it can carry in ' +
+                    'credential_configurations_supported.' };
+  }
+  log.debug("Leaving parseClaimsDescriptions(). " + out.length + " claim(s) requested.");
+  return { claims: out };
+}
+
 function parseAuthorizationDetails(raw) {
   log.debug("Entering parseAuthorizationDetails().");
   if (!raw) {
@@ -850,7 +946,14 @@ function parseAuthorizationDetails(raw) {
       log.debug("Leaving parseAuthorizationDetails(). Unknown configuration: " + configId);
       return { error: 'credential_configuration_id "' + configId + '" is not one this issuer offers.' };
     }
-    wanted.push({ type: 'openid_credential', credential_configuration_id: configId || VCI_CONFIG_ID });
+    const entry = { type: 'openid_credential', credential_configuration_id: configId || VCI_CONFIG_ID };
+    const claims = parseClaimsDescriptions(d.claims, entry.credential_configuration_id);
+    if (claims.error) {
+      log.debug("Leaving parseAuthorizationDetails(). " + claims.error);
+      return { error: claims.error };
+    }
+    if (claims.claims) entry.claims = claims.claims;
+    wanted.push(entry);
   }
   log.debug("Leaving parseAuthorizationDetails(). " + wanted.length + " detail(s).");
   return { details: wanted.length ? wanted : null };
@@ -1769,7 +1872,7 @@ app.post('/oauth2/token', function (req, res) {
     if (!details) return null;
     log.debug("Leaving grantIdentifiers().");
     return details.map(function (d) {
-      return {
+      const granted = {
         type: 'openid_credential',
         credential_configuration_id: d.credential_configuration_id,
         credential_identifiers: [
@@ -1779,6 +1882,13 @@ app.post('/oauth2/token', function (req, res) {
             .digest()).slice(0, 16)
         ]
       };
+      // Echoed back, and it has to be: this is what the credential endpoint
+      // reads the selection off (it rides inside the access token), and it is
+      // also the only way the wallet learns that the claims it asked for are the
+      // claims that were authorized. RFC 9396 section 7 enriches the details it
+      // returns rather than replacing them.
+      if (d.claims) granted.claims = d.claims;
+      return granted;
     });
   };
 
@@ -1905,10 +2015,36 @@ app.post('/oauth2/token', function (req, res) {
       sub: (record.user && record.user.sub) || '', client_id: client.client_id,
       note: 'Identified out of band when the Credential Offer was made; no browser session exists.'
     });
+    // OID4VCI section 6.1.1: the Wallet MAY send authorization_details in the
+    // Token Request, in the Pre-Authorized Code Flow as well as the
+    // Authorization Code one — and here it is the ONLY place it can, because
+    // this flow has no authorization request to have sent them in. That is what
+    // lets a cross-device or deferred issuance ask for a subset of the claims.
+    const askedFor = parseAuthorizationDetails(body.authorization_details);
+    if (askedFor.error) {
+      log.debug("Leaving the token endpoint. " + askedFor.error);
+      return oauthError(res, 400, 'invalid_authorization_details', askedFor.error);
+    }
+    // What the OFFER was for bounds what the Token Request may ask for: the
+    // pre-authorized code authorizes those credentials and no others, so a
+    // request naming a different configuration is asking for something nobody
+    // ever offered.
+    const offered = record.configurationIds || [];
+    const notOffered = (askedFor.details || []).filter(function (d) {
+      return offered.indexOf(d.credential_configuration_id) === -1;
+    });
+    if (notOffered.length) {
+      log.debug("Leaving the token endpoint. The details name a configuration the offer did not.");
+      return oauthError(res, 400, 'invalid_authorization_details',
+        'this Credential Offer is for ' + offered.join(', ') + ', so ' +
+        notOffered.map(function (d) { return '"' + d.credential_configuration_id + '"'; }).join(', ') +
+        ' cannot be authorized by it.');
+    }
     const issued = tokenSet(base, {
       jkt: dpopJkt,
       user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false,
-      grant: 'pre-authorized code'
+      grant: 'pre-authorized code',
+      authorization_details: grantIdentifiers(askedFor.details, record.user)
     });
     // Remember which access token belongs to a deferred issuance, so the
     // credential endpoint knows to answer 202 rather than a credential.
@@ -1950,6 +2086,13 @@ app.post('/oauth2/token', function (req, res) {
       }
     }
     return respond(tokenSet(base, {
+      // The same reasoning applies to the OID4VCI half of the grant: the
+      // credential_identifiers and the claims selection were authorized by the
+      // authorization request this refresh token descends from, so an access
+      // token that dropped them would refuse the very Credential Request the
+      // section 14.5 refresh on step 4 exists to make — naming a
+      // credential_identifier "that was not granted".
+      authorization_details: claims.authorization_details,
       // A refresh keeps whatever binding it had: re-binding to the key that
       // happens to have signed this request would let a stolen bound token be
       // laundered into one bound to the thief's key.

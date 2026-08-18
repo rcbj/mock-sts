@@ -121,8 +121,12 @@ function vciMetadata(req) {
     // Built from the configured claim set rather than written out, so that this
     // metadata cannot come to describe a credential this issuer no longer mints.
     // An SD-JWT VC's claims sit at the top level of the payload, so there is no
-    // prefix. See /admin/vc.
-    claims: vcClaims.metadataClaims([])
+    // prefix. See /admin/vc. Through advertisedClaims() rather than
+    // metadataClaims() directly, because the authorization endpoint validates a
+    // wallet's requested claim paths against the SAME list — an issuer that
+    // advertised one set of paths and accepted another would make the metadata
+    // unusable for exactly the wallet that read it.
+    claims: vcClaims.advertisedClaims('dc+sd-jwt')
   };
   // The same facts as a W3C VC secured as a JWT. `credential_definition.type`
   // is what identifies the credential in this format — jwt_vc_json has no vct —
@@ -143,7 +147,7 @@ function vciMetadata(req) {
       background_color: '#0b6b4f',
       text_color: '#FFFFFF'
     }],
-    claims: vcClaims.metadataClaims(['credentialSubject'])
+    claims: vcClaims.advertisedClaims('jwt_vc_json')
   };
   // ldp_vc: the signing "alg" slot holds a CRYPTOSUITE name, not a JOSE alg —
   // which is the visible sign that this format is secured differently.
@@ -168,7 +172,7 @@ function vciMetadata(req) {
     // JSON-LD, so it can only carry terms the vendored context defines. The
     // claims a selection asks for and this format cannot express are named on
     // /admin/vc rather than being quietly missing here.
-    claims: vcClaims.ldpMetadataClaims()
+    claims: vcClaims.advertisedClaims('ldp_vc')
   };
   // The DID variants, CLONED from the sibling each is based on rather than
   // written out a fourth and fifth time. Everything about the credential is
@@ -660,8 +664,8 @@ async function buildCredentialFor(configId, subjectClaims, holderJwk, credential
 //     The name is what everything downstream is keyed on: it selects the
 //     directory entry and seeds the persona, so `alice` gets the same invented
 //     person here that ldap_server.js wrote onto uid=alice,ou=users.
-function subjectClaimsFrom(accessToken) {
-  log.debug("Entering subjectClaimsFrom().");
+function subjectClaimsFrom(accessToken, configId) {
+  log.debug("Entering subjectClaimsFrom(). configId=" + (configId || '(none)'));
   let t = {};
   try {
     const parts = String(accessToken || '').split('.');
@@ -671,14 +675,64 @@ function subjectClaimsFrom(accessToken) {
     log.debug("The access token is not a readable JWT; using the default claims.");
   }
   const user = t.preferred_username || t.sub || 'mock-holder';
-  const built = vcClaims.subjectClaimsFor(user, t);
+  // What the wallet asked for in its authorization_details, if it asked at all
+  // (OID4VCI section 5.1.1). Null means it did not, which is not the same as an
+  // empty selection: the whole configured set is issued, exactly as before.
+  const asked = requestedClaimPaths(accessToken, configId);
+  const rows = asked ? vcClaims.rowsForPaths(asked, vciFormatOf(configId)) : null;
+  const built = vcClaims.subjectClaimsFor(user, t, rows);
   const claims = Object.assign({ sub: t.sub || ('urn:uuid:' + crypto.randomUUID()) },
                                built.claims);
   log.debug("Leaving subjectClaimsFrom(). The credential will describe " + user +
             " with " + built.report.length + " configured claim(s), " +
+            (asked ? "the " + asked.length + " the wallet asked for, " : "") +
             (built.entryFound ? "read from their directory entry where it has them."
                               : "with no directory entry to read from."));
   return claims;
+}
+
+// ---------------------------------------------------------------------------
+// WHICH CLAIMS THE WALLET ASKED FOR, or null if it asked for none in particular.
+//
+// The request was made at the authorization endpoint, in the `claims` member of
+// an authorization_details entry (OID4VCI section 5.1.1), and it arrives here
+// inside the access token — the same route, and for the same reason, as the
+// credential_identifiers beside it: the token is signed by this service, so a
+// wallet cannot widen its own selection by editing anything, and the credential
+// endpoint needs no state to check it.
+//
+// Null rather than an empty array when nothing was asked for. The two are
+// genuinely different: no `claims` member means "whatever you issue", and an
+// empty one is not expressible at all (section A.1 requires a non-empty array),
+// so a caller that could not tell them apart would issue an empty credential to
+// every wallet that used a scope.
+// ---------------------------------------------------------------------------
+function requestedClaimPaths(accessToken, configId) {
+  log.debug("Entering requestedClaimPaths(). configId=" + (configId || '(none)'));
+  let claims;
+  try {
+    claims = jwt.verify(accessToken, STS.certPem, { algorithms: ['RS256'] });
+  } catch (e) {
+    log.debug("Leaving requestedClaimPaths(). The token is not one of ours: " + e.message);
+    return null;
+  }
+  const details = claims.authorization_details || [];
+  let found = null;
+  details.forEach(function (d) {
+    if (!d || !Array.isArray(d.claims) || !d.claims.length) {
+      return;
+    }
+    // The entry for THIS credential. A token may authorize several
+    // configurations and each carries its own selection, so matching on the
+    // configuration is what keeps one credential's selection off another.
+    if (configId && d.credential_configuration_id && d.credential_configuration_id !== configId) {
+      return;
+    }
+    found = d.claims.map(function (c) { return (c || {}).path; }).filter(Array.isArray);
+  });
+  log.debug("Leaving requestedClaimPaths(). " +
+            (found ? found.length + " claim(s) requested." : "None were requested."));
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1240,7 @@ app.post('/oid4vci/credential', async function (req, res) {
     deferredAccessTokens.delete(accessToken);
     const transactionId = randomId(16);
     deferredTransactions.set(transactionId, {
-      claims: subjectClaimsFrom(accessToken),
+      claims: subjectClaimsFrom(accessToken, requestedConfigId),
       holderJwk: holderJwk,
       holderJwks: holderJwks,
       // The format was chosen in the request that was deferred, not in the one
@@ -1212,7 +1266,7 @@ app.post('/oid4vci/credential', async function (req, res) {
   }
 
   // One credential per key the wallet proved possession of.
-  const claims = subjectClaimsFrom(accessToken);
+  const claims = subjectClaimsFrom(accessToken, requestedConfigId);
   const issuerId = vciMetadata(req).credential_issuer;
   const issued = await Promise.all(holderJwks.map(function (jwk) {
     return buildCredentialFor(requestedConfigId, claims, jwk, issuerId,
