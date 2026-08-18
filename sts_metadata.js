@@ -148,6 +148,33 @@ const SPECS = [
               'match is not evaluated; the attempt is logged rather than silently treated as ' +
               'no match, since an unsupported filter and an empty directory look identical ' +
               'from the client.' },
+  { id: 'rfc8446', name: 'TLS 1.3 (RFC 8446), and TLS 1.2 (RFC 5246)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc8446',
+    coverage: 'full, and none of it is this service\'s code — the two HTTPS listeners are ' +
+              'node\'s own TLS stack over OpenSSL, with whatever versions and ciphers that ' +
+              'build offers. What is written here is the POLICY and the REPORT: one listener ' +
+              'asks for a client certificate and accepts whatever arrives, the other requires ' +
+              'one, and both hand back what the server saw. Two things about client ' +
+              'authentication are worth knowing before reading that report. Under TLS 1.3 the ' +
+              'client sends its Certificate and Finished LAST, so the handshake is complete ' +
+              'from its point of view before the server has said anything about the ' +
+              'certificate — a client that reports success on secureConnect will report a ' +
+              'happy mutual-TLS connection to a server that rejected it a millisecond later. ' +
+              'And node refuses an unverified client certificate by CLOSING THE SOCKET WITH NO ' +
+              'ALERT, which is why the permissive listener exists at all: it is the only one ' +
+              'that can tell you why.' },
+  { id: 'rfc5280', name: 'X.509 certificates and CRLs (RFC 5280)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc5280',
+    coverage: 'partial, and the path validation is OpenSSL\'s rather than this service\'s: ' +
+              'client certificates are verified against anchors POSTed to /tls/trust at ' +
+              'runtime, and the server certificate is self-signed here per start with a ' +
+              'subjectAltName carrying every name this stack is reached by. NO REVOCATION IS ' +
+              'CHECKED — no CRL is fetched and no OCSP responder is consulted — so a revoked ' +
+              'certificate verifies here and would not verify anywhere that matters. Name ' +
+              'constraints, policies and path length are enforced only to the extent OpenSSL ' +
+              'enforces them, which is to say properly, and by nothing written here.' },
   { id: 'ws-trust', name: 'WS-Trust 1.4 (and 1.0-1.3)',
     where: 'OASIS ws-sx',
     url: 'https://docs.oasis-open.org/ws-sx/ws-trust/v1.4/ws-trust.html',
@@ -417,6 +444,44 @@ const ENDPOINTS = [
           'who authenticates through ANY of the twelve protocol families here, through one ' +
           'hook on the funnel they all already pass. Not an LDAP operation. Add ' +
           '?format=json.' },
+
+  // --- TLS ---
+  //
+  // The third instance of the blind spot the Kerberos and LDAP rows describe, and the
+  // one where it is easiest to forget it applies: these listeners speak HTTP, so they
+  // LOOK like they should already be on this page — but they are HTTPS on their own
+  // sockets (8443 and 9443), and this page is built by walking the Express router of
+  // the PLAIN listener. It cannot see them. The four rows below are the plain-HTTP
+  // views; the listeners themselves are described in their text.
+  { path: '/tls', group: 'TLS', name: 'What the TLS endpoint is',
+    specs: ['rfc8446', 'rfc5280'],
+    what: 'Two HTTPS listeners on their own sockets — 8443 asks for a client certificate and ' +
+          'never refuses one, 9443 REQUIRES one and refuses it during the handshake — whose ' +
+          'entire content is what the SERVER saw: the request as it arrived, what TLS ' +
+          'negotiated underneath it, and the client certificate exactly as presented. Neither ' +
+          'is visible to this page, which walks the plain listener\'s router. This row is the ' +
+          'description; GET /tls/whoami over either listener is the report itself. Add ' +
+          '?format=json.' },
+  { path: '/tls/server-certificate', group: 'TLS', name: 'The server certificate (PEM)',
+    specs: ['rfc5280'],
+    what: 'The self-signed certificate both HTTPS listeners present, as PEM. It is REGENERATED ' +
+          'ON EVERY START, like the signing key, so it is an anchor nobody can have baked in ' +
+          'and no cached copy of it stays valid — hence Cache-Control: no-store. Fetch it into ' +
+          'your own truststore rather than switching verification off.' },
+  { path: '/tls/trust', group: 'TLS', name: 'Trust a client certificate issuer',
+    specs: ['rfc5280'],
+    what: 'POST one or more PEM certificates — raw, or as the `certificates` field of a form or ' +
+          'JSON body — and client certificates chaining to them verify from the next handshake ' +
+          'onward (tls.Server.setSecureContext; existing connections keep the truststore they ' +
+          'were made under). It starts EMPTY and has to: the CA it verifies is usually ' +
+          'generated in a browser minutes before the connection and exists nowhere else, so no ' +
+          'file could hold it. It is on the PLAIN port because that is the one reachable before ' +
+          'anything is trusted. POST only.' },
+  { path: '/tls/trust/clear', group: 'TLS', name: 'Empty the client truststore',
+    specs: ['rfc5280'],
+    what: 'Removes every anchor, returning the service to its starting state: no client ' +
+          'certificate verifies, and nothing can connect to the listener that requires one. ' +
+          'POST only.' },
 
   // --- service ---
   { path: '/healthcheck', group: 'Service', name: 'Health check',

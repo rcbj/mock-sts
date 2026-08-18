@@ -5,15 +5,17 @@ this repository.
 
 ## Overview
 
-A mock identity service that speaks thirteen protocol families — Kerberos v5 (a KDC on
+A mock identity service that speaks fourteen protocol families — Kerberos v5 (a KDC on
 raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service and the same
 acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
 1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
 OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
 half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, W3C DID Core with
 DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw TCP 389,
-built on the node-ldapjs SUBMODULE and used unmodified). It exists to exercise *clients*: it authenticates nobody, checks no
-password and validates no access token.
+built on the node-ldapjs SUBMODULE and used unmodified), and **TLS / mutual TLS**
+(two HTTPS listeners of its own, 8443 and 9443, whose whole content is what the
+SERVER saw of the connection — see README.md). It exists to exercise *clients*: it
+authenticates nobody, checks no password and validates no access token.
 
 **There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
 Response. That is now the gap beside WS-Trust and WS-Federation, and it is deliberate;
@@ -45,7 +47,7 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
 middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
-`vc_verifier.js`, `ldap_server.js`, `krb5_kdc.js`,
+`vc_verifier.js`, `ldap_server.js`, `tls_server.js`, `krb5_kdc.js`,
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
 messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `sts_metadata.js`, and the
 two libraries that register nothing, `dpop.js` and `admin_stats.js`.
@@ -59,15 +61,26 @@ codec (a byte-identical copy of the parent project's `common/krb5/krb5_spnego.js
 kept honest by `tests/krb5_codec_sync.js` there), and `spnego.js` is this repo's own.
 Do not merge the two — one of them is somebody else's file.
 
-The two Kerberos modules AND `ldap_server.js` are the exception to rule 1 below in
-one direction only: requiring them registers their HTTP views (`/KdcProxy`,
-`/krb5/principals`, `/ldap`) like everything else, but their **raw socket listeners
-are started from `listen()` in `server.js`, not at require time** — binding a
-privileged port can fail, and a `require` that throws takes the whole service down
-where a route cannot. A failure to bind is RECORDED rather than thrown, and
-`ldap_server.js` publishes it (`listening` / `listenError` on `GET /ldap`), because
-the HTTP view answers 200 either way and there is otherwise no way to tell a running
-directory from one whose listener lost a race with the host's own slapd.
+The two Kerberos modules, `ldap_server.js` AND `tls_server.js` are the exception to
+rule 1 below in one direction only: requiring them registers their HTTP views
+(`/KdcProxy`, `/krb5/principals`, `/ldap`, `/tls`) like everything else, but their
+**own listeners are started from `listen()` in `server.js`, not at require time** —
+binding a port can fail, and a `require` that throws takes the whole service down
+where a route cannot. A failure to bind is RECORDED rather than thrown, and both
+`ldap_server.js` and `tls_server.js` publish it (`listening` / `listenError` on
+`GET /ldap` and `GET /tls`), because the HTTP view answers 200 either way and there
+is otherwise no way to tell a running listener from one whose port was already taken
+— by the host's own slapd, or by a second copy of this service.
+
+`tls_server.js` is the newest of the four and the one whose sockets are easiest to
+forget are sockets: they speak **HTTP**, so they look as though they belong on the
+plain listener — but they are HTTPS on 8443 and 9443, and `GET /sts-metadata` walks
+the plain listener's router, which cannot see them. Its four rows there are the
+plain-HTTP views only, and the listeners are described in their text. Its truststore
+for CLIENT certificates is empty at startup and is filled at runtime through
+`POST /tls/trust`, because the CA it verifies is generated in somebody's browser
+minutes before the connection; that endpoint is on the plain port on purpose, since
+that is the one reachable before anything is trusted.
 
 1. **Requiring a module registers its endpoints.** Each calls `app.get(...)` at its
    top level against the shared app from `app.js`, rather than exporting a
@@ -306,6 +319,14 @@ Worth knowing before "fixing" one of them:
 * **One password is rejected** — the literal string `invalid` on the password grant,
   on WS-Trust and at the WS-Federation sign-in screen — so a negative test has
   something to fail on in every protocol here.
+* **A verified client certificate on the TLS listeners is not a login**, and no
+  revocation is checked there. Verification means one thing exactly: OpenSSL built a
+  chain from what the client sent to an anchor somebody POSTed to `/tls/trust`. No
+  session starts, no token is issued, no other endpoint is told, and a revoked
+  certificate verifies here and would not verify anywhere that matters. Both facts
+  are stated in the report itself rather than left to be discovered — a mock that
+  quietly turned a certificate into an identity would teach a client something false
+  about every server it will ever meet.
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
