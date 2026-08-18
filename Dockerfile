@@ -86,5 +86,11 @@ COPY contexts ./contexts
 COPY env ./env
 ENV CONFIG_FILE=./env/local.js
 
+# 8081 is the HTTP service. The rest are the listeners that are NOT HTTP and so
+# are not on it: 88 is the KDC (TCP and UDP), 389 the LDAP directory, 8443 the
+# TLS endpoint that asks for a client certificate and 9443 the one that requires
+# it. EXPOSE documents them; each compose file decides which it publishes.
 EXPOSE 8081
+EXPOSE 8443
+EXPOSE 9443
 CMD [ "node", "server.js" ]

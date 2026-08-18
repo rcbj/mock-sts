@@ -122,6 +122,16 @@ require('./admin');
 // during require — but keeping it beside the console is what makes the pairing
 // visible to the next reader.
 const ldapServer = require('./ldap_server');
+// The TLS / mutual-TLS endpoint. Third in the family of modules whose real
+// surface is a SOCKET rather than a route: it registers its plain-HTTP views
+// (/tls, /tls/server-certificate, /tls/trust) at require time and starts two
+// HTTPS listeners from listen() below, for the same reason the KDC and the
+// directory do — a bind can fail, and a require that throws takes the whole
+// service down where a route cannot.
+//
+// Its position in this list is free: it depends on nothing here but app.js and
+// helpers.js, and nothing here depends on it.
+const tlsServer = require('./tls_server');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -180,5 +190,26 @@ app.listen(PORT, '0.0.0.0', function () {
     // this service is still useful, and a silent failure to bind would surface
     // later as a directory that never answers.
     log.error('ldap: the directory could not start: ' + err.message);
+  });
+  // The two HTTPS listeners, started here for the same reason the other two
+  // sockets are. GET /tls describes them and hands out the server certificate;
+  // GET /sts-metadata cannot see a socket, so they are described by hand there
+  // beside the KDC's and the directory's.
+  const tlsListeners = tlsServer.listen();
+  tlsListeners.whenReady.then(function (ready) {
+    log.info('tls: an HTTPS endpoint that reports the connection back to ' +
+             'whoever made it is on ' + ready.tlsPort + ' (a client ' +
+             'certificate is asked for, never required, and always ' +
+             'explained) and on ' + ready.mtlsPort + ' (one is REQUIRED, and ' +
+             'refused during the handshake if it does not verify). GET ' +
+             '/tls/whoami over either. The client truststore starts EMPTY — ' +
+             'POST the issuing CA to /tls/trust on this port — because the CA ' +
+             'it has to verify is usually generated in a browser minutes ' +
+             'before the connection.');
+  }).catch(function (err) {
+    // Reported rather than thrown, as the other two are: the rest of this
+    // service is still useful, and a silent failure to bind would surface
+    // later as a TLS endpoint that never answers.
+    log.error('tls: the TLS endpoint could not start: ' + err.message);
   });
 });

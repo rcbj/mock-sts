@@ -1,8 +1,8 @@
 # Mock STS
 
-A deliberately permissive **mock identity service** that speaks thirteen protocol
-families — two of which, Kerberos and LDAP, are not HTTP at all — for exercising
-clients. It
+A deliberately permissive **mock identity service** that speaks fourteen protocol
+families — three of which, Kerberos, LDAP and TLS, are not HTTP over its own
+listener at all — for exercising clients. It
 authenticates nobody, checks no passwords and validates no access tokens (UserInfo
 excepted, deliberately, and there is a section on why below): it exists so that a
 client can be driven through a complete protocol exchange without standing up a real
@@ -44,12 +44,14 @@ are — most of it is the record of something having gone wrong once.
 | **OpenID4VCI 1.0** | a Credential Issuer: SD-JWT VC (RFC 9901), `jwt_vc_json`, `ldp_vc` with bbs-2023; Credential Offers, the pre-authorized code grant with `tx_code`, `authorization_details`, batch issuance, response encryption, deferred issuance, the Notification Endpoint |
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
+| **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
 | **LDAP v3 (RFC 4511)** | an embedded **directory on raw TCP port 389**: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — one hook on the single funnel they all already pass |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
-router, so it cannot go stale, and thirty-eight specifications with how far each one
+router, so it cannot go stale, and forty-six specifications with how far each one
 goes. See *The index of itself* below, including the one blind spot that design has:
-a protocol that registers no route, which is exactly what Kerberos and LDAP are.
+a protocol that registers no route, which is exactly what Kerberos, LDAP and the two
+HTTPS listeners are.
 
 **WS-Federation used to be the gap here, and this note used to say so.** Until
 `wsfed.js` existed, the pieces a passive-requestor profile needs — the assertion
@@ -94,14 +96,16 @@ service logs every endpoint call (path, request and response headers and bodies,
 status, elapsed time) and every assertion, JWT and SD-JWT VC both before and after
 signing or encryption, which is the point of a mock.
 
-**Three listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
-UDP 88**, and the Kerberos-protected service a TCP socket of its own (8888). The two
-Kerberos listeners are started from an exported `listen()` that `server.js` calls
-*after* the HTTP server is up, and a failure to bind is logged rather than thrown —
-port 88 is privileged, a host
-run is usually not root, and a require that throws would take the whole service down
-over a protocol family the caller may not be using. Set `KRB5_KDC_PORT` to something
-unprivileged for a host run.
+**Six listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
+UDP 88**, the Kerberos-protected service a TCP socket of its own (8888), the
+directory **TCP 389**, and the TLS endpoint **8443** and **9443**. Every one of them
+is started from an exported `listen()` that `server.js` calls *after* the HTTP server
+is up, and a failure to bind is logged rather than thrown — port 88 and port 389 are
+privileged, a host run is usually not root, and a require that throws would take the
+whole service down over a protocol family the caller may not be using. Set
+`KRB5_KDC_PORT`, `LDAP_PORT`, `STS_TLS_PORT` and `STS_MTLS_PORT` to something
+unprivileged or unoccupied for a host run, and remember that the parent project's api
+allowlists the port it will reach on each of them.
 
 In Docker:
 
@@ -163,9 +167,18 @@ And LDAP's, which is the other protocol here that is not HTTP:
 | `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
 | `LDAP_SIZE_LIMIT` | the largest result this server will return from one search (default `500`), on top of whatever the client asks for. A search of a directory this small will never reach it — but a client that has never seen `LDAP_SIZE_LIMIT_EXCEEDED` has never handled a paged result either |
 
+And TLS's, the third thing here that is not on the HTTP listener:
+
+| Variable | What it does |
+|---|---|
+| `STS_TLS_PORT` | the listener that **asks** for a client certificate and never refuses one (default `8443`) |
+| `STS_MTLS_PORT` | the listener that **requires** one (default `9443`). Two ports rather than a flag, because "does this server require a client certificate" is a question a debugger answers by connecting twice, and it needs a server that answers each way |
+| `STS_TLS_HOSTNAMES` | the dNSNames the self-signed server certificate is issued for (default `localhost,sts,sts-mock,sts.example.com`). A certificate naming only one of the ways this stack is reached produces a hostname-verification failure that is about this service rather than about anything the caller is debugging |
+| `STS_TLS_IPS` | the iPAddress names on the same certificate (default `127.0.0.1`) |
+
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across thirty-one modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the thirteen modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `ldap_server.js`, `sts_metadata.js`. The other sixteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below.
+A mock Security Token Service used by the test suite, **split across thirty-two modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the fourteen modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `ldap_server.js`, `tls_server.js`, `sts_metadata.js`. The other sixteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below.
 
 The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
 (what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
@@ -549,7 +562,7 @@ The drift check earned its keep immediately: on first run it caught the `OPTIONS
 
 Each path is a **link to that path** — but only where that is honest, which is about half of them. A link is issued as a GET, so a path the router answers only for POST would land the reader on Express's own `Cannot GET /oauth2/token` (reads as a broken service), and a route pattern carrying a `:parameter` or a `*` is not the address of anything. Those are listed unlinked with the reason shown — "POST only", "takes :id", "wildcard" — because that reason is the most useful thing on the row. The five followable endpoints that *do* something when clicked (`/oauth2/authorize`, `/oauth2/logout`, `/oauth2/userinfo`, `/issuer/offer`, `/oid4vp/start`) carry an `effect` note; the first answers **400** when followed bare since it needs `client_id` and `redirect_uri`, and userinfo answers **401** since it is a protected resource. Links are root-relative so they follow whichever host the page was reached at, and open in a new tab so the index survives the click. That test **follows every link** and fails if one does not reach a handler, which is what stops the page advertising a dead one.
 
-Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of thirty-eight specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
+Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of forty-six specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
 
 **Kerberos is the one blind spot in the whole design, and it is structural.** The page is built by walking the live Express router, which is precisely why it cannot go stale — and the KDC's listeners are raw TCP and UDP sockets, as is the protected service's. A protocol family that registers no route is invisible to a router walk. Three HTTP surfaces are all the walk can see (`/KdcProxy`, `/krb5/principals`, `/krb5/service`), so the sockets are described in the text of those rows rather than left to be inferred from silence — the alternative, a described entry with no route behind it, is the *stale* half of the drift check and would have to be exempted from it by hand. Anything added later that speaks a protocol over a socket needs the same treatment.
 
@@ -890,6 +903,83 @@ Which leads to the second defect: **`messageId` defaults to 1**, so `send()`'s
 symptom is an uncaught exception in this log and a search that returns *zero entries and
 then ends successfully*, which reads as an empty directory. `toSearchEntry()` builds the
 instance with `res.messageId` and sidesteps both.
+
+### TLS and mutual TLS — the other side of a handshake
+
+`tls_server.js` puts up **two HTTPS listeners of its own**, and their entire content
+is what the *server* saw. Fetch `GET /tls/whoami` over either one and the reply
+describes the very connection it is travelling on: the HTTPS request as it arrived
+(method, path, every header, where from), what TLS negotiated underneath it (version,
+cipher, SNI, ALPN, session reuse, the server certificate), and the client
+certificate — presented or not, verified or not, with the whole chain the client
+sent, leaf first. `GET /tls` describes the endpoint over plain HTTP, and both pages
+take `?format=json`.
+
+**Why it exists, given that any client already reports its own handshake.** Because
+that report is the side that already knows what it sent. What a client cannot see is
+which chain the server built out of what arrived, which anchor it verified against,
+what it read out of the leaf, or whether the certificate was accepted at all. Under
+**TLS 1.3** it has not even been told: the client sends its Certificate and Finished
+*last*, so its handshake is complete before the server has said anything, and the
+verdict arrives afterwards — as a post-handshake alert, or as a bare hang-up. Node's
+own TLS server does the latter. So a client that reports success on `secureConnect`
+will cheerfully report a working mutual-TLS connection to a server that rejected the
+certificate a millisecond later, and this endpoint is where that gets found out.
+
+**Two listeners, because the question has two answers.**
+
+| | |
+|---|---|
+| `8443` | `requestCert: true, rejectUnauthorized: false`. It always asks, accepts whatever arrives including nothing, and *reports* the verdict rather than enforcing it. Point a debugger here: a refusal at the TLS layer tells you almost nothing, and this listener can tell you which check failed and why |
+| `9443` | `requestCert: true, rejectUnauthorized: true`. It refuses an unverified certificate during the handshake, the way a real server does — which is to say by closing the socket with no alert at all. Reaching it *is* the proof that the certificate verified |
+
+That pair is what makes a caller's mutual-authentication verdicts reachable against a
+real server rather than a fixture: `required` against 9443 once the issuing CA is
+trusted here, `required-and-rejected` before it is (the case an operator hits most,
+and the one a single connection cannot tell from the first), and `not-required`
+against 8443, which is true — it asks and does not insist.
+
+**The client truststore starts empty, and it has to.** The certificate authority
+whose clients this verifies is generated in somebody's *browser*, minutes before the
+connection, and exists nowhere else — so no configuration file could hold it and no
+image could bake it in. `POST /tls/trust` takes one or more PEM certificates (raw, or
+as the `certificates` field of a form or JSON body) and
+`tls.Server.setSecureContext()` applies them; existing connections keep the truststore
+they were made under, and the next handshake is judged against the new one.
+`POST /tls/trust/clear` puts it back.
+
+Three details in there are load-bearing and each was measured rather than assumed:
+
+* **`ca: []` means no anchors.** It is not the same as omitting `ca`, which selects
+  node's bundled root store — the opposite of what is wanted, since a public root has
+  no business verifying a client certificate from a private CA. The empty case is
+  passed explicitly, so the starting state is "nothing verifies", which is correct and
+  is what the page says.
+* **The trust endpoint is on the PLAIN port**, not on 8443. That port is the one
+  reachable before anything is trusted; an endpoint that could only be called by
+  somebody already trusted would be a chicken-and-egg with a specification citation
+  attached.
+* **The server certificate is self-signed and regenerated on every start**, like the
+  signing key, and for the same reason — a certificate committed to a repository is a
+  private key committed to a repository. `GET /tls/server-certificate` hands out the
+  PEM (`Cache-Control: no-store`, since a cached copy outlives the key it describes)
+  so a caller can put it in its own truststore rather than switching verification off,
+  which is the habit this whole workflow exists to break.
+
+**And a verified client certificate is not a login.** It means a chain was built from
+what the client sent to an anchor somebody POSTed to this process, and no more: no
+session is started, no token is issued, and no other endpoint here is told about it.
+The report says so in as many words, because a mock that quietly turned a certificate
+into an identity would teach a client something false about every server it will meet
+afterwards.
+
+One thing worth knowing about the log: a certificate refused by the strict listener
+never reaches a handler, so without help it would be invisible from both ends — the
+caller sees a closed socket and this service says nothing. Both listeners therefore
+log `tlsClientError` with OpenSSL's own reason, and the strict one's message names the
+truststore, the trust endpoint and the permissive port. It is the single most
+confusing failure in mutual TLS and it is the one this service refuses to be silent
+about.
 
 ### The issuer named by a DID
 
