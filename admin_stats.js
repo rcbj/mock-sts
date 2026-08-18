@@ -407,6 +407,12 @@ const users = new Map();       // local name -> the record below
 
 let usersForgotten = 0;
 
+// Does this identity begin `<attributetype>=`? That is the one shape identityOf()
+// below must not split at an '@'. Deliberately strict — a type is a letter
+// followed by letters, digits and hyphens, which is what RFC 4512 allows — so that
+// it cannot match a name somebody typed at a sign-in screen.
+const DN_SHAPED = /^[A-Za-z][A-Za-z0-9-]*=/;
+
 // A presented identity, split into the part that identifies a person here and the
 // parts that merely say where it was presented. Without entering/leaving logs: it is
 // called for every token and artifact on every users page view, so a pair of lines
@@ -427,7 +433,17 @@ function identityOf(value) {
   // domain shown in the Realms column. On this service that is usually what was
   // meant — the same person's Kerberos principal would land in the same row — and
   // where it is not, the column says which domains have been folded together.
-  const at = rest.lastIndexOf('@');
+  //
+  // A DN is the exception, and it has to be: an X.509 subject or an LDAP bind DN
+  // routinely carries `emailAddress=alice@example.com`, where the '@' is inside an
+  // attribute VALUE and the text after it is a mail domain rather than a realm.
+  // Splitting there produced a key ending `...,emailAddress=alice` — a DN that
+  // names nothing, and one the directory would then build an entry from. So a
+  // value that begins with an attribute type and an '=' is taken whole. Nothing
+  // else here can look like that: a username, a `urn:` subject and a mail address
+  // all fail the test, and a Kerberos principal cannot contain '=' before its
+  // first character run ends.
+  const at = DN_SHAPED.test(rest) ? -1 : rest.lastIndexOf('@');
   if (at > 0) {
     realm = rest.slice(at + 1);
     rest = rest.slice(0, at);
@@ -556,7 +572,15 @@ function recordAuthentication(detail) {
       userObserver({
         key: identity.key, name: identity.name, realm: identity.realm,
         presented: identity.form, protocol: protocol, method: method,
-        isClient: record.isClient, sub: info.sub || ''
+        isClient: record.isClient, sub: info.sub || '',
+        // Passed through untouched, and only the TLS listeners set it: a client
+        // certificate's identity IS a DN, so the entry the directory seeds for it
+        // is not `uid=<name>` and the facts that go in it — issuer, serial,
+        // validity — are on the certificate rather than in anything this file
+        // holds. It rides on the observer rather than on a second hook because
+        // this is already the funnel, and a second call at the TLS listener would
+        // be a second thing to keep right. Nothing here reads it.
+        certificate: info.certificate || null
       });
     } catch (e) {
       log.error('the user observer threw and was ignored; the authentication ' +

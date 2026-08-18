@@ -1308,6 +1308,173 @@ app.get('/admin/tokens', function (req, res) {
 // is visible.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// THE EMBEDDED DIRECTORY'S VIEW OF ONE USER, AND WHY IT ARRIVES THROUGH A SLOT.
+//
+// ldap_server.js grows an entry under `ou=users` for everybody who authenticates
+// anywhere in this service, so by the time a person has a page here they usually
+// have a directory object too — and showing it beside their tokens is the point:
+// the two are the same authentication seen from two sides.
+//
+// This module does NOT require ldap_server.js to get at it, and the reason is the
+// route order rather than a cycle. server.js requires ./admin before
+// ./ldap_server (that module needs admin_stats' identity normalisation, and the
+// console reads oauth2's sessions), so a require from here would pull the
+// directory's routes into the router AHEAD of the console's — and /sts-metadata is
+// built by walking that router. So the direction is inverted the same way
+// admin_stats.js's user observer is: this file offers a slot, and ldap_server.js
+// fills it at its own require time.
+//
+// It stays null when that module was never required. That is a real state — the
+// directory is the newest thing here and a build without it must still render this
+// page — so the section says "no directory is loaded" rather than being absent,
+// which would read as "this user has no entry".
+// ---------------------------------------------------------------------------
+let directoryReader = null;
+
+function setDirectoryReader(fn) {
+  directoryReader = fn;
+  log.debug("A directory reader was installed; a user's page will now show that " +
+            "user's LDAP entry.");
+}
+
+// The whole section, as HTML and as the object that goes into ?format=json. Both
+// come out of one call so that the page and the JSON cannot disagree about what
+// the directory holds, which is the same rule /ldap follows for its own two views.
+//
+// `row` is the user record: it is what tells a missing entry apart from an entry
+// that was never going to exist. Four of the five reasons for an absence are facts
+// about the USER rather than about the directory — a client is not a person, an
+// LDAP bind presents a DN and not a user name, an identity that only ever appeared
+// as the subject of something never authenticated at all — and a section that said
+// only "not found" would send a reader to look for a bug in the directory.
+function ldapObjectSection(row, key) {
+  log.debug("Entering ldapObjectSection(). key=" + key);
+  const heading = '<h2>This user in the LDAP directory</h2>';
+  if (!directoryReader) {
+    log.debug("Leaving ldapObjectSection(). No directory is loaded.");
+    return {
+      html: heading +
+        '<p class="note">No LDAP directory is loaded in this process, so there is no entry to ' +
+        'show. That is a build of this service without <code>ldap_server.js</code> and not a ' +
+        'failure — every other section of this page is unaffected.</p>',
+      json: null
+    };
+  }
+  const info = directoryReader(key);
+  const link = '<p class="note"><a href="/ldap">What this directory is</a> &middot; ' +
+    '<a href="/ldap/directory">every entry in it</a> &middot; ' +
+    '<a href="/ldap/directory?format=json">the same as JSON</a>.</p>';
+  // Said on every branch, including the ones with an entry: the entry can be there
+  // and the socket down, and a reader who trusts this page to mean "an LDAP client
+  // can fetch this" needs to know which.
+  const listener = info.listening
+    ? ''
+    : '<div class="warn"><strong>The directory\'s listener is not up</strong> — ' +
+      esc(info.listenError || 'it never bound') + '. The entry below is in this process\'s ' +
+      'store and is what an LDAP client WOULD read; right now no client can connect, most ' +
+      'likely because TCP ' + esc(info.port) + ' was already taken. This page is HTTP and ' +
+      'answers either way.</div>';
+  const alsoNamed = info.alsoNamed.length
+    ? '<p class="note">' + info.alsoNamed.length + ' other entr' +
+      (info.alsoNamed.length === 1 ? 'y names' : 'ies name') + ' this uid: ' +
+      codeList(info.alsoNamed) + '. Those were written through the protocol rather than seeded ' +
+      'by an authentication — this directory has no schema and does not require a uid to be ' +
+      'unique, so they are shown rather than merged.</p>'
+    : '';
+
+  if (!info.found) {
+    // Why not, in the order that makes the first true one the real answer. The DN
+    // is quoted with it, EXCEPT where the identity is an LDAP bind DN — there the
+    // name this console files the person under is itself a DN, so the place an
+    // entry would have gone is `uid=<a whole DN>,ou=users,...`, and leading with
+    // that reads as a malformed directory rather than as the explanation that
+    // follows it.
+    let because;
+    let intro = 'There is no entry at <code>' + esc(info.dn) + '</code>.';
+    if (!info.autoCreateUsers) {
+      because = 'An entry per authenticated user is switched OFF in this process ' +
+        '(<code>LDAP_AUTOCREATE_USERS</code>), so nothing here seeds one.';
+    } else if (row.isClient) {
+      because = 'This identity is a <strong>client</strong>, not a person. ' +
+        '<code>client_credentials</code> produces tokens with a subject and nobody behind them, ' +
+        'and a directory of people is the wrong place for it, so the directory declines to ' +
+        'invent one.';
+    } else if (!row.authenticated) {
+      because = 'This identity has <strong>never authenticated here</strong>. The entry is ' +
+        'seeded at the moment a credential is ACCEPTED, and this one is known only as the ' +
+        'subject of something that was issued — so there was no such moment.';
+    } else if (row.protocols.length === 1 && row.protocols[0].protocol === 'ldap') {
+      intro = 'Nothing was seeded for this identity.';
+      because = 'Everything this identity has done here is an <strong>LDAP bind</strong>, which ' +
+        'presents a DN rather than a user name. Seeding <code>uid=&lt;a whole DN&gt;</code> under ' +
+        '<code>' + esc(info.usersDn) + '</code> would put a second, malformed object beside the ' +
+        'one the DN already names.';
+    } else if (info.full) {
+      because = 'The directory holds its maximum of ' + esc(info.maxEntries) + ' entries, so it ' +
+        'stopped creating them. The authentication itself was unaffected — a full directory ' +
+        'must never fail one.';
+    } else {
+      because = 'It was there and is not now: an entry can be <code>delete</code>d or ' +
+        '<code>modifyDN</code>&rsquo;d through the protocol like any other, and nothing puts it ' +
+        'back until this name authenticates again.';
+    }
+    log.debug("Leaving ldapObjectSection(). There is no entry at " + info.dn + ".");
+    return {
+      html: heading + listener +
+        '<p class="note">' + intro + ' ' + because + '</p>' + alsoNamed + link,
+      json: info
+    };
+  }
+
+  const entry = info.entry;
+  const attributeRows = Object.keys(entry.attributes).map(function (name) {
+    const values = entry.attributes[name];
+    const operational = entry.operational.indexOf(name) >= 0;
+    return '<tr><td><code>' + esc(name) + '</code>' +
+      (operational
+        ? ' <span class="state-none" title="An operational attribute. A search returns it only ' +
+          'when it is asked for by name (RFC 4511 section 4.5.1.8) — this dump shows it always.' +
+          '">(operational)</span>'
+        : '') + '</td>' +
+      '<td class="num">' + values.length + '</td>' +
+      '<td>' + (values.map(function (value) {
+        return '<code>' + esc(value) + '</code>';
+      }).join('<br>') || '—') + '</td></tr>';
+  }).join('');
+
+  const html = heading + listener +
+    '<p class="note">The entry the embedded directory holds for this person &mdash; the object ' +
+    'itself and not a copy of it, so an LDAP client bound to <code>ldap://&lt;host&gt;:' +
+    esc(info.port) + '</code> reading <code>' + esc(entry.dn) + '</code> sees exactly this. It ' +
+    'appeared the first time they authenticated through any protocol here, and it carries no ' +
+    'password: <strong>every bind to this directory succeeds anyway</strong>, whatever DN and ' +
+    'whatever password, so nothing in this object is a credential.</p>' +
+    '<table><tr><th>DN</th><th>Came from</th><th>Created</th><th>Last modified</th></tr>' +
+    '<tr><td><code>' + esc(entry.dn) + '</code></td>' +
+    '<td>' + esc(entry.origin) + '</td>' +
+    '<td><code>' + esc(entry.createdAt) + '</code></td>' +
+    '<td><code>' + esc(entry.modifiedAt) + '</code></td></tr></table>' +
+    '<p class="note">The two timestamps are <em>generalized time</em> ' +
+    '(<code>YYYYMMDDHHMMSSZ</code>), which is what a directory shows &mdash; not the ISO 8601 ' +
+    'strings the rest of this console uses. The difference is only punctuation and it is kept ' +
+    'because a debugger that showed one where the protocol carries the other would be showing ' +
+    'the wrong thing.</p>' +
+    '<table><tr><th>Attribute</th><th class="num">Values</th><th>Value(s)</th></tr>' +
+    attributeRows + '</table>' +
+    '<p class="note">Every attribute the entry has, operational ones included. This directory is ' +
+    '<strong>schemaless</strong>: no <code>objectClass</code> is enforced and no value is checked ' +
+    'against a syntax, so an attribute a real directory would refuse is here because something ' +
+    'wrote it. The <code>description</code> values are this service\'s own note of which ' +
+    'protocols this person has authenticated through &mdash; one line per protocol, added the ' +
+    'first time each is seen.</p>' +
+    alsoNamed + link;
+
+  log.debug("Leaving ldapObjectSection(). " + Object.keys(entry.attributes).length +
+            " attribute(s) dumped.");
+  return { html: html, json: info };
+}
+
 // The live sign-on sessions belonging to one user. Sessions are keyed by an opaque
 // id and hold a user object, so the match is on the identity rather than the string:
 // the session says `alice` and the tokens say `urn:sts-mock:user:alice`, and these
@@ -1484,6 +1651,10 @@ function userDetailPage(req, key) {
   // effect on that person.
   const back = queryWith({ user: key }, {});
   const valid = detail.tokens.filter(function (t) { return t.state === 'valid'; }).length;
+  // Read before the markup is assembled rather than inside it, because it is also
+  // one of the keys of the JSON view below and reading it twice could show a page
+  // and a JSON body that disagree about a directory another request just changed.
+  const directory = ldapObjectSection(row, key);
 
   const sessionBlocks = sessionRows.map(function (session) {
     return sessionBlock(session, split.held[session.id] || [], back);
@@ -1573,6 +1744,8 @@ function userDetailPage(req, key) {
     'is whether the validity window has closed.</p>' +
     userArtifactTable(detail.artifacts) +
 
+    directory.html +
+
     '<h2>Invalidate everything for this user</h2>' +
     '<p class="note">Every access token, ID Token and refresh token held for this identity under ' +
     'any of its spellings, revoked through the same set <code>/oauth2/revoke</code> writes to. ' +
@@ -1595,7 +1768,11 @@ function userDetailPage(req, key) {
       }),
       tokensOnEndedSessions: split.ended,
       tokensWithNoSession: split.sessionless,
-      artifacts: detail.artifacts
+      artifacts: detail.artifacts,
+      // null when no directory is loaded in this process, which is a different
+      // answer from an entry that is not there — that one is an object whose
+      // `found` is false and which says where it would have been.
+      ldap: directory.json
     }
   };
 }
@@ -1968,6 +2145,8 @@ app.get('/admin/claims', function (req, res) {
 });
 
 module.exports = {
+  // Filled by ldap_server.js at its require time; see the note above it.
+  setDirectoryReader: setDirectoryReader,
   jtiFrom: jtiFrom,
   tokenAction: tokenAction,
   claimsAction: claimsAction
