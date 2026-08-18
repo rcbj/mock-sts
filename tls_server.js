@@ -104,6 +104,12 @@ const crypto = require('crypto');
 const forge = require('node-forge');
 const app = require('./app');
 const { log, xmlEscape, parseBody } = require('./helpers');
+// The single funnel every authentication in this service passes through at the
+// moment a credential is ACCEPTED. A verified client certificate is one, and
+// going through here rather than writing to the console and the directory
+// directly is what keeps it one call site and not three — see the note above
+// recordClientCertificate().
+const stats = require('./admin_stats');
 
 // The permissive listener: always asks, never refuses, always explains.
 const TLS_PORT = parseInt(process.env.STS_TLS_PORT, 10) || 8443;
@@ -340,6 +346,62 @@ function dnToString(dn) {
   }).join(', ');
 }
 
+// The SAME subject in RFC 4514 form, which is a different string and has to be.
+//
+// dnToString() above renders what a reader's own tool prints: node hands the
+// subject back most-significant-first (`C=US, O=Example, CN=alice`) and openssl
+// x509 -subject shows it that way too. A DN as LDAP and every RFC 4514 document
+// writes it is the REVERSE — leaf first, `CN=alice,O=Example,C=US` — with no
+// spaces after the commas, and that is the form this service files the identity
+// under and the directory builds an entry from. Producing one form and using it
+// for both would be wrong in whichever direction it was wrong: a report that
+// disagreed with openssl, or a DN nothing in LDAP would accept.
+//
+// Two details that are easy to lose. Node collapses repeated attribute types
+// into an ARRAY (`OU=A,OU=B` arrives as `OU: ['A','B']`), and those are separate
+// RDNs rather than one multi-valued RDN, so each becomes its own component here
+// — dnToString() joins them with '+', which is the right punctuation for the
+// display form and the wrong one for this. And values are escaped: a comma
+// inside `O=Example\, Ltd` that went through unescaped would turn one RDN into
+// two and name an object that does not exist.
+function escapeRdnValue(value) {
+  const text = String(value == null ? '' : value);
+  // RFC 4514 section 2.4: these are escaped anywhere, '#' only leading, and a
+  // space only when it leads or trails.
+  let out = text.replace(/([\\,+"<>;=])/g, '\\$1');
+  if (out.indexOf('#') === 0) out = '\\' + out;
+  out = out.replace(/^ /, '\\ ').replace(/ $/, '\\ ');
+  return out;
+}
+
+function dnRfc4514(dn) {
+  if (!dn || typeof dn !== 'object') return String(dn || '');
+  const parts = [];
+  Object.keys(dn).forEach(function (key) {
+    const value = dn[key];
+    (Array.isArray(value) ? value : [value]).forEach(function (one) {
+      parts.push(key + '=' + escapeRdnValue(one));
+    });
+  });
+  return parts.reverse().join(',');
+}
+
+// The address in a certificate, if it carries one: the emailAddress RDN, or the
+// first rfc822Name in the subjectAltName. Read rather than invented, because the
+// directory entry this ends up on is derived from the certificate and an address
+// the certificate does not carry would be this service making one up.
+function emailOf(cert) {
+  if (!cert) return '';
+  const subject = cert.subject || {};
+  const fromDn = subject.emailAddress || subject.E || '';
+  if (fromDn) {
+    return String(Array.isArray(fromDn) ? fromDn[0] : fromDn);
+  }
+  const san = String(cert.subjectaltname || '');
+  const match = san.match(/email:([^,]+)/i);
+  return match ? match[1].trim() : '';
+}
+
 function describeCertificate(cert, depth) {
   log.debug('Entering describeCertificate(). depth=' + depth);
   if (!cert || !Object.keys(cert).length) {
@@ -409,7 +471,9 @@ function verdictFor(mode, presented, authorized, authorizationError) {
     verdict = 'You are reading this from the listener that REQUIRES a client ' +
       'certificate, so the handshake could not have completed unless the ' +
       'certificate verified against an anchor this service holds. Reaching ' +
-      'this page at all is the proof; the chain below is what was built.';
+      'this page at all is the proof; the chain below is what was built. The ' +
+      'subject DN was recorded as an authentication when that handshake ' +
+      'completed — see below for what that does and does not mean.';
   } else if (!presented) {
     verdict = 'This listener asked for a client certificate and none was ' +
       'presented. It answered anyway — never refusing is what makes it useful ' +
@@ -420,9 +484,11 @@ function verdictFor(mode, presented, authorized, authorizationError) {
   } else if (authorized) {
     verdict = 'A client certificate was presented and it VERIFIED against ' +
       anchors.length + ' anchor(s) this service was given at runtime. That is ' +
-      'the whole of what it means here: a chain was built from what you sent ' +
-      'to something somebody POSTed to /tls/trust. No session was started, no ' +
-      'token was issued, and nothing else in this service knows about it.';
+      'the whole of what it PROVED: a chain was built from what you sent to ' +
+      'something somebody POSTed to /tls/trust. No session was started and no ' +
+      'token was issued. It was, however, written down — the subject DN is now ' +
+      'an identity in the admin console and an entry in this service\'s LDAP ' +
+      'directory, which is a record of what happened and not a credential.';
   } else {
     verdict = 'A client certificate was presented and it did NOT verify: ' +
       (authorizationError || 'no reason was given') + '. The connection ' +
@@ -448,6 +514,13 @@ function describeConnection(req, mode) {
   const leaf = chain.length ? chain[0] : null;
   const presented = !!leaf;
   const authorized = socket.authorized === true;
+  // The leaf's subject as a DN, computed ONCE. It is the string this service
+  // filed the identity under when the handshake completed, so it appears in two
+  // places below and in a link; reading the peer certificate again for each of
+  // them would be three chances to disagree with the chain the report is
+  // otherwise built from.
+  const subjectDn = presented ? dnRfc4514(socket.getPeerCertificate().subject)
+                              : null;
   const authorizationError = socket.authorizationError
     ? String(socket.authorizationError) : null;
   let ephemeral = null;
@@ -532,6 +605,12 @@ function describeConnection(req, mode) {
         'already hold a root will not trust it because somebody offered it.',
       chain: chain,
       subject: leaf ? leaf.subject : null,
+      // The same subject as a DIRECTORY writes it: leaf first, no spaces after
+      // the commas, values escaped. It is here because it is the exact string
+      // this service filed the identity under — /admin/users?user=<this> is the
+      // page for it — and because the difference between the two forms is worth
+      // seeing side by side rather than discovering. See dnRfc4514().
+      subjectRfc4514: subjectDn,
       issuer: leaf ? leaf.issuer : null,
       serialNumber: leaf ? leaf.serialNumber : null,
       validFrom: leaf ? leaf.validFrom : null,
@@ -549,11 +628,30 @@ function describeConnection(req, mode) {
         'before the connection and exists nowhere else.'
     },
     authentication: {
+      // Still false, and it is the most important false in this report: a
+      // verified certificate is not a login here and no endpoint of this
+      // service will let its holder do anything an anonymous caller cannot.
       authenticated: false,
+      // What DID happen, when the certificate verified: the subject DN was
+      // filed as an authentication. Recorded and not authenticated — the
+      // distinction the rest of this page exists to keep.
+      recorded: presented && authorized,
+      identity: presented && authorized ? subjectDn : null,
+      consoleUrl: presented && authorized
+        ? '/admin/users?user=' + encodeURIComponent(subjectDn) : null,
+      directoryUrl: presented && authorized ? '/ldap/directory' : null,
       note: 'Nothing here is a login. A verified client certificate means a ' +
         'chain was built to an anchor somebody supplied, and no more: no ' +
-        'session is started, no token is issued, and no other endpoint of this ' +
-        'service is told about it.'
+        'session is started, no token is issued, no revocation is checked, and ' +
+        'no endpoint of this service will let you do anything an anonymous ' +
+        'caller cannot. What a verified certificate DOES do is get written ' +
+        'down. The subject DN is filed as an authentication on /admin/users, ' +
+        'and the embedded LDAP directory seeds an entry for it — a certificate ' +
+        'subject is already a DN, so it is the one identity here that does not ' +
+        'have to be turned into one. Both of those are records of what ' +
+        'happened. Neither is a credential, and nothing in this service ' +
+        'consults them to decide anything. The two links above are on the ' +
+        'PLAIN HTTP port, not this one.'
     }
   };
   report.verdict = verdictFor(mode, presented, authorized, authorizationError);
@@ -629,6 +727,8 @@ function reportPage(report) {
         ['Verified', report.clientCertificate.authorized ? 'yes' :
           'no — ' + (report.clientCertificate.authorizationError || '')],
         ['Subject', report.clientCertificate.subject],
+        ['Subject as a DN (RFC 4514)',
+          report.clientCertificate.subjectRfc4514],
         ['Issuer', report.clientCertificate.issuer],
         ['Serial', report.clientCertificate.serialNumber],
         ['Valid from', report.clientCertificate.validFrom],
@@ -669,6 +769,15 @@ function reportPage(report) {
       : '') +
     '<h2>What this proves about who you are</h2>' +
     '<p>' + xmlEscape(report.authentication.note) + '</p>' +
+    (report.authentication.recorded
+      ? '<table><tr><th>Thing</th><th>Value</th></tr>' + rowsFrom([
+          ['Recorded as', report.authentication.identity],
+          ['In the console', report.authentication.consoleUrl +
+            ' (on the plain HTTP port)'],
+          ['In the directory', 'an entry under ou=users — ' +
+            report.authentication.directoryUrl + ' lists every one']
+        ]) + '</table>'
+      : '') +
     '<p class="sub"><a href="/tls/whoami">This page as JSON</a></p>';
   log.debug('Leaving reportPage().');
   return pageShell('What the server saw', inner);
@@ -713,6 +822,115 @@ function makeHandler(mode) {
 }
 
 // ---------------------------------------------------------------------------
+// A VERIFIED CLIENT CERTIFICATE IS RECORDED, AND RECORDING IT IS NOT ACCEPTING
+// IT AS A LOGIN.
+//
+// The two are worth holding apart, because this listener's whole value is that
+// it does not confuse them. What a verified certificate means here has not
+// changed and is stated everywhere this module speaks: OpenSSL built a chain
+// from what the client sent to an anchor somebody POSTed to /tls/trust. No
+// session starts, no token is issued, no revocation is checked, and no endpoint
+// of this service will let the holder do anything it would not let an anonymous
+// caller do.
+//
+// What it now also does is get WRITTEN DOWN. `/admin/users` answers "who has
+// this service seen, in an interaction that succeeded", and a mutual-TLS client
+// that verified is exactly that — leaving it out made the console's answer
+// wrong by omission, and it is the one family whose identity the embedded
+// directory can seed an entry for verbatim, because a certificate subject is
+// already a DN. So this calls `stats.recordAuthentication()`, the same funnel
+// the other thirteen families pass through, and the LDAP entry follows from the
+// observer that is already on it rather than from a second call here.
+//
+// Three decisions in the implementation, each of which can be got wrong quietly:
+//
+//   * IT HAPPENS AT THE HANDSHAKE, not in the request handler. The credential
+//     was accepted when the handshake completed, which is the rule every other
+//     call site in this service follows; recording in the handler would count
+//     REQUESTS instead, so one connection carrying six of them would read as six
+//     authentications. The consequence to expect is the other way round and is
+//     honest: a client that opens six CONNECTIONS did present its certificate
+//     six times, and the console says six.
+//   * ONLY WHEN `authorized` IS TRUE. On the optional listener a certificate
+//     that did not verify, or none at all, records nothing — the console lists
+//     identities that got somewhere, not names that were tried.
+//   * A RESUMED SESSION may carry no peer certificate: the client does not send
+//     it again, and node hands back an empty object. Nothing is recorded then,
+//     rather than an authentication with no identity on it.
+// ---------------------------------------------------------------------------
+function recordClientCertificate(socket, mode) {
+  log.debug('Entering recordClientCertificate(). mode=' + mode);
+  if (!socket || socket.authorized !== true) {
+    log.debug('Leaving recordClientCertificate(). Nothing verified here.');
+    return null;
+  }
+  let cert = null;
+  try {
+    cert = socket.getPeerCertificate ? socket.getPeerCertificate() : null;
+  } catch (e) {
+    // A socket that went away between the handshake and this line. Logged
+    // rather than thrown: this is an event handler on a listener, so a throw
+    // out of it is an uncaught exception and takes the service down.
+    log.debug('recordClientCertificate(): the peer certificate could not be ' +
+              'read: ' + e.message);
+    log.debug('Leaving recordClientCertificate(). No certificate.');
+    return null;
+  }
+  if (!cert || !Object.keys(cert).length) {
+    log.debug('Leaving recordClientCertificate(). The connection verified but ' +
+              'carries no peer certificate, which is what a resumed session ' +
+              'looks like.');
+    return null;
+  }
+  const subject = dnRfc4514(cert.subject);
+  if (!subject) {
+    log.debug('Leaving recordClientCertificate(). The subject is empty.');
+    return null;
+  }
+  const common = cert.subject && cert.subject.CN
+    ? String(Array.isArray(cert.subject.CN) ? cert.subject.CN[0] : cert.subject.CN)
+    : '';
+  try {
+    stats.recordAuthentication({
+      presented: subject,
+      protocol: 'TLS',
+      method: 'client certificate on the ' + mode + '-client-certificate ' +
+        'listener (port ' + (mode === 'required'
+          ? (boundMtlsPort || MTLS_PORT) : (boundTlsPort || TLS_PORT)) + ')',
+      note: 'the chain verified against one of the ' + anchors.length +
+        ' anchor(s) POSTed to /tls/trust. That is the whole of what it proved: ' +
+        'no session was started and no token was issued.',
+      // Both DNs in RFC 4514 form, which is not the form the report on this
+      // connection shows — see dnRfc4514(). These two go into a DIRECTORY, and
+      // that is the only form a directory takes.
+      certificate: {
+        subject: subject,
+        commonName: common,
+        issuer: dnRfc4514(cert.issuer),
+        serialNumber: cert.serialNumber || '',
+        validFrom: cert.valid_from || '',
+        validTo: cert.valid_to || '',
+        fingerprint256: cert.fingerprint256 || '',
+        email: emailOf(cert)
+      }
+    });
+  } catch (e) {
+    // Same reason as the read above, and one more: the console and the
+    // directory are bookkeeping, and bookkeeping must never be able to break a
+    // connection that has already been accepted.
+    log.error('tls: recording the client certificate failed and was ignored; ' +
+              'the connection is unaffected: ' + e.message);
+    log.debug('Leaving recordClientCertificate(). The recording threw.');
+    return null;
+  }
+  log.info('tls: ' + subject + ' presented a client certificate that verified ' +
+           'on the ' + mode + ' listener. It is recorded in the admin console ' +
+           'and the directory has an entry for it; it is still not a login.');
+  log.debug('Leaving recordClientCertificate(). Recorded.');
+  return subject;
+}
+
+// ---------------------------------------------------------------------------
 // The two listeners.
 //
 // Created at require time — creating a server binds nothing — and started from
@@ -729,6 +947,19 @@ const strictServer = https.createServer(
     Object.assign({ requestCert: true, rejectUnauthorized: true },
                   secureContextOptions()),
     makeHandler('required'));
+
+// The moment the credential is accepted, on both listeners. `secureConnection`
+// fires once per completed handshake — on the strict listener it cannot fire at
+// all unless the certificate verified, and on the permissive one the check
+// inside decides. See recordClientCertificate() for why it is here and not in
+// the request handler.
+permissiveServer.on('secureConnection', function (socket) {
+  recordClientCertificate(socket, 'optional');
+});
+
+strictServer.on('secureConnection', function (socket) {
+  recordClientCertificate(socket, 'required');
+});
 
 // A refused client certificate reaches the STRICT listener as a socket error
 // and never as a request, so without this it is invisible: the far end sees a
@@ -816,7 +1047,21 @@ function description(req) {
       addUrl: '/tls/trust',
       clearUrl: '/tls/trust/clear'
     },
-    authenticatesNobody: true
+    authenticatesNobody: true,
+    // Not a contradiction of the line above, and the two are next to each other
+    // so that neither can be read alone: nothing here is a login, and a
+    // certificate that VERIFIED is still written down.
+    recordsVerifiedCertificates: {
+      recorded: true,
+      what: 'when a handshake completes with a client certificate that ' +
+        'verified, the subject DN is filed as an authentication (protocol ' +
+        '"TLS") and the embedded LDAP directory seeds an entry for it',
+      when: 'once per handshake, not once per request',
+      consoleUrl: '/admin/users?protocol=TLS',
+      directoryUrl: '/ldap/directory',
+      note: 'a record of what happened, not a credential. No session, no ' +
+        'token, no revocation check, and nothing in this service consults it.'
+    }
   };
   log.debug('Leaving description().');
   return out;
@@ -885,8 +1130,16 @@ app.get('/tls', function (req, res) {
     '<h2>It authenticates nobody</h2>' +
     '<p>A verified client certificate here means one thing: a chain was built ' +
     'from what the client sent to an anchor somebody supplied. No session is ' +
-    'started, no token is issued, and no other endpoint of this service is ' +
-    'told about it.</p>' +
+    'started, no token is issued, no revocation is checked, and no endpoint of ' +
+    'this service will let the holder do anything an anonymous caller cannot.</p>' +
+    '<p>It is <em>recorded</em>, which is a different claim. When the ' +
+    'handshake completes with a certificate that verified, the subject DN is ' +
+    'filed as an authentication on <a href="/admin/users">/admin/users</a> and ' +
+    'the embedded LDAP directory seeds an entry for it — a certificate subject ' +
+    'is already a DN, so it is the one identity here that does not have to be ' +
+    'turned into one, and the subject, issuer, serial and validity go on the ' +
+    'entry beside it. <a href="/ldap">GET /ldap</a> says where. Both are a ' +
+    'record of what happened; neither is a credential.</p>' +
     '<p class="sub"><a href="/tls?format=json">This page as JSON</a> ' +
     '&middot; <a href="/sts-metadata">everything this service speaks</a></p>';
   res.status(200).type('html').set('Cache-Control', 'no-store')

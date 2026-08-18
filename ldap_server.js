@@ -97,12 +97,23 @@
 //     endpoint). A client is not a person, and `ou=users` is for people. The
 //     admin console makes the same distinction with its `isClient` flag, which is
 //     what this reads.
+//
+// And ONE identity is not a name at all: a verified TLS CLIENT CERTIFICATE. Its
+// subject is already a DN, so it does not become `uid=<name>` — see
+// certificatePlan() for where it goes instead and what that costs. It arrives
+// through the same observer as everything else, with the certificate's own facts
+// riding along beside the identity.
 // ---------------------------------------------------------------------------
 
 const ldap = require('ldapjs');
 const app = require('./app');
 const { log, xmlEscape } = require('./helpers');
 const stats = require('./admin_stats');
+// The admin console, for ONE reason: to hand it the reader below so that a user's
+// page can show that user's directory entry. It is required here rather than the
+// other way round because server.js requires ./admin BEFORE this module (rule 6),
+// so admin.js must not require this one back — see the note above objectFor().
+const admin = require('./admin');
 
 // The port. 389 is the assigned one and this process is root in the container,
 // so it binds it directly; a host run is not root, which is why the variable
@@ -188,7 +199,15 @@ const CANONICAL_NAMES = {
   supportedcontrol: 'supportedControl', supportedextension: 'supportedExtension',
   supportedsaslmechanisms: 'supportedSASLMechanisms', vendorname: 'vendorName',
   vendorversion: 'vendorVersion', subschemasubentry: 'subschemaSubentry',
-  entrydn: 'entryDN'
+  entrydn: 'entryDN',
+  // This service's OWN names, on the entries a TLS client certificate seeds.
+  // They are listed here for the display, not to suggest they are standard:
+  // there is no standard attribute type for "the DN inside the certificate",
+  // and certificatePlan() says why the standard one that does exist —
+  // `userCertificate`, which is binary — is not what these are.
+  x509subject: 'x509subject', x509issuer: 'x509issuer',
+  x509serialnumber: 'x509serialNumber', x509notbefore: 'x509notBefore',
+  x509notafter: 'x509notAfter', x509fingerprint256: 'x509fingerprint256'
 };
 
 // A DN as a comparison key. Case-folded, and the whitespace around each comma
@@ -498,6 +517,201 @@ function seed() {
 
 seed();
 
+// An RFC 4514 DN split into its RDNs, leaf first. The split is on commas that
+// are NOT escaped, because a value may legitimately contain one — `O=Example\,
+// Ltd` is one RDN and not two — and splitting there would produce components
+// that name nothing. Like normalizeDn() this honours escaping and does not
+// parse attribute-value syntax; that is enough for the DNs this service and the
+// certificates it is shown are written with.
+function splitRdns(dn) {
+  return String(dn == null ? '' : dn).split(/(?<!\\),/)
+    .map(function (part) { return part.trim(); })
+    .filter(function (part) { return part.length > 0; });
+}
+
+// One RDN as {attribute, value} pairs. A multi-valued RDN (`cn=alice+uid=a1`)
+// is several, and they are all returned, because every one of them has to end
+// up IN the entry: an entry whose RDN names an attribute it does not carry is
+// malformed in any real directory, and this one being schemaless is not a
+// reason to write one. The type is split at the FIRST '=' because an attribute
+// type cannot contain one.
+function rdnPairs(rdn) {
+  return String(rdn == null ? '' : rdn).split('+').map(function (part) {
+    const at = part.indexOf('=');
+    if (at < 1) {
+      return null;
+    }
+    return { attribute: part.slice(0, at).trim().toLowerCase(),
+             value: part.slice(at + 1).trim() };
+  }).filter(Boolean);
+}
+
+// RFC 4514 section 2.4 escaping, and its inverse. A DN is a STRING made of
+// values, so the two directions have to be kept apart: `O=Example\, Ltd` is one
+// RDN whose value is `Example, Ltd`, and storing the backslash as part of the
+// value — or writing the comma into the DN without one — each produce something
+// that looks almost right and names the wrong object.
+//
+// tls_server.js has a sibling of the escape half. They are not shared on
+// purpose: that one renders node's certificate object into a DN and belongs with
+// the code that reads certificates, and this one is used wherever this directory
+// builds a DN of its own. Sharing would mean one of the two modules requiring
+// the other for a string function.
+function escapeDnValue(value) {
+  const text = String(value == null ? '' : value);
+  let out = text.replace(/([\\,+"<>;=])/g, '\\$1');
+  if (out.indexOf('#') === 0) {
+    out = '\\' + out;
+  }
+  return out.replace(/^ /, '\\ ').replace(/ $/, '\\ ');
+}
+
+function unescapeDnValue(value) {
+  return String(value == null ? '' : value).replace(/\\(.)/g, '$1');
+}
+
+// Append the values an attribute does not already have, and say whether
+// anything changed. The caller uses the answer to decide whether
+// modifyTimestamp moves: a timestamp that advanced on a reconnection that wrote
+// nothing would make every handshake look like a write.
+function addValues(stored, name, values) {
+  const key = String(name).toLowerCase();
+  const have = stored.attributes[key] || [];
+  const added = valuesOf(values).filter(function (value) {
+    return value !== '' && have.indexOf(value) === -1;
+  });
+  if (!added.length) {
+    return false;
+  }
+  stored.attributes[key] = have.concat(added);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// WHERE A CLIENT CERTIFICATE'S ENTRY GOES, which is the one placement decision
+// in this module with no obviously right answer.
+//
+// A certificate subject IS a DN — X.509 and LDAP share the model — so unlike
+// every other identity here it does not need a name turned into one. What it
+// needs is a PLACE, and the honest observation is that it usually names an
+// object in somebody ELSE's directory: `CN=alice,O=Example Corp,C=US` is not
+// under `dc=example,dc=com` and never was.
+//
+// Two rules, in this order:
+//
+//   * if the subject already lies under this directory's base DN AND its parent
+//     exists, the entry is created AT it, unchanged. It names an object here, so
+//     putting it anywhere else would be inventing a second one.
+//   * otherwise the subject's CN — or its leaf RDN where it has no CN — names
+//     an entry under ou=users: `CN=alice,O=Example Corp,C=US` becomes
+//     `cn=alice,ou=users,<base>`, and every other RDN of the subject goes on
+//     that entry as an attribute rather than being dropped.
+//     Grafting the whole subject under ou=users instead would need
+//     `o=example corp,c=us,ou=users,<base>` to exist as entries, and a tree with
+//     holes in it is worse than a shortened DN — this directory enforces "an add
+//     needs its parent" and would be breaking its own rule to seed one.
+//
+// Nothing is lost either way: the full subject is written into the entry as
+// `x509subject`. What the second rule COSTS is a collapse — two certificates
+// whose leaf RDNs match, two `CN=alice` from different CAs, land on one entry.
+// Both subjects are listed there so the collapse is visible rather than silent,
+// and the admin console still files them as two identities because it keys on
+// the whole DN.
+//
+// The x509* attributes are NOT standard schema. There is no standard attribute
+// type for "the DN in the certificate" — RFC 4523 defines `userCertificate`,
+// which holds the certificate itself and is a BINARY attribute transferred as
+// `userCertificate;binary`. This store holds strings, so writing base64 into
+// that name would put a value on the wire that no client can parse as a
+// certificate and would read as a bug in the directory rather than as a choice
+// here. So the facts go into names that are obviously this service's own, and
+// the certificate itself stays where it is already published in full: the TLS
+// listener's own report.
+// ---------------------------------------------------------------------------
+function certificatePlan(info) {
+  log.debug('Entering certificatePlan().');
+  const certificate = info.certificate || {};
+  const subject = String(certificate.subject || info.key || '').trim();
+  const rdns = splitRdns(subject);
+  const leaf = rdns.length ? rdns[0] : '';
+  const pairs = rdnPairs(leaf);
+  const common = String(certificate.commonName || '').trim();
+
+  // What the entry is NAMED, when it is not created at the subject itself. The
+  // CN where the certificate has one, and the leaf RDN otherwise — not simply
+  // the leaf, and the reason is the commonest shape a CA produces: openssl puts
+  // emailAddress LAST in the subject, so the leaf RDN of
+  // `C=US,O=Example,CN=alice,emailAddress=alice@example.com` is the address, and
+  // `emailAddress=alice@example.com,ou=users` is not how a directory names a
+  // person. Where there is no CN the leaf is the best name there is and is used
+  // as it stands. Either way the value is ESCAPED in the DN and stored
+  // UNESCAPED as the attribute, which is the distinction escapeDnValue() exists
+  // for.
+  const naming = common
+    ? { attribute: 'cn', rdnValue: escapeDnValue(common), value: common }
+    : (pairs.length
+        ? { attribute: pairs[0].attribute, rdnValue: pairs[0].value,
+            value: unescapeDnValue(pairs[0].value) }
+        : null);
+
+  let dn;
+  if (subject && isUnder(subject, BASE_DN) && getEntry(parentDn(subject))) {
+    dn = subject;
+  } else if (naming) {
+    dn = naming.attribute + '=' + naming.rdnValue + ',' + USERS_DN;
+  } else {
+    // A subject with no parsable RDN at all. It is still an identity that
+    // authenticated, so it gets an entry rather than being dropped; `uid=` is
+    // the shape every other auto-created entry here uses.
+    dn = 'uid=' + escapeDnValue(subject || 'unknown') + ',' + USERS_DN;
+  }
+
+  const attributes = {
+    objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
+    sn: 'Mock',
+    displayName: (common || subject || 'unknown') + ' (client certificate)'
+  };
+  // Every RDN of the subject becomes an attribute — `O`, `OU`, `C` and the rest
+  // — because they describe this identity and a directory entry is where a
+  // reader will look for them. Unescaped: the escaping belongs to the DN.
+  pairs.forEach(function (pair) {
+    attributes[pair.attribute] = [unescapeDnValue(pair.value)];
+  });
+  if (naming) {
+    attributes[naming.attribute] = [naming.value];
+  }
+  // `cn` whatever the RDN was, because it is the attribute every reader and
+  // every naive filter reaches for first.
+  if (!attributes.cn) {
+    attributes.cn = [common || (naming ? naming.value : subject)];
+  }
+  // No mail is invented here, unlike the entry a typed username seeds. The
+  // certificate is the source of truth for this identity, so an address it does
+  // not carry is one this service would be making up.
+  if (certificate.email) {
+    attributes.mail = [String(certificate.email)];
+  }
+  const facts = {
+    x509subject: subject,
+    x509issuer: certificate.issuer || '',
+    x509serialNumber: certificate.serialNumber || '',
+    x509notBefore: certificate.validFrom || '',
+    x509notAfter: certificate.validTo || '',
+    x509fingerprint256: certificate.fingerprint256 || ''
+  };
+  Object.keys(facts).forEach(function (name) {
+    if (facts[name]) {
+      attributes[name] = [String(facts[name])];
+    }
+  });
+  log.debug('Leaving certificatePlan(). dn=' + dn);
+  // `merge` is what a SECOND certificate for an entry that already exists adds
+  // to it — the facts and not the names, since a renewed or reissued
+  // certificate is a new serial and a new validity for the same person and
+  // appending them is what makes both visible.
+  return { dn: dn, attributes: attributes, merge: facts };
+}
+
 // ---------------------------------------------------------------------------
 // An entry for whoever authenticated, anywhere in this service.
 // ---------------------------------------------------------------------------
@@ -523,20 +737,43 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). That identity is a client, not a person.');
     return null;
   }
-  const dn = 'uid=' + name + ',' + USERS_DN;
+  // A client CERTIFICATE identity is a DN and is placed accordingly; everything
+  // else is a name and becomes `uid=<name>,ou=users`. See certificatePlan().
+  const plan = info.certificate
+    ? certificatePlan(info)
+    : {
+        dn: 'uid=' + name + ',' + USERS_DN,
+        attributes: {
+          objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
+          uid: name,
+          cn: name,
+          sn: 'Mock',
+          givenName: name,
+          displayName: name + ' (mock)',
+          mail: name + '@sts-mock.example'
+        },
+        merge: {}
+      };
+  const dn = plan.dn;
   const existing = getEntry(dn);
   const note = 'authenticated through ' + String(info.protocol || 'an ' +
     'unstated protocol');
   if (existing) {
     // Already here. Record the protocol if it is one this entry has not seen —
     // which is what makes the entry say something a second sign-in did not
-    // already say, without growing without bound.
-    const seen = existing.attributes.description || [];
-    if (seen.indexOf(note) === -1) {
-      existing.attributes.description = seen.concat([note]);
+    // already say, without growing without bound — and, for a certificate, any
+    // fact this one carries that the last one did not: a renewal is a new serial
+    // and a new validity for the same person.
+    let changed = addValues(existing, 'description', [note]);
+    Object.keys(plan.merge).forEach(function (attribute) {
+      if (plan.merge[attribute] && addValues(existing, attribute, [String(plan.merge[attribute])])) {
+        changed = true;
+      }
+    });
+    if (changed) {
       existing.attributes.modifytimestamp = [generalizedTime()];
       log.debug('Leaving autoCreateUser(). The entry existed and now records ' +
-                'a new protocol.');
+                'something it did not before.');
       return existing;
     }
     log.debug('Leaving autoCreateUser(). The entry already existed.');
@@ -550,23 +787,126 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). The directory is full.');
     return null;
   }
-  const created = putEntry(dn, {
-    objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
-    uid: name,
-    cn: name,
-    sn: 'Mock',
-    givenName: name,
-    displayName: name + ' (mock)',
-    mail: name + '@sts-mock.example',
-    description: [note]
-  }, { origin: 'authentication' });
+  const created = putEntry(dn, Object.assign({}, plan.attributes,
+                                             { description: [note] }),
+                           { origin: 'authentication' });
   log.info('ldap: created ' + dn + ' because ' + name + ' ' + note + '.');
   log.debug('Leaving autoCreateUser(). The entry was created.');
   return created;
 }
 
+// ---------------------------------------------------------------------------
+// ONE USER'S ENTRY, FOR THE ADMIN CONSOLE.
+//
+// /admin/users?user=<name> is the page that answers "what does this service hold
+// about this person", and the directory entry autoCreateUser() seeded above is
+// part of that answer — so the console shows it there rather than making a reader
+// find the same object again on /ldap/directory.
+//
+// The direction of the dependency is inverted here for the same reason the
+// observer above is, and it is worth stating because it is the OPPOSITE way round
+// from what the call graph looks like. admin.js renders this; it would naturally
+// require this module and read `entries`. It must not: server.js requires ./admin
+// before ./ldap_server (rule 6 — this module needs admin_stats' identity
+// normalisation), and a require from admin.js would drag this module's routes in
+// ahead of the console's, which reorders the express router that /sts-metadata
+// reads. So admin.js offers a slot and this module fills it, exactly as
+// admin_stats.js does for the observer.
+//
+// It is given the IDENTITY KEY the console files a person under — the local name,
+// with `urn:sts-mock:user:` and any realm already stripped — which is the same
+// string autoCreateUser() built the DN from, so the two cannot drift.
+//
+// What comes back is deliberately more than the entry: the DN is reported whether
+// or not anything is there, because "no entry at uid=bob,ou=users" and "the
+// directory is not running" and "auto-creation is off" are three different answers
+// and a null would be all three at once. The console phrases which one it is; this
+// function states the facts it needs to do that.
+// ---------------------------------------------------------------------------
+function objectFor(name) {
+  log.debug('Entering objectFor(). name=' + name);
+  const key = String(name == null ? '' : name).trim();
+  const dn = 'uid=' + key + ',' + USERS_DN;
+  const stored = key ? getEntry(dn) : null;
+
+  // Every OTHER entry in the tree whose uid names this same person. A client can
+  // add `cn=alice,ou=people` through the protocol, and a page that reported only
+  // the auto-created DN would say "no entry" while the directory held one. Only
+  // the DNs are listed — the dump below is of the entry the console is about.
+  const alsoNamed = [];
+  if (key) {
+    entries.forEach(function (entry) {
+      if (normalizeDn(entry.dn) === normalizeDn(dn)) {
+        return;
+      }
+      const uids = entry.attributes.uid || [];
+      if (uids.indexOf(key) >= 0) {
+        alsoNamed.push(entry.dn);
+      }
+    });
+  }
+
+  const out = {
+    dn: dn,
+    found: !!stored,
+    entry: null,
+    alsoNamed: alsoNamed.sort(),
+    baseDn: BASE_DN,
+    usersDn: USERS_DN,
+    port: boundPort,
+    listening: listening,
+    listenError: listenError,
+    autoCreateUsers: AUTOCREATE_USERS,
+    entryCount: entries.size,
+    maxEntries: MAX_ENTRIES,
+    // Not `entryCount >= maxEntries` computed by the caller: the cap is this
+    // module's and a second copy of the comparison is a second thing to keep
+    // right.
+    full: entries.size >= MAX_ENTRIES
+  };
+  if (stored) {
+    // Canonically spelled, and OPERATIONAL ATTRIBUTES INCLUDED. A search would
+    // return createTimestamp and modifyTimestamp only when they were asked for
+    // by name (RFC 4511 section 4.5.1.8, and toSearchEntry() honours it) — but
+    // this is not a search, it is this service showing its own store, and a dump
+    // that silently dropped two of the entry's attributes would be the one thing
+    // a dump must not do.
+    const attributes = {};
+    Object.keys(stored.attributes).sort().forEach(function (attribute) {
+      attributes[canonicalName(attribute)] = stored.attributes[attribute].slice(0);
+    });
+    out.entry = {
+      dn: stored.dn,
+      origin: stored.origin || 'unstated',
+      createdAt: stored.createdAt,
+      modifiedAt: stored.modifiedAt,
+      operational: OPERATIONAL.map(canonicalName),
+      attributes: attributes
+    };
+  }
+  log.debug('Leaving objectFor(). ' + (stored ? 'The entry is there.' : 'There ' +
+            'is no entry at ' + dn + '.') + ' ' + alsoNamed.length +
+            ' other entry/entries name it.');
+  return out;
+}
+
 // The inverted hook. See the header for why the direction is this way round.
 stats.setUserObserver(autoCreateUser);
+
+// The second inverted hook, and the one that reads rather than writes. See
+// objectFor() above for why the console does not simply require this module.
+// Guarded so that a copy of admin.js WITHOUT the slot — an older one, or the
+// parent project's — costs a warning rather than `admin.setDirectoryReader is not
+// a function` thrown at require time, which would take the whole service down over
+// one section of one page. A directory whose entries nobody renders is still a
+// working directory.
+if (typeof admin.setDirectoryReader === 'function') {
+  admin.setDirectoryReader(objectFor);
+} else {
+  log.warn('ldap: the admin console offers no setDirectoryReader(), so a user ' +
+           'page will not show that user\'s directory entry. The directory ' +
+           'itself is unaffected.');
+}
 
 // ---------------------------------------------------------------------------
 // The server, and its handlers.
@@ -1006,7 +1346,12 @@ function description(req) {
     autoCreateRule: 'an entry uid=<name>,' + USERS_DN + ' appears the first ' +
       'time <name> authenticates to this service through ANY protocol. An ' +
       'LDAP bind does not seed one (it presents a DN, not a user name) and ' +
-      'neither does an OAuth client.',
+      'neither does an OAuth client. A verified TLS CLIENT CERTIFICATE is the ' +
+      'one identity that is already a DN: its entry keeps the subject\'s own ' +
+      'leaf RDN — cn=alice,' + USERS_DN + ' for CN=alice,O=Example — or the ' +
+      'whole subject where that already lies under ' + BASE_DN + ', and the ' +
+      'full subject, issuer, serial and validity are on the entry as x509* ' +
+      'attributes, which are this service\'s own names and not schema.',
     enforcedRules: [
       'an add whose parent does not exist is LDAP_NO_SUCH_OBJECT (32)',
       'a delete of an entry with children is LDAP_NOT_ALLOWED_ON_NONLEAF (66)',
@@ -1182,5 +1527,6 @@ module.exports = {
   MAX_ENTRIES: MAX_ENTRIES,
   MAX_SEARCH_RESULTS: MAX_SEARCH_RESULTS,
   entries: entries,
-  autoCreateUser: autoCreateUser
+  autoCreateUser: autoCreateUser,
+  objectFor: objectFor
 };

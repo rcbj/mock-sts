@@ -145,6 +145,17 @@ that is the one reachable before anything is trusted.
    other direction, and do not seed the entry at each authentication site instead:
    thirteen call sites means a fourteenth that is not.
 
+   **A SECOND hook runs the other way, and it is the console that offers it.**
+   `/admin/users?user=<name>` shows that user's directory object — every attribute,
+   operational ones included — and `admin.js` must NOT require this module to get
+   it: `server.js` requires `admin.js` FIRST, so a require from there would pull
+   `/ldap` and `/ldap/directory` into the router ahead of the console's routes, and
+   `GET /sts-metadata` is built by walking that router. So `admin.js` exports
+   `setDirectoryReader()` and this module fills it with `objectFor()` at require
+   time. `objectFor()` is given the identity key the console files a person under,
+   which is the same normalised local name `autoCreateUser()` built the DN from —
+   pass anything else and the two silently stop naming the same entry.
+
 `userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
 them, not because they are especially general. The last two are read by three parsers
