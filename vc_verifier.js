@@ -41,6 +41,14 @@
 //     query asked for is actually there
 // ===========================================================================
 //
+// WHAT it asks for, and in which credential format, is CONFIGURATION rather than a
+// constant: vc_verifier_config.js holds it and /admin/vc-verifier-config sets it.
+// Read that module's header before changing anything about the DCQL query — the
+// grouping of claims, the per-format paths and the "ask for a claim nothing here
+// issues" case are all decisions with reasons written down there. What one request
+// asked for is frozen onto its transaction in buildVpRequest(), because the
+// configuration can change while a presentation is in flight.
+//
 // It shares nothing with vc_issuer.js but the key: this is the OTHER side of the
 // exchange, and it verifies what arrives from first principles rather than by
 // asking the issuer module what it produced. That is deliberate — a verifier that
@@ -57,6 +65,13 @@ const { log, logArtifact, STS, baseUrlOf, b64u, b64uDecode, jsonFromB64u, nowSec
         randomId, xmlEscape, bbsKeyPair, parseBody, oauthError, signJwt,
         WALLET_BASE_URL } = require('./helpers');
 const { VCI_JWT_TYPES, VCI_VCT } = require('./vc_configs');
+// What this Verifier asks for, and which credential format it asks for it in.
+// Configuration rather than a constant since /admin/vc-verifier-config existed: a
+// library like dpop.js and vc_claims.js, registering no route, so requiring it
+// here cannot move a route or make a cycle. See its header for why the unit of
+// request is the top-level claim and why a claim that is not in the catalogue can
+// still be asked for.
+const vpConfig = require('./vc_verifier_config');
 const VP_CLIENT_ID = process.env.OID4VP_CLIENT_ID || 'sts-mock-verifier';
 const VP_WALLET_URL = process.env.OID4VP_WALLET_URL || WALLET_BASE_URL;
 
@@ -66,11 +81,16 @@ const VP_TTL_MS = 10 * 60 * 1000;
 // short on purpose.
 const VP_KB_MAX_AGE_S = Number(process.env.OID4VP_KB_MAX_AGE_S || 600);
 
-// The claims this Verifier asks for: enough to show selective disclosure doing
-// its job — it wants two of the six claims the credential can carry.
-const VP_REQUESTED_CLAIMS = (process.env.OID4VP_CLAIMS || 'given_name,family_name').split(',');
+// The claims this Verifier asks for used to be here, read once from OID4VP_CLAIMS
+// at require time. They are now vpConfig's, read at the moment a request is BUILT
+// and then frozen onto that request — see buildVpRequest(). OID4VP_CLAIMS is still
+// what the process starts with and what Reset on the console goes back to.
 
-const VP_DCQL_ID = 'identity_credential';
+// The DCQL credential query's id, and therefore the key the vp_token arrives
+// under. It is the configuration module's, because the query is built there — two
+// copies of this string would mean a response this Verifier could not find the
+// presentation in.
+const VP_DCQL_ID = vpConfig.DCQL_ID;
 
 // state -> { id, nonce, state, responseMode, clientId, requestObject, dcql,
 //            expires, verdict }
@@ -91,57 +111,21 @@ function sweepVpTransactions() {
 
 // The DCQL query (OID4VP section 6): which credential, of which format, with
 // which claims. `claims` is what makes this a selective-disclosure request — the
-// Verifier names the paths it needs and has no way to ask for "everything".
-// The DCQL credential query, which differs by format in two ways that matter.
+// Verifier names the paths it needs rather than asking for the credential.
 //
-// How the credential is IDENTIFIED: an SD-JWT VC by its vct, a W3C VC by its
-// type array — hence `vct_values` against `type_values`, and note type_values
-// is an array OF ARRAYS (each entry is a complete type set that would satisfy
-// the query).
-//
-// Where the CLAIMS live: an SD-JWT VC keeps them at the top level of the
-// payload, a W3C VC under credentialSubject — so the same claim is asked for as
-// ["given_name"] in one format and ["credentialSubject","given_name"] in the
-// other. Getting that path wrong does not fail loudly; it asks for a claim that
-// is not there and the presentation looks like it withheld something.
+// The query differs by format in two ways, and both of them now live in
+// vc_verifier_config.js rather than here: how the credential is IDENTIFIED (a
+// vct against a type array) and where the CLAIMS live (the top level, or
+// credentialSubject, or credentialSubject under a JSON-LD term that is not the
+// claim's own name). Getting the second wrong does not fail loudly — it asks for
+// a claim that is not there, and the presentation looks as though it withheld
+// something.
 function vpDcqlQuery(format) {
-  log.debug("Entering vpDcqlQuery(). format=" + (format || 'dc+sd-jwt'));
-  if (format === 'ldp_vc') {
-    // A W3C credential identified by its type array, like jwt_vc_json — what
-    // differs is how it is SECURED, not how it is named.
-    const ldp = {
-      id: VP_DCQL_ID,
-      format: 'ldp_vc',
-      meta: { type_values: [VCI_JWT_TYPES] },
-      claims: VP_REQUESTED_CLAIMS.map(function (name) {
-        return { path: ['credentialSubject', name] };
-      })
-    };
-    const ldpQuery = { credentials: [ldp] };
-    logArtifact('OID4VP DCQL query', 'as built (ldp_vc)', ldpQuery);
-    log.debug("Leaving vpDcqlQuery(). ldp_vc, " + VP_REQUESTED_CLAIMS.length + " claim(s).");
-    return ldpQuery;
-  }
-  const jwtVcJson = format === 'jwt_vc_json';
-  const credential = jwtVcJson
-    ? {
-        id: VP_DCQL_ID,
-        format: 'jwt_vc_json',
-        meta: { type_values: [VCI_JWT_TYPES] },
-        claims: VP_REQUESTED_CLAIMS.map(function (name) {
-          return { path: ['credentialSubject', name] };
-        })
-      }
-    : {
-        id: VP_DCQL_ID,
-        format: 'dc+sd-jwt',
-        meta: { vct_values: [VCI_VCT] },
-        claims: VP_REQUESTED_CLAIMS.map(function (name) { return { path: [name] }; })
-      };
-  const query = { credentials: [credential] };
-  logArtifact('OID4VP DCQL query', 'as built', query);
-  log.debug("Leaving vpDcqlQuery(). " + VP_REQUESTED_CLAIMS.length + " claim(s) requested as " +
-            credential.format + ".");
+  log.debug("Entering vpDcqlQuery(). format=" + (format || vpConfig.defaultFormatId()));
+  const wanted = vpConfig.formatOf(format);
+  const query = vpConfig.dcqlQuery(wanted);
+  logArtifact('OID4VP DCQL query', 'as built (' + wanted + ')', query);
+  log.debug("Leaving vpDcqlQuery(). Asked as " + wanted + ".");
   return query;
 }
 
@@ -185,13 +169,18 @@ function buildVpRequest(req, opts) {
   const record = {
     id: id, nonce: nonce, state: state, clientId: clientId,
     responseMode: 'direct_post', request: request, byReference: !!opts.byReference,
+    // The claims asked for, FROZEN onto the transaction rather than read again
+    // when the presentation arrives. That is not tidiness: the list is editable
+    // from /admin/vc-verifier-config while a presentation is in flight, and a
+    // verifier that judged what came back against a list changed after the
+    // request was sent would refuse a wallet for answering the question it was
+    // actually asked.
+    requested: vpConfig.requestedClaims(),
     // Which format this Verifier asked for. The response is verified against
     // THIS, not against whatever shape happens to turn up, so a wallet that
     // answers a jwt_vc_json query with an SD-JWT is refused rather than quietly
     // accepted by the other code path.
-    format: opts.format === 'jwt_vc_json' ? 'jwt_vc_json'
-          : opts.format === 'ldp_vc' ? 'ldp_vc'
-          : 'dc+sd-jwt',
+    format: vpConfig.formatOf(opts.format),
     expires: Date.now() + VP_TTL_MS, verdict: null
   };
   logArtifact('OID4VP Authorization Request', 'as built', request);
@@ -251,13 +240,31 @@ app.get('/oid4vp/verifier', function (req, res) {
   // credential into another one. Without carrying it through these links, every
   // button below would start a dc+sd-jwt request whatever the holder has.
   const pageFormat = String(req.query.format || '');
-  const knownFormat = pageFormat === 'jwt_vc_json' || pageFormat === 'ldp_vc' ||
-                      pageFormat === 'dc+sd-jwt' ? pageFormat : '';
+  // Recognised through the configuration's own lookup rather than compared here,
+  // which is what makes `?format=dc+sd-jwt` work: a plus in a query string is a
+  // space by the time express has parsed it, so the literal comparison this
+  // replaced answered "no such format" for the one format whose id contains one.
+  const named = vpConfig.formatById(pageFormat);
+  const knownFormat = named ? named.id : '';
   const withFormat = function (path) {
     if (!knownFormat) return path;
     return path + (path.indexOf('?') === -1 ? '?' : '&') + 'format=' + encodeURIComponent(knownFormat);
   };
-  const askingFor = knownFormat || 'dc+sd-jwt';
+  const askingFor = vpConfig.formatOf(knownFormat);
+  // What this door is currently configured to ask for. Read here rather than at
+  // require time, so that the page a tester is looking at and the request the
+  // button builds cannot disagree — the console can change this between the two.
+  const wantedClaims = vpConfig.requestedClaims();
+  // The claims an ldp_vc request will silently NOT carry, because the vendored
+  // JSON-LD context defines no term for them. Said on the page rather than left
+  // to be found in a presentation that disclosed less than was asked for.
+  const ldpOmitted = askingFor === 'ldp_vc' ? vpConfig.ldpOmitted() : [];
+  // What the request will name the credential by: a vct for an SD-JWT VC, a type
+  // array for the two W3C formats. Read from the configuration rather than
+  // decided again here — this page saying "type urn:idptools:sd-jwt-vc:identity"
+  // over a request that named a type array is exactly the kind of small lie that
+  // costs somebody an afternoon.
+  const askingType = vpConfig.formatById(askingFor).identifierText;
   const page = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<title>The Bar Door — are you over 21?</title><style>' +
     'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
@@ -271,9 +278,27 @@ app.get('/oid4vp/verifier', function (req, res) {
     '.meta{margin-top:22px;padding-top:14px;border-top:1px solid #eee;font-size:.78em;color:#777}' +
     'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}</style></head><body><div class="card">' +
     '<h1>The Bar Door</h1>' +
-    '<p>We need to see that you are who you say you are — but only that. Present the ' +
-    '<code>' + xmlEscape(VP_REQUESTED_CLAIMS.join(', ')) + '</code> claim(s) from a credential of type ' +
-    '<code>' + xmlEscape(VCI_VCT) + '</code>, and nothing else.</p>' +
+    (wantedClaims.length
+      ? '<p>We need to see that you are who you say you are — but only that. Present the ' +
+        '<code>' + xmlEscape(wantedClaims.join(', ')) + '</code> claim(s) from a credential of type ' +
+        '<code>' + xmlEscape(askingType) + '</code>, and nothing else.</p>'
+      // A configuration naming no claims is a real setting and not an empty page:
+      // DCQL with no `claims` member asks for the whole credential, which is the
+      // opposite of everything else this door says, so it says THAT instead of
+      // printing an empty list.
+      : '<p>This door is currently asking for <strong>no particular claim</strong>, which in DCQL ' +
+        'means the whole credential: the request carries no <code>claims</code> member, so your ' +
+        'wallet is being asked for a credential of type <code>' +
+        xmlEscape(askingType) + '</code> and everything in it.</p>') +
+    (ldpOmitted.length
+      ? '<p class="alt">' + ldpOmitted.length +
+        (ldpOmitted.length === 1 ? ' of these is' : ' of these are') +
+        ' asked for in the other formats and not in this one: ' +
+        '<code>' + xmlEscape(ldpOmitted.join(', ')) + '</code> — an <code>ldp_vc</code> credential ' +
+        'is signed over canonicalized JSON-LD, so a claim the vendored context defines no term for ' +
+        'cannot be named at all, and it is dropped from the query rather than asked for under a ' +
+        'name that would fail canonicalization.</p>'
+      : '') +
     '<p><a class="cta" id="present_by_value" href="' + xmlEscape(withFormat('/oid4vp/start')) +
     '">Present your credential</a>' +
     '<a class="cta secondary" id="present_by_reference" href="' +
@@ -286,7 +311,7 @@ app.get('/oid4vp/verifier', function (req, res) {
     '<p class="alt">This request asks for a <code>' + xmlEscape(askingFor) + '</code> credential. ' +
     'A presentation cannot convert between formats, so a wallet holding a different one has nothing ' +
     'to answer with — pick the format you hold:<br>' +
-    '<a class="cta secondary" id="present_sd_jwt_vc" href="/oid4vp/start?format=dc+sd-jwt">' +
+    '<a class="cta secondary" id="present_sd_jwt_vc" href="/oid4vp/start?format=dc%2Bsd-jwt">' +
     'Present an SD-JWT VC</a> ' +
     '<a class="cta secondary" id="present_jwt_vc_json" href="/oid4vp/start?format=jwt_vc_json">' +
     'Present a JWT VC</a> ' +
@@ -299,7 +324,10 @@ app.get('/oid4vp/verifier', function (req, res) {
     '<code>response_type=vp_token</code>, a <code>dcql_query</code> naming the claims above, a fresh ' +
     '<code>nonce</code>, and <code>response_mode=direct_post</code> — so your wallet POSTs the presentation ' +
     'to <code>' + xmlEscape(base) + '/oid4vp/response</code> rather than putting it in a URL. The wallet is at ' +
-    '<code>' + xmlEscape(VP_WALLET_URL) + '</code>.</div>' +
+    '<code>' + xmlEscape(VP_WALLET_URL) + '</code>. What it asks for is configuration, not a ' +
+    'constant: <a href="/admin/vc-verifier-config">/admin/vc-verifier-config</a> chooses the claims ' +
+    'and the format, from the same catalogue of LDAP attribute types the issuer fills a credential ' +
+    'from.</div>' +
     '</div></body></html>\n';
   res.status(200).type('text/html').send(page);
   log.debug("Leaving the verifier web page.");
@@ -311,12 +339,11 @@ app.get('/oid4vp/start', function (req, res) {
             ", format=" + (req.query.format || 'dc+sd-jwt'));
   const byReference = String(req.query.by || '') === 'reference';
   const mode = String(req.query.mode || 'same-device');
-  // Which credential format to ask for. Anything unrecognised falls back to
-  // dc+sd-jwt, which is what this Verifier has always asked for.
-  const requested = String(req.query.format || '');
-  const format = requested === 'jwt_vc_json' ? 'jwt_vc_json'
-               : requested === 'ldp_vc' ? 'ldp_vc'
-               : 'dc+sd-jwt';
+  // Which credential format to ask for. Anything unrecognised — and a link that
+  // names none, which is the ordinary case — falls back to the CONFIGURED
+  // default rather than to a constant; dc+sd-jwt is what that default starts as,
+  // so a link that worked before this page existed asks for what it always did.
+  const format = vpConfig.formatOf(String(req.query.format || ''));
   const record = buildVpRequest(req, { byReference: byReference, format: format });
   const query = vpRequestQuery(req, record);
   const wallet = String(req.query.wallet || VP_WALLET_URL).replace(/\/+$/, '') +
@@ -625,12 +652,23 @@ function verifyVpJwt(presentation, record) {
   const present = Object.keys(subject).filter(function (k) { return k !== 'id'; });
   present.forEach(function (name) { result.claims[name] = subject[name]; });
   result.disclosed = present;
-  const missing = VP_REQUESTED_CLAIMS.filter(function (name) { return present.indexOf(name) < 0; });
-  result.extraDisclosed = present.filter(function (name) { return VP_REQUESTED_CLAIMS.indexOf(name) < 0; });
+  // What THIS request asked for, not what the console is configured to ask for
+  // now: see buildVpRequest(), where the list is frozen onto the transaction.
+  const requested = [].concat(record.requested || []);
+  const missing = requested.filter(function (name) { return present.indexOf(name) < 0; });
+  // Over-disclosure is measured against what was ASKED FOR, so a request that
+  // named no claims has none of it: an absent DCQL claims member asks for the
+  // whole credential, and reporting every claim in it as "more than we asked for"
+  // would contradict the request in the same sentence.
+  result.extraDisclosed = requested.length
+    ? present.filter(function (name) { return requested.indexOf(name) < 0; })
+    : [];
   vpCheck(checks, 'Requested claims', missing.length === 0,
     missing.length
       ? 'missing: ' + missing.join(', ') + '.'
-      : 'all ' + VP_REQUESTED_CLAIMS.length + ' requested claim(s) arrived' +
+      : (requested.length
+          ? 'all ' + requested.length + ' requested claim(s) arrived'
+          : 'this request named no claims at all, so the whole credential was asked for') +
         (result.extraDisclosed.length
           ? ', along with ' + result.extraDisclosed.length + ' this Verifier did not ask for (' +
             result.extraDisclosed.join(', ') + ') — jwt_vc_json cannot withhold them.'
@@ -815,14 +853,24 @@ function verifyPresentation(presentation, record) {
   }
 
   // --- did we get what we asked for? ---------------------------------------
-  const missing = VP_REQUESTED_CLAIMS.filter(function (name) { return !(name in result.claims); });
+  // What THIS request asked for; see buildVpRequest() for why it is the
+  // transaction's list and not the one the console holds at this moment.
+  const requested = [].concat(record.requested || []);
+  const missing = requested.filter(function (name) { return !(name in result.claims); });
   vpCheck(checks, 'Requested claims', missing.length === 0,
     missing.length === 0
-      ? 'every claim the DCQL query asked for is present (' + VP_REQUESTED_CLAIMS.join(', ') + ').'
+      ? (requested.length
+          ? 'every claim the DCQL query asked for is present (' + requested.join(', ') + ').'
+          : 'this request named no claims at all, so there was nothing to be missing — an ' +
+            'absent DCQL claims member asks for the whole credential.')
       : 'missing: ' + missing.join(', ') + '.');
   // Not a failure — the holder may disclose more than was asked — but worth
   // saying, because over-disclosure is the thing SD-JWT VC exists to prevent.
-  const extra = result.disclosed.filter(function (name) { return VP_REQUESTED_CLAIMS.indexOf(name) === -1; });
+  // Nothing is "extra" when nothing was asked for; see the same note in
+  // verifyVpJwt() for why that is not the same as counting everything.
+  const extra = requested.length
+    ? result.disclosed.filter(function (name) { return requested.indexOf(name) === -1; })
+    : [];
   result.extraDisclosed = extra;
 
   result.ok = checks.every(function (c) { return c.ok; });
@@ -898,7 +946,7 @@ app.post('/oid4vp/response', async function (req, res) {
     claims: verified.claims,
     disclosed: verified.disclosed,
     extraDisclosed: verified.extraDisclosed || [],
-    requested: VP_REQUESTED_CLAIMS,
+    requested: record.requested || [],
     vct: verified.vct,
     sub: verified.sub,
     presentation: presentations[0]
@@ -938,7 +986,7 @@ app.get('/oid4vp/result/:state', function (req, res) {
     state: record.state,
     nonce: record.nonce,
     client_id: record.clientId,
-    requested: VP_REQUESTED_CLAIMS,
+    requested: record.requested || [],
     dcql_query: record.request.dcql_query,
     received: !!record.verdict,
     verdict: record.verdict

@@ -106,13 +106,17 @@ const SPECS = [
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4511',
     coverage: 'partial: bind (simple), unbind, add, delete, modify, modifyDN, compare and ' +
-              'search over plain TCP, with the root DSE and result codes 0 (success), 2 ' +
+              'search, on TWO listeners carrying the same handlers and the same store — ' +
+              'plain TCP 389 and LDAPS (TLS from the first byte) on 636 — with the root DSE ' +
+              'and result codes 0 (success), 2 ' +
               '(protocolError), 4 (sizeLimitExceeded), 11 (adminLimitExceeded), 16 ' +
               '(noSuchAttribute), 32 (noSuchObject), 49 (invalidCredentials), 66 ' +
-              '(notAllowedOnNonLeaf) and 68 (entryAlreadyExists) all reachable. ' +
-              'No SASL, no LDAPS, no StartTLS, no controls ' +
+              '(notAllowedOnNonLeaf) and 68 (entryAlreadyExists) all reachable on both. ' +
+              'No SASL, no StartTLS, no controls ' +
               '(so no paged results and no sorting), no extended operations and no ' +
-              'referrals. ' +
+              'referrals. StartTLS is named twice there on purpose: it IS an extended ' +
+              'operation (section 4.14), so "no extended operations" and "no StartTLS" are ' +
+              'one fact rather than two, and the way to TLS here is the other port. ' +
               // The rule these notes follow: say what would mislead somebody who believed
               // the row. "Bind is implemented" is true and, alone, implies credentials.
               'EVERY BIND SUCCEEDS — any DN, any password, anonymous included — with the ' +
@@ -130,6 +134,25 @@ const SPECS = [
               'refuse. Three structural rules are still enforced, because their absence ' +
               'would teach a client something false: an add needs its parent, a delete needs ' +
               'a leaf, and an attribute with no values does not exist.' },
+  { id: 'rfc4513', name: 'LDAP v3: authentication methods and security mechanisms (RFC 4513)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4513',
+    coverage: 'partial, and the part that is here is the TRANSPORT rather than the ' +
+              'authentication: simple bind (section 5.1) is the only method offered — no ' +
+              'SASL, so no EXTERNAL and no DIGEST-MD5 — and it authenticates nobody, since ' +
+              'every bind succeeds except the literal password "invalid". What TLS on 636 ' +
+              'adds is confidentiality for a password that was never going to be checked, ' +
+              'which is worth having for a client that has to prove it can do LDAPS and ' +
+              'worth saying out loud so nobody reads the TLS as authentication. StartTLS ' +
+              '(section 3) is NOT implemented: it is an extended operation and the ldapjs ' +
+              'submodule this service is built on implements none, and this repository does ' +
+              'not patch that submodule. Worth knowing which of the two this document ' +
+              'actually standardised — StartTLS is in here; ldaps:// is the de-facto scheme ' +
+              'it left alone, which is why no RFC defines the thing every client speaks. ' +
+              'The certificate is self-signed, regenerated on every start and shared with ' +
+              'the two HTTPS listeners, so a client verifies it per run: fetch it from ' +
+              'GET /tls/server-certificate rather than reaching for LDAPTLS_REQCERT=never, ' +
+              'which would also hide the one thing worth checking here.' },
   { id: 'rfc4514', name: 'LDAP v3: string representation of distinguished names (RFC 4514)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4514',
@@ -148,10 +171,25 @@ const SPECS = [
               'match is not evaluated; the attempt is logged rather than silently treated as ' +
               'no match, since an unsupported filter and an empty directory look identical ' +
               'from the client.' },
+  { id: 'rfc4519', name: 'LDAP v3: schema for user applications (RFC 4519)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc4519',
+    coverage: 'mock: this document is where the NAMES this directory uses come from — cn, sn, ' +
+              'uid, mail, givenName, member, uniqueMember, and the groupOfNames and ' +
+              'organizationalUnit classes the seeded tree is built out of. NOTHING IN IT IS ' +
+              'ENFORCED, which is the same absence RFC 4512 records: member is MUST on a ' +
+              'groupOfNames here and an empty group is accepted, an entry may carry any of ' +
+              'these attributes without the objectClass that defines them, and none of the ' +
+              'syntaxes or matching rules is checked. memberOf is NOT from this document or any ' +
+              'other — it is Microsoft\'s and OpenLDAP\'s, maintained by the server in the ' +
+              'directories that have it and maintained by nothing here, so a client can write it ' +
+              'onto an entry and disagree with the group. /admin/groups reports that ' +
+              'disagreement rather than hiding it.' },
   { id: 'rfc8446', name: 'TLS 1.3 (RFC 8446), and TLS 1.2 (RFC 5246)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc8446',
-    coverage: 'full, and none of it is this service\'s code — the two HTTPS listeners are ' +
+    coverage: 'full, and none of it is this service\'s code — the two HTTPS listeners and ' +
+              'the directory\'s LDAPS listener on 636 are ' +
               'node\'s own TLS stack over OpenSSL, with whatever versions and ciphers that ' +
               'build offers. What is written here is the POLICY and the REPORT: one listener ' +
               'asks for a client certificate and accepts whatever arrives, the other requires ' +
@@ -422,17 +460,24 @@ const ENDPOINTS = [
   // --- LDAP ---
   //
   // The same blind spot the Kerberos rows above describe, and for the same reason: the
-  // directory is a RAW TCP SOCKET on port 389, this page is built by walking the Express
-  // router, and the walk cannot see a socket. The two rows below are the only LDAP
-  // surfaces that are HTTP, and NEITHER OF THEM IS LDAP — they are this service
+  // directory is a RAW TCP SOCKET on port 389 — and, since LDAPS, a SECOND raw socket on
+  // 636 — while this page is built by walking the Express router, and the walk cannot see
+  // either of them. Two sockets rather than one is the part that is easy to miss when
+  // reading this page for what LDAP surface exists: neither appears below, and a reader
+  // who counts rows would conclude the directory is HTTP. The two rows below are the only
+  // LDAP surfaces that ARE HTTP, and NEITHER OF THEM IS LDAP — they are this service
   // describing its own directory, which is what lets a reader tell an empty directory
-  // from a search filter that matched nothing. The listener is described in their text.
+  // from a search filter that matched nothing. Both listeners are described in their text.
   { path: '/ldap', group: 'LDAP', name: 'What the directory is',
-    specs: ['rfc4511', 'rfc4512', 'rfc4514', 'rfc4515'],
-    what: 'The embedded LDAPv3 directory: its URL and port (TCP 389 by default, a RAW ' +
-          'SOCKET this page cannot see), its base DN, the bind policy — every bind ' +
+    specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515'],
+    what: 'The embedded LDAPv3 directory: its URLs and ports (TCP 389 for plain LDAP and ' +
+          'TCP 636 for LDAPS by default — RAW SOCKETS this page cannot see, so it reports ' +
+          'whether each one actually bound), its base DN, the bind policy — every bind ' +
           'succeeds, any DN and any password, except the literal "invalid" — and the fact ' +
-          'that it has NO SCHEMA. Also the structural rules it does still enforce and the ' +
+          'that it has NO SCHEMA. The two listeners are one directory: the same handlers ' +
+          'and the same store, so TLS changes what is on the wire and nothing about the ' +
+          'answers, and a certificate presented to 636 is not asked for and would not be a ' +
+          'login if it were. Also the structural rules it does still enforce and the ' +
           'one it deliberately does not (referential integrity: deleting a user leaves its ' +
           'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
           'the machine-readable half of it. Add ?format=json.' },
@@ -453,6 +498,11 @@ const ENDPOINTS = [
   // sockets (8443 and 9443), and this page is built by walking the Express router of
   // the PLAIN listener. It cannot see them. The four rows below are the plain-HTTP
   // views; the listeners themselves are described in their text.
+  //
+  // There is a FOURTH TLS socket in this process and it is not in this group: the
+  // directory's LDAPS listener on 636, which serves the certificate below. It is under
+  // LDAP because that is the protocol it speaks, and the only reason to know it is here
+  // is the certificate — one anchor covers all three.
   { path: '/tls', group: 'TLS', name: 'What the TLS endpoint is',
     specs: ['rfc8446', 'rfc5280'],
     what: 'Two HTTPS listeners on their own sockets — 8443 asks for a client certificate and ' +
@@ -464,7 +514,13 @@ const ENDPOINTS = [
           '?format=json.' },
   { path: '/tls/server-certificate', group: 'TLS', name: 'The server certificate (PEM)',
     specs: ['rfc5280'],
-    what: 'The self-signed certificate both HTTPS listeners present, as PEM. It is REGENERATED ' +
+    what: 'The self-signed certificate every TLS socket in this process presents, as PEM — ' +
+          'both HTTPS listeners and the directory\'s LDAPS listener on 636, which serves this ' +
+          'same certificate and key rather than a second pair. That is a decision about what ' +
+          'a CALLER has to do rather than a saved keypair: one anchor covering 8443, 9443 and ' +
+          '636 is ONE fetch, where two would make an ldapsearch fail with "unable to get local ' +
+          'issuer certificate" against a truststore built for the HTTPS ports — an error that ' +
+          'names nothing and reads as a broken directory. It is REGENERATED ' +
           'ON EVERY START, like the signing key, so it is an anchor nobody can have baked in ' +
           'and no cached copy of it stays valid — hence Cache-Control: no-store. Fetch it into ' +
           'your own truststore rather than switching verification off.' },
@@ -538,6 +594,25 @@ const ENDPOINTS = [
           'urn:sts-mock:user:alice and alice@REALM are one identity — and subjects that never ' +
           'authenticated at all (an exchanged foreign token, OnBehalfOf, S4U) are listed and ' +
           'marked as such. Add ?format=json.' },
+  { path: '/admin/groups', group: 'Admin', name: 'Directory groups',
+    // rfc4519 is linked because member, uniqueMember and the groupOfNames class are its,
+    // and rfc4511 because what this page reports is the state that protocol's operations
+    // leave behind. NOT rfc4512: this directory has no schema and the page says so.
+    specs: ['rfc4511', 'rfc4514', 'rfc4519'],
+    what: 'NON-SPEC page over the embedded LDAP directory. Lists every group with how many of its ' +
+          'membership values name an entry that is actually there; ?group=<dn> drills into one ' +
+          'and shows every attribute it holds, operational ones included, and every member ' +
+          'resolved — each linked to their row on /admin/users where this console knows them by ' +
+          'name. A group is an entry under ou=groups OR one carrying a group objectClass wherever ' +
+          'it sits, because the directory is SCHEMALESS and either alone would miss what a client ' +
+          'can write; the page says which rule caught each. Three states are reported rather than ' +
+          'smoothed over, and they are the point of the page: a DANGLING member (this directory ' +
+          'does not enforce referential integrity, so deleting a user leaves its DN in every ' +
+          'group), a member that is itself a GROUP (nesting is shown and never expanded — nothing ' +
+          'here walks it), and an entry whose own memberOf claims a group that does not list it ' +
+          'back (nothing here maintains memberOf). A GROUP HERE GRANTS NOTHING: no token, ' +
+          'assertion, ticket or PAC this service issues carries a group from this directory and no ' +
+          'endpoint reads one. Add ?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -570,6 +645,42 @@ const ENDPOINTS = [
           'one of those is load-bearing (a settable exp would produce tokens that fail to verify ' +
           'with nothing pointing back at the page). Values may carry ${username}-style ' +
           'placeholders. Add ?format=json; POST the same JSON to set a set.' },
+  { path: '/admin/vc', group: 'Admin', name: 'Credential claims',
+    specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
+    effect: 'changes what every FUTURE Verifiable Credential contains, AND writes to the LDAP ' +
+            'directory',
+    what: 'NON-SPEC. Which claims an issued credential carries, chosen from a catalogue of LDAP ' +
+          'attribute types rather than of claim names — the value of a claim is the value on that ' +
+          'person\'s entry under ou=users, so an LDAP client and a wallet see one person. Ten are ' +
+          'selected on a fresh start, which is exactly the six claims this issuer carried before ' +
+          'the page existed. It applies to all five credential configurations, and the issuer ' +
+          'metadata is built from the same list, so what is advertised cannot drift from what is ' +
+          'minted. THE ldp_vc FORMAT CARRIES A SUBSET: it is signed over canonicalized JSON-LD, so ' +
+          'only terms the vendored context defines can appear, and the page names the ones left ' +
+          'out. Saving a selection SWEEPS the directory: every person under ou=users gains the ' +
+          'selected attributes they are missing, invented from their username — deterministically, ' +
+          'so one username is one invented person across restarts — and an attribute already there ' +
+          'is never overwritten. Add ?format=json; POST {"action":"select","attributes":[...]} for ' +
+          'the same thing without a browser.' },
+
+  { path: '/admin/vc-verifier-config', group: 'Admin', name: 'Verifier request (the bar door)',
+    specs: ['oid4vp', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
+    effect: 'changes the dcql_query of every FUTURE OID4VP Authorization Request',
+    what: 'NON-SPEC. What the mock Verifier at /oid4vp/verifier asks a wallet for — which claims, ' +
+          'and in which of the three credential formats — reaching the wire as the dcql_query of ' +
+          'the next Authorization Request and, after it, as what the presentation is checked ' +
+          'against. The claims are the /admin/vc catalogue grouped into CLAIMS rather than ' +
+          'attribute types, because a credential carries one Disclosure per top-level claim and ' +
+          'address is therefore one unit of disclosure however many LDAP attributes feed it. A ' +
+          'claim NOT in the catalogue can be asked for too, and is the point rather than a loose ' +
+          'end: nothing here issues it, so it is the only way to exercise what a wallet does with ' +
+          'a request it cannot satisfy. Requesting NOTHING is also a setting — DCQL reads an ' +
+          'absent claims member as the whole credential. The DCQL PATH DIFFERS BY FORMAT and the ' +
+          'page shows which: top level for dc+sd-jwt, under credentialSubject for jwt_vc_json, ' +
+          'and under the vendored JSON-LD context\'s own term for ldp_vc, which cannot carry ' +
+          'every claim at all. This page ASKS and admits nobody: a presentation that verifies ' +
+          'starts no session and issues no token. Add ?format=json; POST ' +
+          '{"action":"select","claims":[...]} for the same thing without a browser.' },
 
   // --- WS-Trust ---
   { path: '/sts', group: 'WS-Trust', name: 'Security Token Service',

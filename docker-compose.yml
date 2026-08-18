@@ -38,6 +38,23 @@ services:
     # told which address it was reached at.
     ports:
       - "8081:8081"
+      # The directory's two sockets are NOT published by default, and that is a
+      # choice about collisions rather than about usefulness: 389 and 636 are the
+      # assigned LDAP ports, so a host already running slapd — which is the host
+      # most likely to want this — fails to start the stack with a port binding
+      # error naming a service nobody was thinking about. Uncomment them, or map
+      # them somewhere unprivileged (`"1389:389"`, `"1636:636"`), to point
+      # `ldapsearch` or the parent project's api at the directory. The container
+      # side stays 389 and 636: the service runs as root in the image and binds
+      # them directly, and LDAP_PORT/LDAPS_PORT are for a run outside a container.
+      # - "389:389"
+      # - "636:636"
+      # The TLS endpoint, likewise unpublished by default. 8443 asks for a client
+      # certificate and never refuses one; 9443 requires it. The LDAPS listener
+      # above serves the same certificate these do, so trusting this service is
+      # one fetch of GET /tls/server-certificate whichever of the three you use.
+      # - "8443:8443"
+      # - "9443:9443"
     environment:
       # The log level, and nothing else. debug is the point of a mock: every
       # endpoint call, and every assertion, JWT and SD-JWT VC both before and

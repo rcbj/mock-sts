@@ -87,10 +87,28 @@ COPY env ./env
 ENV CONFIG_FILE=./env/local.js
 
 # 8081 is the HTTP service. The rest are the listeners that are NOT HTTP and so
-# are not on it: 88 is the KDC (TCP and UDP), 389 the LDAP directory, 8443 the
-# TLS endpoint that asks for a client certificate and 9443 the one that requires
-# it. EXPOSE documents them; each compose file decides which it publishes.
+# are not on it: 88 is the KDC (TCP and UDP), 389 the LDAP directory, 636 the
+# same directory over TLS, 8443 the TLS endpoint that asks for a client
+# certificate and 9443 the one that requires it. EXPOSE documents them; each
+# compose file decides which it publishes.
+#
+# The four raw-socket ports were named in that sentence long before they were
+# listed below it, which made the sentence false in the direction that matters:
+# somebody reading the image for what it offers saw three HTTP-family ports and
+# concluded the KDC and the directory were not in it. They are listed now, and
+# EXPOSE is metadata only — it publishes nothing, so the compose files still
+# decide, and `docker run -P` is the one command that reads it.
+#
+# 636 is a SEPARATE SOCKET rather than an option on 389 (ldapjs chooses between a
+# net.Server and a tls.Server at construction), and the two bind independently:
+# either can be up while the other is not, which is why GET /ldap reports them
+# separately. A compose file that publishes 389 and not 636 offers a directory a
+# TLS client cannot reach, with nothing in the image to say why.
 EXPOSE 8081
+EXPOSE 88/tcp
+EXPOSE 88/udp
+EXPOSE 389
+EXPOSE 636
 EXPOSE 8443
 EXPOSE 9443
 CMD [ "node", "server.js" ]

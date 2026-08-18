@@ -3,12 +3,15 @@
 // File: admin.js
 //
 // ---------------------------------------------------------------------------
-// The admin console: four pages over the state admin_stats.js holds.
+// The admin console: five pages over the state admin_stats.js holds, and one more —
+// /admin/groups — over the embedded LDAP directory next door.
 //
 //   GET  /admin           what the console is, and what it can do to this service
 //   GET  /admin/metrics   every call, every artifact, and both kinds of session
 //   GET  /admin/users     everyone this service has authenticated; with ?user= it is
 //                         one of them, their sessions, and what was issued on each
+//   GET  /admin/groups    every group in the embedded LDAP directory; with ?group= it
+//                         is one of them, every attribute it has, and everybody in it
 //   GET  /admin/tokens    what was issued — every JWT, every SAML assertion and every
 //                         Kerberos ticket, filtered and paged — and the buttons that
 //                         invalidate the ones that can be
@@ -58,6 +61,19 @@ const stats = require('./admin_stats');
 // because /oauth2/logout and wsignout1.0 already do that and doing it from a third
 // place would mean three ways of getting the cleanup wrong.
 const { sessions } = require('./oauth2');
+// The credential claim set: which LDAP attributes an issued Verifiable Credential
+// carries, and the invented values behind them. A library like admin_stats.js —
+// it registers no route — so requiring it here neither adds to the express router
+// nor makes a cycle, and /admin/vc below is the page that sets it. The DIRECTORY
+// half of it (populating entries, reading values back) is ldap_server.js's, wired
+// into that module through a slot for the route-order reason rule 6 gives.
+const vcClaims = require('./vc_claims');
+// The other end of that: which of those claims the mock OID4VP Verifier — the
+// "bar door" at /oid4vp/verifier — ASKS a wallet for, and in which credential
+// format. A library like vc_claims.js and admin_stats.js, registering no route,
+// so requiring it here neither moves a route nor makes a cycle; vc_verifier.js
+// reads the same module from the other side of the require order.
+const vpConfig = require('./vc_verifier_config');
 
 // How many rows of a list a page will draw. A cap is needed — 5,000 token rows is
 // a page no browser enjoys — and what it hid is always stated underneath, because a
@@ -98,8 +114,11 @@ const NAV = [
   { path: '/admin', label: 'Console' },
   { path: '/admin/metrics', label: 'Metrics' },
   { path: '/admin/users', label: 'Users' },
+  { path: '/admin/groups', label: 'Groups' },
   { path: '/admin/tokens', label: 'Tokens' },
   { path: '/admin/claims', label: 'Custom claims' },
+  { path: '/admin/vc', label: 'Credential claims' },
+  { path: '/admin/vc-verifier-config', label: 'Verifier request' },
   { path: '/sts-metadata', label: 'Service metadata' }
 ];
 
@@ -611,6 +630,13 @@ app.get('/admin', function (req, res) {
     'sessions, and the assertions, tickets and credentials issued to them. It also lists the ' +
     'subjects that were never here at all — an exchanged token names one, so does a WS-Trust ' +
     '<code>OnBehalfOf</code> and a Kerberos S4U request — and says so on the row.</li>' +
+    '<li><a href="/admin/groups">Groups</a> — every group in the embedded LDAP directory, with ' +
+    'how many of its members name an entry that is actually there. Click one for every attribute ' +
+    'it holds and everybody in it, each member linked back to their row on the users page. It is ' +
+    'the one page here that reports the directory rather than what this service has issued, and ' +
+    'the one thing to know about it is that <strong>a group here grants nothing</strong>: no ' +
+    'token, assertion or ticket this service issues carries a group, and no endpoint reads one.' +
+    '</li>' +
     '<li><a href="/admin/tokens">Tokens</a> — everything issued, in one table: every JWT, every ' +
     'SAML assertion (WS-Trust\'s and WS-Federation\'s alike) and every Kerberos ticket, newest ' +
     'first. And the buttons that invalidate the ones that can be — one access token, one ID Token, ' +
@@ -620,6 +646,11 @@ app.get('/admin', function (req, res) {
     '<li><a href="/admin/claims">Custom claims</a> — what to add to every OAuth 2.0 access token, ' +
     'every OIDC ID Token, and every SAML 2.0 and SAML 1.1 assertion this service issues from now ' +
     'on. Additive only: a custom claim is never allowed to displace one the protocol defines.</li>' +
+    '<li><a href="/admin/vc">Credential claims</a> — which claims a Verifiable Credential issued ' +
+    'from now on carries, chosen from a catalogue of LDAP attribute types rather than of claim ' +
+    'names: the value of a claim is the value on that person\'s directory entry. Saving a ' +
+    'selection also populates the directory, so an LDAP client and a wallet describe one ' +
+    'person.</li>' +
     '</ul>' +
     '<h2>What it deliberately does not do</h2>' +
     '<ul>' +
@@ -642,6 +673,9 @@ app.get('/admin', function (req, res) {
     '<p class="note">Every page answers <code>?format=json</code>:</p>' +
     '<ul>' +
     '<li><code>GET ' + esc(base) + '/admin/metrics?format=json</code></li>' +
+    '<li><code>GET ' + esc(base) + '/admin/groups?format=json</code>, and ' +
+    '<code>GET ' + esc(base) + '/admin/groups?group=cn=developers,ou=groups,...&amp;format=json' +
+    '</code> — the second carries every attribute of that group and every member resolved.</li>' +
     '<li><code>GET ' + esc(base) + '/admin/users?format=json</code>, and ' +
     '<code>GET ' + esc(base) + '/admin/users?user=alice&amp;format=json</code> — the second carries ' +
     '<code>sessions</code>, each with the tokens issued on it, plus the tokens that belong to no ' +
@@ -1330,12 +1364,98 @@ app.get('/admin/tokens', function (req, res) {
 // page — so the section says "no directory is loaded" rather than being absent,
 // which would read as "this user has no entry".
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// The two things every LDAP section of this console draws, in one place each
+// because there are now three such sections — a user's entry, the groups list
+// and one group in full.
+// ---------------------------------------------------------------------------
+
+// What a section is showing, in the four grammatical forms the listener warning
+// needs. A warning about sockets has to name the thing the reader came for —
+// the whole point of it is the gap between "this service holds it" and "an LDAP
+// client can fetch it" — and that sentence needs a noun that agrees with itself.
+const ENTRY_SUBJECT = { upper: 'The entry below', lower: 'the entry below',
+                        verb: 'is', pronoun: 'it' };
+const GROUPS_SUBJECT = { upper: 'The groups below', lower: 'the groups below',
+                         verb: 'are', pronoun: 'they' };
+const GROUP_SUBJECT = { upper: 'The group below', lower: 'the group below',
+                        verb: 'is', pronoun: 'it' };
+
+// The state of the directory's two sockets as a banner, or '' when both are up.
+//
+// Three cases rather than two, because plain 389 and LDAPS 636 are independent
+// sockets and either can be up while the other is not — which is the commonest
+// outcome of a host run, where 636 is privileged and 389 has usually lost the
+// port to the host's own slapd. A page that said "no client can connect" while
+// LDAPS was answering would be wrong in the direction that costs somebody an
+// afternoon looking for a directory that was there all along.
+function directoryListenerWarning(info, subject) {
+  if (!info.listening && !info.ldapsListening) {
+    return '<div class="warn"><strong>The directory\'s listeners are not up</strong> — ' +
+      esc(info.listenError || 'it never bound') + '. ' + subject.upper + ' ' + subject.verb +
+      ' in this process\'s store and ' + subject.verb + ' what an LDAP client WOULD read; ' +
+      'right now no client can connect, most likely because TCP ' + esc(info.port) +
+      ' was already taken. This page is HTTP and answers either way.</div>';
+  }
+  if (!info.listening) {
+    return '<div class="warn"><strong>The directory\'s plain listener is not up</strong> — ' +
+      esc(info.listenError || 'it never bound') + ' — but <strong>LDAPS on ' +
+      esc(info.ldapsPort) + ' is</strong>, so ' + subject.lower + ' ' + subject.verb +
+      ' reachable over TLS. TCP ' + esc(info.port) + ' was most likely already taken.</div>';
+  }
+  if (info.ldapsPort && !info.ldapsListening) {
+    return '<div class="warn">The plain listener on ' + esc(info.port) + ' is up; ' +
+      '<strong>LDAPS is not</strong>. That affects how ' + subject.lower + ' can be ' +
+      'reached, not whether ' + subject.pronoun + ' ' + subject.verb + ' there.</div>';
+  }
+  return '';
+}
+
+// Every attribute of one entry, operational ones included, as the table both the
+// user page and the group page draw. `entry` is what the directory's readers
+// return: canonically spelled names, values already arrays, and `operational`
+// naming which of them a search would have withheld.
+function attributeTable(entry) {
+  const rows = Object.keys(entry.attributes).map(function (name) {
+    const values = entry.attributes[name];
+    const operational = entry.operational.indexOf(name) >= 0;
+    return '<tr><td><code>' + esc(name) + '</code>' +
+      (operational
+        ? ' <span class="state-none" title="An operational attribute. A search returns it only ' +
+          'when it is asked for by name (RFC 4511 section 4.5.1.8) — this dump shows it always.' +
+          '">(operational)</span>'
+        : '') + '</td>' +
+      '<td class="num">' + values.length + '</td>' +
+      '<td>' + (values.map(function (value) {
+        return '<code>' + esc(value) + '</code>';
+      }).join('<br>') || '—') + '</td></tr>';
+  }).join('');
+  return '<table><tr><th>Attribute</th><th class="num">Values</th><th>Value(s)</th></tr>' +
+    rows + '</table>';
+}
+
 let directoryReader = null;
 
 function setDirectoryReader(fn) {
   directoryReader = fn;
   log.debug("A directory reader was installed; a user's page will now show that " +
             "user's LDAP entry.");
+}
+
+// The groups pages read through their own slot, installed the same way and by the
+// same module, for the reason above: this file must not require ldap_server.js.
+//
+// Two slots rather than one object with two functions, because they were added at
+// different times and a single slot would mean an ldap_server.js that filled it
+// with only one of them silently disabling the other. A missing slot is already
+// handled — each page says "no directory is loaded" — and two of those are cheaper
+// than one half-filled reader nothing reports.
+let groupReader = null;
+
+function setGroupReader(fn) {
+  groupReader = fn;
+  log.debug("A group reader was installed; /admin/groups will now show the " +
+            "directory's groups.");
 }
 
 // The whole section, as HTML and as the object that goes into ?format=json. Both
@@ -1368,13 +1488,7 @@ function ldapObjectSection(row, key) {
   // Said on every branch, including the ones with an entry: the entry can be there
   // and the socket down, and a reader who trusts this page to mean "an LDAP client
   // can fetch this" needs to know which.
-  const listener = info.listening
-    ? ''
-    : '<div class="warn"><strong>The directory\'s listener is not up</strong> — ' +
-      esc(info.listenError || 'it never bound') + '. The entry below is in this process\'s ' +
-      'store and is what an LDAP client WOULD read; right now no client can connect, most ' +
-      'likely because TCP ' + esc(info.port) + ' was already taken. This page is HTTP and ' +
-      'answers either way.</div>';
+  const listener = directoryListenerWarning(info, ENTRY_SUBJECT);
   const alsoNamed = info.alsoNamed.length
     ? '<p class="note">' + info.alsoNamed.length + ' other entr' +
       (info.alsoNamed.length === 1 ? 'y names' : 'ies name') + ' this uid: ' +
@@ -1428,20 +1542,6 @@ function ldapObjectSection(row, key) {
   }
 
   const entry = info.entry;
-  const attributeRows = Object.keys(entry.attributes).map(function (name) {
-    const values = entry.attributes[name];
-    const operational = entry.operational.indexOf(name) >= 0;
-    return '<tr><td><code>' + esc(name) + '</code>' +
-      (operational
-        ? ' <span class="state-none" title="An operational attribute. A search returns it only ' +
-          'when it is asked for by name (RFC 4511 section 4.5.1.8) — this dump shows it always.' +
-          '">(operational)</span>'
-        : '') + '</td>' +
-      '<td class="num">' + values.length + '</td>' +
-      '<td>' + (values.map(function (value) {
-        return '<code>' + esc(value) + '</code>';
-      }).join('<br>') || '—') + '</td></tr>';
-  }).join('');
 
   const html = heading + listener +
     '<p class="note">The entry the embedded directory holds for this person &mdash; the object ' +
@@ -1460,8 +1560,7 @@ function ldapObjectSection(row, key) {
     'strings the rest of this console uses. The difference is only punctuation and it is kept ' +
     'because a debugger that showed one where the protocol carries the other would be showing ' +
     'the wrong thing.</p>' +
-    '<table><tr><th>Attribute</th><th class="num">Values</th><th>Value(s)</th></tr>' +
-    attributeRows + '</table>' +
+    attributeTable(entry) +
     '<p class="note">Every attribute the entry has, operational ones included. This directory is ' +
     '<strong>schemaless</strong>: no <code>objectClass</code> is enforced and no value is checked ' +
     'against a syntax, so an attribute a real directory would refuse is here because something ' +
@@ -1944,6 +2043,418 @@ app.get('/admin/users', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/groups — every group in the embedded directory, and one of them in
+// full.
+//
+// The one page in this console whose whole content comes from another module.
+// Everything else here reads admin_stats.js; this reads the directory through
+// the slot ldap_server.js fills, and it renders exactly what that returns
+// without deciding anything — including what counts as a group, which is that
+// module's rule and is stated on the page rather than reimplemented here.
+//
+// A GROUP IS NOT AN AUTHORISATION HERE, and the page says so where a reader will
+// see it. Nothing in this service reads these groups: no token carries them, no
+// SAML assertion has them as an attribute, no endpoint checks one. They are a
+// directory's objects for a directory client to read, and a console that listed
+// them beside the tokens page without saying that would let somebody conclude
+// that adding a user to `cn=directory-admins` changed what their token could do.
+// ---------------------------------------------------------------------------
+
+// The heading a group's link carries, and the fallback when it has no cn — an
+// entry can be a group by placement alone, and `(no cn)` is a truer label than an
+// empty cell that reads as a rendering fault.
+function groupLabel(group) {
+  return group.cn || '(no cn)';
+}
+
+// Why this entry counted as a group, in words. The rule is ldap_server.js's; this
+// is only its three values spelled out, and it is on the page because "developers
+// is a group" is uninteresting next to "this entry is a group because somebody put
+// it under ou=groups and it carries no group objectClass at all".
+const GROUP_RULES = {
+  both: { label: 'placement + objectClass',
+          title: 'It is under ou=groups AND carries a group objectClass. This is what a group ' +
+                 'written the conventional way looks like.' },
+  placement: { label: 'placement only',
+               title: 'It is under ou=groups but carries no group objectClass. This directory ' +
+                      'is schemaless, so nothing refused the add — it is listed here because ' +
+                      'of where it sits.' },
+  objectClass: { label: 'objectClass only',
+                 title: 'It carries a group objectClass but sits outside ou=groups. Nothing ' +
+                        'here requires a group to live under the groups container.' }
+};
+
+function groupRuleCell(rule) {
+  const rendered = GROUP_RULES[rule];
+  if (!rendered) {
+    return '<span class="state-none">' + esc(rule || 'unstated') + '</span>';
+  }
+  return '<span title="' + esc(rendered.title) + '">' + esc(rendered.label) + '</span>';
+}
+
+// THE TWO LISTS ARE DIFFERENT QUESTIONS, and this is where that shows.
+//
+// The directory holds an entry for anybody somebody wrote one for — the three it
+// seeds at startup, and whatever a client has added since. The users page holds
+// everybody who has actually presented a credential to this service. `alice` is
+// in the directory from the moment the process starts and is on the users page
+// only once somebody signs in as her, so a member row that always linked there
+// would usually land on "nothing here has authenticated as alice", which reads
+// as a broken link rather than as the fact it is.
+//
+// So the console's own user registry is consulted, and a member it does not know
+// is named without a link and with the reason. Reading it once per page rather
+// than once per row is deliberate: userRows() walks the whole registry.
+function knownUserKeys() {
+  const known = {};
+  stats.userRows().forEach(function (row) {
+    known[row.key] = true;
+  });
+  return known;
+}
+
+// A member's link. To the group page when the member is itself a group, so
+// nesting can be walked; to the users page when this console has actually seen
+// that person authenticate. Neither, and the DN stands on its own — which is the
+// commonest case in a directory nobody has signed in to yet.
+function memberLink(member, known) {
+  const label = '<code>' + esc(member.dn) + '</code>';
+  if (member.kind === 'group') {
+    return '<a href="' + esc('/admin/groups' + queryWith({ group: member.dn }, {})) +
+      '">' + label + '</a>';
+  }
+  if (member.userKey && known[member.userKey]) {
+    return '<a href="' + esc('/admin/users' + queryWith({ user: member.userKey }, {})) +
+      '">' + label + '</a>';
+  }
+  return label;
+}
+
+// The "On the users page" cell, for a member and for a memberOf claimant alike.
+// Three states and they are all worth telling apart: a name this console has seen
+// authenticate, a name it could file somebody under but never has, and an entry
+// named in a way that yields no user name at all.
+function usersPageCell(userKey, known) {
+  if (!userKey) {
+    return '<span class="state-none" title="This entry is not named uid=&lt;name&gt; and carries ' +
+      'no uid, so there is no name to look it up by. The console files people under the local ' +
+      'name userFor() derives; an entry named some other way — a cn=, or the one a TLS client ' +
+      'certificate seeds — has none.">—</span>';
+  }
+  if (!known[userKey]) {
+    return '<span class="state-none" title="The directory holds an entry for them and nothing ' +
+      'has authenticated as this name in this process, so the users page has no row to link to. ' +
+      'The two lists answer different questions: the directory is what somebody wrote into it, ' +
+      'the users page is who has actually presented a credential here.">' + esc(userKey) +
+      ' <em>(never here)</em></span>';
+  }
+  return '<a href="' + esc('/admin/users' + queryWith({ user: userKey }, {})) + '">' +
+    esc(userKey) + '</a>';
+}
+
+// What this directory's groups are and are not, said on both pages. Repeated
+// rather than shown once on the list, for the reason the open-console banner is
+// repeated: the page somebody arrives at directly is exactly the one that needs it.
+const GROUPS_CAVEAT =
+  '<p class="note"><strong>A group here grants nothing.</strong> Nothing in this service reads ' +
+  'them: no access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries ' +
+  'a group from this directory, and no endpoint checks one. They exist for an LDAP client to ' +
+  'read, write and search. Adding somebody to <code>cn=directory-admins</code> changes what a ' +
+  'directory client sees and changes nothing at all about what their token can do &mdash; on a ' +
+  'service that authenticates nobody, it could hardly be otherwise.</p>';
+
+function noGroupDirectorySection() {
+  return '<p class="note">No LDAP directory is loaded in this process, so there are no groups to ' +
+    'show. That is a build of this service without <code>ldap_server.js</code> and not a failure ' +
+    '&mdash; every other page of this console is unaffected.</p>';
+}
+
+const GROUPS_LINKS =
+  '<p class="note"><a href="/ldap">What this directory is</a> &middot; ' +
+  '<a href="/ldap/directory">every entry in it</a> &middot; ' +
+  '<a href="/ldap/directory?format=json">the same as JSON</a> &middot; ' +
+  '<a href="/admin/users">the people who have authenticated here</a>.</p>';
+
+// The list.
+function groupsListPage(req) {
+  log.debug("Entering groupsListPage().");
+  const info = groupReader('');
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = info.groups.filter(function (group) {
+    if (!needle) {
+      return true;
+    }
+    // The DN and the cn both, because a person looking for a group has one or the
+    // other in mind and which one depends on whether they came from an LDAP client
+    // or from this console.
+    return group.dn.toLowerCase().indexOf(needle) >= 0 ||
+           String(group.cn).toLowerCase().indexOf(needle) >= 0;
+  });
+  const paging = pagingOf(req.query, filtered.length);
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const filterParams = { q: wantedText || '', per: req.query.per || '' };
+  const nav = pageNav('/admin/groups', filterParams, paging);
+
+  const rows = shown.map(function (group) {
+    const href = '/admin/groups' + queryWith({ group: group.dn }, {});
+    return '<tr><td><a href="' + esc(href) + '">' + esc(groupLabel(group)) + '</a></td>' +
+      '<td class="who"><code>' + esc(group.dn) + '</code></td>' +
+      '<td>' + groupRuleCell(group.rule) + '</td>' +
+      '<td class="num">' + group.memberCount + '</td>' +
+      '<td class="num">' + (group.presentCount
+        ? '<span class="state-valid">' + group.presentCount + '</span>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td class="num">' + (group.danglingCount
+        ? '<span class="state-revoked" title="Membership values naming an entry this directory ' +
+          'does not hold. Deleting a user does not remove it from the groups that list it — ' +
+          'referential integrity is a directory feature and not a protocol rule, and this ' +
+          'directory deliberately does not have it.">' + group.danglingCount + '</span>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td class="num">' + (group.claimedCount
+        ? '<span class="state-expired" title="Entries whose own memberOf names this group and ' +
+          'which this group does not list back. Nothing here maintains memberOf, so a client ' +
+          'that writes it creates exactly this disagreement.">' + group.claimedCount + '</span>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td class="num">' + group.attributeCount + '</td>' +
+      '<td>' + esc(group.origin) + '</td>' +
+      '<td><code>' + esc(group.modifiedAt) + '</code></td></tr>';
+  }).join('');
+
+  const totalMembers = info.groups.reduce(function (n, g) { return n + g.memberCount; }, 0);
+  const totalDangling = info.groups.reduce(function (n, g) { return n + g.danglingCount; }, 0);
+
+  const inner = messagesOf(req) +
+    directoryListenerWarning(info, GROUPS_SUBJECT) +
+    '<div class="tiles">' +
+    tile(info.groupCount, 'Groups') +
+    tile(totalMembers, 'Membership values') +
+    tile(totalDangling, 'Dangling') +
+    tile(info.entryCount, 'Entries in the directory') +
+    '</div>' +
+    '<form method="get" action="/admin/groups"><div class="formrow">' +
+    '<label for="q">Group</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(wantedText) + '" size="28" ' +
+    'placeholder="part of a cn or a DN">' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/groups">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    '<table><tr><th>Group</th><th>DN</th><th>Counted because</th><th class="num">Members</th>' +
+    '<th class="num">Resolve</th><th class="num">Dangling</th><th class="num">Claimed</th>' +
+    '<th class="num">Attributes</th><th>Came from</th><th>Last modified</th></tr>' +
+    (rows || '<tr><td colspan="10">No group matches. ' +
+             (wantedText ? 'The filter above may be hiding some.' : 'This directory holds none — ' +
+              'the two it seeds can be deleted through the protocol like any other entry.') +
+             '</td></tr>') + '</table>' +
+    nav +
+    '<p class="note">A group is an entry that sits under <code>' + esc(info.groupsDn) + '</code>, ' +
+    'or that carries one of the group object classes (<code>groupOfNames</code>, ' +
+    '<code>groupOfUniqueNames</code>, <code>posixGroup</code>, <code>groupOfURLs</code>) wherever ' +
+    'it sits &mdash; either rule is enough, and the column above says which one caught each. Both ' +
+    'are applied because this directory is <strong>schemaless</strong>: nothing stops a client ' +
+    'adding a <code>groupOfNames</code> under <code>' + esc(info.usersDn) + '</code>, or an entry ' +
+    'with no <code>objectClass</code> at all under the groups container, and a page that applied ' +
+    'only one rule would answer for one of those and quietly lose the other.</p>' +
+    '<p class="note"><strong>Members</strong> counts the values of <code>member</code>, ' +
+    '<code>uniqueMember</code> and <code>memberUid</code> together; <strong>Resolve</strong> is ' +
+    'how many of them name an entry this directory actually holds and <strong>Dangling</strong> ' +
+    'is the rest. The two are shown apart because a group whose seven members resolve to five is ' +
+    'this directory doing exactly what it says it does &mdash; deleting a user leaves its DN in ' +
+    'every group that listed it &mdash; and one combined number would report that as seven ' +
+    'members with nothing wrong. <strong>Claimed</strong> is the disagreement in the other ' +
+    'direction: entries whose own <code>memberOf</code> names the group while the group does not ' +
+    'list them back.</p>' +
+    GROUPS_CAVEAT + GROUPS_LINKS;
+
+  log.debug("Leaving groupsListPage(). " + shown.length + " row(s) drawn of " +
+            info.groupCount + " group(s).");
+  return {
+    inner: inner,
+    json: {
+      groupCount: info.groupCount, matched: filtered.length, shown: shown.length,
+      membershipValues: totalMembers, dangling: totalDangling,
+      filter: { q: wantedText || null },
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      baseDn: info.baseDn, groupsDn: info.groupsDn, usersDn: info.usersDn,
+      port: info.port, listening: info.listening, listenError: info.listenError,
+      ldapsPort: info.ldapsPort, ldapsListening: info.ldapsListening,
+      groups: shown
+    }
+  };
+}
+
+// One group: every attribute it has, and everybody in it.
+function groupDetailPage(req, wantedDn) {
+  log.debug("Entering groupDetailPage(). dn=" + wantedDn);
+  const info = groupReader(wantedDn);
+  const back = '<p class="note"><a href="/admin/groups">Back to the groups</a>.</p>';
+
+  if (!info.found) {
+    // Three ways to be here and they are different answers, so they get different
+    // words. A 404 is none of them: the console linked here from a list it drew
+    // from this same store, and the interesting case is precisely that the store
+    // has changed since — a client can delete a group, rename it out of
+    // ou=groups, or strip its objectClass through the protocol between one click
+    // and the next.
+    const because = info.notAGroup
+      ? 'There <strong>is</strong> an entry at <code>' + esc(info.entryDn) + '</code>, and it is ' +
+        'not a group: it sits outside <code>' + esc(info.groupsDn) + '</code> and carries no ' +
+        'group <code>objectClass</code>. A <code>modifyDN</code> out of the groups container or ' +
+        'a <code>modify</code> that deleted the <code>objectClass</code> does exactly this, and ' +
+        'neither is refused &mdash; this directory has no schema. ' +
+        '<a href="/ldap/directory">The full dump</a> still shows it.'
+      : 'Nothing is at <code>' + esc(wantedDn) + '</code>. Either it was <code>delete</code>d or ' +
+        '<code>modifyDN</code>&rsquo;d through the protocol since the link was drawn, or the DN ' +
+        'was typed. DNs are compared case-folded and with the space after each comma ignored, so ' +
+        'the spelling is not what is wrong.';
+    log.debug("Leaving groupDetailPage(). Not a group.");
+    return {
+      inner: messagesOf(req) + directoryListenerWarning(info, GROUP_SUBJECT) +
+        '<p class="note">' + because + '</p>' + back,
+      json: Object.assign({ found: false }, info)
+    };
+  }
+
+  const group = info.group;
+  const known = knownUserKeys();
+
+  const memberRows = group.members.map(function (member) {
+    const state = member.present
+      ? '<span class="state-valid">in the directory</span>'
+      : '<span class="state-revoked" title="The value names an entry this directory does not ' +
+        'hold. It is shown rather than dropped: nothing here enforces referential integrity, ' +
+        'so this is the state the protocol leaves behind when a member is deleted.">dangling' +
+        '</span>';
+    return '<tr><td class="who">' + memberLink(member, known) + '</td>' +
+      '<td><code>' + esc(member.attribute) + '</code></td>' +
+      '<td>' + state + '</td>' +
+      '<td>' + esc(member.kind === 'group' ? 'a group' :
+                   member.kind === 'entry' ? 'an entry' : '—') + '</td>' +
+      '<td>' + (member.cn ? esc(member.cn) : '<span class="state-none">—</span>') + '</td>' +
+      '<td>' + (member.mail ? '<code>' + esc(member.mail) + '</code>'
+                            : '<span class="state-none">—</span>') + '</td>' +
+      '<td>' + usersPageCell(member.userKey, known) + '</td>' +
+      // The raw value, last, because for `member` and `uniqueMember` it is the DN
+      // in the first column all over again — and for `memberUid` it is not, which
+      // is the whole reason the column is here.
+      '<td class="who"><code>' + esc(member.value) + '</code></td></tr>';
+  }).join('');
+
+  const claimedRows = group.claimed.map(function (entry) {
+    return '<tr><td class="who"><code>' + esc(entry.dn) + '</code></td>' +
+      '<td>' + (entry.cn ? esc(entry.cn) : '<span class="state-none">—</span>') + '</td>' +
+      '<td>' + (entry.mail ? '<code>' + esc(entry.mail) + '</code>'
+                           : '<span class="state-none">—</span>') + '</td>' +
+      '<td>' + usersPageCell(entry.userKey, known) + '</td></tr>';
+  }).join('');
+
+  const claimedSection = group.claimed.length
+    ? '<h2>Entries that claim this group, and that it does not list</h2>' +
+      '<table><tr><th>DN</th><th>cn</th><th>mail</th><th>On the users page</th></tr>' +
+      claimedRows + '</table>' +
+      '<p class="note">Each of these carries a <code>memberOf</code> naming this group while this ' +
+      'group&rsquo;s own <code>member</code> does not name them back. <strong>Nothing here ' +
+      'maintains <code>memberOf</code></strong> &mdash; it is not a standard attribute at all ' +
+      '(Microsoft&rsquo;s directory and OpenLDAP&rsquo;s <code>memberof</code> overlay both write ' +
+      'it, the server keeping it in step with <code>member</code> itself), and a schemaless mock ' +
+      'that neither writes nor checks it lets a client create exactly this disagreement in one ' +
+      '<code>modify</code>. They are listed apart from the members above rather than merged into ' +
+      'them, because which side of the disagreement a name came from is the only interesting ' +
+      'thing about it.</p>'
+    : '';
+
+  const inner = messagesOf(req) +
+    directoryListenerWarning(info, GROUP_SUBJECT) +
+    '<h2>' + esc(groupLabel(group)) + '</h2>' +
+    '<table><tr><th>DN</th><th>Counted as a group because</th><th>Came from</th>' +
+    '<th>Created</th><th>Last modified</th></tr>' +
+    '<tr><td class="who"><code>' + esc(group.dn) + '</code></td>' +
+    '<td>' + groupRuleCell(group.rule) + '</td>' +
+    '<td>' + esc(group.origin) + '</td>' +
+    '<td><code>' + esc(group.createdAt) + '</code></td>' +
+    '<td><code>' + esc(group.modifiedAt) + '</code></td></tr></table>' +
+    '<p class="note">The two timestamps are <em>generalized time</em> ' +
+    '(<code>YYYYMMDDHHMMSSZ</code>), which is what a directory shows &mdash; not the ISO 8601 ' +
+    'strings the rest of this console uses. An LDAP client bound to <code>ldap://&lt;host&gt;:' +
+    esc(info.port) + '</code> reading <code>' + esc(group.dn) + '</code> sees exactly the object ' +
+    'below, because it <em>is</em> that object and not a copy of it.</p>' +
+
+    '<h2>Members</h2>' +
+    '<div class="tiles">' +
+    tile(group.memberCount, 'Membership values') +
+    tile(group.presentCount, 'Resolve to an entry') +
+    tile(group.danglingCount, 'Dangling') +
+    tile(group.claimed.length, 'Claim it back') +
+    '</div>' +
+    (group.memberCount
+      ? '<table><tr><th>Member</th><th>From</th><th>State</th><th>What it is</th><th>cn</th>' +
+        '<th>mail</th><th>On the users page</th><th>The value as stored</th></tr>' +
+        memberRows + '</table>'
+      : '<p class="note">This group lists nobody. An empty <code>groupOfNames</code> is something ' +
+        'a real directory refuses &mdash; RFC 4519 makes <code>member</code> MUST &mdash; and ' +
+        'this one has no schema, so it is here because something wrote it.</p>') +
+    '<p class="note">Membership is read from <code>' + esc(group.memberAttributes.join('</code>, ' +
+    '<code>')) + '</code>. The first two hold a <strong>DN</strong>; <code>memberUid</code> holds ' +
+    'a bare user name, which is looked up under <code>' + esc(info.usersDn) + '</code> &mdash; ' +
+    'treating the three alike is how a page ends up reporting every <code>posixGroup</code> ' +
+    'member as dangling. <strong>Nesting is shown and not expanded</strong>: a member that is ' +
+    'itself a group links to its own page, and nobody inside it is counted here, because nothing ' +
+    'in this service walks a group tree and a flattened list would be claiming a feature that is ' +
+    'not here.</p>' +
+    '<p class="note">The last column links to the users page only for somebody this service has ' +
+    'actually seen <strong>authenticate</strong>. The other members are marked <em>never ' +
+    'here</em>, and that is not a fault: the directory holds whatever somebody wrote into it — ' +
+    'the three people it seeds at startup, and anything a client has added since — while the ' +
+    'users page holds whoever has presented a credential to this process. <code>alice</code> is ' +
+    'in this directory from the moment it starts and appears on the users page only once ' +
+    'somebody signs in as her. A link that was always drawn would usually land on &ldquo;nothing ' +
+    'here has authenticated as alice&rdquo;, which reads as a broken link rather than as the ' +
+    'answer it is.</p>' +
+    claimedSection +
+
+    '<h2>Every attribute this group has</h2>' +
+    attributeTable(group) +
+    '<p class="note">The whole object, operational attributes included &mdash; a search returns ' +
+    'those only when they are asked for by name (RFC 4511 &sect;4.5.1.8), and this is a dump ' +
+    'rather than a search. The membership attributes are in here too, as the raw values the ' +
+    'store holds; the table above is the same values resolved. This directory is ' +
+    '<strong>schemaless</strong>: no <code>objectClass</code> is enforced and no value is checked ' +
+    'against a syntax, so an attribute a real directory would refuse is here because something ' +
+    'wrote it.</p>' +
+    GROUPS_CAVEAT + back + GROUPS_LINKS;
+
+  log.debug("Leaving groupDetailPage(). " + group.memberCount + " member value(s), " +
+            Object.keys(group.attributes).length + " attribute(s).");
+  return { inner: inner, json: Object.assign({ found: true }, info) };
+}
+
+app.get('/admin/groups', function (req, res) {
+  log.debug("Entering the admin groups page.");
+  if (!groupReader) {
+    // A build without ldap_server.js. Answered rather than 404'd, and with the
+    // nav intact, for the same reason the user page's directory section says it
+    // in words: the page exists, the directory does not, and those are different
+    // facts about this process.
+    respond(req, res, { directory: false, groups: [] }, 'Groups', '/admin/groups',
+            messagesOf(req) + noGroupDirectorySection());
+    log.debug("Leaving the admin groups page. No directory is loaded.");
+    return;
+  }
+  const wantedDn = String(req.query.group || '').trim();
+  if (wantedDn) {
+    const detail = groupDetailPage(req, wantedDn);
+    respond(req, res, detail.json, 'Group ' + wantedDn, '/admin/groups', detail.inner);
+    log.debug("Leaving the admin groups page. Drew the drill-down.");
+    return;
+  }
+  const list = groupsListPage(req);
+  respond(req, res, list.json, 'Groups', '/admin/groups', list.inner);
+  log.debug("Leaving the admin groups page. Drew the list.");
+});
+
+// ---------------------------------------------------------------------------
 // GET /admin/claims, POST /admin/claims
 // ---------------------------------------------------------------------------
 function claimsAction(body) {
@@ -2144,10 +2655,675 @@ app.get('/admin/claims', function (req, res) {
   log.debug("Leaving the admin claims page.");
 });
 
+// ---------------------------------------------------------------------------
+// GET /admin/vc, POST /admin/vc
+//
+// WHICH CLAIMS AN ISSUED CREDENTIAL CARRIES. The page is a list of LDAP attribute
+// types rather than of claim names, and vc_claims.js says at length why; the short
+// version is that this service has a directory, so a claim can have a value that
+// something other than the credential can see.
+//
+// It is the second page here that CHANGES what the protocol endpoints do, and the
+// first that writes to the directory: saving a selection sweeps every person under
+// ou=users and fills in what they are missing. That sweep is the whole point of
+// the page rather than a side effect — without it, ticking `title` would change
+// every future credential and change nothing an LDAP client could see, and the two
+// halves of this service would quietly stop describing the same people.
+// ---------------------------------------------------------------------------
+
+// The values of a field that may appear MORE THAN ONCE in the body — which is what
+// a list of checkboxes is, and what nothing else on this console needed until now.
+//
+// helpers.parseBody() cannot answer it: it builds a plain object, so a repeated
+// field keeps only its LAST value and a form with ten boxes ticked would arrive as
+// a selection of one. That is not a bug there — every other form on this console
+// has scalar fields, and changing the shape of that function would change what
+// eight other handlers see — so the repetition is read here, from the raw body,
+// beside the parsed one.
+function listField(req, body, name) {
+  log.debug("Entering listField(). name=" + name);
+  const type = String(req.headers['content-type'] || '');
+  if (/json/i.test(type)) {
+    const value = body[name];
+    const out = Array.isArray(value) ? value.map(String)
+              : (value == null || value === '' ? [] : [String(value)]);
+    log.debug("Leaving listField(). " + out.length + " value(s) from a JSON body.");
+    return out;
+  }
+  const raw = typeof req.body === 'string' ? req.body : '';
+  const out = new URLSearchParams(raw).getAll(name);
+  log.debug("Leaving listField(). " + out.length + " value(s) from a form body.");
+  return out;
+}
+
+// The sweep's outcome as a sentence, appended to whatever message the action
+// itself produced. It is stated on EVERY selection change, including the ones that
+// changed nothing in the directory, because "0 entries gained anything" and "there
+// is no directory here" are different facts and the page must not read the same
+// for both.
+function sweepText(sweep) {
+  if (!sweep.loaded) {
+    return ' The embedded directory is not loaded, so no entry was populated; ' +
+           'credentials still carry these claims, generated per user.';
+  }
+  if (!sweep.ok) {
+    return ' The directory could not be populated: ' + (sweep.errors || []).join(' ');
+  }
+  return ' Swept ' + sweep.examined + ' directory entry/entries; ' + sweep.changed +
+         ' of them gained ' + sweep.values + ' value(s).';
+}
+
+function vcAction(body, names) {
+  log.debug("Entering vcAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const current = vcClaims.selectedNames();
+
+  if (action === 'select' || action === 'replace') {
+    // `replace` is the same operation under the name a test would look for, and
+    // the same name /admin/claims uses for "here is the whole set at once".
+    const result = vcClaims.setSelection(names);
+    if (!result.ok) {
+      log.debug("Leaving vcAction(). The selection was refused.");
+      return result;
+    }
+    const sweep = vcClaims.populateDirectory();
+    log.debug("Leaving vcAction(). Selected " + result.selected.length + " attribute(s).");
+    return { ok: true, selected: result.selected, added: result.added, removed: result.removed,
+             sweep: sweep,
+             message: 'A credential issued from now on carries ' + result.selected.length +
+                      ' claim(s). Added: ' + (result.added.join(', ') || 'nothing') +
+                      '. Removed: ' + (result.removed.join(', ') || 'nothing') + '.' +
+                      sweepText(sweep) };
+  }
+
+  if (action === 'add' || action === 'remove') {
+    const name = String(body.attribute || body.name || '').trim();
+    if (!name) {
+      log.debug("Leaving vcAction(). No attribute was named.");
+      return { ok: false, errors: ['Name the attribute to ' + action + '.'] };
+    }
+    const lower = name.toLowerCase();
+    const already = current.some(function (n) { return n.toLowerCase() === lower; });
+    if (action === 'add' && already) {
+      log.debug("Leaving vcAction(). Already selected.");
+      return { ok: false, errors: ['"' + name + '" is already in the claim set.'] };
+    }
+    if (action === 'remove' && !already) {
+      log.debug("Leaving vcAction(). Not selected.");
+      return { ok: false, errors: ['"' + name + '" is not in the claim set.'] };
+    }
+    const wanted = action === 'add' ? current.concat([name])
+                                    : current.filter(function (n) { return n.toLowerCase() !== lower; });
+    const result = vcClaims.setSelection(wanted);
+    if (!result.ok) {
+      log.debug("Leaving vcAction(). The attribute was refused.");
+      return result;
+    }
+    const sweep = vcClaims.populateDirectory();
+    log.debug("Leaving vcAction(). " + action + " -> " + result.selected.length + " selected.");
+    return { ok: true, selected: result.selected, sweep: sweep,
+             message: (action === 'add' ? 'Added ' : 'Removed ') + name +
+                      '. A credential issued from now on carries ' + result.selected.length +
+                      ' claim(s).' + sweepText(sweep) };
+  }
+
+  if (action === 'defaults') {
+    const result = vcClaims.resetSelection();
+    const sweep = vcClaims.populateDirectory();
+    log.debug("Leaving vcAction(). Restored the defaults.");
+    return { ok: true, selected: result.selected, sweep: sweep,
+             message: 'The claim set is the default ' + result.selected.length +
+                      ' attribute(s) again — the six claims this issuer carried before this ' +
+                      'page existed.' + sweepText(sweep) };
+  }
+
+  if (action === 'populate') {
+    const sweep = vcClaims.populateDirectory();
+    log.debug("Leaving vcAction(). Populated only.");
+    return { ok: sweep.ok, errors: sweep.errors, selected: current, sweep: sweep,
+             message: 'Populated the directory for the current claim set.' + sweepText(sweep) };
+  }
+
+  log.debug("Leaving vcAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The five are: select, add, ' +
+                               'remove, defaults, populate.'] };
+}
+
+app.post('/admin/vc', function (req, res) {
+  log.debug("Entering the admin credential-claims action endpoint.");
+  const body = parseBody(req);
+  // Two names for the list, because the two callers spell it differently and
+  // neither spelling is wrong: a checkbox is one `attribute` repeated, and a JSON
+  // body carries one `attributes` array.
+  const names = listField(req, body, 'attribute').concat(listField(req, body, 'attributes'));
+  const result = vcAction(body, names);
+  respondToAction(req, res, '/admin/vc', result);
+  log.debug("Leaving the admin credential-claims action endpoint.");
+});
+
+// The one preview row: what this attribute would put in a credential for the
+// person the page is previewing, and where that value came from.
+function vcExampleCell(row, persona, byLdap) {
+  const found = byLdap[row.ldap.toLowerCase()];
+  if (found) {
+    return '<td><code>' + esc(found.value) + '</code></td><td>' + esc(found.source) + '</td>';
+  }
+  if (!row.from) {
+    // The only row with no generator: `description`, which this service already
+    // writes on every entry to record the protocols that person has used. Saying
+    // so is the point — it is the one attribute whose value is a real fact.
+    return '<td>—</td><td>the entry\'s own</td>';
+  }
+  // Shown in the form the CLAIM would take rather than the form the attribute
+  // holds, because that is what the column above it is showing for the selected
+  // rows and a table with two conventions in one column is a table nobody can
+  // read. The two differ for exactly two attributes — a date and a postal
+  // address — and both differences are punctuation.
+  const raw = persona[row.from] == null ? '' : String(persona[row.from]);
+  return '<td><code>' + esc(row.toClaim ? row.toClaim(raw) : raw) +
+         '</code></td><td>would be generated</td>';
+}
+
+function vcAttributeTable(previewUser) {
+  log.debug("Entering vcAttributeTable(). previewUser=" + previewUser);
+  const persona = vcClaims.personaFor(previewUser);
+  const built = vcClaims.subjectClaimsFor(previewUser, {});
+  const byLdap = {};
+  built.report.forEach(function (item) { byLdap[item.ldap.toLowerCase()] = item; });
+
+  const rows = vcClaims.VC_ATTRIBUTES.map(function (row) {
+    const on = vcClaims.isSelected(row.ldap);
+    return '<tr><td><input type="checkbox" name="attribute" value="' + esc(row.ldap) + '"' +
+      (on ? ' checked' : '') + '></td>' +
+      '<td><code>' + esc(row.ldap) + '</code></td>' +
+      '<td>' + esc(row.schema) + '</td>' +
+      '<td><code>' + esc(row.claim.join('.')) + '</code></td>' +
+      '<td>' + (row.ldpTerm ? '<code>' + esc(row.ldpTerm) + '</code>' : '<span class="state-none">—</span>') +
+      '</td>' + vcExampleCell(row, persona, byLdap) + '</tr>';
+  }).join('');
+
+  log.debug("Leaving vcAttributeTable(). " + vcClaims.VC_ATTRIBUTES.length + " row(s).");
+  return '<form method="post" action="/admin/vc">' +
+    '<input type="hidden" name="action" value="select">' +
+    '<table><tr><th>In</th><th>LDAP attribute</th><th>Defined by</th><th>Claim</th>' +
+    '<th>ldp_vc term</th><th>In a credential for ' + esc(previewUser) + '</th><th>Source</th></tr>' +
+    rows + '</table>' +
+    '<div class="formrow"><button>Save this selection</button>' +
+    '<span class="note">Saving also populates the directory: every person under ' +
+    '<code>ou=users</code> gains the attributes they are missing.</span></div></form>' +
+    '<div class="formrow">' +
+    '<form method="post" action="/admin/vc" class="inline">' +
+    '<input type="hidden" name="action" value="defaults">' +
+    '<button class="secondary">Restore the six default claims</button></form> ' +
+    '<form method="post" action="/admin/vc" class="inline">' +
+    '<input type="hidden" name="action" value="populate">' +
+    '<button class="secondary">Populate the directory now</button></form></div>';
+}
+
+// What a credential for this person would actually assert, claim by claim. It is
+// built by the same function the issuer calls, not by a second walk of the
+// catalogue — a preview that agreed with the page and disagreed with the
+// credential would be worse than no preview.
+function vcPreviewSection(previewUser) {
+  log.debug("Entering vcPreviewSection(). previewUser=" + previewUser);
+  const built = vcClaims.subjectClaimsFor(previewUser, {});
+  const rows = built.report.map(function (item) {
+    return '<tr><td><code>' + esc(item.claim) + '</code></td>' +
+      '<td><code>' + esc(item.value) + '</code></td>' +
+      '<td>' + esc(item.source) + '</td>' +
+      '<td>' + (item.ldpTerm ? 'yes' : '<span class="state-none">no</span>') + '</td></tr>';
+  }).join('');
+  const omitted = vcClaims.ldpOmitted();
+
+  log.debug("Leaving vcPreviewSection(). " + built.report.length + " claim(s).");
+  return '<form method="get" action="/admin/vc"><div class="formrow">' +
+    '<label for="user">Preview the credential for</label>' +
+    '<input type="text" id="user" name="user" size="20" value="' + esc(previewUser) + '">' +
+    '<button class="secondary">Show</button></div></form>' +
+    '<p class="note">' + (built.entryFound
+      ? 'This person has an entry in the directory, so the values below marked ' +
+        '<em>directory</em> are what an LDAP client reads from it.'
+      : 'This person has no entry in the directory — nobody has authenticated as them and ' +
+        'nothing was added by hand — so every value below is generated. It will be the same ' +
+        'one next time: the invented person is seeded from the username.') + '</p>' +
+    '<table><tr><th>Claim</th><th>Value</th><th>From</th><th>In ldp_vc</th></tr>' +
+    (rows || '<tr><td colspan="4">No attribute is selected, so a credential carries nothing ' +
+             'but its subject identifier. That is a legitimate thing to test and is not a ' +
+             'mistake this page will correct.</td></tr>') + '</table>' +
+    (omitted.length
+      ? '<p class="note"><strong>' + codeList(omitted) + '</strong> ' +
+        (omitted.length === 1 ? 'is selected and does' : 'are selected and do') +
+        ' not appear in an <code>ldp_vc</code> credential. That format is signed over ' +
+        'canonicalized JSON-LD, so it can only carry terms the vendored context defines, and ' +
+        'the context is vendored precisely because editing it would invalidate every ' +
+        'credential already issued against it. The two JOSE-secured formats carry all of ' +
+        'them.</p>'
+      : '');
+}
+
+app.get('/admin/vc', function (req, res) {
+  log.debug("Entering the admin credential-claims page.");
+  // Somebody the directory actually holds, so the page shows real values on a
+  // fresh start rather than an invented person nobody can look up. The parameter
+  // wins where it is given; the cap is there because this string is echoed.
+  const previewUser = String(req.query.user || 'alice').trim().slice(0, 64) || 'alice';
+
+  const inner = messagesOf(req) +
+    '<p class="note">Which claims a Verifiable Credential issued by this service carries, ' +
+    '<em>from now on</em>. Nothing already issued changes — a credential is a signed document ' +
+    'and this page cannot reach inside one. It applies to all five OID4VCI configurations: the ' +
+    'SD-JWT VC, the <code>jwt_vc_json</code> W3C credential, the <code>ldp_vc</code> one with a ' +
+    'BBS proof, and the two whose only difference is that the issuer names itself by DID.</p>' +
+
+    '<p class="note">The list is of <strong>LDAP attribute types</strong> and not of claim ' +
+    'names, because this service has a directory and a claim with a value nothing else can see ' +
+    'is half a demonstration. A selected attribute becomes the claim named beside it, and the ' +
+    'value is the one on that person\'s entry under <code>ou=users</code> — so an LDAP client ' +
+    'and an OID4VCI wallet pointed at this service are shown the same person. Three rows are ' +
+    'not RFC 4519/4524/2798: there is no standard attribute type for a birthdate or a ' +
+    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
+
+    '<div class="warn"><strong>None of this is verified, and the values are garbage on ' +
+    'purpose.</strong> This service authenticates nobody — the username typed at the sign-in ' +
+    'screen is the identity in every token and credential it issues — so there is no source of ' +
+    'a real birthdate here and there had better not be. What a person is missing is invented ' +
+    'from their username: the same invented person every time, across restarts, so that two ' +
+    'credentials issued a minute apart describe one human being rather than two. A verifier ' +
+    'that believed any of it would be believing this page.</div>' +
+
+    '<h2>The attributes</h2>' +
+    vcAttributeTable(previewUser) +
+
+    '<h2>What a credential would carry</h2>' +
+    vcPreviewSection(previewUser) +
+
+    '<h2>Where a value comes from</h2>' +
+    '<p class="note">Three sources, in this order. <strong>The access token</strong>, where it ' +
+    'carries a claim of that name — that is a statement this service already made about the ' +
+    'person, from the sign-in or from the <a href="/admin/claims">custom claims</a> page, and a ' +
+    'credential contradicting the token that authorised it would be indefensible. Then <strong>' +
+    'the directory entry</strong>, which is where the generated values live once an entry ' +
+    'exists and also where an <code>ldapmodify</code> lands: change <code>mail</code> on ' +
+    '<code>uid=alice,ou=users</code> and the next credential says so. Then <strong>the ' +
+    'generated persona</strong>, for a person with no entry, or an entry without that ' +
+    'attribute, or a directory that is not running.</p>' +
+    '<p class="note">Populating never overwrites. An attribute an entry already carries is left ' +
+    'exactly as it is — which is why the three seeded people keep their names and only gain what ' +
+    'they had nothing for, and why a sweep run twice does nothing the second time.</p>' +
+
+    '<h2>What these claims do not do</h2>' +
+    '<p class="note">Nothing reads them back. No access token, ID Token, SAML assertion or ' +
+    'Kerberos PAC carries a claim from this page, and no endpoint makes a decision on one — it ' +
+    'reaches a credential and stops there. The <a href="/admin/users">users</a> page shows the ' +
+    'directory entry each of these values was written onto.</p>';
+
+  respond(req, res, {
+    selected: vcClaims.selectedNames(),
+    defaults: vcClaims.DEFAULT_SELECTION,
+    ldpOmitted: vcClaims.ldpOmitted(),
+    attributes: vcClaims.VC_ATTRIBUTES.map(function (row) {
+      return { ldap: row.ldap, claim: row.claim.join('.'), label: row.label,
+               schema: row.schema, ldpTerm: row.ldpTerm || '',
+               selected: vcClaims.isSelected(row.ldap) };
+    }),
+    preview: { user: previewUser, claims: vcClaims.subjectClaimsFor(previewUser, {}) }
+  }, 'Credential claims', '/admin/vc', inner);
+  log.debug("Leaving the admin credential-claims page.");
+});
+
+
+// ---------------------------------------------------------------------------
+// GET /admin/vc-verifier-config, POST /admin/vc-verifier-config
+//
+// WHAT THE BAR DOOR ASKS FOR — the other end of the page above. /admin/vc decides
+// what an issued credential CARRIES; this decides what the Verifier at
+// /oid4vp/verifier ASKS FOR, and the two are deliberately separate settings
+// because the interesting states are the ones where they disagree. A Verifier
+// asking for a claim the issuer is not minting is the negative that exercises a
+// wallet's "I cannot satisfy this request" path, and there is no way to reach it
+// if one page sets both.
+//
+// The catalogue is vc_claims.js's, grouped into CLAIMS rather than listed as
+// attribute types, and vc_verifier_config.js says at length why: a credential
+// carries one Disclosure per top-level claim, so `address` is one unit of
+// disclosure however many attribute types feed it. Offering six address
+// checkboxes would offer a choice that does not exist on the wire.
+//
+// It is the third page here that changes what a protocol endpoint does, and the
+// only one whose effect is visible in a document this service SENDS rather than
+// in one it issues — the dcql_query in the next Authorization Request.
+// ---------------------------------------------------------------------------
+function vpConfigAction(body, names) {
+  log.debug("Entering vpConfigAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+
+  if (action === 'select' || action === 'replace') {
+    // An empty list is a legitimate save and not an empty form: DCQL with no
+    // `claims` member asks for the WHOLE credential, so unticking everything is
+    // how somebody tests that. It is stated in the message rather than left to be
+    // discovered from a presentation that disclosed everything.
+    const result = vpConfig.setRequested(names);
+    if (!result.ok) {
+      log.debug("Leaving vpConfigAction(). The selection was refused.");
+      return result;
+    }
+    log.debug("Leaving vpConfigAction(). " + result.requested.length + " claim(s) requested.");
+    return { ok: true, requested: result.requested, added: result.added, removed: result.removed,
+             message: result.requested.length
+               ? 'The next Authorization Request asks for ' + result.requested.length +
+                 ' claim(s): ' + result.requested.join(', ') + '. Added: ' +
+                 (result.added.join(', ') || 'nothing') + '. Removed: ' +
+                 (result.removed.join(', ') || 'nothing') + '.'
+               : 'The next Authorization Request names no claims at all, which in DCQL asks for ' +
+                 'the WHOLE credential — the query carries no claims member. Removed: ' +
+                 (result.removed.join(', ') || 'nothing') + '.' };
+  }
+
+  if (action === 'add') {
+    const name = String(body.claim || body.name || '').trim();
+    const result = vpConfig.addRequested(name);
+    if (!result.ok) {
+      log.debug("Leaving vpConfigAction(). The claim was refused.");
+      return result;
+    }
+    const known = vpConfig.rowFor(name);
+    log.debug("Leaving vpConfigAction(). Added " + name + ".");
+    return { ok: true, requested: result.requested,
+             message: 'Now asking for ' + name + '.' + (known ? '' :
+               ' It is not in the catalogue, so no credential this service issues carries it — ' +
+               'which is what makes it a test of what your wallet does with a request it cannot ' +
+               'satisfy. This Verifier will refuse the presentation on the "Requested claims" ' +
+               'check and name it.') };
+  }
+
+  if (action === 'remove') {
+    const name = String(body.claim || body.name || '').trim();
+    const result = vpConfig.removeRequested(name);
+    if (!result.ok) {
+      log.debug("Leaving vpConfigAction(). Nothing named that.");
+      return result;
+    }
+    log.debug("Leaving vpConfigAction(). Removed " + name + ".");
+    return { ok: true, requested: result.requested,
+             message: 'No longer asking for ' + name + '.' };
+  }
+
+  if (action === 'defaults') {
+    const result = vpConfig.resetRequested();
+    log.debug("Leaving vpConfigAction(). Restored the startup request.");
+    return { ok: true, requested: result.requested,
+             message: 'Back to what this process started with: ' +
+                      (result.requested.join(', ') || '(no claims)') + '. That is OID4VP_CLAIMS ' +
+                      'where it was set and given_name, family_name where it was not.' };
+  }
+
+  if (action === 'format') {
+    const result = vpConfig.setDefaultFormat(String(body.format || ''));
+    if (!result.ok) {
+      log.debug("Leaving vpConfigAction(). No such format.");
+      return result;
+    }
+    log.debug("Leaving vpConfigAction(). Default format is " + result.format + ".");
+    return { ok: true, format: result.format,
+             message: 'A request that does not name a format now asks for a ' + result.format +
+                      ' credential. The three format links on the bar door name one explicitly ' +
+                      'and are unaffected.' };
+  }
+
+  log.debug("Leaving vpConfigAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The five are: select, add, ' +
+                               'remove, defaults, format.'] };
+}
+
+app.post('/admin/vc-verifier-config', function (req, res) {
+  log.debug("Entering the admin verifier-request action endpoint.");
+  const body = parseBody(req);
+  // Two names for the list, for the reason /admin/vc has two: a checkbox is one
+  // `claim` repeated, and a JSON body carries one `claims` array.
+  const names = listField(req, body, 'claim').concat(listField(req, body, 'claims'));
+  const result = vpConfigAction(body, names);
+  respondToAction(req, res, '/admin/vc-verifier-config', result);
+  log.debug("Leaving the admin verifier-request action endpoint.");
+});
+
+// Whether the ISSUER currently mints the claim this Verifier is asking for. The
+// two pages are separate settings on purpose (see the header), so the disagreement
+// is a state to report rather than one to prevent — and reporting it is what stops
+// "the wallet disclosed nothing" being investigated as a wallet bug.
+function vpIssuedCell(claimName) {
+  const carried = vpConfig.carriedNow(claimName);
+  if (!carried.known) {
+    return '<td><span class="state-none">not a claim this service issues</span></td>';
+  }
+  if (!carried.carried.length) {
+    return '<td><span class="state-expired">no — not selected on ' +
+           '<a href="/admin/vc">/admin/vc</a></span></td>';
+  }
+  if (carried.missing.length) {
+    return '<td><span class="state-expired">partly — ' + codeList(carried.missing) +
+           ' not selected</span></td>';
+  }
+  return '<td><span class="state-valid">yes</span></td>';
+}
+
+// One catalogue row. The DCQL path column is shown for the format the next
+// unqualified request will use, because a path is not a property of the claim: the
+// same claim is ["given_name"], ["credentialSubject","given_name"] or
+// ["credentialSubject","birthDate"] depending on what is being asked for, and a
+// column that picked one silently would be wrong two-thirds of the time.
+function vpClaimRow(row, format) {
+  const on = vpConfig.isRequested(row.claim);
+  const paths = vpConfig.dcqlPathsFor(format, row.claim);
+  const attributes = row.members.map(function (member) {
+    return '<code>' + esc(member.ldap) + '</code> <span class="state-none">(' +
+           esc(member.schema) + ')</span>';
+  }).join('<br>');
+  return '<tr><td><input type="checkbox" name="claim" value="' + esc(row.claim) + '"' +
+    (on ? ' checked' : '') + '></td>' +
+    '<td><code>' + esc(row.claim) + '</code>' +
+    (row.nested ? '<br><span class="state-none">one object, ' + row.members.length +
+                  ' attributes</span>' : '') + '</td>' +
+    '<td>' + esc(row.label) + '</td>' +
+    '<td>' + attributes + '</td>' +
+    '<td>' + (paths.length
+      ? paths.map(function (path) { return '<code>' + esc(JSON.stringify(path)) + '</code>'; }).join('<br>')
+      : '<span class="state-expired">cannot be asked for in this format</span>') + '</td>' +
+    '<td>' + (row.ldpTerms.length ? codeList(row.ldpTerms)
+                                  : '<span class="state-none">—</span>') + '</td>' +
+    vpIssuedCell(row.claim) + '</tr>';
+}
+
+// The claims being asked for that are NOT in the catalogue. Rendered as ticked
+// checkboxes in the same form rather than as a separate list with its own Save,
+// because a form that dropped them the moment somebody saved the table above would
+// silently undo a deliberate configuration.
+function vpExtraRows(format) {
+  const extras = vpConfig.requestedRows().filter(function (row) { return !row.inCatalogue; });
+  if (!extras.length) {
+    return '';
+  }
+  return '<h3>Asked for, and not in the catalogue</h3>' +
+    '<p class="note">Nothing this service issues carries these, which is what makes them worth ' +
+    'asking for: it is the only way to see what a wallet does with a request it cannot satisfy, ' +
+    'and what this Verifier says when it checks. They are ticked below so that saving the table ' +
+    'above keeps them — untick one to stop asking for it.</p>' +
+    '<table><tr><th>In</th><th>Claim</th><th>DCQL path (' + esc(format) + ')</th></tr>' +
+    extras.map(function (row) {
+      const paths = vpConfig.dcqlPathsFor(format, row.claim);
+      return '<tr><td><input type="checkbox" name="claim" value="' + esc(row.claim) + '" checked></td>' +
+        '<td><code>' + esc(row.claim) + '</code></td>' +
+        '<td>' + paths.map(function (path) {
+          return '<code>' + esc(JSON.stringify(path)) + '</code>';
+        }).join('<br>') + '</td></tr>';
+    }).join('') + '</table>';
+}
+
+function vpClaimsSection(format) {
+  log.debug("Entering vpClaimsSection(). format=" + format);
+  const rows = vpConfig.REQUESTABLE.map(function (row) { return vpClaimRow(row, format); }).join('');
+  const omitted = format === 'ldp_vc' ? vpConfig.ldpOmitted() : [];
+  log.debug("Leaving vpClaimsSection(). " + vpConfig.REQUESTABLE.length + " row(s).");
+  return '<form method="post" action="/admin/vc-verifier-config">' +
+    '<input type="hidden" name="action" value="select">' +
+    '<table><tr><th>Ask</th><th>Claim</th><th>Label</th><th>LDAP attribute (defined by)</th>' +
+    '<th>DCQL path (' + esc(format) + ')</th><th>ldp_vc term</th>' +
+    '<th>Issued now</th></tr>' + rows + '</table>' +
+    vpExtraRows(format) +
+    '<div class="formrow"><button>Save this request</button>' +
+    '<span class="note">It applies to the next Authorization Request. One already in flight ' +
+    'keeps the claims it was built with — a Verifier that judged a presentation against a list ' +
+    'changed after it asked would refuse a wallet for answering the question it was really ' +
+    'asked.</span></div></form>' +
+    (omitted.length
+      ? '<p class="note"><strong>' + codeList(omitted) + '</strong> ' +
+        (omitted.length === 1 ? 'is asked for and is' : 'are asked for and are') +
+        ' dropped from an <code>ldp_vc</code> query. That format is signed over canonicalized ' +
+        'JSON-LD, so only terms the vendored context defines can be named at all, and asking ' +
+        'under a name it does not define would fail canonicalization rather than return less. ' +
+        'The two JOSE-secured formats ask for all of them.</p>'
+      : '') +
+    '<div class="formrow">' +
+    '<form method="post" action="/admin/vc-verifier-config" class="inline">' +
+    '<input type="hidden" name="action" value="add">' +
+    '<label for="claim">Also ask for a claim that is not in the catalogue</label>' +
+    '<input type="text" id="claim" name="claim" size="24" placeholder="drivers_licence_number">' +
+    '<button class="secondary">Add</button></form> ' +
+    '<form method="post" action="/admin/vc-verifier-config" class="inline">' +
+    '<input type="hidden" name="action" value="defaults">' +
+    '<button class="secondary">Back to what this process started with</button></form></div>';
+}
+
+// The credential types a wallet may submit, and which one an unqualified request
+// asks for. One request is for ONE of them: a presentation cannot convert between
+// formats, so a wallet holding a jwt_vc_json credential has nothing to answer a
+// dc+sd-jwt query with — and the honest outcome is that it says so rather than
+// that this page pretends the choice does not matter.
+function vpFormatsSection(format) {
+  log.debug("Entering vpFormatsSection(). format=" + format);
+  const rows = vpConfig.FORMATS.map(function (item) {
+    const configs = item.configs.map(function (id) {
+      return '<code>' + esc(id) + '</code>';
+    }).join('<br>');
+    return '<tr><td><input type="radio" name="format" value="' + esc(item.id) + '"' +
+      (item.id === format ? ' checked' : '') + '></td>' +
+      '<td><code>' + esc(item.id) + '</code><br>' + esc(item.label) + '</td>' +
+      '<td><code>' + esc(item.identifiedBy) + '</code><br><code>' +
+      esc(item.identifierText) + '</code></td>' +
+      '<td>' + esc(item.selectiveDisclosure) + '</td>' +
+      '<td>' + esc(item.holderBinding) + '</td>' +
+      '<td>' + configs + '</td>' +
+      '<td><a href="' + esc('/oid4vp/verifier?format=' + encodeURIComponent(item.id)) +
+      '">Present one</a></td></tr>';
+  }).join('');
+  log.debug("Leaving vpFormatsSection(). " + vpConfig.FORMATS.length + " row(s).");
+  return '<form method="post" action="/admin/vc-verifier-config">' +
+    '<input type="hidden" name="action" value="format">' +
+    '<table><tr><th>Default</th><th>Format</th><th>Identified in DCQL by</th>' +
+    '<th>Selective disclosure</th><th>Holder binding</th><th>Issued here as</th><th></th></tr>' +
+    rows + '</table>' +
+    '<div class="formrow"><button>Ask for this one by default</button>' +
+    '<span class="note">The default is what <code>/oid4vp/start</code> asks for when the link ' +
+    'that reached it names no format. The bar door\'s three format buttons name one explicitly, ' +
+    'so they are unaffected — a button saying "present an SD-JWT VC" that asked for something ' +
+    'else would be lying in the one place a reader is most likely to trust it.</span></div>' +
+    '</form>' +
+    '<p class="note">' + vpConfig.FORMATS.map(function (item) {
+      return '<strong>' + esc(item.id) + '</strong> — ' + esc(item.what);
+    }).join('<br><br>') + '</p>' +
+    '<p class="note">The identifying values are not settable here. They are what this service\'s ' +
+    'own issuer mints (<code>vc_configs.js</code>), and a Verifier asking for a <code>vct</code> ' +
+    'nobody here issues would be a request no wallet in this stack could ever satisfy — a ' +
+    'negative worth having, but one that belongs to the issuer\'s configuration rather than to a ' +
+    'text box on this page.</p>';
+}
+
+app.get('/admin/vc-verifier-config', function (req, res) {
+  log.debug("Entering the admin verifier-request page.");
+  const format = vpConfig.defaultFormatId();
+  const requested = vpConfig.requestedClaims();
+  const query = vpConfig.dcqlQuery(format);
+
+  const inner = messagesOf(req) +
+    '<p class="note">What the mock Verifier at <a href="/oid4vp/verifier">/oid4vp/verifier</a> — ' +
+    'the pages call it <em>The Bar Door</em> — asks a wallet for, and in which credential format. ' +
+    'It reaches the wire as the <code>dcql_query</code> of the next OID4VP Authorization Request, ' +
+    'and it is what the Verifier then checks the presentation against: a claim asked for and not ' +
+    'presented fails the <em>Requested claims</em> check by name.</p>' +
+
+    '<p class="note">The claims are the same catalogue <a href="/admin/vc">/admin/vc</a> fills a ' +
+    'credential from, grouped into <strong>claims</strong> rather than listed as attribute types. ' +
+    'A credential carries one Disclosure per top-level claim, so <code>address</code> is one unit ' +
+    'of disclosure however many LDAP attributes feed it — asking for it gets the street, the ' +
+    'locality, the region, the postal code and the country together, and a page offering six ' +
+    'address checkboxes would be offering a choice that does not exist on the wire.</p>' +
+
+    '<div class="warn"><strong>This asks; it does not admit anybody.</strong> A presentation that ' +
+    'verifies here starts no session, issues no token and grants no access — the door says yes and ' +
+    'that is the whole of it. Nothing else in this service reads what was presented. The two ' +
+    'settings are also deliberately separate: this page decides what is ASKED FOR and ' +
+    '<a href="/admin/vc">/admin/vc</a> decides what is ISSUED, so that asking for a claim the ' +
+    'issuer does not mint stays reachable. That is the negative worth testing, and one page ' +
+    'setting both would make it impossible to reach.</div>' +
+
+    '<h2>The claims</h2>' +
+    (requested.length
+      ? '<p class="note">Asking for ' + requested.length + ': ' + codeList(requested) + '.</p>'
+      : '<div class="warn"><strong>No claim is selected, and that is a real request rather than ' +
+        'an empty form.</strong> DCQL reads an absent <code>claims</code> member as the WHOLE ' +
+        'credential, so the query below carries none and the wallet is being asked for ' +
+        'everything — the opposite of what selective disclosure is for, which is exactly why it ' +
+        'is worth being able to ask for it.</div>') +
+    vpClaimsSection(format) +
+
+    '<h2>The credential types that can be submitted</h2>' +
+    vpFormatsSection(format) +
+
+    '<h2>The query this builds</h2>' +
+    '<p class="note">Built by the function that builds the real one, not by a second walk of the ' +
+    'table above — a preview that agreed with this page and disagreed with the request would be ' +
+    'worse than no preview. It is the <code>dcql_query</code> parameter of the next ' +
+    'Authorization Request, by value or inside the signed Request Object.</p>' +
+    '<textarea readonly spellcheck="false">' + esc(JSON.stringify(query, null, 2)) + '</textarea>' +
+
+    '<h2>What this page does not change</h2>' +
+    '<p class="note">Not what the issuer mints — that is <a href="/admin/vc">/admin/vc</a>, and ' +
+    'the <em>Issued now</em> column above is this page reporting on that one. Not a request ' +
+    'already in flight, which keeps the claims it was built with. Not the <code>vct</code> or the ' +
+    'type array a credential is identified by. And not what a verified presentation is worth: ' +
+    'nothing here turns one into a credential of any kind.</p>';
+
+  respond(req, res, {
+    requested: requested,
+    defaults: vpConfig.DEFAULT_REQUESTED,
+    format: format,
+    formats: vpConfig.FORMATS.map(function (item) {
+      return { id: item.id, label: item.label, identifiedBy: item.identifiedBy,
+               identifier: item.identifier, selectiveDisclosure: item.selectiveDisclosure,
+               holderBinding: item.holderBinding, configurations: item.configs };
+    }),
+    ldpOmitted: vpConfig.ldpOmitted(),
+    catalogue: vpConfig.REQUESTABLE.map(function (row) {
+      return { claim: row.claim, label: row.label, nested: row.nested,
+               attributes: row.members.map(function (member) {
+                 return { ldap: member.ldap, schema: member.schema };
+               }),
+               ldpTerms: row.ldpTerms,
+               paths: vpConfig.dcqlPathsFor(format, row.claim),
+               requested: vpConfig.isRequested(row.claim),
+               issued: vpConfig.carriedNow(row.claim) };
+    }),
+    dcqlQuery: query
+  }, 'Verifier request', '/admin/vc-verifier-config', inner);
+  log.debug("Leaving the admin verifier-request page.");
+});
+
 module.exports = {
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
+  setGroupReader: setGroupReader,
   jtiFrom: jtiFrom,
   tokenAction: tokenAction,
-  claimsAction: claimsAction
+  claimsAction: claimsAction,
+  vcAction: vcAction,
+  vpConfigAction: vpConfigAction
 };

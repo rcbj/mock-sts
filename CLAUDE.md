@@ -11,8 +11,9 @@ acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
 1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
 OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
 half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, W3C DID Core with
-DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw TCP 389,
-built on the node-ldapjs SUBMODULE and used unmodified), and **TLS / mutual TLS**
+DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw TCP 389 and,
+over TLS, on raw TCP 636 as **LDAPS**, one set of handlers and one store behind
+both, built on the node-ldapjs SUBMODULE and used unmodified), and **TLS / mutual TLS**
 (two HTTPS listeners of its own, 8443 and 9443, whose whole content is what the
 SERVER saw of the connection — see README.md). It exists to exercise *clients*: it
 authenticates nobody, checks no password and validates no access token.
@@ -50,7 +51,8 @@ middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `vc_verifier.js`, `ldap_server.js`, `tls_server.js`, `krb5_kdc.js`,
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
 messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `sts_metadata.js`, and the
-two libraries that register nothing, `dpop.js` and `admin_stats.js`.
+four libraries that register nothing, `dpop.js`, `admin_stats.js`, `vc_claims.js` and
+`vc_verifier_config.js`.
 
 **`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
 dependency rather than a preference: it calls that module's `accept()` for every
@@ -72,8 +74,31 @@ where a route cannot. A failure to bind is RECORDED rather than thrown, and both
 is otherwise no way to tell a running listener from one whose port was already taken
 — by the host's own slapd, or by a second copy of this service.
 
+`ldap_server.js` starts **two** of those listeners — plain 389 and LDAPS 636 — and
+they are published SEPARATELY (`listening`/`listenError`, and a `tls` object with its
+own `listening`/`error`) because they bind independently and "389 is up and 636 is
+not" is the ordinary outcome of a host run, which is not root. One flag could only
+report one of them, and the direction it would get wrong is the expensive one: a page
+saying no client can connect while LDAPS is answering. Note what LDAPS is NOT: it is
+not an option on the plain server. ldapjs decides between a `net.Server` and a
+`tls.Server` at CONSTRUCTION, so there is a second server object, handlers are
+registered per instance, and the `server` most of that file registers against is a
+FAN-OUT over the eight operations plus unbind rather than a server — see the comment
+above it before adding an operation. `listen`, `close` and `address` are deliberately
+not fanned out. There is no StartTLS to add instead: it is an extended operation,
+ldapjs implements none, and this repository does not patch that submodule.
+
 `tls_server.js` is the newest of the four and the one whose sockets are easiest to
-forget are sockets: they speak **HTTP**, so they look as though they belong on the
+forget are sockets — and there is now a FOURTH TLS socket in this process that is not
+its own: the directory's LDAPS listener serves `serverCertificate()`'s certificate and
+key rather than generating a second pair, so one anchor covers 8443, 9443 and 636 and
+a caller trusts this service once per start rather than twice. That is what makes
+`ldap_server.js` require this module, and therefore what fixes their order in
+`server.js` (rule 6). The private key crosses a module boundary and no network one:
+it is generated per start, held in memory, and `GET /tls/server-certificate` publishes
+the certificate alone.
+
+Its own sockets: they speak **HTTP**, so they look as though they belong on the
 plain listener — but they are HTTPS on 8443 and 9443, and `GET /sts-metadata` walks
 the plain listener's router, which cannot see them. Its four rows there are the
 plain-HTTP views only, and the listeners are described in their text. Its truststore
@@ -100,6 +125,50 @@ that is the one reachable before anything is trusted.
    share — lives there rather than in `vc_issuer.js` where it was written: the
    fourth caller is in `oauth2.js`, which vc_issuer.js cannot be required from
    without building a cycle or moving OID4VCI ahead of OAuth2 in the route order.
+3a. **`vc_claims.js` is a library like `dpop.js` too, and it is read from three
+   different points of the require order.** It holds which claims an issued
+   Verifiable Credential carries — a catalogue of LDAP ATTRIBUTE TYPES, not of claim
+   names, because a claim's value is the value on that person's directory entry —
+   plus the invented, DETERMINISTIC persona that fills what an entry lacks.
+   `vc_issuer.js` (early), `admin.js` (late) and `ldap_server.js` (last) all read it,
+   so it must stay a library: it registers no route and requires only `helpers.js`
+   and `admin_stats.js` (for `identityKeyOf()`, so that `alice`,
+   `urn:sts-mock:user:alice` and `alice@REALM` are one invented person and one
+   entry). The DIRECTORY half is inverted the usual way — `setDirectory()` is filled
+   by `ldap_server.js` at ITS require time, because that module cannot be required
+   from a module `vc_issuer.js` reads without dragging every `/ldap` route to the
+   front of the router. Two things there are load-bearing and easy to undo: the
+   ISSUER METADATA is built from the same selection the credential is (an issuer
+   advertising five claims and minting fourteen teaches every wallet author that the
+   metadata is not worth reading), and `ldp_vc` carries only the terms the vendored
+   JSON-LD context defines — `bbs2023.js` canonicalizes with `safe: true`, so an
+   undefined term does not go missing, it THROWS inside a cryptosuite at issuance
+   time. `buildLdpVc()` filters against the context it actually loaded rather than
+   trusting the hand-kept list.
+3a-ii. **`vc_verifier_config.js` is the same kind of library, and it holds the
+   OTHER end of that catalogue.** `vc_claims.js` says what an issued credential
+   CARRIES; this says what the mock Verifier — the bar door at `/oid4vp/verifier` —
+   ASKS FOR, and which of the three credential formats it asks in. Both ends read
+   it (`vc_verifier.js` early, `admin.js` late), so it registers no route and
+   requires only `helpers.js`, `vc_claims.js` and `vc_configs.js`, none of which
+   registers anything either. Four things in it are load-bearing:
+   its catalogue is `vc_claims.js`'s rows GROUPED BY CLAIM rather than listed as
+   attribute types, because `buildSdJwtVc()` makes one Disclosure per top-level
+   claim and `address` is therefore one unit of disclosure however many attributes
+   feed it; the DCQL query is built HERE and `vpDcqlQuery()` in `vc_verifier.js` is
+   now only the caller that logs it, so the console's preview and the real request
+   cannot drift; the ldp_vc paths use the VENDORED CONTEXT'S TERM and not the OIDC
+   claim name (`birthDate`, and four flat terms where the others have `address`),
+   which was silently wrong while the Verifier could only ask for the two claims
+   whose spellings coincide; and `formatById()` reads a SPACE AS A PLUS, because
+   `dc+sd-jwt` is a format id containing the one character a query string spells a
+   space with — `?format=dc+sd-jwt` arrives as `dc sd-jwt`, which cost nothing
+   while an unrecognised format fell back to a constant and costs the bar door's
+   own button the moment that fallback is configuration.
+   The claims a request asks for are FROZEN onto the transaction in
+   `buildVpRequest()` and every check reads them from there: the list is editable
+   while a presentation is in flight, and judging what came back against a list
+   changed after the question was asked refuses a wallet for answering correctly.
 3b. **`admin_stats.js` is a library like `dpop.js`, and one dependency into it is
    INVERTED.** It registers nothing and requires only `helpers.js`, which it needs to
    stay that way more than `dpop.js` does: it is called from `app.js`'s call log,
@@ -130,8 +199,16 @@ that is the one reachable before anything is trusted.
    sets would each look correct alone and never see each other, and a token revoked
    from the console would keep introspecting as active with no error to point at.
 
-6. **`ldap_server.js` must stay after `admin.js`, and it INVERTS a dependency the
-   same way `helpers.js` does.** Its embedded directory grows an entry under
+6. **`ldap_server.js` must stay after `admin.js` AND after `tls_server.js`, and it
+   INVERTS a dependency the same way `helpers.js` does.** The second half of that is
+   new and is a plain require rather than an inversion: it serves `tls_server.js`'s
+   server certificate and key on 636, and neither thing that forces an inversion
+   applies — that module knows nothing about this one, so there is no cycle, and its
+   routes (`/tls*`) collide with nothing here. What the require DOES do is pull those
+   routes into the express router at that point, so `server.js` requires
+   `./tls_server` BEFORE `./ldap_server` to keep "the require order is the route
+   order" true rather than a fiction node quietly corrects. It changes no output —
+   `/sts-metadata` sorts its rows by path within a group. Its embedded directory grows an entry under
    `ou=users` for anybody who authenticates through any of the families here, and
    `admin_stats.recordAuthentication()` is already the single funnel all of them
    pass at the moment a credential is ACCEPTED — so one observer there is one place
@@ -163,6 +240,52 @@ that is the one reachable before anything is trusted.
    which is the same normalised local name `autoCreateUser()` built the DN from —
    pass anything else and the two silently stop naming the same entry.
 
+   **A THIRD hook is the same direction as the second, and there is one rule it
+   carries that is not obvious from the code.** `/admin/groups` lists this
+   directory's groups and drills into one; `admin.js` offers `setGroupReader()`
+   and this module fills it with `groupsFor()`, for exactly the route-order reason
+   above. What that function decides — and what must not be reimplemented in
+   `admin.js`, which renders and decides nothing — is **what counts as a group**,
+   and it is two rules rather than one: an entry UNDER `ou=groups`, or an entry
+   carrying a group `objectClass` wherever it sits. Both, because the directory is
+   schemaless and a client can `add` a `groupOfNames` under `ou=users` or an entry
+   with no `objectClass` at all under the groups container; either rule alone
+   answers for one of those and silently loses the other, so each row says which
+   rule caught it. The three disagreements it reports are the point of the page and
+   none of them is a defect to fix: a **dangling** member (this directory does not
+   do referential integrity, so a delete leaves the DN behind), a member that is
+   itself a **group** (nesting is shown, never expanded — nothing here walks it),
+   and an entry whose own `memberOf` names a group that does not list it back
+   (nothing here maintains `memberOf`; it is not even a standard attribute). Note
+   also that `memberUid` holds a bare name where `member` and `uniqueMember` hold a
+   DN — resolving the three alike is how every `posixGroup` member gets reported as
+   dangling.
+
+   **A FOURTH HOOK POINTS AT `vc_claims.js` and it writes rather than reads.**
+   `/admin/vc` chooses which LDAP attributes an issued Verifiable Credential
+   carries, so those attributes have to exist on people: this module fills
+   `vcClaims.setDirectory()` with `vcAttributesFor()` (one person's attributes, for
+   a claim value) and `populateVcAttributes()` (the sweep). The sweep runs when the
+   selection changes, when an entry is created, when a returning person
+   authenticates, and once at startup. Three rules in it are load-bearing —
+   it fills only what is ABSENT (so an operator's `ldapmodify` and the seeded
+   people's own names survive), it writes ONE value rather than appending (or an
+   entry accumulates a birthdate per sign-in), and it walks entries UNDER
+   `ou=users` only rather than everything carrying a `person` objectClass, because
+   this directory is schemaless and a client can put that class on a group.
+   Auto-created entries also take their `cn`, `sn`, `givenName`, `displayName` and
+   `mail` from the invented persona now rather than from the login name — those
+   are attributes a credential asserts, and `given_name: "dave"` taught a wallet
+   nothing — while the `uid` and the DN stay the login name, which is the identity.
+
+   **A GROUP HERE GRANTS NOTHING**, and both pages say so where a reader will see
+   it. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos
+   PAC carries a group from this directory and no endpoint reads one. On a service
+   that authenticates nobody it could hardly be otherwise — but a console that
+   listed groups beside the tokens page without saying it would let somebody
+   conclude that adding a user to `cn=directory-admins` changed what their token
+   could do.
+
 `userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
 them, not because they are especially general. The last two are read by three parsers
@@ -179,7 +302,8 @@ it cannot go stale — but it reports two kinds of drift and the parent project'
 description whose path is not registered (what a rename produces). See README.md.
 
 Reading the router has one blind spot: **a protocol that registers no route is
-invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are. Those
+invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are — and
+the directory's two, plain 389 and LDAPS 636. Those
 have to be described by hand or they go unlisted with nothing failing.
 
 Coverage notes in that file **must start `full`, `partial` or `mock`** and say what is
@@ -220,7 +344,9 @@ them have already cost something:
   service. `.npmrc` carries `omit=dev` and the Dockerfile passes `--omit=dev` as
   well; the duplication is deliberate.
 * **The library is NOT patched.** Everything in `ldap_server.js` is handlers
-  registered against its public API, so the submodule stays a usable copy of
+  registered against its public API — LDAPS included, which is a second
+  `createServer({ certificate, key })` instance and a fan-out over the operation
+  methods, not a reach into the internal `routes` map — so the submodule stays a usable copy of
   ldapjs rather than a fork nobody else can consume — and the api on the other
   side of the exchange runs the same code. Two of its defects are routed around
   rather than fixed, both in `SearchResponse.send()`: a second, case-sensitive
@@ -291,7 +417,10 @@ Worth knowing before "fixing" one of them:
   `/wsfed/login`, which creates the same session — becomes the identity in every
   token and every assertion.
 * **The LDAP directory takes that further: EVERY BIND SUCCEEDS**, any DN and any
-  password, anonymous included — with the single exception of the literal password
+  password, anonymous included — **on LDAPS (636) exactly as on the plain port**,
+  since the two listeners share one set of handlers. TLS there keeps the password off
+  the wire and does not make it checked, and a client certificate is never even asked
+  for on that socket. The single exception is the literal password
   `invalid`, which is refused with `LDAP_INVALID_CREDENTIALS` (49). That exception
   is not a softening; it is what keeps result code 49 reachable, and 49 is the code
   an LDAP client's error handling is built around. The directory is also
@@ -357,6 +486,25 @@ Worth knowing before "fixing" one of them:
   is the subject in **RFC 4514 form** (leaf first, values escaped), which is a
   different string from the display DN shown beside it and is the one the directory
   builds from.
+* **The values in an issued credential are invented, and nothing verifies them.**
+  `/admin/vc` says which LDAP attributes a credential carries; the value is read
+  from that person's directory entry, and what the entry lacks is generated from
+  their username — deterministically, so one username is one invented person across
+  restarts, and in obviously fictional ranges (RFC 2606 mail domains, `555-01xx`
+  numbers, streets called `Placeholder`). A verifier that believed a birthdate from
+  here would be believing a web form. Nothing reads a credential claim back either:
+  no token, assertion or PAC carries one and no endpoint decides anything on one.
+* **A presentation that VERIFIES is not a sign-on either.** The OID4VP Verifier
+  checks properly — issuer signature, every Disclosure digest against `_sd`, the Key
+  Binding JWT including `sd_hash`, the nonce, the audience, the validity window and
+  whether the claims asked for arrived — and then says yes on a web page and stops.
+  No session starts, no token is issued and nothing else in this service reads what
+  was presented. What it asks for is configuration (`/admin/vc-verifier-config`) and
+  is deliberately a SEPARATE setting from what the issuer mints (`/admin/vc`), so
+  that asking for a claim no credential here carries stays reachable: that is the
+  only way to exercise a wallet's "I cannot satisfy this request" path, and one page
+  setting both would make it impossible to produce. Asking for NO claim is a setting
+  too — DCQL reads an absent `claims` member as the whole credential.
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
@@ -377,6 +525,15 @@ Worth knowing before "fixing" one of them:
   carries a session identifier and adding one would change what every client receives.
   A new authentication point needs one `stats.recordAuthentication()` call at the
   moment the credential is ACCEPTED, not when the request arrives. See README.md.
+  Its `/admin/groups` page is the one page here that reports the DIRECTORY rather
+  than what this service has issued, and the difference between the two lists is
+  the thing to keep straight: the directory holds an entry for whoever somebody
+  wrote one for — the three people it seeds at startup included — while
+  `/admin/users` holds whoever has actually presented a credential. So a member
+  row links to that page only for somebody this service has seen authenticate and
+  is marked *never here* otherwise; a link drawn unconditionally would usually
+  land on "nothing here has authenticated as alice", which reads as a broken link
+  rather than as the answer it is. See rule 6 for the rest of it.
 * **WS-Federation's `wauth` is refused rather than faked.** A relying party demanding
   multi-factor against a password-only session gets an error and two ways forward, not
   an assertion claiming a second factor that did not happen. It is the one thing in

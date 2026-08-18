@@ -109,6 +109,18 @@ require('./spnego');
 // and is required by app.js, so the counting is already running by the time this
 // line is reached.
 require('./admin');
+// The TLS / mutual-TLS endpoint. Third in the family of modules whose real
+// surface is a SOCKET rather than a route: it registers its plain-HTTP views
+// (/tls, /tls/server-certificate, /tls/trust) at require time and starts two
+// HTTPS listeners from listen() below, for the same reason the KDC and the
+// directory do — a bind can fail, and a require that throws takes the whole
+// service down where a route cannot.
+//
+// Its position used to be free. It is not any more: ldap_server.js below serves
+// this module's server certificate on 636, so it requires this file — and node
+// would load it here whatever this line said. Saying it explicitly is what
+// keeps "the order in this file is the route order" true.
+const tlsServer = require('./tls_server');
 // The embedded LDAPv3 directory (RFC 4511), built on the node-ldapjs submodule.
 // Like the two Kerberos modules it registers its HTTP views at require time
 // (/ldap, /ldap/directory) and starts its TCP listener from listen() below, for
@@ -121,17 +133,12 @@ require('./admin');
 // protocol here. Requiring it earlier would work too — nothing authenticates
 // during require — but keeping it beside the console is what makes the pairing
 // visible to the next reader.
-const ldapServer = require('./ldap_server');
-// The TLS / mutual-TLS endpoint. Third in the family of modules whose real
-// surface is a SOCKET rather than a route: it registers its plain-HTTP views
-// (/tls, /tls/server-certificate, /tls/trust) at require time and starts two
-// HTTPS listeners from listen() below, for the same reason the KDC and the
-// directory do — a bind can fail, and a require that throws takes the whole
-// service down where a route cannot.
 //
-// Its position in this list is free: it depends on nothing here but app.js and
-// helpers.js, and nothing here depends on it.
-const tlsServer = require('./tls_server');
+// It must also come after ./tls_server below, and THAT one is not optional: its
+// LDAPS listener on 636 serves the certificate and key that module generates,
+// so requiring it first is what makes the route order in this file the real one
+// rather than a fiction node quietly corrects.
+const ldapServer = require('./ldap_server');
 require('./sts_metadata');
 
 app.listen(PORT, '0.0.0.0', function () {
@@ -182,9 +189,16 @@ app.listen(PORT, '0.0.0.0', function () {
   const ldapListener = ldapServer.listen();
   ldapListener.whenReady.then(function (ready) {
     log.info('ldap: the directory is reachable on TCP ' + ready.port +
-             ' with base DN ' + ready.baseDn + '. Every bind succeeds except ' +
-             'the password "invalid"; GET /ldap describes it and ' +
-             'GET /ldap/directory lists every entry.');
+             ' with base DN ' + ready.baseDn + (ready.ldapsListening
+               ? ', and over LDAPS on ' + ready.ldapsPort + ' with the same ' +
+                 'certificate the HTTPS listeners serve (fetch it from ' +
+                 '/tls/server-certificate and trust it; it is regenerated on ' +
+                 'every start)'
+               : ', and NOT over LDAPS — ' + (ready.ldapsError ||
+                 'it never bound') + ', which leaves the plain listener and ' +
+                 'the rest of this service untouched') +
+             '. Every bind succeeds except the password "invalid"; GET /ldap ' +
+             'describes it and GET /ldap/directory lists every entry.');
   }).catch(function (err) {
     // Reported rather than thrown, exactly as the KDC's failure is: the rest of
     // this service is still useful, and a silent failure to bind would surface

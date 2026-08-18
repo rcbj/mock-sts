@@ -390,6 +390,40 @@ const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 
 const authzCodes = new Map();       // code -> the authorization request it came from
 
+// ---------------------------------------------------------------------------
+// NON-SPEC: what happens when the SAME authorization code arrives twice.
+//
+// RFC 6749 section 4.1.2 says a code is single use, and section 10.5 says a
+// second presentation SHOULD invalidate what the first one issued. A real
+// authorization server does exactly that, and so did this one: the record was
+// deleted the moment it was looked up, so EVERY second Token Request carrying
+// that code — a reloaded debugger2.html, a double-submitted form, a retry
+// after a PKCE or redirect_uri check refused the first attempt — was answered
+// with "Unknown or already-used authorization code". That sentence is equally
+// true of a stolen code and of a browser that asked twice, and it says nothing
+// about which one happened, which is the wrong trade for a service whose whole
+// job is to show what occurred.
+//
+// So redemption here is IDEMPOTENT for as long as the code would have been
+// valid anyway: the token set a code was redeemed for is kept for the rest of
+// that code's own five-minute lifetime, and a repeat of the SAME request —
+// same client, same redirect_uri, same PKCE verifier, same DPoP key — is
+// answered with the tokens it already got. Nothing new is minted, so the
+// second answer IS the first answer, down to the jti.
+//
+// It is not a way to redeem somebody else's code. Anything about the request
+// that differs is refused and the difference is named; once the code's own
+// lifetime is over, so is the replay; and both refusals now say when the code
+// was redeemed and by which client, which is the fact the old message was
+// missing. What is remembered is kept a further five minutes past the code's
+// expiry PURELY so that those sentences can still be written.
+//
+// The pre-authorized code grant further down is deliberately NOT relaxed: its
+// single use is a property of the Credential Offer under test, and
+// tests/sd_jwt_vc_issuance.js asserts that a replayed offer is refused.
+// ---------------------------------------------------------------------------
+const redeemedCodes = new Map();    // code -> the token set it was redeemed for
+
 const sessions = new Map();         // session id -> the signed-in user
 
 const pendingLogins = new Map();    // login id -> the authorization request being interrupted
@@ -1540,6 +1574,146 @@ app.post('/dpop/nonce-mode', function (req, res) {
   log.debug("Leaving the DPoP nonce-mode endpoint (write). required=" + dpop.nonceModeOn());
 });
 
+// --- what became of an authorization code -----------------------------------
+// The functions behind the relaxation described where `redeemedCodes` is
+// declared. They are here rather than beside it because everything they exist
+// for happens in the token endpoint immediately below.
+
+function forgetStaleRedemptions() {
+  log.debug("Entering forgetStaleRedemptions().");
+  const now = Date.now();
+  redeemedCodes.forEach(function (v, k) {
+    if (v.forget < now) redeemedCodes.delete(k);
+  });
+  log.debug("Leaving forgetStaleRedemptions(). " + redeemedCodes.size +
+            " redemption(s) remembered.");
+}
+
+// What makes two Token Requests for one code the SAME request. The client id
+// is the resolved one rather than the body parameter, so a client using
+// client_secret_basic is compared on what it authenticated as.
+function redemptionFingerprint(client, body, dpopJkt) {
+  log.debug("Entering redemptionFingerprint().");
+  const parts = {
+    client_id: String((client && client.client_id) || ''),
+    redirect_uri: String(body.redirect_uri || ''),
+    code_verifier: String(body.code_verifier || ''),
+    dpop_jkt: String(dpopJkt || '')
+  };
+  log.debug("Leaving redemptionFingerprint(). client_id=" +
+            (parts.client_id || '(none)'));
+  return parts;
+}
+
+// The FIRST field that differs, by name, or "" when the two are the same
+// request. The name is the whole point: it is what the refusal says.
+function redemptionDifference(was, now) {
+  log.debug("Entering redemptionDifference().");
+  const names = ['client_id', 'redirect_uri', 'code_verifier', 'dpop_jkt'];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    if (String(was[name] || '') !== String(now[name] || '')) {
+      log.debug("Leaving redemptionDifference(). " + name + " differs.");
+      return name;
+    }
+  }
+  log.debug("Leaving redemptionDifference(). It is the same request.");
+  return '';
+}
+
+function rememberRedemption(code, record, fingerprint, issued) {
+  log.debug("Entering rememberRedemption().");
+  forgetStaleRedemptions();
+  redeemedCodes.set(code, {
+    when: Date.now(),
+    // The code's OWN expiry, not a fresh one: the replay window is the rest of
+    // the life the code already had, so this relaxation cannot outlive the
+    // rule it relaxes.
+    expires: record.expires,
+    forget: record.expires + AUTH_CODE_TTL_MS,
+    client_id: fingerprint.client_id,
+    fingerprint: fingerprint,
+    response: issued
+  });
+  log.debug("Leaving rememberRedemption(). The tokens for this code are " +
+            "replayable until " + new Date(record.expires).toISOString() + ".");
+}
+
+// How long this process has been up, in words, for the one refusal that needs
+// to say it: a code minted before a restart is not "already used", it is gone
+// with the Map that held it, and those two look identical from the client.
+function describeUptime() {
+  log.debug("Entering describeUptime().");
+  const seconds = Math.max(0,
+    Math.round((Date.now() - stats.STARTED_AT) / 1000));
+  if (seconds < 120) {
+    log.debug("Leaving describeUptime().");
+    return seconds + ' second(s)';
+  }
+  if (seconds < 7200) {
+    log.debug("Leaving describeUptime().");
+    return Math.round(seconds / 60) + ' minute(s)';
+  }
+  log.debug("Leaving describeUptime().");
+  return Math.round(seconds / 3600) + ' hour(s)';
+}
+
+// A code the live map does not hold. Either it was redeemed here — in which
+// case the same request gets the same tokens back and a different one is
+// refused with the difference named — or this server never issued it, which is
+// its own sentence and not "already used".
+function replayOrRefuseRedemption(res, code, fingerprint, respond) {
+  log.debug("Entering replayOrRefuseRedemption().");
+  forgetStaleRedemptions();
+  const done = redeemedCodes.get(code);
+  if (!done) {
+    log.debug("Leaving replayOrRefuseRedemption(). This server has no record " +
+              "of that code at all.");
+    return oauthError(res, 400, 'invalid_grant',
+      'Unknown or already-used authorization code. Nothing is held here ' +
+      'under that value and nothing was redeemed under it recently: this ' +
+      'service keeps authorization codes in memory only, so a code issued ' +
+      'before it was last restarted (it has been up ' + describeUptime() +
+      ') went with them, as did one issued by a different authorization ' +
+      'server.');
+  }
+  const ago = Math.max(0, Math.round((Date.now() - done.when) / 1000));
+  const differs = redemptionDifference(done.fingerprint, fingerprint);
+  if (differs) {
+    log.debug("Leaving replayOrRefuseRedemption(). The " + differs +
+              " differs from the request this code was redeemed with.");
+    return oauthError(res, 400, 'invalid_grant',
+      'This authorization code was redeemed ' + ago + ' second(s) ago by ' +
+      'client "' + (done.client_id || '(none)') + '". A repeat of that same ' +
+      'request would be answered with the same tokens, but this one differs ' +
+      'in ' + differs + ', so it is refused (RFC 6749 section 4.1.2: an ' +
+      'authorization code is single use).');
+  }
+  if (done.expires < Date.now()) {
+    log.debug("Leaving replayOrRefuseRedemption(). The code was redeemed and " +
+              "its own lifetime has since run out.");
+    return oauthError(res, 400, 'invalid_grant',
+      'This authorization code was redeemed ' + ago + ' second(s) ago by ' +
+      'client "' + (done.client_id || '(none)') + '", and the ' +
+      Math.round(AUTH_CODE_TTL_MS / 60000) + ' minute lifetime it was issued ' +
+      'with has since run out, so the tokens it bought are no longer ' +
+      'replayed here. Start a new authorization request; the refresh token ' +
+      'from the first redemption is still good.');
+  }
+  // Loud, because a client that redeems a code twice is doing something a real
+  // authorization server would refuse, and reading this log is how somebody
+  // finds that out from a server that did not.
+  log.warn('An authorization code was presented a second time by client "' +
+           (done.client_id || '(none)') + '" ' + ago + ' second(s) after it ' +
+           'was redeemed. The request is identical and the code is still ' +
+           'within its lifetime, so the SAME token set is being returned ' +
+           'rather than an error. RFC 6749 section 4.1.2 permits a real ' +
+           'authorization server to refuse this and section 10.5 to revoke ' +
+           'what it issued.');
+  log.debug("Leaving replayOrRefuseRedemption(). Replaying the token set.");
+  return respond(done.response);
+}
+
 app.post('/oauth2/token', function (req, res) {
   log.debug("Entering the token endpoint.");
   const base = baseUrlOf(req);
@@ -1609,17 +1783,42 @@ app.post('/oauth2/token', function (req, res) {
   };
 
   if (grant === 'authorization_code') {
-    const record = authzCodes.get(String(body.code || ''));
-    if (!record) return oauthError(res, 400, 'invalid_grant', 'Unknown or already-used authorization code.');
-    authzCodes.delete(String(body.code));  // single use
-    if (record.expires < Date.now()) return oauthError(res, 400, 'invalid_grant', 'The authorization code has expired.');
+    const code = String(body.code || '');
+    const fingerprint = redemptionFingerprint(client, body, dpopJkt);
+    const record = authzCodes.get(code);
+    if (!record) {
+      // Not necessarily an error: this is also where a second, identical Token
+      // Request for a code already redeemed is answered with the tokens it got
+      // the first time. See `redeemedCodes` above.
+      log.debug("Leaving the token endpoint. No live code by that value; " +
+                "what became of it decides the answer.");
+      return replayOrRefuseRedemption(res, code, fingerprint, respond);
+    }
+    if (record.expires < Date.now()) {
+      authzCodes.delete(code);
+      log.debug("Leaving the token endpoint. The code had expired.");
+      return oauthError(res, 400, 'invalid_grant',
+        'The authorization code has expired.');
+    }
+    // NOTHING below consumes the code: every check refuses and leaves it
+    // redeemable, so a client that gets one of them can fix what the message
+    // names and try the same code again. Burning it here is what used to turn
+    // "your code_verifier does not match" into "already-used authorization
+    // code" on the very next attempt — the wrong answer at exactly the moment
+    // somebody was acting on the right one. The code is consumed at the bottom,
+    // where it is actually redeemed.
     if (body.redirect_uri && body.redirect_uri !== record.redirect_uri) {
       log.debug("Leaving the token endpoint. The grant was refused.");
       return oauthError(res, 400, 'invalid_grant', 'redirect_uri does not match the authorization request.');
     }
     if (record.code_challenge) {
       const verifier = String(body.code_verifier || '');
-      if (!verifier) return oauthError(res, 400, 'invalid_grant', 'PKCE was used, so code_verifier is required.');
+      if (!verifier) {
+        log.debug("Leaving the token endpoint. PKCE was used and no " +
+                  "code_verifier came with the code.");
+        return oauthError(res, 400, 'invalid_grant',
+          'PKCE was used, so code_verifier is required.');
+      }
       const computed = record.code_challenge_method === 'S256'
         ? b64u(crypto.createHash('sha256').update(verifier, 'ascii').digest())
         : verifier;
@@ -1647,7 +1846,7 @@ app.post('/oauth2/token', function (req, res) {
       }
       log.debug("The authorization code's dpop_jkt matches the proof. jkt=" + dpopJkt);
     }
-    return respond(tokenSet(base, {
+    const issued = tokenSet(base, {
       jkt: dpopJkt,
       user: record.user, client_id: record.client_id, scope: record.scope,
       nonce: record.nonce, auth_time: record.auth_time, amr: record.amr, acr: record.acr,
@@ -1656,7 +1855,13 @@ app.post('/oauth2/token', function (req, res) {
       // and only arrive at the console as belonging to one because of this line.
       session_id: record.session_id || '', grant: 'authorization_code',
       authorization_details: grantIdentifiers(record.authorization_details, record.user)
-    }));
+    });
+    // Single use — and remembered as used, with what it bought, so that the
+    // same request arriving again gets that answer back instead of a sentence
+    // about a code nobody can look up any more.
+    authzCodes.delete(code);
+    rememberRedemption(code, record, fingerprint, issued);
+    return respond(issued);
   }
 
   // OID4VCI's pre-authorized code grant (Appendix H.2 / H.3, RFC-registered as

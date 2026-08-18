@@ -53,6 +53,12 @@ const { VCI_AS, VCI_BATCH_SIZE, VCI_CONFIGS, VCI_CONFIG_ID, VCI_JWT_CONFIG_ID,
         VCI_VCT, VC_CONTEXT, configIdOfIdentifier, vciConfigIds, vciFormatOf,
         vciUsesIssuerDid } = require('./vc_configs');
 const { issuerDidFor, stsDid } = require('./vc_did');
+// WHICH claims a credential carries, and what each one's value is. A library like
+// dpop.js — it registers nothing, so its place in the require order does not
+// matter — and it is the single list both the metadata below and the three
+// builders read, so an issuer that advertises one claim set and mints another is
+// not a state this file can reach. /admin/vc is what changes it.
+const vcClaims = require('./vc_claims');
 const { DEFERRED_INTERVAL_S, DEFERRED_READY_MS, OFFER_TTL_MS, deferredAccessTokens,
         deferredTransactions } = require('./vc_offers');
 // c_nonce values this issuer has handed out and not yet seen used. A nonce is
@@ -112,13 +118,11 @@ function vciMetadata(req) {
       background_color: '#12107c',
       text_color: '#FFFFFF'
     }],
-    claims: [
-      { path: ['given_name'], display: [{ locale: 'en-US', name: 'Given name' }] },
-      { path: ['family_name'], display: [{ locale: 'en-US', name: 'Family name' }] },
-      { path: ['email'], display: [{ locale: 'en-US', name: 'Email address' }] },
-      { path: ['birthdate'], display: [{ locale: 'en-US', name: 'Date of birth' }] },
-      { path: ['address', 'country'], display: [{ locale: 'en-US', name: 'Country' }] }
-    ]
+    // Built from the configured claim set rather than written out, so that this
+    // metadata cannot come to describe a credential this issuer no longer mints.
+    // An SD-JWT VC's claims sit at the top level of the payload, so there is no
+    // prefix. See /admin/vc.
+    claims: vcClaims.metadataClaims([])
   };
   // The same facts as a W3C VC secured as a JWT. `credential_definition.type`
   // is what identifies the credential in this format — jwt_vc_json has no vct —
@@ -139,13 +143,7 @@ function vciMetadata(req) {
       background_color: '#0b6b4f',
       text_color: '#FFFFFF'
     }],
-    claims: [
-      { path: ['credentialSubject', 'given_name'], display: [{ locale: 'en-US', name: 'Given name' }] },
-      { path: ['credentialSubject', 'family_name'], display: [{ locale: 'en-US', name: 'Family name' }] },
-      { path: ['credentialSubject', 'email'], display: [{ locale: 'en-US', name: 'Email address' }] },
-      { path: ['credentialSubject', 'birthdate'], display: [{ locale: 'en-US', name: 'Date of birth' }] },
-      { path: ['credentialSubject', 'address', 'country'], display: [{ locale: 'en-US', name: 'Country' }] }
-    ]
+    claims: vcClaims.metadataClaims(['credentialSubject'])
   };
   // ldp_vc: the signing "alg" slot holds a CRYPTOSUITE name, not a JOSE alg —
   // which is the visible sign that this format is secured differently.
@@ -165,12 +163,12 @@ function vciMetadata(req) {
       name: 'Identity Credential (ldp_vc, BBS selective disclosure)',
       locale: 'en-US', background_color: '#4a148c', text_color: '#FFFFFF'
     }],
-    claims: [
-      { path: ['credentialSubject', 'given_name'], display: [{ locale: 'en-US', name: 'Given name' }] },
-      { path: ['credentialSubject', 'family_name'], display: [{ locale: 'en-US', name: 'Family name' }] },
-      { path: ['credentialSubject', 'email'], display: [{ locale: 'en-US', name: 'Email address' }] },
-      { path: ['credentialSubject', 'birthDate'], display: [{ locale: 'en-US', name: 'Date of birth' }] }
-    ]
+    // NOT the same list as the two above, and the difference is the format's
+    // rather than a choice: an ldp_vc credential is signed over canonicalized
+    // JSON-LD, so it can only carry terms the vendored context defines. The
+    // claims a selection asks for and this format cannot express are named on
+    // /admin/vc rather than being quietly missing here.
+    claims: vcClaims.ldpMetadataClaims()
   };
   // The DID variants, CLONED from the sibling each is based on rather than
   // written out a fourth and fifth time. Everything about the credential is
@@ -515,6 +513,62 @@ function buildJwtVcJson(subjectClaims, holderJwk, credentialIssuer, issuerDid) {
   return { credential: token, disclosures: [], payload: payload, vc: vc };
 }
 
+// ---------------------------------------------------------------------------
+// THE MEMBERS AN ldp_vc CREDENTIAL SUBJECT MAY CARRY, checked against the
+// context this process actually loaded rather than against a list.
+//
+// vc_claims.js names a JSON-LD term per configurable attribute, and those names
+// were read off contexts/idptools_identity_v1.json by hand. Two files agreeing by
+// hand is a drift waiting to happen, and the way this one would announce itself is
+// the worst available: jsonld canonicalizes with `safe: true`, so an undefined
+// term THROWS, inside a cryptosuite, at the moment a wallet asks for a credential.
+//
+// So the term list is filtered through the context bbs2023.js loaded. A term that
+// is not in it is dropped with an error in the log — the credential is one claim
+// short, which is visible and survivable, where the throw is neither. The context
+// is fetched through that module's own document loader so there is no second
+// reader of that file to keep right.
+// ---------------------------------------------------------------------------
+async function identityContextTerms() {
+  log.debug("Entering identityContextTerms().");
+  try {
+    const loaded = await bbs2023.documentLoader(bbs2023.IDENTITY_CONTEXT_URL);
+    const terms = (loaded && loaded.document && loaded.document['@context']) || {};
+    log.debug("Leaving identityContextTerms(). The context defines " +
+              Object.keys(terms).length + " term(s).");
+    return terms;
+  } catch (e) {
+    // Cannot happen while the context is vendored — bbs2023.js reads it at
+    // require time and this service does not start without it — but a caught
+    // failure here costs one claim and an uncaught one costs the credential.
+    log.error('the identity JSON-LD context could not be read; no configured ' +
+              'claim will be put in an ldp_vc credential this time: ' + e.message);
+    log.debug("Leaving identityContextTerms(). It could not be read.");
+    return {};
+  }
+}
+
+async function ldpSubjectMembers(subjectClaims) {
+  log.debug("Entering ldpSubjectMembers().");
+  const members = vcClaims.ldpSubjectFrom(subjectClaims);
+  const terms = await identityContextTerms();
+  Object.keys(members).forEach(function (term) {
+    if (!Object.prototype.hasOwnProperty.call(terms, term)) {
+      log.error('vc_claims.js maps a configured attribute to the JSON-LD term "' + term +
+                '", which contexts/idptools_identity_v1.json does not define; it is ' +
+                'left out of this credential rather than failing the signature.');
+      delete members[term];
+    }
+  });
+  const omitted = vcClaims.ldpOmitted();
+  if (omitted.length) {
+    log.debug("ldpSubjectMembers(): " + omitted.join(', ') + " is/are configured and " +
+              "have no term in this format, so this credential does not carry them.");
+  }
+  log.debug("Leaving ldpSubjectMembers(). " + Object.keys(members).length + " member(s).");
+  return members;
+}
+
 // A W3C credential with an EMBEDDED bbs-2023 proof (OID4VCI format ldp_vc).
 //
 // Async, unlike the other two, because canonicalization is — which is why
@@ -545,13 +599,8 @@ async function buildLdpVc(subjectClaims, holderJwk, credentialIssuer, issuerDid)
     issuer: issuerId,
     validFrom: new Date(now * 1000).toISOString(),
     validUntil: new Date((now + 30 * 24 * 3600) * 1000).toISOString(),
-    credentialSubject: {
-      id: subjectId,
-      given_name: subjectClaims.given_name,
-      family_name: subjectClaims.family_name,
-      email: subjectClaims.email,
-      birthDate: subjectClaims.birthdate
-    }
+    credentialSubject: Object.assign({ id: subjectId },
+                                     await ldpSubjectMembers(subjectClaims))
   };
   logArtifact('ldp_vc credential', 'before signing', unsecured);
   const issued = await bbs2023.issue(unsecured, {
@@ -597,9 +646,20 @@ async function buildCredentialFor(configId, subjectClaims, holderJwk, credential
   return built;
 }
 
-// The claims the credential asserts. Lifted from the access token when it is a
-// JWT (so the credential describes whoever actually authenticated), with
-// mock-issuer defaults for anything the token does not carry.
+// The claims the credential asserts.
+//
+// WHICH claims those are is configuration now (vc_claims.js, set on /admin/vc)
+// and no longer the seven names that used to be written out here. Where each
+// VALUE comes from is that module's decision too and is stated there: the access
+// token first, then this person's LDAP entry, then a persona invented from their
+// username. What stays here is the two things that are this file's own —
+//
+//   * `sub`, because each of the three formats names its subject differently and
+//     vc_claims.js deliberately has no opinion about which.
+//   * WHO the credential is about, read off the access token exactly as before.
+//     The name is what everything downstream is keyed on: it selects the
+//     directory entry and seeds the persona, so `alice` gets the same invented
+//     person here that ldap_server.js wrote onto uid=alice,ou=users.
 function subjectClaimsFrom(accessToken) {
   log.debug("Entering subjectClaimsFrom().");
   let t = {};
@@ -611,16 +671,14 @@ function subjectClaimsFrom(accessToken) {
     log.debug("The access token is not a readable JWT; using the default claims.");
   }
   const user = t.preferred_username || t.sub || 'mock-holder';
-  log.debug("Leaving subjectClaimsFrom(). The credential will describe " + user + ".");
-  return {
-    sub: t.sub || ('urn:uuid:' + crypto.randomUUID()),
-    given_name: t.given_name || user,
-    family_name: t.family_name || 'Holder',
-    email: t.email || (user + '@example.com'),
-    birthdate: '1979-04-01',
-    nationality: 'US',
-    address: { street_address: '100 Main St', locality: 'Springfield', region: 'IL', country: 'US' }
-  };
+  const built = vcClaims.subjectClaimsFor(user, t);
+  const claims = Object.assign({ sub: t.sub || ('urn:uuid:' + crypto.randomUUID()) },
+                               built.claims);
+  log.debug("Leaving subjectClaimsFrom(). The credential will describe " + user +
+            " with " + built.report.length + " configured claim(s), " +
+            (built.entryFound ? "read from their directory entry where it has them."
+                              : "with no directory entry to read from."));
+  return claims;
 }
 
 // ---------------------------------------------------------------------------
