@@ -25,8 +25,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # submodules: recursive is LOAD-BEARING and its absence is silent until the
+      # container starts. The LDAP directory's library is `"ldapjs":
+      # "file:node-ldapjs"` — a git SUBMODULE — and actions/checkout does not fetch
+      # submodules unless asked. An uninitialised submodule is an EMPTY DIRECTORY,
+      # so nothing below fails: the COPY succeeds, npm installs a package with no
+      # `main`, `docker build` reports success, and the job dies sixty seconds
+      # later at the /healthcheck wait with `Cannot find module 'ldapjs'` in the
+      # container log — a message that names a package rather than a submodule.
+      # That is exactly what happened on 2026-08-18.
+      #
+      # `recursive` rather than `true` because ldapjs may carry submodules of its
+      # own, and because it costs nothing here; it is also the flag the parent
+      # project needs for the same reason one level up (this repository is itself
+      # a submodule over there).
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # A guard rather than trust in the line above. The failure this whole comment
+      # is about is a build that SUCCEEDS, so the cheapest place to catch it is
+      # before the build: an empty node-ldapjs is a one-line failure here instead of
+      # a MODULE_NOT_FOUND read out of a container log after a 60-second timeout.
+      # package.json is what the COPY needs to be there — the directory itself
+      # exists either way, because git creates the mount point.
+      - name: Check the ldapjs submodule was fetched
+        run: |
+          if [ ! -f node-ldapjs/package.json ]; then
+            echo "node-ldapjs is empty — the submodule was not checked out." >&2
+            echo "The image would build and then die with Cannot find module 'ldapjs'." >&2
+            exit 1
+          fi
+          echo "node-ldapjs is present."
 
       # buildx, for the GitHub Actions layer cache below. The Dockerfile installs
       # nvm and a Node toolchain from the network on every layer miss, which is
