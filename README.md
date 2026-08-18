@@ -45,7 +45,7 @@ are — most of it is the record of something having gone wrong once.
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 | **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
-| **LDAP v3 (RFC 4511)** | an embedded **directory on raw TCP port 389**: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — one hook on the single funnel they all already pass |
+| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — one hook on the single funnel they all already pass |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
 router, so it cannot go stale, and forty-six specifications with how far each one
@@ -82,13 +82,17 @@ git submodule update --init
 # same thing, so a bare `npm install` here behaves too.
 npm install --omit=dev
 
-CONFIG_FILE=./env/local.js node server.js      # listens on 8081, LDAP on 389
+CONFIG_FILE=./env/local.js node server.js      # 8081, LDAP on 389, LDAPS on 636
 ```
 
-**Port 389 is privileged**, so a host run that is not root will fail to bind it —
-which is reported and is not fatal, the rest of the service being unaffected. Set
-`LDAP_PORT` to something unprivileged for a host run, and remember that the parent
-project's api has to allow the new port in `ldapAllowedPorts`.
+**Ports 389 and 636 are both privileged**, so a host run that is not root will fail to
+bind them — which is reported and is not fatal, the rest of the service being
+unaffected. Set `LDAP_PORT` and `LDAPS_PORT` to something unprivileged for a host run,
+and remember that the parent project's api has to allow the new ports in
+`ldapAllowedPorts` (its default list carries `1389` and `1636` for exactly this). The
+two sockets bind **independently**: 389 up and 636 down is the ordinary outcome of a
+host run, and `GET /ldap` reports each of them separately rather than through one flag
+that would have to lie about one.
 
 `STS_PORT` overrides the port. `CONFIG_FILE` selects a configuration from `env/`,
 the only setting in which is the bunyan log level — at the default `debug` the
@@ -96,16 +100,17 @@ service logs every endpoint call (path, request and response headers and bodies,
 status, elapsed time) and every assertion, JWT and SD-JWT VC both before and after
 signing or encryption, which is the point of a mock.
 
-**Six listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
+**Seven listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
 UDP 88**, the Kerberos-protected service a TCP socket of its own (8888), the
-directory **TCP 389**, and the TLS endpoint **8443** and **9443**. Every one of them
+directory **TCP 389** and — the same directory over TLS — **TCP 636**, and the TLS
+endpoint **8443** and **9443**. Every one of them
 is started from an exported `listen()` that `server.js` calls *after* the HTTP server
-is up, and a failure to bind is logged rather than thrown — port 88 and port 389 are
+is up, and a failure to bind is logged rather than thrown — ports 88, 389 and 636 are
 privileged, a host run is usually not root, and a require that throws would take the
 whole service down over a protocol family the caller may not be using. Set
-`KRB5_KDC_PORT`, `LDAP_PORT`, `STS_TLS_PORT` and `STS_MTLS_PORT` to something
-unprivileged or unoccupied for a host run, and remember that the parent project's api
-allowlists the port it will reach on each of them.
+`KRB5_KDC_PORT`, `LDAP_PORT`, `LDAPS_PORT`, `STS_TLS_PORT` and `STS_MTLS_PORT` to
+something unprivileged or unoccupied for a host run, and remember that the parent
+project's api allowlists the port it will reach on each of them.
 
 In Docker:
 
@@ -138,6 +143,7 @@ docker-compose up
 | `CONFIG_FILE` | which file in `env/` to read (default `./env/local.js`) |
 | `OID4VCI_WALLET_URL` | **the base URL the BROWSER uses for the wallet.** The Credential Offer pages and the verifier's request pages hand the End-User back by appending `/vc-issuance-1.html` or `/vc-presentation-1.html` to it. Its default of `http://localhost:3000` is right only when the browser and the wallet share a host; get it wrong and the hand-off lands on an unreachable origin, and because the URL still *contains* the wallet page a `urlContains` wait passes and the failure looks like an unrelated timeout |
 | `OID4VP_WALLET_URL` | the same for the presentation side; falls back to `OID4VCI_WALLET_URL` |
+| `OID4VP_CLAIMS` | which claims the mock Verifier asks a wallet for (default `given_name,family_name`). It is now the value the process *starts* with rather than the value it uses: `/admin/vc-verifier-config` changes it while running, and Reset on that page comes back here |
 | `OID4VCI_AUTHORIZATION_SERVER` | point the issuer metadata at a *different* authorization server (a real IdP) while the credential endpoint stays here |
 | `OID4VCI_SD_JWT_ISSUER_DID` / `OID4VCI_LDP_VC_ISSUER_DID` | switch the **plain** credential configurations over to naming the issuer by DID. Off by default — see *The issuer named by a DID* |
 
@@ -162,6 +168,7 @@ And LDAP's, which is the other protocol here that is not HTTP:
 | Variable | What it does |
 |---|---|
 | `LDAP_PORT` | the directory's TCP port (default `389`). It is privileged, so the container binds it as root and a host run usually cannot — that is what this is for. If the parent project's api is opening this directory, its `ldapAllowedPorts` has to allow whatever this becomes; the same coupling `KRB5_KDC_PORT` has, and for the same reason |
+| `LDAPS_PORT` | the same directory over TLS (default `636`, the IANA-assigned one). Privileged for the reason 389 is, and bound by a **second server object** rather than by an option on the first — ldapjs decides between a `net.Server` and a `tls.Server` at construction — so the two fail independently and are reported independently. There is no StartTLS to turn on instead: it is an extended operation, ldapjs implements none, and this repository does not patch that submodule |
 | `LDAP_BASE_DN` | the naming context (default `dc=example,dc=com`). `ou=users` and `ou=groups` are derived from it rather than configured, because two variables that could disagree with it would put entries in a tree nobody is searching |
 | `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client. A verified **TLS client certificate** does, and it is the one identity that is a DN rather than a name — see the TLS section for where its entry goes |
 | `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
@@ -314,6 +321,43 @@ always honoured and the document did not mention, and
 unadvertised — `iss` is on every authorization response, errors included, but a client
 may only *require* it, and so refuse a mix-up attacker's response without it, if the
 metadata says the server sends it.
+
+### A redeemed authorization code is replayed, not refused
+
+RFC 6749 section 4.1.2 makes an authorization code single use and section 10.5 says a
+second presentation SHOULD invalidate what the first one issued. This service used to
+implement that in the shortest way there is — delete the record on the line after the
+lookup — and the cost was the answer it then gave: **every** second Token Request
+carrying that code was refused with *Unknown or already-used authorization code*, which
+is equally true of a stolen code, a reloaded page, a double-submitted form and a client
+retrying after the first attempt was refused for a bad `code_verifier`. It named none
+of them. The last case is the perverse one: the check consumed the code it refused, so
+the corrected request was answered by talking about reuse instead of issuing tokens.
+
+Three things are different now, and only the second departs from the RFC.
+
+Nothing below the lookup consumes the code: `redirect_uri`, PKCE and the RFC 9449
+`dpop_jkt` binding all refuse and leave it redeemable, so the message a client acts on
+is the message it gets to act on. The code is deleted where it is actually redeemed.
+
+A redeemed code is **idempotent for the rest of its own lifetime**. The token set is
+kept beside the code until the moment the code would have expired anyway
+(`AUTH_CODE_TTL_MS`, five minutes), and an identical repeat of the Token Request — same
+client, same `redirect_uri`, same PKCE verifier, same DPoP key — is answered with that
+same token set rather than an error. Nothing is minted twice: the second answer is the
+first answer, down to the `jti`. So the relaxation cannot outlive the rule it relaxes,
+and a `log.warn` says each time it fires that a real authorization server would refuse.
+
+The refusals now say what happened. A code presented with anything different is refused
+with the field that differed named, and with when the code was redeemed and by which
+client. A code this service never issued gets its own sentence: codes live in memory
+only, so one minted before the last restart is *gone* rather than *used*, and the
+message says so along with how long the process has been up. Those two states are
+indistinguishable from the client, which is why the server has to be the one that tells
+them apart.
+
+The **pre-authorized code** grant is deliberately not relaxed — its single use is a
+property of the Credential Offer under test, and the debugger's suite asserts it.
 
 ### Token Exchange (RFC 8693), and what it deliberately does not check
 
@@ -584,6 +628,20 @@ Two details worth knowing before changing the test. **A 404 is ambiguous and the
 
 Where there is no entry the section says **which** of the five reasons it is, because four of them are facts about the user rather than about the directory and "not found" alone would send a reader looking for a bug: auto-creation is switched off, the identity is a *client* and not a person, it has never authenticated here at all (it is known only as the subject of something that was issued), everything it has ever done here is an *LDAP bind* — which presents a DN and not a user name — or the entry was there and has since been `delete`d or `modifyDN`'d through the protocol. It also lists any **other** entry whose `uid` names the same person, since this directory has no schema and does not require a uid to be unique, and it says so loudly when the directory's listener is down: the entry can be in this process's store while no client can connect to read it, and only one of those two facts is visible from an HTTP page. The dependency is the thing to be careful with. `admin.js` does **not** require `ldap_server.js` — `server.js` requires the console first (rule 6: the directory needs `admin_stats`' identity normalisation, and the console reads `oauth2`'s sessions), so a require from the console would drag the directory's routes into the router *ahead* of its own, and `/sts-metadata` is built by walking that router. So the direction is inverted the same way the user observer is: `admin.js` offers `setDirectoryReader()`, `ldap_server.js` fills it at its own require time with a function that takes the identity key the console files a person under — the same normalised local name the entry's DN was built from, so the two cannot drift — and a build of this service without the directory renders the section as "no directory is loaded", which is a different answer from an entry that is not there.
 
+**`/admin/groups`** is the one page in this console that reports the *directory* rather than what this service has issued. It lists every group with what it is made of, and `?group=<dn>` drills into one: every attribute the entry holds, operational ones included, and every member resolved to the entry it names. Both views come out of `groupsFor()` in `ldap_server.js` through a third inverted hook — `admin.js` offers `setGroupReader()` and the directory fills it, for the same route-order reason `setDirectoryReader()` exists — and the console renders what it is handed without deciding anything, which matters most for the first decision below.
+
+**What counts as a group is two rules and not one.** An entry under `ou=groups`, *or* an entry carrying a group `objectClass` (`groupOfNames`, `groupOfUniqueNames`, `posixGroup`, `groupOfURLs`) wherever it sits. Both, because this directory is schemaless and nothing stops a client adding a `groupOfNames` under `ou=users` or an entry with no `objectClass` at all under the groups container — either rule applied alone answers correctly for one of those and quietly loses the other. The list says which rule caught each row, since "this entry is a group because somebody put it under `ou=groups` and it carries no group class at all" is the interesting fact and "developers is a group" is not.
+
+**Membership is read from `member`, `uniqueMember` and `memberUid` together, and the third one is not like the other two**: it holds a bare user name where they hold a DN, so it is resolved under `ou=users` rather than as written. Treating the three alike is how a page ends up reporting every `posixGroup` member as dangling. Three disagreements are then reported rather than smoothed over, and every one of them is a state a client can reach in two operations:
+
+* a **dangling** member — a value naming an entry this directory does not hold. Deleting a user does not remove its DN from the groups that list it, because referential integrity is a directory feature and not a protocol rule (see below), so the count of membership values and the count that resolve are shown as two numbers. One combined number would report a group whose seven members resolve to five as seven members with nothing wrong, which is precisely the thing this page exists to make visible.
+* a member that is itself a **group**. Nesting is shown and never expanded: the row links to that group's own page and nobody inside it is counted here, because nothing in this service walks a group tree and a flattened list would be claiming a feature that is not here.
+* an entry whose own **`memberOf`** names a group that does not list it back. `memberOf` is not a standard attribute at all — it is Microsoft's and OpenLDAP's, and in the directories that have it the *server* keeps it in step with `member`. This one keeps nothing in step, so a client can write it onto a user in one `modify` and create the disagreement. Those entries are listed under their own heading rather than merged into the members, because which side of the disagreement a name came from is the only interesting thing about it.
+
+**A member links to `/admin/users` only for somebody this service has actually seen authenticate**, and is marked *never here* otherwise. The two lists answer different questions and it is worth being deliberate about the difference: the directory holds an entry for whoever somebody wrote one for — including `alice`, `bob` and `carol`, who are seeded at startup — while the users page holds whoever has presented a credential to this process. A link drawn unconditionally would usually land on "nothing here has authenticated as alice", which reads as a broken link rather than as the answer it is.
+
+**A group here grants nothing**, and both pages say so where a reader will see it rather than leaving it to be discovered. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries a group from this directory, and no endpoint checks one; they exist for an LDAP client to read, write and search. On a service that authenticates nobody it could hardly be otherwise — but a console that listed groups a click away from the tokens page without saying it would let somebody conclude that adding a user to `cn=directory-admins` had changed what their token could do.
+
 **`/admin/tokens`** lists what was issued and invalidates what can be. What it lists is **every JWT, every SAML assertion and every Kerberos ticket, in one table, newest first** — the assertions whether WS-Trust issued them or a WS-Federation sign-in did, since both go through the two builders and both are counted there. One table rather than three because a WS-Federation sign-in that produces an ID Token and a SAML 1.1 assertion is *one event*, and three tables would leave it to be reassembled by comparing timestamps. The three families are declared in `admin_stats.js` (`ISSUED_FAMILIES`) and `issuedList()` merges them, because which artifact belongs beside a token and what "still valid" means for each are statements about the state that file holds; `admin.js` renders what it is handed. Two things had to be made common to merge them at all: the state, which comes from one function per family against one clock, and the expiry, which is **normalised to milliseconds** — a JWT's `exp` is seconds and an artifact's `expiresAt` already is not, and one table cannot sort two units. A filter for the family sits beside the one for the kind, and the kind list is grouped by family and built from that same structure, so the two cannot come to disagree about which kind is which.
 
 **Only the JWTs have a button, and the rows that do not are the reason to list them.** Nothing consults this service about a SAML assertion or a Kerberos ticket: an assertion is valid because its signature verifies and its `Conditions` hold, and a ticket because the service it names can decrypt it with a key it already has. So the only thing that ends one is its own expiry — and until it was on this page there was no way to see when that was, or to see that a sign-in had produced one at all. Each such row carries the reason there is no button in place of it, which is the honest version of the button this console deliberately does not offer. Because most columns then mean something slightly different depending on the row — `Detail` is a scope, or whether the signature was written, or the enc-type — the page carries **a legend saying which**, and the code is written one function per *column* answering for all three families rather than one per family, so a header like "Client, audience or service" can be checked against the three answers underneath it. Two of those answers are worth stating: a Kerberos ticket has **no identifier at all** to put in the `jti` column, because none exists for anyone to quote and the KDC keeps no handle on one either; and an assertion's `Detail` says signed or unsigned, which meant correcting the record in the two builders' `catch` blocks — the assertion is counted *before* the signing attempt on purpose, so an assertion that went out unsigned was being counted as signed, and a column showing that would have agreed with the page rather than with what left. **OID4VCI credentials are not in the table**, only counted on the metrics page; that is a gap rather than a principle, and the page says so rather than letting "everything this service has issued" be read as four families.
@@ -597,6 +655,30 @@ Three further details of that page are worth knowing before changing it. It keep
 **`/admin/claims`** decides what every *future* access token, ID Token, SAML 2.0 assertion and SAML 1.1 assertion carries. Four sets rather than one, because the four are genuinely different vocabularies: an access token and an ID Token go to different readers (a resource server and a client), and SAML 1.1 splits the claim URI into an `AttributeNamespace` and an `AttributeName` where SAML 2.0 has one `Name`. They are **additive** — a configured claim is added to what the protocol already puts in the artifact and never replaces one — and the names this service sets itself are **refused at configuration time** rather than silently dropped at issuance, because every one of them is load-bearing: an `exp` settable from a web form would produce tokens that fail to verify with nothing anywhere pointing back at the page, and a settable `scope` would quietly change what UserInfo answers. The same rule protects the SAML side for a different reason: a WS-Federation relying party keys off the claim URIs `claimsFor()` writes, so a custom attribute that displaced one would break a sign-in somewhere that looks nothing like this console.
 
 Values may contain `${username}`-style placeholders, because a claim that can only be a constant cannot exercise the thing worth testing — that a claim carrying the signed-in user's identity reaches the relying party. **An unknown placeholder is left exactly as written** rather than replaced with the empty string: a `${dept}` that silently became `""` is a bug that looks like a configuration mistake, and one that still says `${dept}` names itself. A JWT claim value is typed when it unambiguously looks like JSON (an object, an array, a bare `true`/`false`/`null`, a number) and is a string otherwise, which has one consequence the page states rather than leaving to be discovered: a claim whose value is genuinely the four characters `true` cannot be configured, and `"true"` is the escape. SAML attribute values are never typed — the XML content model is text.
+
+**`/admin/vc`** decides what every *future* Verifiable Credential carries, and it is the page here whose list is of **LDAP attribute types rather than of claim names**. That is the decision the rest of it follows from. Until this page existed the answer was seven lines in `vc_issuer.js` — `given_name`, `family_name`, `email`, a constant birthdate, a constant nationality and a constant address — which is enough to demonstrate one credential and not enough to exercise a wallet: what a holder actually wants to know is what their UI does with fourteen claims, what their verifier does with one it has never seen, and whether the issuer metadata really describes what arrives. None of those can be asked without changing the claim list. The catalogue is of attribute types because this service *has* a directory, so a claim can have a value something other than the credential can see: `mail` on `uid=alice,ou=users` is what a wallet is handed as `email`, and an LDAP client and an OID4VCI wallet pointed at this one process are shown the same person. Ten rows are selected on a fresh start, which is exactly the six claims the issuer carried before the page existed — `address` is five of them, one per component, because the OIDC address claim has five members and a directory has an attribute type for each. Three rows are not RFC 4519/4524/2798 and the page says so: there is no standard attribute type for a birthdate or a nationality, so the SCHAC schema's names are borrowed rather than invented, and the page shows every row's defining document so the borrowed ones are distinguishable at a glance.
+
+
+**`/admin/vc-verifier-config`** is the other end of that page, and the two are deliberately separate settings. `/admin/vc` decides what an issued credential *carries*; this decides what the mock Verifier at `/oid4vp/verifier` — the pages call it *The Bar Door* — **asks for**, which reaches the wire as the `dcql_query` of the next OID4VP Authorization Request and then decides what the presentation is checked against. Keeping them apart is what makes the interesting state reachable: a Verifier asking for a claim the issuer is not minting is the negative that exercises a wallet's "I cannot satisfy this request" path, and one page setting both would make it impossible to produce. The same page chooses which of the three **credential formats** an unqualified request asks for, since a presentation cannot convert between them — a wallet holding a `jwt_vc_json` credential has nothing to answer a `dc+sd-jwt` query with, and the honest outcome is that it says so.
+
+**Its table is of claims where `/admin/vc`'s is of attribute types, and the grouping is forced by the credential rather than chosen for tidiness.** `buildSdJwtVc()` makes one Disclosure per *top-level* claim, so `address` is one unit of disclosure however many LDAP attributes feed it: a holder cannot present the locality without the street, and a page offering six address checkboxes would be offering a choice that does not exist on the wire. So the catalogue is `vc_claims.js`'s rows grouped by claim — every row still names the attribute types behind it and their defining document, because "this is `l`, RFC 4519 2.16" is what connects the request to the directory entry the value will come from — and an *Issued now* column reports what the issuer is currently configured to mint, so that a presentation which disclosed nothing is not investigated as a wallet bug.
+
+**Three of its behaviours are deliberate and each is the answer to a question a mock exists to let somebody ask.** A claim that is **not in the catalogue** can be asked for from a text box, and is the only way to reach "the wallet cannot satisfy this request" — nothing here issues it, so the presentation fails this Verifier's own *Requested claims* check with the name in it. Asking for **nothing at all** is a setting rather than an empty form: DCQL reads an absent `claims` member as the whole credential, so the query is built without one and the page says, in as many words, that it is now asking for everything. And the **DCQL path differs by format**, which the table shows rather than implies — `["given_name"]` for `dc+sd-jwt`, `["credentialSubject","given_name"]` for `jwt_vc_json`, and for `ldp_vc` the term the vendored JSON-LD context defines, which is `birthDate` and not `birthdate`, and which for `address` is four flat terms and not one. That last was quietly wrong before this page existed: both W3C formats were given the OIDC claim name, which coincides for `given_name` and `family_name` — the only two claims the Verifier could then ask for — and for nothing else. A claim the context defines no term for is **dropped from an `ldp_vc` query and named on the page**, because asking under a name that context does not define fails canonicalization rather than returning less.
+
+**What a request asks for is frozen onto it, not read again when the answer arrives.** The list is editable while a presentation is in flight, and a Verifier that judged what came back against a list changed after it asked would refuse a wallet for correctly answering the question it was really asked. So `buildVpRequest()` stores the claims on the transaction and every check reads them from there — which is also what makes the verdict at `/oid4vp/result/:state` a true record of that exchange rather than of the console's current state.
+
+**And this page admits nobody.** A presentation that verifies here starts no session, issues no token and grants no access; the door says yes and that is the whole of it. It is the same disclaimer the groups page and the TLS report carry, for the same reason — a console page a click away from the tokens page would otherwise let somebody conclude that a verified credential had become an identity somewhere in this service.
+**The metadata is built from the same list the credential is**, which is the reason not to keep the claim set anywhere else. An issuer whose `credential_configurations_supported` advertises five claims while its credentials carry fourteen is teaching every wallet developer who reads it that the metadata is not worth reading, and OID4VCI's whole discovery story rests on it being worth reading. So `vciMetadata()` derives its `claims` arrays from `vc_claims.js` and `subjectClaimsFrom()` derives the credential from the same place, and drift between them is not a state this service can reach. **`ldp_vc` carries a subset, and that is the format's doing rather than a choice**: it is signed over canonicalized JSON-LD, `bbs2023.js` canonicalizes with `safe: true`, and a term the vendored context does not define does not go missing quietly — it *throws*, inside a cryptosuite, at the moment a wallet asks for a credential. So each catalogue row names the JSON-LD term to use in that format or says it has none, `buildLdpVc()` filters what it is given through the context this process actually loaded (a hand-kept list agreeing with a vendored file is a drift waiting to happen, and this is the one where it would surface as a crypto bug), and both the page and `/sts-metadata` name the selected attributes that format leaves out. The context is vendored precisely because editing it would invalidate every credential already issued against it, so "add a term" is not the fix it looks like.
+
+**A claim's value has three sources and the order between them is the whole policy.** The **access token** first, where it carries a claim of that name — that is a statement this service has already made about the person, from the sign-in or from `/admin/claims`, and a credential contradicting the token that authorised it would be indefensible. Then **the directory entry**, which is where the generated values live once an entry exists and is also where an `ldapmodify` lands: change `mail` on `uid=alice,ou=users` and the next credential says so. Then **a generated persona**, for a person with no entry, an entry without that attribute, or a directory that is not running. Nothing is ever left out because a source was missing, since a claim that silently did not arrive is indistinguishable at the wallet from a selection that never took effect.
+
+**The generated values are garbage on purpose and deterministic on purpose**, and the second half is the one worth explaining. This service authenticates nobody, so there is no source of a real birthdate here and there had better not be; the invented street names say `Placeholder`, the mailboxes are in the RFC 2606 example domains and the telephone numbers are in the `555-01xx` fiction range, so no invented value can be mistaken for or collide with a real one. They are seeded from the username rather than drawn fresh because the alternative costs more than it looks: a random birthdate per call means the credential issued at 10:00 and the one issued at 10:01 describe two different people, the directory entry disagrees with both, and a wallet's "did this change" check fires on something that is not the thing being tested. One username is therefore one invented person for the life of the process *and across restarts* — and one **whole** person rather than a field at a time, because a `given_name` of "Ingrid" beside an email of `kwame.osei@…` is two facts that contradict each other and a reader who notices spends ten minutes deciding whether it is a bug here. The seed is the **normalised** local name, which is load-bearing rather than tidy: `alice`, `urn:sts-mock:user:alice` and `alice@EXAMPLE.COM` reach this module from three directions, and seeding on the raw string invented three different people and then failed to find the entry any of them had — a credential whose name its own directory entry contradicted, which looks like the directory not being read at all.
+
+**Saving a selection writes to the directory**, and that is the point of the page rather than a side effect of it. Every person under `ou=users` gains the selected attributes they are missing, invented from their username; without it, ticking `title` would change every future credential and change nothing an LDAP client could see, and the two halves of this service would quietly stop describing the same people. Three rules hold that sweep up. It **never overwrites** — an attribute already on an entry is left exactly as it is, which is why the three seeded people keep their own names and gain only what they had nothing for, and why an operator's `ldapmodify` is not undone by the next sweep. It writes **one value**, not an appended one, so an entry cannot accumulate a birthdate per sign-in. And what it walks is **entries under `ou=users`**, the container excepted — deliberately not "everything with a person `objectClass`", because this directory is schemaless, a client can add anything anywhere, and inventing a nationality for `cn=developers,ou=groups` because somebody gave it a `person` class would be a sweep doing damage where nobody asked it to look. The same fill runs when an entry is created and when a returning person authenticates, so somebody whose entry predates a selection change is covered without waiting for the button. It runs once at startup too, so the seeded three are not asserting values in credentials that their own entries lack from the first request.
+
+**Auto-created entries now get an invented name as well**, where they used to get the login name three times over — `cn: dave`, `givenName: dave`, `mail: dave@sts-mock.example`. Those are attributes a credential asserts, so a directory deriving all of them from the login name made every credential say the login name back, and `given_name: "dave"` is not a given name to test a wallet's rendering against. What the entry keeps from the login name is the two things that *are* the identity, the DN and the `uid` — which is also how a real directory looks, since somebody's uid rarely is their name. The `displayName` keeps its `(mock)` marker: every value on the entry is invented and the field a person reads first should say so.
+
+**A credential claim grants nothing and nothing reads one back.** No access token, ID Token, SAML assertion or Kerberos PAC carries a claim from this page, and no endpoint makes a decision on one — it reaches a credential and stops there. The page says so, for the reason the groups page says the same thing about membership.
 
 **The recording had to invert one dependency, and that is the only clever thing here.** Every JWT this service issues is minted by `signJwt()` in `helpers.js`, which is what makes the count a count rather than an estimate — but `admin_stats.js` requires `helpers.js` (it needs the log), so `helpers.js` cannot require it back. So the leaf offers a slot (`setJwtRecorder`) and `admin_stats.js` installs itself in it at its own require time. What makes that safe rather than fragile is *who requires `admin_stats.js`*: **`app.js` does**, which is not a trick to fix the ordering but a real dependency, since the call log lives there — and every protocol module requires `app.js`, so the recorder is installed before any route exists and therefore before any token can be minted. The recorder's return value is ignored and a throw inside it is caught and logged, because statistics must never be able to stop a token being issued. Everything that is not a JWT is recorded by an ordinary require in the other direction: the two assertion builders, `buildCredentialFor()` where all three credential formats meet, and the two points in `krb5_kdc.js` where a ticket is minted — Kerberos being the one family whose artifacts pass through neither `signJwt()` nor an assertion builder.
 
@@ -790,9 +872,10 @@ service rather than to a KDC, and it lives in `krb5_service.js`.
 
 ### LDAP v3 — the other protocol here that is not HTTP
 
-RFC 4511 is BER over a TCP socket, so `ldap_server.js` opens a raw one on port 389 and
-everything in this section is invisible to the HTTP half of this service. Four things
-follow, and three of them are the same ones the KDC's section records.
+RFC 4511 is BER over a TCP socket, so `ldap_server.js` opens raw ones — **389 in the
+clear and 636 over TLS** — and everything in this section is invisible to the HTTP half
+of this service. Five things follow, and three of them are the same ones the KDC's
+section records.
 
 **Requiring the module does not start the listener.** Every other module here registers
 its endpoints at require time, and for a route that is harmless; binding a privileged
@@ -803,7 +886,8 @@ also **published** — `listening` and `listenError` on `GET /ldap` — because 
 HTTP and answers 200 either way, so without those fields there is no way to tell a
 running directory from one whose listener lost a race with the host's own `slapd`.
 
-**`GET /sts-metadata` cannot see a raw socket.** The two LDAP rows it does carry, `/ldap`
+**`GET /sts-metadata` cannot see a raw socket**, and there are two of them here. The two
+LDAP rows it does carry, `/ldap`
 and `/ldap/directory`, are this service describing its own store; neither is LDAP. The
 second is the more useful of the two: it lists every entry with **where it came from** —
 seeded, added over LDAP, or created because somebody authenticated — which is what lets a
@@ -827,6 +911,78 @@ That is the same convention the password grant, WS-Trust and the WS-Federation s
 screen already follow, and it is what keeps 49 reachable: a directory that could not
 produce one would make "the bind failed" untestable, and 49 is the code an LDAP client's
 error handling is built around.
+
+#### LDAPS on 636 — the same directory, and what TLS does not change
+
+Port 636 is the **same directory over TLS**: the same handlers, the same store, the same
+every-bind-succeeds. What TLS adds is that the password is not on the wire in the clear.
+It does not make it *checked* — this service still authenticates nobody — and saying so
+is the point, because "it is over TLS" is exactly the sentence people substitute for "it
+is authenticated".
+
+**Two ports rather than StartTLS, and that is not a preference.** StartTLS is an
+*extended operation* (RFC 4511 section 4.14) that upgrades a connection already in
+progress, and ldapjs implements no extended operations at all — so offering it would mean
+patching the submodule, which this repository does not do. Worth knowing which of the two
+is the standardised one, since it is the opposite of what the port numbers suggest: RFC
+4513 specifies StartTLS, and left `ldaps://` as the de-facto scheme it already was. No RFC
+defines the thing every client speaks.
+
+**Two server objects, one set of handlers.** ldapjs chooses between a `net.Server` and a
+`tls.Server` **at construction**, from whether it was handed a certificate and key, so
+LDAPS is a second server *object* here rather than an option on the first — and handlers
+are registered per instance. The `server` that every `server.bind(...)`, `server.search(...)`
+and the rest in that file is registered against is therefore **not a server**: it is a
+fan-out over the eight operations plus unbind, which registers each handler on both
+instances. The alternative was a second copy of three hundred lines of handlers or a reach
+into ldapjs's internal `routes` map, and this repository consumes that submodule through
+its public API only. The failure it exists to prevent is a handler that lands on one
+listener and not the other, which presents as a search that works on 389 and fails on 636
+— read as a TLS fault, which it is not. `listen`, `close` and `address` are deliberately
+*not* fanned out: each socket has its own port, its own bind failure and its own answer to
+"are you up".
+
+**One certificate for every TLS socket in this process.** The LDAPS listener serves the
+certificate and key `tls_server.js` generates at require time — the same pair 8443 and
+9443 present — rather than a second one. That is a decision about what a *caller* has to
+do rather than a saved keypair: the certificate is self-signed and regenerated on every
+start, so anybody who wants to verify this service has to fetch it and trust it, and one
+anchor covering all three sockets is **one fetch**. Two keypairs would mean an
+`ldapsearch` that verifies perfectly against a truststore built for the HTTPS ports
+failing with `unable to get local issuer certificate` — an error that names nothing and
+reads as a broken directory. Fetch it from `GET /tls/server-certificate`:
+
+```bash
+curl -s http://localhost:8081/tls/server-certificate > /tmp/sts.pem
+LDAPTLS_CACERT=/tmp/sts.pem ldapsearch -H ldaps://localhost:636 -x \
+  -D "cn=admin,dc=example,dc=com" -w 'password!' \
+  -b "dc=example,dc=com" "(objectClass=*)"
+```
+
+`LDAPTLS_REQCERT=never` is the habit that endpoint exists to avoid, and here it would also
+hide the one thing on this listener worth checking.
+
+**No client certificate is ever asked for on 636.** This listener proves the *server* to
+the client and nothing more; a certificate offered to it is not requested and would not be
+a login if it were. The HTTPS listeners next door are where client certificates are the
+whole subject — and even there, a verified one is explicitly not a login. `GET /ldap` says
+this rather than leaving somebody to work out why the certificate they configured was
+never sent.
+
+**It changes the require order, and `server.js` says so out loud.** `ldap_server.js` now
+requires `tls_server.js` — for the certificate, nothing else — so node loads that module
+first whatever `server.js` says. Since **the require order in `server.js` is the route
+order**, the line there was moved to match: `./tls_server` before `./ldap_server`. It
+changes no output, because `/sts-metadata` sorts its rows by path within a group; it keeps
+that file honest for the next reader.
+
+Finally, the two listeners are **published separately** on `GET /ldap` — `listening` /
+`listenError` for 389, and a `tls` object carrying `ldaps`, `port`, `listening` and `error`
+for 636 — because that page is HTTP and answers 200 whichever of them is up. "389 is up and
+636 is not" is the ordinary outcome of a host run, and a single flag could only report one
+of them. The admin console's user page reads the same fields and warns in three cases
+rather than two, for the same reason: telling somebody no client can connect while LDAPS is
+answering costs them an afternoon.
 
 #### What it enforces, and the one thing it deliberately does not
 
@@ -857,7 +1013,10 @@ And one rule is deliberately **not** enforced, stated here rather than discovere
 **deleting a user does not remove its DN from the groups that list it as a `member`.**
 Referential integrity is a feature of some directories and not of the protocol — OpenLDAP
 needs an overlay for it and Active Directory does it in the DSA — so the dangling member
-is the honest result, and it is what a `member`-based group search should then show.
+is the honest result, and it is what a `member`-based group search should then show. It is
+also what the admin console's `/admin/groups` page counts separately from the members that
+resolve, rather than reporting one number that would make a group of seven whose members
+are five look untouched.
 
 #### An LDAP object for every user who authenticates
 
@@ -899,6 +1058,20 @@ not one of those attributes. The `x509subject` value is also how the admin conso
 finds the entry again: an identity that is a DN is looked up by the subject the entry
 recorded rather than by a name, which is exact and stays right if the naming rule ever
 changes.
+
+**What the entry holds is now decided partly by `/admin/vc`.** The attributes that make it
+a person — its `objectClass`, `uid`, `cn`, `sn`, `givenName`, `displayName` and `mail` — are
+written when it is created, and the name in them is an **invented** one rather than the
+login name repeated: those are attributes an issued credential asserts, so an entry that
+derived all of them from the login name made every credential say the login name back. The
+`uid` and the DN stay the login name, because those two *are* the identity. On top of that,
+every attribute the credential claim set selects and the entry does not already carry is
+filled in — a birthdate, a nationality, the five components of an address, whatever else has
+been ticked — invented from the same username seed, so an LDAP client and a wallet describe
+one person. Nothing already on the entry is ever overwritten, which is why the three seeded
+people keep their own names, and why an operator's `ldapmodify` survives every later sweep.
+The console's own section above carries the rest of it, including what the sweep walks and
+what it deliberately does not.
 
 #### Two ldapjs defects this code routes around
 
@@ -986,6 +1159,14 @@ Three details in there are load-bearing and each was measured rather than assume
   PEM (`Cache-Control: no-store`, since a cached copy outlives the key it describes)
   so a caller can put it in its own truststore rather than switching verification off,
   which is the habit this whole workflow exists to break.
+* **It is served on three sockets, not two.** The directory's LDAPS listener on 636
+  presents this same certificate and key, read from this module rather than generated
+  again — so one fetch is one anchor for 8443, 9443 *and* `ldaps://`. Two keypairs
+  would have made an `ldapsearch` fail against a truststore built for the HTTPS ports
+  with `unable to get local issuer certificate`, which names nothing. The private key
+  crosses a module boundary to do it and does not cross a network one: it is generated
+  per start, lives in memory, dies with the process, and nothing writes it to a
+  response — `GET /tls/server-certificate` publishes the certificate alone.
 
 **And a verified client certificate is not a login.** It means a chain was built from
 what the client sent to an anchor somebody POSTed to this process, and no more: no

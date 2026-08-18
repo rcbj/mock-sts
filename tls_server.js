@@ -213,6 +213,24 @@ function fingerprintOf(pem) {
 const SERVER_CERTIFICATE = makeServerCertificate();
 
 // ---------------------------------------------------------------------------
+// ONE CERTIFICATE FOR EVERY TLS SOCKET IN THIS PROCESS.
+//
+// ldap_server.js's LDAPS listener on 636 serves this same certificate and key,
+// read through serverCertificate() below rather than generating a second pair.
+// That is a decision about what a CALLER has to do rather than a saving of one
+// keypair: this certificate is self-signed and regenerated on every start, so
+// anybody who wants to verify this service has to fetch it and trust it — and
+// one anchor covering 8443, 9443 and 636 is one fetch. Two keypairs would mean
+// an `ldapsearch` that verifies perfectly well against a truststore built for
+// the HTTPS ports failing with `unable to get local issuer certificate`, which
+// names nothing and reads as a broken directory.
+//
+// The names are the other half of why one certificate works for both: they are
+// in the subjectAltName (see above — the CN is ignored by every current client)
+// and they are the names this stack is reached at, not names about HTTPS.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // The client truststore.
 // ---------------------------------------------------------------------------
 
@@ -1291,6 +1309,22 @@ module.exports = {
   addAnchors: addAnchors,
   clearAnchors: clearAnchors,
   serverCertificatePem: function () { return SERVER_CERTIFICATE.certPem; },
+  // The whole of it, private key included, because ldap_server.js serves it on
+  // 636 — see the note above SERVER_CERTIFICATE. Handing a private key to
+  // another module in this process is not the same act as publishing one: this
+  // key is generated per start, exists only in memory and dies with the
+  // process, exactly like the signing key in helpers.js. Nothing here writes it
+  // to a response; GET /tls/server-certificate publishes the CERTIFICATE alone.
+  serverCertificate: function () {
+    return {
+      certPem: SERVER_CERTIFICATE.certPem,
+      privateKeyPem: SERVER_CERTIFICATE.privateKeyPem,
+      subject: SERVER_CERTIFICATE.subject,
+      names: SERVER_CERTIFICATE.names.slice(0),
+      fingerprint256: SERVER_CERTIFICATE.fingerprint256,
+      notAfter: SERVER_CERTIFICATE.notAfter
+    };
+  },
   anchorCount: function () { return anchors.length; },
   ports: function () {
     return { tls: boundTlsPort || TLS_PORT,

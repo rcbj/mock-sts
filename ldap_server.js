@@ -114,6 +114,31 @@ const stats = require('./admin_stats');
 // other way round because server.js requires ./admin BEFORE this module (rule 6),
 // so admin.js must not require this one back — see the note above objectFor().
 const admin = require('./admin');
+// The TLS module, for ONE thing: the server certificate and key it generates at
+// its own require time. The LDAPS listener below serves that same pair rather
+// than making a second one — see the note above SERVER_CERTIFICATE over there
+// for why one certificate for every TLS socket in this process is the property
+// worth having, and this file's own LDAPS section for what it costs.
+//
+// This is a plain require rather than one of the two inverted hooks above,
+// because neither of the things that force an inversion applies: tls_server.js
+// requires app.js, helpers.js and admin_stats.js and knows nothing about this
+// module, so there is no cycle to make; and its routes are /tls, which collide
+// with nothing here. What the require DOES do is pull those routes into the
+// express router at this point rather than after this module's, so server.js
+// now requires ./tls_server BEFORE ./ldap_server to say so out loud. It changes
+// no output — /sts-metadata sorts its rows by path within a group — and the
+// line over there is for the next reader rather than for the page.
+const tlsServer = require('./tls_server');
+// WHICH attributes a person's entry should carry so that the credentials this
+// service issues have something to say, and what to invent for them. Another
+// plain require and not a third inversion, for the same reasons as tls_server.js
+// above: vc_claims.js is a LIBRARY — it registers no route, so requiring it adds
+// nothing to the express router and cannot reorder /sts-metadata — and it
+// requires only helpers.js, so there is no cycle to make. The traffic in the
+// other direction, this module's two functions that IT calls, does go through a
+// slot: see the setDirectory() install further down.
+const vcClaims = require('./vc_claims');
 
 // The port. 389 is the assigned one and this process is root in the container,
 // so it binds it directly; a host run is not root, which is why the variable
@@ -121,6 +146,23 @@ const admin = require('./admin');
 // in `ldapAllowedPorts` or its LDAP client will refuse to reach it — the same
 // coupling KRB5_KDC_PORT has with krb5AllowedPorts, and for the same reason.
 const LDAP_PORT = parseInt(process.env.LDAP_PORT, 10) || 389;
+
+// The LDAPS port. 636 is the IANA-assigned one for LDAP over TLS and, like 389,
+// it is privileged — so the container binds it and a host run usually cannot.
+// A failure to bind is RECORDED and published on GET /ldap exactly as the plain
+// listener's is, and it is not fatal to the plain listener: the two sockets are
+// started independently and either can be up while the other is not, which is
+// the commonest outcome of a host run and is why they have separate state
+// below rather than one `listening` flag that would have to lie about one.
+//
+// Two ports rather than StartTLS, and that is not a preference: StartTLS is an
+// EXTENDED OPERATION (RFC 4511 section 4.14) that upgrades a connection already
+// in progress, and ldapjs implements no extended operations at all — so
+// offering it would mean patching the submodule, which this repository does not
+// do. It is also worth knowing that LDAPS is the one of the two that no RFC
+// defines: RFC 4513 standardised StartTLS and left `ldaps://` as the de-facto
+// scheme it already was. Every client speaks it anyway.
+const LDAPS_PORT = parseInt(process.env.LDAPS_PORT, 10) || 636;
 
 // The naming context this directory serves. Everything below it is ours;
 // anything outside it is answered LDAP_NO_SUCH_OBJECT, which is what a real
@@ -167,6 +209,12 @@ const MAX_SEARCH_RESULTS = parseInt(process.env.LDAP_SIZE_LIMIT, 10) || 500;
 let listening = false;
 let listenError = '';
 let boundPort = LDAP_PORT;
+// The LDAPS listener's own three. Separate rather than a flag on the ones above,
+// for the reason LDAPS_PORT gives: "389 is up and 636 is not" is a state a host
+// run reaches almost every time, and a single pair could only report one of them.
+let tlsListening = false;
+let tlsListenError = '';
+let boundTlsPort = LDAPS_PORT;
 
 // ---------------------------------------------------------------------------
 // The store.
@@ -187,6 +235,10 @@ const CANONICAL_NAMES = {
   uid: 'uid', mail: 'mail', givenname: 'givenName', displayname: 'displayName',
   telephonenumber: 'telephoneNumber', title: 'title', description: 'description',
   member: 'member', memberof: 'memberOf', uniquemember: 'uniqueMember',
+  // RFC 2307's, and the one a posixGroup's membership is written in. It holds a
+  // bare user name where the other three hold a DN, which is why /admin/groups
+  // resolves it differently — see MEMBER_ATTRIBUTES.
+  memberuid: 'memberUid',
   userpassword: 'userPassword', employeenumber: 'employeeNumber',
   employeetype: 'employeeType', departmentnumber: 'departmentNumber',
   postaladdress: 'postalAddress', l: 'l', st: 'st', c: 'c', gidnumber: 'gidNumber',
@@ -211,6 +263,17 @@ const CANONICAL_NAMES = {
   x509serialnumber: 'x509serialNumber', x509notbefore: 'x509notBefore',
   x509notafter: 'x509notAfter', x509fingerprint256: 'x509fingerprint256'
 };
+
+// The attribute types /admin/vc can put on a person so that a credential has
+// something to carry. They are MERGED rather than typed out a second time: that
+// catalogue already spells each one the way its schema document spells it
+// (`schacDateOfBirth`, `labeledURI`, `departmentNumber`), and two lists of
+// spellings is one list that will eventually be wrong. Anything already named
+// above keeps its spelling — Object.assign's later argument wins, so the merge
+// is written in the order that makes the table above authoritative.
+Object.keys(vcClaims.CANONICAL_NAMES).forEach(function (lower) {
+  if (!CANONICAL_NAMES[lower]) CANONICAL_NAMES[lower] = vcClaims.CANONICAL_NAMES[lower];
+});
 
 // A DN as a comparison key. Case-folded, and the whitespace around each comma
 // removed, because `cn=alice, ou=users` and `CN=Alice,OU=Users` name the same
@@ -777,6 +840,21 @@ function autoCreateUser(detail) {
   }
   // A client CERTIFICATE identity is a DN and is placed accordingly; everything
   // else is a name and becomes `uid=<name>,ou=users`. See certificatePlan().
+  // The invented person behind the name. Their given name, family name and
+  // mailbox are what the entry gets — where it used to get `dave`, `Mock` and
+  // `dave@sts-mock.example`, one string three times over.
+  //
+  // The change is deliberate and it is not cosmetic: those three are attributes a
+  // credential asserts, so a directory that derived all of them from the login
+  // name made every issued credential say the login name back. `given_name:
+  // "dave"` is not a given name, and a wallet developer testing what their UI does
+  // with a person's name learned nothing from it. What the entry keeps from the
+  // login name is the two things that ARE the identity — the DN and the `uid` —
+  // which is also how a real directory looks: somebody's uid rarely is their name.
+  //
+  // `(mock)` stays on the displayName. Every value here is invented, and the one
+  // place a person reads before the others should say so.
+  const persona = vcClaims.personaFor(name);
   const plan = info.certificate
     ? certificatePlan(info)
     : {
@@ -784,11 +862,11 @@ function autoCreateUser(detail) {
         attributes: {
           objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
           uid: name,
-          cn: name,
-          sn: 'Mock',
-          givenName: name,
-          displayName: name + ' (mock)',
-          mail: name + '@sts-mock.example'
+          cn: persona.display,
+          sn: persona.family,
+          givenName: persona.given,
+          displayName: persona.display + ' (mock)',
+          mail: persona.email
         },
         merge: {}
       };
@@ -808,6 +886,15 @@ function autoCreateUser(detail) {
         changed = true;
       }
     });
+    // And whatever the credential claim set now wants that this entry does not
+    // carry. It runs on a RETURNING person and not only on a new one, because the
+    // selection can change between two sign-ins: somebody who ticks `title` on
+    // /admin/vc gets the whole directory populated then (that page runs the same
+    // sweep), and this is what covers the person who authenticates for the first
+    // time after that but whose entry was created before it.
+    if (applyVcAttributes(existing, name)) {
+      changed = true;
+    }
     if (changed) {
       existing.attributes.modifytimestamp = [generalizedTime()];
       log.debug('Leaving autoCreateUser(). The entry existed and now records ' +
@@ -828,9 +915,170 @@ function autoCreateUser(detail) {
   const created = putEntry(dn, Object.assign({}, plan.attributes,
                                              { description: [note] }),
                            { origin: 'authentication' });
+  // The invented facts a credential will assert about this person, written HERE
+  // rather than into the credential, so that the entry an LDAP client reads and
+  // the credential a wallet is handed say the same thing about the same person.
+  // It runs after putEntry() rather than being folded into the attributes above
+  // because it fills only what is ABSENT, and the plan's own attributes — uid,
+  // cn, sn, the certificate's RDNs — are the ones that must win.
+  applyVcAttributes(created, name);
   log.info('ldap: created ' + dn + ' because ' + name + ' ' + note + '.');
   log.debug('Leaving autoCreateUser(). The entry was created.');
   return created;
+}
+
+// ---------------------------------------------------------------------------
+// THE FACTS A CREDENTIAL NEEDS, INVENTED ONCE AND KEPT HERE.
+//
+// /admin/vc chooses which attributes an issued credential carries. Those
+// attributes have to have VALUES, and this service authenticates nobody — there
+// is no source of a real birthdate, and there had better not be. So vc_claims.js
+// invents a consistent person per username and this function writes what is
+// missing onto their entry.
+//
+// Three rules, and each of them is the answer to a way this could go wrong:
+//
+//   * ABSENT ONLY. An attribute the entry already carries is never touched. That
+//     covers the seeded people (alice keeps `Alice Anderson`, and only gains the
+//     attributes she had none of), a certificate's RDNs, and — the one that
+//     matters most — anything an operator set through LDAP. A sweep that
+//     overwrote `mail` after somebody had just ldapmodify'd it would be a
+//     directory that argues with its own clients.
+//   * ONE VALUE. These are single-valued facts; addValues() would happily append
+//     a second `mail` on the next sweep if the first were ever edited, and an
+//     entry that accumulated a birthdate per sign-in would be the visible symptom
+//     of a bug nobody could locate.
+//   * A NAME, NOT A DN, seeds the person. A TLS client certificate's identity is
+//     a DN, and `uid` holding one would contradict the entry it sits on — so the
+//     row that carries the username is skipped for those. Everything else is
+//     invented from the DN string quite happily; it is only a seed.
+// ---------------------------------------------------------------------------
+function applyVcAttributes(stored, key) {
+  log.debug('Entering applyVcAttributes(). dn=' + (stored && stored.dn));
+  if (!stored) {
+    log.debug('Leaving applyVcAttributes(). There is no entry.');
+    return false;
+  }
+  const name = String(key == null ? '' : key).trim() || commonNameOf(stored.dn) ||
+               (stored.attributes.uid || [])[0] || stored.dn;
+  const isDn = DN_SHAPED.test(name);
+  const generated = vcClaims.generatedFor(name);
+  const added = [];
+  Object.keys(generated).forEach(function (attribute) {
+    const have = stored.attributes[attribute] || [];
+    if (have.length) {
+      return;
+    }
+    if (isDn && attribute === 'uid') {
+      // See the third rule: this entry is named by a certificate subject, and a
+      // uid holding that subject would name the person something the DN does not.
+      return;
+    }
+    stored.attributes[attribute] = [generated[attribute]];
+    added.push(canonicalName(attribute));
+  });
+  if (!added.length) {
+    log.debug('Leaving applyVcAttributes(). It already had everything the ' +
+              'credential claim set asks for.');
+    return false;
+  }
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  log.info('ldap: ' + stored.dn + ' gained ' + added.join(', ') +
+           ' so that an issued credential has something to assert.');
+  log.debug('Leaving applyVcAttributes(). ' + added.length + ' attribute(s) added.');
+  return true;
+}
+
+// The name to invent a person from, for an entry nobody handed us a key for —
+// which is every entry the sweep below walks. The uid is what autoCreateUser()
+// built the DN from and what /admin/users files the person under, so it is the
+// one that keeps the sweep's values identical to the ones an authentication
+// would have written; the CN is the fallback for a certificate-seeded entry,
+// which has no uid; the DN is the last resort and is at least stable.
+function personaKeyOf(stored) {
+  const uid = (stored.attributes.uid || [])[0];
+  if (uid) return String(uid);
+  const cn = (stored.attributes.cn || [])[0];
+  if (cn) return String(cn);
+  return stored.dn;
+}
+
+// ---------------------------------------------------------------------------
+// THE SWEEP, run when the claim set changes and once at startup.
+//
+// Changing the selection on /admin/vc has to reach the people who are already
+// here, or the page would appear to do nothing for every user created before it
+// was touched — and the way that failure presents is the expensive one: the
+// credential still carries the claim (vc_claims.js falls back to the invented
+// value), so it looks like it worked, and only an LDAP client shows that the
+// directory disagrees.
+//
+// What counts as a person is ENTRIES UNDER ou=users, the container excepted.
+// Deliberately not "everything with a person objectClass anywhere": this
+// directory is schemaless, a client can add anything anywhere, and inventing a
+// birthdate for `cn=developers,ou=groups` because somebody gave it an
+// objectClass of person would be a sweep doing damage in a place nobody asked it
+// to look. The container itself is excepted because it is an
+// organizationalUnit — an `ou=users` carrying a nationality is not a person, it
+// is a bug that reads as one.
+// ---------------------------------------------------------------------------
+function populateVcAttributes() {
+  log.debug('Entering populateVcAttributes().');
+  const wanted = vcClaims.selectedNames();
+  let examined = 0;
+  let changed = 0;
+  const before = new Map();
+  entries.forEach(function (stored) {
+    if (!isUnder(stored.dn, USERS_DN) || normalizeDn(stored.dn) === normalizeDn(USERS_DN)) {
+      return;
+    }
+    examined++;
+    before.set(stored.dn, Object.keys(stored.attributes).length);
+    if (applyVcAttributes(stored, personaKeyOf(stored))) {
+      changed++;
+    }
+  });
+  // The number of VALUES written, not just of entries touched, because "12
+  // entries changed" says nothing about whether the attribute somebody just
+  // ticked actually landed anywhere.
+  let values = 0;
+  entries.forEach(function (stored) {
+    if (before.has(stored.dn)) {
+      values += Object.keys(stored.attributes).length - before.get(stored.dn);
+    }
+  });
+  log.info('ldap: swept ' + examined + ' entry/entries under ' + USERS_DN + ' for the ' +
+           wanted.length + ' attribute(s) the credential claim set asks for; ' + changed +
+           ' entry/entries gained ' + values + ' value(s).');
+  log.debug('Leaving populateVcAttributes(). ' + changed + ' of ' + examined + ' changed.');
+  return { examined: examined, changed: changed, values: values, attributes: wanted };
+}
+
+// What one person's entry holds, for vc_claims.js to read a claim value out of.
+// The attribute names are the stored (lower-cased) ones, which is what that
+// module compares against — see the note on its directoryAttributes().
+//
+// It is given the same identity key the console files a person under, so
+// locateEntry() answers for both shapes of identity: a name is
+// `uid=<name>,ou=users` and a certificate's DN is found by the subject the entry
+// recorded. Nothing is invented here — a missing entry is null, and the caller's
+// own fallback is what fills the claim.
+function vcAttributesFor(key) {
+  log.debug('Entering vcAttributesFor(). key=' + key);
+  const name = String(key == null ? '' : key).trim();
+  if (!name) {
+    log.debug('Leaving vcAttributesFor(). There was no identity to look up.');
+    return null;
+  }
+  const located = locateEntry(name);
+  if (!located.stored) {
+    log.debug('Leaving vcAttributesFor(). Nothing at ' + located.dn + '.');
+    return null;
+  }
+  log.debug('Leaving vcAttributesFor(). ' +
+            Object.keys(located.stored.attributes).length + ' attribute(s) at ' +
+            located.stored.dn + '.');
+  return located.stored.attributes;
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +1186,12 @@ function objectFor(name) {
     port: boundPort,
     listening: listening,
     listenError: listenError,
+    // The second socket, because the console warns when a reader cannot reach
+    // this entry over LDAP and that is now two questions. A page that said "no
+    // client can connect" while LDAPS was up would be wrong in the direction
+    // that costs somebody an afternoon.
+    ldapsPort: secureServer ? boundTlsPort : null,
+    ldapsListening: tlsListening,
     autoCreateUsers: AUTOCREATE_USERS,
     entryCount: entries.size,
     maxEntries: MAX_ENTRIES,
@@ -972,6 +1226,298 @@ function objectFor(name) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// WHAT THE CONSOLE'S GROUPS PAGE READS. The third inverted hook, and the same
+// direction as objectFor() above for the same reason — see the note there.
+//
+// ---------------------------------------------------------------------------
+// WHAT COUNTS AS A GROUP, which is the one decision here with two defensible
+// answers and no third.
+//
+// A real directory would answer with a SCHEMA: an entry is a group when its
+// objectClass says so. This one has no schema (that is deliberate, and GET
+// /ldap says so), and a client can `add` anything anywhere through the
+// protocol — a groupOfNames under ou=users, or an entry under ou=groups
+// carrying no objectClass at all. So both rules are applied and neither is
+// allowed to hide the other:
+//
+//   * PLACEMENT — it sits under ou=groups and is not that container itself.
+//   * OBJECTCLASS — it carries one of the four group classes below, wherever
+//     it sits.
+//
+// Which rule matched is reported per group, because a groupOfNames sitting
+// outside ou=groups and an attribute-less entry inside it are both things
+// somebody wrote on purpose to see what this service does with them, and a page
+// that silently normalised them into one list would answer the question wrong.
+// ---------------------------------------------------------------------------
+const GROUP_CLASSES = ['groupofnames', 'groupofuniquenames', 'posixgroup',
+                       'groupofurls'];
+
+// The attributes that carry membership, and what each one's values ARE — which
+// is the distinction that matters when they are resolved. `member` and
+// `uniqueMember` hold a DN (RFC 4519); `memberUid` holds a bare user name, so a
+// posixGroup's members are looked up as uid=<value>,ou=users rather than as
+// DNs. Treating them alike is how a page ends up reporting every posixGroup
+// member as dangling.
+const MEMBER_ATTRIBUTES = [
+  { name: 'member', holds: 'dn' },
+  { name: 'uniquemember', holds: 'dn' },
+  { name: 'memberuid', holds: 'uid' }
+];
+
+// Is this entry a group, and by which rule? Returns '' for "it is not one".
+function groupRuleFor(stored) {
+  const under = isUnder(stored.dn, GROUPS_DN) &&
+                normalizeDn(stored.dn) !== normalizeDn(GROUPS_DN);
+  const classes = (stored.attributes.objectclass || []).map(function (value) {
+    return String(value).toLowerCase();
+  });
+  const classed = classes.some(function (value) {
+    return GROUP_CLASSES.indexOf(value) >= 0;
+  });
+  if (under && classed) return 'both';
+  if (under) return 'placement';
+  if (classed) return 'objectClass';
+  return '';
+}
+
+// The key the ADMIN CONSOLE files a person under, worked out from the DN of the
+// entry that names them — the inverse of the `uid=<name>,ou=users` locateEntry()
+// builds, and the reason a member row can link to /admin/users?user=... at all.
+//
+// Two sources, in this order, and the order is what keeps the link honest: the
+// entry's own `uid` where it has one, because that is what autoCreateUser()
+// wrote and is exactly what the console keyed on; failing that, the uid RDN of
+// the DN itself, which is all there is for a member that names an entry this
+// directory does not hold. An entry named some other way — `cn=alice,ou=users`
+// added through the protocol, or the `cn=` entry a TLS client certificate
+// seeds — yields '' and gets no link rather than a link to a user page that
+// would say "nothing has authenticated as that".
+function consoleKeyFor(dn, stored) {
+  if (stored && (stored.attributes.uid || []).length) {
+    return String(stored.attributes.uid[0]);
+  }
+  const leaf = splitRdns(dn)[0] || '';
+  const pairs = rdnPairs(leaf).filter(function (pair) {
+    return pair.attribute === 'uid';
+  });
+  return pairs.length ? unescapeDnValue(pairs[0].value) : '';
+}
+
+// One membership value, resolved. `holds` says how to read it — see
+// MEMBER_ATTRIBUTES — and everything else is a fact about what is or is not at
+// the far end.
+//
+// A member that names nothing is reported as DANGLING rather than dropped, and
+// that is the whole reason this resolution exists: this directory does not
+// enforce referential integrity (deleting a user leaves its DN in every group
+// that listed it — see the header), so a dangling member is a state a client
+// can reach in two operations and a page that quietly showed six members where
+// the entry lists seven would be hiding the very thing it was built to show.
+function resolveMember(value, attribute) {
+  const raw = String(value == null ? '' : value);
+  const holds = attribute.holds;
+  const dn = holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
+  const stored = getEntry(dn);
+  const rule = stored ? groupRuleFor(stored) : '';
+  return {
+    value: raw,
+    attribute: canonicalName(attribute.name),
+    // What the attribute's value MEANT, so a reader can see why memberUid's
+    // `alice` and member's `uid=alice,ou=users,...` end up at the same entry.
+    holds: holds,
+    dn: dn,
+    present: !!stored,
+    // A group that lists another group is NESTED membership, which this service
+    // does not expand — nothing here walks it, and no protocol endpoint reads
+    // these groups at all. Saying which members are groups is what lets a reader
+    // see the nesting they wrote; claiming to have flattened it would be a lie
+    // about a feature that is not here.
+    kind: !stored ? 'dangling' : (rule ? 'group' : 'entry'),
+    userKey: stored ? consoleKeyFor(dn, stored) : '',
+    // Enough of the entry to draw a row without a second lookup. Empty for a
+    // dangling member, which is the point.
+    cn: stored ? (stored.attributes.cn || [])[0] || '' : '',
+    mail: stored ? (stored.attributes.mail || [])[0] || '' : '',
+    displayName: stored ? (stored.attributes.displayname || [])[0] || '' : ''
+  };
+}
+
+// Every membership value on one entry, in the order MEMBER_ATTRIBUTES lists the
+// attributes and, within an attribute, the order the values are stored in.
+function membersOf(stored) {
+  const out = [];
+  MEMBER_ATTRIBUTES.forEach(function (attribute) {
+    (stored.attributes[attribute.name] || []).forEach(function (value) {
+      out.push(resolveMember(value, attribute));
+    });
+  });
+  return out;
+}
+
+// The OTHER answer to "who is in this group": entries elsewhere in the tree
+// whose own `memberOf` names it and which the group's member attributes do NOT
+// list back.
+//
+// This is not a nicety. `memberOf` is maintained by the SERVER in every
+// directory that has it (it is not even a standard attribute — it is Microsoft's
+// and OpenLDAP's, through an overlay), and this one maintains nothing: a client
+// that writes `memberOf: cn=developers,...` onto a user creates exactly this
+// disagreement, and it is one of the two or three things a person would come to
+// a mock directory to try. Listing them separately, under their own heading,
+// says which side of the disagreement each name came from — merging them into
+// the member list would manufacture a consistency this directory never claimed.
+function claimedMembersOf(groupDn) {
+  const listed = {};
+  const stored = getEntry(groupDn);
+  if (stored) {
+    membersOf(stored).forEach(function (member) {
+      listed[normalizeDn(member.dn)] = true;
+    });
+  }
+  const out = [];
+  const key = normalizeDn(groupDn);
+  entries.forEach(function (entry) {
+    const claims = (entry.attributes.memberof || []).some(function (value) {
+      return normalizeDn(value) === key;
+    });
+    if (!claims || listed[normalizeDn(entry.dn)]) {
+      return;
+    }
+    out.push({
+      dn: entry.dn,
+      userKey: consoleKeyFor(entry.dn, entry),
+      cn: (entry.attributes.cn || [])[0] || '',
+      mail: (entry.attributes.mail || [])[0] || ''
+    });
+  });
+  return out.sort(function (a, b) {
+    return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
+  });
+}
+
+// The directory-level facts every one of the console's LDAP sections needs. The
+// same six objectFor() reports, out of one function so that the two pages cannot
+// come to disagree about whether a socket is up.
+function directoryState() {
+  return {
+    baseDn: BASE_DN,
+    usersDn: USERS_DN,
+    groupsDn: GROUPS_DN,
+    port: boundPort,
+    listening: listening,
+    listenError: listenError,
+    ldapsPort: secureServer ? boundTlsPort : null,
+    ldapsListening: tlsListening,
+    entryCount: entries.size,
+    maxEntries: MAX_ENTRIES
+  };
+}
+
+// The console's group reader. One function for both of its pages, because the
+// list and the detail answer the same question at two depths and two functions
+// would be two places for "what counts as a group" to drift apart.
+//
+// With no DN it is the list. With one it is the list AND that group in full —
+// the list costs one pass over a store capped at MAX_ENTRIES and it is what lets
+// the detail page carry its own way back to the siblings.
+function groupsFor(dn) {
+  log.debug('Entering groupsFor(). dn=' + (dn || '(the whole list)'));
+  const wanted = String(dn == null ? '' : dn).trim();
+  const out = directoryState();
+  out.requested = wanted;
+  out.found = false;
+  out.notAGroup = false;
+  out.group = null;
+
+  const groups = [];
+  entries.forEach(function (entry) {
+    const rule = groupRuleFor(entry);
+    if (!rule) {
+      return;
+    }
+    const members = membersOf(entry);
+    groups.push({
+      dn: entry.dn,
+      cn: (entry.attributes.cn || [])[0] || commonNameOf(entry.dn),
+      rule: rule,
+      description: (entry.attributes.description || [])[0] || '',
+      objectClass: (entry.attributes.objectclass || []).slice(0),
+      origin: entry.origin || 'unstated',
+      createdAt: entry.createdAt,
+      modifiedAt: entry.modifiedAt,
+      memberCount: members.length,
+      // Split out because the two numbers are the interesting pair: a group
+      // whose seven members resolve to five entries is the referential-integrity
+      // story, and a single count tells it as "seven members" with nothing wrong.
+      presentCount: members.filter(function (m) { return m.present; }).length,
+      danglingCount: members.filter(function (m) { return !m.present; }).length,
+      claimedCount: claimedMembersOf(entry.dn).length,
+      attributeCount: Object.keys(entry.attributes).length
+    });
+  });
+  groups.sort(function (a, b) {
+    return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
+  });
+  out.groups = groups;
+  out.groupCount = groups.length;
+
+  if (!wanted) {
+    log.debug('Leaving groupsFor(). ' + groups.length + ' group(s).');
+    return out;
+  }
+
+  const stored = getEntry(wanted);
+  if (!stored) {
+    log.debug('Leaving groupsFor(). There is no entry at ' + wanted + '.');
+    return out;
+  }
+  const rule = groupRuleFor(stored);
+  if (!rule) {
+    // The entry is real and is not a group. A separate state from "no such
+    // entry" because the page has something useful to say about it — a client
+    // can rename a group out of ou=groups or strip its objectClass, and "there
+    // is nothing there" would send a reader looking for a deletion that did not
+    // happen.
+    out.notAGroup = true;
+    out.entryDn = stored.dn;
+    log.debug('Leaving groupsFor(). ' + stored.dn + ' is an entry but not a group.');
+    return out;
+  }
+
+  // Canonically spelled and OPERATIONAL ATTRIBUTES INCLUDED, for the reason
+  // objectFor() gives: this is not a search, it is the service showing its own
+  // store, and a dump that dropped two attributes would be the one thing a dump
+  // must not do.
+  const attributes = {};
+  Object.keys(stored.attributes).sort().forEach(function (attribute) {
+    attributes[canonicalName(attribute)] = stored.attributes[attribute].slice(0);
+  });
+  const members = membersOf(stored);
+  out.found = true;
+  out.group = {
+    dn: stored.dn,
+    cn: (stored.attributes.cn || [])[0] || commonNameOf(stored.dn),
+    rule: rule,
+    origin: stored.origin || 'unstated',
+    createdAt: stored.createdAt,
+    modifiedAt: stored.modifiedAt,
+    operational: OPERATIONAL.map(canonicalName),
+    memberAttributes: MEMBER_ATTRIBUTES.map(function (a) {
+      return canonicalName(a.name);
+    }),
+    attributes: attributes,
+    members: members,
+    memberCount: members.length,
+    presentCount: members.filter(function (m) { return m.present; }).length,
+    danglingCount: members.filter(function (m) { return !m.present; }).length,
+    claimed: claimedMembersOf(stored.dn)
+  };
+  log.debug('Leaving groupsFor(). ' + stored.dn + ' has ' + members.length +
+            ' member value(s), ' + out.group.danglingCount + ' of them dangling.');
+  return out;
+}
+
 // The inverted hook. See the header for why the direction is this way round.
 stats.setUserObserver(autoCreateUser);
 
@@ -990,6 +1536,41 @@ if (typeof admin.setDirectoryReader === 'function') {
            'itself is unaffected.');
 }
 
+// The third, and guarded for the same reason: an older admin.js without the slot
+// costs a warning rather than a TypeError at require time, which would take the
+// whole service down over one page.
+if (typeof admin.setGroupReader === 'function') {
+  admin.setGroupReader(groupsFor);
+} else {
+  log.warn('ldap: the admin console offers no setGroupReader(), so /admin/groups ' +
+           'will report that no directory is loaded. The directory itself is ' +
+           'unaffected.');
+}
+
+// The fourth, and the only one that goes to a module this file also requires
+// outright. That is not a contradiction: vc_claims.js is required above for the
+// catalogue and the invented people, and it calls back into these two functions
+// through a slot because IT must not require THIS module — it is read by
+// vc_issuer.js, which server.js requires fifty lines before ./admin, and a
+// require from there would drag this directory's routes to the front of the
+// express router that /sts-metadata is built by walking. Guarded like the two
+// above: an older vc_claims.js without the slot costs a warning, not a service
+// that will not start.
+if (typeof vcClaims.setDirectory === 'function') {
+  vcClaims.setDirectory({ attributesFor: vcAttributesFor, populate: populateVcAttributes });
+} else {
+  log.warn('ldap: vc_claims.js offers no setDirectory(), so issued credentials ' +
+           'will carry invented values rather than what this directory holds. The ' +
+           'directory itself is unaffected.');
+}
+
+// And once, now. The seeded people were written before any of this existed and
+// the claim set already has ten attributes selected, so without this sweep alice
+// would have no birthdate in the directory while her credential asserted one —
+// the two disagreeing from the very first request, which is the exact confusion
+// this whole arrangement exists to avoid.
+populateVcAttributes();
+
 // ---------------------------------------------------------------------------
 // The server, and its handlers.
 //
@@ -998,14 +1579,99 @@ if (typeof admin.setDirectoryReader === 'function') {
 // before it knows the base DN reads the root DSE first, and a server that had no
 // handler for it answers LDAP_UNAVAILABLE, which reads as the server being down.
 // ---------------------------------------------------------------------------
-const server = ldap.createServer({ log: log });
+// ---------------------------------------------------------------------------
+// TWO SERVERS, ONE SET OF HANDLERS.
+//
+// ldapjs decides between a net.Server and a tls.Server AT CONSTRUCTION, from
+// whether it was given a certificate and a key (lib/server.js) — so LDAPS is a
+// second server OBJECT here and not an option on the first, and handlers are
+// registered per instance. Every `server.bind(...)`, `server.search(...)` and
+// the rest below therefore has to reach both, and the failure to avoid is a
+// handler that lands on one and not the other: a directory that answers a
+// search on 389 and refuses it on 636 looks like a TLS fault and is not one.
+//
+// So `server` below is NOT a server. It is a fan-out carrying the nine method
+// names ldapjs exposes for the operations, and every registration in this file
+// goes through it unchanged — which is the whole point, since the alternatives
+// are a second copy of three hundred lines of handlers or a reach into ldapjs's
+// internal `routes` map, and this repository consumes that submodule through
+// its public API only (see CLAUDE.md). Adding an operation costs one name in
+// the list; adding a listener costs nothing.
+//
+// The secure one is built only if there IS certificate material. There always
+// is — tls_server.js generates it at require time and would have thrown before
+// this line if it could not — so this branch is for the case where that stops
+// being true: an absence recorded and published on GET /ldap is worth more than
+// a TypeError out of a constructor, which is the same trade every listen path
+// here makes.
+// ---------------------------------------------------------------------------
+const plainServer = ldap.createServer({ log: log });
 
-server.on('error', function (err) {
+const serverCertificate = tlsServer.serverCertificate();
+
+let secureServer = null;
+if (serverCertificate && serverCertificate.certPem &&
+    serverCertificate.privateKeyPem) {
+  // `certificate` and `key` are the option names ldapjs checks for, and it
+  // hands the whole options object to tls.createServer(). No client certificate
+  // is asked for here: this listener proves the SERVER's identity and nothing
+  // else, which GET /ldap says out loud rather than leaving somebody to work
+  // out why the client certificate they offered was never requested. The
+  // permissive and strict client-certificate listeners are the HTTPS ones next
+  // door, where the whole content is the answer to that question.
+  secureServer = ldap.createServer({
+    log: log,
+    certificate: serverCertificate.certPem,
+    key: serverCertificate.privateKeyPem
+  });
+} else {
+  tlsListenError = 'there was no server certificate at startup';
+  log.warn('ldap: no server certificate is available, so LDAPS will not be ' +
+           'offered on ' + LDAPS_PORT + '. The plain listener on ' + LDAP_PORT +
+           ' is unaffected.');
+}
+
+const servers = secureServer ? [plainServer, secureServer] : [plainServer];
+
+// The eight operations and unbind. Written out rather than read off ldapjs's
+// prototype, because that would fan out `listen`, `close` and `address` too —
+// and those three must stay per-server: each listener has its own port, its own
+// bind failure and its own answer to "are you up".
+const OPERATIONS = ['bind', 'unbind', 'add', 'del', 'modify', 'modifyDN',
+                    'compare', 'search'];
+
+const server = {};
+OPERATIONS.forEach(function (operation) {
+  server[operation] = function () {
+    const args = Array.prototype.slice.call(arguments);
+    servers.forEach(function (one) {
+      one[operation].apply(one, args);
+    });
+    // ldapjs returns the server for chaining and nothing here chains, but a
+    // fan-out that returned undefined would break the first caller that did.
+    return server;
+  };
+});
+
+// NOT fanned out: an error says which listener it came from. Two sockets and
+// one message about "the server" would send a reader to the wrong port, and the
+// two fail in different ways — 389 loses a race with the host's own slapd, 636
+// is refused because the process is not root.
+plainServer.on('error', function (err) {
   // Reported rather than thrown: the rest of this service is still useful, and
   // a listener that dies silently surfaces later as a directory that never
   // answers.
-  log.error('ldap: the server reported an error: ' + err.message);
+  log.error('ldap: the plain listener (' + boundPort + ') reported an error: ' +
+            err.message);
 });
+
+if (secureServer) {
+  secureServer.on('error', function (err) {
+    log.error('ldap: the LDAPS listener (' + boundTlsPort + ') reported an ' +
+              'error: ' + err.message + '. The plain listener on ' + boundPort +
+              ' is a separate socket and is unaffected.');
+  });
+}
 
 // --- bind ------------------------------------------------------------------
 server.bind('', function (req, res, next) {
@@ -1398,6 +2064,10 @@ function pageShell(title, inner) {
 function description(req) {
   log.debug('Entering description().');
   const host = String(req.get('host') || 'localhost').split(':')[0];
+  // Read rather than written down again: the HTTPS listeners' ports are that
+  // module's to decide, and a second copy here would be a second thing to keep
+  // right the day somebody sets STS_TLS_PORT.
+  const tlsPorts = tlsServer.ports();
   const out = {
     url: 'ldap://' + host + ':' + boundPort,
     port: boundPort,
@@ -1423,7 +2093,42 @@ function description(req) {
       'against a syntax, so an entry may carry whatever attributes a client ' +
       'sends. A real directory would refuse most of that.',
     referentialIntegrity: false,
-    tls: false,
+    // This was `false` and it is now the whole answer, because one boolean had
+    // to stand for three different facts and got at least one of them wrong for
+    // any reader: LDAPS is here, StartTLS is not, and no CLIENT certificate is
+    // ever asked for on either transport.
+    tls: {
+      ldaps: !!secureServer,
+      port: secureServer ? boundTlsPort : null,
+      url: secureServer ? 'ldaps://' + host + ':' + boundTlsPort : '',
+      // Published for the same reason the plain listener's is: this page is
+      // HTTP and answers 200 whether or not 636 was available, so there is
+      // otherwise no way to tell LDAPS being offered from LDAPS having lost the
+      // port to something else.
+      listening: tlsListening,
+      error: tlsListenError,
+      // Not a gap that was overlooked: StartTLS is an extended operation and
+      // ldapjs implements none, and this repository does not patch that
+      // submodule. LDAPS is also the one of the pair no RFC defines — RFC 4513
+      // standardised StartTLS and left ldaps:// as the de-facto scheme.
+      startTls: false,
+      clientCertificates: 'never requested. This listener proves the SERVER ' +
+        'to the client and nothing more; a client certificate offered to it ' +
+        'is not asked for and would not be a login if it were. The HTTPS ' +
+        'listeners on ' + tlsPorts.tls + ' and ' + tlsPorts.mtls + ' are ' +
+        'where client certificates are the whole subject.',
+      certificate: {
+        subject: serverCertificate ? serverCertificate.subject : '',
+        names: serverCertificate ? serverCertificate.names : [],
+        fingerprint256: serverCertificate ? serverCertificate.fingerprint256 : '',
+        notAfter: serverCertificate ? serverCertificate.notAfter : '',
+        source: 'the same certificate and key the HTTPS listeners on ' +
+          tlsPorts.tls + ' and ' + tlsPorts.mtls + ' serve. It is self-signed ' +
+          'and regenerated on every start, so trust it per run rather than ' +
+          'once: GET /tls/server-certificate hands it out in PEM. One anchor ' +
+          'for all three sockets is why they share it.'
+      }
+    },
     autoCreateUsers: AUTOCREATE_USERS,
     autoCreateRule: 'an entry uid=<name>,' + USERS_DN + ' appears the first ' +
       'time <name> authenticates to this service through ANY protocol. An ' +
@@ -1469,27 +2174,57 @@ app.get('/ldap', function (req, res) {
   }
   const rows = [
     ['URL', info.url],
+    ['LDAPS URL', info.tls.ldaps
+      ? info.tls.url
+      : 'not offered — ' + (info.tls.error || 'no reason was recorded')],
     ['Base DN', info.baseDn],
     ['People', info.usersDn],
     ['Groups', info.groupsDn],
     ['Protocol version', 'LDAPv3'],
-    ['Transport', 'plain TCP. There is no LDAPS and no StartTLS here.'],
+    ['Transport', 'plain TCP on ' + info.port + ', and LDAPS — TLS from the ' +
+      'first byte — on ' + (info.tls.port || LDAPS_PORT) + '. There is no ' +
+      'StartTLS: it is an extended operation and this library implements none.'],
     ['Entries right now', String(info.limits.currentEntries)],
     ['Listener', info.listening
       ? 'up on TCP ' + info.port
       : 'DOWN — ' + (info.listenError || 'it never bound') +
         '. This page is HTTP and answers either way; the directory does not.'],
+    ['LDAPS listener', info.tls.listening
+      ? 'up on TCP ' + info.tls.port
+      : 'DOWN — ' + (info.tls.error || 'it never bound') +
+        '. The two sockets are independent, so this says nothing about the ' +
+        'one above.'],
     ['An entry per authenticated user', info.autoCreateUsers ? 'on' : 'off']
   ].map(function (pair) {
     return '<tr><td>' + xmlEscape(pair[0]) + '</td><td><code>' +
       xmlEscape(pair[1]) + '</code></td></tr>';
   }).join('');
   const inner = '<h1>An LDAP directory lives here</h1>' +
-    '<p class="sub">LDAPv3 over TCP ' + LDAP_PORT + ', RFC 4511. A browser ' +
-    'cannot speak it &mdash; the debugger&rsquo;s api opens the socket.</p>' +
+    '<p class="sub">LDAPv3 over TCP ' + LDAP_PORT + ', and over TLS on ' +
+    LDAPS_PORT + ', RFC 4511. A browser cannot speak it &mdash; the ' +
+    'debugger&rsquo;s api opens the socket.</p>' +
     '<table><tr><th>Thing</th><th>Value</th></tr>' + rows + '</table>' +
     '<h2>It authenticates nobody</h2>' +
     '<p>' + xmlEscape(info.bindPolicy) + '.</p>' +
+    '<h2>LDAPS, and what it does not change</h2>' +
+    '<p>Port ' + (info.tls.port || LDAPS_PORT) + ' is the same directory over ' +
+    'TLS &mdash; the same entries, the same handlers, the same every-bind-' +
+    'succeeds. What TLS adds is that the password is not on the wire in the ' +
+    'clear; it does not make it <em>checked</em>. The certificate is ' +
+    '<strong>the one the HTTPS listeners serve</strong>: ' +
+    '<code>' + xmlEscape(info.tls.certificate.subject) + '</code>, SHA-256 ' +
+    '<code>' + xmlEscape(info.tls.certificate.fingerprint256) + '</code>, ' +
+    'self-signed and regenerated on every start. Fetch it from ' +
+    '<a href="/tls/server-certificate">/tls/server-certificate</a> and put it ' +
+    'in your truststore &mdash; <code>LDAPTLS_REQCERT=never</code> is the ' +
+    'habit this endpoint exists to avoid, and it would also hide the one ' +
+    'thing worth checking here.</p>' +
+    '<p>' + xmlEscape(info.tls.clientCertificates) + ' There is no StartTLS: ' +
+    'it is an extended operation (RFC 4511 &sect;4.14) and ldapjs implements ' +
+    'none, and this service does not patch that submodule. LDAPS is the one ' +
+    'of the two no RFC defines &mdash; RFC 4513 standardised StartTLS and ' +
+    'left <code>ldaps://</code> as the de-facto scheme every client speaks ' +
+    'anyway.</p>' +
     '<h2>It has no schema</h2>' +
     '<p>' + xmlEscape(info.schema) + '</p>' +
     '<h2>What it does still enforce</h2><ul>' +
@@ -1561,9 +2296,9 @@ app.get('/ldap/directory', function (req, res) {
 // ---------------------------------------------------------------------------
 function listen() {
   log.debug('Entering listen().');
-  const whenReady = new Promise(function (resolve, reject) {
-    server.listen(LDAP_PORT, '0.0.0.0', function () {
-      const address = server.address();
+  const whenPlain = new Promise(function (resolve, reject) {
+    plainServer.listen(LDAP_PORT, '0.0.0.0', function () {
+      const address = plainServer.address();
       boundPort = address ? address.port : LDAP_PORT;
       listening = true;
       listenError = '';
@@ -1572,7 +2307,7 @@ function listen() {
                ' entry/entries; GET /ldap describes it.');
       resolve({ port: boundPort, baseDn: BASE_DN });
     });
-    server.once('error', function (err) {
+    plainServer.once('error', function (err) {
       // 389 is privileged and it is a well-known port, so the two ways this
       // fails are "not root" and "something else is already there" — a host's
       // own slapd, most often. Neither is fatal to the rest of the service, so
@@ -1587,13 +2322,76 @@ function listen() {
       reject(err);
     });
   });
+  // The LDAPS socket. This promise NEVER REJECTS, and that asymmetry is the
+  // point: LDAPS is the second way in to a directory that already answers on
+  // 389, so a failure to bind 636 must not turn into a rejected whenReady and
+  // an "ldap: the directory could not start" in server.js for a directory that
+  // started. It is recorded, logged, and published on GET /ldap — the same
+  // treatment a failure on 389 gets, minus the rejection.
+  const whenSecure = new Promise(function (resolve) {
+    if (!secureServer) {
+      // No certificate material. Already logged and recorded where that was
+      // discovered; this only has to answer.
+      resolve({ ldapsPort: null, ldapsListening: false,
+                ldapsError: tlsListenError });
+      return;
+    }
+    secureServer.listen(LDAPS_PORT, '0.0.0.0', function () {
+      const address = secureServer.address();
+      boundTlsPort = address ? address.port : LDAPS_PORT;
+      tlsListening = true;
+      tlsListenError = '';
+      log.info('ldap: LDAPS is listening on TCP ' + boundTlsPort +
+               ', serving the same certificate as the HTTPS listeners (' +
+               serverCertificate.subject + ', SHA-256 ' +
+               serverCertificate.fingerprint256 + '). It is self-signed and ' +
+               'regenerated on every start, so fetch it from ' +
+               '/tls/server-certificate and trust it rather than turning ' +
+               'verification off.');
+      resolve({ ldapsPort: boundTlsPort, ldapsListening: true,
+                ldapsError: '' });
+    });
+    secureServer.once('error', function (err) {
+      // 636 is privileged for exactly the same reason 389 is, so the two ways
+      // this fails are the same two: not root, or something else already owns
+      // the port. Resolved rather than rejected — see above.
+      tlsListening = false;
+      tlsListenError = err.message + (err.code ? ' (' + err.code + ')' : '');
+      log.error('ldap: could not bind TCP ' + LDAPS_PORT + ' for LDAPS: ' +
+                tlsListenError + '. The plain listener and everything else in ' +
+                'this service are unaffected; set LDAPS_PORT to a free, ' +
+                'unprivileged port for a host run.');
+      resolve({ ldapsPort: null, ldapsListening: false,
+                ldapsError: tlsListenError });
+    });
+  });
+  // Merged rather than returned as a pair, so that the caller in server.js
+  // keeps reading `ready.port` and `ready.baseDn` as it always did and finds
+  // the LDAPS fields beside them.
+  const whenReady = Promise.all([whenPlain, whenSecure]).then(function (both) {
+    return Object.assign({}, both[0], both[1]);
+  });
   log.debug('Leaving listen().');
-  return { server: server, whenReady: whenReady };
+  return { server: plainServer, secureServer: secureServer,
+           whenReady: whenReady };
 }
 
 function close() {
   log.debug('Entering close().');
-  server.close();
+  servers.forEach(function (one) {
+    try {
+      one.close();
+    } catch (e) {
+      // Closing a listener that never bound throws, and there is nothing useful
+      // to do about it: this exists for tests and for an orderly shutdown. It
+      // matters more with two listeners than it did with one — 636 is
+      // privileged and often never bound at all, and an unguarded close there
+      // would take the plain listener down with it.
+      log.debug('close(): ' + e.message);
+    }
+  });
+  listening = false;
+  tlsListening = false;
   log.debug('Leaving close().');
 }
 
@@ -1601,6 +2399,7 @@ module.exports = {
   listen: listen,
   close: close,
   LDAP_PORT: LDAP_PORT,
+  LDAPS_PORT: LDAPS_PORT,
   BASE_DN: BASE_DN,
   USERS_DN: USERS_DN,
   GROUPS_DN: GROUPS_DN,
@@ -1610,5 +2409,6 @@ module.exports = {
   MAX_SEARCH_RESULTS: MAX_SEARCH_RESULTS,
   entries: entries,
   autoCreateUser: autoCreateUser,
-  objectFor: objectFor
+  objectFor: objectFor,
+  groupsFor: groupsFor
 };
