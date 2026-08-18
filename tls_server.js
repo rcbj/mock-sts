@@ -774,8 +774,13 @@ function reportPage(report) {
           ['Recorded as', report.authentication.identity],
           ['In the console', report.authentication.consoleUrl +
             ' (on the plain HTTP port)'],
-          ['In the directory', 'an entry under ou=users — ' +
-            report.authentication.directoryUrl + ' lists every one']
+          // Not "under ou=users": a subject that already lies inside this
+          // directory's own tree keeps its place there, so naming the branch
+          // here would be right most of the time and wrong exactly when a
+          // reader was testing that case.
+          ['In the directory', 'an entry derived from this subject — ' +
+            report.authentication.directoryUrl + ' lists every one, and ' +
+            '/ldap says how the DN is chosen']
         ]) + '</table>'
       : '') +
     '<p class="sub"><a href="/tls/whoami">This page as JSON</a></p>';

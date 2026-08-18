@@ -192,6 +192,8 @@ const CANONICAL_NAMES = {
   postaladdress: 'postalAddress', l: 'l', st: 'st', c: 'c', gidnumber: 'gidNumber',
   uidnumber: 'uidNumber', homedirectory: 'homeDirectory',
   createtimestamp: 'createTimestamp', modifytimestamp: 'modifyTimestamp',
+  // PKCS#9, and it arrives on this directory inside a certificate subject.
+  emailaddress: 'emailAddress',
   // The root DSE's own attributes (RFC 4512 section 5.1). They are here for the
   // same reason as the rest: a client showing `namingcontexts` where every
   // document says `namingContexts` looks like the client is broken.
@@ -587,6 +589,25 @@ function addValues(stored, name, values) {
   return true;
 }
 
+// Does this identity begin `<attributetype>=`, which is to say: is it a DN
+// rather than a name? admin_stats.js asks the same question of the same values
+// for a different reason (it must not split a DN at an '@'), and the two are
+// deliberately separate one-line tests rather than a shared export: this one
+// decides where an entry goes, that one decides what a person is called, and a
+// single knob turning both would couple two decisions that only look alike.
+const DN_SHAPED = /^[A-Za-z][A-Za-z0-9-]*=/;
+
+// The CN out of a DN, unescaped, or '' where there is none. Used when the
+// certificate's own commonName was not passed — the DN always carries it if the
+// subject has one, so there is no second source to disagree with.
+function commonNameOf(dn) {
+  const pairs = splitRdns(dn).map(rdnPairs).reduce(function (a, b) {
+    return a.concat(b);
+  }, []);
+  const cn = pairs.filter(function (pair) { return pair.attribute === 'cn'; })[0];
+  return cn ? unescapeDnValue(cn.value) : '';
+}
+
 // ---------------------------------------------------------------------------
 // WHERE A CLIENT CERTIFICATE'S ENTRY GOES, which is the one placement decision
 // in this module with no obviously right answer.
@@ -634,8 +655,18 @@ function certificatePlan(info) {
   const subject = String(certificate.subject || info.key || '').trim();
   const rdns = splitRdns(subject);
   const leaf = rdns.length ? rdns[0] : '';
+  // The LEAF's pairs name the entry; ALL of them become attributes. Two
+  // different lists, and using one for both is the mistake to avoid in each
+  // direction: naming the entry from the whole subject produces a DN with
+  // somebody's country in it, and taking the attributes from the leaf alone
+  // silently drops the O, OU and C the certificate went to the trouble of
+  // carrying.
   const pairs = rdnPairs(leaf);
-  const common = String(certificate.commonName || '').trim();
+  const allPairs = rdns.map(rdnPairs).reduce(function (a, b) {
+    return a.concat(b);
+  }, []);
+  const common = String(certificate.commonName || commonNameOf(subject) ||
+                        '').trim();
 
   // What the entry is NAMED, when it is not created at the subject itself. The
   // CN where the certificate has one, and the leaf RDN otherwise — not simply
@@ -674,8 +705,15 @@ function certificatePlan(info) {
   // Every RDN of the subject becomes an attribute — `O`, `OU`, `C` and the rest
   // — because they describe this identity and a directory entry is where a
   // reader will look for them. Unescaped: the escaping belongs to the DN.
-  pairs.forEach(function (pair) {
-    attributes[pair.attribute] = [unescapeDnValue(pair.value)];
+  allPairs.forEach(function (pair) {
+    const existing = attributes[pair.attribute] || [];
+    const value = unescapeDnValue(pair.value);
+    // Concatenated rather than assigned: a subject with two OUs has two RDNs of
+    // the same type, and the second overwriting the first would lose half of
+    // what the certificate said.
+    if (existing.indexOf(value) < 0) {
+      attributes[pair.attribute] = existing.concat([value]);
+    }
   });
   if (naming) {
     attributes[naming.attribute] = [naming.value];
@@ -823,18 +861,62 @@ function autoCreateUser(detail) {
 // and a null would be all three at once. The console phrases which one it is; this
 // function states the facts it needs to do that.
 // ---------------------------------------------------------------------------
+//
+// Finding it is two rules, because there are two shapes of identity here. A NAME
+// is `uid=<name>,ou=users` and always was. A DN — which is what a TLS client
+// certificate's identity is — is looked up by the subject the entry RECORDED,
+// in `x509subject`, because that is exact and stays right if certificatePlan()'s
+// naming rule ever changes; and where the subject lies inside this directory's
+// own tree, the entry it names directly is the answer. Failing both, the DN
+// certificatePlan() WOULD have built is reported, so the page can say where the
+// entry would have gone rather than naming a place nothing was ever going to be.
+function locateEntry(key) {
+  log.debug('Entering locateEntry(). key=' + key);
+  if (DN_SHAPED.test(key)) {
+    const direct = getEntry(key);
+    if (direct) {
+      log.debug('Leaving locateEntry(). The DN names an entry here directly.');
+      return { dn: direct.dn, stored: direct };
+    }
+    let found = null;
+    entries.forEach(function (entry) {
+      if (found) {
+        return;
+      }
+      if ((entry.attributes.x509subject || []).indexOf(key) >= 0) {
+        found = entry;
+      }
+    });
+    if (found) {
+      log.debug('Leaving locateEntry(). Found by x509subject: ' + found.dn);
+      return { dn: found.dn, stored: found };
+    }
+    const plan = certificatePlan({ certificate: { subject: key } });
+    log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
+    return { dn: plan.dn, stored: null };
+  }
+  const dn = 'uid=' + key + ',' + USERS_DN;
+  log.debug('Leaving locateEntry(). A name, so ' + dn);
+  return { dn: dn, stored: getEntry(dn) };
+}
+
 function objectFor(name) {
   log.debug('Entering objectFor(). name=' + name);
   const key = String(name == null ? '' : name).trim();
-  const dn = 'uid=' + key + ',' + USERS_DN;
-  const stored = key ? getEntry(dn) : null;
+  const located = key ? locateEntry(key) : { dn: '', stored: null };
+  const dn = located.dn;
+  const stored = located.stored;
 
   // Every OTHER entry in the tree whose uid names this same person. A client can
   // add `cn=alice,ou=people` through the protocol, and a page that reported only
   // the auto-created DN would say "no entry" while the directory held one. Only
   // the DNs are listed — the dump below is of the entry the console is about.
+  //
+  // Skipped for a DN identity: `uid` holds names, so matching a whole DN against
+  // it can only ever find nothing, and the entry for that identity was found by
+  // its subject above rather than by a name at all.
   const alsoNamed = [];
-  if (key) {
+  if (key && !DN_SHAPED.test(key)) {
     entries.forEach(function (entry) {
       if (normalizeDn(entry.dn) === normalizeDn(dn)) {
         return;

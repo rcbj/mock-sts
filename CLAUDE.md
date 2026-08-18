@@ -132,10 +132,17 @@ that is the one reachable before anything is trusted.
 
 6. **`ldap_server.js` must stay after `admin.js`, and it INVERTS a dependency the
    same way `helpers.js` does.** Its embedded directory grows an entry under
-   `ou=users` for anybody who authenticates through any of the thirteen families
-   here, and `admin_stats.recordAuthentication()` is already the single funnel all
-   of them pass at the moment a credential is ACCEPTED — so one observer there is
-   one place and not thirteen. But this module requires `admin_stats.js` (it needs
+   `ou=users` for anybody who authenticates through any of the families here, and
+   `admin_stats.recordAuthentication()` is already the single funnel all of them
+   pass at the moment a credential is ACCEPTED — so one observer there is one place
+   and not fourteen. **A verified TLS client certificate is one of them and is the
+   odd one: its identity is not a name but a DN**, so its entry is named from the
+   subject's CN (or the leaf RDN where there is none), every other RDN of the
+   subject becomes an attribute, and the issuer, serial, validity and fingerprint go
+   on beside them as `x509*` attributes that are this service's own names and not
+   schema. `certificatePlan()` carries the placement rules and what they cost.
+
+   But this module requires `admin_stats.js` (it needs
    `identityOf`'s normalisation, so `alice`, `urn:sts-mock:user:alice` and
    `alice@REALM` seed ONE entry), which means `admin_stats.js` cannot require it
    back: that is the cycle rule 2 exists for. So `admin_stats.js` offers
@@ -143,7 +150,7 @@ that is the one reachable before anything is trusted.
    return value is ignored and a throw from it is caught — a directory must never
    be able to fail an authentication. Do not "simplify" that into a require in the
    other direction, and do not seed the entry at each authentication site instead:
-   thirteen call sites means a fourteenth that is not.
+   fourteen call sites means a fifteenth that is not.
 
    **A SECOND hook runs the other way, and it is the console that offers it.**
    `/admin/users?user=<name>` shows that user's directory object — every attribute,
@@ -333,11 +340,23 @@ Worth knowing before "fixing" one of them:
 * **A verified client certificate on the TLS listeners is not a login**, and no
   revocation is checked there. Verification means one thing exactly: OpenSSL built a
   chain from what the client sent to an anchor somebody POSTed to `/tls/trust`. No
-  session starts, no token is issued, no other endpoint is told, and a revoked
-  certificate verifies here and would not verify anywhere that matters. Both facts
-  are stated in the report itself rather than left to be discovered — a mock that
-  quietly turned a certificate into an identity would teach a client something false
-  about every server it will ever meet.
+  session starts, no token is issued, no endpoint will let its holder do anything an
+  anonymous caller cannot, and a revoked certificate verifies here and would not
+  verify anywhere that matters. All of that is stated in the report itself rather
+  than left to be discovered — a mock that quietly turned a certificate into an
+  identity would teach a client something false about every server it will ever meet.
+  **It IS recorded, which is a different claim and the two must not be merged.** When
+  a handshake completes with a certificate that verified, `tls_server.js` calls
+  `stats.recordAuthentication()` — the same funnel every other family uses — so the
+  subject DN appears on `/admin/users` under protocol `TLS` and the directory's
+  observer seeds an entry for it. Three things there are load-bearing: it happens on
+  `secureConnection` and **not in the request handler**, because the credential was
+  accepted at the handshake and per-request counting would report one connection's six
+  requests as six authentications; it happens only when `authorized` is true, so a
+  certificate that failed records nothing on the permissive listener; and the identity
+  is the subject in **RFC 4514 form** (leaf first, values escaped), which is a
+  different string from the display DN shown beside it and is the one the directory
+  builds from.
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every

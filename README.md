@@ -163,7 +163,7 @@ And LDAP's, which is the other protocol here that is not HTTP:
 |---|---|
 | `LDAP_PORT` | the directory's TCP port (default `389`). It is privileged, so the container binds it as root and a host run usually cannot — that is what this is for. If the parent project's api is opening this directory, its `ldapAllowedPorts` has to allow whatever this becomes; the same coupling `KRB5_KDC_PORT` has, and for the same reason |
 | `LDAP_BASE_DN` | the naming context (default `dc=example,dc=com`). `ou=users` and `ou=groups` are derived from it rather than configured, because two variables that could disagree with it would put entries in a tree nobody is searching |
-| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client |
+| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client. A verified **TLS client certificate** does, and it is the one identity that is a DN rather than a name — see the TLS section for where its entry goes |
 | `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
 | `LDAP_SIZE_LIMIT` | the largest result this server will return from one search (default `500`), on top of whatever the client asks for. A search of a directory this small will never reach it — but a client that has never seen `LDAP_SIZE_LIMIT_EXCEEDED` has never handled a paged result either |
 
@@ -888,6 +888,18 @@ would grow the directory without bound. **An OAuth client** does not either: a c
 not a person and `ou=users` is for people, a distinction the admin console already makes
 with its `isClient` flag, which is what this reads.
 
+**And one identity is not a name at all: a verified TLS client certificate.** Its
+subject is already a DN, so the entry is not `uid=<name>` and is placed by
+`certificatePlan()` instead — at the subject itself where that lies under this
+directory's base, and otherwise under `ou=users` named by the CN, with the subject's
+other RDNs kept as attributes and the certificate's own facts written on as `x509*`
+attributes that are this service's names rather than schema. The TLS section above
+carries the reasoning, including what the placement costs and why `userCertificate` is
+not one of those attributes. The `x509subject` value is also how the admin console
+finds the entry again: an identity that is a DN is looked up by the subject the entry
+recorded rather than by a name, which is exact and stays right if the naming rule ever
+changes.
+
 #### Two ldapjs defects this code routes around
 
 Both are in `SearchResponse.prototype.send()`, and both are worked around here rather than
@@ -977,10 +989,58 @@ Three details in there are load-bearing and each was measured rather than assume
 
 **And a verified client certificate is not a login.** It means a chain was built from
 what the client sent to an anchor somebody POSTed to this process, and no more: no
-session is started, no token is issued, and no other endpoint here is told about it.
-The report says so in as many words, because a mock that quietly turned a certificate
-into an identity would teach a client something false about every server it will meet
-afterwards.
+session is started, no token is issued, no revocation is checked, and no endpoint here
+will let its holder do anything an anonymous caller cannot. The report says so in as
+many words, because a mock that quietly turned a certificate into an identity would
+teach a client something false about every server it will meet afterwards.
+
+**It is, however, recorded, and that is a different claim.** `/admin/users` answers
+"who has this service seen, in an interaction that succeeded", and a mutual-TLS client
+whose certificate verified is exactly that — leaving it out made the console's answer
+wrong by omission. So when a handshake completes with a certificate that verified, the
+subject DN is filed through `stats.recordAuthentication()`, the same funnel every other
+family here passes, under protocol `TLS`; and because that funnel already carries the
+directory's observer, the embedded LDAP server seeds an entry for it. A record of what
+happened, not a credential: nothing in this service consults either one to decide
+anything, and the report and `GET /tls` both say so beside the sentence above rather
+than leaving a reader to work out which of the two claims is being made.
+
+Three details of that are decisions rather than mechanics. It is recorded **at the
+handshake** (`secureConnection`) and not in the request handler, because the handshake
+is where the credential was accepted — recording per request would report one
+connection carrying six of them as six authentications, where the honest count is one
+per handshake and a client that opens six connections did present its certificate six
+times. It is recorded **only when `authorized` is true**, so the permissive listener
+writes nothing down for a certificate that failed to verify or was never sent. And the
+identity is the subject in **RFC 4514 form** — leaf first, no spaces after the commas,
+values escaped — which is a *different string* from the display DN the report shows
+next to it and than the one `openssl x509 -subject` prints. Both forms are on the
+report, side by side and labelled, because the difference is the sort of thing that
+otherwise gets discovered in an hour of comparing two strings that look the same.
+
+**The directory entry is the one identity here that did not have to be invented**, and
+it is worth reading `certificatePlan()` in `ldap_server.js` before changing where it
+goes. A certificate subject is already a DN — X.509 and LDAP share the model — but it
+usually names an object in somebody *else's* directory: `CN=alice,O=Example Corp,C=US`
+is not under `dc=example,dc=com` and never was. So: a subject that already lies under
+this directory's base DN (with its parent present) is created **at it, unchanged**;
+anything else is named by the subject's `CN` — or its leaf RDN where there is none —
+under `ou=users`, with every other RDN of the subject kept as an attribute and the
+full subject, issuer, serial, validity and fingerprint written on as `x509*`
+attributes. Those names are this service's own and not schema: there is no standard
+attribute type for "the DN inside the certificate", and the standard one that exists
+for the certificate itself, `userCertificate`, is binary and transferred as
+`userCertificate;binary` — writing base64 into that name would put a value on the wire
+no client could parse and would read as a bug in the directory. The CN is preferred
+over the leaf RDN for a reason worth knowing: openssl puts `emailAddress` **last** in a
+subject, so the leaf RDN of a typical client certificate is the address, and
+`emailAddress=alice@example.com,ou=users` is not how a directory names a person. What
+the reparenting costs is a collapse — two certificates whose CNs match, from two
+different CAs, land on one entry — and it is made visible rather than hidden: both
+subjects are listed there under `x509subject`, and the console still files them as two
+identities because it keys on the whole DN. A renewed certificate for the same subject
+does not make a second entry either; its serial, validity and fingerprint are appended
+to the one that is there, so the entry shows the history.
 
 One thing worth knowing about the log: a certificate refused by the strict listener
 never reaches a handler, so without help it would be invisible from both ends — the
