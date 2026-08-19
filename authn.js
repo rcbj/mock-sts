@@ -60,6 +60,16 @@ const app = require('./app');
 const { log, logArtifact, baseUrlOf, nowSec, randomId, xmlEscape, parseBody,
         oauthError, userFor } = require('./helpers');
 const stats = require('./admin_stats');
+// The audit log. Two things happen here that no other module can see: a session
+// is created, and a session is ended. Neither is an authentication —
+// admin_stats.js records that, at the funnel every protocol family shares — and
+// neither is an HTTP call, which app.js records. A sign-in therefore writes
+// three audit rows, which is three facts at three layers rather than one fact
+// three times; /admin/audit says so where a reader counting rows will see it.
+//
+// This module also FILLS audit.js's actor slot at the bottom of this file, which
+// is what puts a name on every console and management API row.
+const audit = require('./audit');
 
 // The path a caller sends the browser to. Exported, because the two callers
 // build a URL out of it and a string spelled twice is a string that drifts.
@@ -183,6 +193,39 @@ function startSession(res, username, amr, acr, via) {
     sub: session.user.sub, amr: amr, acr: acr, sessionId: sessionId,
     note: 'No password was checked; the name typed is the identity.'
   });
+  // The session itself, as its own audit event. It is deliberately separate
+  // from the authentication recorded on the line above: the two are one act at
+  // this screen and are NOT one act everywhere — a Kerberos AS-REQ and a
+  // WS-Trust UsernameToken authenticate somebody and start no session at all,
+  // and a session that outlives the sign-in is the thing single sign-on then
+  // runs on. An audit log that could not tell those apart could not answer
+  // "when did this browser get its session", which is the question a sign-out
+  // row is only interesting beside.
+  //
+  // The session id is recorded WHOLE. It is a credential-shaped thing and this
+  // is the one exception to "no credential is ever recorded" — it is not one:
+  // the cookie is HttpOnly and the console already prints session ids on
+  // /admin/users and /admin/metrics, where the whole point is to line a token
+  // up with the session it was issued on. Truncating it here would break that
+  // and protect nothing.
+  audit.audit({
+    action: 'session.start',
+    actor: username,
+    protocol: via || 'OAuth 2.0 / OIDC',
+    channel: 'http',
+    target: sessionId,
+    summary: username + ' was signed in at the ' + (via || 'OAuth 2.0 / OIDC') +
+             ' screen; session ' + sessionId + ' was created',
+    detail: {
+      sessionId: sessionId,
+      sub: session.user.sub,
+      amr: (amr || []).join(', '),
+      acr: acr || '',
+      authTime: session.authTime,
+      expiresAt: new Date(session.expires).toISOString(),
+      note: 'No password was checked; the name typed is the identity.'
+    }
+  });
   log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
   return session;
 }
@@ -197,6 +240,36 @@ function endSession(req, res) {
   const session = id ? sessions.get(id) : null;
   if (id) sessions.delete(id);
   res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0');
+  // The sign-out, recorded here because this is the one place both of them
+  // reach: /oauth2/logout and WS-Federation's wsignout1.0 are two protocols'
+  // words for ending the one session this service holds, and a row per caller
+  // would be two rows that could come to disagree about what a sign-out is.
+  //
+  // A logout with NOTHING TO END is recorded too, as `refused`. That is not
+  // pedantry: a relying party looping on wsignout1.0 against a session that
+  // expired an hour ago looks identical, from every other page in this console,
+  // to one that is working — and the row that says "there was no session to
+  // drop" is the only place that shows up.
+  audit.audit({
+    action: 'session.end',
+    outcome: session ? 'success' : 'refused',
+    actor: session ? session.user.username : '',
+    channel: 'http',
+    target: session ? session.id : (id || ''),
+    summary: session
+      ? 'the sign-on session for ' + session.user.username + ' was ended'
+      : 'a sign-out was asked for and there was no session to end',
+    detail: {
+      sessionId: session ? session.id : '',
+      cookiePresented: id ? 'yes' : 'no',
+      // Whether the cookie named a session this service still had. A `yes`
+      // here with no session means it had already expired or already been
+      // signed out, which are the two ordinary ways this row is a refusal.
+      sessionFound: session ? 'yes' : 'no',
+      amr: session ? (session.amr || []).join(', ') : '',
+      acr: session ? (session.acr || '') : ''
+    }
+  });
   log.debug("Leaving endSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
                                                : 'There was no session to drop.'));
   return session || null;
@@ -668,6 +741,46 @@ app.post('/authn/webauthn', function (req, res) {
   returnToCaller(res, step.authn, null, null);
   log.debug("Leaving the WebAuthn endpoint. " + step.username + " completed the second factor.");
 });
+// ---------------------------------------------------------------------------
+// WHO POSTED THAT FORM: the audit log's actor, filled from here.
+//
+// Every row on /admin/audit that came in over HTTP wants a name against it, and
+// this module is the only one that can supply it — it owns the cookie and the
+// session store. It cannot be REQUIRED from audit.js, though: that module is
+// required by app.js, this module requires app.js, and a require the other way
+// would close the loop and hand back a half-initialised module whose exports
+// are undefined. So the direction is inverted the same way helpers.js's
+// setJwtRecorder and admin_stats.js's setUserObserver are — audit.js offers a
+// slot and this file fills it at require time, which is before any route can be
+// called because every protocol module requires app.js.
+//
+// It is deliberately NOT sessionOf(). Three differences, and each of them is the
+// reason:
+//
+//   * It has NO SIDE EFFECTS. sessionOf() deletes an expired session as it
+//     finds it, which is right for a protocol endpoint deciding whether to show
+//     the login screen and wrong for an observer: an audit log that quietly
+//     ended sessions while reporting on them would be changing the thing it
+//     describes.
+//   * It says WHO the cookie names even when the session has expired, marked as
+//     such by the caller's own vocabulary rather than reported as nobody.
+//     "alice, whose session had expired" is the answer to what happened; "" is
+//     not.
+//   * It adds no log lines of its own. sessionOf()'s four say what a protocol
+//     endpoint decided; this runs once per answered request, beside the two the
+//     call log already writes, and repeating them would be most of the log.
+//     (cookiesOf() writes its own pair, which is one parser rather than two.)
+// ---------------------------------------------------------------------------
+function auditActorOf(req) {
+  const id = cookiesOf(req)[SESSION_COOKIE];
+  if (!id) return '';
+  const session = sessions.get(id);
+  if (!session) return '';
+  return session.user.username;
+}
+
+audit.setActorResolver(auditActorOf);
+
 // ---------------------------------------------------------------------------
 // What the rest of this service uses.
 //

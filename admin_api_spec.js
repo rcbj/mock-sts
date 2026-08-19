@@ -185,6 +185,31 @@ const PAGING_PROPERTIES = {
   lastRow: { type: 'integer', description: '1-based and inclusive.' }
 };
 
+// The same members as an OBJECT, for a reply that carries more than one list and
+// therefore cannot put them at the top level. Built from PAGING_PROPERTIES above
+// rather than written out again, because two hand-kept copies of five member
+// names is one copy that will eventually be missing `lastRow`.
+//
+// `total` is here and not up there for a reason worth stating: at the top level
+// the number is called `matched`, which is the count AFTER a filter. A
+// drill-down's lists have no filter, so the honest name for the number is the
+// plain one.
+function pagingObject(what) {
+  return {
+    type: 'object',
+    description: 'Where `' + what + '` came from in the whole list: the page, ' +
+                 'how many there are, and the 1-based row numbers this page ' +
+                 'covers. Same member names the flat lists carry at the top ' +
+                 'level, one level down.',
+    properties: Object.assign({
+      total: { type: 'integer',
+               description: 'How many there are in all, which is what to page ' +
+                            'through rather than the length of this array.' }
+    }, PAGING_PROPERTIES),
+    additionalProperties: false
+  };
+}
+
 function openObject(description, properties) {
   return { type: 'object', description: description,
            properties: properties, additionalProperties: true };
@@ -411,10 +436,28 @@ const SCHEMAS = {
         description: 'The identity, or the name that was asked for when ' +
                      '`known` is false.'
       },
-      sessions: { type: 'array', items: openObject('One session.', {}) },
+      // EVERY ARRAY HERE IS ONE PAGE, not the whole list — the same thing
+      // `users` is on the list beside it — and every one is answered by the
+      // `*Paging` object under it. Five lists on one reply is why they are
+      // paged separately: `sessionsPage`, `endedPage`, `sessionlessPage` and
+      // `artifactsPage` each move one of them, and `per` is shared.
+      sessions: {
+        type: 'array',
+        description: 'One page of this identity\'s sign-on sessions. Each ' +
+                     'carries the tokens issued ON it — itself one page, ' +
+                     'moved by `session-{id}Page` and answered by that ' +
+                     'session\'s own `tokensPaging`, because there is one ' +
+                     'such list per session and no top-level place to put ' +
+                     'five of them that would still say which was which.',
+        items: openObject('One session, with `tokens` and `tokensPaging`.', {})
+      },
+      sessionsPaging: pagingObject('sessions'),
       tokensOnEndedSessions: { type: 'array', items: ISSUED_RECORD },
+      tokensOnEndedSessionsPaging: pagingObject('tokensOnEndedSessions'),
       tokensWithNoSession: { type: 'array', items: ISSUED_RECORD },
+      tokensWithNoSessionPaging: pagingObject('tokensWithNoSession'),
       artifacts: { type: 'array', items: ISSUED_RECORD },
+      artifactsPaging: pagingObject('artifacts'),
       ldap: {
         description: 'This person\'s directory entry, or null when no ' +
                      'directory is loaded in this process — which is a ' +
@@ -534,12 +577,26 @@ const SCHEMAS = {
                          'would report that as seven with nothing wrong.'
           },
           danglingCount: { type: 'integer' },
-          members: { type: 'array',
-                     items: openObject('One member, resolved.', {}) },
-          claimed: { type: 'array',
-                     items: openObject('One entry claiming membership.', {}) },
+          members: {
+            type: 'array',
+            description: 'ONE PAGE of them, moved by `membersPage` and ' +
+                         'answered by `membersPaging` beside `group`. The ' +
+                         'three counts above are of the whole list.',
+            items: openObject('One member, resolved.', {})
+          },
+          claimed: {
+            type: 'array',
+            description: 'One page, moved by `claimedPage`.',
+            items: openObject('One entry claiming membership.', {})
+          },
           attributes: openObject('Every attribute value it holds.', {})
         }),
+      // Beside `group` rather than inside it, because they describe THIS REPLY
+      // and not the directory entry — whose own memberCount, presentCount and
+      // danglingCount are untouched next to them and stay counts of the whole
+      // list.
+      membersPaging: pagingObject('group.members'),
+      claimedPaging: pagingObject('group.claimed'),
       baseDn: { type: 'string' },
       groupsDn: { type: 'string' },
       usersDn: { type: 'string' },
@@ -625,6 +682,64 @@ const SCHEMAS = {
         description: 'The ${...} substitutions a value may use.'
       },
       defaultSaml11Namespace: { type: 'string' },
+      precedence: {
+        type: 'string',
+        description: 'Stated in the reply and not only in this document, ' +
+                     'because it only shows up when both halves of a set ' +
+                     'name one claim: the typed one wins.'
+      },
+      attributeCatalogue: {
+        type: 'array',
+        description: 'Every LDAP attribute type a set may carry, and which ' +
+                     'of the four currently carries it. It is the same ' +
+                     'catalogue the credential claims choose from — one list ' +
+                     'of spellings, because two would eventually disagree ' +
+                     'about what `schacDateOfBirth` is called.',
+        items: openObject('One attribute type.', {
+          ldap: {
+            type: 'string',
+            description: 'Spelled the way its schema document spells it, ' +
+                         'which is what the `attributes` field of a POST takes.'
+          },
+          claim: {
+            type: 'string',
+            description: 'The claim it becomes. A dot means NESTED in a JWT ' +
+                         '(`address.locality` is a member of an `address` ' +
+                         'object) and is the attribute\'s literal name in an ' +
+                         'assertion, where the content model cannot nest.'
+          },
+          label: { type: 'string' },
+          schema: {
+            type: 'string',
+            description: 'Where the attribute type is defined. Three of them ' +
+                         'are not RFC 4519/4524/2798: there is no standard ' +
+                         'type for a birthdate or a nationality, so the ' +
+                         'SCHAC schema\'s names are borrowed rather than ' +
+                         'invented.'
+          },
+          sets: openObject(
+            'Which of the four sets carries it, keyed by set id.', {})
+        })
+      },
+      preview: openObject(
+        'One person\'s value for every attribute in the catalogue, selected ' +
+        'or not, so a caller can see what selecting one WOULD produce.',
+        {
+          user: { type: 'string' },
+          entryFound: {
+            type: 'boolean',
+            description: 'Whether the directory holds this person at all. ' +
+                         'False means every value below was generated from ' +
+                         'the username — the same invented person every ' +
+                         'time — and that is a different answer from "the ' +
+                         'entry says so", which the values alone cannot tell ' +
+                         'you.'
+          },
+          byLdap: openObject(
+            'Keyed by the LOWER-CASED attribute name, because that is what ' +
+            'the store holds. Each value carries the claim, the value and ' +
+            'the source it came from.', {})
+        }),
       sets: {
         type: 'array',
         items: openObject('One set.', {
@@ -633,7 +748,38 @@ const SCHEMAS = {
             description: 'What the `set` field of every POST here takes.'
           },
           label: { type: 'string' },
-          claims: { type: 'array', items: CLAIM_ENTRY }
+          claims: { type: 'array', items: CLAIM_ENTRY },
+          attributes: {
+            type: 'array', items: { type: 'string' },
+            description: 'The LDAP attribute types this set carries, ' +
+                         'canonically spelled and in CATALOGUE order rather ' +
+                         'than in the order they were chosen — the order ' +
+                         'reaches the token, and a list that reordered ' +
+                         'itself would look like a different token to ' +
+                         'anything diffing them. Empty on a fresh start, in ' +
+                         'all four sets: this changes what every client ' +
+                         'receives, so it does nothing until asked.'
+          },
+          attributeClaims: openObject(
+            'What those attributes would put in this set right now for the ' +
+            'previewed person, nested as the token would carry it. Built by ' +
+            'the function the ISSUANCE path calls, so it cannot disagree ' +
+            'with the token.', {}),
+          attributeReport: {
+            type: 'array',
+            description: 'The same, flat, with where each value came from.',
+            items: openObject('One claim.', {
+              ldap: { type: 'string' },
+              claim: { type: 'string' },
+              value: { type: 'string' },
+              source: {
+                type: 'string',
+                description: '`directory` when the entry carries it, ' +
+                             '`generated` when it was invented from the ' +
+                             'username.'
+              }
+            })
+          }
         })
       }
     }),
@@ -704,7 +850,147 @@ const SCHEMAS = {
       dcqlQuery: openObject(
         'The query this builds, from the function that builds the real ' +
         'one.', {})
-    })
+    }),
+
+  AuditEvent: openObject(
+    'One thing that happened, with the facts of it and no credential of any ' +
+    'kind. Written out rather than left open because a caller filtering or ' +
+    'alerting on this list needs a name for every field.',
+    {
+      seq: {
+        type: 'integer',
+        description: 'Monotonic and NEVER REUSED, including across a drop. ' +
+                     'This is the stable name for an event and the thing to ' +
+                     'walk the log by: a row number would silently mean a ' +
+                     'different event as soon as the cap discarded anything.'
+      },
+      at: { type: 'integer',
+            description: 'When it happened, in milliseconds since the epoch.' },
+      category: { type: 'string',
+                  enum: ['authentication', 'session', 'directory', 'admin',
+                         'api', 'protocol'],
+                  description: 'Derived from `action` and never set ' +
+                               'independently, so the two cannot disagree.' },
+      action: { type: 'string',
+                description: 'What happened, from a fixed vocabulary the ' +
+                             'list\'s `actions` member enumerates.' },
+      outcome: { type: 'string', enum: ['success', 'refused', 'error'],
+                 description: 'A `refused` is this service saying no and ' +
+                              'working; an `error` is this service failing.' },
+      actor: {
+        type: 'string',
+        description: 'The NORMALISED local name, so a row here and a row on ' +
+                     '/admin-api/users name the same person — `alice`, ' +
+                     '`urn:sts-mock:user:alice` and `alice@STS.MOCK` are one ' +
+                     'identity. Empty where nothing named an actor, which an ' +
+                     'unauthenticated protocol call and an anonymous LDAP ' +
+                     'bind both are.'
+      },
+      actorForm: {
+        type: 'string',
+        description: 'The identity exactly as it was presented, when that ' +
+                     'differs from `actor` — a bind DN, a Kerberos ' +
+                     'principal, an X.509 subject. Both are carried because ' +
+                     'the collapse from one to the other is something an ' +
+                     'auditor has to be able to see rather than infer.'
+      },
+      target: { type: 'string',
+                description: 'What it was done to: a DN, a request path, a ' +
+                             'session id.' },
+      protocol: { type: 'string',
+                  description: 'The family, where one applies. Free text: the ' +
+                               'fourteen families here spell themselves ' +
+                               'differently in the places this is read from, ' +
+                               'and an enum would be a lookup table that ' +
+                               'silently drops the fifteenth.' },
+      channel: {
+        type: 'string',
+        enum: ['http', 'ldap', 'ldaps', 'internal'],
+        description: 'Which socket it arrived on, or `internal` for something ' +
+                     'this service did on its own — the directory entry it ' +
+                     'seeds for somebody who authenticated elsewhere. NOT the ' +
+                     'client\'s address, which on a mock behind a compose ' +
+                     'bridge would be a fact about docker.'
+      },
+      summary: { type: 'string',
+                 description: 'One sentence, the same one the console shows.' },
+      detail: openObject(
+        'Flat facts about this event, at most twelve keys with each value ' +
+        'trimmed. What is in it depends on the action — a modify names the ' +
+        'ATTRIBUTES it changed and never their values, a search names how ' +
+        'many entries came back, an HTTP row names the route and the ' +
+        'elapsed time.', {})
+    }),
+
+  AuditList: openObject(
+    'What happened here, newest first, filtered and paged. HISTORY where the ' +
+    'rest of this API is STATE.\n\nWalk it with `seq` rather than with ' +
+    '`page`: events are still being recorded while you page, so page 2 taken ' +
+    'a second after page 1 can repeat a row that shifted onto it. The ' +
+    'sequence number cannot do that.',
+    Object.assign({
+      held: { type: 'integer',
+              description: 'Events currently in the log.' },
+      recorded: {
+        type: 'integer',
+        description: 'Events recorded since this process started. Greater ' +
+                     'than `held` once the cap has bitten — `held` alone ' +
+                     'would read as "this is all there ever was".'
+      },
+      dropped: { type: 'integer',
+                 description: 'Events discarded to stay under the cap, oldest ' +
+                              'first.' },
+      maxEvents: { type: 'integer',
+                   description: 'The cap: `audit.maxEvents`, changeable at ' +
+                                'runtime through POST /admin-api/config/set.' },
+      protocolCalls: {
+        type: 'boolean',
+        description: 'Whether ordinary protocol endpoint calls are being ' +
+                     'recorded — `audit.protocolCalls`. False means the ' +
+                     '`protocol` category is deliberately empty rather than ' +
+                     'quiet; /admin-api/metrics counts every call either way.'
+      },
+      matched: { type: 'integer', description: 'How many events the filter ' +
+                                               'matched.' },
+      shown: { type: 'integer', description: 'How many are in `events`.' },
+      oldestSeq: {
+        type: 'integer',
+        description: 'The lowest sequence number still held. A gap between ' +
+                     'the last one a caller saw and this is exactly how many ' +
+                     'events it missed.'
+      },
+      newestSeq: { type: 'integer',
+                   description: 'The highest sequence number recorded.' },
+      byCategory: openObject('How many held events are in each category.', {}),
+      byOutcome: openObject('How many held events had each outcome.', {}),
+      byAction: openObject('How many held events had each action. Only ' +
+                           'actions that have occurred appear.', {}),
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      categories: {
+        type: 'array',
+        description: 'The six categories with what each covers — what the ' +
+                     '`category` filter takes.',
+        items: openObject('One category.', {
+          category: { type: 'string' },
+          label: { type: 'string' },
+          what: { type: 'string' }
+        })
+      },
+      actions: {
+        type: 'array',
+        description: 'Every action with the category it belongs to — what ' +
+                     'the `action` filter takes. Read off the same table the ' +
+                     'log records against, so an action cannot occur and be ' +
+                     'unfilterable, nor be offered and never occur.',
+        items: openObject('One action.', {
+          action: { type: 'string' },
+          category: { type: 'string' },
+          label: { type: 'string' }
+        })
+      },
+      outcomes: { type: 'array', items: { type: 'string' } },
+      events: { type: 'array', items: { $ref: '#/components/schemas/AuditEvent' } }
+    }, PAGING_PROPERTIES))
 };
 
 // The prose at the top of the document. It is long on purpose: the first thing
@@ -850,6 +1136,11 @@ const TAG_DESCRIPTIONS = {
           'endpoint reads one.',
   Tokens: 'What has been issued, and the revocation of the three kinds that ' +
           'can be revoked.',
+  'Audit log': 'What happened here, in order — history rather than state, ' +
+               'and read-only. It carries no credential of any kind and has ' +
+               'no clear operation: an erase control on an unprotected ' +
+               'surface would make an audit log unable to answer the one ' +
+               'question it exists for.',
   'Custom claims': 'What to add to every access token, ID Token and SAML ' +
                    'assertion issued from now on.',
   'Credential claims': 'What an issued Verifiable Credential carries.',

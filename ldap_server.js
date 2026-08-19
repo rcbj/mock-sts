@@ -110,6 +110,19 @@ const app = require('./app');
 const { log, xmlEscape } = require('./helpers');
 const config = require('./config');
 const stats = require('./admin_stats');
+// The audit log. A plain require and it cannot become anything else: audit.js
+// requires helpers.js and config.js only, so it can be reached from the deepest
+// module here without dragging a graph behind it.
+//
+// This is the module with the MOST recording sites in the service — one per LDAP
+// operation, seven of them — and unlike the HTTP call log there is no single
+// funnel to put them behind: ldapjs dispatches straight into the handler for
+// each operation, and what an audit row has to say differs per operation (a
+// modify names its changed attributes, a search names how many entries came
+// back). What IS written once is the rule that decides whether an add is a
+// user, a group or something else, and that lives in audit.directoryActionFor()
+// rather than being spelled out at four of the seven.
+const audit = require('./audit');
 // The admin console, for ONE reason: to hand it the reader below so that a user's
 // page can show that user's directory entry. It is required here rather than the
 // other way round because server.js requires ./admin BEFORE this module (rule 6),
@@ -929,6 +942,33 @@ function autoCreateUser(detail) {
   // cn, sn, the certificate's RDNs — are the ones that must win.
   applyVcAttributes(created, name);
   log.info('ldap: created ' + dn + ' because ' + name + ' ' + note + '.');
+  // A user created by the SERVICE rather than by a client, and the audit row
+  // says so through `channel: 'internal'` — no LDAP client asked for this. It
+  // is the one directory row with no connection behind it, which is why it does
+  // not go through auditLdap(): there is no socket to read a bind DN off, and
+  // the actor is the person who authenticated somewhere else entirely.
+  //
+  // It is recorded only on the branch that actually created something. The two
+  // returns above are a directory that already had the entry and a directory
+  // that is full, and neither created a user; a row on either would make
+  // "when did uid=dave appear?" unanswerable, which is the whole question this
+  // row exists for.
+  audit.recordDirectory({
+    action: 'user.create',
+    actor: detail.key || '',
+    actorForm: detail.presented || '',
+    target: dn,
+    protocol: detail.protocol || '',
+    channel: 'internal',
+    summary: 'created ' + dn + ' because ' + name + ' ' + note,
+    detail: { reason: note,
+              protocol: detail.protocol || '',
+              method: detail.method || '',
+              attributes: Object.keys(created.attributes).join(', '),
+              entriesNow: entries.size,
+              note: 'created by this service, not by an LDAP client; ' +
+                    'ldap.autocreateUsers is on' }
+  });
   log.debug('Leaving autoCreateUser(). The entry was created.');
   return created;
 }
@@ -1679,6 +1719,88 @@ if (secureServer) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// THE AUDIT ROW EVERY OPERATION BELOW WRITES.
+//
+// Two facts are worked out here rather than at each of the seven handlers,
+// because both are about the CONNECTION rather than about the operation and
+// getting either wrong at one handler out of seven is the kind of thing nobody
+// notices:
+//
+// **Which socket it came in on.** The plain listener on 389 and LDAPS on 636
+// share one set of handlers — that is the whole point of the fan-out this file
+// registers against — so a handler cannot tell them apart, and a page that could
+// not either would be unable to answer the question somebody turning on LDAPS
+// actually has, which is whether anything is using it. `req.connection` is the
+// raw socket and a TLS one carries `encrypted`.
+//
+// **Who is bound.** ldapjs holds the bound DN on the connection, which is what
+// makes an operation attributable at all: the bind names somebody and the six
+// operations after it do not. The DN is recorded whole in `actorForm`, and
+// `actor` is the console's key for that person where the DN yields one, so a
+// directory row and a /admin/users row name one person rather than two.
+// consoleKeyFor() is the same derivation the groups page links with, reused
+// rather than repeated — a second copy would be a second thing to keep in step
+// with autoCreateUser().
+//
+// Note what is NOT here: the client's address. See the note on the console page
+// — on a mock behind a compose bridge it reports the bridge, which is a fact
+// about docker and not about whoever made the call.
+// ---------------------------------------------------------------------------
+function ldapChannelOf(req) {
+  return (req.connection && req.connection.encrypted) ? 'ldaps' : 'ldap';
+}
+
+function boundDnOf(req) {
+  const bound = req.connection && req.connection.ldap && req.connection.ldap.bindDN;
+  if (!bound) return '';
+  const text = String(bound);
+  // ldapjs seeds an unbound connection with `cn=anonymous` rather than leaving
+  // it empty, and reporting that as an identity would put a person called
+  // "anonymous" on the users page. It is the absence of a bind, so it is
+  // reported as one.
+  return text.toLowerCase() === 'cn=anonymous' ? '' : text;
+}
+
+// How many entries still list this DN as a member, counted just before it is
+// deleted. It is the single most useful fact on a delete row: this directory
+// does not enforce referential integrity (see the header — that is a decision),
+// so every one of those becomes a DANGLING member the moment the entry goes,
+// and this is the only record of when that happened. /admin/groups shows the
+// resulting state and can never say when it arrived.
+//
+// All three membership attributes are counted, resolved the way MEMBER_ATTRIBUTES
+// says: `memberUid` holds a bare name where `member` and `uniqueMember` hold a
+// DN, and counting the three alike is exactly how every posixGroup member gets
+// missed.
+function membershipsNaming(dn) {
+  const key = normalizeDn(dn);
+  const uid = (splitRdns(dn)[0] || '').toLowerCase().indexOf('uid=') === 0
+    ? unescapeDnValue(rdnPairs(splitRdns(dn)[0])[0].value) : '';
+  let count = 0;
+  entries.forEach(function (entry) {
+    const names = MEMBER_ATTRIBUTES.some(function (attribute) {
+      return (entry.attributes[attribute.name] || []).some(function (value) {
+        return attribute.holds === 'uid'
+          ? (uid && String(value).toLowerCase() === uid.toLowerCase())
+          : normalizeDn(value) === key;
+      });
+    });
+    if (names) count++;
+  });
+  return count;
+}
+
+function auditLdap(req, fields) {
+  const boundDn = boundDnOf(req);
+  audit.recordDirectory(Object.assign({
+    channel: ldapChannelOf(req),
+    protocol: ldapChannelOf(req) === 'ldaps' ? 'LDAPS' : 'LDAP',
+    actor: boundDn ? consoleKeyFor(boundDn, getEntry(boundDn)) : '',
+    actorForm: boundDn
+  }, fields));
+}
+
 // --- bind ------------------------------------------------------------------
 server.bind('', function (req, res, next) {
   log.debug('Entering the LDAP bind handler.');
@@ -1693,9 +1815,47 @@ server.bind('', function (req, res, next) {
     log.info('ldap: refusing the bind; the password is the literal string "' +
              REFUSED_PASSWORD + '", which this service rejects in every ' +
              'protocol so that a negative test has something to fail on.');
+    // The refusal is recorded, and it is the one audit row in this file with no
+    // successful operation behind it. That is the point of recording it: a
+    // client whose password is wrong and a client that cannot reach the port at
+    // all look identical from every other page here, and result code 49 is the
+    // one an LDAP client's error handling is built around.
+    //
+    // The bind DN is on the row and the PASSWORD IS NOT, not even its length as
+    // a "harmless" fact — the whole log carries no credential and a length is a
+    // credential's most useful property to an attacker who has the rest.
+    auditLdap(req, {
+      action: 'directory.bind', outcome: 'refused',
+      // Not the connection's bound DN, which for a REFUSED bind is whatever the
+      // connection was before: the DN this attempt named.
+      actor: dn ? consoleKeyFor(dn, getEntry(dn)) : '', actorForm: dn,
+      target: dn || '(anonymous)',
+      summary: 'a bind as ' + (dn || '(anonymous)') + ' was refused with ' +
+               'LDAP_INVALID_CREDENTIALS (49)',
+      detail: { resultCode: 49,
+                reason: 'the password is the literal string "' +
+                        REFUSED_PASSWORD + '", the one this service refuses in ' +
+                        'every protocol' }
+    });
     log.debug('Leaving the LDAP bind handler. LDAP_INVALID_CREDENTIALS.');
     return next(new ldap.InvalidCredentialsError());
   }
+  // A successful bind writes TWO audit rows and they are not duplicates: this
+  // one says an LDAP bind happened on this socket, and the `authentication` row
+  // recordAuthentication() writes below says a credential was accepted — the
+  // same row a Kerberos AS-REQ and a WS-Trust UsernameToken produce, which is
+  // what makes "everyone who got in today" one filter rather than fourteen.
+  auditLdap(req, {
+    action: 'directory.bind',
+    actor: dn ? consoleKeyFor(dn, getEntry(dn)) : '', actorForm: dn,
+    target: dn || '(anonymous)',
+    summary: 'a ' + (dn ? 'simple' : 'anonymous simple') + ' bind as ' +
+             (dn || '(anonymous)') + ' succeeded',
+    detail: { anonymous: !dn,
+              entryExists: dn ? !!getEntry(dn) : false,
+              note: 'no password was checked; every bind here succeeds except ' +
+                    'the password "' + REFUSED_PASSWORD + '"' }
+  });
   stats.recordAuthentication({
     presented: dn || '(anonymous)',
     protocol: 'ldap',
@@ -1741,6 +1901,25 @@ server.add('', function (req, res, next) {
   putEntry(dn, attributes, { origin: 'ldap add' });
   log.info('ldap: added ' + dn + ' with ' + Object.keys(attributes).length +
            ' attribute(s).');
+  // What KIND of thing was created is decided by PLACEMENT and not by the
+  // objectClass the client sent, and that is not a shortcut. This directory is
+  // schemaless: a client can add a `groupOfNames` under ou=users or an entry
+  // with no objectClass at all under ou=groups, and believing the class would
+  // file both wrongly. Placement is the same rule /admin/groups reports by, so
+  // the two pages agree about what a user is. The classes are on the row as a
+  // detail, which is where the disagreement shows up when there is one.
+  auditLdap(req, {
+    action: audit.directoryActionFor('create', dn,
+                                     { users: USERS_DN, groups: GROUPS_DN }),
+    target: dn,
+    summary: 'added ' + dn + ' with ' + Object.keys(attributes).length +
+             ' attribute(s)',
+    detail: { attributes: Object.keys(attributes).join(', '),
+              attributeCount: Object.keys(attributes).length,
+              objectClass: (attributes.objectClass || attributes.objectclass ||
+                            []).join(', '),
+              entriesNow: entries.size }
+  });
   res.end();
   log.debug('Leaving the LDAP add handler. The entry was added.');
   return next();
@@ -1767,6 +1946,28 @@ server.del('', function (req, res, next) {
   // reader should see.
   log.info('ldap: deleted ' + dn + '. Any group listing it as a member still ' +
            'does; this server does not do referential integrity.');
+  // The kind is worked out from the DN and not from `stored`, so that a delete
+  // and the add that preceded it produce the same word for the same entry.
+  //
+  // `danglingLeft` is on the row on purpose and is the most useful fact on it:
+  // this directory does not enforce referential integrity, so a delete leaves
+  // the DN in every group that listed it, and the audit row is the only place
+  // the moment that happened is recorded. /admin/groups shows the resulting
+  // state and cannot say when it arrived. Counted AFTER the delete, so it is
+  // the number of memberships that are dangling now rather than the number that
+  // were about to be.
+  const dangling = membershipsNaming(dn);
+  auditLdap(req, {
+    action: audit.directoryActionFor('delete', dn,
+                                     { users: USERS_DN, groups: GROUPS_DN }),
+    target: dn,
+    summary: 'deleted ' + dn,
+    detail: { attributeCount: Object.keys(stored.attributes).length,
+              danglingLeft: dangling,
+              entriesNow: entries.size,
+              note: 'any group listing this DN as a member still does; this ' +
+                    'directory does not do referential integrity' }
+  });
   res.end();
   log.debug('Leaving the LDAP delete handler. The entry was deleted.');
   return next();
@@ -1844,6 +2045,31 @@ server.modify('', function (req, res, next) {
   stored.attributes = working;
   stored.modifiedAt = working.modifytimestamp[0];
   log.info('ldap: modified ' + dn + '.');
+  // Recorded AFTER the working copy has replaced the stored one, and that is
+  // not incidental: a modify is atomic (RFC 4511 section 4.6, which is why the
+  // changes were applied to a copy above), so every early return in the loop
+  // over the changes is an operation that did NOT happen and must not leave a
+  // row saying it did.
+  //
+  // The changes are named as `operation attribute`, WITHOUT their values. That
+  // is the same rule the rest of this log follows and it bites here: a modify
+  // is where a `userPassword` gets set, and a row that helpfully showed what
+  // changed would put it on a page. The attribute names alone answer "what was
+  // touched", which is the audit question; the debug log has the values for
+  // anybody who wants them.
+  auditLdap(req, {
+    action: audit.directoryActionFor('update', dn,
+                                     { users: USERS_DN, groups: GROUPS_DN }),
+    target: dn,
+    summary: 'modified ' + dn + ' with ' + req.changes.length + ' change(s)',
+    detail: { changes: req.changes.map(function (change) {
+                return String(change.operation || '').toLowerCase() + ' ' +
+                       String(change.modification.type || '').toLowerCase();
+              }).join(', '),
+              changeCount: req.changes.length,
+              attributesNow: Object.keys(working).length,
+              note: 'attribute names only; no value is ever recorded here' }
+  });
   res.end();
   log.debug('Leaving the LDAP modify handler. The changes were applied.');
   return next();
@@ -1893,6 +2119,22 @@ server.modifyDN('', function (req, res, next) {
   }
   stored.attributes.modifytimestamp = [generalizedTime()];
   entries.set(normalizeDn(target), stored);
+  // The kind is taken from the NEW DN, because that is what the entry is now —
+  // and a rename can move an entry between containers, which is exactly the
+  // case where the two DNs would disagree. Both are on the row, so a rename out
+  // of ou=users shows as a `user.rename` or an `entry.rename` with the other
+  // name beside it rather than as a row that quietly picked one.
+  auditLdap(req, {
+    action: audit.directoryActionFor('rename', target,
+                                     { users: USERS_DN, groups: GROUPS_DN }),
+    target: target,
+    summary: 'renamed ' + dn + ' to ' + target,
+    detail: { from: dn, to: target, newRdn: newRdn,
+              newSuperior: newSuperior,
+              movedContainer: normalizeDn(parentDn(dn)) !== normalizeDn(newSuperior),
+              note: 'any group listing the OLD DN as a member still does; this ' +
+                    'directory does not do referential integrity' }
+  });
   res.end();
   log.debug('Leaving the LDAP modifyDN handler. The entry was renamed.');
   return next();
@@ -1918,6 +2160,19 @@ server.compare('', function (req, res, next) {
     // attributes use does. A schema-aware server would pick the rule per
     // attribute; this one has no schema and says so.
     return v.toLowerCase() === String(req.value).toLowerCase();
+  });
+  // The attribute is named and the VALUE is not, for the reason the modify row
+  // gives: `compare` against `userPassword` is precisely how a client checks a
+  // password without binding, and the value is the password. Whether it matched
+  // is the outcome of the operation and is recorded; what was tried is not.
+  auditLdap(req, {
+    action: 'directory.compare',
+    target: dn,
+    summary: 'compared ' + type + ' on ' + dn + ' — ' +
+             (matched ? 'it matched' : 'it did not match'),
+    detail: { attribute: type, matched: matched,
+              note: 'the value compared is not recorded; on userPassword it ' +
+                    'would be a password' }
   });
   res.end(matched);
   log.debug('Leaving the LDAP compare handler. matched=' + matched);
@@ -1956,6 +2211,18 @@ server.search('', function (req, res, next) {
                         'controls, extended operations or SASL mechanisms.']
         }
       }, req.attributes, res.messageId));
+      // Recorded like any other search, and it earns its row: a client that
+      // does not yet know the base DN asks for the root DSE FIRST, so this is
+      // usually the very first thing any LDAP client does here and its absence
+      // from the log would make a client that never got past discovery look
+      // like a client that never connected.
+      auditLdap(req, {
+        action: 'directory.search',
+        target: '(root DSE)',
+        summary: 'read the root DSE',
+        detail: { scope: scope, filter: filter, returned: 1,
+                  attributes: (req.attributes || []).join(', ') }
+      });
       res.end();
       log.debug('Leaving the LDAP search handler. The root DSE was sent.');
       return next();
@@ -1978,6 +2245,14 @@ server.search('', function (req, res, next) {
     : maxSearchResults();
   let sent = 0;
   let considered = 0;
+  // How many of the entries that went back were PEOPLE. It is what decides
+  // whether this row reads as `user.query` or as `directory.search`, and the
+  // decision is made on what was RETURNED rather than on the base the client
+  // asked from: a subtree search of the whole directory is the ordinary way an
+  // LDAP client looks somebody up, and filing that as "a search somewhere" and
+  // a search based at ou=users as "a user query" would put the two commonest
+  // spellings of one act in two different buckets.
+  let usersSent = 0;
   for (const stored of entries.values()) {
     if (!isUnder(stored.dn, base)) continue;
     const depth = depthUnder(stored.dn, base);
@@ -2009,15 +2284,49 @@ server.search('', function (req, res, next) {
     if (!matches) continue;
     if (sent >= limit) {
       log.info('ldap: the search reached its size limit of ' + limit + '.');
-      res.end(ldap.LDAP_SIZE_LIMIT_EXCEEDED);
+      // A truncated search is `refused` rather than `success`, and the two must
+      // not be merged: the client has an INCOMPLETE answer and, unless it reads
+      // result code 4, does not know it. That is the search whose absence from
+      // this log would cost somebody an afternoon.
+      auditLdap(req, {
+        action: usersSent ? 'user.query' : 'directory.search',
+        outcome: 'refused',
+        target: base,
+        summary: 'a search of ' + base + ' hit the size limit of ' + limit +
+                 ' after ' + sent + ' entry/entries',
+        detail: { scope: scope, filter: filter, returned: sent,
+                  users: usersSent, sizeLimit: limit,
+                  clientSizeLimit: clientLimit || 'none',
+                  resultCode: 4,
+                  note: 'LDAP_SIZE_LIMIT_EXCEEDED; the answer is incomplete' }
+      });
       log.debug('Leaving the LDAP search handler. The size limit was reached.');
       return next();
     }
     res.send(toSearchEntry(stored, req.attributes, res.messageId));
     sent++;
+    if (isUnder(stored.dn, USERS_DN) && normalizeDn(stored.dn) !== normalizeDn(USERS_DN)) {
+      usersSent++;
+    }
   }
   log.info('ldap: the search considered ' + considered + ' entry/entries in ' +
            'scope and returned ' + sent + '.');
+  // A search that returned nothing is still a search and still gets a row. That
+  // is not completeness for its own sake: a filter this store cannot evaluate,
+  // and a presence filter defeated by attribute-name case, both look exactly
+  // like an empty directory from the client's side (the comment above
+  // req.filter.matches is the record of that having happened here), and the row
+  // saying "considered 14, returned 0" is what tells the two apart.
+  auditLdap(req, {
+    action: usersSent ? 'user.query' : 'directory.search',
+    target: base,
+    summary: 'searched ' + base + ' (' + scope + ') and returned ' + sent +
+             ' of ' + considered + ' entry/entries in scope' +
+             (usersSent ? ', ' + usersSent + ' of them under ou=users' : ''),
+    detail: { scope: scope, filter: filter, considered: considered,
+              returned: sent, users: usersSent, sizeLimit: limit,
+              attributes: (req.attributes || []).join(', ') || '(all)' }
+  });
   res.end();
   log.debug('Leaving the LDAP search handler. ' + sent + ' entry/entries sent.');
   return next();

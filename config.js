@@ -579,7 +579,33 @@ const SETTINGS = [
   { key: 'ldap.sizeLimit', group: 'LDAP', label: 'Search size limit',
     env: 'LDAP_SIZE_LIMIT', type: 'int', dflt: 500, runtime: true,
     description: 'The server-side size limit for a search, which is what ' +
-                 'produces LDAP_SIZE_LIMIT_EXCEEDED.' }
+                 'produces LDAP_SIZE_LIMIT_EXCEEDED.' },
+
+  // --- Audit log -----------------------------------------------------------
+  //
+  // Both are runtime and both are honestly so: audit.js reads them per event
+  // rather than capturing them at require time, which is the rule a runtime
+  // setting has to be able to defend. Lowering the cap trims on the very next
+  // event rather than one row per event thereafter.
+  { key: 'audit.maxEvents', group: 'Audit log', label: 'Maximum events held',
+    env: 'AUDIT_MAX_EVENTS', type: 'int', dflt: 5000, runtime: true,
+    description: 'How many audit events /admin/audit keeps before the oldest ' +
+                 'are dropped. What was dropped is COUNTED and shown, so a ' +
+                 'truncated log says it was truncated rather than implying ' +
+                 'the cap is all there ever was. Lowering it takes effect on ' +
+                 'the next event and discards the excess immediately.' },
+
+  { key: 'audit.protocolCalls', group: 'Audit log',
+    label: 'Record protocol endpoint calls',
+    env: 'AUDIT_PROTOCOL_CALLS', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether every call into a protocol endpoint gets an audit ' +
+                 'event. On by default, because "everything this service was ' +
+                 'asked to do" is the point of the log — but it is by far the ' +
+                 'noisiest source (every JWKS poll and metadata fetch is one), ' +
+                 'so turning it off is how somebody watching the directory or ' +
+                 'the console gets a readable page. It never affects the ' +
+                 'other five categories, and /admin/metrics counts every call ' +
+                 'either way.' }
 ];
 
 // Indexed once. A linear scan per read would be invisible on a mock and the

@@ -90,7 +90,18 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   // carry them. A configured attribute that displaced the claim a relying party
   // keys off would break the sign-in and look like a bug in the relying party.
   const custom = stats.samlAttributes('saml2', { subject: subject, audience: audience });
-  const attributeEls = attributes.concat(custom).map(function (a) {
+  // Appended, and FILTERED against what is already there by name. The rule is the
+  // one the JWT builders follow — the protocol's own claims win — but it has to be
+  // written as a filter rather than as an assignment order, because an assertion
+  // is a list of elements and not an object: a duplicate name does not overwrite
+  // anything, it produces two <Attribute> elements with one name, and a relying
+  // party reading the first sees whichever this function happened to emit first.
+  // It became reachable by ticking a box rather than by typing a name when
+  // /admin/claims grew its directory attributes: `cn` becomes the claim `name`,
+  // and `name` is one of the two attributes above.
+  const names = new Set(attributes.map(function (a) { return a.name; }));
+  const configured = custom.filter(function (a) { return !names.has(a.name); });
+  const attributeEls = attributes.concat(configured).map(function (a) {
     return '<saml:Attribute Name="' + xmlEscape(a.name) + '"' +
       (a.nameFormat ? ' NameFormat="' + xmlEscape(a.nameFormat) + '"' : '') + '>' +
       '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';

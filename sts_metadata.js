@@ -660,6 +660,37 @@ const ENDPOINTS = [
           'can undo a revocation, and it is here so that getting back to a working token does not ' +
           'mean restarting the service. OID4VCI credentials are counted on /admin/metrics and are ' +
           'not in this table.' },
+  { path: '/admin/audit', group: 'Admin', name: 'Audit log',
+    // rfc4511 is linked because the directory operations are its and they are the
+    // largest source of rows here. Nothing else: an audit log is not a protocol,
+    // and citing one would be claiming an interoperability this page does not have.
+    specs: ['rfc4511'],
+    what: 'NON-SPEC. What this service has been asked to do, in the order it was asked, as ROWS ' +
+          'rather than as counters — which is the difference from /admin/metrics: that page can ' +
+          'say the directory holds eleven entries, and only this one can say a twelfth was created ' +
+          'at 14:02 and deleted at 14:03 by somebody bound as uid=carol, over LDAPS. Six ' +
+          'categories: a credential ACCEPTED in any of the fourteen families here; a sign-on ' +
+          'session created or ended; every LDAP operation over 389 and 636 alike (an entry ' +
+          'created, deleted, updated, renamed, searched, compared, bound to), with a user, a group ' +
+          'and an entry told apart by PLACEMENT because this directory is schemaless; every ' +
+          '/admin page viewed and form posted; every /admin-api call; and every other endpoint ' +
+          'call. NO CREDENTIAL IS EVER RECORDED — no password, bearer token, assertion, request or ' +
+          'response body; a modify names the attributes it changed and never their values, a ' +
+          'compare says whether it matched and not what was tried, and an authorization code in a ' +
+          'query string is redacted. ONE ACT USUALLY PRODUCES SEVERAL ROWS and they are not ' +
+          'duplicates: a sign-in writes the HTTP call, the credential being accepted and the ' +
+          'session that came out of it, which are three facts at three layers. It also OBSERVES ' +
+          'ITSELF — fetching this page records an admin.view event — which is stated rather than ' +
+          'suppressed, because the alternative is a blind spot exactly where the reader stands. ' +
+          'Filtered by category, action, outcome, actor and free text, and paged with ?page= and ' +
+          '?per=; both work with ?format=json, whose reply carries page, pages, matched and the ' +
+          'rows in `events`. Walk it by `seq` rather than by page: that number is monotonic and ' +
+          'never reused, so a gap between the last one seen and oldestSeq is exactly how many ' +
+          'events the cap discarded. In memory and dies with the process, and there is NO CLEAR ' +
+          'BUTTON — an erase control on an unprotected console would make the page unable to ' +
+          'answer the one question an audit log exists for. audit.maxEvents and ' +
+          'audit.protocolCalls on /admin/config change the cap and whether the noisiest category ' +
+          'is recorded at all.' },
   { path: '/admin/claims', group: 'Admin', name: 'Custom claims',
     specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
     effect: 'changes what every FUTURE access token, ID Token and SAML assertion contains',
@@ -808,6 +839,22 @@ const ENDPOINTS = [
           'consults this service about an assertion or a ticket. restore is ' +
           'NON-SPEC even here: no real authorization server can undo a ' +
           'revocation. Mirrors POST /admin/tokens.' },
+  { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
+    specs: ['rfc4511'],
+    what: 'NON-SPEC. What happened here, in order, as JSON: every ' +
+          'authentication, sign-on session, LDAP directory operation, console ' +
+          'interaction, management API call and protocol endpoint call, ' +
+          'newest first, filtered by category, action, outcome, actor and ' +
+          'free text and paged with ?page= and ?per=. NO CREDENTIAL IS EVER ' +
+          'IN A ROW — no password, bearer token, assertion or body; a modify ' +
+          'names the attributes it changed and never their values. WALK IT BY ' +
+          '`seq` rather than by page: it is monotonic and never reused, so ' +
+          '"everything after 4102" is exact where page 2 taken a second after ' +
+          'page 1 can repeat a row that shifted onto it. READ ONLY, and the ' +
+          'only resource here that is: there is no clear operation, because ' +
+          'an erase control on an unprotected API would make an audit log ' +
+          'unable to answer the one question it exists for. Mirrors GET ' +
+          '/admin/audit.' },
   { path: '/admin-api/config', group: 'Management API', name: 'Configuration',
     specs: [],
     what: 'NON-SPEC. Every setting, its effective value, and the source of ' +

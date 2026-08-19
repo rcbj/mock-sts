@@ -114,8 +114,33 @@ function pagingParameters() {
     { name: 'per', in: 'query', required: false,
       schema: { type: 'integer', minimum: 1, maximum: admin.MAX_ROWS },
       description: 'Rows per page. Defaults to ' + admin.DEFAULT_PER_PAGE +
-                   ' and is capped at ' + admin.MAX_ROWS + '.' }
+                   ' and is capped at ' + admin.MAX_ROWS + '. On a ' +
+                   'drill-down it is SHARED by every list in the reply, ' +
+                   'which each carry a page number of their own.' }
   ];
+}
+
+// The page parameters of a DRILL-DOWN, which is a different shape from a list
+// and has to be, because a drill-down answers with several lists at once — five
+// on /users, two on /groups. One `page` would move all of them together, so each
+// gets a parameter named after itself and `per` above stays shared.
+//
+// Every one is clamped the way `page` is, and every one is answered: the reply
+// carries a `<name>Paging` object beside the array, with the same member names
+// the flat lists put at the top level. A caller walks these exactly as it walks
+// /tokens, one list at a time.
+// ONE NAME PER LIST: the parameter is the reply array's own name with `Page` on
+// the end, and the object answering it is that name with `Paging` on the end. A
+// caller that can read the reply can therefore write the request without a table
+// mapping one set of names onto the other.
+function detailPagingParameters(lists) {
+  return lists.map(function (list) {
+    return { name: list.name + 'Page', in: 'query', required: false,
+             schema: { type: 'integer', minimum: 1 },
+             description: 'Which page of `' + list.name + '` to return, ' +
+                          'answered by `' + list.name + 'Paging`. ' +
+                          list.description };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +288,19 @@ const ROUTES = [
                  'the characters a path is made of (a Kerberos service ' +
                  'principal is `HTTP/host`, a subject is a `urn:`), so ' +
                  '/users/HTTP/web.example.com would be a two-segment path ' +
-                 'naming nobody.',
+                 'naming nobody.\n\nONE PAGE PARAMETER IS NOT IN THE LIST ' +
+                 'BELOW, because its name is data: each session\'s own token ' +
+                 'list is moved by `session-<the session id>Page`, so ' +
+                 '`?user=alice&session-8Qk3...Page=2` moves that block and no ' +
+                 'other, and each session in the reply answers with its own ' +
+                 '`tokensPaging`. It is named after the session rather than ' +
+                 'numbered so that the link still moves the same session after ' +
+                 'the list around it has changed, and it is paged at all ' +
+                 'because one browser session can hold most of the tokens this ' +
+                 'service remembers. OpenAPI cannot spell a parameter whose ' +
+                 'name is built at runtime, and a `session-{id}Page` in the ' +
+                 'list would generate a client that sends a literal `{id}` — ' +
+                 'so it is here in words instead.',
     mirrors: 'GET /admin/users',
     parameters: [
       { name: 'user', in: 'query', required: false,
@@ -278,7 +315,22 @@ const ROUTES = [
                      'protocol family. The list\'s `protocols` member says ' +
                      'which values there are; it is read off the data, so a ' +
                      'family nobody has used is not offered.' }
-    ].concat(pagingParameters()),
+    ].concat(pagingParameters()).concat(detailPagingParameters([
+      { name: 'sessions',
+        description: 'Sign-on session blocks, which default to ' +
+                     admin.DEFAULT_BLOCKS_PER_PAGE + ' rather than ' +
+                     admin.DEFAULT_PER_PAGE + ' because each one carries a ' +
+                     'token list of its own. Only the sessions ON this page ' +
+                     'are in the reply.' },
+      { name: 'tokensOnEndedSessions',
+        description: 'Tokens issued on a session this service no longer ' +
+                     'holds.' },
+      { name: 'tokensWithNoSession',
+        description: 'Tokens issued with no browser session at all: the ' +
+                     'grants that never involve one.' },
+      { name: 'artifacts',
+        description: 'SAML assertions, Kerberos tickets and credentials.' }
+    ])),
     responseDescription: 'The list, or one identity.',
     responseSchema: { oneOf: [
       { $ref: '#/components/schemas/UserList' },
@@ -312,7 +364,19 @@ const ROUTES = [
         description: 'One group\'s DN. Returns the drill-down.' },
       { name: 'q', in: 'query', required: false, schema: { type: 'string' },
         description: 'Substring of the DN or the name, case-insensitive.' }
-    ].concat(pagingParameters()),
+    ].concat(pagingParameters()).concat(detailPagingParameters([
+      { name: 'members',
+        description: 'The membership values of the group named by `group`, ' +
+                     'resolved. `group.memberCount`, `presentCount` and ' +
+                     '`danglingCount` beside them are counts of the WHOLE ' +
+                     'list and not of the page — a group whose seven ' +
+                     'members resolve to five is the fact this resource ' +
+                     'exists to report, and a per-page count would not be ' +
+                     'an answer to it.' },
+      { name: 'claimed',
+        description: 'Entries whose own memberOf names this group while it ' +
+                     'does not list them back.' }
+    ])),
     responseDescription: 'The list, or one group.',
     responseSchema: { oneOf: [
       { $ref: '#/components/schemas/GroupList' },
@@ -616,13 +680,37 @@ const ROUTES = [
                  'SAML 2.0 Attribute, SAML 1.1 Attribute — with the rules ' +
                  'that govern them: the claim names this service sets itself ' +
                  'and will not let you override, and the placeholders a ' +
-                 'value may use.',
+                 'value may use.\n\nEach set has TWO HALVES and they are ' +
+                 'configured by different operations. `claims` are TYPED: a ' +
+                 'name and a value somebody wrote, the same for everybody ' +
+                 'except where a ${placeholder} carries the sign-in. ' +
+                 '`attributes` are LDAP ATTRIBUTE TYPES chosen from ' +
+                 '`attributeCatalogue`, whose value is read off that ' +
+                 'person\'s entry under ou=users — so an `ldapmodify` ' +
+                 'changes the next token, and an LDAP client and an OIDC ' +
+                 'client pointed at this service are shown the same ' +
+                 'person.\n\n`attributeClaims` is what the current selection ' +
+                 'would actually put in each set for the previewed person, ' +
+                 'built by the same function the issuance path calls. A ' +
+                 'caller with no browser has no other way to ask "what would ' +
+                 'this issue".',
     mirrors: 'GET /admin/claims',
-    responseDescription: 'The four sets.',
+    parameters: [
+      { name: 'user', in: 'query', required: false,
+        schema: { type: 'string', default: 'alice' },
+        description: 'Whose attribute values to preview. Defaults to a ' +
+                     'person the directory holds from startup, so the ' +
+                     'preview shows real values on a fresh process. Somebody ' +
+                     'with no entry gets generated values — the same ' +
+                     'invented person every time, seeded from the name — and ' +
+                     '`preview.entryFound` says which of the two happened.' }
+    ],
+    responseDescription: 'The four sets, the attribute catalogue and the ' +
+                         'preview.',
     responseSchema: { $ref: '#/components/schemas/ClaimSets' },
     handler: function (req, res) {
       log.debug("Entering the management API claims endpoint.");
-      sendJson(res, 200, admin.claimsJson());
+      sendJson(res, 200, admin.claimsJson(admin.claimsPreviewUser(req.query)));
       log.debug("Leaving the management API claims endpoint.");
     } },
 
@@ -631,7 +719,10 @@ const ROUTES = [
     handler: function (req, res) {
       log.debug("Entering the management API claims action endpoint.");
       const body = parseBody(req);
-      const result = admin.claimsAction(withAction(req, body));
+      // The `attributes` action's list, in both spellings, exactly as the
+      // credential-claims row below takes it. The other six actions ignore it.
+      const names = namesOf(req, body, 'attribute', 'attributes');
+      const result = admin.claimsAction(withAction(req, body), names);
       sendJson(res, result.ok ? 200 : 400, result);
       log.debug("Leaving the management API claims action endpoint.");
     },
@@ -727,7 +818,120 @@ const ROUTES = [
           ] }],
           additionalProperties: false
         },
-        responseDescription: 'The set as it now stands, in `claims`.' }
+        responseDescription: 'The set as it now stands, in `claims`.' },
+
+      // --- the directory-attribute half of a set --------------------------
+      //
+      // Three operations rather than one with a mode, mirroring the console's
+      // three buttons, and the reason is in admin.js beside them: an empty
+      // `attributes` array would otherwise be ambiguous between "clear it" and
+      // "my HTTP client dropped an empty array", which is a real behaviour of
+      // real clients and the kind of ambiguity that silently empties a set.
+      { action: 'attributes', operationId: 'setClaimAttributes',
+        summary: 'Set which LDAP attributes one set carries',
+        description: 'The array REPLACES the selection for that set. An ' +
+                     'attribute not in the array is removed, which is how ' +
+                     'removal is expressed — there is no per-attribute ' +
+                     'remove, because the console\'s control is a table of ' +
+                     'checkboxes and an API that removed differently would ' +
+                     'be a second model of the same state.\n\nThe value a ' +
+                     'selected attribute carries is the one on that ' +
+                     'person\'s entry under ou=users, or — where the entry ' +
+                     'has nothing — invented from their username, ' +
+                     'deterministically, so one username is one invented ' +
+                     'person across restarts. Unlike POST ' +
+                     '/admin-api/credential-claims/select this does NOT ' +
+                     'sweep the directory: the credential page writes the ' +
+                     'attributes it needs onto every entry, and doing it ' +
+                     'from here as well would mean two pages racing to ' +
+                     'populate one directory. Selecting an attribute nobody ' +
+                     'has an entry value for still produces a claim; it is ' +
+                     'generated, and `attributeReport` says so per claim.' +
+                     '\n\nAn unknown attribute name refuses the WHOLE call ' +
+                     'rather than being skipped: the catalogue is fixed, so ' +
+                     'an unknown name is either a hand-written request that ' +
+                     'deserves an answer or a rename that left a caller ' +
+                     'behind. `attributeCatalogue` in GET ' +
+                     '/admin-api/claims is the list.\n\nA TYPED claim of ' +
+                     'the same name WINS over one of these, and THE ' +
+                     'PROTOCOL\'S OWN CLAIM BEATS BOTH — which is worth ' +
+                     'knowing before it is discovered on a token. An ID ' +
+                     'Token always carries name, given_name, family_name, ' +
+                     'preferred_username and email built from the sign-in, ' +
+                     'so selecting cn, givenName, sn, uid or mail ON THAT ' +
+                     'SET changes nothing the client sees; the same five ' +
+                     'reach an access token from the directory, because the ' +
+                     'protocol sets none of them there. A SAML 2.0 assertion ' +
+                     'sets `name` the same way and a WS-Federation one sets ' +
+                     'the whole identity claim list. Both halves are ' +
+                     'reported by that same GET.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            set: { type: 'string',
+                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] },
+            attributes: { type: 'array', items: { type: 'string' },
+                          description: 'LDAP attribute type names, from ' +
+                                       '`attributeCatalogue`. An EMPTY ' +
+                                       'array clears the selection — and so ' +
+                                       'does an ABSENT one, so a misspelt ' +
+                                       'field name empties the set rather ' +
+                                       'than being refused. The reply names ' +
+                                       'everything it `removed` and the ' +
+                                       'audit log keeps a row saying the ' +
+                                       'same, and `attributes-clear` is how ' +
+                                       'a caller that means it says so.' }
+          },
+          required: ['set', 'attributes'],
+          examples: [{ set: 'access_token',
+                       attributes: ['mail', 'departmentNumber', 'title'] }],
+          additionalProperties: false
+        },
+        responseDescription: 'What the set carries now, in `attributes`, ' +
+                             'with `added` and `removed`.' },
+
+      { action: 'attributes-all', operationId: 'selectAllClaimAttributes',
+        summary: 'Put every catalogued attribute in one set',
+        description: 'Every attribute type in the catalogue, which is a ' +
+                     'legitimate thing to test and makes a large token. It ' +
+                     'exists as its own operation so that "all of them" does ' +
+                     'not mean a caller constructing the whole list of ' +
+                     'names that has to be updated whenever the catalogue ' +
+                     'is.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            set: { type: 'string',
+                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] }
+          },
+          required: ['set'],
+          examples: [{ set: 'id_token' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The whole catalogue, in `attributes`.' },
+
+      { action: 'attributes-clear', operationId: 'clearClaimAttributes',
+        summary: 'Take every directory attribute out of one set',
+        description: 'The TYPED claims on that set are untouched — this is ' +
+                     'the other half. Clearing both takes this and `clear`.' +
+                     '\n\nNothing is deleted from the directory: what was ' +
+                     'written onto an entry stays there, because an operator ' +
+                     'may have set it and nothing here has the standing to ' +
+                     'remove it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            set: { type: 'string',
+                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] }
+          },
+          required: ['set'],
+          examples: [{ set: 'id_token' }],
+          additionalProperties: false
+        },
+        responseDescription: 'An empty `attributes`, and what was `removed`.' }
     ] },
 
   { method: 'GET', path: BASE + '/credential-claims', tag: 'Credential claims',
@@ -980,7 +1184,81 @@ const ROUTES = [
           additionalProperties: false
         },
         responseDescription: 'The format now in force.' }
-    ] }
+    ] },
+
+  // The audit log. READ ONLY, and that is a decision rather than an operation
+  // nobody got round to. Every other resource here has a POST beside it because
+  // the console control it mirrors is a form; this one mirrors a page with no
+  // form on it, because a clear button on an unprotected console would make an
+  // audit log unable to answer the one question it exists for. There is nothing
+  // to change, so there is nothing to document as changeable.
+  { method: 'GET', path: BASE + '/audit', tag: 'Audit log',
+    operationId: 'getAudit',
+    summary: 'What happened here, in order, filtered and paged',
+    description: 'Every authentication, session, LDAP directory operation, ' +
+                 'console interaction, management API call and protocol ' +
+                 'endpoint call, newest first.\n\nThis is HISTORY where the ' +
+                 'rest of this API is STATE. /admin-api/metrics can say the ' +
+                 'directory holds eleven entries; only this can say a twelfth ' +
+                 'was created at 14:02 and deleted at 14:03 by somebody bound ' +
+                 'as `uid=carol`, over LDAPS.\n\n**NO CREDENTIAL IS EVER IN ' +
+                 'A ROW.** Not a password, not a bearer token, not an ' +
+                 'assertion, and no request or response body. A modify names ' +
+                 'the attributes it changed and never their values, because a ' +
+                 'modify is where a `userPassword` gets set; a compare says ' +
+                 'whether it matched and not what was tried; an ' +
+                 'authorization code in a query string is replaced with ' +
+                 '`(redacted)`.\n\n**One act usually produces several ' +
+                 'events.** A sign-in writes three — the HTTP call, the ' +
+                 'credential being accepted, and the session that came out of ' +
+                 'it. They are three facts at three layers, and a Kerberos ' +
+                 'AS-REQ authenticates somebody and starts no session at all.' +
+                 '\n\nWALK IT BY `seq`, not by page. That number is ' +
+                 'monotonic and never reused, including across a drop, so ' +
+                 '"everything after 4102" is exact; a gap between the last ' +
+                 'one you saw and `oldestSeq` is precisely how many events ' +
+                 'you missed while the cap discarded them.',
+    mirrors: 'GET /admin/audit',
+    parameters: [
+      { name: 'category', in: 'query', required: false,
+        schema: { type: 'string',
+                  enum: ['authentication', 'session', 'directory', 'admin',
+                         'api', 'protocol'] },
+        description: 'One of the six categories. The reply\'s `categories` ' +
+                     'member describes each of them.' },
+      { name: 'action', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One action. ANDed with `category`, so an action from ' +
+                     'another category matches nothing — which is what an ' +
+                     'empty list then means. The reply\'s `actions` member ' +
+                     'lists every action with the category it belongs to.' },
+      { name: 'outcome', in: 'query', required: false,
+        schema: { type: 'string', enum: ['success', 'refused', 'error'] },
+        description: 'Three rather than two on purpose: a `refused` is this ' +
+                     'service working correctly and saying no, an `error` is ' +
+                     'this service failing, and collapsing them would bury ' +
+                     'the one row worth paging somebody about under the ' +
+                     'fifty that are a client getting its parameters wrong.' },
+      { name: 'actor', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'Substring of either spelling of the actor, ' +
+                     'case-insensitive — the normalised key (`alice`) or the ' +
+                     'form it was presented in (a bind DN, `alice@REALM`, an ' +
+                     'X.509 subject). A substring because the collapse to one ' +
+                     'key can only be done where an identity is normalised, ' +
+                     'and a directory row\'s actor is a DN.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the summary, the target or the action, ' +
+                     'case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The matching events, with the paging that found ' +
+                         'them and the vocabulary the filters take.',
+    responseSchema: { $ref: '#/components/schemas/AuditList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API audit endpoint.");
+      sendJson(res, 200, admin.auditView(req.query).json);
+      log.debug("Leaving the management API audit endpoint.");
+    } }
 ];
 
 // Every operation, flattened, for the index. The same walk buildSpec() does,

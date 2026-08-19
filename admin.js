@@ -16,6 +16,10 @@
 //                         Kerberos ticket, filtered and paged — and the buttons that
 //                         invalidate the ones that can be
 //   POST /admin/tokens    revoke / restore, one token or a whole class of them
+//   GET  /admin/audit     what happened here, in order — every authentication,
+//                         session, directory operation, console interaction,
+//                         management API call and protocol endpoint call, as
+//                         rows rather than as counters, filtered and paged
 //   GET  /admin/claims    the custom claims every new token will carry
 //   POST /admin/claims    add, remove, clear, or replace a whole set
 //
@@ -76,6 +80,21 @@ const vcClaims = require('./vc_claims');
 // so requiring it here neither moves a route nor makes a cycle; vc_verifier.js
 // reads the same module from the other side of the require order.
 const vpConfig = require('./vc_verifier_config');
+// The THIRD reader of that same catalogue: which LDAP attributes a token or an
+// assertion carries, per claim set. A library like the two above, registering no
+// route, so requiring it here neither moves a route nor makes a cycle — it
+// requires admin_stats.js and vc_claims.js, and neither requires it back. It is
+// what turns /admin/claims from a page of typed constants into one that can put
+// what the directory says into an access token. See its header for why the
+// selection is per-set and why nothing is selected on a fresh start.
+const claimAttributes = require('./claim_attributes');
+// The audit log: what happened here, in order, as rows rather than as counters.
+// A library like the three above — it registers no route — so requiring it here
+// neither moves a route nor makes a cycle. It holds the events and this file
+// renders them at /admin/audit, which is the same split admin_stats.js has and
+// for the same reason: a test can walk the log over JSON without going near an
+// HTML page.
+const auditLog = require('./audit');
 
 // How many rows of a list a page will draw. A cap is needed — 5,000 token rows is
 // a page no browser enjoys — and what it hid is always stated underneath, because a
@@ -91,6 +110,16 @@ const MAX_ROWS = 300;
 // screen rather than the last, and the paging controls above and below it say what
 // the rest of the list is.
 const DEFAULT_PER_PAGE = 50;
+
+// Rows per page for a list whose ROW IS A TABLE. There is one of those — the session
+// blocks on the users drill-down, where each row of the list is a session heading, a
+// facts table and a token table under it — and giving it DEFAULT_PER_PAGE would put
+// fifty tables on one page, each of which is itself paged at fifty rows. The list
+// pages get away with one number because a row there is a row.
+//
+// `?per=` still overrides it, for the same reason it overrides everything else: a
+// number somebody typed is a number they meant.
+const DEFAULT_BLOCKS_PER_PAGE = 5;
 
 // How many subjects the metrics page names in one "Who" cell before it says how
 // many more there are. A separate cap from MAX_ROWS because it bounds a cell rather
@@ -118,6 +147,7 @@ const NAV = [
   { path: '/admin/users', label: 'Users' },
   { path: '/admin/groups', label: 'Groups' },
   { path: '/admin/tokens', label: 'Tokens' },
+  { path: '/admin/audit', label: 'Audit log' },
   { path: '/admin/claims', label: 'Custom claims' },
   { path: '/admin/vc', label: 'Credential claims' },
   { path: '/admin/vc-verifier-config', label: 'Verifier request' },
@@ -522,15 +552,33 @@ const COLUMN_LEGEND =
 // from a stale bookmark taken when the list was longer — a revocation sweep can
 // shorten it between two clicks, and an out-of-range page must be the last page
 // rather than an empty table that reads as "nothing matched".
+//
+// ONE PAGE CAN HOLD SEVERAL LISTS, and that is what `options.name` is for. The three
+// list views have one list each and read the bare `page`, which is what they have
+// always done and what every bookmark and every caller of the management API already
+// says. The two DRILL-DOWNS have five and two: a users page holds its sessions, the
+// tokens under each of them, the tokens on ended sessions, the tokens on no session
+// and the artifacts, and a group page holds its members and the entries claiming it.
+// A single `page` cannot serve those — clicking "next" under the artifacts would
+// silently advance the sessions above it — so each list gets a page parameter named
+// after itself and `per` stays shared, because "rows per table" is one choice a
+// reader makes for the whole page rather than seven.
+//
+// `per` is shared for a second reason worth stating: it is the parameter with the
+// cap on it, and one capped parameter is one place the cap can be got right.
 // ---------------------------------------------------------------------------
-function pagingOf(query, total) {
-  log.debug("Entering pagingOf(). total=" + total);
+function pagingOf(query, total, options) {
+  const opts = options || {};
+  const param = opts.name ? opts.name + 'Page' : 'page';
+  log.debug("Entering pagingOf(). total=" + total + ", param=" + param);
   const askedPer = parseInt(String(query.per || ''), 10);
-  const perPage = (isFinite(askedPer) && askedPer > 0) ? Math.min(askedPer, MAX_ROWS) : DEFAULT_PER_PAGE;
+  const perPage = (isFinite(askedPer) && askedPer > 0)
+    ? Math.min(askedPer, MAX_ROWS)
+    : (opts.defaultPer || DEFAULT_PER_PAGE);
   // At least one page even when nothing matched, so "page 1 of 1" is what an empty
   // list says rather than "page 1 of 0".
   const pages = Math.max(1, Math.ceil(total / perPage));
-  const askedPage = parseInt(String(query.page || ''), 10);
+  const askedPage = parseInt(String(query[param] || ''), 10);
   const page = Math.min(Math.max(isFinite(askedPage) ? askedPage : 1, 1), pages);
   const offset = (page - 1) * perPage;
   log.debug("Leaving pagingOf(). page=" + page + " of " + pages + ", perPage=" + perPage + ".");
@@ -539,8 +587,120 @@ function pagingOf(query, total) {
     // 1-based and inclusive, for the "rows 51–100 of 312" line. Zero and zero when
     // nothing matched, which is what the line then has to say.
     firstRow: total ? offset + 1 : 0,
-    lastRow: Math.min(offset + perPage, total)
+    lastRow: Math.min(offset + perPage, total),
+    // Which query parameter this list moves on, carried on the result rather than
+    // passed to pageNav() a second time: the one place that decides the name is the
+    // one place that builds the links, so a control cannot come to page a list other
+    // than the one it is drawn under.
+    param: param,
+    // What a row of this list IS, for the summary line. Seven controls on one page
+    // all saying "rows" would leave the reader counting tables to work out which
+    // number belongs to which.
+    noun: opts.noun || 'rows'
   };
+}
+
+// The paging members of a reply, for a page that carries more than one list and
+// therefore cannot put them at the top level the way the three list views do.
+// Same names one level down, deliberately: a caller that has learned to walk
+// `page`/`pages` on /admin-api/tokens reads `sessionsPaging.page` without being
+// told anything new. `total` is here and not up there because up there it is
+// `matched`, which is the count AFTER a filter — there is no filter on a
+// drill-down's lists, so the honest name for the number is the plain one.
+function pagingJson(pg) {
+  return {
+    page: pg.page, pages: pg.pages, perPage: pg.perPage,
+    firstRow: pg.firstRow, lastRow: pg.lastRow, total: pg.total
+  };
+}
+
+// The slice, with the paging that produced it. Written once because seven lists
+// across the two drill-downs do exactly this and a hand-written eighth would be the
+// one that forgets to slice.
+function pagedRows(query, rows, options) {
+  const pg = pagingOf(query, rows.length, options);
+  return { paging: pg, shown: rows.slice(pg.offset, pg.offset + pg.perPage) };
+}
+
+// The parameters every control on a drill-down has to carry.
+//
+// The list views name theirs one by one, and they can: their parameter set is the
+// filter form beside them and it is written down two lines above the call. A
+// drill-down's is not written down anywhere — one of its lists has a page parameter
+// PER SESSION BLOCK, so the set depends on what the reader has been clicking — and
+// listing the ones that exist today is how paging the artifacts comes to reset the
+// members six months from now. So the current query is carried through whole and
+// each control overrides its own key.
+//
+// Three things are dropped and each for its own reason. `format`, for the reason the
+// tokens page gives about its own links: JSON has no page to click, so a nav link
+// carrying it would answer a click with a download. And `notice` and `error`, which
+// are the message a revoke's redirect brought back — they belong to the act that has
+// just happened and not to the view, so carrying them would leave "Revoked …" at the
+// top of every page the reader clicked to afterwards, and would put a stale one in
+// the `back` field of the next revoke, which answers with two.
+const NOT_A_VIEW = ['format', 'notice', 'error'];
+
+function pageParamsOf(query) {
+  log.debug("Entering pageParamsOf().");
+  const out = {};
+  Object.keys(query || {}).forEach(function (key) {
+    if (NOT_A_VIEW.indexOf(key) >= 0) {
+      return;
+    }
+    // Express hands back an array when a parameter is repeated. The first is taken
+    // rather than String()'d, because String(['2','5']) is "2,5" — a page number
+    // nothing can parse, silently reached by a link somebody clicked twice.
+    const value = Array.isArray(query[key]) ? query[key][0] : query[key];
+    out[key] = value == null ? '' : String(value);
+  });
+  log.debug("Leaving pageParamsOf(). " + Object.keys(out).length + " parameter(s).");
+  return out;
+}
+
+// The per-page select, written once because five surfaces offer it and a sixth
+// written by hand is the one that forgets to add a hand-typed size to the list.
+//
+// MAX_ROWS is offered as the largest choice so the old behaviour — everything on one
+// page, up to the cap — is still one click away for anyone who wants to search the
+// table with the browser's own find.
+//
+// A hand-typed `?per=7` is ADDED to the list rather than ignored, or the select would
+// show a size that is not the one being used and would silently change it on the next
+// Filter — which is a control that lies about the page it is on.
+function perPageOptions(perPage) {
+  const choices = [25, DEFAULT_PER_PAGE, 100, MAX_ROWS];
+  if (choices.indexOf(perPage) < 0) {
+    choices.push(perPage);
+    choices.sort(function (a, b) { return a - b; });
+  }
+  return choices.map(function (n) {
+    return '<option value="' + n + '"' + (n === perPage ? ' selected' : '') + '>' +
+           n + ' rows</option>';
+  }).join('');
+}
+
+// The same control as a form of its own, for the two DRILL-DOWNS — which have no
+// filter form to hang it on, and which need it more than the lists do because they
+// carry several tables at once.
+//
+// Submitting it drops every page parameter, which is deliberate rather than an
+// oversight of the hidden inputs: a GET form posts its own fields and nothing else,
+// and page 4 of fifty-row pages is not page 4 of anything after the size changes.
+// Going back to the top of each list is the only answer that is true of all of them.
+function perPageForm(path, key, value, perPage, extraNote) {
+  log.debug("Entering perPageForm(). path=" + path);
+  const html = '<form method="get" action="' + esc(path) + '"><div class="formrow">' +
+    '<input type="hidden" name="' + esc(key) + '" value="' + esc(value) + '">' +
+    '<label for="per">Rows per table</label>' +
+    '<select id="per" name="per">' + perPageOptions(perPage) + '</select>' +
+    '<button class="secondary">Apply</button>' +
+    '<span class="note">Every table below is paged separately and they share this ' +
+    'size. Changing it starts each of them at its first page.' +
+    (extraNote ? ' ' + extraNote : '') + '</span>' +
+    '</div></form>';
+  log.debug("Leaving perPageForm().");
+  return html;
 }
 
 // A query string built from what the caller is already looking at plus an override.
@@ -568,13 +728,18 @@ function queryWith(params, overrides) {
 // 5,000 tokens at 50 a page is 100 links, which is a worse navigation aid than none.
 // First and last are always offered so the ends stay one click away.
 function pageNav(path, params, pg) {
-  log.debug("Entering pageNav(). pages=" + pg.pages);
+  log.debug("Entering pageNav(). pages=" + pg.pages + ", param=" + pg.param);
   if (pg.pages <= 1) {
     log.debug("Leaving pageNav(). One page; no control drawn.");
     return '';
   }
   function link(page, label, title) {
-    return '<a href="' + esc(path + queryWith(params, { page: page })) + '"' +
+    const move = {};
+    // The list's OWN parameter, off pg, so that a drill-down's five controls move
+    // five different lists. Everything else in `params` rides along untouched,
+    // which is what keeps the other four where the reader left them.
+    move[pg.param] = page;
+    return '<a href="' + esc(path + queryWith(params, move)) + '"' +
            (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</a>';
   }
   const out = [];
@@ -595,7 +760,7 @@ function pageNav(path, params, pg) {
   } else {
     out.push('<span class="off">next &rsaquo;</span><span class="off">last &raquo;</span>');
   }
-  out.push('<span class="where">page ' + pg.page + ' of ' + pg.pages + ' — rows ' +
+  out.push('<span class="where">page ' + pg.page + ' of ' + pg.pages + ' — ' + pg.noun + ' ' +
            pg.firstRow + '&ndash;' + pg.lastRow + ' of ' + pg.total + '</span>');
   log.debug("Leaving pageNav(). Drew " + out.length + " element(s).");
   return '<div class="pagenav">' + out.join('') + '</div>';
@@ -1121,6 +1286,37 @@ function tokenAction(body) {
 // page. That is what keeps the open-redirect property while letting a second page
 // share the handler — a `back` field carrying `//evil.example` would otherwise become
 // a redirect off this service the moment a path came from the body.
+// The drill-down's page parameters, out of a `back` field, for the redirect that
+// follows a revoke.
+//
+// The named parameters above are a WHITELIST, which is the right shape for a
+// redirect target built out of a form field somebody posted — but a whitelist cannot
+// cover this set, because one of the users page's lists has a page parameter per
+// session block and the names therefore depend on which sessions exist. So the rule
+// is a shape rather than a list: a key ending in `Page`, made of the characters a
+// name and a base64url session id are made of, whose value is a positive integer.
+// The value is REBUILT from parseInt rather than passed through, so what lands in
+// the URL is a number this function produced.
+//
+// What it buys is the thing a reader notices immediately: revoking a token from page
+// three of a session's table used to answer with page one of everything, so the row
+// you had just acted on was no longer on screen and neither was its neighbour.
+function drillDownPages(params) {
+  log.debug("Entering drillDownPages().");
+  const out = {};
+  params.forEach(function (value, key) {
+    if (!/^[A-Za-z0-9_-]+Page$/.test(key)) {
+      return;
+    }
+    const n = parseInt(String(value), 10);
+    if (isFinite(n) && n > 0) {
+      out[key] = String(n);
+    }
+  });
+  log.debug("Leaving drillDownPages(). " + Object.keys(out).length + " page parameter(s).");
+  return out;
+}
+
 function backTo(body) {
   log.debug("Entering backTo().");
   let params = null;
@@ -1133,13 +1329,13 @@ function backTo(body) {
     return '/admin/tokens';
   }
   if (String(body.from || '') === 'users') {
-    const usersTarget = '/admin/users' + queryWith({
+    const usersTarget = '/admin/users' + queryWith(Object.assign({
       user: params.get('user') || '',
       q: params.get('q') || '',
       protocol: params.get('protocol') || '',
       per: params.get('per') || '',
       page: params.get('page') || ''
-    }, {});
+    }, drillDownPages(params)), {});
     log.debug("Leaving backTo(). " + usersTarget);
     return usersTarget;
   }
@@ -1276,22 +1472,7 @@ app.get('/admin/tokens', function (req, res) {
       return '<option value="' + esc(s) + '"' + (s === wantedState ? ' selected' : '') + '>' +
              esc(s || 'any state') + '</option>';
     }).join('');
-  // MAX_ROWS is offered as the largest choice so the old behaviour — everything on
-  // one page, up to the cap — is still one click away for anyone who wants to search
-  // the table with the browser's own find.
-  //
-  // A hand-typed `?per=7` is added to the list rather than ignored, or the select
-  // would show a size that is not the one being used and would silently change it on
-  // the next Filter.
-  const perChoices = [25, DEFAULT_PER_PAGE, 100, MAX_ROWS];
-  if (perChoices.indexOf(paging.perPage) < 0) {
-    perChoices.push(paging.perPage);
-    perChoices.sort(function (a, b) { return a - b; });
-  }
-  const perOptions = perChoices.map(function (n) {
-    return '<option value="' + n + '"' + (n === paging.perPage ? ' selected' : '') + '>' +
-           n + ' rows</option>';
-  }).join('');
+  const perOptions = perPageOptions(paging.perPage);
 
   const inner = messagesOf(req) +
     '<p class="note">Everything this service has issued and still remembers: every JWT, every SAML ' +
@@ -1404,6 +1585,391 @@ app.get('/admin/tokens', function (req, res) {
 
   respond(req, res, view.json, 'Tokens', '/admin/tokens', inner);
   log.debug("Leaving the admin tokens page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/audit — what happened here, in order.
+//
+// The other pages on this console are STATE: how many calls, which tokens are
+// still valid, who is in cn=developers. This one is HISTORY, and the difference
+// is the reason it exists. The metrics page can tell you the directory holds
+// eleven entries; only this one can tell you that a twelfth was created at
+// 14:02 and deleted at 14:03, by somebody bound as uid=carol, over LDAPS.
+//
+// Six categories, and every event in the service arrives through one of five
+// funnels rather than from a recording site per feature:
+//
+//   authentication   admin_stats.recordAuthentication(), the single point all
+//                    fourteen protocol families already pass through when a
+//                    credential is ACCEPTED
+//   session          authn.js's startSession / endSession, which is where both
+//                    OAuth 2.0 / OIDC and WS-Federation sign in and out
+//   directory        the seven LDAP handlers in ldap_server.js, plus the
+//                    entries this service creates for people who authenticated
+//                    somewhere else
+//   admin / api      app.js's call log, classified by path
+//   protocol         the same call log, everything else
+//
+// **ONE ACT USUALLY PRODUCES SEVERAL ROWS.** A sign-in at /authn/login writes
+// three: the HTTP call, the credential being accepted, and the session that came
+// out of it. They are three facts at three layers rather than one fact three
+// times — and which of them you want depends on the question, which is exactly
+// why the log does not choose. The page says so under the table.
+//
+// **IT OBSERVES ITSELF.** Drawing this page is console access, so it records an
+// `admin.view` row, so the list is one longer than when you asked for it.
+// Suppressing that would put a blind spot exactly where the person reading the
+// audit log stands. It is stated instead, and `?category=` reads past it.
+// ---------------------------------------------------------------------------
+
+// Everything the page and the API both need out of one query string. Written as
+// a view function for the reason the comment above consoleJson() gives: this
+// console and /admin-api are two callers, and two hand-built copies of the same
+// filtering would be two answers that each look right alone.
+function auditView(query) {
+  log.debug("Entering auditView().");
+  const wantedCategory = String(query.category || '');
+  const wantedAction = String(query.action || '');
+  const wantedOutcome = String(query.outcome || '');
+  const wantedActor = String(query.actor || '');
+  const wantedText = String(query.q || '');
+  const all = auditLog.list();
+  const needle = wantedText.toLowerCase();
+  const actorNeedle = wantedActor.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (wantedCategory && row.category !== wantedCategory) return false;
+    if (wantedAction && row.action !== wantedAction) return false;
+    if (wantedOutcome && row.outcome !== wantedOutcome) return false;
+    // Substring rather than equality, and case-insensitively, because the actor
+    // on a directory row may be the console key (`alice`) while the one on a
+    // Kerberos row arrived as `alice@STS.MOCK` — the collapse to one key is done
+    // where an identity is normalised and cannot be done for a row whose actor
+    // is a bind DN. A substring finds the person either way.
+    if (actorNeedle && (row.actor + ' ' + row.actorForm).toLowerCase()
+                         .indexOf(actorNeedle) < 0) return false;
+    // One free-text box over the three columns somebody would look in. The
+    // summary alone would miss a DN that only appears in `target`, and a box
+    // that silently searched one column while the reader assumed three is worse
+    // than no box.
+    if (needle && (row.summary + ' ' + row.target + ' ' + row.action)
+                    .toLowerCase().indexOf(needle) < 0) return false;
+    return true;
+  });
+  // Filter first, then page — the same order the tokens page uses and for the
+  // same reason: paging a list and then filtering it gives a page 2 whose length
+  // depends on what page 1 happened to hold.
+  const paging = pagingOf(query, filtered.length);
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const summary = auditLog.summary();
+  log.debug("Leaving auditView(). " + shown.length + " row(s) of " +
+            filtered.length + ".");
+  return {
+    wantedCategory: wantedCategory, wantedAction: wantedAction,
+    wantedOutcome: wantedOutcome, wantedActor: wantedActor,
+    wantedText: wantedText,
+    all: all, filtered: filtered, paging: paging, shown: shown,
+    summary: summary,
+    json: {
+      held: summary.held,
+      // Everything ever recorded and everything dropped, both, because `held`
+      // alone reads as "this is all there was" the moment the cap has bitten.
+      recorded: summary.recorded, dropped: summary.dropped,
+      maxEvents: summary.maxEvents, protocolCalls: summary.protocolCalls,
+      matched: filtered.length, shown: shown.length,
+      // The lowest and highest sequence numbers still held. A caller polling
+      // this endpoint uses them rather than a timestamp: `seq` is monotonic and
+      // never reused, so "everything after 4,102" is exact, and a gap between
+      // the last seq you saw and `oldestSeq` is precisely how many events you
+      // missed.
+      oldestSeq: summary.oldestSeq, newestSeq: summary.newestSeq,
+      byCategory: summary.byCategory, byOutcome: summary.byOutcome,
+      byAction: summary.byAction,
+      filter: { category: wantedCategory || null, action: wantedAction || null,
+                outcome: wantedOutcome || null, actor: wantedActor || null,
+                q: wantedText || null },
+      // The clamped values, not what was asked for: `?page=999` on a two-page
+      // list reports page 2, which is the page whose rows are in the reply.
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      // The vocabulary, off the data rather than out of a list in a test: what
+      // the `category`, `action` and `outcome` filters take.
+      categories: auditLog.CATEGORIES, actions: auditLog.ACTIONS,
+      outcomes: auditLog.OUTCOMES,
+      events: shown
+    }
+  };
+}
+
+// The outcome, in the same three colours the token states use — so that a page
+// somebody has learned to skim once reads the same way here. `refused` is amber
+// rather than red on purpose: it is this service working correctly and saying
+// no, which is most of what a debugger of a protocol client wants to see, and
+// painting it as a failure would bury the 5xx rows that are one.
+function outcomeCell(outcome) {
+  const cls = outcome === 'success' ? 'state-valid'
+            : (outcome === 'refused' ? 'state-expired' : 'state-revoked');
+  return '<span class="' + cls + '">' + esc(outcome) + '</span>';
+}
+
+// The detail object as one cell. Rendered as `key=value` pairs rather than as
+// JSON because the column is narrow and a reader is scanning for one fact, not
+// parsing a document; `?format=json` has the object itself for anything that is
+// not a person.
+function auditDetailCell(detail) {
+  const keys = Object.keys(detail || {});
+  if (!keys.length) return '<span class="state-none">—</span>';
+  return keys.map(function (key) {
+    return '<code>' + esc(key) + '=' + esc(detail[key]) + '</code>';
+  }).join(' ');
+}
+
+// Who did it. The console key links to their page where this service has seen
+// them authenticate, following the same three-state rule the groups page uses —
+// a name it knows, a name it could file somebody under but never has, and no
+// name at all. The PRESENTED form is shown underneath when it differs, because
+// the collapse from `uid=alice,ou=users,dc=example,dc=com` to `alice` is a thing
+// an auditor has to be able to see rather than take on trust.
+function auditActorCell(row, known) {
+  if (!row.actor && !row.actorForm) {
+    return '<span class="state-none" title="Nothing here names an actor. An ' +
+      'unauthenticated protocol call and an anonymous LDAP bind both look like ' +
+      'this, and both are ordinary on a service that authenticates nobody.">—</span>';
+  }
+  const parts = [];
+  if (row.actor) {
+    parts.push(known[row.actor]
+      ? '<a href="' + esc('/admin/users' + queryWith({ user: row.actor }, {})) +
+        '">' + esc(row.actor) + '</a>'
+      : '<span class="state-none" title="The console has no row for this name: ' +
+        'nothing has authenticated as them in this process. A directory bind DN ' +
+        'yields a name without there being anybody behind it.">' +
+        esc(row.actor) + ' <em>(never here)</em></span>');
+  }
+  if (row.actorForm && row.actorForm !== row.actor) {
+    parts.push('<code>' + esc(row.actorForm) + '</code>');
+  }
+  return parts.join('<br>');
+}
+
+function auditRow(row, known) {
+  return '<tr>' +
+    '<td class="num">' + esc(row.seq) + '</td>' +
+    '<td>' + esc(whenText(row.at)) + '</td>' +
+    '<td>' + esc(row.category) + '</td>' +
+    '<td><code>' + esc(row.action) + '</code></td>' +
+    '<td>' + outcomeCell(row.outcome) + '</td>' +
+    '<td class="who">' + auditActorCell(row, known) + '</td>' +
+    '<td class="who">' + (row.target ? '<code>' + esc(row.target) + '</code>'
+                                     : '<span class="state-none">—</span>') +
+      (row.channel ? '<br><span class="state-none">' + esc(row.channel) +
+                     (row.protocol ? ' — ' + esc(row.protocol) : '') + '</span>' : '') +
+    '</td>' +
+    '<td>' + esc(row.summary) + '</td>' +
+    '<td class="who">' + auditDetailCell(row.detail) + '</td>' +
+    '</tr>';
+}
+
+app.get('/admin/audit', function (req, res) {
+  log.debug("Entering the admin audit page.");
+  const view = auditView(req.query);
+  const paging = view.paging;
+  const summary = view.summary;
+  const known = knownUserKeys();
+  // What every paging link carries with it. The page number is not in here —
+  // pageNav() supplies that per link — for the reason the tokens page gives: a
+  // "next" that dropped the filter would be page 2 of a different list.
+  const filterParams = { category: view.wantedCategory, action: view.wantedAction,
+                         outcome: view.wantedOutcome, actor: view.wantedActor,
+                         q: view.wantedText,
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/audit', filterParams, paging);
+
+  const rows = view.shown.map(function (row) {
+    return auditRow(row, known);
+  }).join('');
+
+  const categoryOptions = ['<option value=""' + (view.wantedCategory ? '' : ' selected') +
+                           '>any category</option>']
+    .concat(auditLog.CATEGORIES.map(function (entry) {
+      return '<option value="' + esc(entry.category) + '"' +
+             (entry.category === view.wantedCategory ? ' selected' : '') + '>' +
+             esc(entry.label) + ' (' + (summary.byCategory[entry.category] || 0) + ')</option>';
+    })).join('');
+
+  // Grouped by category, and built from the SAME table the category select is,
+  // so the two cannot come to disagree about which action belongs where — which
+  // they would, being two hand-written lists of the same twenty-four strings.
+  const actionOptions = '<option value=""' + (view.wantedAction ? '' : ' selected') +
+    '>any action</option>' +
+    auditLog.CATEGORIES.map(function (entry) {
+      const inGroup = auditLog.ACTIONS.filter(function (a) {
+        return a.category === entry.category;
+      });
+      return '<optgroup label="' + esc(entry.label) + '">' + inGroup.map(function (a) {
+        return '<option value="' + esc(a.action) + '"' +
+               (a.action === view.wantedAction ? ' selected' : '') + '>' +
+               esc(a.action) + ' (' + (summary.byAction[a.action] || 0) + ')</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
+
+  const outcomeOptions = ['<option value=""' + (view.wantedOutcome ? '' : ' selected') +
+                          '>any outcome</option>']
+    .concat(auditLog.OUTCOMES.map(function (name) {
+      return '<option value="' + esc(name) + '"' +
+             (name === view.wantedOutcome ? ' selected' : '') + '>' + esc(name) +
+             ' (' + (summary.byOutcome[name] || 0) + ')</option>';
+    })).join('');
+
+  const perOptions = perPageOptions(paging.perPage);
+
+  const filtering = view.wantedCategory || view.wantedAction || view.wantedOutcome ||
+                    view.wantedActor || view.wantedText;
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+      tile(summary.held, 'events held') +
+      tile(summary.recorded, 'events recorded') +
+      tile(summary.dropped, 'dropped (oldest first)') +
+      tile(summary.byCategory.directory || 0, 'directory') +
+      tile(summary.byCategory.authentication || 0, 'authentications') +
+      tile(summary.byCategory.session || 0, 'session events') +
+    '</div>' +
+
+    '<p class="note">What this service has been asked to do, in the order it was ' +
+    'asked, newest first. The other pages here are <em>state</em> — how many calls, ' +
+    'which tokens are still valid, who is in <code>cn=developers</code>. This one is ' +
+    '<em>history</em>: the metrics page can say the directory holds eleven entries, and ' +
+    'only this page can say that a twelfth was created at 14:02 and deleted at 14:03 by ' +
+    'somebody bound as <code>uid=carol</code>, over LDAPS.</p>' +
+
+    '<p class="note"><strong>No credential is ever recorded here.</strong> Not a ' +
+    'password, not a bearer token, not an assertion, and no request or response body. ' +
+    'An event carries the facts of what happened — who, what, where, the outcome — and ' +
+    'the identifiers that are already safe to show. A modify names the attributes it ' +
+    'changed and never their values, because a modify is where a <code>userPassword</code> ' +
+    'gets set; a compare says whether it matched and not what was tried; an ' +
+    '<code>authorization code</code> in a query string is replaced with ' +
+    '<code>(redacted)</code>. The debug log is where somebody who wants the bodies looks, ' +
+    'and it is a log rather than a web page.</p>' +
+
+    '<p class="note"><strong>One act usually produces several rows, and they are not ' +
+    'duplicates.</strong> Signing in at <code>/authn/login</code> writes three: the HTTP ' +
+    'call (<code>protocol.call</code>), the credential being accepted ' +
+    '(<code>authentication</code>) and the session that came out of it ' +
+    '(<code>session.start</code>). Those are three facts at three layers, and which one ' +
+    'answers your question depends on the question — a Kerberos AS-REQ authenticates ' +
+    'somebody and starts no session at all, and an LDAP bind does both without an HTTP ' +
+    'request anywhere in it. Collapsing them would mean choosing, once and for everybody, ' +
+    'which of the three this page can answer.</p>' +
+
+    '<p class="note"><strong>This log observes itself.</strong> Drawing this page is ' +
+    'console access, so fetching it records an <code>admin.view</code> event and the list ' +
+    'is one row longer than it was when you asked. That is not a defect being left ' +
+    'unfixed: suppressing it would put a blind spot exactly where the person reading the ' +
+    'audit log stands. Filter by category to read past it.</p>' +
+
+    '<h2>What happened</h2>' +
+    // No `page` input in this form, deliberately: changing a filter or the page
+    // size returns to page 1. Carrying the old page number over would land
+    // somebody on page 6 of a two-page result and the clamp in pagingOf() would
+    // then move them again, which reads as the form ignoring them.
+    '<form method="get" action="/admin/audit"><div class="formrow">' +
+      '<label for="category">Category</label><select id="category" name="category">' +
+        categoryOptions + '</select>' +
+      '<label for="action">Action</label><select id="action" name="action">' +
+        actionOptions + '</select>' +
+      '<label for="outcome">Outcome</label><select id="outcome" name="outcome">' +
+        outcomeOptions + '</select>' +
+      '<label for="per">Per page</label><select id="per" name="per">' + perOptions +
+        '</select>' +
+    '</div><div class="formrow">' +
+      '<label for="actor">Actor</label>' +
+      '<input type="text" id="actor" name="actor" size="20" value="' +
+        esc(view.wantedActor) + '" placeholder="alice">' +
+      '<label for="q">Text</label>' +
+      '<input type="text" id="q" name="q" size="30" value="' + esc(view.wantedText) +
+        '" placeholder="a DN, a path, anything in the summary">' +
+      '<button class="secondary">Filter</button>' +
+      (filtering ? ' <a href="/admin/audit">clear</a>' : '') +
+    '</div></form>' +
+    '<p class="note">Category and Action narrow together, like any two filters, so an ' +
+    'action from another category matches nothing — which is what an empty table below ' +
+    'then means. Actor matches a substring of either spelling of the name, because the ' +
+    'actor on a directory row is a bind DN and the one on a Kerberos row is ' +
+    '<code>alice@REALM</code>; the collapse to a single key can only be done where an ' +
+    'identity is normalised.</p>' +
+    nav +
+    '<table><tr><th class="num">#</th><th>When</th><th>Category</th><th>Action</th>' +
+    '<th>Outcome</th><th>Actor</th><th>Target</th><th>What happened</th><th>Detail</th></tr>' +
+    (rows || '<tr><td colspan="9">Nothing matches.</td></tr>') + '</table>' +
+    nav +
+
+    '<p class="note">' + view.filtered.length + ' row(s) match' +
+    (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
+                        ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
+    '; ' + summary.held + ' held of ' + summary.recorded + ' recorded since this process ' +
+    'started' +
+    (summary.dropped
+      ? ', and <strong>' + summary.dropped + ' dropped</strong> — the log holds at most ' +
+        summary.maxEvents + ' events and discards the oldest first. Raise ' +
+        '<code>audit.maxEvents</code> on <a href="/admin/config">the configuration page</a> ' +
+        'if that is losing something you need.'
+      : '. The cap is ' + summary.maxEvents + ' events and nothing has been dropped yet.') +
+    '</p>' +
+
+    '<p class="note">The <strong>#</strong> column is a sequence number, and it is ' +
+    'monotonic and never reused — including across a drop. That is what makes it a stable ' +
+    'name for an event: a caller can say &ldquo;I have read up to ' +
+    (summary.newestSeq || 0) + '&rdquo; and mean it, where a row number would silently ' +
+    'name a different event as soon as anything was discarded. <code>?format=json</code> ' +
+    'carries <code>oldestSeq</code> and <code>newestSeq</code> for exactly that: a gap ' +
+    'between the last one you saw and <code>oldestSeq</code> is how many events you ' +
+    'missed.</p>' +
+
+    '<h3>Where the rows come from</h3>' +
+    '<p class="note">Six categories and five recording points, rather than a recording ' +
+    'site per feature. Each of these is a funnel this service already had:</p>' +
+    '<ul>' + auditLog.CATEGORIES.map(function (entry) {
+      return '<li><strong>' + esc(entry.label) + '</strong> (<code>' + esc(entry.category) +
+             '</code>, ' + (summary.byCategory[entry.category] || 0) + ') — ' +
+             esc(entry.what) + '</li>';
+    }).join('') + '</ul>' +
+
+    '<p class="note"><strong>What is deliberately not on a row: the client\'s address.</strong> ' +
+    'On a mock this service is reached over a compose bridge, through a published port, or ' +
+    'from the same machine, so what it would record is the bridge — a fact about docker ' +
+    'rather than about whoever made the call. A column that was right on a laptop and ' +
+    'quietly wrong everywhere else is worse than no column. What a row does say is the ' +
+    'CHANNEL it arrived on — <code>http</code>, <code>ldap</code>, <code>ldaps</code>, or ' +
+    '<code>internal</code> for the things this service did on its own — which is the part ' +
+    'that is actually knowable and is what somebody turning on LDAPS wants to check.</p>' +
+
+    '<p class="note"><strong>It is in memory and dies with the process</strong>, like the ' +
+    'counters, the sessions and the signing key. There is no compliance story here to ' +
+    'serve: this service checks no password anywhere, so an audit log of it is a debugging ' +
+    'aid and not a record of anything. It also has no clear button, and that is a decision ' +
+    'rather than an omission — an erase control on an unprotected console would make the ' +
+    'page unable to answer the one question an audit log exists for. Restarting the ' +
+    'service is how you get an empty one.</p>' +
+
+    '<p class="note">Two settings on <a href="/admin/config">the configuration page</a> ' +
+    'change this page and both take effect immediately: <code>audit.maxEvents</code> (now ' +
+    summary.maxEvents + ') is the cap, and <code>audit.protocolCalls</code> (now ' +
+    (summary.protocolCalls ? 'on' : '<strong>off</strong>') + ') is whether ordinary ' +
+    'protocol endpoint calls get a row at all. That last one is the noisy category — every ' +
+    'JWKS poll and metadata fetch is an event — so turning it off is how somebody watching ' +
+    'the directory or the console gets a readable page. It never affects the other five ' +
+    'categories, and <a href="/admin/metrics">the metrics page</a> counts every call either ' +
+    'way.</p>' +
+
+    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' +
+    MAX_ROWS + ' rows a page) and both work with <code>?format=json</code>, whose reply ' +
+    'carries <code>page</code>, <code>pages</code> and <code>matched</code> so a test can ' +
+    'walk the whole list without guessing where it ends. The same list is at ' +
+    '<code>GET /admin-api/audit</code> with the same parameters.</p>';
+
+  respond(req, res, view.json, 'Audit log', '/admin/audit', inner);
+  log.debug("Leaving the admin audit page.");
 });
 
 // ---------------------------------------------------------------------------
@@ -1798,8 +2364,18 @@ function authenticationTable(row) {
 // page exists for — "what does this person hold right now, and where did it come
 // from" — so the session's own facts and its tokens are drawn as one block rather
 // than as two tables somebody has to join by eye.
-function sessionBlock(session, tokens, back) {
+//
+// Its token table is PAGED, and paged separately from every other block on the page.
+// One browser session can hold most of the five thousand tokens this service
+// remembers — a refresh grant in a loop is all it takes — so the block that answers
+// "what does this person hold right now" is the one table here that can genuinely
+// run away, and a single `page` shared with the block above it would move both.
+// Hence a page parameter named after the session id: it names the block it moves, so
+// a bookmark still moves the same session after the list around it has changed,
+// which an index into the session list would not.
+function sessionBlock(session, tokenPage, back, params) {
   log.debug("Entering sessionBlock(). id=" + session.id);
+  const nav = pageNav('/admin/users', params, tokenPage.paging);
   const html = '<h3>Session ' + shortened(session.id, 12) + ' &mdash; ' +
     '<span class="' + (session.expired ? 'state-expired' : 'state-valid') + '">' +
     (session.expired ? 'expired, not yet swept' : 'active') + '</span></h3>' +
@@ -1810,10 +2386,12 @@ function sessionBlock(session, tokens, back) {
     '<td>' + esc(session.amr || '—') + '</td>' +
     '<td>' + esc(session.acr || '—') + '</td>' +
     '<td>' + (session.wsfedRealms.length ? esc(session.wsfedRealms.join(', ')) : '—') + '</td></tr></table>' +
-    userTokenTable(tokens, back,
+    nav +
+    userTokenTable(tokenPage.shown, back,
       'Nothing has been issued on this session yet. A browser can hold a sign-on session and have ' +
       'been given no token at all — it is what the authorization endpoint reads before it issues ' +
-      'anything.');
+      'anything.') +
+    nav;
   log.debug("Leaving sessionBlock().");
   return html;
 }
@@ -1834,17 +2412,64 @@ function userDetailPage(req, key) {
   const split = tokensBySession(detail.tokens, sessionRows);
   // Where a revoke button on this page returns to: this user's page, which is the
   // only sensible answer — the reader is looking at one person and wants to see the
-  // effect on that person.
-  const back = queryWith({ user: key }, {});
+  // effect on that person. It carries the whole query and not just the name, so the
+  // answer is the page of the table the button was on rather than the first page of
+  // all five; backTo() picks the page parameters back out by shape.
+  //
+  // `params` is the whole current query carried through, and every control on this
+  // page rides on it, so moving one of the five lists leaves the other four where
+  // they are. See pageParamsOf() for why it is carried rather than listed.
+  const params = pageParamsOf(req.query);
+  const back = queryWith(params, {});
   const valid = detail.tokens.filter(function (t) { return t.state === 'valid'; }).length;
   // Read before the markup is assembled rather than inside it, because it is also
   // one of the keys of the JSON view below and reading it twice could show a page
   // and a JSON body that disagree about a directory another request just changed.
   const directory = ldapObjectSection(row, key);
 
-  const sessionBlocks = sessionRows.map(function (session) {
-    return sessionBlock(session, split.held[session.id] || [], back);
+  // Five lists on one page, each with its own page parameter and all of them sharing
+  // `per` — see pagingOf() for why it is that way round.
+  //
+  // What is deliberately NOT paged here: the names this identity has been seen under,
+  // the protocols it authenticated through, and the authentication events. The first
+  // two are bounded by how many spellings and protocols exist, and the third is
+  // capped at stats.MAX_EVENTS_PER_USER — fifty — by the registry itself, which is
+  // the note authenticationTable() already prints. Paging a list that cannot exceed
+  // fifty would buy a control nobody will see, and it would cost something real: all
+  // three live on `row`, which goes out whole as this reply's `user`, so slicing them
+  // for the table would either corrupt that object or duplicate it, and leaving the
+  // JSON whole while the table paged is the console-and-API disagreement this file
+  // keeps warning about.
+  const sessionPage = pagedRows(req.query, sessionRows,
+    { name: 'sessions', noun: 'sessions', defaultPer: DEFAULT_BLOCKS_PER_PAGE });
+  const sessionsNav = pageNav('/admin/users', params, sessionPage.paging);
+  // The token paging of each session that is on this page of sessions, kept beside
+  // the block rather than recomputed for the JSON below: two calls with the same
+  // arguments would be two chances for the page and the reply to disagree about
+  // which tokens a reader is looking at.
+  const sessionTokenPages = sessionPage.shown.map(function (session) {
+    return pagedRows(req.query, split.held[session.id] || [],
+                     { name: 'session-' + session.id, noun: 'tokens' });
+  });
+  const sessionBlocks = sessionPage.shown.map(function (session, index) {
+    return sessionBlock(session, sessionTokenPages[index], back, params);
   }).join('');
+
+  // ONE NAME PER LIST, and it is the name the reply's array carries: the parameter is
+  // `<array>Page` and the paging object beside it is `<array>Paging`. Shortening
+  // these two to `endedPage` and `sessionlessPage` read better and was wrong — a
+  // caller reading `tokensWithNoSession` in the reply had to be told separately that
+  // the parameter moving it was called something else, which is the sort of thing a
+  // document gets right and a client author never finds.
+  const endedPage = pagedRows(req.query, split.ended,
+                              { name: 'tokensOnEndedSessions', noun: 'tokens' });
+  const endedNav = pageNav('/admin/users', params, endedPage.paging);
+  const sessionlessPage = pagedRows(req.query, split.sessionless,
+                                    { name: 'tokensWithNoSession', noun: 'tokens' });
+  const sessionlessNav = pageNav('/admin/users', params, sessionlessPage.paging);
+  const artifactPage = pagedRows(req.query, detail.artifacts,
+                                 { name: 'artifacts', noun: 'artifacts' });
+  const artifactNav = pageNav('/admin/users', params, artifactPage.paging);
 
   const inner = messagesOf(req) +
     '<div class="tiles">' +
@@ -1892,6 +2517,11 @@ function userDetailPage(req, key) {
     }).join('') || '<tr><td colspan="4">Never, here.</td></tr>') + '</table>' +
     authenticationTable(row) +
 
+    perPageForm('/admin/users', 'user', key, artifactPage.paging.perPage,
+                'The session BLOCKS below start at ' + DEFAULT_BLOCKS_PER_PAGE +
+                ' rather than ' + DEFAULT_PER_PAGE + ', because each of them is ' +
+                'itself a table; setting a size here applies to those too.') +
+
     '<h2>Sessions, and what was issued on each</h2>' +
     '<p class="note">A <strong>sign-on session</strong> is a browser holding the ' +
     '<code>sts_mock_session</code> cookie, shared between the OAuth 2.0 / OIDC login screen and ' +
@@ -1901,9 +2531,11 @@ function userDetailPage(req, key) {
     'client receives. The link is recorded out of band at issuance instead, and it survives a ' +
     'refresh: a refreshed token is looked up by the refresh token\'s <code>jti</code> and lands ' +
     'under the same session.</p>' +
+    sessionsNav +
     (sessionBlocks || '<p class="note">This user holds no sign-on session. That is the normal state ' +
       'for every identity that never used a browser here — a password grant, a Kerberos client, a ' +
       'WS-Trust requester — and for anyone whose session has expired and been swept.</p>') +
+    sessionsNav +
 
     (split.ended.length
       ? '<h3>Issued on a session that has since ended</h3>' +
@@ -1911,7 +2543,7 @@ function userDetailPage(req, key) {
         'it is the ordinary end state: the session expired or was signed out, and the tokens it ' +
         'produced outlived it — which is exactly the position a client is in when its access token ' +
         'still verifies and the browser would be asked to sign in again.</p>' +
-        userTokenTable(split.ended, back, '')
+        endedNav + userTokenTable(endedPage.shown, back, '') + endedNav
       : '') +
 
     (split.sessionless.length
@@ -1920,7 +2552,7 @@ function userDetailPage(req, key) {
         '<code>client_credentials</code>, OID4VCI\'s pre-authorized code, and token exchange. The ' +
         'Grant column says which. An empty Grant means the token was minted somewhere that states ' +
         'nothing about how — WS-Trust\'s JWT and the credential issuer both sign directly.</p>' +
-        userTokenTable(split.sessionless, back, '')
+        sessionlessNav + userTokenTable(sessionlessPage.shown, back, '') + sessionlessNav
       : '') +
 
     '<h2>Assertions, tickets and credentials</h2>' +
@@ -1928,7 +2560,7 @@ function userDetailPage(req, key) {
     'nothing consults this service about a SAML assertion, a Kerberos ticket or a credential, so a ' +
     'button would change a number on this page and nothing at all out there. The only distinction ' +
     'is whether the validity window has closed.</p>' +
-    userArtifactTable(detail.artifacts) +
+    artifactNav + userArtifactTable(artifactPage.shown) + artifactNav +
 
     directory.html +
 
@@ -1944,17 +2576,33 @@ function userDetailPage(req, key) {
       '<div class="formrow"><button class="danger">Revoke everything for ' + esc(row.name) +
       '</button></div></form>';
 
-  log.debug("Leaving userDetailPage(). " + detail.tokens.length + " token(s) shown.");
+  log.debug("Leaving userDetailPage(). " + sessionPage.shown.length + " session(s), " +
+            artifactPage.shown.length + " artifact(s) shown of " + detail.tokens.length +
+            " token(s) held.");
   return {
     inner: inner,
     json: {
       user: row,
-      sessions: sessionRows.map(function (session) {
-        return Object.assign({}, session, { tokens: split.held[session.id] || [] });
+      // Every array here is THE PAGE, not the whole list, exactly as `users` is on
+      // the list view — and every one of them is answered by a `*Paging` object
+      // carrying the same member names one level down, so a caller walks a
+      // drill-down's five lists the way it already walks the three flat ones. A
+      // session's own tokens are paged too and its paging travels with it, because
+      // there is one such list per session and no top-level place to put five of
+      // them that would still say which was which.
+      sessions: sessionPage.shown.map(function (session, index) {
+        return Object.assign({}, session, {
+          tokens: sessionTokenPages[index].shown,
+          tokensPaging: pagingJson(sessionTokenPages[index].paging)
+        });
       }),
-      tokensOnEndedSessions: split.ended,
-      tokensWithNoSession: split.sessionless,
-      artifacts: detail.artifacts,
+      sessionsPaging: pagingJson(sessionPage.paging),
+      tokensOnEndedSessions: endedPage.shown,
+      tokensOnEndedSessionsPaging: pagingJson(endedPage.paging),
+      tokensWithNoSession: sessionlessPage.shown,
+      tokensWithNoSessionPaging: pagingJson(sessionlessPage.paging),
+      artifacts: artifactPage.shown,
+      artifactsPaging: pagingJson(artifactPage.paging),
       // null when no directory is loaded in this process, which is a different
       // answer from an entry that is not there — that one is an object whose
       // `found` is false and which says where it would have been.
@@ -2023,15 +2671,7 @@ function usersListPage(req) {
     return '<option value="' + esc(p) + '"' + (p === wantedProtocol ? ' selected' : '') + '>' +
            esc(p || 'any protocol') + '</option>';
   }).join('');
-  const perChoices = [25, DEFAULT_PER_PAGE, 100, MAX_ROWS];
-  if (perChoices.indexOf(paging.perPage) < 0) {
-    perChoices.push(paging.perPage);
-    perChoices.sort(function (a, b) { return a - b; });
-  }
-  const perOptions = perChoices.map(function (n) {
-    return '<option value="' + n + '"' + (n === paging.perPage ? ' selected' : '') + '>' +
-           n + ' rows</option>';
-  }).join('');
+  const perOptions = perPageOptions(paging.perPage);
 
   const authenticatedHere = all.filter(function (row) { return row.authenticated; }).length;
   const inner = messagesOf(req) +
@@ -2289,7 +2929,8 @@ function groupsListPage(req) {
   });
   const paging = pagingOf(req.query, filtered.length);
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
-  const filterParams = { q: wantedText || '', per: req.query.per || '' };
+  const filterParams = { q: wantedText || '',
+                         per: req.query.per ? paging.perPage : '' };
   const nav = pageNav('/admin/groups', filterParams, paging);
 
   const rows = shown.map(function (group) {
@@ -2332,6 +2973,8 @@ function groupsListPage(req) {
     '<label for="q">Group</label>' +
     '<input type="text" id="q" name="q" value="' + esc(wantedText) + '" size="28" ' +
     'placeholder="part of a cn or a DN">' +
+    '<label for="per">Per page</label>' +
+    '<select id="per" name="per">' + perPageOptions(paging.perPage) + '</select>' +
     '<button type="submit">Filter</button>' +
     (wantedText ? ' <a href="/admin/groups">clear</a>' : '') +
     '</div></form>' +
@@ -2416,7 +3059,23 @@ function groupDetailPage(req, wantedDn) {
   const group = info.group;
   const known = knownUserKeys();
 
-  const memberRows = group.members.map(function (member) {
+  // Two lists on this page and a page parameter each, sharing `per` — the same
+  // arrangement the users drill-down has, and for the same reason: one `page` would
+  // move both, and the two disagreements this page exists to show are read against
+  // each other, so advancing the members while the claimants jumped with them would
+  // be the one navigation that makes the page harder to read than no navigation.
+  //
+  // The counts above the tables — memberCount, presentCount, danglingCount — stay
+  // counts of the WHOLE list and are read off the directory rather than off the
+  // slice, because "seven members, five resolve" is the fact the page is for and
+  // "five members on this page" is not an answer to it.
+  const params = pageParamsOf(req.query);
+  const memberPage = pagedRows(req.query, group.members, { name: 'members', noun: 'members' });
+  const membersNav = pageNav('/admin/groups', params, memberPage.paging);
+  const claimedPage = pagedRows(req.query, group.claimed, { name: 'claimed', noun: 'entries' });
+  const claimedNav = pageNav('/admin/groups', params, claimedPage.paging);
+
+  const memberRows = memberPage.shown.map(function (member) {
     const state = member.present
       ? '<span class="state-valid">in the directory</span>'
       : '<span class="state-revoked" title="The value names an entry this directory does not ' +
@@ -2438,7 +3097,7 @@ function groupDetailPage(req, wantedDn) {
       '<td class="who"><code>' + esc(member.value) + '</code></td></tr>';
   }).join('');
 
-  const claimedRows = group.claimed.map(function (entry) {
+  const claimedRows = claimedPage.shown.map(function (entry) {
     return '<tr><td class="who"><code>' + esc(entry.dn) + '</code></td>' +
       '<td>' + (entry.cn ? esc(entry.cn) : '<span class="state-none">—</span>') + '</td>' +
       '<td>' + (entry.mail ? '<code>' + esc(entry.mail) + '</code>'
@@ -2448,8 +3107,10 @@ function groupDetailPage(req, wantedDn) {
 
   const claimedSection = group.claimed.length
     ? '<h2>Entries that claim this group, and that it does not list</h2>' +
+      claimedNav +
       '<table><tr><th>DN</th><th>cn</th><th>mail</th><th>On the users page</th></tr>' +
       claimedRows + '</table>' +
+      claimedNav +
       '<p class="note">Each of these carries a <code>memberOf</code> naming this group while this ' +
       'group&rsquo;s own <code>member</code> does not name them back. <strong>Nothing here ' +
       'maintains <code>memberOf</code></strong> &mdash; it is not a standard attribute at all ' +
@@ -2477,6 +3138,8 @@ function groupDetailPage(req, wantedDn) {
     esc(info.port) + '</code> reading <code>' + esc(group.dn) + '</code> sees exactly the object ' +
     'below, because it <em>is</em> that object and not a copy of it.</p>' +
 
+    perPageForm('/admin/groups', 'group', group.dn, memberPage.paging.perPage, '') +
+
     '<h2>Members</h2>' +
     '<div class="tiles">' +
     tile(group.memberCount, 'Membership values') +
@@ -2485,9 +3148,10 @@ function groupDetailPage(req, wantedDn) {
     tile(group.claimed.length, 'Claim it back') +
     '</div>' +
     (group.memberCount
-      ? '<table><tr><th>Member</th><th>From</th><th>State</th><th>What it is</th><th>cn</th>' +
+      ? membersNav +
+        '<table><tr><th>Member</th><th>From</th><th>State</th><th>What it is</th><th>cn</th>' +
         '<th>mail</th><th>On the users page</th><th>The value as stored</th></tr>' +
-        memberRows + '</table>'
+        memberRows + '</table>' + membersNav
       : '<p class="note">This group lists nobody. An empty <code>groupOfNames</code> is something ' +
         'a real directory refuses &mdash; RFC 4519 makes <code>member</code> MUST &mdash; and ' +
         'this one has no schema, so it is here because something wrote it.</p>') +
@@ -2521,9 +3185,26 @@ function groupDetailPage(req, wantedDn) {
     'wrote it.</p>' +
     GROUPS_CAVEAT + back + GROUPS_LINKS;
 
-  log.debug("Leaving groupDetailPage(). " + group.memberCount + " member value(s), " +
+  log.debug("Leaving groupDetailPage(). " + memberPage.shown.length + " of " +
+            group.memberCount + " member value(s) shown, " +
             Object.keys(group.attributes).length + " attribute(s).");
-  return { inner: inner, json: Object.assign({ found: true }, info) };
+  // The entry is copied rather than sliced in place. groupsFor() builds a fresh
+  // object per call today, so mutating it would work — but that is a fact about
+  // another module, and a reader of this one cannot see it. `members` and `claimed`
+  // go out as THE PAGE, like every other list here; the paging objects sit beside
+  // `group` rather than inside it because they describe this reply and not the
+  // directory entry, whose own counts are untouched next to them.
+  const pagedGroup = Object.assign({}, group, {
+    members: memberPage.shown, claimed: claimedPage.shown
+  });
+  return {
+    inner: inner,
+    json: Object.assign({ found: true }, info, {
+      group: pagedGroup,
+      membersPaging: pagingJson(memberPage.paging),
+      claimedPaging: pagingJson(claimedPage.paging)
+    })
+  };
 }
 
 // Three answers again, and the first of them — no directory in this process —
@@ -2562,7 +3243,12 @@ app.get('/admin/groups', function (req, res) {
 // ---------------------------------------------------------------------------
 // GET /admin/claims, POST /admin/claims
 // ---------------------------------------------------------------------------
-function claimsAction(body) {
+// `names` is the second argument for the same reason vcAction() has one: a list
+// that may appear more than once in a form body is not something
+// helpers.parseBody() can answer, so the caller reads it with listField() and
+// hands it in. It is only read by the `attributes` action; the other six ignore
+// it.
+function claimsAction(body, names) {
   log.debug("Entering claimsAction(). action=" + (body.action || '(none)'));
   const action = String(body.action || '');
   const setId = String(body.set || '');
@@ -2631,23 +3317,188 @@ function claimsAction(body) {
       : result;
   }
 
+  // ------------------------------------------------------------------------
+  // The three that act on the DIRECTORY ATTRIBUTE half of a set rather than on
+  // the typed claims above.
+  //
+  // They are three actions and not one with a mode, because each is a different
+  // thing to authorise and a different row in the audit log: `attributes`
+  // carries a list somebody chose, and the other two carry nothing and mean the
+  // extremes. A single action taking a list would make "select all" a caller's
+  // job to construct — the whole catalogue in a POST body to say "all of them" —
+  // which is a list that has to be updated every time the catalogue is.
+  //
+  // What the split does NOT do is make an empty `attributes` unambiguous, and it
+  // is worth being plain about that rather than implying otherwise. An empty
+  // list and an absent one both mean "the selection is nothing", so a caller
+  // that misspells the field clears the set. Three things make that recoverable
+  // rather than silent, and they are the reason it is not refused instead: the
+  // reply names every attribute it `removed`, the audit log keeps a row saying
+  // the same, and unticking every box and pressing Update is a legitimate way to
+  // clear a set that a refusal would have to break. `attributes-clear` exists so
+  // that a caller which MEANS it can say so, and so that the console's button
+  // does not depend on submitting an empty form.
+  //
+  // The console's buttons are form posts for the same reason every other control
+  // here is: app.js sets `script-src 'none'` for the whole service, so a
+  // browser-side "tick every box" is not available and would not be taken if it
+  // were — a server-side select-all leaves an audit row, and a scripted one
+  // would leave the boxes ticked and the set unchanged until somebody pressed
+  // Update.
+  // ------------------------------------------------------------------------
+  if (action === 'attributes') {
+    const result = claimAttributes.setSelection(setId, names || [], 'select');
+    log.debug("Leaving claimsAction(). attributes -> ok=" + result.ok);
+    return result.ok
+      ? { ok: true, set: setId, attributes: result.attributes,
+          added: result.added, removed: result.removed,
+          message: 'The ' + label + ' set now carries ' + result.attributes.length +
+                   ' directory attribute(s): ' + (result.attributes.join(', ') || '(none)') +
+                   '. Every one of those issued from now on carries them, with the value on ' +
+                   'that person\'s entry; nothing already issued changes.' }
+      : result;
+  }
+
+  if (action === 'attributes-all') {
+    const result = claimAttributes.selectAll(setId);
+    log.debug("Leaving claimsAction(). attributes-all -> ok=" + result.ok);
+    return result.ok
+      ? { ok: true, set: setId, attributes: result.attributes,
+          added: result.added, removed: result.removed,
+          message: 'The ' + label + ' set now carries every attribute in the catalogue — ' +
+                   result.attributes.length + ' of them. That is a legitimate thing to test ' +
+                   'and it makes a large token; it is not a mistake this page will correct.' }
+      : result;
+  }
+
+  if (action === 'attributes-clear') {
+    const result = claimAttributes.clearSelection(setId);
+    log.debug("Leaving claimsAction(). attributes-clear -> ok=" + result.ok);
+    return result.ok
+      ? { ok: true, set: setId, attributes: [], added: [], removed: result.removed,
+          message: 'The ' + label + ' set carries no directory attribute again. Removed: ' +
+                   (result.removed.join(', ') || 'nothing — it was already empty') + '. The ' +
+                   'typed claims on this set, if any, are untouched.' }
+      : result;
+  }
+
   log.debug("Leaving claimsAction(). Unknown action.");
-  return { ok: false, errors: ['Unknown action "' + action + '". The four are: add, remove, clear, ' +
-                               'replace.'] };
+  return { ok: false, errors: ['Unknown action "' + action + '". The seven are: add, remove, ' +
+                               'clear, replace, attributes, attributes-all, attributes-clear.'] };
 }
 
 app.post('/admin/claims', function (req, res) {
   log.debug("Entering the admin claims action endpoint.");
   const body = parseBody(req);
-  const result = claimsAction(body);
-  respondToAction(req, res, '/admin/claims', result);
+  // Two names for the list, exactly as /admin/vc takes them and for the same
+  // reason: a checkbox column is one `attribute` repeated, and a JSON body
+  // carries one `attributes` array. Neither spelling is wrong and refusing
+  // either would make the console's own form and the API's document disagree.
+  const names = listField(req, body, 'attribute').concat(listField(req, body, 'attributes'));
+  const result = claimsAction(body, names);
+  // Back to the page the reader was on, preview user and all: the four tables
+  // show that person's values, and a redirect that dropped the parameter would
+  // answer "what did that do" with somebody else's row.
+  respondToAction(req, res, claimsPageUrl(req.query), result);
   log.debug("Leaving the admin claims action endpoint.");
 });
+
+// Which person the four tables show values for, and where the page sends itself
+// back to. Capped because the string is echoed, and defaulted to somebody the
+// directory actually holds from startup so a fresh process shows real values
+// rather than an invented person nobody can look up — the same rule and the same
+// default /admin/vc uses, deliberately, so the two pages preview the same person
+// unless somebody says otherwise.
+function claimsPreviewUser(query) {
+  const asked = String((query && query.user) || 'alice').trim();
+  return asked.slice(0, 64) || 'alice';
+}
+
+// The page's own URL with the preview user on it. Every form on this page posts
+// to THIS rather than to the bare path, so that the 303 after an action lands
+// back on the person the reader was looking at. A form that dropped the
+// parameter would answer "what did that do?" with somebody else's values, which
+// reads as the action having done something it did not.
+function claimsPageUrl(query) {
+  return '/admin/claims?user=' + encodeURIComponent(claimsPreviewUser(query));
+}
+
+// ---------------------------------------------------------------------------
+// THE DIRECTORY ATTRIBUTE HALF OF ONE SET.
+//
+// A checkbox per attribute type in the catalogue, a column saying what it would
+// put in a token for the person being previewed, and three buttons. It is
+// repeated for each of the four sets rather than being one table with four
+// checkbox columns, because the four sets are chosen for different reasons — an
+// access token goes to a resource server and an ID Token goes to a client, and
+// the interesting configuration is usually the one where they DIFFER. A single
+// grid would make four independent decisions look like one, and would have to
+// post all four sets at once, so changing the ID Token would rewrite the access
+// token's selection as a side effect.
+//
+// THE THREE BUTTONS ARE THREE FORMS, and unticking a box in one of the other
+// three sets' tables does nothing to this one: only the form that is submitted
+// sends anything, so each Update button carries exactly its own set's boxes.
+// That is worth stating because a page with four checkbox tables and one Update
+// button would be the obvious design and would be wrong in the direction nobody
+// notices — it would clear the three sets whose tables were rendered before the
+// reader ticked anything.
+// ---------------------------------------------------------------------------
+function claimAttributeSection(setId, previewUser, values, pageUrl) {
+  log.debug("Entering claimAttributeSection(). setId=" + setId);
+  const selected = claimAttributes.selectedNames(setId);
+
+  const rows = claimAttributes.CATALOGUE.map(function (row) {
+    const on = claimAttributes.isSelected(setId, row.ldap);
+    const found = values.byLdap[row.ldap.toLowerCase()];
+    // `description` is the one row with no generator: this service writes it on
+    // every entry itself, to record the protocols that person has used. So it is
+    // the one attribute whose value is a real fact, and it is absent rather than
+    // invented for somebody with no entry.
+    const valueCell = found
+      ? '<td><code>' + esc(found.value) + '</code></td><td>' + esc(found.source) + '</td>'
+      : '<td><span class="state-none">—</span></td><td>' +
+        (row.from ? 'would be generated' : 'the entry\'s own') + '</td>';
+    return '<tr><td><input type="checkbox" name="attribute" value="' + esc(row.ldap) + '"' +
+      (on ? ' checked' : '') + '></td>' +
+      '<td><code>' + esc(row.ldap) + '</code></td>' +
+      '<td>' + esc(row.schema) + '</td>' +
+      '<td><code>' + esc(row.claim.join('.')) + '</code></td>' +
+      valueCell + '</tr>';
+  }).join('');
+
+  log.debug("Leaving claimAttributeSection(). " + selected.length + " of " +
+            claimAttributes.CATALOGUE.length + " selected.");
+  return '<p class="note">' + (selected.length
+      ? 'Carries ' + selected.length + ' directory attribute(s): ' + codeList(selected) + '.'
+      : 'Carries no directory attribute. Tick some and press Update.') + '</p>' +
+    '<form method="post" action="' + esc(pageUrl) + '">' +
+    '<input type="hidden" name="action" value="attributes">' +
+    '<input type="hidden" name="set" value="' + esc(setId) + '">' +
+    '<table><tr><th>In</th><th>LDAP attribute</th><th>Defined by</th>' +
+    '<th>' + (setId === 'saml2' || setId === 'saml11' ? 'Attribute name' : 'Claim') + '</th>' +
+    '<th>For ' + esc(previewUser) + '</th><th>Source</th></tr>' +
+    rows + '</table>' +
+    '<div class="formrow"><button>Update</button>' +
+    '<span class="note">The ticked boxes become the whole selection for this set: unticking is ' +
+    'how an attribute is removed.</span></div></form>' +
+    '<div class="formrow">' +
+    '<form method="post" action="' + esc(pageUrl) + '" class="inline">' +
+    '<input type="hidden" name="action" value="attributes-all">' +
+    '<input type="hidden" name="set" value="' + esc(setId) + '">' +
+    '<button class="secondary">Select all</button></form> ' +
+    '<form method="post" action="' + esc(pageUrl) + '" class="inline">' +
+    '<input type="hidden" name="action" value="attributes-clear">' +
+    '<input type="hidden" name="set" value="' + esc(setId) + '">' +
+    '<button class="secondary">Delete all</button></form>' +
+    '<span class="note">Both act immediately — there is no script on this page, so these are ' +
+    'form posts and not a way of ticking the boxes above.</span></div>';
+}
 
 // One set, rendered: what is in it, a way to remove each, and a way to add another.
 // The three sets differ in the extra field each needs, which is why the form is
 // built from the set's kind rather than being one form four times.
-function claimSetSection(setId) {
+function claimSetSection(setId, previewUser, values, pageUrl) {
   log.debug("Entering claimSetSection(). setId=" + setId);
   const set = stats.CLAIM_SETS[setId];
   const claims = stats.claimSet(setId);
@@ -2660,7 +3511,7 @@ function claimSetSection(setId) {
                     : (isSaml11 ? '<td>' + shortened(claim.namespace, 44) + '</td>' : '');
     return '<tr><td><code>' + esc(claim.name) + '</code></td>' + extraCell +
       '<td><code>' + esc(claim.value) + '</code></td>' +
-      '<td><form method="post" action="/admin/claims" class="inline">' +
+      '<td><form method="post" action="' + esc(pageUrl) + '" class="inline">' +
       '<input type="hidden" name="action" value="remove">' +
       '<input type="hidden" name="set" value="' + esc(setId) + '">' +
       '<input type="hidden" name="name" value="' + esc(claim.name) + '">' +
@@ -2678,10 +3529,17 @@ function claimSetSection(setId) {
 
   log.debug("Leaving claimSetSection(). " + claims.length + " claim(s).");
   return '<h3>' + esc(set.label) + ' <code>' + esc(setId) + '</code></h3>' +
+    // The two halves in this order because the second is the one that changes
+    // per person, and a reader who has just pressed Update wants to see the
+    // table they pressed it under rather than scroll past a form they did not
+    // touch. The headings say which half is which: they are configured
+    // separately, audited separately, and only one of them can be wrong in a way
+    // the directory explains.
+    '<p class="sub">Typed claims &mdash; a name and a value, the same for everybody.</p>' +
     '<table><tr><th>Name</th>' + extraHeader + '<th>Value</th><th></th></tr>' +
     (rows || '<tr><td colspan="' + (extraHeader ? 4 : 3) + '">No custom claim is configured; ' +
              'these tokens carry only what the protocol puts in them.</td></tr>') + '</table>' +
-    '<form method="post" action="/admin/claims"><div class="formrow">' +
+    '<form method="post" action="' + esc(pageUrl) + '"><div class="formrow">' +
       '<input type="hidden" name="action" value="add">' +
       '<input type="hidden" name="set" value="' + esc(setId) + '">' +
       '<label for="n-' + setId + '">Name</label>' +
@@ -2692,28 +3550,58 @@ function claimSetSection(setId) {
       '<button>Add</button>' +
       '</div></form>' +
     (claims.length
-      ? '<form method="post" action="/admin/claims" class="inline">' +
+      ? '<form method="post" action="' + esc(pageUrl) + '" class="inline">' +
         '<input type="hidden" name="action" value="clear">' +
         '<input type="hidden" name="set" value="' + esc(setId) + '">' +
         '<button class="secondary">Clear this set</button></form>'
-      : '');
+      : '') +
+    '<p class="sub">Directory attributes &mdash; a value read off each person\'s own entry.</p>' +
+    claimAttributeSection(setId, previewUser, values, pageUrl);
 }
 
 // The four sets and the rules that govern them. The rules are in the reply and
 // not only on the page because the first thing a caller of POST .../claims/add
 // needs is the list of names it will refuse.
-function claimsJson() {
-  log.debug("Entering claimsJson().");
+function claimsJson(previewUser) {
+  log.debug("Entering claimsJson(). previewUser=" + previewUser);
+  const user = previewUser || 'alice';
   const json = {
     reservedJwtClaims: stats.RESERVED_JWT_CLAIMS,
     placeholders: stats.PLACEHOLDERS,
     defaultSaml11Namespace: stats.DEFAULT_SAML11_NAMESPACE,
+    // The catalogue every set chooses from, so a caller can discover the legal
+    // values of `attributes` without reading this service's source or guessing
+    // at LDAP spellings. `sets` says which of the four carries each, which is
+    // the same fact the console's four tables draw and is answered here once
+    // rather than repeated inside every set below.
+    attributeCatalogue: claimAttributes.catalogueRows(),
+    // Stated rather than left to be discovered, because the two halves of a set
+    // are one screen apart and the precedence only shows up when both name one
+    // claim.
+    precedence: 'A typed claim wins over a directory attribute of the same name.',
     sets: stats.CLAIM_SET_IDS.map(function (id) {
+      const preview = claimAttributes.previewFor(id, user);
       return { id: id, label: stats.CLAIM_SETS[id].label,
-               claims: stats.claimSet(id) };
-    })
+               claims: stats.claimSet(id),
+               attributes: claimAttributes.selectedNames(id),
+               // What those attributes would actually put in this set right now,
+               // built by the function the ISSUANCE path calls. A caller with no
+               // browser has no other way to ask "what would this issue", and a
+               // preview built by a second walk of the catalogue would be a
+               // preview that can disagree with the token.
+               attributeClaims: preview.claims,
+               attributeReport: preview.report };
+    }),
+    // Whether the directory holds this person at all, and what every attribute
+    // in the catalogue would say about them — selected or not, so a caller can
+    // see what ticking a box would do before ticking it. Read through
+    // catalogueValuesFor() rather than off one of the previews above, because a
+    // set with nothing selected reports no entry: that is the right answer to
+    // "what does this set carry" and the wrong answer to "is this person in the
+    // directory".
+    preview: Object.assign({ user: user }, claimAttributes.catalogueValuesFor(user))
   };
-  log.debug("Leaving claimsJson().");
+  log.debug("Leaving claimsJson(). " + json.sets.length + " set(s).");
   return json;
 }
 
@@ -2722,6 +3610,13 @@ app.get('/admin/claims', function (req, res) {
   const setSelect = stats.CLAIM_SET_IDS.map(function (id) {
     return '<option value="' + esc(id) + '">' + esc(stats.CLAIM_SETS[id].label) + '</option>';
   }).join('');
+  const previewUser = claimsPreviewUser(req.query);
+  const pageUrl = claimsPageUrl(req.query);
+  // ONE read of the directory and one invented persona for the whole page, not
+  // one per set: the four tables show the same catalogue of values for the same
+  // person, and four reads of one entry per render would be three that exist
+  // only because the sections were written separately.
+  const values = claimAttributes.catalogueValuesFor(previewUser);
 
   const inner = messagesOf(req) +
     '<p class="note">What to add to every token and assertion this service issues <em>from now ' +
@@ -2729,6 +3624,25 @@ app.get('/admin/claims', function (req, res) {
     'reach inside one. Four sets, because the four are different vocabularies: an OAuth access ' +
     'token and an OIDC ID Token go to different readers (a resource server and a client), and SAML ' +
     '2.0 and SAML 1.1 spell an attribute differently enough that one list could not serve both.</p>' +
+
+    '<p class="note">Each set has <strong>two halves</strong>. A <em>typed claim</em> is a name and ' +
+    'a value somebody wrote here, the same for everybody except where it carries a ' +
+    '<code>${placeholder}</code>. A <em>directory attribute</em> is ticked from the catalogue below ' +
+    'and its value is whatever that person\'s entry under <code>ou=users</code> says — so an ' +
+    '<code>ldapmodify</code> changes the next token, and an LDAP client and an OIDC client pointed ' +
+    'at this service are shown the same person. That is the half worth exercising, and until now ' +
+    'only a Verifiable Credential could do it.</p>' +
+
+    '<form method="get" action="/admin/claims"><div class="formrow">' +
+    '<label for="user">Show the values for</label>' +
+    '<input type="text" id="user" name="user" size="20" value="' + esc(previewUser) + '">' +
+    '<button class="secondary">Show</button>' +
+    '<span class="note">' + (values.entryFound
+      ? 'This person has an entry in the directory, so the values marked <em>directory</em> are ' +
+        'what an LDAP client reads from it.'
+      : 'This person has no entry in the directory — nobody has authenticated as them and nothing ' +
+        'was added by hand — so every value below is generated. It will be the same one next ' +
+        'time: the invented person is seeded from the username.') + '</span></div></form>' +
 
     '<div class="warn"><strong>Custom claims are additive.</strong> A configured claim is added to ' +
     'what the protocol already puts in the token and never replaces one. The names this service ' +
@@ -2738,7 +3652,52 @@ app.get('/admin/claims', function (req, res) {
     'tokens that fail to verify with nothing pointing back at this page.</div>' +
 
     '<h2>The four sets</h2>' +
-    stats.CLAIM_SET_IDS.map(claimSetSection).join('') +
+    stats.CLAIM_SET_IDS.map(function (id) {
+      return claimSetSection(id, previewUser, values, pageUrl);
+    }).join('') +
+
+    '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
+    '<p class="note">The catalogue is of <strong>LDAP attribute types</strong> and not of claim ' +
+    'names, and it is the same catalogue <a href="/admin/vc">the credential claims page</a> ' +
+    'chooses from — one list of spellings, because two would eventually disagree about what ' +
+    '<code>schacDateOfBirth</code> is called while both looked right. The value is the one on that ' +
+    'person\'s entry under <code>ou=users</code>; where the entry has nothing, it is invented from ' +
+    'the username — the same invented person every time, across restarts, in obviously fictional ' +
+    'ranges. Three rows are not RFC 4519/4524/2798: there is no standard attribute type for a ' +
+    'birthdate or a nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
+    '<p class="note">The four selections are <strong>independent</strong>, which is the point of ' +
+    'having four: an access token carrying <code>employee_number</code> and an ID Token carrying ' +
+    '<code>email</code> is a normal arrangement and a single list could not express it. They are ' +
+    'also independent of what a <a href="/admin/vc">credential</a> carries and of what the ' +
+    '<a href="/admin/vc-verifier-config">Verifier asks for</a>, deliberately — that is what keeps ' +
+    '"issue a credential carrying a claim the access token does not" reachable.</p>' +
+    '<p class="note">A <strong>nested</strong> claim stays nested in a JWT: <code>address.locality' +
+    '</code> is a <code>locality</code> member of an <code>address</code> object, which is what ' +
+    'OIDC Core 5.1.1 defines. A SAML Attribute has no way to spell that — the content model is a ' +
+    'name and text values — so the assertion carries the dotted path as the attribute\'s name. ' +
+    'Both families then call one claim by one name, which is the property somebody comparing an ID ' +
+    'Token with an assertion needs.</p>' +
+    '<p class="note"><strong>A typed claim of the same name wins.</strong> Somebody who wrote ' +
+    '<code>email</code> by hand on the set that also has <code>mail</code> ticked has said ' +
+    'something specific, and the specific thing beats the general one. In an assertion that has to ' +
+    'be a filter rather than an overwrite: two <code>&lt;Attribute&gt;</code> elements with one ' +
+    'name would leave a relying party reading whichever the builder emitted first.</p>' +
+    '<p class="note"><strong>And the protocol\'s own claim beats both</strong>, which is worth ' +
+    'knowing before it is discovered on a token. An ID Token always carries <code>name</code>, ' +
+    '<code>given_name</code>, <code>family_name</code>, <code>preferred_username</code> and ' +
+    '<code>email</code> built from the sign-in, so ticking <code>cn</code>, <code>givenName</code>, ' +
+    '<code>sn</code>, <code>uid</code> or <code>mail</code> <em>on that set</em> changes nothing ' +
+    'the client sees — the same five reach an access token, where the protocol sets none of them, ' +
+    'and reach it from the directory. A SAML 2.0 assertion sets <code>name</code> the same way, and ' +
+    'a WS-Federation one sets the whole identity claim list. The rule is not new and is not this ' +
+    'page\'s: a configured claim is added to a token and never substituted into one, because a ' +
+    'claim a relying party keys off that a web form could displace would break a sign-in somewhere ' +
+    'that looks nothing like this page.</p>' +
+    '<p class="note"><strong>None of it is verified and none of it grants anything.</strong> This ' +
+    'service authenticates nobody — the username typed at the sign-in screen is the identity in ' +
+    'every token it issues — so a birthdate from here is a birthdate from a web form. No endpoint ' +
+    'here reads one of these claims back or decides anything on one, and a group on that person\'s ' +
+    'entry still grants nothing: see <a href="/admin/groups">the groups page</a>.</p>' +
 
     '<h2>Values</h2>' +
     '<p class="note">A value may contain <code>${placeholders}</code>, because a claim that can only ' +
@@ -2757,8 +3716,10 @@ app.get('/admin/claims', function (req, res) {
     'text.</p>' +
 
     '<h2>Replace a whole set</h2>' +
-    '<p class="note">The form a test wants. POST the same thing as JSON to get JSON back.</p>' +
-    '<form method="post" action="/admin/claims">' +
+    '<p class="note">The form a test wants. POST the same thing as JSON to get JSON back. This ' +
+    'replaces the <em>typed</em> claims only; the directory attributes ticked above are a separate ' +
+    'action (<code>attributes</code>) and are left alone by it.</p>' +
+    '<form method="post" action="' + esc(pageUrl) + '">' +
       '<input type="hidden" name="action" value="replace">' +
       '<div class="formrow"><label for="set">Set</label>' +
       '<select id="set" name="set">' + setSelect + '</select></div>' +
@@ -2767,7 +3728,7 @@ app.get('/admin/claims', function (req, res) {
       '<div class="formrow"><button>Replace</button></div>' +
     '</form>';
 
-  respond(req, res, claimsJson(), 'Custom claims', '/admin/claims', inner);
+  respond(req, res, claimsJson(previewUser), 'Custom claims', '/admin/claims', inner);
   log.debug("Leaving the admin claims page.");
 });
 
@@ -3782,9 +4743,19 @@ module.exports = {
   consoleJson: consoleJson,
   metricsJson: metricsJson,
   tokensView: tokensView,
+  // The audit log's view is the whole function rather than a JSON builder, for
+  // the reason the block above consoleJson() gives: the filtering and the paging
+  // are work both the page and the API need, and two copies of it would be two
+  // answers that each looked right alone.
+  auditView: auditView,
   usersView: usersView,
   groupsView: groupsView,
   claimsJson: claimsJson,
+  // Which person the claims page shows attribute values for. Exported for the
+  // same reason vcPreviewUser is: GET /admin-api/claims takes the same `user`
+  // parameter, and a second reader of that query string would be a second cap
+  // and a second default.
+  claimsPreviewUser: claimsPreviewUser,
   vcJson: vcJson,
   vcPreviewUser: vcPreviewUser,
   vpConfigJson: vpConfigJson,
@@ -3798,5 +4769,9 @@ module.exports = {
   // and `page` the way every page here does rather than inventing a second
   // ceiling.
   MAX_ROWS: MAX_ROWS,
-  DEFAULT_PER_PAGE: DEFAULT_PER_PAGE
+  DEFAULT_PER_PAGE: DEFAULT_PER_PAGE,
+  // The drill-downs' session blocks start smaller, and the API documents that
+  // number rather than repeating it: a document saying 50 beside a service doing
+  // 5 is worse than a document that says nothing.
+  DEFAULT_BLOCKS_PER_PAGE: DEFAULT_BLOCKS_PER_PAGE
 };
