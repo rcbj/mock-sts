@@ -34,6 +34,16 @@ const { log, headersOf, bodyOf } = require('./helpers');
 // can be minted. See the comment on setJwtRecorder in helpers.js for why that
 // installation is a hook rather than a require in the other direction.
 const stats = require('./admin_stats');
+// The service's account of WHAT HAPPENED, as against how much of it. Required
+// here for the same reason admin_stats.js is and with the same consequence: the
+// call log below is the single place every answered request passes through, so
+// one call there covers three of the six audit categories — the admin console,
+// the management API and every protocol endpoint — instead of a recording site
+// in each of forty route handlers, thirty-seven of which would never be added.
+// It is a library like admin_stats.js (it registers no route) and it requires
+// only helpers.js and config.js, which is what keeps it out of the cycles rule 2
+// exists to avoid.
+const audit = require('./audit');
 // --- express app -----------------------------------------------------------
 const app = express();
 
@@ -181,6 +191,23 @@ app.use(function (req, res, next) {
       path: matchedPath || String(req.originalUrl || '/').split('?')[0],
       matched: !!matchedPath,
       status: res.statusCode,
+      durationMs: Date.now() - started
+    });
+    // The same event, as one ROW rather than as a number that went up. It is
+    // recorded here and not at the top of the middleware for the same reason
+    // the counting is: the status and the elapsed time do not exist until the
+    // response has gone out. `req` is still live — the body has been flushed,
+    // the request object has not gone anywhere — which is what lets audit.js
+    // resolve the signed-in user without that having to be threaded through
+    // every handler.
+    //
+    // Nothing out of the request or response BODY is recorded, deliberately:
+    // those carry passwords, bearer tokens and assertions on this service, and
+    // the debug log above is where a person who wants them looks. The one field
+    // read out of an admin body is `action`, by name — see audit.js.
+    audit.recordHttp(req, res, {
+      route: matchedPath,
+      matched: !!matchedPath,
       durationMs: Date.now() - started
     });
     log.debug({ response: { path: req.originalUrl,

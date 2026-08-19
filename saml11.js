@@ -137,7 +137,26 @@ function buildSaml11Assertion(opts) {
   // with no namespace gets the identity claims namespace, which is where a relying
   // party is already looking.
   const custom = stats.samlAttributes('saml11', { subject: opts.subject, audience: opts.audience });
-  const attributeEls = (opts.attributes || []).concat(custom).map(function (a) {
+  // FILTERED against the caller's own claims by name, for the reason saml2.js
+  // states beside the same line: an assertion is a list of elements, so a
+  // duplicate name is not an overwrite but two <Attribute> elements with one
+  // name, and the relying party reads whichever came first. It matters more here
+  // than there — a WS-Federation relying party keys off these claim URIs — and it
+  // became easy to hit when /admin/claims grew a table of directory attributes to
+  // tick.
+  //
+  // Keyed on the NAMESPACE AND THE NAME together, which is the only correct key
+  // here: SAML 1.1 splits a claim URI into the two, so `name` in the identity
+  // claims namespace and `name` in somebody else's are different claims, and a
+  // filter on the local name alone would drop a configured attribute that
+  // collided with nothing. The one collision it does catch is real — the
+  // WS-Federation claim list carries `name` in that namespace, and so does a
+  // ticked `cn`.
+  const asked = opts.attributes || [];
+  const keyOf = function (a) { return String(a.namespace || '') + ' ' + String(a.name || ''); };
+  const names = new Set(asked.map(keyOf));
+  const configured = custom.filter(function (a) { return !names.has(keyOf(a)); });
+  const attributeEls = asked.concat(configured).map(function (a) {
     return '<saml:Attribute AttributeName="' + xmlEscape(a.name) + '"' +
       ' AttributeNamespace="' + xmlEscape(a.namespace) + '">' +
       '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';

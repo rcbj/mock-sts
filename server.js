@@ -90,6 +90,16 @@ const app = require('./app');
 const { log, PORT, HOST } = require('./helpers');
 const config = require('./config');
 
+// Which LDAP attributes the four claim sets carry. A LIBRARY — it registers no
+// route, so this line adds nothing to /sts-metadata and its position in the route
+// order is not a position at all. It is required HERE, ahead of the modules that
+// issue, because requiring it is what fills admin_stats.js's attribute-resolver
+// slot, and an empty slot means tokens issued without their configured
+// attributes. admin.js requires it too, which would be enough today by accident;
+// this line is what makes it true on purpose, and what keeps it true for a
+// process that loads the protocol modules without the console.
+require('./claim_attributes');
+
 require('./wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
 // person to, and the session store it fills. FIRST of the modules that use it,

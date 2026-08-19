@@ -43,6 +43,20 @@
 // ---------------------------------------------------------------------------
 
 const { log, setJwtRecorder, userFor } = require('./helpers');
+// The audit log. A one-way require and it must stay one: audit.js requires
+// helpers.js and config.js and nothing else in this repository, precisely so
+// that this file — which most of the service already requires — can call it
+// without dragging a graph behind it.
+//
+// It is called from ONE place in here, recordAuthentication() below, and that
+// is the point: that function is already the single funnel every one of the
+// fourteen protocol families passes through at the moment a credential is
+// accepted, so the audit log gets its authentication events from one line
+// rather than from fourteen call sites, the fifteenth of which would be the one
+// nobody adds. It is also the only place in this service that has already
+// normalised the identity, which is what lets an audit row and a /admin/users
+// row name the same person.
+const audit = require('./audit');
 
 // When this process started answering. Everything on the metrics page is "since"
 // this instant, and the page prints it, because a rate with no window is a number
@@ -562,6 +576,36 @@ function recordAuthentication(detail) {
   }
   log.info('admin: ' + identity.key + ' authenticated through ' + protocol + ' (' + method +
            '). ' + record.authentications + ' time(s) so far; ' + users.size + ' user(s) known.');
+  // The audit log's authentication event. Here rather than at the fourteen call
+  // sites for the reason given at the require above, and here rather than at the
+  // TOP of this function because the row must mean "a credential was accepted"
+  // — an identity that could not be read is not an authentication and gets no
+  // row, which is the early return above.
+  //
+  // audit.audit() cannot throw; see its header. Nothing about recording an
+  // authentication may be able to fail one.
+  audit.audit({
+    action: 'authentication',
+    actor: identity.key,
+    actorForm: identity.form,
+    protocol: protocol,
+    channel: 'internal',
+    target: info.sessionId || '',
+    summary: identity.key + ' authenticated through ' + protocol + ' (' + method + ')',
+    detail: {
+      method: method,
+      presented: identity.form,
+      realm: identity.realm || '',
+      sub: info.sub || '',
+      client_id: info.client_id || '',
+      amr: (info.amr || []).join(', '),
+      acr: info.acr || '',
+      sessionId: info.sessionId || '',
+      isClient: !!record.isClient,
+      authenticationsSoFar: record.authentications,
+      note: info.note || ''
+    }
+  });
   // The embedded LDAP directory, if it is loaded. Wrapped for the same reason the
   // JWT recorder is: a throw out here would fail the request that was accepting a
   // credential, which is the tail wagging the dog. It is given the NORMALISED
@@ -631,6 +675,74 @@ const CLAIM_SET_IDS = Object.keys(CLAIM_SETS);
 const DEFAULT_SAML11_NAMESPACE = 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims';
 
 // ---------------------------------------------------------------------------
+// THE OTHER HALF OF A CLAIM SET, AND WHY IT ARRIVES THROUGH A SLOT.
+//
+// /admin/claims now offers two things per set: the typed claims below, and a
+// SELECTION of LDAP attribute types whose values are read off the person's entry
+// under ou=users. The selection and the reading live in claim_attributes.js,
+// which cannot be required from here — it requires vc_claims.js, vc_claims.js
+// requires THIS file, and the loop would hand back a half-initialised module
+// whose exports are undefined. That is the cycle rule 2 of the architecture
+// exists for, and the symptom arrives later as something that is not a function.
+//
+// So the direction is inverted the same way setUserObserver() below and
+// helpers.js's setJwtRecorder() are: this file offers the slot and
+// claim_attributes.js fills it at ITS require time. What that buys is the whole
+// point of doing it this way — NO ISSUANCE SITE CHANGED. oauth2.js's two calls
+// to jwtClaims() and the two assertion builders' calls to samlAttributes() are
+// the lines they always were, and the attribute claims arrive through them. Four
+// edited call sites would have been four that drift and a fifth added later that
+// nobody remembers.
+//
+// It stays null in a process that never loaded that module, and every set is
+// then its typed claims alone — a smaller service, not a broken one.
+// ---------------------------------------------------------------------------
+let attributeResolver = null;
+
+function setAttributeResolver(hooks) {
+  attributeResolver = hooks || null;
+  log.debug("A claim-attribute resolver was installed; the four claim sets can " +
+            "now carry LDAP attributes read from the directory.");
+}
+
+// Both wrapped, and for the reason the user observer is wrapped: a directory
+// this service consults must never be able to fail the issuance it was consulted
+// during. A token missing a configured claim is a bug somebody can see and
+// diagnose; a token endpoint returning 500 because an entry was mid-write is a
+// bug that looks like the token endpoint.
+//
+// Neither has an entering/leaving pair, deliberately: each runs once per token
+// inside jwtClaims() or samlAttributes(), whose own pair already brackets it,
+// and claim_attributes.js logs what it did on the other side of the call. Three
+// pairs around one call would be most of what the log said about issuing a
+// token.
+function resolvedJwtClaims(id, context) {
+  if (!attributeResolver || typeof attributeResolver.jwtClaims !== 'function') {
+    return {};
+  }
+  try {
+    return attributeResolver.jwtClaims(id, context) || {};
+  } catch (e) {
+    log.error('the claim-attribute resolver threw and was ignored; the token is ' +
+              'issued without its attribute claims: ' + e.message);
+    return {};
+  }
+}
+
+function resolvedSamlAttributes(id, context) {
+  if (!attributeResolver || typeof attributeResolver.samlAttributes !== 'function') {
+    return [];
+  }
+  try {
+    return attributeResolver.samlAttributes(id, context) || [];
+  } catch (e) {
+    log.error('the claim-attribute resolver threw and was ignored; the assertion ' +
+              'is issued without its attribute claims: ' + e.message);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The placeholders a value may contain.
 //
 // Without them every configured claim would be a constant, and a constant claim
@@ -683,6 +795,53 @@ function typedValue(text) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The audit row for a typed-claim change, and why it is here rather than in
+// admin.js's four action branches.
+//
+// setClaimSet() is the single funnel all four of them pass through — add,
+// remove, clear and replace all end here — so one call is one place, and four
+// calls at the branches would be four that drift and a fifth branch added later
+// with none. The same rule the authentication funnel follows, for the same
+// reason.
+//
+// It shares the `claims.change` action with the attribute half in
+// claim_attributes.js, because they are the same fact about the same page: this
+// set changed. What differs is the detail, and `how` is what says which half.
+//
+// NO CLAIM VALUE IS EVER RECORDED — only names. A value here is whatever
+// somebody typed into a web form on a service where people paste JWTs into web
+// forms, and audit.js's header states that the log carries no credential. That
+// sentence stays true because every call site keeps it, not because something
+// central strips it.
+// ---------------------------------------------------------------------------
+function recordClaimSetChange(id, set, added, removed, count, ok, errors) {
+  log.debug("Entering recordClaimSetChange(). id=" + id + ", ok=" + ok);
+  // No guard: audit.audit() is wrapped over there and cannot throw. A guard
+  // would suggest to the next reader that this call is allowed to fail a
+  // configuration change, and it is not.
+  audit.audit({
+    action: 'claims.change',
+    outcome: ok ? 'success' : 'refused',
+    actor: '',
+    target: id,
+    channel: 'http',
+    summary: ok
+      ? 'The ' + set.label + ' set now carries ' + count + ' typed claim(s)' +
+        (added.length ? '; added ' + added.join(', ') : '') +
+        (removed.length ? '; removed ' + removed.join(', ') : '') + '.'
+      : 'A change to the ' + set.label + ' set was refused: ' + (errors || []).join(' '),
+    detail: {
+      set: id,
+      how: 'claims',
+      added: added.join(', '),
+      removed: removed.join(', '),
+      claimCount: count
+    }
+  });
+  log.debug("Leaving recordClaimSetChange().");
+}
+
 // Validate and install a whole set at once. Returns the errors rather than
 // throwing, because the caller is a form handler that has to redisplay them.
 function setClaimSet(id, entries) {
@@ -719,12 +878,18 @@ function setClaimSet(id, entries) {
     cleaned.push(claim);
   });
   if (errors.length) {
+    recordClaimSetChange(id, set, [], [], set.claims.length, false, errors);
     log.debug("Leaving setClaimSet(). Refused with " + errors.length + " error(s); nothing changed.");
     return { ok: false, errors: errors };
   }
+  const beforeNames = set.claims.map(function (claim) { return claim.name; });
+  const afterNames = cleaned.map(function (claim) { return claim.name; });
+  const added = afterNames.filter(function (name) { return beforeNames.indexOf(name) < 0; });
+  const removed = beforeNames.filter(function (name) { return afterNames.indexOf(name) < 0; });
   set.claims = cleaned;
   log.info('admin: the ' + set.label + ' claim set now has ' + cleaned.length + ' custom claim(s): ' +
-           (cleaned.map(function (c) { return c.name; }).join(', ') || '(none)'));
+           (afterNames.join(', ') || '(none)'));
+  recordClaimSetChange(id, set, added, removed, cleaned.length, true, []);
   log.debug("Leaving setClaimSet(). Installed " + cleaned.length + " claim(s).");
   return { ok: true, errors: [], claims: cleaned };
 }
@@ -740,7 +905,21 @@ function claimSet(id) {
 // the braces of the reserved list.
 function jwtClaims(id, context) {
   log.debug("Entering jwtClaims(). id=" + id);
-  const out = {};
+  // The directory attributes FIRST, so that a claim somebody typed by hand wins
+  // over an attribute claim of the same name. Somebody who typed
+  // `email = nobody@example.org` on the same page that has `mail` ticked has said
+  // something specific, and the specific thing beats the general one. The rule is
+  // stated on the page and in the API's reply rather than left to be discovered:
+  // the two halves are one screen apart, and a silent precedence rule is the kind
+  // of thing that gets diagnosed as a bug in the directory.
+  //
+  // Neither half can reach a reserved name. The typed ones are refused at
+  // configuration time by setClaimSet() below, and the attribute ones cannot
+  // collide by construction — no OIDC claim in that catalogue is a name this
+  // service sets. The merge at the CALL SITE is the third defence: oauth2.js
+  // assigns the protocol's own payload over this object, so a collision that
+  // somehow got past both loses there.
+  const out = resolvedJwtClaims(id, context);
   claimSet(id).forEach(function (claim) {
     out[claim.name] = typedValue(expandValue(claim.value, context));
   });
@@ -759,13 +938,24 @@ function jwtClaims(id, context) {
 // single shape here would only push that difference into both builders.
 function samlAttributes(id, context) {
   log.debug("Entering samlAttributes(). id=" + id);
-  const out = claimSet(id).map(function (claim) {
+  const typed = claimSet(id).map(function (claim) {
     const attribute = { name: claim.name, value: expandValue(claim.value, context) };
     if (id === 'saml2' && claim.nameFormat) attribute.nameFormat = claim.nameFormat;
     if (id === 'saml11') attribute.namespace = claim.namespace || DEFAULT_SAML11_NAMESPACE;
     return attribute;
   });
-  log.debug("Leaving samlAttributes(). " + out.length + " attribute(s).");
+  // The same precedence jwtClaims() applies, but it has to be written as a FILTER
+  // rather than as an assignment order: an assertion is a list of <Attribute>
+  // elements and not an object, so a duplicate name would not overwrite anything
+  // — it would produce two elements with one name, and a relying party reading
+  // the first would silently see whichever the builder happened to emit first.
+  const names = new Set(typed.map(function (attribute) { return attribute.name; }));
+  const fromDirectory = resolvedSamlAttributes(id, context).filter(function (attribute) {
+    return !names.has(attribute.name);
+  });
+  const out = fromDirectory.concat(typed);
+  log.debug("Leaving samlAttributes(). " + out.length + " attribute(s), " +
+            fromDirectory.length + " of them from the directory.");
   return out;
 }
 
@@ -1242,6 +1432,9 @@ module.exports = {
   revokedCount: revokedCount,
   claimSet: claimSet,
   setClaimSet: setClaimSet,
+  // Filled by claim_attributes.js at its require time; see the note above it.
+  // The inversion is what keeps the four issuance sites unchanged.
+  setAttributeResolver: setAttributeResolver,
   jwtClaims: jwtClaims,
   samlAttributes: samlAttributes,
   expandValue: expandValue,

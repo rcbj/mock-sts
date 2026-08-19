@@ -54,8 +54,9 @@ express app and every middleware), `authn.js` (the authentication service), `sam
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
 messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
 `sts_metadata.js`, and the libraries that register nothing: `dpop.js`,
-`admin_stats.js`, `vc_claims.js`, `vc_verifier_config.js`, and `admin_api_spec.js`
-and `admin_api_docs.js` beside the management API. One file in the tree is not a
+`admin_stats.js`, `audit.js`, `vc_claims.js`, `vc_verifier_config.js`,
+`claim_attributes.js`, and
+`admin_api_spec.js` and `admin_api_docs.js` beside the management API. One file in the tree is not a
 node module at all — `admin_api_explorer.js` is BROWSER code, read off disk by
 `admin_api_docs.js` and served verbatim; its own header says so at length.
 
@@ -237,6 +238,120 @@ that is the one reachable before anything is trusted.
    require in the other direction, and do not count tokens at their call sites
    instead — `signJwt()` is the single funnel, and five counted call sites means a
    sixth that is not.
+3c. **`audit.js` is a library too, it sits BESIDE `admin_stats.js` rather than
+   under it, and one dependency into it is inverted.** `admin_stats.js` answers
+   "how much"; this answers "what, when, and to whom", as a list of discrete
+   events. It requires `helpers.js` and `config.js` and NOTHING ELSE in this
+   repository, and that has to stay true: it is called from `app.js`'s call log,
+   from `admin_stats.js`'s `recordAuthentication()`, from `authn.js`'s session
+   store and from every LDAP handler, which between them are most of the
+   service. In particular it must not require `admin_stats.js`, because that
+   module requires THIS one — so the identity normalisation an audit row wants
+   is passed IN by the one caller that has already done it.
+
+   **Five recording points, and four of them are funnels this service already
+   had.** `app.js`'s call log covers three of the six categories (the console,
+   the management API and every protocol endpoint) because it is the single
+   place every answered request passes through; `recordAuthentication()` covers
+   the fourteen protocol families for the same reason it covers the directory's
+   user observer; `authn.js`'s `startSession`/`endSession` covers both
+   protocols' sign-in and sign-out. Only `ldap_server.js` has a site per
+   operation, because ldapjs dispatches straight into the handler and what a row
+   says genuinely differs per operation. Do not add a recording site beside a
+   funnel — that is how a category comes to be counted twice for one act.
+
+   **The one inverted dependency is the ACTOR.** An HTTP row wants the
+   signed-in user's name and only `authn.js` can supply it, but `authn.js`
+   requires `app.js` and `app.js` requires this — so `audit.js` offers
+   `setActorResolver()` and `authn.js` fills it at require time, the same shape
+   `setJwtRecorder()` and `setUserObserver()` have. The resolver it installs is
+   deliberately NOT `sessionOf()`: that function deletes an expired session as
+   it finds it, and an observer that quietly ended sessions while reporting on
+   them would be changing the thing it describes.
+
+   **Three properties are load-bearing and each is easy to undo.** `audit()`
+   CANNOT THROW — it is wrapped, and a caller must never guard it, because an
+   audit log that could fail a bind is a worse bug than a missing row. **NO
+   CREDENTIAL IS EVER RECORDED** — no password, bearer token, assertion, or
+   request/response body; a modify names the attributes it changed and never
+   their values, a compare says whether it matched and not what was tried, and
+   the query string redacts `code`, `id_token_hint` and the rest of
+   `REDACTED_QUERY_KEYS`. The one field read out of an admin body is `action`,
+   by name and capped, and widening that would put a pasted JWT on a web page.
+   And the VOCABULARY IS A TABLE — `CATEGORIES` and `ACTIONS` — from which the
+   console's filter selects and the API's `actions` member are both built, so an
+   action cannot occur and be unfilterable nor be offered and never occur. A new
+   action is a row there and nothing else.
+
+   **Both its settings are read per event, not captured at require time**
+   (`maxEvents()`, `protocolCallsRecorded()`), which is what the `runtime: true`
+   on `audit.maxEvents` and `audit.protocolCalls` claims — see the config
+   section below for why a captured `const` is the one thing `/admin/config`
+   cannot reach.
+
+   **There is no clear operation and there must not be one.** An erase control
+   on an unprotected console would make an audit log unable to answer the one
+   question it exists for. Restarting the service is how you get an empty one;
+   it is in memory and dies with the process like everything else here.
+
+3d. **`claim_attributes.js` is the THIRD reader of `vc_claims.js`'s catalogue,
+   and it is a library like the other two.** `vc_claims.js` says what an issued
+   CREDENTIAL carries and `vc_verifier_config.js` says what the mock Verifier
+   ASKS FOR; this says which LDAP attributes a TOKEN or an ASSERTION carries,
+   per claim set, and it is the second half of `/admin/claims`. It registers no
+   route and requires `helpers.js`, `admin_stats.js`, `vc_claims.js` and
+   `audit.js`, none of which requires it back.
+
+   **The catalogue is not copied and the three selections are not shared**, and
+   both halves of that matter. One catalogue, because two lists of spellings is
+   one list that will eventually be wrong about `schacDateOfBirth` while both
+   look right alone. Three selections, because "issue a credential carrying a
+   claim the access token does not" and "ask for a claim nothing here issues"
+   are the mismatches a client's error paths are built for, and a single page
+   setting all three would make both impossible to produce.
+
+   **The merge into a token is INVERTED, and that is what keeps the four
+   issuance sites unchanged.** `admin_stats.js` offers `setAttributeResolver()`
+   and this module fills it at ITS require time; `jwtClaims()` and
+   `samlAttributes()` then merge what comes back. It has to be that direction —
+   `vc_claims.js` requires `admin_stats.js`, so a require the other way closes a
+   loop (rule 2). Do not "simplify" it by calling this module from `oauth2.js`
+   and the two assertion builders instead: four edited call sites are four that
+   drift and a fifth added later with none. **`server.js` requires this module
+   itself**, ahead of the modules that issue, because an unfilled slot means
+   tokens issued without their configured attributes and `admin.js` requiring it
+   would only make that true by accident.
+
+   **Nothing is selected on a fresh start, in any of the four sets.** Unlike
+   `/admin/vc`'s ten defaults — which reproduce what that issuer already carried
+   — this page changes what every client of this service receives, so it does
+   nothing until it is asked to.
+
+   **Precedence is three deep and two of the three are only visible in a
+   collision**: the protocol's own claim wins (an ID Token always carries
+   `name`, `given_name`, `family_name`, `preferred_username` and `email`, so
+   ticking `cn`, `givenName`, `sn`, `uid` or `mail` on THAT set changes nothing
+   a client sees), then a typed claim of the same name, then the attribute. In
+   the two assertion builders that had to be written as a FILTER rather than as
+   an assignment order, because an assertion is a list of elements: a duplicate
+   name is not an overwrite, it is two `<Attribute>` elements with one name and
+   a relying party reading whichever was emitted first. SAML 1.1 filters on
+   NAMESPACE AND NAME together, since that profile splits a claim URI into the
+   two.
+
+3e. **`admin_stats.js` now has three inverted hooks and one require of a
+   library, and they are four different problems rather than a pattern.**
+   `helpers.js` offers `setJwtRecorder()` and this file fills it, because
+   `helpers.js` cannot require the counter that `signJwt()` has to reach.
+   `admin_stats.js` offers `setUserObserver()` and `ldap_server.js` fills it, so
+   that seeding a directory entry cannot drag `/ldap`'s routes to the front of
+   the router. `admin_stats.js` offers `setAttributeResolver()` and
+   `claim_attributes.js` fills it, because `vc_claims.js` requires this file.
+   And `audit.js` is a plain require in the ordinary direction, because it
+   requires nothing here. Each is justified by a specific thing that would
+   otherwise break; **do not add a fifth by analogy** — a slot is what you reach
+   for when a require would close a cycle or move a route, and it costs a reader
+   an indirection every time.
 
 4. **`wsfed.js` must stay after `oauth2.js` in the require order**, and that is a
    dependency rather than a preference: it signs users in to the browser session
@@ -359,7 +474,10 @@ WS-Trust 1.0 through 1.4 instead of four.
    on `/admin-api` in the same commit**. Not eventually, and not when somebody
    asks: an API that covers eight of nine controls is worse than one that covers
    none, because the ninth is found by a caller who has already written the code
-   that assumed it.
+   that assumed it. A page with no form on it still needs its GET —
+   `/admin-api/audit` is that, and it is the one resource here with no POST
+   beside it, which is the audit page having nothing to change rather than an
+   operation nobody got round to.
 
    Two things make that cheap rather than a matter of discipline, and one thing
    cannot be made cheap at all:
@@ -696,13 +814,31 @@ Worth knowing before "fixing" one of them:
   only way to exercise a wallet's "I cannot satisfy this request" path, and one page
   setting both would make it impossible to produce. Asking for NO claim is a setting
   too — DCQL reads an absent `claims` member as the whole credential.
+* **The audit log at `/admin/audit` is HISTORY where the rest of the console is
+  STATE**, and it is the one page here that can answer *when* and *by whom*.
+  Six categories — a credential accepted in any of the fourteen families, a
+  sign-on session created or ended, every LDAP operation over 389 and 636 alike,
+  every console page and form, every management API call, every other endpoint
+  call — recorded at the five funnels rule 3c names. **No credential is ever in
+  a row** and the page says so; **one act usually produces several rows** (a
+  sign-in writes three, at three layers) and the page says that too, because a
+  reader counting rows will otherwise read them as duplicates; and **it observes
+  itself**, since drawing it is console access, which is stated rather than
+  suppressed — a blind spot exactly where the reader stands is worse than an
+  extra row. What it deliberately does not record is the CLIENT'S ADDRESS: on a
+  mock reached over a compose bridge that is a fact about docker, and a column
+  right on a laptop and quietly wrong everywhere else is worse than none. It
+  records the CHANNEL instead (`http`, `ldap`, `ldaps`, `internal`).
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
   future access token, ID Token and SAML assertion. Custom claims are **additive**:
   the names this service sets itself are refused at configuration time, because an
   `exp` settable from a web form would produce tokens that fail to verify with nothing
-  pointing back at the page. It deliberately does not invalidate assertions, tickets
+  pointing back at the page. The same page's other half puts **LDAP attributes** in
+  those four, whose values come off the person's own entry rather than out of the form
+  — see rule 3d, and note that the additive rule holds there too: the protocol's own
+  claim wins, then a typed one, then the attribute. It deliberately does not invalidate assertions, tickets
   or credentials (nothing consults this service about those, so the button would be a
   lie), does not end sign-on sessions (`wsignout1.0` has cleanup to fan out), and does
   not touch refresh tokens' claims. Its `/admin/users` page lists every userid

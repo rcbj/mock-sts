@@ -90,6 +90,12 @@ var config = {
     autocreateUsers: false,
     maxEntries: 2000,
     sizeLimit: 500
+  },
+
+  // --- Audit log ---------------------------------------------------------
+  audit: {
+    maxEvents: 5000,
+    protocolCalls: true
   }
 };
 
