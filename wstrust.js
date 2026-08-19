@@ -17,9 +17,26 @@
 //
 // Authentication: a WS-Security UsernameToken is accepted when username and
 // password are both present (and the password is not the literal "invalid",
-// which lets a negative test force an auth failure). A request carrying an
-// OnBehalfOf/ActAs token (delegation) is also accepted. This is a TEST STS — it
-// does not verify request signatures or enforce real policy.
+// which lets a negative test force an auth failure). A SAML assertion in the
+// security header is accepted as a credential too, and a request carrying an
+// OnBehalfOf/ActAs token (delegation) is accepted on top of either. This is a
+// TEST STS — it does not verify request signatures or enforce real policy.
+//
+// EVERY accepted credential is put through stats.recordAuthentication(), on
+// every one of the four operations, and that matters beyond the counter it
+// increments: it is this service's single authentication funnel, so it is also
+// what writes the audit log's `authentication` row and what makes the embedded
+// LDAP directory grow a `uid=<name>,ou=users` entry for the person. Three
+// things here used to miss it, and each one produced somebody who had
+// authenticated through WS-Trust and had no directory object:
+//
+//   * Validate and Cancel answered before authenticate() was ever called.
+//   * a request with BOTH a UsernameToken and an OnBehalfOf recorded only the
+//     delegated subject — the requester, the one party that presented a
+//     credential, was dropped.
+//   * a Renew with no security header read the assertion out of its own
+//     RenewTarget and recorded THAT as the credential; the token was talking,
+//     not the requester.
 //
 // The SAML assertion itself is built and protected by saml2.js: WS-Trust carries
 // tokens, it does not define them.
@@ -130,56 +147,186 @@ function detectSoapVersion(doc, contentType) {
   return /text\/xml/i.test(contentType || '') ? '1.1' : '1.2';
 }
 
-function authenticate(doc) {
-  log.debug("Entering authenticate().");
-  // OnBehalfOf / ActAs => delegated, accept and use the delegated subject if any.
-  const obo = firstByLocal(doc, 'OnBehalfOf') || firstByLocal(doc, 'ActAs');
-  if (obo) {
-    const nameId = firstByLocal(obo, 'NameID') || firstByLocal(obo, 'NameIdentifier');
-    const delegated = (nameId && (nameId.textContent || '').trim()) || 'delegated-subject';
-    // Recorded, with what it is said plainly: the subject named in an OnBehalfOf
-    // presented no credential of their own here. Something else asked for a token
-    // about them, and this service — which checks nothing — agreed. The users page
-    // prints the method, so the row is not mistaken for a sign-in.
-    stats.recordAuthentication({
-      presented: delegated, protocol: 'WS-Trust', method: 'OnBehalfOf / ActAs (delegated)',
-      note: 'The requester named this subject; the subject presented nothing. This service ' +
-            'accepts any delegation without checking who may perform it.'
-    });
-    log.debug("Leaving authenticate(). Delegated request (OnBehalfOf/ActAs).");
-    return { ok: true, subject: delegated };
+// The elements of a WS-Trust request that hold SOMEBODY ELSE'S token. A
+// UsernameToken or an Assertion inside one of these is not the requester's
+// credential and must never be read as one.
+const NOT_A_CREDENTIAL = ['OnBehalfOf', 'ActAs', 'RenewTarget',
+                          'ValidateTarget', 'CancelTarget'];
+
+// Is `node` inside one of them?
+function insideAnotherPartysToken(node) {
+  log.debug("Entering insideAnotherPartysToken().");
+  let current = node && node.parentNode;
+  while (current) {
+    const name = current.localName || current.nodeName || '';
+    if (NOT_A_CREDENTIAL.indexOf(String(name).split(':').pop()) >= 0) {
+      log.debug("Leaving insideAnotherPartysToken(). It is inside " + name +
+                ".");
+      return true;
+    }
+    current = current.parentNode;
   }
-  const ut = firstByLocal(doc, 'UsernameToken');
+  log.debug("Leaving insideAnotherPartysToken(). It is not.");
+  return false;
+}
+
+// The first element of that local name under `root` that is the REQUESTER'S
+// own, skipping any that belongs to somebody else.
+//
+// This exists because a WS-Trust request routinely carries several identities:
+// the requester's UsernameToken in the security header, the subject named in
+// `wst:OnBehalfOf` or `wst:ActAs`, and the token being renewed, validated or
+// cancelled in `wst:RenewTarget` / `wst:ValidateTarget`. All of them are
+// `wsse:UsernameToken` or `saml:Assertion` elements, so a plain search over the
+// document answers "which comes first in DOCUMENT ORDER", which is not the
+// question being asked.
+//
+// That is not hypothetical: a Renew whose RenewTarget held the expiring
+// assertion, sent with no security header at all, used to authenticate as that
+// assertion's NameID. It was the TOKEN talking, not the requester.
+function firstOwnedByRequester(root, name) {
+  log.debug("Entering firstOwnedByRequester(). name=" + name);
+  const found = root.getElementsByTagNameNS('*', name);
+  for (let i = 0; found && i < found.length; i++) {
+    if (!insideAnotherPartysToken(found[i])) {
+      log.debug("Leaving firstOwnedByRequester(). Found one at index " + i +
+                ".");
+      return found[i];
+    }
+  }
+  log.debug("Leaving firstOwnedByRequester(). There is none.");
+  return null;
+}
+
+// The element a REQUESTER's own credential may be read from: `wsse:Security`
+// when the request has one, and the whole document when it has none. The
+// fallback is deliberately lenient — a UsernameToken put somewhere other than
+// the security header is still read — and it is safe because
+// firstOwnedByRequester() below is what does the looking.
+function credentialScope(doc) {
+  log.debug("Entering credentialScope().");
+  const security = firstByLocal(doc, 'Security');
+  if (security) {
+    log.debug("Leaving credentialScope(). The security header is the scope.");
+    return security;
+  }
+  log.debug("Leaving credentialScope(). There is no security header, so the " +
+            "whole document is the scope.");
+  return doc;
+}
+
+// The requester's own credential, read from that scope. It returns null when
+// nothing was presented, which is a different answer from a credential that was
+// presented and refused.
+function requesterCredential(doc) {
+  log.debug("Entering requesterCredential().");
+  const scope = credentialScope(doc);
+  const ut = firstOwnedByRequester(scope, 'UsernameToken');
   if (ut) {
     const user = textByLocal(ut, 'Username');
     const pass = textByLocal(ut, 'Password');
     if (!user || !pass) {
-      log.debug("Leaving authenticate(). Incomplete UsernameToken.");
-      return { ok: false, reason: 'UsernameToken requires a username and password.' };
+      log.debug("Leaving requesterCredential(). Incomplete UsernameToken.");
+      return { ok: false,
+               reason: 'UsernameToken requires a username and password.' };
     }
     if (pass === 'invalid') {
-      log.debug("Leaving authenticate(). The reserved password was used, so this is a failure.");
-      return { ok: false, reason: 'Authentication failed for user ' + user + '.' };
+      log.debug("Leaving requesterCredential(). The reserved password was " +
+                "used, so this is a failure.");
+      return { ok: false,
+               reason: 'Authentication failed for user ' + user + '.' };
     }
-    stats.recordAuthentication({
-      presented: user, protocol: 'WS-Trust', method: 'WS-Security UsernameToken',
-      note: 'The password is not checked, except for the reserved string "invalid".'
-    });
-    log.debug("Leaving authenticate(). UsernameToken accepted for " + user + ".");
-    return { ok: true, subject: user };
+    log.debug("Leaving requesterCredential(). A UsernameToken for " + user +
+              ".");
+    return { ok: true, subject: user, method: 'WS-Security UsernameToken',
+             note: 'The password is not checked, except for the reserved ' +
+                   'string "invalid".' };
   }
   // A SAML assertion presented directly as the credential.
-  const assertion = firstByLocal(doc, 'Assertion');
+  const assertion = firstOwnedByRequester(scope, 'Assertion');
   if (assertion) {
-    const nameId = firstByLocal(assertion, 'NameID') || firstByLocal(assertion, 'NameIdentifier');
-    const named = (nameId && (nameId.textContent || '').trim()) || 'saml-subject';
+    const nameId = firstByLocal(assertion, 'NameID') ||
+      firstByLocal(assertion, 'NameIdentifier');
+    const named = (nameId && (nameId.textContent || '').trim()) ||
+      'saml-subject';
+    log.debug("Leaving requesterCredential(). A SAML assertion for " + named +
+              ".");
+    return { ok: true, subject: named,
+             method: 'a SAML assertion as the credential',
+             note: 'The assertion\'s signature and Conditions are not ' +
+                   'checked; the NameID is read and believed.' };
+  }
+  log.debug("Leaving requesterCredential(). Nothing was presented.");
+  return null;
+}
+
+// The subject named in `wst:OnBehalfOf` or `wst:ActAs`, or '' when the request
+// delegates nothing.
+function delegatedSubject(doc) {
+  log.debug("Entering delegatedSubject().");
+  const obo = firstByLocal(doc, 'OnBehalfOf') || firstByLocal(doc, 'ActAs');
+  if (!obo) {
+    log.debug("Leaving delegatedSubject(). Nothing is delegated.");
+    return '';
+  }
+  const nameId = firstByLocal(obo, 'NameID') ||
+    firstByLocal(obo, 'NameIdentifier');
+  const named = (nameId && (nameId.textContent || '').trim()) ||
+    'delegated-subject';
+  log.debug("Leaving delegatedSubject(). " + named + ".");
+  return named;
+}
+
+// Who this request is from, who the token it asks for is about, and whether the
+// credential presented was accepted.
+//
+// TWO identities can be in one request and BOTH are recorded, which is the part
+// that used to be wrong: a request carrying a UsernameToken AND an OnBehalfOf
+// returned at the delegation branch before it had looked at the UsernameToken,
+// so the requester — the one party here that actually presented a credential —
+// was recorded nowhere and grew no directory entry. The delegated subject is
+// still what the token is ABOUT, and is still what this returns as the subject.
+//
+// Every accepted credential goes through stats.recordAuthentication(), which is
+// this service's single authentication funnel: it is what the admin console's
+// users page counts, what the audit log writes an `authentication` row from,
+// and what the embedded LDAP directory grows a `uid=<name>,ou=users` entry
+// from. A path that accepts a credential without calling it is a person who
+// authenticated here and is in none of the three.
+function authenticate(doc) {
+  log.debug("Entering authenticate().");
+  const credential = requesterCredential(doc);
+  if (credential && !credential.ok) {
+    log.debug("Leaving authenticate(). The credential was refused.");
+    return { ok: false, reason: credential.reason };
+  }
+  if (credential) {
     stats.recordAuthentication({
-      presented: named, protocol: 'WS-Trust', method: 'a SAML assertion as the credential',
-      note: 'The assertion\'s signature and Conditions are not checked; the NameID is read and ' +
-            'believed.'
+      presented: credential.subject, protocol: 'WS-Trust',
+      method: credential.method, note: credential.note
     });
-    log.debug("Leaving authenticate(). A SAML assertion was presented as the credential.");
-    return { ok: true, subject: named };
+  }
+  const delegated = delegatedSubject(doc);
+  if (delegated) {
+    // Recorded, with what it is said plainly: the subject named in an
+    // OnBehalfOf presented no credential of their own here. Something else
+    // asked for a token about them, and this service — which checks nothing —
+    // agreed. The users page prints the method, so the row is not mistaken for
+    // a sign-in.
+    stats.recordAuthentication({
+      presented: delegated, protocol: 'WS-Trust',
+      method: 'OnBehalfOf / ActAs (delegated)',
+      note: 'The requester named this subject; the subject presented ' +
+            'nothing. This service accepts any delegation without checking ' +
+            'who may perform it.'
+    });
+    log.debug("Leaving authenticate(). Delegated request (OnBehalfOf/ActAs).");
+    return { ok: true, subject: delegated };
+  }
+  if (credential) {
+    log.debug("Leaving authenticate(). Accepted for " + credential.subject +
+              ".");
+    return { ok: true, subject: credential.subject };
   }
   // No credential — lenient (anonymous), so a "None" credential still issues.
   //
@@ -223,6 +370,26 @@ function handleRst(rawBody, contentType, options) {
     }
   }
 
+  // EVERY operation authenticates, and it happens here — above the four
+  // branches rather than inside two of them.
+  //
+  // Validate and Cancel used to return before this line was reached, so a
+  // UsernameToken presented to either was accepted (the operation answered
+  // 200) and recorded nowhere: the requester appeared in neither the admin
+  // console's users page, nor the audit log, nor the embedded LDAP directory,
+  // which grows its `uid=<name>,ou=users` entry off the same funnel. Half of
+  // this endpoint's operations authenticated nobody.
+  //
+  // It also means the reserved password "invalid" now refuses a Validate and a
+  // Cancel the way it already refused an Issue and a Renew, which is the answer
+  // a client should get: a credential this service rejects does not become
+  // acceptable because of what was asked with it.
+  const auth = authenticate(doc);
+  if (!auth.ok) {
+    log.debug("Leaving handleRst(). Authentication failed, answering with a SOAP Fault.");
+    return { status: 500, version: version, body: soapFault(version, auth.reason || 'Authentication failed.') };
+  }
+
   if (op === 'validate') {
     const target = firstByLocal(doc, 'ValidateTarget');
     const hasToken = target && (firstByLocal(target, 'Assertion') || firstByLocal(target, 'BinarySecurityToken') || (target.textContent || '').trim());
@@ -243,15 +410,32 @@ function handleRst(rawBody, contentType, options) {
     return { status: 200, version: version, body: envelope(version, trustNs + '/RSTR/CancelFinal', rstr) };
   }
 
-  // Issue / Renew both mint (or re-mint) a token.
-  const auth = authenticate(doc);
-  if (!auth.ok) {
-    log.debug("Leaving handleRst(). Authentication failed, answering with a SOAP Fault.");
-    return { status: 500, version: version, body: soapFault(version, auth.reason || 'Authentication failed.') };
+  // Issue / Renew both mint (or re-mint) a token, for whoever authenticate()
+  // above says this request is about.
+  //
+  // The one thing that answer does not cover is a Renew sent with NO credential
+  // at all: the requester is anonymous, but the token being renewed names
+  // somebody, and a renewal that came back about `anonymous` would have thrown
+  // away the only subject in the exchange. So the RenewTarget's own NameID is
+  // read for the SUBJECT — and only for the subject. It is not an
+  // authentication and is not recorded as one: the token said it, nobody
+  // presented it. A Renew that DID authenticate keeps its own subject, which is
+  // what a service renewing a token in its own name should get.
+  let subject = auth.subject;
+  if (op === 'renew' && subject === 'anonymous') {
+    const renewTarget = firstByLocal(doc, 'RenewTarget');
+    const renewNameId = renewTarget && (firstByLocal(renewTarget, 'NameID') ||
+      firstByLocal(renewTarget, 'NameIdentifier'));
+    const renewNamed = renewNameId ?
+      (renewNameId.textContent || '').trim() : '';
+    if (renewNamed) {
+      log.debug("An unauthenticated Renew; the subject is the one the " +
+                "RenewTarget names, " + renewNamed + ".");
+      subject = renewNamed;
+    }
   }
-
   const tokenType = (tokenTypeReq === JWT_TOKEN_TYPE) ? JWT_TOKEN_TYPE : SAML2_TOKEN_TYPE;
-  const tok = buildToken(tokenType, auth.subject, audience, lifetimeMin);
+  const tok = buildToken(tokenType, subject, audience, lifetimeMin);
 
   // Optional encryption (?encrypt=1): encrypt the SAML assertion to the recipient
   // certificate carried in the request's WS-Security signature (X509Data).
