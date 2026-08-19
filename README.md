@@ -37,7 +37,7 @@ are — most of it is the record of something having gone wrong once.
 | **WS-Trust 1.0–1.4** | Issue / Renew / Validate / Cancel, WS-Security, WS-Addressing, optional XML-DSIG and XML-Enc |
 | **SAML 2.0 and SAML 1.1** | signed assertions of both vintages, and the metadata a relying party needs. 1.1 is here because it is what a WS-Federation relying party expects by default |
 | **WS-Federation 1.2** | the Web (Passive) Requestor Profile of section 13 — `wsignin1.0` with `wtrealm`, `wreply`, `wctx`, `wct`, `wfresh`, `wauth`, `whr` and `wreq`, the response as a **form POST**, `wsignout1.0` with front-channel cleanup, signed federation metadata at AD FS's path, and a mock relying party that verifies the response check by check |
-| **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (with a login screen), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
+| **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (which redirects to the authentication service when nobody is signed in), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
 | **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
 | **WebAuthn Level 3** | the relying party's half of a second factor on the login screen: registration and assertion both verified, and `amr` / `acr` in the tokens that follow saying a hardware key was used |
 | **DPoP (RFC 9449)** | all twelve section 4.3 proof checks, `cnf.jkt` on access *and* refresh tokens, `dpop_jkt`, replay detection, the nonce handshake |
@@ -185,7 +185,7 @@ And TLS's, the third thing here that is not on the HTTP listener:
 
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across thirty-two modules** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the fourteen modules that register routes, and listens: `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `ldap_server.js`, `tls_server.js`, `sts_metadata.js`. The other sixteen are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below.
+A mock Security Token Service used by the test suite, **split across forty files at its root** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the modules that register routes, and listens: `authn.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `admin_api.js`, `ldap_server.js`, `tls_server.js`, `sts_metadata.js`. The rest are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `vc_claims.js`, `vc_verifier_config.js`, `dpop.js`, `admin_stats.js`, `bbs2023.js`, `webauthn.js`, `admin_api_spec.js`, `admin_api_docs.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below. One file among them is **not a module at all**: `admin_api_explorer.js` is browser code, read off disk by `admin_api_docs.js` and served verbatim at `/admin-api/docs/explorer.js`, and nothing in node ever requires it.
 
 The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
 (what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
@@ -427,16 +427,60 @@ place in the service for one, since the exception replaces the very message that
 explaining what went wrong. The header copy is now folded to ASCII; the body keeps the
 real text.
 
+### The authentication service
+
+The sign-in screen is its own endpoint, `/authn/login`, and not part of any
+protocol here. `GET /oauth2/authorize` used to render it in the body of a 200 at
+the authorization endpoint's own URL; it now redirects to the service and is
+entered a second time when the person comes back:
+
+```
+GET /oauth2/authorize?response_type=code&client_id=…      no session
+  302 -> /authn/login?authn=8mQ2…                         the screen
+  POST /authn/login   username=alice                      Set-Cookie: sts_mock_session=…
+  302 -> /oauth2/authorize?response_type=code&client_id=… the ORIGINAL request
+  302 -> http://localhost:3000/callback?code=…            answered per spec
+```
+
+The return URL is the request that was interrupted, whole, minus `prompt` — which
+has been honoured by then and would otherwise prompt for ever. Everything else
+goes back untouched, because the second pass is where the PKCE challenge, the
+nonce, `authorization_details` and the rest are read. That is also why the
+authorization endpoint keeps no state across the two entries: it is the same
+query string both times.
+
+Three properties are worth knowing before building on it:
+
+* **It knows nothing about the protocol that sent anybody there.** The rows the
+  screen shows about the request it interrupted — client, scope, redirect URI,
+  the Credential Offer an `issuer_state` came from — are supplied by the caller,
+  because only the caller knows what its own parameters mean.
+* **Cancelling comes back too.** The browser returns to the caller with
+  `authn_error=access_denied`, and the caller turns that into its own protocol's
+  refusal — for OAuth, a redirect to the client's `redirect_uri`, or in
+  `response_mode=form_post` a self-submitting form, which is not a redirect at
+  all and is exactly why this service does not try to answer for it.
+* **The return URL must be a path on this service**, and is checked to be one. An
+  authentication service that will redirect a browser anywhere after signing
+  somebody in is a credential phishing tool with a login screen in front of it.
+
+The session cookie it establishes is the same one WS-Federation signs people into,
+so single sign-on across the two protocols is unchanged. WS-Federation keeps its
+own screen for now: section 13.2.1 lets its sign-in request arrive as a cross-site
+form POST, `SameSite=Lax` keeps the cookie off that, and a redirect chain would
+lose the request.
+
 ### WebAuthn as the second factor a mock is allowed to have
 
 The login screen carries a "use a security key" checkbox, and an authorization request
 whose `acr_values` names `mfa`, `hwk`, `phr` or `phrh` ticks it and disables it — that
 parameter is how a relying party *demands* a second factor, and a mock that ignored it
 would let a client's step-up request appear to work while proving nothing. The step
-itself is `POST /oauth2/webauthn`: first use for a username **enrols** a credential
+itself is `POST /authn/webauthn`: first use for a username **enrols** a credential
 (section 7.1), every later sign-in **asserts** with it (section 7.2), against a
 challenge minted server-side and held for five minutes with the interrupted
-authorization request.
+request, which the person is returned to exactly as the password-only path returns
+them.
 
 **This is a relying party, and the ceremony is genuinely verified**: the challenge, the
 origin, the RP ID hash, the user-presence and user-verification flags, a signature
@@ -456,7 +500,7 @@ signature check — which is what makes `tests/webauthn_cross_impl.js` over ther
 result rather than an implementation agreeing with itself; the independence is not
 cosmetic, since this side verifies ECDSA through node's `crypto.verify` in its native
 **DER** form while the browser has to convert DER to raw `r‖s` because Web Crypto will
-not. **The ceremony script is a separate resource** (`/oauth2/webauthn.js`) rather than
+not. **The ceremony script is a separate resource** (`/authn/webauthn.js`) rather than
 an inline `<script>`, because `app.js` sets `script-src 'none'` on every response and
 that one page relaxes it to `'self'`: an inline script there simply would not run, with
 the button doing nothing and no error anywhere. And **the RP ID is this origin's host
@@ -688,6 +732,28 @@ Everything the console holds is **in memory and dies with the process**, like th
 
 Three things the console deliberately does **not** do. It does not invalidate a SAML assertion, a Kerberos ticket or a credential: none of those has a revocation mechanism a relying party consults — an assertion is valid because its signature verifies and its `Conditions` hold, and nothing about this service is asked — so a button claiming to revoke one would change a number here and nothing at all out there. It does not end a sign-on session, because `/oauth2/logout` and `wsignout1.0` already do and the second has cleanup to fan out to every relying party the session signed into; a third way to end one would be a third way to get that wrong. And it adds no claims to refresh tokens: a refresh token is presented back to this server and to nothing else, so a claim in one reaches no relying party and would only make the two halves of a grant disagree.
 
+### The management API
+
+`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. Thirty-two operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
+
+**It exists because a form is the right shape for a person and the wrong one for anything else.** Every page here has answered `?format=json` since it was written, so reading was never the problem; *changing* something was. A caller that wanted to revoke a token from a script, or narrow the issuer's claim set from a CI job before running a wallet against it, was left either parsing a 303 redirect for the message in its query string or knowing which hidden input a particular form carried. Both are ways of driving a browser without one.
+
+**The rule the API is written under is about the future rather than about the code**: a control added to `/admin` gets an operation on `/admin-api` in the same commit. An API that covers eight of nine controls is worse than one that covers none, because the ninth is discovered by somebody who has already written the code that assumed it was there. Two things make keeping that rule cheap, and the third thing is why there is a test for it in the parent project.
+
+The first is that **this API decides nothing**. Every POST calls the same action function the console's form posts to — `tokenAction`, `claimsAction`, `vcAction`, `vpConfigAction` — with the action taken from the URL instead of from a hidden field, and every GET calls the same JSON view the page's `?format=json` answers. Those views became functions in `admin.js` for this reason (`consoleJson`, `metricsJson`, `tokensView`, `usersView`, `groupsView`, `claimsJson`, `vcJson`, `vpConfigJson`); they had been built inline in the route handlers, which was fine while there was one caller and is exactly the shape that produces two objects that agree today and not next month. So `admin_api.js` holds no opinion about what a revocation means that `admin.js` does not, and the way to see that is not to read the code: revoke a token through the API and RFC 7662 introspection calls it inactive, because there is one set of revoked jtis in this service and it is the same one `/oauth2/revoke` writes to.
+
+The second is that **the OpenAPI document is generated from the table that registers the routes**. `admin_api.js` holds one row per resource — the handler, the parameters, the request bodies with their examples, the prose — and `admin_api_spec.js` turns that into the document. An operation therefore cannot exist and be undocumented, nor be documented and not exist. A specification file kept beside the code it describes is wrong within a month, and the way it goes wrong is silent: somebody adds an action to the console, adds it to the API, and does not touch the YAML.
+
+The third is the direction neither of those can check. **Nothing in this service can see a form appear on a page**, so a new console control with no operation here would go unnoticed by everything above. That is asserted from outside, by the parent project's `tests/admin_api.js`, and it reads the facts off this service rather than off a list in the test: the console's own page list comes back in `GET /admin-api/status`, and each action handler, asked to perform an action that does not exist, replies with the names of the ones that do — "Unknown action "x". The four are: add, remove, clear, replace." Add an action to a switch and that sentence grows; the test then fails until there is an operation for it. The same test checks every property the document describes against a live reply, which has already caught two names that were wrong and unnoticeable: an `expiresAt` that is really `expiresAtMs`, and a group drill-down documented with its members at the top level when they are inside `group`.
+
+**Four POST routes serve twenty-four URLs**, and the shape is deliberate. Express registers `/admin-api/tokens/:action` once; the document lists `/admin-api/tokens/revoke`, `/restore`, `/revoke-kind`, `/revoke-subject`, `/revoke-user` and `/revoke-all` as the six operations they are, each with its own body schema and its own example. One pattern keeps `GET /sts-metadata` to one row per resource showing the parameter — the router is what that page reads, and twenty-four rows of near-identical prose there would bury the rest of the service — while the document describes URLs a caller can actually use. An action nobody has heard of is not a 404: it reaches the console's own handler and comes back as its refusal, naming the ones that exist, which is both the friendliest error and the sentence the parity check reads.
+
+**The explorer at `/admin-api/docs` is the only page in this service with a script on it**, and that is the one thing this feature costs. `app.js` sets `script-src 'none'` service-wide, which is what makes the whole family of reflected-content problems moot here rather than merely unlikely, so the explorer relaxes that header on its own two routes and in exactly two clauses: `script-src 'self'`, and an added `connect-src 'self'` so the page can call the API it documents. `default-src 'none'` and everything else stay as they are, and the console next door is still `script-src 'none'` — which the test asserts, because a middleware change that widened the exception would show up there first. The script is a **separate resource rather than an inline block for precisely that reason**: `'self'` is enough for a file, an inline block would have needed `'unsafe-inline'`, and `'unsafe-inline'` is the clause that would make the relaxation matter.
+
+**It is this repository's own explorer rather than Swagger UI**, which was weighed rather than skipped. `swagger-ui-dist` is 11.7 MB unpacked and pulls in an install-time telemetry package, in a service whose `package.json` is deliberately short and whose image is built in containers that may have no network beyond the registry. What it would have bought is a familiar look, for an API with no authentication, no OAuth flows, no polymorphic bodies and nobody generating a client from it. `admin_api_explorer.js` is about 250 lines with no dependency and does the same three things — read the document, fill a form, show the response — plus the equivalent `curl` line beside each operation, which is what an operator of a mock actually copies. It is also the one file in this repository that is **not a node module**: `admin_api_docs.js` reads it off disk and serves it verbatim, so it has no `require`, no `process`, and builds every node with `createElement` rather than assigning `innerHTML` — it renders response bodies, which are not always this service's own.
+
+**Nothing here is protected, for the same reason nothing else is.** This service checks no password anywhere — the username typed at the sign-in screen becomes the identity in every token it issues — so an authenticated management API would be the only authenticated surface in a service whose premise is that it authenticates nobody, and the only one a test would have to hold a secret for. What follows is worth stating rather than implying: anyone who can reach this port can revoke every token this service has issued and change what the next one contains. That was already true of `/oauth2/token`, which will mint a token for any username asked of it. Do not put this service on a public address.
+
 ### DPoP — sender-constrained access tokens (RFC 9449)
 
 A Bearer access token (RFC 6750) is a password: whatever can read the bytes can spend them. **DPoP** binds the token to a key — the token carries `cnf.jkt`, the RFC 7638 thumbprint of a public key — and every request presenting it must carry a fresh signature from the matching private key over *that request's* method and URI. The stolen bytes are then worthless.
@@ -720,7 +786,7 @@ principal name works right up to the first machine account, which is exactly the
 at which somebody is debugging a service rather than a user.
 
 **Any username, one password.** Everything else in this service checks no password at
-all: the name typed at `/oauth2/login` becomes the identity and that is the end of it.
+all: the name typed at `/authn/login` becomes the identity and that is the end of it.
 Kerberos cannot work that way, and the reason is structural rather than a decision — the
 password *is* the key. Pre-authentication is a timestamp encrypted under it and the
 AS-REP's enc-part is encrypted under it too, so a KDC that accepted any password would

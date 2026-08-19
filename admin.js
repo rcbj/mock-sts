@@ -56,11 +56,12 @@
 const app = require('./app');
 const { log, xmlEscape, baseUrlOf, ISSUER, parseBody, b64uDecode } = require('./helpers');
 const stats = require('./admin_stats');
-// The browser sign-on sessions, shared between the OAuth 2.0 / OIDC login screen
-// and WS-Federation. Read-only here: the console reports them and never ends one,
-// because /oauth2/logout and wsignout1.0 already do that and doing it from a third
-// place would mean three ways of getting the cleanup wrong.
-const { sessions } = require('./oauth2');
+// The browser sign-on sessions, from the authentication service that creates
+// them — shared between the OAuth 2.0 / OIDC flow and WS-Federation. Read-only
+// here: the console reports them and never ends one, because /oauth2/logout and
+// wsignout1.0 already do that and doing it from a third place would mean three
+// ways of getting the cleanup wrong.
+const { sessions } = require('./authn');
 // The credential claim set: which LDAP attributes an issued Verifiable Credential
 // carries, and the invented values behind them. A library like admin_stats.js —
 // it registers no route — so requiring it here neither adds to the express router
@@ -600,6 +601,47 @@ function pageNav(path, params, pg) {
 // ---------------------------------------------------------------------------
 // GET /admin — the index.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// THE JSON VIEWS, AND WHY EVERY ONE OF THEM IS NOW A FUNCTION.
+//
+// Each page here answers `?format=json`, and until admin_api.js existed each of
+// those objects was built inline in the route handler that also built the
+// markup. That was fine while there was one caller. There are two now — this
+// console and the management API at /admin-api — and two hand-built copies of
+// the same object is precisely the drift the console's own text keeps warning
+// about elsewhere: two views that each look correct alone and never see each
+// other.
+//
+// So the JSON is a function per page, and where the markup needs the same
+// intermediate work (the filtered, paged token list; a user drill-down that is
+// one of three answers) the WHOLE VIEW is the function and the route is what
+// chooses between HTML and JSON. admin_api.js calls these and nothing else — it
+// holds no second opinion about what a metrics reply contains.
+//
+// One cost is worth stating rather than discovering: usersView() and
+// groupsView() build the HTML as well, and the API throws it away. That is what
+// `/admin/users?format=json` has always done, it is a string concatenation on a
+// mock, and the alternative — a second set of builders for the same data — is
+// the thing this whole arrangement exists to prevent.
+// ---------------------------------------------------------------------------
+function consoleJson() {
+  log.debug("Entering consoleJson().");
+  const snap = stats.snapshot();
+  const json = {
+    issuer: ISSUER, startedAt: new Date(snap.startedAt).toISOString(),
+    uptimeMs: snap.uptimeMs,
+    calls: snap.calls.total, tokensHeld: snap.tokens.held,
+    tokensRevoked: snap.tokens.revoked,
+    artifactsHeld: snap.artifacts.held, signOnSessions: sessions.size,
+    usersKnown: snap.users.known,
+    usersAuthenticatedHere: snap.users.authenticatedHere,
+    pages: NAV.map(function (n) { return n.path; })
+  };
+  log.debug("Leaving consoleJson().");
+  return json;
+}
+
 app.get('/admin', function (req, res) {
   log.debug("Entering the admin console index.");
   const snap = stats.snapshot();
@@ -688,13 +730,7 @@ app.get('/admin', function (req, res) {
     '<li><code>POST ' + esc(base) + '/admin/claims</code> with ' +
     '<code>{"action":"replace","set":"id_token","claims":[{"name":"dept","value":"engineering"}]}</code></li>' +
     '</ul>';
-  respond(req, res, {
-    issuer: ISSUER, startedAt: new Date(snap.startedAt).toISOString(), uptimeMs: snap.uptimeMs,
-    calls: snap.calls.total, tokensHeld: snap.tokens.held, tokensRevoked: snap.tokens.revoked,
-    artifactsHeld: snap.artifacts.held, signOnSessions: sessions.size,
-    usersKnown: snap.users.known, usersAuthenticatedHere: snap.users.authenticatedHere,
-    pages: NAV.map(function (n) { return n.path; })
-  }, 'Admin console', '/admin', inner);
+  respond(req, res, consoleJson(), 'Admin console', '/admin', inner);
   log.debug("Leaving the admin console index.");
 });
 
@@ -797,10 +833,31 @@ function artifactKindTable(snap) {
     '</table>';
 }
 
-app.get('/admin/metrics', function (req, res) {
-  log.debug("Entering the admin metrics page.");
+// The metrics reply: the whole snapshot, with the sign-on sessions beside it.
+// The snapshot's own keys are at the TOP LEVEL of it rather than under a
+// `snapshot` member, which is what /admin/metrics?format=json has always
+// answered and what the parent project's tests read — so the route below uses
+// this object for the markup too rather than taking a second snapshot a few
+// microseconds later.
+function metricsJson() {
+  log.debug("Entering metricsJson().");
   const snap = stats.snapshot();
   const signOn = signOnSessionRows();
+  const live = signOn.filter(function (s) { return !s.expired; });
+  const json = Object.assign({}, snap, {
+    startedAtIso: new Date(snap.startedAt).toISOString(),
+    signOnSessions: { held: signOn.length, active: live.length, rows: signOn }
+  });
+  log.debug("Leaving metricsJson(). " + signOn.length + " sign-on session(s).");
+  return json;
+}
+
+app.get('/admin/metrics', function (req, res) {
+  log.debug("Entering the admin metrics page.");
+  const json = metricsJson();
+  // The snapshot's keys are the top level of that object; see the note on it.
+  const snap = json;
+  const signOn = json.signOnSessions.rows;
   const liveSignOn = signOn.filter(function (s) { return !s.expired; });
 
   // The Who column holds SUBJECTS, and one family's are not names in any readable
@@ -906,10 +963,7 @@ app.get('/admin/metrics', function (req, res) {
     'that is what they are: the TGT is the credential the session consists of, and a service ticket ' +
     'is one use of it. Counting both would report the same session twice.</p>';
 
-  respond(req, res, Object.assign({}, snap, {
-    startedAtIso: new Date(snap.startedAt).toISOString(),
-    signOnSessions: { held: signOn.length, active: liveSignOn.length, rows: signOn }
-  }), 'Metrics', '/admin/metrics', inner);
+  respond(req, res, json, 'Metrics', '/admin/metrics', inner);
   log.debug("Leaving the admin metrics page.");
 });
 
@@ -1104,11 +1158,16 @@ app.post('/admin/tokens', function (req, res) {
   log.debug("Leaving the admin token action endpoint.");
 });
 
-app.get('/admin/tokens', function (req, res) {
-  log.debug("Entering the admin tokens page.");
-  const wantedFamily = String(req.query.family || '');
-  const wantedKind = String(req.query.kind || '');
-  const wantedState = String(req.query.state || '');
+// The filtered, paged token list and the reply built from it. The WHOLE view
+// rather than only its JSON, because the markup below needs every intermediate
+// step of it — and a second walk of the same list a few lines later is how a
+// table and the JSON beside it come to disagree about a revocation that
+// happened in between.
+function tokensView(query) {
+  log.debug("Entering tokensView().");
+  const wantedFamily = String(query.family || '');
+  const wantedKind = String(query.kind || '');
+  const wantedState = String(query.state || '');
   // Not tokenList(): this page lists every JWT, every SAML assertion (whether
   // WS-Trust or WS-Federation issued it) and every Kerberos ticket, in one table in
   // the order they were issued.
@@ -1121,7 +1180,7 @@ app.get('/admin/tokens', function (req, res) {
   });
   // Filter first, then page: paging a list and then filtering it would give a page 2
   // whose length depends on what page 1 happened to contain.
-  const paging = pagingOf(req.query, filtered.length);
+  const paging = pagingOf(query, filtered.length);
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
   // How much of each family is held, for the line under the table. Counted from this
   // list rather than taken from the snapshot, because the snapshot's artifact count
@@ -1131,6 +1190,48 @@ app.get('/admin/tokens', function (req, res) {
   all.forEach(function (record) {
     heldByFamily[record.family] = (heldByFamily[record.family] || 0) + 1;
   });
+  log.debug("Leaving tokensView(). " + shown.length + " row(s) of " +
+            filtered.length + ".");
+  return {
+    wantedFamily: wantedFamily, wantedKind: wantedKind,
+    wantedState: wantedState,
+    all: all, filtered: filtered, paging: paging, shown: shown,
+    heldByFamily: heldByFamily,
+    json: {
+      held: all.length, matched: filtered.length, shown: shown.length,
+      heldByFamily: stats.ISSUED_FAMILIES.reduce(function (out, entry) {
+        out[entry.family] = heldByFamily[entry.family] || 0;
+        return out;
+      }, {}),
+      filter: { family: wantedFamily || null, kind: wantedKind || null,
+                state: wantedState || null },
+      // The clamped values, not what was asked for: `?page=999` on a two-page
+      // list reports page 2, which is the page whose rows are in the reply.
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      families: stats.ISSUED_FAMILIES,
+      revocableKinds: stats.REVOCABLE_KINDS,
+      revokedCount: stats.revokedCount(),
+      // `issued` rather than `tokens`, because the array is no longer only
+      // tokens and a key that says otherwise is the kind of thing a test
+      // asserts against once and then trusts. Nothing outside this repository
+      // read the old name.
+      issued: shown
+    }
+  };
+}
+
+app.get('/admin/tokens', function (req, res) {
+  log.debug("Entering the admin tokens page.");
+  const view = tokensView(req.query);
+  const wantedFamily = view.wantedFamily;
+  const wantedKind = view.wantedKind;
+  const wantedState = view.wantedState;
+  const all = view.all;
+  const filtered = view.filtered;
+  const paging = view.paging;
+  const shown = view.shown;
+  const heldByFamily = view.heldByFamily;
   // What every paging link has to carry with it. The page number is not in here —
   // pageNav() supplies that per link — and neither is `format`, because JSON has no
   // links in it and a caller asking for JSON passes its own parameters anyway.
@@ -1297,25 +1398,7 @@ app.get('/admin/tokens', function (req, res) {
     'revocation between two clicks cannot make the wrong token the target — the most it can do is ' +
     'shift a row onto another page.</p>';
 
-  respond(req, res, {
-    held: all.length, matched: filtered.length, shown: shown.length,
-    heldByFamily: stats.ISSUED_FAMILIES.reduce(function (out, entry) {
-      out[entry.family] = heldByFamily[entry.family] || 0;
-      return out;
-    }, {}),
-    filter: { family: wantedFamily || null, kind: wantedKind || null, state: wantedState || null },
-    // The clamped values, not what was asked for: `?page=999` on a two-page list
-    // reports page 2, which is the page whose rows are in the reply.
-    page: paging.page, pages: paging.pages, perPage: paging.perPage,
-    firstRow: paging.firstRow, lastRow: paging.lastRow,
-    families: stats.ISSUED_FAMILIES,
-    revocableKinds: stats.REVOCABLE_KINDS,
-    revokedCount: stats.revokedCount(),
-    // `issued` rather than `tokens`, because the array is no longer only tokens and
-    // a key that says otherwise is the kind of thing a test asserts against once and
-    // then trusts. Nothing outside this repository read the old name.
-    issued: shown
-  }, 'Tokens', '/admin/tokens', inner);
+  respond(req, res, view.json, 'Tokens', '/admin/tokens', inner);
   log.debug("Leaving the admin tokens page.");
 });
 
@@ -2013,8 +2096,11 @@ function usersListPage(req) {
   };
 }
 
-app.get('/admin/users', function (req, res) {
-  log.debug("Entering the admin users page.");
+// One route, three answers, and the choice between them is here rather than in
+// the route so that /admin-api/users makes the same one. `known: false` is the
+// third and it is not a 404 — see the comment inside it.
+function usersView(req) {
+  log.debug("Entering usersView().");
   const wantedUser = String(req.query.user || '').trim();
   if (wantedUser) {
     const detail = userDetailPage(req, wantedUser);
@@ -2028,18 +2114,24 @@ app.get('/admin/users', function (req, res) {
         'seen, or it has been forgotten — the registry holds the most recent ' + stats.MAX_USERS +
         ' identities, and everything in it dies with the process.</p>' +
         '<p class="note"><a href="/admin/users">Back to the list</a>.</p>';
-      respond(req, res, { user: wantedUser, known: false }, 'User', '/admin/users', inner);
-      log.debug("Leaving the admin users page. No such user.");
-      return;
+      log.debug("Leaving usersView(). No such user.");
+      return { json: { user: wantedUser, known: false }, inner: inner,
+               title: 'User' };
     }
-    respond(req, res, Object.assign({ known: true }, detail.json),
-            'User ' + wantedUser, '/admin/users', detail.inner);
-    log.debug("Leaving the admin users page. Drew the drill-down.");
-    return;
+    log.debug("Leaving usersView(). The drill-down.");
+    return { json: Object.assign({ known: true }, detail.json),
+             inner: detail.inner, title: 'User ' + wantedUser };
   }
   const list = usersListPage(req);
-  respond(req, res, list.json, 'Users', '/admin/users', list.inner);
-  log.debug("Leaving the admin users page. Drew the list.");
+  log.debug("Leaving usersView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Users' };
+}
+
+app.get('/admin/users', function (req, res) {
+  log.debug("Entering the admin users page.");
+  const view = usersView(req);
+  respond(req, res, view.json, view.title, '/admin/users', view.inner);
+  log.debug("Leaving the admin users page. " + view.title + ".");
 });
 
 // ---------------------------------------------------------------------------
@@ -2430,28 +2522,37 @@ function groupDetailPage(req, wantedDn) {
   return { inner: inner, json: Object.assign({ found: true }, info) };
 }
 
-app.get('/admin/groups', function (req, res) {
-  log.debug("Entering the admin groups page.");
+// Three answers again, and the first of them — no directory in this process —
+// is the one an API caller is most likely to meet and least likely to expect,
+// because it answers 200 with `directory: false` rather than failing.
+function groupsView(req) {
+  log.debug("Entering groupsView().");
   if (!groupReader) {
     // A build without ldap_server.js. Answered rather than 404'd, and with the
     // nav intact, for the same reason the user page's directory section says it
     // in words: the page exists, the directory does not, and those are different
     // facts about this process.
-    respond(req, res, { directory: false, groups: [] }, 'Groups', '/admin/groups',
-            messagesOf(req) + noGroupDirectorySection());
-    log.debug("Leaving the admin groups page. No directory is loaded.");
-    return;
+    log.debug("Leaving groupsView(). No directory is loaded.");
+    return { json: { directory: false, groups: [] }, title: 'Groups',
+             inner: messagesOf(req) + noGroupDirectorySection() };
   }
   const wantedDn = String(req.query.group || '').trim();
   if (wantedDn) {
     const detail = groupDetailPage(req, wantedDn);
-    respond(req, res, detail.json, 'Group ' + wantedDn, '/admin/groups', detail.inner);
-    log.debug("Leaving the admin groups page. Drew the drill-down.");
-    return;
+    log.debug("Leaving groupsView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'Group ' + wantedDn };
   }
   const list = groupsListPage(req);
-  respond(req, res, list.json, 'Groups', '/admin/groups', list.inner);
-  log.debug("Leaving the admin groups page. Drew the list.");
+  log.debug("Leaving groupsView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Groups' };
+}
+
+app.get('/admin/groups', function (req, res) {
+  log.debug("Entering the admin groups page.");
+  const view = groupsView(req);
+  respond(req, res, view.json, view.title, '/admin/groups', view.inner);
+  log.debug("Leaving the admin groups page. " + view.title + ".");
 });
 
 // ---------------------------------------------------------------------------
@@ -2594,6 +2695,24 @@ function claimSetSection(setId) {
       : '');
 }
 
+// The four sets and the rules that govern them. The rules are in the reply and
+// not only on the page because the first thing a caller of POST .../claims/add
+// needs is the list of names it will refuse.
+function claimsJson() {
+  log.debug("Entering claimsJson().");
+  const json = {
+    reservedJwtClaims: stats.RESERVED_JWT_CLAIMS,
+    placeholders: stats.PLACEHOLDERS,
+    defaultSaml11Namespace: stats.DEFAULT_SAML11_NAMESPACE,
+    sets: stats.CLAIM_SET_IDS.map(function (id) {
+      return { id: id, label: stats.CLAIM_SETS[id].label,
+               claims: stats.claimSet(id) };
+    })
+  };
+  log.debug("Leaving claimsJson().");
+  return json;
+}
+
 app.get('/admin/claims', function (req, res) {
   log.debug("Entering the admin claims page.");
   const setSelect = stats.CLAIM_SET_IDS.map(function (id) {
@@ -2644,14 +2763,7 @@ app.get('/admin/claims', function (req, res) {
       '<div class="formrow"><button>Replace</button></div>' +
     '</form>';
 
-  respond(req, res, {
-    reservedJwtClaims: stats.RESERVED_JWT_CLAIMS,
-    placeholders: stats.PLACEHOLDERS,
-    defaultSaml11Namespace: stats.DEFAULT_SAML11_NAMESPACE,
-    sets: stats.CLAIM_SET_IDS.map(function (id) {
-      return { id: id, label: stats.CLAIM_SETS[id].label, claims: stats.claimSet(id) };
-    })
-  }, 'Custom claims', '/admin/claims', inner);
+  respond(req, res, claimsJson(), 'Custom claims', '/admin/claims', inner);
   log.debug("Leaving the admin claims page.");
 });
 
@@ -2901,12 +3013,39 @@ function vcPreviewSection(previewUser) {
       : '');
 }
 
+// Somebody the directory actually holds, so the page shows real values on a
+// fresh start rather than an invented person nobody can look up. The parameter
+// wins where it is given; the cap is there because this string is echoed.
+function vcPreviewUser(query) {
+  const asked = String((query && query.user) || 'alice').trim();
+  return asked.slice(0, 64) || 'alice';
+}
+
+// The catalogue, the selection, and one person's claims as they would be minted
+// right now. The preview is in the JSON as well as on the page because "what
+// would this issue" is the question the selection exists to answer, and a
+// caller with no browser has no other way to ask it.
+function vcJson(previewUser) {
+  log.debug("Entering vcJson(). previewUser=" + previewUser);
+  const json = {
+    selected: vcClaims.selectedNames(),
+    defaults: vcClaims.DEFAULT_SELECTION,
+    ldpOmitted: vcClaims.ldpOmitted(),
+    attributes: vcClaims.VC_ATTRIBUTES.map(function (row) {
+      return { ldap: row.ldap, claim: row.claim.join('.'), label: row.label,
+               schema: row.schema, ldpTerm: row.ldpTerm || '',
+               selected: vcClaims.isSelected(row.ldap) };
+    }),
+    preview: { user: previewUser,
+               claims: vcClaims.subjectClaimsFor(previewUser, {}) }
+  };
+  log.debug("Leaving vcJson().");
+  return json;
+}
+
 app.get('/admin/vc', function (req, res) {
   log.debug("Entering the admin credential-claims page.");
-  // Somebody the directory actually holds, so the page shows real values on a
-  // fresh start rather than an invented person nobody can look up. The parameter
-  // wins where it is given; the cap is there because this string is echoed.
-  const previewUser = String(req.query.user || 'alice').trim().slice(0, 64) || 'alice';
+  const previewUser = vcPreviewUser(req.query);
 
   const inner = messagesOf(req) +
     '<p class="note">Which claims a Verifiable Credential issued by this service carries, ' +
@@ -2957,17 +3096,8 @@ app.get('/admin/vc', function (req, res) {
     'reaches a credential and stops there. The <a href="/admin/users">users</a> page shows the ' +
     'directory entry each of these values was written onto.</p>';
 
-  respond(req, res, {
-    selected: vcClaims.selectedNames(),
-    defaults: vcClaims.DEFAULT_SELECTION,
-    ldpOmitted: vcClaims.ldpOmitted(),
-    attributes: vcClaims.VC_ATTRIBUTES.map(function (row) {
-      return { ldap: row.ldap, claim: row.claim.join('.'), label: row.label,
-               schema: row.schema, ldpTerm: row.ldpTerm || '',
-               selected: vcClaims.isSelected(row.ldap) };
-    }),
-    preview: { user: previewUser, claims: vcClaims.subjectClaimsFor(previewUser, {}) }
-  }, 'Credential claims', '/admin/vc', inner);
+  respond(req, res, vcJson(previewUser), 'Credential claims', '/admin/vc',
+          inner);
   log.debug("Leaving the admin credential-claims page.");
 });
 
@@ -3237,6 +3367,42 @@ function vpFormatsSection(format) {
     'text box on this page.</p>';
 }
 
+// What the bar door asks for, and the dcql_query that carries it. The query is
+// built by the function that builds the REAL one — see the note in
+// vc_verifier_config.js — so a caller reading this reply is reading the next
+// Authorization Request rather than a description of one.
+function vpConfigJson() {
+  log.debug("Entering vpConfigJson().");
+  const format = vpConfig.defaultFormatId();
+  const json = {
+    requested: vpConfig.requestedClaims(),
+    defaults: vpConfig.DEFAULT_REQUESTED,
+    format: format,
+    formats: vpConfig.FORMATS.map(function (item) {
+      return { id: item.id, label: item.label, identifiedBy: item.identifiedBy,
+               identifier: item.identifier,
+               selectiveDisclosure: item.selectiveDisclosure,
+               holderBinding: item.holderBinding,
+               configurations: item.configs };
+    }),
+    ldpOmitted: vpConfig.ldpOmitted(),
+    catalogue: vpConfig.REQUESTABLE.map(function (row) {
+      return { claim: row.claim, label: row.label, nested: row.nested,
+               attributes: row.members.map(function (member) {
+                 return { ldap: member.ldap, schema: member.schema };
+               }),
+               ldpTerms: row.ldpTerms,
+               paths: vpConfig.dcqlPathsFor(format, row.claim),
+               requested: vpConfig.isRequested(row.claim),
+               issued: vpConfig.carriedNow(row.claim) };
+    }),
+    dcqlQuery: vpConfig.dcqlQuery(format)
+  };
+  log.debug("Leaving vpConfigJson(). Asking for " + json.requested.length +
+            " claim(s).");
+  return json;
+}
+
 app.get('/admin/vc-verifier-config', function (req, res) {
   log.debug("Entering the admin verifier-request page.");
   const format = vpConfig.defaultFormatId();
@@ -3292,28 +3458,8 @@ app.get('/admin/vc-verifier-config', function (req, res) {
     'type array a credential is identified by. And not what a verified presentation is worth: ' +
     'nothing here turns one into a credential of any kind.</p>';
 
-  respond(req, res, {
-    requested: requested,
-    defaults: vpConfig.DEFAULT_REQUESTED,
-    format: format,
-    formats: vpConfig.FORMATS.map(function (item) {
-      return { id: item.id, label: item.label, identifiedBy: item.identifiedBy,
-               identifier: item.identifier, selectiveDisclosure: item.selectiveDisclosure,
-               holderBinding: item.holderBinding, configurations: item.configs };
-    }),
-    ldpOmitted: vpConfig.ldpOmitted(),
-    catalogue: vpConfig.REQUESTABLE.map(function (row) {
-      return { claim: row.claim, label: row.label, nested: row.nested,
-               attributes: row.members.map(function (member) {
-                 return { ldap: member.ldap, schema: member.schema };
-               }),
-               ldpTerms: row.ldpTerms,
-               paths: vpConfig.dcqlPathsFor(format, row.claim),
-               requested: vpConfig.isRequested(row.claim),
-               issued: vpConfig.carriedNow(row.claim) };
-    }),
-    dcqlQuery: query
-  }, 'Verifier request', '/admin/vc-verifier-config', inner);
+  respond(req, res, vpConfigJson(), 'Verifier request',
+          '/admin/vc-verifier-config', inner);
   log.debug("Leaving the admin verifier-request page.");
 });
 
@@ -3322,8 +3468,33 @@ module.exports = {
   setDirectoryReader: setDirectoryReader,
   setGroupReader: setGroupReader,
   jtiFrom: jtiFrom,
+  // The four action functions. admin_api.js calls exactly these — it decides
+  // nothing about a revocation or a claim that this console does not — which is
+  // what makes "every /admin control has an /admin-api operation" a property of
+  // the code rather than a promise in a comment.
   tokenAction: tokenAction,
   claimsAction: claimsAction,
   vcAction: vcAction,
-  vpConfigAction: vpConfigAction
+  vpConfigAction: vpConfigAction,
+  // The JSON views, one per page, for the same reason. See the block comment
+  // above consoleJson().
+  consoleJson: consoleJson,
+  metricsJson: metricsJson,
+  tokensView: tokensView,
+  usersView: usersView,
+  groupsView: groupsView,
+  claimsJson: claimsJson,
+  vcJson: vcJson,
+  vcPreviewUser: vcPreviewUser,
+  vpConfigJson: vpConfigJson,
+  // A body field that may appear more than once. Exported because the
+  // management API takes the same two spellings of a list (`attribute` and
+  // `attributes`), and reading a repeated form field is not something
+  // helpers.parseBody() can answer.
+  listField: listField,
+  // The console's own paging rules, so that /admin-api reports and clamps `per`
+  // and `page` the way every page here does rather than inventing a second
+  // ceiling.
+  MAX_ROWS: MAX_ROWS,
+  DEFAULT_PER_PAGE: DEFAULT_PER_PAGE
 };

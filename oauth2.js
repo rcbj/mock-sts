@@ -63,6 +63,11 @@ const { VCI_CONFIGS, VCI_CONFIG_ID, VCI_SCOPE, vciFormatOf } = require('./vc_con
 // registers no route, so this adds nothing to the require order.
 const vcClaims = require('./vc_claims');
 const { deferredAccessTokens, issuerStates, preAuthorizedCodes } = require('./vc_offers');
+// The authentication service. It requires nothing from this module, which is
+// what makes this a one-way dependency: a protocol asks it to authenticate
+// somebody and is handed them back with a session.
+const authn = require('./authn');
+const { sessionOf, endSession } = authn;
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
 //
@@ -380,12 +385,6 @@ app.get('/oauth2/jwks', function (req, res) {
   }
 });
 
-const SESSION_COOKIE = 'sts_mock_session';
-
-const SESSION_TTL_MS = 60 * 60 * 1000;
-
-const LOGIN_TTL_MS = 10 * 60 * 1000;
-
 const ACCESS_TOKEN_TTL = 3600;
 
 const REFRESH_TOKEN_TTL = 30 * 24 * 3600;
@@ -428,23 +427,10 @@ const authzCodes = new Map();       // code -> the authorization request it came
 // ---------------------------------------------------------------------------
 const redeemedCodes = new Map();    // code -> the token set it was redeemed for
 
-const sessions = new Map();         // session id -> the signed-in user
-
-const pendingLogins = new Map();    // login id -> the authorization request being interrupted
-
-// WebAuthn as a second factor. The verifier is ./webauthn — written from the
-// specification and sharing no code with the debugger's own decoder, which is
-// what makes tests/webauthn_cross_impl.js over there a real check rather than
-// an implementation agreeing with itself.
-//
-// This lives in oauth2.js rather than a module of its own because it is a step
-// IN THE LOGIN FLOW: it needs pendingLogins and sessions, both of which this
-// module owns, and reaching for them from elsewhere is the import cycle this
-// service's split exists to avoid.
-const webauthnVerifier = require('./webauthn');
-const webauthnCredentials = new Map();  // username -> { credentialId, publicKeyJwk, signCount }
-const pendingMfa = new Map();           // mfa id -> { login, username, challenge, expires }
-const MFA_TTL_MS = 5 * 60 * 1000;
+// The browser session, the login screen it comes out of and the WebAuthn step
+// beside it all used to be declared here. They are `authn.js` now — see its
+// header for why, and note that this module reads the session and never writes
+// one: authenticating is somebody else's endpoint.
 
 // Which tokens are no longer valid. This was a `new Set()` here, and it moved into
 // admin_stats.js when the admin console gained a page that revokes tokens too:
@@ -642,128 +628,25 @@ function tokenSet(base, opts) {
   return body;
 }
 
-// --- authorization endpoint + login screen ----------------------------------
-// A browser flow, so it behaves like one: an unauthenticated request is shown a
-// login screen, and only once the user has signed in does the endpoint issue
-// the authorization code (or the implicit/hybrid tokens) and redirect back to
-// the client.
+// --- the authorization endpoint ----------------------------------------------
+// A browser flow, so it behaves like one: an unauthenticated request is sent to
+// the AUTHENTICATION SERVICE (authn.js), and only once the person comes back
+// signed in does this endpoint issue the authorization code (or the
+// implicit/hybrid tokens) and redirect back to the client.
 //
-//   GET  /oauth2/authorize   no session  -> the login screen
-//                            session     -> issue and redirect to redirect_uri
-//   POST /oauth2/login       signs the user in, then redirects BACK to
-//                            /oauth2/authorize with the original request, which
-//                            then proceeds as normal
+//   GET /oauth2/authorize   no session  -> 302 to /authn/login, with a return
+//                                          URL carrying this request whole
+//                           session     -> issue and redirect to redirect_uri
 //
-// No password is checked — the username typed in is simply who the tokens then
-// describe. A session cookie means the next authorization request does not
-// prompt again; prompt=login forces it to.
-function cookiesOf(req) {
-  log.debug("Entering cookiesOf().");
-  const out = {};
-  String(req.headers.cookie || '').split(';').forEach(function (part) {
-    const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
-  });
-  log.debug("Leaving cookiesOf(). " + Object.keys(out).length + " cookie(s).");
-  return out;
-}
-
-function sessionOf(req) {
-  log.debug("Entering sessionOf().");
-  const id = cookiesOf(req)[SESSION_COOKIE];
-  if (!id) {
-    log.debug("Leaving sessionOf(). No session cookie.");
-    return null;
-  }
-  const session = sessions.get(id);
-  if (!session) {
-    log.debug("Leaving sessionOf(). The cookie names no session this server knows.");
-    return null;
-  }
-  if (session.expires < Date.now()) {
-    sessions.delete(id);
-    log.debug("Leaving sessionOf(). The session had expired and was discarded.");
-    return null;
-  }
-  log.debug("Leaving sessionOf(). Signed in as " + session.user.username + ".");
-  return session;
-}
-
-// --- starting and ending a session -----------------------------------------
-// Both are functions rather than four lines repeated at each call site, and the
-// reason is WS-Federation. `wsfed.js` signs a user in at its own login screen and
-// must land them in THE SAME session this module reads, because the two protocols
-// share the browser and single sign-on between them is the interesting behaviour:
-// sign in at the OIDC screen with a security key, arrive at `wsignin1.0`, and the
-// assertion says a hardware key was used because the session recorded it.
+// So the endpoint is entered TWICE for a sign-in and once afterwards, and the
+// second entry is the first request over again — which is exactly what makes it
+// safe to keep no state here: everything the response is built from is on the
+// query string both times.
 //
-// The cookie's attributes are the part that must not be written twice. Sharing a
-// session across protocols means the cookie NAME, PATH and SameSite have to agree
-// exactly; a second copy that set Path=/oauth2 or omitted SameSite would produce
-// two sessions that each looked fine on its own and never saw each other, which is
-// a debugging session with no error message anywhere in it.
-//
-// **SameSite=Lax is deliberate and it has one consequence worth knowing.** It is
-// sent on a top-level GET navigation, which is how a relying party sends a browser
-// here in both protocols — but NOT on a cross-site POST, and WS-Federation section
-// 13.2.1 permits the sign-in request to arrive as a form POST. Such a request
-// therefore sees no session and is shown the login screen even though one exists.
-// The alternative is SameSite=None, which requires Secure, which this service
-// cannot be over http://localhost — so the quirk stays, and wsfed.js says so on
-// the screen rather than leaving it to look like a broken session.
-//
-// `via` names the screen the person actually used, and it is a parameter rather than
-// something derived here because this function cannot tell: WS-Federation's sign-in
-// screen calls it too, and a session started there is indistinguishable afterwards
-// from one started at the OIDC login screen — which is the point of sharing the
-// store, and is exactly why the admin console would otherwise report every
-// WS-Federation sign-in as an OIDC one. It defaults to the OIDC screen, so the
-// existing call sites keep saying what they always meant.
-function startSession(res, username, amr, acr, via) {
-  log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
-  const sessionId = randomId(24);
-  const session = {
-    // The id is on the session as well as being the map key, because everything that
-    // is handed a session gets the object and not the key — the authorization
-    // endpoint, WS-Federation, the console — and without it the tokens issued on a
-    // session could not name the session they were issued on.
-    id: sessionId,
-    user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
-    // Stated rather than omitted: a relying party that asked for a second factor
-    // needs to be able to see that it did not get one.
-    amr: amr, acr: acr
-  };
-  sessions.set(sessionId, session);
-  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
-  // One of the two places a person is authenticated by typing a name at a screen —
-  // this one covers both, since WS-Federation signs in through here.
-  stats.recordAuthentication({
-    presented: username, protocol: via || 'OAuth 2.0 / OIDC',
-    method: (amr || []).indexOf('hwk') >= 0 ? 'sign-in screen (password and a security key)'
-                                            : 'sign-in screen (password)',
-    sub: session.user.sub, amr: amr, acr: acr, sessionId: sessionId,
-    note: 'No password was checked; the name typed is the identity.'
-  });
-  log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
-  return session;
-}
-
-// Ends the session the request carries, and returns it — the caller needs what it
-// was, not merely that it is gone: WS-Federation's sign-out has to send a cleanup
-// request to each relying party the session signed into, and that list lives on
-// the session object it is about to discard.
-function endSession(req, res) {
-  log.debug("Entering endSession().");
-  const id = cookiesOf(req)[SESSION_COOKIE];
-  const session = id ? sessions.get(id) : null;
-  if (id) sessions.delete(id);
-  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0');
-  log.debug("Leaving endSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
-                                               : 'There was no session to drop.'));
-  return session || null;
-}
-
-// The authorization request, as the query string it arrived as. Kept whole so
+// No password is checked over there — the username typed in is simply who the
+// tokens then describe. A session cookie means the next authorization request
+// does not prompt again; prompt=login forces it to, and is dropped from the
+// return URL so that it forces it exactly once.
 // the redirect back after login is the same request over again.
 function queryString(query, omit) {
   log.debug("Entering queryString().");
@@ -774,56 +657,6 @@ function queryString(query, omit) {
   });
   log.debug("Leaving queryString().");
   return usp.toString();
-}
-
-function loginPage(base, login, error) {
-  log.debug("Entering loginPage(). client_id=" + (login.query.client_id || '(none)') +
-            (error ? ", showing an error" : ""));
-  const q = login.query;
-  const scope = q.scope || '(none requested)';
-  const page = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
-    '<title>Sign in — mock authorization server</title><style>' +
-    'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
-    'display:flex;align-items:center;justify-content:center;min-height:100vh;color:#222}' +
-    '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:28px 32px;width:380px;' +
-    'box-shadow:0 6px 24px rgba(0,0,0,.08)}h1{font-size:1.25em;margin:0 0 4px}' +
-    'p.sub{color:#666;font-size:.85em;margin:0 0 18px}label{display:block;font-size:.85em;font-weight:600;' +
-    'margin:12px 0 4px}input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:8px 10px;' +
-    'border:1px solid #bbb;border-radius:5px;font-size:1em}.row{display:flex;gap:10px;margin-top:20px}' +
-    'button{flex:1;padding:9px 12px;border-radius:5px;border:1px solid #12107c;background:#12107c;color:#fff;' +
-    'font-size:.95em;cursor:pointer}button.secondary{background:#fff;color:#12107c}' +
-    '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
-    'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
-    'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}code{font-family:ui-monospace,' +
-    'SFMono-Regular,Menlo,monospace}</style></head><body><div class="card">' +
-    '<h1>Sign in</h1>' +
-    '<p class="sub">Mock authorization server at <code>' + xmlEscape(base) + '</code></p>' +
-    (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
-    '<form method="post" action="/oauth2/login">' +
-    '<input type="hidden" name="login_id" value="' + xmlEscape(login.id) + '">' +
-    '<label for="username">Username</label>' +
-    '<input type="text" id="username" name="username" autocomplete="username" autofocus' +
-    ' value="' + xmlEscape(q.login_hint || '') + '">' +
-    '<label for="password">Password</label>' +
-    '<input type="password" id="password" name="password" autocomplete="current-password">' +
-    '<label class="chk"><input type="checkbox" id="use_webauthn" name="use_webauthn" value="1"' +
-    (login.forceMfa ? ' checked disabled' : '') + '> Use a security key (WebAuthn)</label>' +
-    (login.forceMfa ? '<input type="hidden" name="use_webauthn" value="1">' : '') +
-    '<div class="row"><button type="submit" id="kc-login" name="action" value="login">Sign In</button>' +
-    '<button type="submit" id="kc-cancel" name="action" value="cancel" class="secondary">Cancel</button></div>' +
-    '</form><div class="meta">' +
-    '<div>No password is checked. The username you enter is the identity the issued tokens describe.</div>' +
-    '<div>client_id: <code>' + xmlEscape(q.client_id || '') + '</code></div>' +
-    '<div>scope: <code>' + xmlEscape(scope) + '</code></div>' +
-    '<div>redirect_uri: <code>' + xmlEscape(q.redirect_uri || '') + '</code></div>' +
-    (q.issuer_state
-      ? '<div>issuer_state: <code>' + xmlEscape(q.issuer_state) + '</code>' +
-        (issuerStates.has(String(q.issuer_state)) ? ' (from a Credential Offer this issuer made)' : '') +
-        '</div>'
-      : '') +
-    '</div></div></body></html>\n';
-  log.debug("Leaving loginPage().");
-  return page;
 }
 
 // Build the authorization response for a signed-in user and redirect back to
@@ -1085,8 +918,25 @@ app.get('/oauth2/authorize', function (req, res) {
     }
   }
 
-  // Already signed in? Then this is the second pass — after the login screen,
-  // or a later request on the same session — and the response goes out now.
+  // Did the person come back from the authentication service having refused?
+  // Checked BEFORE the session, because there is no session in that case and
+  // the next thing this endpoint would otherwise do is send them straight back
+  // to the screen they just declined — a redirect loop with a login form in it.
+  //
+  // The service names the outcome and this endpoint decides what OAuth does
+  // about it, which is what keeps protocol knowledge here: `redirectBack()`
+  // knows about response_mode, and in form_post the answer is not a redirect at
+  // all but a self-submitting form.
+  if (q.authn_error) {
+    log.debug("Leaving the authorization endpoint. The authentication service reported " +
+              q.authn_error + ".");
+    return fail(String(q.authn_error),
+                String(q.authn_error_description || 'Authentication did not complete.'));
+  }
+
+  // Already signed in? Then this is the second pass — back from the
+  // authentication service, or a later request on the same session — and the
+  // response goes out now.
   const session = sessionOf(req);
   const forcePrompt = String(q.prompt || '').split(/\s+/).indexOf('login') >= 0;
   if (session && !forcePrompt) {
@@ -1098,330 +948,42 @@ app.get('/oauth2/authorize', function (req, res) {
     return fail('login_required', 'No session, and prompt=none forbids showing the login screen.');
   }
 
-  // Otherwise: authenticate the user first. The request is stashed so the login
-  // POST can send the browser back to it unchanged.
-  const login = {
-    id: randomId(18),
-    query: JSON.parse(JSON.stringify(q)),
-    expires: Date.now() + LOGIN_TTL_MS
-  };
+  // Otherwise: hand the person to the authentication service, and say where to
+  // bring them back to — this same endpoint, with this same request.
+  //
+  // `prompt` is dropped from the return URL and only from it: it has been
+  // honoured by the time they come back, and leaving it on would send them
+  // round again for ever. Everything else goes back untouched, because what
+  // runs on the return leg has to be the request the client actually made —
+  // the PKCE challenge, the nonce, authorization_details and the rest are all
+  // read on that second pass.
+  const returnTo = '/oauth2/authorize?' + queryString(q, ['prompt']);
   // acr_values is how a relying party demands a second factor. Anything naming
   // mfa or a hardware key forces the WebAuthn step and disables the opt-out, so
   // the checkbox cannot be used to answer a request for step-up with a password.
-  login.forceMfa = /\b(mfa|hwk|phr|phrh)\b/i.test(String(login.query.acr_values || ''));
-  pendingLogins.set(login.id, login);
-  pendingLogins.forEach(function (v, k) { if (v.expires < Date.now()) pendingLogins.delete(k); });
-  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(loginPage(base, login, ''));
-  log.debug("Leaving the authorization endpoint. Showing the login screen first.");
-});
-
-app.post('/oauth2/login', function (req, res) {
-  log.debug("Entering the login endpoint.");
-  const base = baseUrlOf(req);
-  const body = parseBody(req);
-  const login = pendingLogins.get(String(body.login_id || ''));
-  if (!login || login.expires < Date.now()) {
-    pendingLogins.delete(String(body.login_id || ''));
-    log.debug("Leaving the login endpoint. The form had expired.");
-    return oauthError(res, 400, 'invalid_request',
-      'This login form has expired. Start the authorization request again.');
+  const forceMfa = /\b(mfa|hwk|phr|phrh)\b/i.test(String(q.acr_values || ''));
+  // What the screen tells the person they are signing in FOR. Written here
+  // because these are OAuth's parameters and only this module knows what they
+  // mean — the issuer_state note in particular, which says whether the request
+  // came from a Credential Offer this issuer actually made.
+  const details = [
+    { label: 'client_id', value: q.client_id || '' },
+    { label: 'scope', value: q.scope || '(none requested)' },
+    { label: 'redirect_uri', value: q.redirect_uri || '' }
+  ];
+  if (q.issuer_state) {
+    details.push({ label: 'issuer_state', value: q.issuer_state,
+                   note: issuerStates.has(String(q.issuer_state))
+                     ? 'from a Credential Offer this issuer made' : '' });
   }
-  const redirectUri = String(login.query.redirect_uri);
-
-  if (String(body.action || '') === 'cancel') {
-    pendingLogins.delete(login.id);
-    log.debug("Leaving the login endpoint. The user cancelled.");
-    return redirectBack(res, base, redirectUri, login.query.state,
-      { error: 'access_denied', error_description: 'The user cancelled at the login screen.' }, false);
-  }
-
-  const username = String(body.username || '').trim();
-  // The only two ways to fail: no username to put in the tokens, and the
-  // reserved password the rest of this mock also refuses.
-  if (!username) {
-    log.debug("Leaving the login endpoint. No username was entered, so the form is shown again.");
-    return res.status(200).type('text/html').set('Cache-Control', 'no-store')
-      .send(loginPage(base, login, 'Enter a username. It does not have to exist — it is the identity the ' +
-                                  'issued tokens will describe.'));
-  }
-  if (String(body.password || '') === 'invalid') {
-    log.debug("Leaving the login endpoint. The reserved password was used, so the form is shown again.");
-    return res.status(200).type('text/html').set('Cache-Control', 'no-store')
-      .send(loginPage(base, login, 'Authentication failed for ' + username + '.'));
-  }
-
-  // The second factor, if this request asked for one. The password step has
-  // succeeded; the session is NOT created yet, because a session created here
-  // and upgraded later would be a valid single-factor session in the window
-  // between — and an authorization request arriving in that window would be
-  // answered with tokens that claim one factor's worth of assurance and carry
-  // none of the second's.
-  if (String(body.use_webauthn || '') === '1') {
-    pendingLogins.delete(login.id);
-    const mfaId = randomId(24);
-    pendingMfa.set(mfaId, {
-      login: login, username: username,
-      challenge: crypto.randomBytes(32).toString('base64url'),
-      expires: Date.now() + MFA_TTL_MS
-    });
-    pendingMfa.forEach(function (v, k) { if (v.expires < Date.now()) pendingMfa.delete(k); });
-    log.debug("Leaving the login endpoint. " + username + " passed the password step; asking for " +
-              "the security key.");
-    return sendWebauthnPage(res, webauthnPage(base, mfaId, username, ''));
-  }
-
-  pendingLogins.delete(login.id);
-  // One factor, and the tokens will say so.
-  startSession(res, username, ['pwd'], '1');
-
-  // Back to the authorization endpoint with the original request — minus
-  // prompt, which has now been honoured and would otherwise prompt forever.
-  res.redirect(302, base + '/oauth2/authorize?' + queryString(login.query, ['prompt']));
-  log.debug("Leaving the login endpoint. " + username + " is signed in; back to the authorization endpoint.");
+  res.redirect(302, authn.beginAuthentication({
+    returnTo: returnTo, details: details, hint: q.login_hint || '',
+    forceMfa: forceMfa, protocol: 'OAuth 2.0 / OIDC'
+  }));
+  log.debug("Leaving the authorization endpoint. Sent to the authentication service first.");
 });
 
 
-// The second-factor screen. It performs the ceremony in the browser against
-// THIS origin — the RP ID is the STS's own host, because WebAuthn binds a
-// ceremony to the calling origin and no amount of configuration changes that.
-//
-// Registration on first use, assertion afterwards: a mock authorization server
-// that demanded an already-enrolled key would be untestable without a manual
-// enrolment step, and the interesting artifacts are the same either way.
-function webauthnPage(base, mfaId, username, error) {
-  log.debug("Entering webauthnPage(). username=" + username);
-  const known = webauthnCredentials.get(username);
-  const mode = known ? 'get' : 'create';
-  const pending = pendingMfa.get(mfaId);
-  const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
-    '<title>Security key — mock authorization server</title><style>' +
-    'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
-    'display:flex;align-items:center;justify-content:center;min-height:100vh;color:#222}' +
-    '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:28px 32px;width:420px;' +
-    'box-shadow:0 6px 24px rgba(0,0,0,.08)}h1{font-size:1.25em;margin:0 0 4px}' +
-    'p.sub{color:#666;font-size:.85em;margin:0 0 18px}button{padding:9px 12px;border-radius:5px;' +
-    'border:1px solid #12107c;background:#12107c;color:#fff;font-size:.95em;cursor:pointer;width:100%}' +
-    '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
-    'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
-    'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}' +
-    'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}</style></head><body>' +
-    '<div class="card"><h1>' + (mode === 'create' ? 'Enrol a security key' : 'Use your security key') + '</h1>' +
-    '<p class="sub">Second factor for <code>' + xmlEscape(username) + '</code></p>' +
-    (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
-    '<button id="wa-go" type="button">' +
-    (mode === 'create' ? 'Enrol security key' : 'Authenticate with security key') + '</button>' +
-    '<form method="post" action="/oauth2/webauthn" id="wa-form">' +
-    '<input type="hidden" name="mfa_id" value="' + xmlEscape(mfaId) + '">' +
-    '<input type="hidden" name="mode" value="' + mode + '">' +
-    '<input type="hidden" name="credential" id="wa-credential">' +
-    '</form>' +
-    // The ceremony's parameters travel as data attributes and the script is a
-    // separate resource, so this page needs no inline script. That is not
-    // fastidiousness: this service sets `script-src 'none'` on everything by
-    // design (see app.js), and an inline script here would simply not run —
-    // silently, with the button doing nothing. One page relaxes it to 'self',
-    // which is the smallest exception that works.
-    '<div id="wa-data"' +
-    ' data-challenge="' + xmlEscape(pending ? pending.challenge : '') + '"' +
-    ' data-rpid="' + xmlEscape(rpIdOf(base)) + '"' +
-    ' data-user="' + xmlEscape(username) + '"' +
-    ' data-allow="' + xmlEscape(known ? known.credentialId : '') + '"' +
-    ' data-mode="' + mode + '"></div>' +
-    '<div class="meta">' +
-    '<div>RP ID: <code>' + xmlEscape(rpIdOf(base)) + '</code> — the ceremony is bound to this origin.</div>' +
-    '<div>challenge: <code>' + xmlEscape(pending ? pending.challenge : '') + '</code></div>' +
-    '<div>' + (mode === 'create'
-      ? 'No key is enrolled for this user yet, so this step registers one.'
-      : 'A key is already enrolled for this user, so this step is an assertion.') + '</div>' +
-    '</div></div>' +
-    '<script src="/oauth2/webauthn.js"></script></body></html>\n';
-  log.debug("Leaving webauthnPage(). mode=" + mode);
-  return html;
-}
-
-// The ceremony script, as its own resource. Written with split/join rather than
-// regular expressions on purpose: this string passes through a JavaScript string
-// literal on the way out, where `\+` collapses to `+` and `\/` to `/`, which
-// silently produced `/+/g` and `///g` in the delivered script the first time
-// this was written inline. split/join has nothing to escape.
-const WEBAUTHN_SCRIPT = [
-  '(function () {',
-  '  var d = document.getElementById("wa-data");',
-  '  var b64u = function (b) {',
-  '    var s = btoa(String.fromCharCode.apply(null, new Uint8Array(b)));',
-  '    return s.split("+").join("-").split("/").join("_").split("=").join("");',
-  '  };',
-  '  var bytes = function (s) {',
-  '    var t = s.split("-").join("+").split("_").join("/");',
-  '    while (t.length % 4) { t += "="; }',
-  '    var bin = atob(t), out = new Uint8Array(bin.length);',
-  '    for (var i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }',
-  '    return out;',
-  '  };',
-  '  var send = function (payload) {',
-  '    document.getElementById("wa-credential").value = JSON.stringify(payload);',
-  '    document.getElementById("wa-form").submit();',
-  '  };',
-  '  document.getElementById("wa-go").addEventListener("click", function () {',
-  '    var challenge = bytes(d.getAttribute("data-challenge"));',
-  '    var rpId = d.getAttribute("data-rpid");',
-  '    var user = d.getAttribute("data-user");',
-  '    var allow = d.getAttribute("data-allow");',
-  '    var p;',
-  '    if (d.getAttribute("data-mode") === "create") {',
-  '      p = navigator.credentials.create({ publicKey: {',
-  '        rp: { name: "Mock authorization server", id: rpId },',
-  '        user: { id: new TextEncoder().encode(user), name: user, displayName: user },',
-  '        challenge: challenge,',
-  '        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],',
-  '        authenticatorSelection: { userVerification: "preferred" },',
-  '        attestation: "direct", timeout: 60000 } })',
-  '        .then(function (c) { return { id: c.id, rawId: b64u(c.rawId), type: c.type, response: {',
-  '          clientDataJSON: b64u(c.response.clientDataJSON),',
-  '          attestationObject: b64u(c.response.attestationObject) } }; });',
-  '    } else {',
-  '      p = navigator.credentials.get({ publicKey: {',
-  '        challenge: challenge, rpId: rpId,',
-  '        allowCredentials: allow ? [{ type: "public-key", id: bytes(allow) }] : undefined,',
-  '        userVerification: "preferred", timeout: 60000 } })',
-  '        .then(function (a) { return { id: a.id, rawId: b64u(a.rawId), type: a.type, response: {',
-  '          clientDataJSON: b64u(a.response.clientDataJSON),',
-  '          authenticatorData: b64u(a.response.authenticatorData),',
-  '          signature: b64u(a.response.signature),',
-  '          userHandle: a.response.userHandle ? b64u(a.response.userHandle) : null } }; });',
-  '    }',
-  '    p.then(send).catch(function (e) { send({ error: e.name, message: e.message }); });',
-  '  });',
-  '})();',
-  ''
-].join('\n');
-
-// The one page in this service that runs a script, and the one response that
-// relaxes the policy for it — to 'self', not 'unsafe-inline', so the exception
-// is a named resource rather than a hole. app.js sets script-src 'none' on
-// everything by default and that default is worth keeping.
-function sendWebauthnPage(res, html) {
-  res.set('Content-Security-Policy',
-          "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
-          "base-uri 'none'; frame-ancestors 'none'");
-  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(html);
-}
-
-app.get('/oauth2/webauthn.js', function (req, res) {
-  log.debug("Serving the WebAuthn ceremony script.");
-  res.set('Content-Security-Policy', "default-src 'none'");
-  res.type('application/javascript').set('Cache-Control', 'no-store').send(WEBAUTHN_SCRIPT);
-});
-
-// The RP ID is the origin's HOST, never anything configurable. A mock that let
-// you set it to something else would be teaching the one lesson WebAuthn exists
-// to prevent.
-function rpIdOf(base) {
-  try {
-    return new URL(base).hostname;
-  } catch (e) {
-    // A base that will not parse is a misconfiguration of this service rather
-    // than of the ceremony; fall back to the literal so the page still says
-    // something true about what it will send.
-    return String(base).replace(/^https?:\/\//, '').split(':')[0];
-  }
-}
-
-app.post('/oauth2/webauthn', function (req, res) {
-  log.debug("Entering the WebAuthn second-factor endpoint.");
-  const base = baseUrlOf(req);
-  const body = parseBody(req);
-  const pending = pendingMfa.get(String(body.mfa_id || ''));
-  if (!pending || pending.expires < Date.now()) {
-    pendingMfa.delete(String(body.mfa_id || ''));
-    log.debug("Leaving the WebAuthn endpoint. The step had expired.");
-    return oauthError(res, 400, 'invalid_request',
-      'This second-factor step has expired. Start the authorization request again.');
-  }
-
-  let credential;
-  try {
-    credential = JSON.parse(String(body.credential || '{}'));
-  } catch (e) {
-    log.debug("Leaving the WebAuthn endpoint. The posted credential was not JSON.");
-    return sendWebauthnPage(res, webauthnPage(base, pending.login && String(body.mfa_id), pending.username,
-                         'The browser returned something this server could not read.'));
-  }
-  if (credential.error) {
-    // The browser refused the ceremony. Its error is deliberately ambiguous —
-    // no credential, declined, and timed out are one error — so report it as
-    // given rather than guessing which happened.
-    log.debug("Leaving the WebAuthn endpoint. The browser refused: " + credential.error);
-    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
-        credential.error + ': ' + (credential.message || '') +
-        '  (WebAuthn reports one error for several situations, so this does not say which.)'));
-  }
-
-  const expectedOrigin = base;
-  const expectedRpId = rpIdOf(base);
-  let verdict;
-  try {
-    if (String(body.mode || '') === 'create') {
-      verdict = webauthnVerifier.verifyRegistration({
-        attestationObject: credential.response.attestationObject,
-        clientDataJSON: credential.response.clientDataJSON,
-        expectedChallenge: pending.challenge,
-        expectedOrigin: expectedOrigin,
-        expectedRpId: expectedRpId,
-        requireUserVerification: false
-      });
-      if (verdict.ok) {
-        webauthnCredentials.set(pending.username, {
-          credentialId: verdict.credentialId,
-          publicKeyJwk: verdict.publicKeyJwk,
-          signCount: verdict.signCount
-        });
-      }
-    } else {
-      const known = webauthnCredentials.get(pending.username);
-      if (!known) {
-        throw new Error('no key is enrolled for ' + pending.username);
-      }
-      verdict = webauthnVerifier.verifyAssertion({
-        authenticatorData: credential.response.authenticatorData,
-        clientDataJSON: credential.response.clientDataJSON,
-        signature: credential.response.signature,
-        publicKeyJwk: known.publicKeyJwk,
-        expectedChallenge: pending.challenge,
-        expectedOrigin: expectedOrigin,
-        expectedRpId: expectedRpId,
-        requireUserVerification: false,
-        previousSignCount: known.signCount
-      });
-      if (verdict.ok) {
-        known.signCount = verdict.signCount;
-        webauthnCredentials.set(pending.username, known);
-      }
-    }
-  } catch (e) {
-    log.debug("Leaving the WebAuthn endpoint. Verification threw: " + e.message);
-    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
-                         'The second factor could not be checked: ' + e.message));
-  }
-
-  logArtifact('WebAuthn ' + (String(body.mode) === 'create' ? 'registration' : 'assertion'),
-              'as verified by this server', { ok: verdict.ok, checks: verdict.checks });
-
-  if (!verdict.ok) {
-    // Name the check that failed. "Authentication failed" would be true and
-    // useless, and this is a debugging service.
-    log.debug("Leaving the WebAuthn endpoint. Refused: " + verdict.failed.join('; '));
-    return sendWebauthnPage(res, webauthnPage(base, String(body.mfa_id), pending.username,
-                         'The second factor did not verify — ' + verdict.failed.join('; ') + '.'));
-  }
-
-  pendingMfa.delete(String(body.mfa_id));
-  // Two factors, and the tokens say so. `hwk` is the RFC 8176 value for proof of
-  // possession of a hardware key, which is what a WebAuthn assertion is.
-  startSession(res, pending.username, ['pwd', 'hwk'], 'mfa');
-  res.redirect(302, base + '/oauth2/authorize?' + queryString(pending.login.query, ['prompt']));
-  log.debug("Leaving the WebAuthn endpoint. " + pending.username + " completed the second factor.");
-});
 
 // Ends the session, so the next authorization request prompts again.
 app.get('/oauth2/logout', function (req, res) {
@@ -2390,15 +1952,9 @@ module.exports = {
   asMetadata: asMetadata,
   accessToken: accessToken,
   tokenSet: tokenSet,
-  sessions: sessions,
-  registeredClients: registeredClients,
-  // The browser session, shared with wsfed.js. It is exported from here rather
-  // than moved to helpers.js because this module owns the login flow the session
-  // comes out of (pendingLogins, the WebAuthn step), and wsfed.js is required
-  // AFTER this one in server.js — a one-way dependency, so no cycle.
-  SESSION_COOKIE: SESSION_COOKIE,
-  cookiesOf: cookiesOf,
-  sessionOf: sessionOf,
-  startSession: startSession,
-  endSession: endSession
+  registeredClients: registeredClients
+  // The browser session used to be exported from here, because this module owned
+  // the login flow it came out of. It does not any more: `authn.js` does, and
+  // wsfed.js and admin.js take it from there. Re-exporting it would leave two
+  // names for one store and a reader no way to tell which is the real one.
 };

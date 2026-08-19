@@ -82,7 +82,12 @@ const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso, baseUrlOf, randomI
         parseBody, firstByLocal, textByLocal } = require('./helpers');
 const { buildSamlAssertion } = require('./saml2');
 const { buildSaml11Assertion } = require('./saml11');
-const { sessionOf, startSession, endSession } = require('./oauth2');
+// The session, from the service that owns it. This module has a sign-in screen
+// of its own (section 13.2.1's POST cannot be answered with a redirect chain
+// through another endpoint without losing the wresult), but the SESSION it
+// lands in has to be the same one — single sign-on between the two protocols
+// is the interesting behaviour, and two stores would each look right alone.
+const { sessionOf, startSession, endSession } = require('./authn');
 
 // --- the vocabulary --------------------------------------------------------
 const WSFED_NS = 'http://docs.oasis-open.org/wsfed/federation/200706';

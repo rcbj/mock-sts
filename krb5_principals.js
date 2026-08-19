@@ -62,7 +62,7 @@ function userSalt(realm, name) {
 // One password, and an account for anybody who asks.
 //
 // Everything else in this service checks no password at all — the username typed at
-// /oauth2/login becomes the identity and that is the end of it. Kerberos cannot be
+// /authn/login becomes the identity and that is the end of it. Kerberos cannot be
 // made to work that way, and the reason is structural rather than a decision: the
 // password IS the key. Pre-authentication is a timestamp encrypted under it, and the
 // AS-REP's enc-part is encrypted under it too, so a KDC that accepted any password
