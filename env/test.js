@@ -87,7 +87,12 @@ var config = {
     port: 389,                   // restart to apply
     tlsPort: 636,                // restart to apply
     baseDn: "dc=example,dc=com", // restart to apply
-    autocreateUsers: false,
+    // ON. It was `false` in all three env files, which is what an
+    // appconfig value does: it beats the default, and the default is
+    // what every document here describes. So a person signed in through
+    // any protocol and the directory stayed empty — which reads as a
+    // broken hook and is a setting doing what it was told.
+    autocreateUsers: true,
     maxEntries: 2000,
     sizeLimit: 500
   },

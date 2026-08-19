@@ -148,12 +148,34 @@ const TYPES = {
   // Truthy spellings, matching what the modules accepted before: LDAP read
   // /^(1|true|yes|on)$/i and OID4VCI compared against the literal 'true'. The
   // union is accepted so neither spelling regressed.
+  //
+  // A value that is NEITHER spelling falls back to the setting's own DEFAULT,
+  // and that is the half worth explaining. This used to be a truthy allow-list
+  // alone — anything unrecognised was false — which reads as harmless until a
+  // setting whose default is ON meets a typo: `LDAP_AUTOCREATE_USERS=treu`
+  // silently turned off the feature docs/ldap.md says only an explicit
+  // 0/false/no/off turns off. check() catches a misspelling on the admin
+  // console's Save, but nothing checks an environment variable at startup, so
+  // the only place that asymmetry could be fixed is here. A value nobody can
+  // read is WARNED about rather than swallowed: falling back silently is how a
+  // typo survives to be discovered as a missing feature.
   bool: {
-    parse: function (raw) {
+    parse: function (raw, setting) {
       if (typeof raw === 'boolean') {
         return raw;
       }
-      return /^(1|true|yes|on)$/i.test(String(raw).trim());
+      const text = String(raw).trim();
+      if (/^(1|true|yes|on)$/i.test(text)) {
+        return true;
+      }
+      if (/^(0|false|no|off)$/i.test(text)) {
+        return false;
+      }
+      const fallback = !!(setting && setting.dflt);
+      log.warn('config: "' + text + '" is not a true/false value' +
+               (setting && setting.env ? ' for ' + setting.env : '') +
+               '; using the default (' + fallback + ').');
+      return fallback;
     },
     text: function (v) { return v ? 'true' : 'false'; },
     check: function (raw) {
@@ -563,12 +585,29 @@ const SETTINGS = [
     description: 'The root of the embedded directory. ou=users and ou=groups ' +
                  'hang off it.' },
 
+  // ON, and the description below is what it actually does. It used to be off
+  // with a description about BINDS — "a bind as a name with no entry creates
+  // one" — and that behaviour does not exist and never did: the bind handler
+  // does not consult this setting, autoCreateUser() skips `protocol === 'ldap'`
+  // outright (a bind presents a DN, which already names an object here), and
+  // every bind succeeds regardless except the password "invalid". So the stated
+  // reason for the default protected nothing, while the default itself turned
+  // off the one thing this setting does control.
+  //
+  // What it cost is worth recording, because it was invisible from every
+  // direction: ldap_server.js's own header, docs/ldap.md, docs/mock-sts.md and
+  // tests/api_ldap.js all said "on by default", so a directory that stayed
+  // empty after somebody signed in read as a broken hook rather than as a
+  // setting doing exactly what it was set to.
   { key: 'ldap.autocreateUsers', group: 'LDAP', label: 'Auto-create users',
-    env: 'LDAP_AUTOCREATE_USERS', type: 'bool', dflt: false, runtime: true,
-    description: 'When on, a bind as a name with no entry creates one. Off by ' +
-                 'default so that binding as somebody who does not exist ' +
-                 'still fails, which is the case worth being able to ' +
-                 'produce.' },
+    env: 'LDAP_AUTOCREATE_USERS', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, an entry appears at uid=<name>,ou=users,<base> the ' +
+                 'first time anybody authenticates to this service through ' +
+                 'ANY protocol. On by default: a directory that fills up as ' +
+                 'you use the other protocols is the thing this one is here ' +
+                 'to show. An LDAP bind never seeds an entry either way — the ' +
+                 'identity a bind presents is a DN, which already names an ' +
+                 'object here.' },
 
   { key: 'ldap.maxEntries', group: 'LDAP', label: 'Maximum entries',
     env: 'LDAP_MAX_ENTRIES', type: 'int', dflt: 2000, runtime: true,

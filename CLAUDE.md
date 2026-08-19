@@ -852,6 +852,30 @@ Worth knowing before "fixing" one of them:
   carries a session identifier and adding one would change what every client receives.
   A new authentication point needs one `stats.recordAuthentication()` call at the
   moment the credential is ACCEPTED, not when the request arrives. See README.md.
+  **"The observer is installed" is not the same claim as "this protocol calls the
+  funnel", and WS-Trust is what that cost.** Three of its paths accepted a
+  credential without ever reaching `recordAuthentication()`, so each produced
+  somebody who had authenticated here and appeared on no page and in no
+  directory: `Validate` and `Cancel` answered above the `authenticate()` call, a
+  request carrying both a UsernameToken and an `OnBehalfOf` returned at the
+  delegation branch before the UsernameToken had been looked at, and a `Renew`
+  with no security header read the assertion out of its own `RenewTarget` and
+  recorded that as the credential. Two rules come out of it and both generalise
+  to the next family: authenticate ABOVE the branch on the operation rather than
+  inside the branches that happen to need a subject, and look for a credential in
+  `wsse:Security` — anywhere else, only OUTSIDE the elements that hold somebody
+  else's token, since a document with four identities in it answers "which comes
+  first" and not "who is asking".
+  **And the funnel being reached is still not the whole chain: `ldap.autocreateUsers`
+  was `false` in all three `env/*.js` files**, which beats its default, so no
+  protocol seeded a directory entry anywhere any of them was loaded — while
+  `config.js`'s own description for it described a BIND behaviour that has never
+  existed, the default said `false` where four documents said ON, the `bool`
+  coercion turned an unrecognised spelling into `false` rather than the default,
+  and `tests/api_ldap.js` SKIPPED its own check with a warning whenever it found
+  the feature off. An appconfig value is the last word; a default nobody reaches
+  is not a default, and a test that opts out when its subject is disabled is how
+  a setting stays wrong for as long as that one did.
   Its `/admin/groups` page is the one page here that reports the DIRECTORY rather
   than what this service has issued, and the difference between the two lists is
   the thing to keep straight: the directory holds an entry for whoever somebody
