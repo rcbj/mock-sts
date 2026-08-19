@@ -32,8 +32,12 @@ const app = require('./app');
 // reads the same shapes (a `wreq` RST, and a `wresult` at its mock relying party), and a
 // second copy of a reader that has to cope with four trust namespaces is a second copy
 // that gets one of them wrong.
-const { log, logArtifact, ISSUER, STS, xmlEscape, iso,
+const { log, logArtifact, STS, xmlEscape, iso,
         firstByLocal, textByLocal } = require('./helpers');
+// wstrust.issuer. A SAML token requested THROUGH WS-Trust is built by the
+// SAML modules and carries saml.issuer instead; the two are separate
+// settings for that reason and default to the same value.
+const config = require('./config');
 const { buildSamlAssertion, encryptAssertion } = require('./saml2');
 const stats = require('./admin_stats');
 const WST_NS = 'http://docs.oasis-open.org/ws-sx/ws-trust/200512';
@@ -59,7 +63,7 @@ function buildJwt(subject, audience, lifetimeMin) {
   log.debug("Entering buildJwt().");
   const opts = { 
     algorithm: 'RS256', 
-    issuer: ISSUER, 
+    issuer: config.value('wstrust.issuer'), 
     expiresIn: (lifetimeMin > 0 ? lifetimeMin : 60) * 60 
   };
   if (audience) opts.audience = audience;
@@ -300,7 +304,8 @@ app.get('/sts/cert', function (req, res) {
 
 app.get('/sts', function (req, res) {
   log.debug("Entering the STS description endpoint.");
-  res.type('text/plain').send('WS-Trust STS mock. POST a SOAP RequestSecurityToken here.\nIssuer: ' + ISSUER + '\n');
+  res.type('text/plain').send('WS-Trust STS mock. POST a SOAP RequestSecurityToken here.\nIssuer: ' +
+                              config.value('wstrust.issuer') + '\n');
   log.debug("Leaving the STS description endpoint.");
 });
 

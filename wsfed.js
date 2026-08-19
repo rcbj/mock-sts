@@ -78,8 +78,14 @@
 const { DOMParser } = require('@xmldom/xmldom');
 const { SignedXml } = require('xml-crypto');
 const app = require('./app');
-const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
+const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
         parseBody, firstByLocal, textByLocal } = require('./helpers');
+// TWO settings here, and they are not the same one. wsfed.entityId names
+// THIS identity provider in the federation metadata; saml.issuer is who
+// signed an assertion, which is what the relying party below checks a
+// presented one against. They shared a value until config.js split them and
+// still default to the same string.
+const config = require('./config');
 const { buildSamlAssertion } = require('./saml2');
 const { buildSaml11Assertion } = require('./saml11');
 // The session, from the service that owns it. This module has a sign-in screen
@@ -902,7 +908,8 @@ function passiveRequestor(req, res) {
 function descriptionPage(base) {
   log.debug("Entering descriptionPage().");
   const inner = '<h1>WS-Federation 1.2 — passive requestor endpoint</h1>' +
-    '<p class="sub">Issuer <code>' + xmlEscape(ISSUER) + '</code> at <code>' + xmlEscape(base) +
+    '<p class="sub">Issuer <code>' + xmlEscape(config.value('saml.issuer')) +
+      '</code> at <code>' + xmlEscape(base) +
     PASSIVE_PATH + '</code></p>' +
     '<p>This endpoint takes a <code>wa</code> parameter, by GET or by form POST, and signs a browser ' +
     'in to a relying party by POSTing it a token (section 13.2.2). It authenticates nobody: the ' +
@@ -994,7 +1001,7 @@ function federationMetadata(base) {
   const xml =
     '<?xml version="1.0" encoding="UTF-8"?>' +
     '<EntityDescriptor xmlns="' + SAML_METADATA_NS + '" ID="' + id + '"' +
-      ' entityID="' + xmlEscape(ISSUER) + '">' +
+      ' entityID="' + xmlEscape(config.value('wsfed.entityId')) + '">' +
       '<RoleDescriptor xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' +
         ' xmlns:fed="' + WSFED_NS + '"' +
         ' xmlns:auth="' + WSFED_AUTH_NS + '"' +
@@ -1184,7 +1191,8 @@ function verifySignInResponse(params, realm) {
                  : verdict.why);
 
   const issuer = isSaml11 ? (assertion.getAttribute('Issuer') || '') : textByLocal(assertion, 'Issuer');
-  add('the issuer is this service', issuer === ISSUER, issuer || '(none)');
+  add('the issuer is this service', issuer === config.value('saml.issuer'),
+      issuer || '(none)');
 
   const conditions = firstByLocal(assertion, 'Conditions');
   const audience = conditions ? textByLocal(conditions, 'Audience') : '';

@@ -21,7 +21,10 @@
 const forge = require('node-forge');
 const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const { SignedXml } = require('xml-crypto');
-const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso } = require('./helpers');
+const { log, logArtifact, STS, xmlEscape, genId, iso } = require('./helpers');
+// saml.issuer, read per assertion rather than captured at require time so
+// that /admin/config can change what the next one says it came from.
+const config = require('./config');
 // The custom attributes an admin configured, and the register every assertion is
 // counted in. A library like dpop.js: it registers no route and requires only
 // helpers.js, so it cannot join a cycle with this file.
@@ -79,7 +82,7 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
     'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport';
   const attributes = (opts.attributes && opts.attributes.length) ? opts.attributes : [
     { name: 'name', value: subject },
-    { name: 'issuedBy', value: ISSUER }
+    { name: 'issuedBy', value: config.value('saml.issuer') }
   ];
   // Whatever the admin console was told to add, APPENDED to the above rather than
   // replacing it — and appended in both branches, so a WS-Federation sign-in
@@ -95,7 +98,7 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   const xml =
     '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"' +
       ' ID="' + id + '" Version="2.0" IssueInstant="' + now + '">' +
-      '<saml:Issuer>' + xmlEscape(ISSUER) + '</saml:Issuer>' +
+      '<saml:Issuer>' + xmlEscape(config.value('saml.issuer')) + '</saml:Issuer>' +
       '<saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified">' +
         xmlEscape(subject) + '</saml:NameID>' +
       '<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"/></saml:Subject>' +

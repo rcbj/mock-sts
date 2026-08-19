@@ -94,11 +94,62 @@ two sockets bind **independently**: 389 up and 636 down is the ordinary outcome 
 host run, and `GET /ldap` reports each of them separately rather than through one flag
 that would have to lie about one.
 
-`STS_PORT` overrides the port. `CONFIG_FILE` selects a configuration from `env/`,
-the only setting in which is the bunyan log level — at the default `debug` the
-service logs every endpoint call (path, request and response headers and bodies,
-status, elapsed time) and every assertion, JWT and SD-JWT VC both before and after
+### Configuration
+
+`CONFIG_FILE` selects a configuration from `env/`, and since 2026-08 that file
+carries **every setting this service has** — forty-five of them, grouped by the
+protocol they belong to: the three issuers, the listeners, the OID4VCI and
+OID4VP tuning, the Kerberos realm, SIDs, passwords and clock, and the
+directory's base DN and limits. At the default log level `debug` the service
+logs every endpoint call (path, request and response headers and bodies, status,
+elapsed time) and every assertion, JWT and SD-JWT VC both before and after
 signing or encryption, which is the point of a mock.
+
+A value can arrive from four places, and **higher beats lower**:
+
+| | |
+|---|---|
+| a runtime override | set on `/admin/config` or through `POST /admin-api/config/set`; in memory, gone on restart |
+| an environment variable | `STS_PORT`, `KRB5_REALM`, … — one per setting, and every one that worked before still does |
+| the appconfig file | the `CONFIG_FILE` module, e.g. `env/local.js` |
+| the built-in default | what the expression in the module carried before the table existed |
+
+`config.js` is the table. It is the one place that says, for each setting, what
+it does, what its environment variable is, what the default is and why, and
+**whether changing it while the service runs does anything**. Twenty-three of
+the forty-five can be changed at runtime; the other twenty-two were consumed by
+the time the service was listening — a bound socket, the TLS certificate's
+names, the Kerberos principal database and its long-term keys, the directory's
+base DN — and are refused with the reason rather than accepted and ignored.
+
+`/admin/config` renders that table with the effective value of each setting and
+**where that value came from**, which is the question it exists to answer: the
+four sources are indistinguishable once a value has been read. `GET
+/admin-api/config` is the same thing over JSON, and `POST
+/admin-api/config/{set,set-many,reset,reset-all}` are its four actions.
+`set-many` is all-or-nothing, so a section's Save cannot half-apply. **Nothing
+here writes to the appconfig file** — an edit lasts for the life of the process,
+the same arrangement as the custom claims next door, and `reset-all` is what a
+test should call to put the service back.
+
+**`STS_ISSUER` was one value doing three jobs** and is now three settings.
+`saml.issuer` is the `<saml:Issuer>` of every SAML assertion (WS-Federation's
+included, since the same two functions build them); `wstrust.issuer` is the
+`iss` of the JWT this STS returns; `wsfed.entityId` is the `entityID` in the
+federation metadata. They shared a default and nothing else — an entityID names
+the identity provider, an Issuer names whoever signed an assertion — so a
+deployment that needed one of them to be its own real name had to change all
+three. All three still default to `urn:wstrust:mock:sts` and all three are still
+fed by `STS_ISSUER` when it is set.
+
+**The OAuth 2.0 / OIDC issuer identifier is new and is empty by default**, which
+means each response names the base URL the request arrived on — what makes one
+process answer correctly as `localhost`, as `sts` on a compose network and
+through a published port. Set `oauth2.issuer` to pin it, which is how a
+conforming client's "the issuer is not the one I fetched from" refusal is
+produced on purpose. Only the identifier moves: every endpoint in the discovery
+document stays on the request's base URL, because an endpoint has to be
+reachable and a pinned issuer may not be.
 
 **Seven listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
 UDP 88**, the Kerberos-protected service a TCP socket of its own (8888), the

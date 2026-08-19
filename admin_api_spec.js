@@ -190,6 +190,74 @@ function openObject(description, properties) {
            properties: properties, additionalProperties: true };
 }
 
+
+// One row of config.js's table, as this API reports it. Written out rather than
+// left open because every property here is one a generator would want a name
+// for, and because `source` is the answer to the question the whole resource
+// exists for: a value alone does not say whether somebody set it, the container
+// set it, the file set it, or nobody did.
+const CONFIG_SETTING = openObject(
+  'One setting: what it is, what it is set to, and where that came from.',
+  {
+    key: { type: 'string',
+           description: 'The dot path, which is BOTH the name every operation ' +
+                        'here takes and the path in the appconfig file. ' +
+                        '`oid4vci.batchSize` is `appconfig.oid4vci.batchSize`.' },
+    group: { type: 'string',
+             description: 'The protocol it belongs to, and the console\'s ' +
+                          'section heading.' },
+    label: { type: 'string' },
+    description: { type: 'string',
+                   description: 'What it does and why the default is the ' +
+                                'default.' },
+    type: { type: 'string',
+            enum: ['string', 'int', 'port', 'bool', 'csv', 'enum'],
+            description: 'How a value posted for it is coerced and checked.' },
+    enumValues: { type: 'array', items: { type: 'string' },
+                  description: 'Present on `enum` settings only.' },
+    value: { description: 'The effective value, coerced to its type: a number ' +
+                          'for int/port, a boolean for bool, an array of ' +
+                          'strings for csv.' },
+    text: { type: 'string',
+            description: 'The same value on one line — what the console shows ' +
+                         'in its input and what the environment variable ' +
+                         'would carry.' },
+    source: {
+      type: 'string',
+      enum: ['override', 'env', 'env-legacy', 'appconfig', 'default'],
+      description: 'Where the effective value came from, highest first: a ' +
+                   'runtime override set through this API or the console; the ' +
+                   'setting\'s own environment variable; the LEGACY variable ' +
+                   'named in `legacyEnv` (STS_ISSUER still feeds the three ' +
+                   'issuers carved out of it); the appconfig file; the ' +
+                   'built-in default.'
+    },
+    editable: {
+      type: 'boolean',
+      description: 'Whether POST /config/set will take it. False means the ' +
+                   'value was consumed at startup — a bound socket, the TLS ' +
+                   'certificate\'s names, the Kerberos principal database, ' +
+                   'the directory\'s base DN — so changing it now would do ' +
+                   'nothing. It is refused rather than accepted, because an ' +
+                   'accepted change that does nothing reads as having worked.'
+    },
+    restartReason: { type: 'string',
+                     description: 'Why it is not editable. Present exactly ' +
+                                  'when `editable` is false.' },
+    env: { type: 'string', description: 'Its environment variable.' },
+    legacyEnv: { type: 'string',
+                 description: 'An older variable that still feeds it. Only ' +
+                              'the three issuers have one.' },
+    appconfigPath: { type: 'string' },
+    default: { description: 'The built-in default, which is what the shipped ' +
+                            'appconfig files were seeded with.' },
+    overridden: { type: 'boolean',
+                  description: 'Whether a runtime override is in force. Equal ' +
+                               'to `source === "override"`, and reported ' +
+                               'separately so a caller can filter without ' +
+                               'matching a string.' }
+  });
+
 const SCHEMAS = {
   ActionResult: ACTION_RESULT,
   IssuedRecord: ISSUED_RECORD,
@@ -506,6 +574,41 @@ const SCHEMAS = {
       revokedCount: { type: 'integer' },
       issued: { type: 'array', items: ISSUED_RECORD }
     }, PAGING_PROPERTIES)),
+
+  Config: openObject(
+    'Every setting this service has, grouped by the protocol it belongs to. ' +
+    'The same table the /admin/config page renders and the same call it ' +
+    'makes, so the console and this API cannot come to describe different ' +
+    'sets of settings.',
+    {
+      configFile: {
+        type: 'string',
+        description: 'The CONFIG_FILE this process was started with, which is ' +
+                     'the file to edit to make a change survive a restart. ' +
+                     'Nothing here ever writes to it.'
+      },
+      settingCount: { type: 'integer' },
+      editableCount: {
+        type: 'integer',
+        description: 'How many of them POST /config/set will take. The rest ' +
+                     'are restart-only and say why in `restartReason`.'
+      },
+      overridden: {
+        type: 'array', items: { type: 'string' },
+        description: 'The keys with a runtime override in force. Empty on a ' +
+                     'freshly started service, and emptied again by ' +
+                     'POST /config/reset-all.'
+      },
+      groups: {
+        type: 'array',
+        description: 'In the order config.js declares them, which is the ' +
+                     'order the console renders its sections.',
+        items: openObject('One protocol\'s settings.', {
+          group: { type: 'string' },
+          settings: { type: 'array', items: CONFIG_SETTING }
+        })
+      }
+    }),
 
   ClaimSets: openObject(
     'The four custom claim sets and the rules that govern them.',

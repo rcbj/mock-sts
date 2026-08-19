@@ -63,6 +63,8 @@ const { VCI_CONFIGS, VCI_CONFIG_ID, VCI_SCOPE, vciFormatOf } = require('./vc_con
 // registers no route, so this adds nothing to the require order.
 const vcClaims = require('./vc_claims');
 const { deferredAccessTokens, issuerStates, preAuthorizedCodes } = require('./vc_offers');
+// The issuer identifier and everything else settable at runtime.
+const config = require('./config');
 // The authentication service. It requires nothing from this module, which is
 // what makes this a one-way dependency: a protocol asks it to authenticate
 // somebody and is handed them back with a session.
@@ -80,12 +82,38 @@ const { sessionOf, endSession } = authn;
 // on, so the document is self-consistent whether it is reached as
 // http://localhost:8081 (host) or http://sts:8081 (compose network).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE ISSUER IDENTIFIER, which is not the same thing as the base URL even
+// though it is derived from it by default.
+//
+// Everything this module serves is addressed from the URL the request arrived
+// on, so one process answers correctly as http://localhost:8081 from a host
+// run and as http://sts:8081 from a compose network without being told which.
+// The issuer came from the same place, and for the same good reason: a
+// conforming client MUST reject a discovery document whose `issuer` is not the
+// identifier it fetched from, so a pinned value would break one of those two
+// callers.
+//
+// `oauth2.issuer` in config.js lets it be pinned anyway, and is EMPTY by
+// default so that nothing changes unless somebody means it to. Pinning it is
+// how the mismatch above is produced on purpose — which is a case worth being
+// able to reach, since the failure it causes in a real client is reported as
+// something else entirely.
+//
+// Only the IDENTIFIER moves. Every endpoint in the document stays on the
+// request's base URL, because an endpoint has to be reachable and a pinned
+// issuer may not be.
+// ---------------------------------------------------------------------------
+function issuerOf(base) {
+  return config.value('oauth2.issuer') || base;
+}
+
 function asMetadata(req) {
   log.debug("Entering asMetadata().");
   const base = baseUrlOf(req);
   const metadata = {
     // --- REQUIRED ---
-    issuer: base,
+    issuer: issuerOf(base),
     authorization_endpoint: base + '/oauth2/authorize',
     token_endpoint: base + '/oauth2/token',
     // Every combination the authorization endpoint actually issues: it splits
@@ -300,7 +328,12 @@ function oidcMetadata(req, issuer) {
   // The path-appended form's issuer (see below). Assigned after the merge so it
   // replaces the base URL asMetadata() derived, and assigned rather than merged
   // so the member keeps its position at the top of the document.
-  if (issuer) metadata.issuer = issuer;
+  //
+  // A PINNED oauth2.issuer beats it, and has to: pinning is an explicit
+  // instruction that this service has one identifier, and a tenant path that
+  // went on answering with its own would leave two documents from one process
+  // disagreeing about who issued the tokens they describe.
+  if (issuer && !config.value('oauth2.issuer')) metadata.issuer = issuer;
   log.debug("Leaving oidcMetadata(). " + Object.keys(metadata).length + " member(s).");
   return metadata;
 }
@@ -501,7 +534,8 @@ function accessToken(base, opts) {
   const iat = nowSec();
   const user = opts.user || userFor(opts.username);
   const payload = {
-    iss: base, sub: opts.sub || user.sub, aud: opts.audience || base + '/resource',
+    iss: issuerOf(base), sub: opts.sub || user.sub,
+    aud: opts.audience || base + '/resource',
     client_id: opts.client_id, scope: opts.scope || '', typ: 'Bearer',
     jti: randomId(16), iat: iat, nbf: iat, exp: iat + ACCESS_TOKEN_TTL,
     username: user.username
@@ -539,7 +573,7 @@ function refreshToken(base, opts) {
   const token = signJwt({
     // username travels with the refresh token, so refreshing keeps describing
     // the person who actually signed in.
-    iss: base, sub: opts.sub || user.sub, aud: base, client_id: opts.client_id,
+    iss: issuerOf(base), sub: opts.sub || user.sub, aud: base, client_id: opts.client_id,
     scope: opts.scope || '', typ: 'Refresh', jti: randomId(16), username: user.username,
     iat: iat, nbf: iat, exp: iat + REFRESH_TOKEN_TTL,
     // RFC 9449 section 5: a refresh token issued to a PUBLIC client alongside a
@@ -575,7 +609,7 @@ function idToken(base, opts) {
   const iat = nowSec();
   const user = opts.user || userFor(opts.username);
   const payload = {
-    iss: base, sub: opts.sub || user.sub, aud: opts.client_id, typ: 'ID',
+    iss: issuerOf(base), sub: opts.sub || user.sub, aud: opts.client_id, typ: 'ID',
     iat: iat, nbf: iat, exp: iat + ACCESS_TOKEN_TTL, auth_time: opts.auth_time || iat,
     azp: opts.client_id, jti: randomId(16),
     name: user.name, given_name: user.given_name, family_name: user.family_name,
@@ -1181,7 +1215,8 @@ function userinfoResponse(req, res) {
         'This client registered userinfo_signed_response_alg="' + alg + '", and this server signs ' +
         'RS256 only (see userinfo_signing_alg_values_supported).');
     }
-    const signed = signJwt(Object.assign({ iss: base, aud: claims.client_id, typ: 'UserInfo' }, body));
+    const signed = signJwt(Object.assign(
+      { iss: issuerOf(base), aud: claims.client_id, typ: 'UserInfo' }, body));
     res.status(200).type('application/jwt').set('Cache-Control', 'no-store').send(signed);
     log.debug("Leaving userinfoResponse(). A signed UserInfo response for " + body.sub + ".");
     return;

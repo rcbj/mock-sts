@@ -37,7 +37,8 @@
 // ---------------------------------------------------------------------------
 
 const app = require('./app');
-const { log, xmlEscape, baseUrlOf, ISSUER, PORT } = require('./helpers');
+const { log, xmlEscape, baseUrlOf, PORT } = require('./helpers');
+const config = require('./config');
 
 // ---------------------------------------------------------------------------
 // The specifications this service implements, and how far.
@@ -686,6 +687,21 @@ const ENDPOINTS = [
           'is never overwritten. Add ?format=json; POST {"action":"select","attributes":[...]} for ' +
           'the same thing without a browser.' },
 
+  { path: '/admin/config', group: 'Admin', name: 'Configuration',
+    specs: [],
+    effect: 'changes what every FUTURE token, assertion, ticket and search is ' +
+            'built with, for the settings that are changeable at all',
+    what: 'NON-SPEC. Every setting this service has — forty-five of them, ' +
+          'grouped by the protocol they belong to — with the effective value ' +
+          'of each and, which is the part that was not answerable before, ' +
+          'WHERE THAT VALUE CAME FROM: a runtime override set here, an ' +
+          'environment variable, the appconfig file this process was started ' +
+          'with, or the built-in default. Twenty-three of them can be changed ' +
+          'while the service runs; the rest were consumed at startup (a bound ' +
+          'socket, the TLS certificate\'s names, the Kerberos principal ' +
+          'database and its long-term keys, the directory\'s base DN) and are ' +
+          'shown with the reason rather than hidden. Changes are IN MEMORY and ' +
+          'are gone on restart — nothing writes to the appconfig file.' },
   { path: '/admin/vc-verifier-config', group: 'Admin', name: 'Verifier request (the bar door)',
     specs: ['oid4vp', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
     effect: 'changes the dcql_query of every FUTURE OID4VP Authorization Request',
@@ -792,6 +808,24 @@ const ENDPOINTS = [
           'consults this service about an assertion or a ticket. restore is ' +
           'NON-SPEC even here: no real authorization server can undo a ' +
           'revocation. Mirrors POST /admin/tokens.' },
+  { path: '/admin-api/config', group: 'Management API', name: 'Configuration',
+    specs: [],
+    what: 'NON-SPEC. Every setting, its effective value, and the source of ' +
+          'that value — override, environment variable, appconfig file or ' +
+          'built-in default. Mirrors GET /admin/config.' },
+  { path: '/admin-api/config/:action', group: 'Management API',
+    name: 'Configuration actions',
+    specs: [],
+    effect: 'changes what every FUTURE token, assertion, ticket and search is ' +
+            'built with',
+    what: 'NON-SPEC. Four URLs behind one pattern: set, set-many, reset, ' +
+          'reset-all. set-many is ALL-OR-NOTHING, so a body with one bad ' +
+          'field changes nothing and names it; a setting consumed at startup ' +
+          'is refused with the reason rather than accepted, because an ' +
+          'accepted change that does nothing reads as having worked. Every ' +
+          'change is in memory and gone on restart, and reset-all is what a ' +
+          'test should call to put the service back. Mirrors POST ' +
+          '/admin/config.' },
   { path: '/admin-api/claims', group: 'Management API', name: 'Custom claims',
     specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
     what: 'NON-SPEC. The four custom claim sets and the rules that govern them: ' +
@@ -1287,7 +1321,8 @@ function renderPage(base, report) {
   html += '<p class="lead">Every endpoint this service registers and every specification it ' +
     'implements. The endpoint list is read from the running Express router on each request, not ' +
     'from a list kept by hand, so it cannot claim an endpoint that is not there or miss one that ' +
-    'is. Issuer identifier <code>' + esc(base) + '</code>; WS-Trust issuer <code>' + esc(ISSUER) +
+    'is. Issuer identifier <code>' + esc(base) + '</code>; WS-Trust issuer <code>' +
+    esc(config.value('wstrust.issuer')) +
     '</code>; listening on port ' + esc(PORT) + '.</p>';
 
   html += '<p class="lead"><strong>This is a test double.</strong> It signs everything with a key ' +
@@ -1365,7 +1400,7 @@ function metadataJson(base, report) {
   return {
     service: 'idptools mock Security Token Service',
     issuer: base,
-    wsTrustIssuer: ISSUER,
+    wsTrustIssuer: config.value('wstrust.issuer'),
     port: PORT,
     testDouble: true,
     endpoints: report.rows.map(function (r) {

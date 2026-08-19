@@ -45,8 +45,9 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 ## Architecture, and the four rules that hold it together
 
 `server.js` is a shell: it requires the modules and listens. The modules are
-`helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
-middleware), `authn.js` (the authentication service), `saml2.js`, `saml11.js`,
+`config.js` (every setting this service has, and the only module `helpers.js`
+depends on), `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the
+express app and every middleware), `authn.js` (the authentication service), `saml2.js`, `saml11.js`,
 `wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
 `vc_verifier.js`, `ldap_server.js`, `tls_server.js`, `krb5_kdc.js`,
@@ -415,6 +416,73 @@ authentication, no OAuth flows and no polymorphic bodies. `admin_api_explorer.js
 is ~250 lines, has no dependency, and does the same three things — read the
 document, fill a form, show the response — plus the equivalent `curl` line, which
 is what an operator of a mock actually copies.
+
+## `config.js` is the only place a setting is read
+
+Configuration used to be forty-odd `process.env.X || 'a default'` expressions spread
+over twelve modules. Each was readable where it stood and the set of them was not:
+there was no way to ask this service what it was configured with, no way to change
+anything without restarting it, and no list anywhere of what could be changed at all
+— the answer was a grep, and the grep only found the ones spelt the way you guessed.
+
+**A new setting is a row in `SETTINGS` and nothing else.** The row carries the key
+(which is both the dot path in the appconfig file and the name every surface uses),
+the environment variable, the type, the default, the prose, and `runtime`. From that
+one row it appears in `/admin/config`, in `GET /admin-api/config`, in the OpenAPI
+document's `Config` schema, and in the startup audit — none of which has a list of
+its own to update. A `process.env` read added anywhere else is invisible to all four,
+which is the state this file exists to end.
+
+**`runtime: false` is a claim you have to be able to defend.** It means the value was
+consumed before the service was listening, so changing it now would do nothing — and
+`set` refuses it with the `restartReason` rather than accepting it, because an
+accepted change that does nothing reads as having worked. Three kinds qualify and it
+is worth knowing which: a **bound socket** (the HTTP port, both TLS ports, both LDAP
+ports, both Kerberos ports); **material derived at startup** (the TLS certificate is
+issued for `tls.hostnames`/`tls.ips` at boot, and the Kerberos principal database and
+every long-term key in it comes from the realm, the SIDs and the passwords at require
+time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
+setting runtime when the thing derived from it is not rebuilt is worse than marking
+it restart-only, because the two then disagree silently.
+
+**A runtime setting must be READ WHERE IT IS USED.** That is why so many of the
+module-level `const`s became functions — `vciBatchSize()`, `clockSkewSeconds()`,
+`maxEntries()`. A `const` captured at require time is the one thing `/admin/config`
+cannot change, and it fails in the direction that looks like the console is broken.
+
+**Resolution order is override, env var, LEGACY env var, appconfig file, built-in
+default.** Env beating the file is what keeps every existing container and test
+working: nothing in the parent project sets these variables in compose, but
+`tests/krb5_spnego_http.js` sets `KRB5_REALM`, `KRB5_KDC_PORT` and
+`KRB5_SERVICE_PORT` before requiring the KDC in-process, and that still wins. The
+legacy level has exactly one occupant: `STS_ISSUER`, which used to be a single value
+serving as the SAML assertion issuer, the WS-Trust token issuer AND the
+WS-Federation entityID. Those are three different things that shared a default — an
+entityID names the identity provider, an Issuer names whoever signed an assertion —
+so they are now `saml.issuer`, `wstrust.issuer` and `wsfed.entityId`, all three still
+fed by `STS_ISSUER` when it is set.
+
+**It is a library (rule 3) and it sits UNDER `helpers.js`.** It requires only bunyan
+and `process.env.CONFIG_FILE`, and makes a bunyan logger of its own rather than
+taking the shared one, because `helpers.js` requires IT. A cycle here would hand
+`helpers.js` a half-initialised module whose `value` is undefined, and the symptom
+would arrive somewhere else entirely as "value is not a function".
+
+**The three `env/*.js` files were GENERATED from the table** and carry every key with
+the value the expression in the module used to have, so a run with the shipped file
+behaves exactly as one with the old file that carried only `logLevel`. Two settings
+are deliberately absent because their default is DERIVED from another
+(`krb5.serviceDomains` from the realm, `oid4vp.walletUrl` from `oid4vci.walletUrl`);
+they carry `derived: true`, which is what keeps the startup audit from reporting them
+as drift. That audit — `auditAppconfig()` — logs a setting the file omits and a key
+the table does not know, and does neither when the file carries none of these keys at
+all, which is the ordinary case for the parent project's in-process tests: they load
+this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's config.
+
+**`tests/Dockerfile` in the parent project copies this file.** It is under
+`helpers.js` in the graph, so every in-process job that loads `krb5_kdc.js`,
+`app.js` or `spnego.js` needs it; missing, the failure is `Cannot find module
+'./config'` before any test has run.
 
 ## Adding an endpoint costs one entry in `sts_metadata.js`
 

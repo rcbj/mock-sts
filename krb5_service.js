@@ -47,6 +47,7 @@
 const net = require('net');
 const app = require('./app');
 const { log } = require('./helpers');
+const config = require('./config');
 const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
 const prim = require('./krb5_primitives.js');
@@ -54,15 +55,21 @@ const gss = require('./krb5_gss.js');
 const principals = require('./krb5_principals.js');
 const stats = require('./admin_stats');
 
-const SERVICE_PORT = parseInt(process.env.KRB5_SERVICE_PORT || '8888', 10);
-const SERVICE_PRINCIPAL = (process.env.KRB5_SERVICE_PRINCIPAL || 'HTTP/web.example.com').split('/');
-const CLOCK_SKEW_SECONDS = parseInt(process.env.KRB5_CLOCK_SKEW || '300', 10);
+const SERVICE_PORT = config.value('krb5.servicePort');
+const SERVICE_PRINCIPAL = config.value('krb5.servicePrincipal').split('/');
+// A function, because krb5.clockSkew is settable at runtime: the tolerance a
+// request is judged against has to be the one in force when it arrives.
+function clockSkewSeconds() {
+  return config.value('krb5.clockSkew');
+}
 const MAX_TOKEN_BYTES = 64 * 1024;
 
 // The replay cache. Keyed by the Authenticator's client, ctime and cusec — the
 // triple RFC 4120 section 3.2.3 names — and bounded, because an unbounded cache in a
 // long-running service is a memory leak an attacker controls.
-const REPLAY_WINDOW_SECONDS = CLOCK_SKEW_SECONDS * 2;
+function replayWindowSeconds() {
+  return clockSkewSeconds() * 2;
+}
 const MAX_REPLAY_ENTRIES = 10000;
 const replayCache = new Map();
 
@@ -73,7 +80,7 @@ function replayKey(authenticator) {
 
 function pruneReplayCache(nowMs) {
   for (const [key, seenAt] of replayCache) {
-    if (nowMs - seenAt > REPLAY_WINDOW_SECONDS * 1000) replayCache.delete(key);
+    if (nowMs - seenAt > replayWindowSeconds() * 1000) replayCache.delete(key);
   }
   // If it is still oversized, the oldest go first. Refusing to grow without bound
   // matters more than remembering everything: entries older than the skew window
@@ -246,11 +253,11 @@ async function accept(tokenBytes, opts) {
   // 6. The clock, and the ticket's window.
   const nowDate = new Date();
   const skew = Math.abs(nowDate.getTime() - authenticator.ctime.getTime()) / 1000;
-  if (skew > CLOCK_SKEW_SECONDS) {
+  if (skew > clockSkewSeconds()) {
     check('clock skew within tolerance', false, Math.round(skew) + 's against a ' +
-      CLOCK_SKEW_SECONDS + 's tolerance');
+      clockSkewSeconds() + 's tolerance');
     return { reply: errorReply(37, 'the Authenticator\'s clock is ' + Math.round(skew) +
-      ' seconds from this service\'s (tolerance ' + CLOCK_SKEW_SECONDS + 's)'),
+      ' seconds from this service\'s (tolerance ' + clockSkewSeconds() + 's)'),
              checks: checks, ok: false };
   }
   check('clock skew within tolerance', true, Math.round(skew) + 's');
@@ -459,7 +466,7 @@ app.get('/krb5/service', function (req, res) {
     // identity check in accept().
     acceptsAnySpnForHosts: principals.SERVICE_DOMAINS,
     port: SERVICE_PORT,
-    clockSkewSeconds: CLOCK_SKEW_SECONDS,
+    clockSkewSeconds: clockSkewSeconds(),
     replayCacheEntries: replayCache.size,
     checksThisServicePerforms: [
       'the GSS InitialContextToken wrapper and its mechanism OID',
@@ -469,7 +476,7 @@ app.get('/krb5/service', function (req, res) {
       'the key version the ticket names matches the one held',
       'the Authenticator decrypts with the ticket session key at key usage 11',
       'the Authenticator and the ticket name the same client',
-      'the clock, against a ' + CLOCK_SKEW_SECONDS + '-second tolerance',
+      'the clock, against a ' + clockSkewSeconds() + '-second tolerance',
       'the replay cache (client, ctime, cusec)',
       'the 0x8003 checksum and the GSS flags in it'
     ],

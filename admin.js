@@ -54,7 +54,8 @@
 // ---------------------------------------------------------------------------
 
 const app = require('./app');
-const { log, xmlEscape, baseUrlOf, ISSUER, parseBody, b64uDecode } = require('./helpers');
+const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode } = require('./helpers');
+const config = require('./config');
 const stats = require('./admin_stats');
 // The browser sign-on sessions, from the authentication service that creates
 // them — shared between the OAuth 2.0 / OIDC flow and WS-Federation. Read-only
@@ -120,6 +121,7 @@ const NAV = [
   { path: '/admin/claims', label: 'Custom claims' },
   { path: '/admin/vc', label: 'Credential claims' },
   { path: '/admin/vc-verifier-config', label: 'Verifier request' },
+  { path: '/admin/config', label: 'Configuration' },
   { path: '/sts-metadata', label: 'Service metadata' }
 ];
 
@@ -209,7 +211,8 @@ function page(title, active, inner) {
     '.pagenav .where{border:0;background:none;color:#666;padding-left:.4em}' +
     '</style></head><body><div class="card">' +
     '<h1>' + esc(title) + '</h1>' +
-    '<p class="sub">Mock STS admin console — issuer <code>' + esc(ISSUER) + '</code></p>' +
+    '<p class="sub">Mock STS admin console — issuer <code>' +
+      esc(config.value('wstrust.issuer')) + '</code></p>' +
     navBar(active) + OPEN_BANNER + inner +
     '<div class="meta">' +
     '<div>Everything on these pages is held in memory and dies with the process, like the signing ' +
@@ -629,7 +632,8 @@ function consoleJson() {
   log.debug("Entering consoleJson().");
   const snap = stats.snapshot();
   const json = {
-    issuer: ISSUER, startedAt: new Date(snap.startedAt).toISOString(),
+    issuer: config.value('wstrust.issuer'),
+    startedAt: new Date(snap.startedAt).toISOString(),
     uptimeMs: snap.uptimeMs,
     calls: snap.calls.total, tokensHeld: snap.tokens.held,
     tokensRevoked: snap.tokens.revoked,
@@ -3376,7 +3380,7 @@ function vpConfigJson() {
   const format = vpConfig.defaultFormatId();
   const json = {
     requested: vpConfig.requestedClaims(),
-    defaults: vpConfig.DEFAULT_REQUESTED,
+    defaults: vpConfig.defaultRequested(),
     format: format,
     formats: vpConfig.FORMATS.map(function (item) {
       return { id: item.id, label: item.label, identifiedBy: item.identifiedBy,
@@ -3463,6 +3467,302 @@ app.get('/admin/vc-verifier-config', function (req, res) {
   log.debug("Leaving the admin verifier-request page.");
 });
 
+
+// ---------------------------------------------------------------------------
+// /admin/config — every setting this service has, in one page.
+//
+// The sections are the PROTOCOLS, in the order config.js's table declares them,
+// because that is where a reader looks: somebody who wants the Kerberos realm
+// looks under Kerberos, not under an alphabetical list of forty-five keys. The
+// grouping is not decided here — `config.groups()` is the same call the
+// management API makes, so the page and the API cannot come to describe
+// different sets of settings.
+//
+// EVERY ROW SAYS WHERE ITS VALUE CAME FROM. That is the question this page
+// exists to answer and it is the one that used to require a grep: a value can
+// arrive from a runtime override, from an environment variable (its own or the
+// legacy STS_ISSUER), from the appconfig file, or from the built-in default,
+// and the four are indistinguishable once they have been read.
+//
+// A restart-only row is SHOWN and its input is DISABLED, with the reason beside
+// it. Both halves matter. Hiding it would answer "what is this service
+// configured with?" with three quarters of the answer; letting it be typed into
+// would accept a change that does nothing, which reads as having worked.
+//
+// No script here, like every other page in this console: each section is a
+// plain form that posts the whole section at once (`set-many`), and each row
+// has a Reset button of its own. See the shell's note above — `script-src
+// 'none'` is what makes reflected content moot for this service, and the
+// explorer at /admin-api/docs is the single exception.
+// ---------------------------------------------------------------------------
+
+// The four sources, as a phrase a reader can act on. `env-legacy` is its own
+// case rather than being folded into `env`, because the variable it names is
+// not the one the rest of the row talks about — being told the value comes from
+// "the environment" while STS_SAML_ISSUER is unset is the kind of true answer
+// that costs twenty minutes.
+function sourceNote(setting) {
+  if (setting.source === 'override') {
+    return 'set here, in memory only';
+  }
+  if (setting.source === 'env') {
+    return 'from ' + setting.env;
+  }
+  if (setting.source === 'env-legacy') {
+    return 'from ' + setting.legacyEnv + ' (the legacy variable)';
+  }
+  if (setting.source === 'appconfig') {
+    return 'from ' + (process.env.CONFIG_FILE || 'the appconfig file');
+  }
+  return 'built-in default';
+}
+
+function configRow(setting) {
+  const id = 'cfg-' + setting.key.replace(/\./g, '-');
+  const input = setting.type === 'enum'
+    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+      (setting.editable ? '' : ' disabled') + '>' +
+      setting.enumValues.map(function (option) {
+        return '<option value="' + esc(option) + '"' +
+          (option === setting.text ? ' selected' : '') + '>' + esc(option) + '</option>';
+      }).join('') + '</select>'
+    : (setting.type === 'bool'
+      ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+        (setting.editable ? '' : ' disabled') + '>' +
+        ['true', 'false'].map(function (option) {
+          return '<option value="' + option + '"' +
+            (option === setting.text ? ' selected' : '') + '>' + option + '</option>';
+        }).join('') + '</select>'
+      : '<input type="text" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+        ' size="34" value="' + esc(setting.text) + '"' +
+        (setting.editable ? '' : ' disabled') + '>');
+
+  // The Reset button is its own form. It has to be: it is a different action
+  // from the section's Save, and a second submit button inside one form would
+  // post every field in the section with it.
+  const reset = setting.overridden
+    ? '<form method="post" action="/admin/config" class="inline">' +
+      '<input type="hidden" name="action" value="reset">' +
+      '<input type="hidden" name="key" value="' + esc(setting.key) + '">' +
+      '<button class="secondary">Reset</button></form>'
+    : '';
+
+  const provenance = setting.overridden
+    ? '<strong>' + esc(sourceNote(setting)) + '</strong>'
+    : esc(sourceNote(setting));
+
+  const note = setting.editable
+    ? ''
+    : '<div class="note"><strong>Restart to apply:</strong> ' +
+      esc(setting.restartReason) + '.</div>';
+
+  return '<tr>' +
+    '<td><label for="' + esc(id) + '"><code>' + esc(setting.key) + '</code></label>' +
+    '<div class="note">' + esc(setting.label) + '. ' + esc(setting.description) + '</div>' +
+    note + '</td>' +
+    '<td>' + input + '</td>' +
+    '<td>' + provenance + '</td>' +
+    '<td>' + reset + '</td></tr>';
+}
+
+function configSection(group) {
+  log.debug("Entering configSection(). group=" + group.group);
+  const rows = group.settings.map(configRow).join('');
+  const anyEditable = group.settings.some(function (setting) { return setting.editable; });
+  const save = anyEditable
+    ? '<p><button>Save ' + esc(group.group) + '</button> ' +
+      '<span class="note">Applies to the next token, assertion, ticket or ' +
+      'search — nothing already issued changes.</span></p>'
+    : '<p class="note">Every setting in this section is read at startup, so ' +
+      'there is nothing here to save. Change them in ' +
+      esc(process.env.CONFIG_FILE || 'the appconfig file') + ' or in the ' +
+      'environment and restart.</p>';
+  log.debug("Leaving configSection(). " + group.settings.length + " setting(s).");
+  return '<h3>' + esc(group.group) + '</h3>' +
+    '<form method="post" action="/admin/config">' +
+    '<input type="hidden" name="action" value="set-many">' +
+    '<table><tr><th>Setting</th><th>Value</th><th>Source</th><th></th></tr>' +
+    rows + '</table>' + save + '</form>';
+}
+
+// The action switch. `set` and `reset` name one setting; `set-many` is what a
+// section's Save posts, and it is not a convenience — a section is how a person
+// changes configuration, and turning that into one call per field would make a
+// partly-applied section the ordinary outcome of a mistake in any one of them.
+// So set-many is ALL-OR-NOTHING: every field is checked before any is written.
+function configAction(body) {
+  log.debug("Entering configAction(). action=" + (body && body.action));
+  const action = String((body && body.action) || '').trim();
+
+  if (action === 'set') {
+    const key = String(body.key || '').trim();
+    const result = config.setOverride(key, body.value);
+    if (!result.ok) {
+      log.debug("Leaving configAction(). set refused.");
+      return result;
+    }
+    log.debug("Leaving configAction(). set ok.");
+    return { ok: true, key: key, setting: config.describe(configSettingFor(key)),
+             message: key + ' is now "' + config.text(key) + '". It applies to ' +
+                      'the next token, assertion, ticket or search, and is gone ' +
+                      'on restart.' };
+  }
+
+  if (action === 'set-many') {
+    // Only the keys this service knows and that were actually posted. A form
+    // posts its disabled inputs not at all, so a section holding restart-only
+    // rows submits the editable ones and nothing else — which is why an absent
+    // key is silently skipped rather than treated as an attempt to clear it.
+    const wanted = Object.keys(body).filter(function (name) {
+      return name !== 'action' && configKnows(name);
+    });
+    if (!wanted.length) {
+      log.debug("Leaving configAction(). set-many named nothing.");
+      return { ok: false, errors: ['No settings were posted. Every name must be ' +
+        'one of the keys GET /admin/config?format=json lists.'] };
+    }
+    // Checked first, every one of them, and only then written. A section that
+    // applied its first three fields and refused the fourth would leave the
+    // service in a state nobody asked for and the page showing it.
+    const errors = [];
+    wanted.forEach(function (key) {
+      const problem = config.checkOverride(key, body[key]);
+      if (problem) errors.push(problem);
+    });
+    if (errors.length) {
+      log.debug("Leaving configAction(). set-many refused: " + errors.length + " problem(s).");
+      return { ok: false, errors: errors };
+    }
+    const changed = [];
+    wanted.forEach(function (key) {
+      const before = config.text(key);
+      config.setOverride(key, body[key]);
+      if (config.text(key) !== before) changed.push(key);
+    });
+    log.debug("Leaving configAction(). set-many ok, " + changed.length + " changed.");
+    return { ok: true, applied: wanted, changed: changed,
+             settings: wanted.map(function (key) {
+               return config.describe(configSettingFor(key));
+             }),
+             message: changed.length
+               ? changed.length + ' setting(s) changed: ' + changed.join(', ') +
+                 '. Gone on restart.'
+               : 'Nothing changed — every value posted was the one already in force.' };
+  }
+
+  if (action === 'reset') {
+    const key = String(body.key || '').trim();
+    const result = config.clearOverride(key);
+    if (!result.ok) {
+      log.debug("Leaving configAction(). reset refused.");
+      return result;
+    }
+    log.debug("Leaving configAction(). reset ok.");
+    return { ok: true, key: key, setting: config.describe(configSettingFor(key)),
+             message: key + ' is back to its ' + config.sourceOf(key) + ' value, "' +
+                      config.text(key) + '".' };
+  }
+
+  if (action === 'reset-all') {
+    const result = config.clearAllOverrides();
+    log.debug("Leaving configAction(). reset-all ok.");
+    return { ok: true, cleared: result.cleared,
+             message: result.cleared.length
+               ? result.cleared.length + ' runtime override(s) cleared: ' +
+                 result.cleared.join(', ') + '.'
+               : 'There were no runtime overrides to clear.' };
+  }
+
+  log.debug("Leaving configAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The four are: ' +
+    'set, set-many, reset, reset-all.'] };
+}
+
+// Whether this service has a setting of that name. Asked before `describe()`,
+// which throws on an unknown key by design — the throw is right for a caller
+// that has a key it believes in, and wrong for a form body whose field names
+// arrived from outside.
+function configKnows(key) {
+  return config.SETTINGS.some(function (setting) { return setting.key === key; });
+}
+
+function configSettingFor(key) {
+  return config.SETTINGS.filter(function (setting) {
+    return setting.key === key;
+  })[0];
+}
+
+function configJson() {
+  log.debug("Entering configJson().");
+  const json = config.snapshot();
+  log.debug("Leaving configJson(). " + json.settingCount + " setting(s).");
+  return json;
+}
+
+app.post('/admin/config', function (req, res) {
+  log.debug("Entering the admin configuration action endpoint.");
+  const body = parseBody(req);
+  const result = configAction(body);
+  respondToAction(req, res, '/admin/config', result);
+  log.debug("Leaving the admin configuration action endpoint.");
+});
+
+app.get('/admin/config', function (req, res) {
+  log.debug("Entering the admin configuration page.");
+  const snapshot = config.snapshot();
+  const overridden = snapshot.overridden.length;
+
+  const inner = messagesOf(req) +
+    '<p class="note">Every setting this service has, grouped by the protocol it ' +
+    'belongs to. A value can arrive from four places and the <em>Source</em> ' +
+    'column says which: a runtime override set on this page, an environment ' +
+    'variable, the appconfig file this process was started with (<code>' +
+    esc(snapshot.configFile || '(none)') + '</code>), or the built-in default. ' +
+    'Higher beats lower, so an environment variable set on the container still ' +
+    'wins over the file — which is what keeps every existing deployment working ' +
+    'unchanged.</p>' +
+
+    '<div class="warn"><strong>Changes here are in memory and are gone on ' +
+    'restart.</strong> Nothing writes to the appconfig file. That is the same ' +
+    'arrangement as the custom claims and the credential claims next door, and ' +
+    'it is deliberate: a service that edited a file checked into a repository ' +
+    'would leave a test\'s forgotten change behind permanently. To make ' +
+    'something stick, put it in <code>' + esc(snapshot.configFile || 'env/local.js') +
+    '</code>.</div>' +
+
+    '<div class="warn"><strong>' + esc(String(snapshot.settingCount - snapshot.editableCount)) +
+    ' of these ' + esc(String(snapshot.settingCount)) + ' cannot be changed while ' +
+    'this service runs</strong>, and they are shown with their inputs disabled ' +
+    'and the reason beside them rather than hidden. They are the ones already ' +
+    'consumed by the time the service was listening: a bound socket, the TLS ' +
+    'certificate\'s names, the Kerberos principal database and its long-term ' +
+    'keys, and the directory\'s base DN. Accepting a change to one of those ' +
+    'would do nothing and read as having worked.</div>' +
+
+    '<h2>' + esc(String(snapshot.settingCount)) + ' settings, ' +
+    esc(String(snapshot.editableCount)) + ' of them changeable here</h2>' +
+
+    (overridden
+      ? '<div class="ok">' + esc(String(overridden)) + ' runtime override(s) in ' +
+        'force: ' + codeList(snapshot.overridden) + '. ' +
+        '<form method="post" action="/admin/config" class="inline">' +
+        '<input type="hidden" name="action" value="reset-all">' +
+        '<button class="secondary">Reset all</button></form></div>'
+      : '<p class="note">No runtime overrides are in force: every value below ' +
+        'is coming from the environment, the appconfig file or a built-in ' +
+        'default.</p>') +
+
+    snapshot.groups.map(configSection).join('') +
+
+    '<p class="note">The same table over JSON is at <code>/admin/config?format=json</code> ' +
+    'and <code>GET /admin-api/config</code>; the four actions on this page are ' +
+    '<code>POST /admin-api/config/set</code>, <code>/set-many</code>, ' +
+    '<code>/reset</code> and <code>/reset-all</code>.</p>';
+
+  respond(req, res, configJson(), 'Configuration', '/admin/config', inner);
+  log.debug("Leaving the admin configuration page.");
+});
+
 module.exports = {
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
@@ -3476,6 +3776,7 @@ module.exports = {
   claimsAction: claimsAction,
   vcAction: vcAction,
   vpConfigAction: vpConfigAction,
+  configAction: configAction,
   // The JSON views, one per page, for the same reason. See the block comment
   // above consoleJson().
   consoleJson: consoleJson,
@@ -3487,6 +3788,7 @@ module.exports = {
   vcJson: vcJson,
   vcPreviewUser: vcPreviewUser,
   vpConfigJson: vpConfigJson,
+  configJson: configJson,
   // A body field that may appear more than once. Exported because the
   // management API takes the same two spellings of a list (`attribute` and
   // `attributes`), and reading a repeated form field is not something

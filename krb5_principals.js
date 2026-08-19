@@ -43,8 +43,9 @@
 const kcrypto = require('./krb5_crypto.js');
 const prim = require('./krb5_primitives.js');
 const { log } = require('./helpers');
+const config = require('./config');
 
-const REALM = process.env.KRB5_REALM || 'EXAMPLE.COM';
+const REALM = config.value('krb5.realm');
 const DOMAIN = REALM.toLowerCase();
 
 // The etypes this KDC will use at all, strongest first. arcfour is included
@@ -85,7 +86,7 @@ function userSalt(realm, name) {
 // trust have to hold three DIFFERENT secrets or every assertion about which key sealed
 // which ticket would pass for the wrong reason.
 // ---------------------------------------------------------------------------
-const USER_PASSWORD = process.env.KRB5_USER_PASSWORD || 'password!';
+const USER_PASSWORD = config.value('krb5.userPassword');
 
 // The usernames that stay unknown, so KDC_ERR_C_PRINCIPAL_UNKNOWN is still reachable.
 //
@@ -94,10 +95,10 @@ const USER_PASSWORD = process.env.KRB5_USER_PASSWORD || 'password!';
 // to produce on purpose, because a client that renders it as "wrong password" sends a
 // person off to reset a password that was never the problem. These names are therefore
 // refused rather than created, and they are configurable so a test can name its own.
-const RESERVED_UNKNOWN = String(process.env.KRB5_UNKNOWN_USERS || 'nosuchuser,nobody')
-  .split(',')
-  .map(function (name) { return name.trim().toLowerCase(); })
-  .filter(function (name) { return name.length > 0; });
+function reservedUnknown() {
+  return config.value('krb5.unknownUsers')
+    .map(function (name) { return name.toLowerCase(); });
+}
 
 // ---------------------------------------------------------------------------
 // THE HOSTS THIS MOCK WILL BE A SERVICE FOR, and why services are created on
@@ -136,11 +137,12 @@ const RESERVED_UNKNOWN = String(process.env.KRB5_UNKNOWN_USERS || 'nosuchuser,no
 // replaces it entirely, and setting it to an empty string restores the old
 // behaviour of creating nothing.
 // ---------------------------------------------------------------------------
-const SERVICE_DOMAINS = String(process.env.KRB5_SERVICE_DOMAINS === undefined
-    ? DOMAIN + ',localhost,sts,127.0.0.1' : process.env.KRB5_SERVICE_DOMAINS)
-  .split(',')
-  .map(function (name) { return name.trim().toLowerCase(); })
-  .filter(function (name) { return name.length > 0; });
+// config.js derives the default from krb5.realm, and an explicitly empty
+// value still creates nothing — the distinction between "unset" and "set to
+// nothing" that this expression used to make with `=== undefined` is now the
+// distinction between a setting with no value anywhere and one set to ''.
+const SERVICE_DOMAINS = config.value('krb5.serviceDomains')
+  .map(function (name) { return name.toLowerCase(); });
 
 // One password for every service created on demand, and it is PUBLISHED by
 // GET /krb5/principals for the same reason USER_PASSWORD is: a debugger whose
@@ -150,8 +152,7 @@ const SERVICE_DOMAINS = String(process.env.KRB5_SERVICE_DOMAINS === undefined
 // — which is otherwise the one thing a client can never see. The CONFIGURED
 // service accounts keep their own separate passwords, so nothing about this
 // weakens an assertion about which key sealed which ticket.
-const AUTO_SERVICE_PASSWORD = process.env.KRB5_AUTO_SERVICE_PASSWORD ||
-    'auto-service-password';
+const AUTO_SERVICE_PASSWORD = config.value('krb5.autoServicePassword');
 
 // ---------------------------------------------------------------------------
 // The domain SID, and the account data that goes into the PAC.
@@ -167,7 +168,7 @@ const AUTO_SERVICE_PASSWORD = process.env.KRB5_AUTO_SERVICE_PASSWORD ||
 // only thing that matters here is that it is the same in every ticket, since a
 // service compares SIDs and not names.
 // ---------------------------------------------------------------------------
-const DOMAIN_SID = process.env.KRB5_DOMAIN_SID || 'S-1-5-21-1004336348-1177238915-682003330';
+const DOMAIN_SID = config.value('krb5.domainSid');
 
 // ---------------------------------------------------------------------------
 // The second realm, and the trust between them.
@@ -185,11 +186,10 @@ const DOMAIN_SID = process.env.KRB5_DOMAIN_SID || 'S-1-5-21-1004336348-117723891
 // Its own domain SID differs, which is the point of having it: SID filtering across a
 // trust is about whose domain a SID belongs to.
 // ---------------------------------------------------------------------------
-const TRUSTED_REALM = process.env.KRB5_TRUSTED_REALM || 'PARTNER.COM';
+const TRUSTED_REALM = config.value('krb5.trustedRealm');
 const TRUSTED_DOMAIN = TRUSTED_REALM.toLowerCase();
-const TRUST_PASSWORD = process.env.KRB5_TRUST_PASSWORD || 'inter-realm-trust-password';
-const TRUSTED_DOMAIN_SID = process.env.KRB5_TRUSTED_DOMAIN_SID ||
-  'S-1-5-21-2035427030-2118130302-1178042555';
+const TRUST_PASSWORD = config.value('krb5.trustPassword');
+const TRUSTED_DOMAIN_SID = config.value('krb5.trustedDomainSid');
 
 // [MS-SAMR] section 2.2.1.13's USER_ACCOUNT codes — NOT the LDAP userAccountControl
 // bits, which share most of these names and none of their values.
@@ -233,7 +233,7 @@ const DEFINITIONS = [
   {
     name: ['krbtgt', REALM],
     type: 2,                                   // NT-SRV-INST
-    password: process.env.KRB5_KRBTGT_PASSWORD || 'krbtgt-mock-password',
+    password: config.value('krb5.krbtgtPassword'),
     salt: userSalt(REALM, 'krbtgt'),
     description: 'the ticket-granting service, whose key seals every TGT'
   },
@@ -522,7 +522,7 @@ const TRUSTED_DEFINITIONS = [
   {
     name: ['krbtgt', TRUSTED_REALM],
     type: 2,
-    password: process.env.KRB5_TRUSTED_KRBTGT_PASSWORD || 'partner-krbtgt-password',
+    password: config.value('krb5.trustedKrbtgtPassword'),
     salt: userSalt(TRUSTED_REALM, 'krbtgt'),
     realm: TRUSTED_REALM,
     description: TRUSTED_REALM + "'s own ticket-granting service — NOT the trust key"
@@ -721,7 +721,7 @@ function findOrCreateUser(nameComponents, realm) {
     return null;
   }
   const name = String(nameComponents[0]);
-  if (RESERVED_UNKNOWN.indexOf(name.toLowerCase()) !== -1) {
+  if (reservedUnknown().indexOf(name.toLowerCase()) !== -1) {
     log.info('krb5: ' + name + ' is a reserved name and stays unknown, so ' +
       'KDC_ERR_C_PRINCIPAL_UNKNOWN can still be produced on purpose');
     log.debug('Leaving findOrCreateUser(). reserved.');
@@ -880,16 +880,17 @@ function chooseEtype(principal, requested) {
 // s2kparams and therefore already uses the profile default, so what changes is
 // only what the KDC advertises.
 // ---------------------------------------------------------------------------
-const S2KPARAMS_MODE =
-  String(process.env.KRB5_S2KPARAMS || 'omit').toLowerCase() === 'send'
+function s2kparamsMode() {
+  return String(config.value('krb5.s2kparams')).toLowerCase() === 'send'
     ? 'send' : 'omit';
+}
 
 function etypeInfo2For(principal) {
   return supportedEtypes(principal).map(function (id) {
     // arcfour ignores the salt entirely, so its entry carries neither a salt
     // nor s2kparams whatever the mode.
     if (id === 23) return { etype: id, salt: null, s2kparams: null };
-    if (S2KPARAMS_MODE === 'omit') {
+    if (s2kparamsMode() === 'omit') {
       return { etype: id, salt: principal.salt, s2kparams: null };
     }
     const profile = kcrypto.etypeById(id);
@@ -914,13 +915,13 @@ module.exports = {
   USER_PASSWORD: USER_PASSWORD,
   AUTO_SERVICE_PASSWORD: AUTO_SERVICE_PASSWORD,
   SERVICE_DOMAINS: SERVICE_DOMAINS,
-  RESERVED_UNKNOWN: RESERVED_UNKNOWN,
+  reservedUnknown: reservedUnknown,
   all: function () { return Array.from(principals.values()); },
   longTermKey: longTermKey,
   supportedEtypes: supportedEtypes,
   chooseEtype: chooseEtype,
   etypeInfo2For: etypeInfo2For,
-  S2KPARAMS_MODE: S2KPARAMS_MODE,
+  s2kparamsMode: s2kparamsMode,
   userSalt: userSalt,
   hostSalt: hostSalt,
   DOMAIN_SID: DOMAIN_SID,

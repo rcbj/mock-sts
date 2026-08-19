@@ -63,7 +63,8 @@ const app = require('./app');
 const bbs2023 = require('./bbs2023.js');
 const { log, logArtifact, STS, baseUrlOf, b64u, b64uDecode, jsonFromB64u, nowSec,
         randomId, xmlEscape, bbsKeyPair, parseBody, oauthError, signJwt,
-        WALLET_BASE_URL } = require('./helpers');
+        walletBaseUrl } = require('./helpers');
+const config = require('./config');
 const { VCI_JWT_TYPES, VCI_VCT } = require('./vc_configs');
 // What this Verifier asks for, and which credential format it asks for it in.
 // Configuration rather than a constant since /admin/vc-verifier-config existed: a
@@ -72,14 +73,24 @@ const { VCI_JWT_TYPES, VCI_VCT } = require('./vc_configs');
 // request is the top-level claim and why a claim that is not in the catalogue can
 // still be asked for.
 const vpConfig = require('./vc_verifier_config');
-const VP_CLIENT_ID = process.env.OID4VP_CLIENT_ID || 'sts-mock-verifier';
-const VP_WALLET_URL = process.env.OID4VP_WALLET_URL || WALLET_BASE_URL;
+function vpClientId() {
+  return config.value('oid4vp.clientId');
+}
+// oid4vp.walletUrl falls back to the OID4VCI one in config.js's table, which
+// is why walletBaseUrl() is not consulted here any more — the fallback moved
+// to where the setting is declared rather than being spelt out at one of the
+// two places that read it.
+function vpWalletUrl() {
+  return config.value('oid4vp.walletUrl');
+}
 
 const VP_TTL_MS = 10 * 60 * 1000;
 
 // How old a Key Binding JWT may be. It is signed for one presentation, so this is
 // short on purpose.
-const VP_KB_MAX_AGE_S = Number(process.env.OID4VP_KB_MAX_AGE_S || 600);
+function vpKbMaxAgeS() {
+  return config.value('oid4vp.kbMaxAgeS');
+}
 
 // The claims this Verifier asks for used to be here, read once from OID4VP_CLAIMS
 // at require time. They are now vpConfig's, read at the moment a request is BUILT
@@ -145,7 +156,7 @@ function buildVpRequest(req, opts) {
   const id = randomId(16);
   const nonce = randomId(18);
   const state = randomId(18);
-  const clientId = opts.byReference ? VP_CLIENT_ID : ('redirect_uri:' + responseUri);
+  const clientId = opts.byReference ? vpClientId() : ('redirect_uri:' + responseUri);
   const request = {
     client_id: clientId,
     response_type: 'vp_token',
@@ -324,7 +335,7 @@ app.get('/oid4vp/verifier', function (req, res) {
     '<code>response_type=vp_token</code>, a <code>dcql_query</code> naming the claims above, a fresh ' +
     '<code>nonce</code>, and <code>response_mode=direct_post</code> — so your wallet POSTs the presentation ' +
     'to <code>' + xmlEscape(base) + '/oid4vp/response</code> rather than putting it in a URL. The wallet is at ' +
-    '<code>' + xmlEscape(VP_WALLET_URL) + '</code>. What it asks for is configuration, not a ' +
+    '<code>' + xmlEscape(vpWalletUrl()) + '</code>. What it asks for is configuration, not a ' +
     'constant: <a href="/admin/vc-verifier-config">/admin/vc-verifier-config</a> chooses the claims ' +
     'and the format, from the same catalogue of LDAP attribute types the issuer fills a credential ' +
     'from.</div>' +
@@ -346,7 +357,7 @@ app.get('/oid4vp/start', function (req, res) {
   const format = vpConfig.formatOf(String(req.query.format || ''));
   const record = buildVpRequest(req, { byReference: byReference, format: format });
   const query = vpRequestQuery(req, record);
-  const wallet = String(req.query.wallet || VP_WALLET_URL).replace(/\/+$/, '') +
+  const wallet = String(req.query.wallet || vpWalletUrl()).replace(/\/+$/, '') +
                  '/vc-presentation-1.html';
 
   if (mode !== 'cross-device') {
@@ -820,9 +831,9 @@ function verifyPresentation(presentation, record) {
       ? 'is this Verifier\'s Client Identifier.'
       : 'is "' + kbPayload.aud + '", not "' + record.clientId + '" — this presentation was made for someone else.');
   vpCheck(checks, 'KB-JWT freshness',
-    !!kbPayload.iat && Math.abs(now - Number(kbPayload.iat)) <= VP_KB_MAX_AGE_S,
+    !!kbPayload.iat && Math.abs(now - Number(kbPayload.iat)) <= vpKbMaxAgeS(),
     'iat is ' + kbPayload.iat + ' (' + (kbPayload.iat ? (now - Number(kbPayload.iat)) + 's ago' : 'absent') +
-    '); at most ' + VP_KB_MAX_AGE_S + 's is accepted.');
+    '); at most ' + vpKbMaxAgeS() + 's is accepted.');
 
   // sd_hash ties the KB-JWT to exactly these bytes: the issuer-signed JWT and the
   // Disclosures presented, each followed by a tilde.

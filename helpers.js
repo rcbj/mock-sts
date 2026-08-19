@@ -32,13 +32,25 @@
 // ---------------------------------------------------------------------------
 
 const appconfig = require(process.env.CONFIG_FILE);
+// Every setting this service has, resolved from the runtime overrides, the
+// environment, the appconfig file and the built-in defaults in that order.
+// It is BELOW this module in the dependency graph and requires nothing from
+// here, which is what keeps the graph a tree (rule 3).
+const config = require('./config');
 const crypto = require('crypto');
 const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const bunyan = require("bunyan");
 const bbs2023 = require('./bbs2023.js');
-const log = bunyan.createLogger({ name: 'sts', 
-                                level: appconfig.logLevel });
+const log = bunyan.createLogger({ name: 'sts',
+                                level: config.value('global.logLevel') });
+// Registering it is what makes global.logLevel a setting rather than a claim:
+// bunyan takes a level when the logger is created, so without this /admin/config
+// could change the setting and every line after it would still be written at the
+// level the process started with. This is the logger every protocol module
+// destructures, so it is nearly all of them; see the note in config.js for the
+// eight vendored krb5_* modules that cannot be registered.
+config.registerLogger(log);
 log.info("Log initialized. logLevel=" + log.level());
 
 // ---------------------------------------------------------------------------
@@ -104,9 +116,29 @@ function setJwtRecorder(fn) {
   log.debug("A JWT recorder was installed; every token this service signs will now be counted.");
 }
 
-const PORT = parseInt(process.env.STS_PORT, 10) || 8081;
+// Read once, because the listener is bound with it before anything can ask
+// for it again; config.js marks it restart-only for that reason and refuses
+// to change it while this process runs.
+const PORT = config.value('global.port');
 
-const ISSUER = process.env.STS_ISSUER || 'urn:wstrust:mock:sts';
+// The bind address, likewise fixed once. 0.0.0.0 is every interface, which is
+// what a container needs.
+const HOST = config.value('global.host');
+
+// ---------------------------------------------------------------------------
+// ISSUER USED TO LIVE HERE, and it was ONE value doing three jobs: the SAML
+// <Issuer>, the `iss` of the WS-Trust JWT, and the WS-Federation entityID.
+// They shared a default and nothing else — an entityID names the identity
+// provider, an Issuer names whoever signed an assertion — so a deployment
+// that needed one of them to be its own real name had to change all three.
+//
+// They are now `saml.issuer`, `wstrust.issuer` and `wsfed.entityId` in
+// config.js, all three still defaulting to `urn:wstrust:mock:sts` and all
+// three still fed by STS_ISSUER when it is set, so nothing that worked before
+// changed. Callers read them from config.js directly rather than through a
+// re-export here: they are runtime-settable, so a constant captured at
+// require time would be the one thing the console could not change.
+// ---------------------------------------------------------------------------
 
 // --- STS signing key/cert (generated once at startup) ----------------------
 function makeStsKeys() {
@@ -301,8 +333,15 @@ function baseUrlOf(req) {
 
 // Where the wallet lives, as a URL the BROWSER can use. Shared because the
 // Credential Offer pages and the OID4VP request pages both hand the End-User back
-// to it (OID4VP_WALLET_URL falls back to this one).
-const WALLET_BASE_URL = process.env.OID4VCI_WALLET_URL || 'http://localhost:3000';
+// to it (oid4vp.walletUrl falls back to this one).
+//
+// A FUNCTION rather than the constant it used to be, and that is the shape
+// every runtime-settable value takes here: a constant is read once at require
+// time, so /admin/config could change the setting and every caller would go
+// on using what it captured at startup.
+function walletBaseUrl() {
+  return config.value('oid4vci.walletUrl');
+}
 
 // Whoever signs in at the login screen. No password is ever checked; the
 // username they type is the identity every token then describes.
@@ -329,7 +368,7 @@ module.exports = {
   headersOf: headersOf,
   bodyOf: bodyOf,
   PORT: PORT,
-  ISSUER: ISSUER,
+  HOST: HOST,
   STS: STS,
   xmlEscape: xmlEscape,
   genId: genId,
@@ -343,7 +382,7 @@ module.exports = {
   nowSec: nowSec,
   randomId: randomId,
   bbsKeyPair: bbsKeyPair,
-  WALLET_BASE_URL: WALLET_BASE_URL,
+  walletBaseUrl: walletBaseUrl,
   parseBody: parseBody,
   oauthError: oauthError,
   vciError: vciError,

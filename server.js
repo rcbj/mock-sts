@@ -28,11 +28,25 @@
 //
 // Config via env:
 //   CONFIG_FILE  the configuration module to load, chosen the same way as for the
-//                api and client services (e.g. ./env/local.js). It supplies the
-//                log level; env/docker-tests.js is what the containerized test
-//                stack uses.
-//   STS_PORT     listening port (default 8081)
-//   STS_ISSUER   the WS-Trust issuer name (default the mock's own)
+//                api and client services (e.g. ./env/local.js). It supplies
+//                EVERY setting this service has — env/docker-tests.js is what
+//                the containerized test stack uses.
+//
+// The forty-five settings themselves are not listed here any more, because a
+// list in a comment is a list that goes stale: `config.js` is the table, and it
+// carries each setting's name, its environment variable, its default, what it
+// does, and whether changing it while the service runs does anything.
+// /admin/config renders that table with the effective value of each and where
+// it came from, and `GET /admin-api/config` answers the same thing over JSON.
+//
+// An ENVIRONMENT VARIABLE STILL BEATS THE FILE, which is what keeps every
+// container and test that set one working unchanged: STS_PORT, STS_ISSUER,
+// KRB5_REALM and the rest all still do exactly what they did. STS_ISSUER is the
+// one that grew: it was a single value serving as the SAML assertion issuer,
+// the WS-Trust token issuer and the WS-Federation entityID, which are three
+// different things that shared a default. They are now saml.issuer,
+// wstrust.issuer and wsfed.entityId, all three still fed by STS_ISSUER when it
+// is set.
 //
 // Logging: everything this mock does is written to the log at DEBUG level — every
 // endpoint call (path, request headers and body, response headers and body,
@@ -73,7 +87,8 @@
 // ---------------------------------------------------------------------------
 
 const app = require('./app');
-const { log, PORT, ISSUER } = require('./helpers');
+const { log, PORT, HOST } = require('./helpers');
+const config = require('./config');
 
 require('./wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
@@ -157,8 +172,10 @@ const tlsServer = require('./tls_server');
 const ldapServer = require('./ldap_server');
 require('./sts_metadata');
 
-app.listen(PORT, '0.0.0.0', function () {
-  log.info('WS-Trust STS mock listening on :' + PORT + ' (issuer ' + ISSUER + '); POST SOAP RST to /sts');
+app.listen(PORT, HOST, function () {
+  log.info('WS-Trust STS mock listening on ' + HOST + ':' + PORT +
+           ' (WS-Trust issuer ' + config.value('wstrust.issuer') +
+           '); POST SOAP RST to /sts');
   log.info('RFC 8414 metadata at /.well-known/oauth-authorization-server; ' +
            'OpenID Provider Configuration at /.well-known/openid-configuration; JWKS at /oauth2/jwks');
   log.info('OID4VCI issuer metadata at /.well-known/openid-credential-issuer; ' +
