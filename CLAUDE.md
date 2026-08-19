@@ -46,13 +46,67 @@ signing is logged — that is the point of a mock, so do not quieten it by defau
 
 `server.js` is a shell: it requires the modules and listens. The modules are
 `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the express app and every
-middleware), `saml2.js`, `saml11.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`,
+middleware), `authn.js` (the authentication service), `saml2.js`, `saml11.js`,
+`wstrust.js`, `oauth2.js`, `wsfed.js`,
 `webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
 `vc_verifier.js`, `ldap_server.js`, `tls_server.js`, `krb5_kdc.js`,
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
-messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `sts_metadata.js`, and the
-four libraries that register nothing, `dpop.js`, `admin_stats.js`, `vc_claims.js` and
-`vc_verifier_config.js`.
+messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
+`sts_metadata.js`, and the libraries that register nothing: `dpop.js`,
+`admin_stats.js`, `vc_claims.js`, `vc_verifier_config.js`, and `admin_api_spec.js`
+and `admin_api_docs.js` beside the management API. One file in the tree is not a
+node module at all — `admin_api_explorer.js` is BROWSER code, read off disk by
+`admin_api_docs.js` and served verbatim; its own header says so at length.
+
+**`authn.js` is the authentication service, and it is not part of any protocol.**
+The sign-in screen used to be rendered inside `GET /oauth2/authorize`: no session
+meant a 200 with the login form in the body, at the authorization endpoint's own
+URL. It is now its own endpoint and its own module, and the protocol endpoints
+send people to it:
+
+```
+GET /oauth2/authorize (no session)
+    -> 302 /authn/login?authn=<id>          the request is stashed with a
+                                            return URL built from its own query
+    -> the screen; POST /authn/login        the session cookie is established
+    -> 302 back to /oauth2/authorize?<the original query, minus prompt>
+    -> the session is there this time, so the response goes out per spec
+```
+
+Four things about that are load-bearing:
+
+* **The service knows nothing about OAuth.** It never reads `client_id` or
+  `redirect_uri`. What the screen shows about the request it interrupted arrives
+  as `details` rows the CALLER wrote, because only the caller knows what its own
+  parameters mean — the `issuer_state` note, for one, which says whether the
+  request came from a Credential Offer this issuer actually made.
+* **A refusal comes back rather than being answered there.** Cancel returns to
+  the caller with `authn_error=access_denied`, and the caller turns that into
+  its own protocol's refusal. `redirectBack()` in `oauth2.js` knows about
+  `response_mode`, and in `form_post` the answer is not a redirect at all but a
+  self-submitting form — protocol knowledge stays in the protocol module. The
+  authorization endpoint checks for that parameter BEFORE it checks the session,
+  or a refusal would be answered by sending the person straight back to the
+  screen they just declined.
+* **`returnTo` is checked to be a path on this service.** It is built by the
+  caller and never read off the query string, and it is checked anyway: an
+  authentication service that will redirect a browser to an arbitrary URL after
+  signing somebody in is a credential phishing tool with a login screen in front
+  of it.
+* **It owns the SESSION**, and `wsfed.js` and `admin.js` take it from here.
+  `oauth2.js`'s old note said the session lived there "because this module owns
+  the login flow the session comes out of" — which is exactly the sentence that
+  moved it, now that the login flow has. `oauth2.js` reads the session and never
+  writes one. The WebAuthn second factor moved with it for the same reason: it
+  is the other half of one act of authentication, and it shares the pending
+  record.
+
+WS-Federation still has a sign-in screen of its own, deliberately: section
+13.2.1 lets the sign-in request arrive as a cross-site form POST, which
+`SameSite=Lax` keeps a session cookie off, and routing that through a redirect
+chain would lose the request. It lands in the SAME session, which is what makes
+single sign-on between the two protocols work. Pointing it at this service is the
+obvious next move and is not done yet.
 
 **`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
 dependency rather than a preference: it calls that module's `accept()` for every
@@ -294,6 +348,74 @@ is POSTed — and they match on **local name with the namespace ignored** becaus
 trust namespace alone has four versions in use. That is what lets one parser answer
 WS-Trust 1.0 through 1.4 instead of four.
 
+7. **`admin_api.js` must stay after `admin.js`, and the rule it carries is about
+   the FUTURE rather than about load order.** The plain dependency first: it
+   requires that module for the four action functions and the per-page JSON
+   views, so it must come after it. Nothing else about its position matters — it
+   registers no wildcard and collides with no path.
+
+   The rule that does matter is **a control added to `/admin` gets an operation
+   on `/admin-api` in the same commit**. Not eventually, and not when somebody
+   asks: an API that covers eight of nine controls is worse than one that covers
+   none, because the ninth is found by a caller who has already written the code
+   that assumed it.
+
+   Two things make that cheap rather than a matter of discipline, and one thing
+   cannot be made cheap at all:
+
+   * **The API decides nothing.** Every POST calls the SAME action function the
+     console's form posts to — `tokenAction`, `claimsAction`, `vcAction`,
+     `vpConfigAction` — with `action` taken from the URL instead of from a hidden
+     input, and every GET calls the same JSON view the page's `?format=json`
+     answers. Those views are now functions in `admin.js` (`consoleJson`,
+     `metricsJson`, `tokensView`, `usersView`, `groupsView`, `claimsJson`,
+     `vcJson`, `vpConfigJson`) for exactly this reason: they used to be built
+     inline in the route handlers, which was fine while there was one caller. So
+     adding an action to a console switch is most of adding it here, and what
+     remains is one row of `admin_api.js`'s table.
+   * **The OpenAPI document is GENERATED from that table** (`admin_api_spec.js`),
+     so an operation cannot exist and be undocumented, nor be documented and not
+     exist. Do not write a spec file beside the code — that is the thing that is
+     wrong within a month.
+   * **What no code here can check is a new console control with no row.**
+     Nothing in this service can see a form appear on a page. So the parity is
+     asserted from outside, by the parent project's `tests/admin_api.js`, and it
+     reads the facts off the SERVICE rather than off a list in the test: the
+     console's page list comes back in `GET /admin-api/status`, and each action
+     handler, asked for an action that does not exist, replies naming the ones
+     that do. Add an action to a switch and that sentence grows; the test then
+     fails until the API has an operation for it.
+
+   One consequence for the console side: `usersView()` and `groupsView()` build
+   the HTML as well as the JSON, and `/admin-api` throws the markup away. That is
+   what `/admin/users?format=json` has always done, it is a string concatenation
+   on a mock, and the alternative — a second set of builders for the same data —
+   is the thing this whole arrangement exists to prevent.
+
+## `/admin-api/docs` is the only page here with a script on it
+
+`app.js` sets `script-src 'none'` for the whole service, and the reason is in its
+own comment: it is what makes the family of reflected-content problems moot rather
+than merely unlikely. The API explorer needs a script, so it is the one page that
+relaxes that header — on two routes, in exactly two clauses (`script-src 'self'`
+and an added `connect-src 'self'`), with `default-src 'none'` and everything else
+untouched.
+
+**The script is a separate resource for that reason and no other.** `'self'` is
+enough for a file; an inline block would have needed `'unsafe-inline'`, which is
+the clause that would make the relaxation matter. Do not inline it, and do not add
+a second scripted page without asking whether it needs to be one.
+
+It is also **this repository's own explorer rather than Swagger UI**, and that was
+weighed rather than skipped: `swagger-ui-dist` is 11.7 MB unpacked with an
+install-time telemetry dependency, in a service whose package.json is deliberately
+short and whose image is built in containers that may have no network beyond the
+registry. What it would have bought is a familiar look for an API with no
+authentication, no OAuth flows and no polymorphic bodies. `admin_api_explorer.js`
+is ~250 lines, has no dependency, and does the same three things — read the
+document, fill a form, show the response — plus the equivalent `curl` line, which
+is what an operator of a mock actually copies.
+
 ## Adding an endpoint costs one entry in `sts_metadata.js`
 
 `GET /sts-metadata` reads the endpoint list **from the running Express router**, so
@@ -386,6 +508,7 @@ parent project need only this service and should be ported:
 | Test | What it covers |
 |---|---|
 | `tests/sts_metadata.js` | the `/sts-metadata` drift checks — that the page lists exactly what the router registers, that every method reaches a handler, that every link resolves, and that no specification claim is idle |
+| `tests/admin_api.js` | the management API at `/admin-api`: its OpenAPI document, the PARITY it exists to keep — every `/admin` page and every action of its four handlers has an operation, read off this service's own answers rather than off a list in the test — every documented schema property checked against a live reply, and that a revocation made through the API is dead at `/oauth2/introspect`. It restores everything it changes, including the tokens its bulk revocations touched |
 | `tests/sts_dpop.js` | RFC 9449 end to end over HTTP: all twelve section 4.3 checks, the `cnf.jkt` binding on access and refresh tokens, `dpop_jkt`, `jti` replay, and the nonce handshake in both shapes. Almost entirely negatives, because a DPoP server that issues bound tokens and accepts good proofs looks finished and can be worth nothing |
 | `tests/oauth2_sts_endpoints.js` | every endpoint the RFC 8414 metadata advertises answers, and every token verifies against the advertised JWKS |
 | `tests/vc_did.js` | the DID-named issuer chain: advertisement → resolution → domain linkage → the key that actually verifies the credential |
@@ -413,7 +536,7 @@ looks finished and proves almost nothing.
 
 Worth knowing before "fixing" one of them:
 
-* **It checks no password.** The username typed at `/oauth2/login` — or at
+* **It checks no password.** The username typed at `/authn/login` — or at
   `/wsfed/login`, which creates the same session — becomes the identity in every
   token and every assertion.
 * **The LDAP directory takes that further: EVERY BIND SUCCEEDS**, any DN and any

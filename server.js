@@ -76,12 +76,18 @@ const app = require('./app');
 const { log, PORT, ISSUER } = require('./helpers');
 
 require('./wstrust');
+// The authentication service: the sign-in screen every protocol here sends a
+// person to, and the session store it fills. FIRST of the modules that use it,
+// because require order is route order on the /sts-metadata page and the thing
+// that authenticates should be listed before the protocols that lean on it.
+require('./authn');
 require('./oauth2');
-// WS-Federation's passive requestor profile. It must come AFTER oauth2.js and the
+// WS-Federation's passive requestor profile. It must come AFTER authn.js and the
 // order is a dependency and not a preference: it signs users in to the session
-// oauth2.js owns (startSession/sessionOf), so that single sign-on works across the
-// two protocols. The dependency is one-way — oauth2.js knows nothing about this
-// module — which is what keeps it out of the cycles the split exists to avoid.
+// that service owns (startSession/sessionOf), so that single sign-on works across
+// the two protocols. The dependency is one-way — authn.js knows nothing about
+// this module — which is what keeps it out of the cycles the split exists to
+// avoid.
 require('./wsfed');
 require('./vc_offers');
 require('./vc_did');
@@ -109,6 +115,16 @@ require('./spnego');
 // and is required by app.js, so the counting is already running by the time this
 // line is reached.
 require('./admin');
+// The management API: everything that console shows and everything it can
+// change, at /admin-api, over JSON. It must come AFTER admin.js and the order is
+// a dependency rather than a preference — it requires that module for the four
+// action functions and the per-page JSON views, and calls nothing else, which is
+// what makes it incapable of holding a second opinion about what a revocation
+// means. Its OpenAPI document is built from its own route table (admin_api.js ->
+// admin_api_spec.js), so an operation cannot be undocumented; the explorer that
+// calls it is at /admin-api/docs and is the ONE page in this service with a
+// script on it, served under a policy that relaxes exactly that clause.
+require('./admin_api');
 // The TLS / mutual-TLS endpoint. Third in the family of modules whose real
 // surface is a SOCKET rather than a route: it registers its plain-HTTP views
 // (/tls, /tls/server-certificate, /tls/trust) at require time and starts two
@@ -149,9 +165,11 @@ app.listen(PORT, '0.0.0.0', function () {
            'credential endpoint at /oid4vci/credential');
   log.info('Issuer-initiated (OID4VCI H.1): the issuer web page is at /issuer; ' +
            'it builds a Credential Offer and sends the browser to the wallet.');
-  log.info('Mock authorization server endpoints: /oauth2/authorize (login screen), /oauth2/login, ' +
-           '/oauth2/token, /oauth2/userinfo, /oauth2/introspect, /oauth2/revoke, /oauth2/register, ' +
-           '/oauth2/logout');
+  log.info('Authentication service at /authn/login (the sign-in screen every protocol here sends ' +
+           'a person to) and /authn/webauthn (its second factor).');
+  log.info('Mock authorization server endpoints: /oauth2/authorize (redirects to /authn/login when ' +
+           'there is no session), /oauth2/token, /oauth2/userinfo, /oauth2/introspect, ' +
+           '/oauth2/revoke, /oauth2/register, /oauth2/logout');
   log.info('WS-Federation passive requestor at /wsfed (wsignin1.0 / wsignout1.0); metadata at ' +
            '/FederationMetadata/2007-06/FederationMetadata.xml; a mock relying party that verifies ' +
            'the sign-in response is at /wsfed/rp.');
@@ -162,6 +180,9 @@ app.listen(PORT, '0.0.0.0', function () {
            'negotiation fail in one specific way each.');
   log.info('Every endpoint and every specification this service implements is listed at ' +
            '/sts-metadata (add ?format=json for the machine-readable form).');
+  log.info('The management API is at /admin-api — every /admin control over JSON, with ' +
+           'its OpenAPI 3.1 document at /admin-api/openapi.json and an explorer that ' +
+           'calls it at /admin-api/docs. It is NOT protected either.');
   log.info('The admin console is at /admin: /admin/metrics counts every call, token, assertion, ' +
            'ticket and session; /admin/tokens lists every JWT, SAML assertion and Kerberos ticket ' +
            'issued and invalidates access tokens, ID Tokens and refresh tokens (only those three ' +

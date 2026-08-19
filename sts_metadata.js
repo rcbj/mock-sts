@@ -48,6 +48,26 @@ const { log, xmlEscape, baseUrlOf, ISSUER, PORT } = require('./helpers');
 // test double is for.
 // ---------------------------------------------------------------------------
 const SPECS = [
+  // The one specification on this page that is not a protocol this service
+  // speaks: it is the shape of the DOCUMENT that describes the management API.
+  // It is listed because the drift check requires every referenced id to exist,
+  // and because a reader who follows the /admin-api rows deserves to know which
+  // version of OpenAPI they will be handed — 3.0 and 3.1 differ enough that a
+  // generator pointed at the wrong one fails in the schemas rather than at the
+  // top.
+  { id: 'openapi', name: 'OpenAPI Specification 3.1.0',
+    where: 'OpenAPI Initiative',
+    url: 'https://spec.openapis.org/oas/v3.1.0.html',
+    coverage: 'full for what the management API needs, which is most of a ' +
+              'document and none of the hard parts: paths, operations, query ' +
+              'parameters, JSON request bodies with examples, component ' +
+              'schemas, tags and an empty security requirement — that last ' +
+              'being how OpenAPI states "this needs no credential", which is ' +
+              'true of every operation here. NO securitySchemes, no callbacks, ' +
+              'no webhooks, no links, no discriminated unions. The document is ' +
+              'GENERATED from the route table that registers the routes, so ' +
+              'this row describes a serializer rather than a hand-written ' +
+              'file.' },
   { id: 'rfc4120', name: 'Kerberos v5 (RFC 4120)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4120',
@@ -685,6 +705,149 @@ const ENDPOINTS = [
           'starts no session and issues no token. Add ?format=json; POST ' +
           '{"action":"select","claims":[...]} for the same thing without a browser.' },
 
+  // --- Management API ---
+  //
+  // NON-SPEC, all of it, and it is the /admin console's own surface over JSON:
+  // every page's `?format=json` view and every one of its forms, at a path a
+  // script can use. The rows are short on purpose — the OpenAPI document at
+  // /admin-api/openapi.json carries the detail, is built from the same table
+  // that registers these routes, and cannot go stale in the way a hand-written
+  // description can.
+  //
+  // The four POST rows are ONE express pattern each, behind every action in
+  // them: `/admin-api/tokens/:action` serves six real URLs. That is why they are
+  // listed with the parameter rather than as twenty-four rows, and why they are
+  // not linkable here.
+  { path: '/admin-api', group: 'Management API', name: 'Management API index',
+    specs: ['openapi'],
+    what: 'NON-SPEC. What the API is and every operation in it, each naming the ' +
+          '/admin control it mirrors. Nothing here changes anything. NOT ' +
+          'PROTECTED — nothing in this service checks a credential.' },
+  { path: '/admin-api/openapi.json', group: 'Management API',
+    name: 'OpenAPI document', specs: ['openapi'],
+    what: 'NON-SPEC. The OpenAPI 3.1 document for the management API, BUILT ' +
+          'FROM THE ROUTE TABLE that registers those routes rather than kept ' +
+          'beside it, so an operation cannot exist and be undocumented. ' +
+          'servers[0].url is this service as the request reached it, so a ' +
+          'document fetched through a published port names an address the ' +
+          'caller can use.' },
+  { path: '/admin-api/docs', group: 'Management API', name: 'API explorer',
+    specs: ['openapi'],
+    what: 'NON-SPEC. A page that reads the document above and renders one form ' +
+          'per operation, with the equivalent curl line beside each. It is this ' +
+          'repository\'s own rather than Swagger UI — 11.7 MB with an ' +
+          'install-time telemetry dependency, in a service that is deliberately ' +
+          'dependency-light and must build offline. THE ONE PAGE IN THIS SERVICE ' +
+          'WITH A SCRIPT: it is served under a policy that relaxes script-src to ' +
+          "'self' and adds connect-src, and nothing else." },
+  { path: '/admin-api/docs/explorer.js', group: 'Management API',
+    name: 'API explorer script', specs: [],
+    what: 'NON-SPEC. The explorer\'s script, and the only script this service ' +
+          'serves. A separate resource rather than an inline block precisely so ' +
+          "that script-src 'self' suffices and 'unsafe-inline' is never needed." },
+  { path: '/admin-api/status', group: 'Management API', name: 'Service status',
+    specs: [],
+    what: 'NON-SPEC. The issuer, when this process started, and the running ' +
+          'totals — calls, tokens held and revoked, other artifacts, users, ' +
+          'sign-on sessions. The cheapest call here and the one to poll. Mirrors ' +
+          'GET /admin.' },
+  { path: '/admin-api/metrics', group: 'Management API', name: 'Metrics',
+    specs: [],
+    what: 'NON-SPEC. Everything /admin/metrics counts, as JSON: calls by matched ' +
+          'route and status class, tokens and artifacts by kind with the state ' +
+          'of each, and sessions counted both ways. Mirrors GET /admin/metrics.' },
+  { path: '/admin-api/users', group: 'Management API', name: 'Users',
+    specs: [],
+    what: 'NON-SPEC. Every identity this service has authenticated, filtered and ' +
+          'paged; ?user= is the drill-down, with the sessions each holds and the ' +
+          'tokens issued on them. A name never seen answers 200 with ' +
+          'known:false rather than 404 — it is an answer about the identity, not ' +
+          'about the route. Mirrors GET /admin/users.' },
+  { path: '/admin-api/groups', group: 'Management API', name: 'Directory groups',
+    specs: ['rfc4511', 'rfc4514', 'rfc4519'],
+    what: 'NON-SPEC. Every group in the embedded LDAP directory; ?group=<dn> is ' +
+          'the drill-down. A process with no directory answers 200 with ' +
+          'directory:false and a group that is not there with found:false, ' +
+          'because both are answers rather than errors. A GROUP HERE GRANTS ' +
+          'NOTHING. Mirrors GET /admin/groups.' },
+  { path: '/admin-api/tokens', group: 'Management API',
+    name: 'Issued tokens, assertions and tickets',
+    specs: ['rfc7009', 'rfc7662', 'oidc', 'saml2', 'saml11', 'rfc4120'],
+    what: 'NON-SPEC. Everything issued and still remembered — every JWT, every ' +
+          'SAML assertion and every Kerberos ticket — in one list, newest first, ' +
+          'filtered by family, kind and state and paged with ?page= and ?per=. ' +
+          'Claims and facts only, never the signed artifact. OID4VCI credentials ' +
+          'are counted on /admin-api/metrics and are not in this list. Mirrors ' +
+          'GET /admin/tokens.' },
+  { path: '/admin-api/tokens/:action', group: 'Management API',
+    name: 'Token actions',
+    specs: ['rfc7009', 'rfc7662', 'oidc'],
+    effect: 'revokes one token, a whole kind, everything for a subject or an ' +
+            'identity, or everything',
+    what: 'NON-SPEC path over an RFC 7009 operation. Six URLs behind one ' +
+          'pattern: revoke, restore, revoke-kind, revoke-subject, revoke-user, ' +
+          'revoke-all. It is the SAME revocation set /oauth2/revoke writes to, ' +
+          'so introspection, UserInfo and the refresh grant honour it ' +
+          'immediately. ONLY THE THREE JWT KINDS CAN BE REVOKED — nothing ' +
+          'consults this service about an assertion or a ticket. restore is ' +
+          'NON-SPEC even here: no real authorization server can undo a ' +
+          'revocation. Mirrors POST /admin/tokens.' },
+  { path: '/admin-api/claims', group: 'Management API', name: 'Custom claims',
+    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
+    what: 'NON-SPEC. The four custom claim sets and the rules that govern them: ' +
+          'the claim names this service sets itself and will not let you ' +
+          'override, and the placeholders a value may use. Mirrors GET ' +
+          '/admin/claims.' },
+  { path: '/admin-api/claims/:action', group: 'Management API',
+    name: 'Custom claim actions',
+    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
+    effect: 'changes what every FUTURE access token, ID Token and SAML ' +
+            'assertion contains',
+    what: 'NON-SPEC. Four URLs behind one pattern: add, remove, clear, replace. ' +
+          'ADDITIVE only — a claim this service sets itself is refused rather ' +
+          'than overridden, because every one of those is load-bearing. Nothing ' +
+          'already issued changes. Mirrors POST /admin/claims.' },
+  { path: '/admin-api/credential-claims', group: 'Management API',
+    name: 'Credential claims',
+    specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
+    what: 'NON-SPEC. Which claims an issued Verifiable Credential carries — the ' +
+          'catalogue of LDAP attribute types, what is selected from it, which ' +
+          'terms ldp_vc cannot carry, and a preview of what one person\'s ' +
+          'credential would contain if it were issued now. Mirrors GET ' +
+          '/admin/vc.' },
+  { path: '/admin-api/credential-claims/:action', group: 'Management API',
+    name: 'Credential claim actions',
+    specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
+    effect: 'changes what every FUTURE Verifiable Credential contains, AND ' +
+            'writes to the LDAP directory',
+    what: 'NON-SPEC. Five URLs behind one pattern: select, add, remove, ' +
+          'defaults, populate. Changing the selection SWEEPS the directory — ' +
+          'every person under ou=users gains the selected attributes they are ' +
+          'missing, invented deterministically from their username, and an ' +
+          'attribute already there is never overwritten. The issuer metadata is ' +
+          'built from the same selection, so what is advertised cannot drift ' +
+          'from what is minted. Mirrors POST /admin/vc.' },
+  { path: '/admin-api/verifier-request', group: 'Management API',
+    name: 'Verifier request (the bar door)',
+    specs: ['oid4vp', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
+    what: 'NON-SPEC. What the mock Verifier at /oid4vp/verifier asks a wallet ' +
+          'for, in which credential format, and the dcql_query they build — ' +
+          'from the function that builds the real one, so it is the next ' +
+          'Authorization Request rather than a description of it. Each ' +
+          'catalogue row also says whether the ISSUER currently mints that ' +
+          'claim. Mirrors GET /admin/vc-verifier-config.' },
+  { path: '/admin-api/verifier-request/:action', group: 'Management API',
+    name: 'Verifier request actions',
+    specs: ['oid4vp', 'sd-jwt-vc', 'vcdm'],
+    effect: 'changes the dcql_query of every FUTURE OID4VP Authorization Request',
+    what: 'NON-SPEC. Five URLs behind one pattern: select, add, remove, ' +
+          'defaults, format. A claim NOT in the catalogue can be asked for and ' +
+          'that is the point — nothing here issues it, so it is the only way to ' +
+          'exercise what a wallet does with a request it cannot satisfy. ' +
+          'Requesting NOTHING is also a setting: DCQL reads an absent claims ' +
+          'member as the whole credential. A request already in flight keeps the ' +
+          'claims it was built with. Mirrors POST /admin/vc-verifier-config.' },
+
   // --- WS-Trust ---
   { path: '/sts', group: 'WS-Trust', name: 'Security Token Service',
     specs: ['ws-trust', 'wss-username', 'saml2', 'xmldsig'],
@@ -773,14 +936,27 @@ const ENDPOINTS = [
     what: 'The signing key as a single RS256 JWK with its x5c. Regenerated on every start, so it is ' +
           'served no-store.' },
   { path: '/oauth2/authorize', group: 'OAuth 2.0 / OIDC', name: 'Authorization endpoint',
-    specs: ['rfc6749', 'oidc', 'rfc7636', 'rfc9396', 'rfc9207'], effect: 'needs client_id and redirect_uri — answers 400 when followed bare, then shows the login screen once they are supplied',
-    what: 'Shows a login screen, then issues a code, token and/or id_token per response_type. ' +
-          'Carries PKCE, nonce, authorization_details and OID4VCI issuer_state.' },
-  { path: '/oauth2/login', group: 'OAuth 2.0 / OIDC', name: 'Login form target',
+    specs: ['rfc6749', 'oidc', 'rfc7636', 'rfc9396', 'rfc9207'], effect: 'needs client_id and redirect_uri — answers 400 when followed bare, then redirects to the sign-in screen once they are supplied',
+    what: 'Redirects to the authentication service when there is no session, and is entered a ' +
+          'second time when the person comes back signed in — the same request over again, which ' +
+          'is why this endpoint keeps no state between the two. Then issues a code, token and/or ' +
+          'id_token per response_type. Carries PKCE, nonce, authorization_details and OID4VCI ' +
+          'issuer_state.' },
+  { path: '/authn/login', group: 'Authentication', name: 'Sign-in screen',
     specs: ['oidc'],
-    what: 'Where the login screen posts. No password is checked; the username typed becomes the ' +
-          'identity in every token that follows.' },
-  { path: '/oauth2/webauthn', group: 'OAuth 2.0 / OIDC', name: 'WebAuthn second factor',
+    effect: 'shows the sign-in screen for a request another endpoint sent here; needs an ?authn= id, ' +
+            'so following it bare answers 400',
+    what: 'THE AUTHENTICATION SERVICE. Every protocol here that needs a person identified sends ' +
+          'them to this one screen with a return URL carrying its own request whole, and gets them ' +
+          'back with a session cookie established — GET renders the screen, POST takes what was ' +
+          'typed. No password is checked; the username typed becomes the identity in every token, ' +
+          'assertion and credential that follows. It knows nothing about the protocol that sent ' +
+          'anybody here: what the screen SHOWS about the request it interrupted is supplied by the ' +
+          'caller, and a refusal comes back as authn_error=access_denied for the CALLER to turn ' +
+          'into whatever its own specification says a refusal looks like. The return URL is checked ' +
+          'to be a path on this service — an authentication service that will redirect anywhere ' +
+          'after signing somebody in is a phishing tool with a login screen in front of it.' },
+  { path: '/authn/webauthn', group: 'Authentication', name: 'WebAuthn second factor',
     specs: ['oidc', 'webauthn'],
     effect: 'enrols or asserts a security key, then completes the sign-in',
     what: 'The second-factor step of the login flow, reached when the authorization request named ' +
@@ -793,7 +969,7 @@ const ENDPOINTS = [
           'amr ["pwd"] and acr "1" instead. The RP ID is this origin\'s host and is not ' +
           'configurable: WebAuthn binds a ceremony to the calling origin, and that is the whole of ' +
           'its phishing resistance.' },
-  { path: '/oauth2/webauthn.js', group: 'OAuth 2.0 / OIDC', name: 'WebAuthn ceremony script',
+  { path: '/authn/webauthn.js', group: 'Authentication', name: 'WebAuthn ceremony script',
     specs: ['webauthn'],
     what: 'The script the second-factor page runs. It is a separate resource rather than an inline ' +
           'script because this service sets script-src \'none\' on every response by default; that ' +
@@ -998,8 +1174,12 @@ function describeEndpoints() {
 // 'Admin' sits last of the real groups, before 'Undocumented': it is the only group
 // that is not a protocol, and a reader looking for what this service SPEAKS should
 // not have to scroll past an operator console to find it.
-const GROUP_ORDER = ['Service', 'WS-Trust', 'WS-Federation', 'OAuth 2.0 / OIDC', 'VC Issuance (OID4VCI)',
-                     'Decentralized Identifiers', 'VC Presentation (OID4VP)', 'Admin', 'Undocumented'];
+// 'Authentication' sits directly after 'Service' and before every protocol: it is
+// not one of them, it is the thing they all send a person to, and a reader who
+// finds it under OAuth would reasonably conclude WS-Federation has a second one.
+const GROUP_ORDER = ['Service', 'Authentication', 'WS-Trust', 'WS-Federation', 'OAuth 2.0 / OIDC',
+                     'VC Issuance (OID4VCI)', 'Decentralized Identifiers', 'VC Presentation (OID4VP)',
+                     'Admin', 'Management API', 'Undocumented'];
 
 function groupsOf(rows) {
   const seen = [];

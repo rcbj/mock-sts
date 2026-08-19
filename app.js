@@ -89,7 +89,7 @@ app.use(function (req, res, next) {
 //                       by the qrcode library server-side.
 //
 // NOT present, and it must not be added back: **form-action**. It looks obviously
-// right here — the only form posts to /oauth2/login, which is same-origin — but
+// right here — the only form posts to /authn/login, which is same-origin — but
 // Chrome enforces form-action against the whole REDIRECT CHAIN that follows a
 // submission, not just its immediate target. This is an authorization server:
 // signing in POSTs the login form and the response is a 302 to the client's
