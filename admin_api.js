@@ -486,6 +486,129 @@ const ROUTES = [
         responseDescription: 'How many were revoked, in `revoked`.' }
     ] },
 
+  { method: 'GET', path: BASE + '/config', tag: 'Configuration',
+    operationId: 'getConfig',
+    summary: 'Every setting this service has, and where each value came from',
+    description: 'The forty-five settings, grouped by protocol, each with its ' +
+                 'effective value and the SOURCE of that value: a runtime ' +
+                 'override, an environment variable, the appconfig file, or ' +
+                 'the built-in default. The source is the part that was not ' +
+                 'answerable before this resource existed — the four are ' +
+                 'indistinguishable once a value has been read, and the ' +
+                 'question "why is the issuer that?" used to be a grep.\n\n' +
+                 'It also says which settings can be CHANGED while the ' +
+                 'service runs. The ones that cannot were consumed at ' +
+                 'startup — a bound socket, the TLS certificate\'s names, the ' +
+                 'Kerberos principal database and its long-term keys, the ' +
+                 'directory\'s base DN — and each carries the reason.',
+    mirrors: 'GET /admin/config',
+    responseDescription: 'The whole table.',
+    responseSchema: { $ref: '#/components/schemas/Config' },
+    handler: function (req, res) {
+      log.debug("Entering the management API configuration endpoint.");
+      sendJson(res, 200, admin.configJson());
+      log.debug("Leaving the management API configuration endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/config/:action', tag: 'Configuration',
+    mirrors: 'POST /admin/config',
+    handler: function (req, res) {
+      log.debug("Entering the management API configuration action endpoint.");
+      const body = parseBody(req);
+      const result = admin.configAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API configuration action endpoint.");
+    },
+    actions: [
+      { action: 'set', operationId: 'setSetting',
+        summary: 'Change one setting',
+        description: 'IN MEMORY ONLY, and gone on restart — nothing here ' +
+                     'writes to the appconfig file. That is the same ' +
+                     'arrangement as the custom claims and the credential ' +
+                     'claims, and it is deliberate: a service that edited a ' +
+                     'file checked into a repository would leave a test\'s ' +
+                     'forgotten change behind permanently.\n\nThe change ' +
+                     'applies to the next token, assertion, ticket or search. ' +
+                     'Nothing already issued changes, because a token is a ' +
+                     'signed document.\n\nA setting whose `editable` is false ' +
+                     'is REFUSED with the reason rather than accepted, and a ' +
+                     'value that does not fit the setting\'s type is refused ' +
+                     'by name.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            key: { type: 'string',
+                   description: 'The dot path, as GET /admin-api/config ' +
+                                'lists it.' },
+            value: { description: 'A string is always accepted and is coerced ' +
+                                  'to the setting\'s type, so the environment ' +
+                                  'spelling works here too; a JSON number, ' +
+                                  'boolean or array of strings is accepted ' +
+                                  'where the type takes one.' }
+          },
+          required: ['key', 'value'],
+          examples: [{ key: 'saml.issuer', value: 'urn:example:idp' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The setting as it now stands, in `setting`.' },
+
+      { action: 'set-many', operationId: 'setSettings',
+        summary: 'Change a whole section at once',
+        description: 'What the console\'s per-section Save posts, and it is ' +
+                     'not a convenience: a section is how a person changes ' +
+                     'configuration, and one call per field would make a ' +
+                     'partly-applied section the ordinary outcome of a ' +
+                     'mistake in any one of them.\n\nALL-OR-NOTHING. Every ' +
+                     'value is checked before any is written, so a body with ' +
+                     'one bad field changes nothing and names it. A key this ' +
+                     'service does not know is ignored rather than refused, ' +
+                     'because a form posts fields this resource never ' +
+                     'declared; `applied` says which were taken and `changed` ' +
+                     'which actually differed from what was already in force.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          description: 'One property per setting, named by its dot path.',
+          properties: {},
+          examples: [{ 'oid4vci.batchSize': 8,
+                       'oid4vci.offerUsername': 'alice' }],
+          additionalProperties: true
+        },
+        responseDescription: 'What was applied, in `applied`, and what ' +
+                             'actually changed, in `changed`.' },
+
+      { action: 'reset', operationId: 'resetSetting',
+        summary: 'Drop one runtime override',
+        description: 'The setting falls back to whatever it would have used ' +
+                     'had nothing ever been set here — its environment ' +
+                     'variable, the appconfig file, or the built-in default. ' +
+                     'A setting with no override is refused rather than ' +
+                     'treated as already done, because the two are different ' +
+                     'facts and a caller that misspelt a key would otherwise ' +
+                     'be told it succeeded.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { key: { type: 'string' } },
+          required: ['key'],
+          examples: [{ key: 'saml.issuer' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The setting as it now stands, in `setting`.' },
+
+      { action: 'reset-all', operationId: 'resetAllSettings',
+        summary: 'Drop every runtime override',
+        description: 'Returns the whole service to the configuration it ' +
+                     'started with, without restarting it. This is what a ' +
+                     'test should call to put the service back: the mock\'s ' +
+                     'admin state survives between jobs, so a setting left ' +
+                     'changed here changes what every later job sees.',
+        requestBodyRequired: false,
+        requestBody: { type: 'object', properties: {},
+                       additionalProperties: false },
+        responseDescription: 'The keys that were cleared, in `cleared`.' } ] },
+
   { method: 'GET', path: BASE + '/claims', tag: 'Custom claims',
     operationId: 'getClaims',
     summary: 'The custom claims every new token and assertion will carry',

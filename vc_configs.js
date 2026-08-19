@@ -16,13 +16,22 @@
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
-const VCI_AS = process.env.OID4VCI_AUTHORIZATION_SERVER || '';
+const config = require('./config');
+// A FUNCTION rather than the constant this was, so that /admin/config can
+// change it and the next metadata document says so. Same for every
+// runtime-settable value in this service; the ones that are still constants
+// are the ones config.js marks restart-only.
+function vciAuthorizationServer() {
+  return config.value('oid4vci.authorizationServer');
+}
 
 const VCI_CONFIG_ID = 'IdentityCredential';
 
 // The most proofs this issuer will take in one Credential Request, and so the
 // most credentials it will return (OID4VCI section 14.6).
-const VCI_BATCH_SIZE = Number(process.env.OID4VCI_BATCH_SIZE || 4);
+function vciBatchSize() {
+  return config.value('oid4vci.batchSize');
+}
 
 const VCI_VCT = 'urn:idptools:sd-jwt-vc:identity';
 
@@ -125,9 +134,9 @@ function configIdOfIdentifier(identifier) {
 }
 
 module.exports = {
-  VCI_AS: VCI_AS,
+  vciAuthorizationServer: vciAuthorizationServer,
   VCI_CONFIG_ID: VCI_CONFIG_ID,
-  VCI_BATCH_SIZE: VCI_BATCH_SIZE,
+  vciBatchSize: vciBatchSize,
   VCI_VCT: VCI_VCT,
   VCI_SCOPE: VCI_SCOPE,
   VCI_JWT_CONFIG_ID: VCI_JWT_CONFIG_ID,

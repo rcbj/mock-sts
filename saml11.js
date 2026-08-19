@@ -48,7 +48,10 @@
 // ---------------------------------------------------------------------------
 
 const { SignedXml } = require('xml-crypto');
-const { log, logArtifact, ISSUER, STS, xmlEscape, genId, iso } = require('./helpers');
+const { log, logArtifact, STS, xmlEscape, genId, iso } = require('./helpers');
+// saml.issuer — the same setting the 2.0 assertions carry, because it names
+// the same signer.
+const config = require('./config');
 // As in saml2.js: the custom attributes an admin configured, and the register every
 // assertion is counted in.
 const stats = require('./admin_stats');
@@ -145,7 +148,7 @@ function buildSaml11Assertion(opts) {
     '<saml:Assertion xmlns:saml="' + SAML11_NS + '"' +
       ' MajorVersion="1" MinorVersion="1"' +
       ' AssertionID="' + id + '"' +
-      ' Issuer="' + xmlEscape(ISSUER) + '"' +
+      ' Issuer="' + xmlEscape(config.value('saml.issuer')) + '"' +
       ' IssueInstant="' + now + '">' +
       '<saml:Conditions NotBefore="' + now + '" NotOnOrAfter="' + exp + '">' + audienceEl +
       '</saml:Conditions>' +

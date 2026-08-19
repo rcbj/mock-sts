@@ -108,6 +108,7 @@
 const ldap = require('ldapjs');
 const app = require('./app');
 const { log, xmlEscape } = require('./helpers');
+const config = require('./config');
 const stats = require('./admin_stats');
 // The admin console, for ONE reason: to hand it the reader below so that a user's
 // page can show that user's directory entry. It is required here rather than the
@@ -145,7 +146,7 @@ const vcClaims = require('./vc_claims');
 // exists. Changing it means the parent project's api has to allow the new port
 // in `ldapAllowedPorts` or its LDAP client will refuse to reach it — the same
 // coupling KRB5_KDC_PORT has with krb5AllowedPorts, and for the same reason.
-const LDAP_PORT = parseInt(process.env.LDAP_PORT, 10) || 389;
+const LDAP_PORT = config.value('ldap.port');
 
 // The LDAPS port. 636 is the IANA-assigned one for LDAP over TLS and, like 389,
 // it is privileged — so the container binds it and a host run usually cannot.
@@ -162,12 +163,12 @@ const LDAP_PORT = parseInt(process.env.LDAP_PORT, 10) || 389;
 // do. It is also worth knowing that LDAPS is the one of the two that no RFC
 // defines: RFC 4513 standardised StartTLS and left `ldaps://` as the de-facto
 // scheme it already was. Every client speaks it anyway.
-const LDAPS_PORT = parseInt(process.env.LDAPS_PORT, 10) || 636;
+const LDAPS_PORT = config.value('ldap.tlsPort');
 
 // The naming context this directory serves. Everything below it is ours;
 // anything outside it is answered LDAP_NO_SUCH_OBJECT, which is what a real
 // server does for a base DN it holds no data for.
-const BASE_DN = process.env.LDAP_BASE_DN || 'dc=example,dc=com';
+const BASE_DN = config.value('ldap.baseDn');
 
 // Where auto-created people and hand-made groups are expected to live. They are
 // derived rather than configured: two variables that could disagree with
@@ -179,8 +180,9 @@ const GROUPS_DN = 'ou=groups,' + BASE_DN;
 // misspelled variable leaves it ON — the safe direction here, because the
 // feature is what makes the directory non-empty for somebody who has just
 // signed in and gone looking for themselves.
-const AUTOCREATE_USERS = !/^(0|false|no|off)$/i
-  .test(String(process.env.LDAP_AUTOCREATE_USERS || '').trim());
+function autocreateUsers() {
+  return config.value('ldap.autocreateUsers');
+}
 
 // The password that is refused. See the header: this is the service's standing
 // convention rather than an authentication policy.
@@ -190,13 +192,17 @@ const REFUSED_PASSWORD = 'invalid';
 // on its own (every authentication can add an entry), so an unbounded one is a
 // memory leak with a protocol in front of it. When it is reached, new entries
 // are refused with LDAP_ADMIN_LIMIT_EXCEEDED rather than silently dropped.
-const MAX_ENTRIES = parseInt(process.env.LDAP_MAX_ENTRIES, 10) || 2000;
+function maxEntries() {
+  return config.value('ldap.maxEntries');
+}
 
 // How many entries one search may return. RFC 4511 section 4.5.1.4 lets a
 // client ask for fewer with sizeLimit and lets the server impose its own; a
 // search of a directory this small will never reach it, but a client that has
 // never seen LDAP_SIZE_LIMIT_EXCEEDED has never handled a paged result either.
-const MAX_SEARCH_RESULTS = parseInt(process.env.LDAP_SIZE_LIMIT, 10) || 500;
+function maxSearchResults() {
+  return config.value('ldap.sizeLimit');
+}
 
 // Whether the socket is up, and on which port. Declared HERE, beside the other
 // module state, rather than beside listen() where it is written: the HTTP views
@@ -818,7 +824,7 @@ function certificatePlan(info) {
 // ---------------------------------------------------------------------------
 function autoCreateUser(detail) {
   log.debug('Entering autoCreateUser(). key=' + (detail && detail.key));
-  if (!AUTOCREATE_USERS) {
+  if (!autocreateUsers()) {
     log.debug('Leaving autoCreateUser(). LDAP_AUTOCREATE_USERS is off.');
     return null;
   }
@@ -904,11 +910,11 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). The entry already existed.');
     return existing;
   }
-  if (entries.size >= MAX_ENTRIES) {
+  if (entries.size >= maxEntries()) {
     // Reported rather than thrown: the authentication itself succeeded and must
     // not be failed by a directory that is full.
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum ' +
-             'of ' + MAX_ENTRIES + ' entries.');
+             'of ' + maxEntries() + ' entries.');
     log.debug('Leaving autoCreateUser(). The directory is full.');
     return null;
   }
@@ -1192,13 +1198,13 @@ function objectFor(name) {
     // that costs somebody an afternoon.
     ldapsPort: secureServer ? boundTlsPort : null,
     ldapsListening: tlsListening,
-    autoCreateUsers: AUTOCREATE_USERS,
+    autoCreateUsers: autocreateUsers(),
     entryCount: entries.size,
-    maxEntries: MAX_ENTRIES,
+    maxEntries: maxEntries(),
     // Not `entryCount >= maxEntries` computed by the caller: the cap is this
     // module's and a second copy of the comparison is a second thing to keep
     // right.
-    full: entries.size >= MAX_ENTRIES
+    full: entries.size >= maxEntries()
   };
   if (stored) {
     // Canonically spelled, and OPERATIONAL ATTRIBUTES INCLUDED. A search would
@@ -1410,7 +1416,7 @@ function directoryState() {
     ldapsPort: secureServer ? boundTlsPort : null,
     ldapsListening: tlsListening,
     entryCount: entries.size,
-    maxEntries: MAX_ENTRIES
+    maxEntries: maxEntries()
   };
 }
 
@@ -1419,7 +1425,7 @@ function directoryState() {
 // would be two places for "what counts as a group" to drift apart.
 //
 // With no DN it is the list. With one it is the list AND that group in full —
-// the list costs one pass over a store capped at MAX_ENTRIES and it is what lets
+// the list costs one pass over a store capped at maxEntries() and it is what lets
 // the detail page carry its own way back to the siblings.
 function groupsFor(dn) {
   log.debug('Entering groupsFor(). dn=' + (dn || '(the whole list)'));
@@ -1723,10 +1729,10 @@ server.add('', function (req, res, next) {
     log.debug('Leaving the LDAP add handler. The parent is missing.');
     return next(new ldap.NoSuchObjectError(parent));
   }
-  if (entries.size >= MAX_ENTRIES) {
+  if (entries.size >= maxEntries()) {
     log.debug('Leaving the LDAP add handler. The directory is full.');
     return next(new ldap.AdminLimitExceededError(
-      'this directory holds its maximum of ' + MAX_ENTRIES + ' entries'));
+      'this directory holds its maximum of ' + maxEntries() + ' entries'));
   }
   const attributes = {};
   req.attributes.forEach(function (attr) {
@@ -1968,8 +1974,8 @@ server.search('', function (req, res, next) {
   }
   const clientLimit = parseInt(req.sizeLimit, 10) || 0;
   const limit = clientLimit > 0
-    ? Math.min(clientLimit, MAX_SEARCH_RESULTS)
-    : MAX_SEARCH_RESULTS;
+    ? Math.min(clientLimit, maxSearchResults())
+    : maxSearchResults();
   let sent = 0;
   let considered = 0;
   for (const stored of entries.values()) {
@@ -2129,7 +2135,7 @@ function description(req) {
           'for all three sockets is why they share it.'
       }
     },
-    autoCreateUsers: AUTOCREATE_USERS,
+    autoCreateUsers: autocreateUsers(),
     autoCreateRule: 'an entry uid=<name>,' + USERS_DN + ' appears the first ' +
       'time <name> authenticates to this service through ANY protocol. An ' +
       'LDAP bind does not seed one (it presents a DN, not a user name) and ' +
@@ -2147,8 +2153,8 @@ function description(req) {
       'deleting the last value of an attribute deletes the attribute'
     ],
     limits: {
-      maxEntries: MAX_ENTRIES,
-      maxSearchResults: MAX_SEARCH_RESULTS,
+      maxEntries: maxEntries(),
+      maxSearchResults: maxSearchResults(),
       currentEntries: entries.size
     },
     operations: ['bind', 'unbind', 'add', 'delete', 'modify', 'modifyDN',
@@ -2403,10 +2409,10 @@ module.exports = {
   BASE_DN: BASE_DN,
   USERS_DN: USERS_DN,
   GROUPS_DN: GROUPS_DN,
-  AUTOCREATE_USERS: AUTOCREATE_USERS,
+  autocreateUsers: autocreateUsers,
   REFUSED_PASSWORD: REFUSED_PASSWORD,
-  MAX_ENTRIES: MAX_ENTRIES,
-  MAX_SEARCH_RESULTS: MAX_SEARCH_RESULTS,
+  maxEntries: maxEntries,
+  maxSearchResults: maxSearchResults,
   entries: entries,
   autoCreateUser: autoCreateUser,
   objectFor: objectFor,

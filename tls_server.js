@@ -110,25 +110,21 @@ const { log, xmlEscape, parseBody } = require('./helpers');
 // directly is what keeps it one call site and not three — see the note above
 // recordClientCertificate().
 const stats = require('./admin_stats');
+const config = require('./config');
 
 // The permissive listener: always asks, never refuses, always explains.
-const TLS_PORT = parseInt(process.env.STS_TLS_PORT, 10) || 8443;
+const TLS_PORT = config.value('tls.port');
 // The strict one: node refuses an unverified client certificate during the
 // handshake, so nothing below ever runs for one.
-const MTLS_PORT = parseInt(process.env.STS_MTLS_PORT, 10) || 9443;
+const MTLS_PORT = config.value('tls.mutualPort');
 
 // The names the server certificate is issued for. A caller reaches this stack
 // as `localhost` from a host run, as `sts` from the compose network and as
 // `127.0.0.1` from whatever is easiest, and a certificate that named only one of
 // them would produce a hostname-verification failure that is about this file
 // rather than about anything the reader is debugging.
-const TLS_HOSTNAMES = String(process.env.STS_TLS_HOSTNAMES ||
-    'localhost,sts,sts-mock,sts.example.com')
-  .split(',').map(function (name) { return name.trim(); })
-  .filter(function (name) { return !!name; });
-const TLS_IPS = String(process.env.STS_TLS_IPS || '127.0.0.1')
-  .split(',').map(function (address) { return address.trim(); })
-  .filter(function (address) { return !!address; });
+const TLS_HOSTNAMES = config.value('tls.hostnames');
+const TLS_IPS = config.value('tls.ips');
 
 // A truststore is a list of anchors, not a certificate store dump. The cap is
 // generous for any private PKI and stops a caller handing over a body that costs

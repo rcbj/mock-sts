@@ -100,6 +100,7 @@ const net = require('net');
 const dgram = require('dgram');
 const app = require('./app');
 const { log } = require('./helpers');
+const config = require('./config');
 // The register the admin console counts tickets in. Kerberos is the one protocol
 // family here whose artifacts do not pass through signJwt() or an assertion
 // builder, so the two places a ticket is minted say so explicitly — and there are
@@ -112,18 +113,25 @@ const prim = require('./krb5_primitives.js');
 const principals = require('./krb5_principals.js');
 const kpac = require('./krb5_pac.js');
 
-const KDC_PORT = parseInt(process.env.KRB5_KDC_PORT || '88', 10);
+const KDC_PORT = config.value('krb5.kdcPort');
 const REALM = principals.REALM;
 
 // Active Directory's default tolerance, and the reason KRB_AP_ERR_SKEW is one of
 // the most common Kerberos failures in the field.
-const CLOCK_SKEW_SECONDS = parseInt(process.env.KRB5_CLOCK_SKEW || '300', 10);
+// Functions rather than constants: both are settable at runtime, and moving
+// the clock deliberately is the whole point of the offset — a value captured
+// at require time could only ever be moved by a restart.
+function clockSkewSeconds() {
+  return config.value('krb5.clockSkew');
+}
 const TICKET_LIFETIME_SECONDS = 10 * 3600;
 const RENEW_LIFETIME_SECONDS = 7 * 24 * 3600;
 
 // A test can ask this KDC to lie about its clock, so the client's skew handling
 // can be exercised without changing anybody's system time.
-const CLOCK_OFFSET_SECONDS = parseInt(process.env.KRB5_CLOCK_OFFSET || '0', 10);
+function clockOffsetSeconds() {
+  return config.value('krb5.clockOffset');
+}
 
 // Replies larger than this are a bug in this service rather than a legitimate
 // message; the cap exists so a mistake surfaces here rather than as a truncated
@@ -131,7 +139,7 @@ const CLOCK_OFFSET_SECONDS = parseInt(process.env.KRB5_CLOCK_OFFSET || '0', 10);
 const MAX_REPLY_BYTES = 128 * 1024;
 
 function now() {
-  return new Date(Date.now() + CLOCK_OFFSET_SECONDS * 1000);
+  return new Date(Date.now() + clockOffsetSeconds() * 1000);
 }
 
 function kdcTime(offsetSeconds) {
@@ -492,7 +500,7 @@ async function resolveS4u(ctx) {
         sname: body.sname,
         eText: 'S4U2Self named ' + forUser.userName.name.join('/') + '@' + forUser.userRealm +
                ', which this KDC does not know and will not create. The name is either ' +
-               'reserved (' + principals.RESERVED_UNKNOWN.join(', ') + '), service-shaped, ' +
+               'reserved (' + principals.reservedUnknown().join(', ') + '), service-shaped, ' +
                'or in a realm this KDC does not serve'
       }) };
     }
@@ -685,7 +693,7 @@ function preAuthRequiredReply(client, request) {
   log.info('krb5: ' + client.name.join('/') + ' needs pre-authentication; sending ETYPE-INFO2 with ' +
     entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies') + ', salt ' +
     JSON.stringify(client.salt) + ', s2kparams ' +
-    (principals.S2KPARAMS_MODE === 'send'
+    (principals.s2kparamsMode() === 'send'
       ? 'SENT (explicit 4096, the pre-2026-08 behaviour of this mock)'
       : 'OMITTED (as Active Directory does; the client must apply the RFC ' +
         '3962 default). Set KRB5_S2KPARAMS=send to advertise it explicitly.'));
@@ -744,8 +752,8 @@ async function checkEncTimestamp(client, etype, padata) {
     return { code: 24, eText: 'the decrypted PA-ENC-TS-ENC is not well formed' };
   }
   const skew = Math.abs(now().getTime() - stamp.patimestamp.getTime()) / 1000;
-  if (skew > CLOCK_SKEW_SECONDS) {
-    log.info('krb5: clock skew ' + Math.round(skew) + 's exceeds the ' + CLOCK_SKEW_SECONDS +
+  if (skew > clockSkewSeconds()) {
+    log.info('krb5: clock skew ' + Math.round(skew) + 's exceeds the ' + clockSkewSeconds() +
              's tolerance for ' + client.name.join('/'));
     return { code: 37, eText: 'clock skew is ' + Math.round(skew) + ' seconds' };
   }
@@ -791,7 +799,7 @@ async function handleAsReq(request) {
       // one field whose whole job is to be read by a person.
       eText: 'no such principal: ' + body.cname.name.join('/') + '. Every other username ' +
              'would have been created on the spot; this one is either reserved (' +
-             principals.RESERVED_UNKNOWN.join(', ') + ') or has more than one component, ' +
+             principals.reservedUnknown().join(', ') + ') or has more than one component, ' +
              'which makes it a service name rather than a user'
     });
   }
@@ -1124,11 +1132,11 @@ async function handleTgsReq(request) {
       realm: REALM, sname: body.sname,
       eText: 'the ticket expired at ' + ticketPart.endtime.toISOString() });
   }
-  if (ticketPart.starttime && ticketPart.starttime > new Date(at.getTime() + CLOCK_SKEW_SECONDS * 1000)) {
+  if (ticketPart.starttime && ticketPart.starttime > new Date(at.getTime() + clockSkewSeconds() * 1000)) {
     return errorReply(33, { realm: REALM, sname: body.sname, eText: 'the ticket is not yet valid' });
   }
   const authSkew = Math.abs(at.getTime() - authenticator.ctime.getTime()) / 1000;
-  if (authSkew > CLOCK_SKEW_SECONDS) {
+  if (authSkew > clockSkewSeconds()) {
     return errorReply(37, { crealm: ticketPart.crealm, cname: ticketPart.cname,
       realm: REALM, sname: body.sname,
       eText: 'the Authenticator\'s clock is ' + Math.round(authSkew) + ' seconds out' });
@@ -1778,8 +1786,8 @@ app.get('/krb5/principals', function (req, res) {
   res.status(200).json({
     realm: REALM,
     kdcPort: KDC_PORT,
-    clockSkewSeconds: CLOCK_SKEW_SECONDS,
-    clockOffsetSeconds: CLOCK_OFFSET_SECONDS,
+    clockSkewSeconds: clockSkewSeconds(),
+    clockOffsetSeconds: clockOffsetSeconds(),
     ticketLifetimeSeconds: TICKET_LIFETIME_SECONDS,
     // The one thing about this KDC a client cannot discover from the protocol, and the
     // one that stops somebody guessing at passwords: any username authenticates, and
@@ -1792,7 +1800,7 @@ app.get('/krb5/principals', function (req, res) {
       userPassword: principals.USER_PASSWORD,
       // The names that are refused instead, so KDC_ERR_C_PRINCIPAL_UNKNOWN stays
       // reachable, plus the shape rule that keeps a missing SPN an error.
-      neverCreated: principals.RESERVED_UNKNOWN,
+      neverCreated: principals.reservedUnknown(),
       // SERVICES are created on first sight too, but only for the hosts this mock
       // is willing to be — a client derives `HTTP/<url host>` and cannot be
       // expected to know this table. Their password is shared and published for
@@ -1856,5 +1864,5 @@ module.exports = {
   handleMessage: handleMessage,
   KDC_PORT: KDC_PORT,
   REALM: REALM,
-  CLOCK_SKEW_SECONDS: CLOCK_SKEW_SECONDS
+  clockSkewSeconds: clockSkewSeconds
 };

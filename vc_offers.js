@@ -37,7 +37,8 @@
 const qrcode = require('qrcode');
 const app = require('./app');
 const { log, logArtifact, baseUrlOf, randomId, xmlEscape, vciError, userFor,
-        WALLET_BASE_URL } = require('./helpers');
+        walletBaseUrl } = require('./helpers');
+const config = require('./config');
 const { VCI_CONFIG_ID, vciConfigIds } = require('./vc_configs');
 const credentialOffers = new Map();     // id -> { offer, issuerState, expires }
 
@@ -60,16 +61,22 @@ const deferredAccessTokens = new Set();
 
 // How long a deferred issuance "takes". Short enough for a test to wait for it,
 // long enough that the first poll genuinely comes back still-pending.
-const DEFERRED_READY_MS = Number(process.env.OID4VCI_DEFERRED_READY_MS || 4000);
+function deferredReadyMs() {
+  return config.value('oid4vci.deferredReadyMs');
+}
 
-const DEFERRED_INTERVAL_S = Number(process.env.OID4VCI_DEFERRED_INTERVAL_S || 2);
+function deferredIntervalS() {
+  return config.value('oid4vci.deferredIntervalS');
+}
 
 const OFFER_TTL_MS = 10 * 60 * 1000;
 
 // A pre-authorized offer is made to an End-User the issuer has ALREADY
 // identified (H.2: they uploaded documents to an employee portal days before),
 // so the issuer knows the subject without anyone signing in.
-const VCI_OFFER_USERNAME = process.env.OID4VCI_OFFER_USERNAME || 'diploma.student';
+function vciOfferUsername() {
+  return config.value('oid4vci.offerUsername');
+}
 
 // Build a Credential Offer for one of the Appendix H use cases.
 //
@@ -104,7 +111,7 @@ function buildCredentialOffer(req, configurationIds, mode) {
     preAuthorizedCodes.set(preAuthorizedCode, {
       configurationIds: configurationIds,
       txCode: txCodeValue,
-      user: userFor(VCI_OFFER_USERNAME),
+      user: userFor(vciOfferUsername()),
       deferred: mode === 'deferred',
       expires: expires
     });
@@ -162,7 +169,7 @@ app.get('/issuer', function (req, res) {
     '<a class="cta secondary" href="/issuer/offer?mode=cross-device">Show a QR code (cross-device)</a>' +
     '<a class="cta secondary" href="/issuer/offer?mode=deferred">Show a QR code (issuance takes a while)</a></p>' +
     '<div class="meta">This is the Credential Issuer\'s web page in OID4VCI Appendix H. The first two links ' +
-    'build a Credential Offer and send you to your wallet at <code>' + xmlEscape(WALLET_BASE_URL) + '</code> ' +
+    'build a Credential Offer and send you to your wallet at <code>' + xmlEscape(walletBaseUrl()) + '</code> ' +
     '(H.1, same device). The other two hand the offer over by QR code and a Transaction Code instead — H.2, ' +
     'and H.3 where the issuer needs time to produce the credential. The issuer is ' +
     '<code>' + xmlEscape(base) + '</code>.</div>' +
@@ -180,7 +187,7 @@ app.get('/issuer/offer', function (req, res) {
     : [VCI_CONFIG_ID];
   const mode = String(req.query.mode || 'same-device');
   const built = buildCredentialOffer(req, configurationIds, mode);
-  const wallet = String(req.query.wallet || WALLET_BASE_URL).replace(/\/+$/, '') +
+  const wallet = String(req.query.wallet || walletBaseUrl()).replace(/\/+$/, '') +
                  '/vc-issuance-1.html';
 
   // Sweep expired offers/states/codes while we are here.
@@ -290,10 +297,10 @@ module.exports = {
   preAuthorizedCodes: preAuthorizedCodes,
   deferredTransactions: deferredTransactions,
   deferredAccessTokens: deferredAccessTokens,
-  DEFERRED_READY_MS: DEFERRED_READY_MS,
-  DEFERRED_INTERVAL_S: DEFERRED_INTERVAL_S,
+  deferredReadyMs: deferredReadyMs,
+  deferredIntervalS: deferredIntervalS,
   OFFER_TTL_MS: OFFER_TTL_MS,
-  VCI_OFFER_USERNAME: VCI_OFFER_USERNAME,
+  vciOfferUsername: vciOfferUsername,
   buildCredentialOffer: buildCredentialOffer,
   renderOfferQrPage: renderOfferQrPage
 };

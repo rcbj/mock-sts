@@ -39,6 +39,7 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const app = require('./app');
+const config = require('./config');
 const bbs2023 = require('./bbs2023.js');
 const { log, logArtifact, STS, baseUrlOf, b64u, b64uDecode, jsonFromB64u, randomId,
         bbsKeyPair, vciError } = require('./helpers');
@@ -48,7 +49,7 @@ const dpop = require('./dpop');
 // helpers.signJwt(), so they are not counted by the recorder that catches every
 // OAuth token — buildCredentialFor(), which all three go through, says so instead.
 const stats = require('./admin_stats');
-const { VCI_AS, VCI_BATCH_SIZE, VCI_CONFIGS, VCI_CONFIG_ID, VCI_JWT_CONFIG_ID,
+const { vciAuthorizationServer, vciBatchSize, VCI_CONFIGS, VCI_CONFIG_ID, VCI_JWT_CONFIG_ID,
         VCI_JWT_SCOPE, VCI_JWT_TYPES, VCI_LDP_CONFIG_ID, VCI_LDP_SCOPE, VCI_SCOPE,
         VCI_VCT, VC_CONTEXT, configIdOfIdentifier, vciConfigIds, vciFormatOf,
         vciUsesIssuerDid } = require('./vc_configs');
@@ -59,7 +60,7 @@ const { issuerDidFor, stsDid } = require('./vc_did');
 // builders read, so an issuer that advertises one claim set and mints another is
 // not a state this file can reach. /admin/vc is what changes it.
 const vcClaims = require('./vc_claims');
-const { DEFERRED_INTERVAL_S, DEFERRED_READY_MS, OFFER_TTL_MS, deferredAccessTokens,
+const { deferredIntervalS, deferredReadyMs, OFFER_TTL_MS, deferredAccessTokens,
         deferredTransactions } = require('./vc_offers');
 // c_nonce values this issuer has handed out and not yet seen used. A nonce is
 // single-use (RFC-conformant behaviour, and it makes replay visible in a test).
@@ -70,7 +71,7 @@ const VCI_NONCE_TTL_MS = 5 * 60 * 1000;
 function vciMetadata(req) {
   log.debug("Entering vciMetadata().");
   const base = baseUrlOf(req);
-  const authServer = VCI_AS || base;
+  const authServer = vciAuthorizationServer() || base;
   const meta = {
     // --- REQUIRED ---
     credential_issuer: base,
@@ -83,7 +84,7 @@ function vciMetadata(req) {
     // omits it entirely (walt.id's does). Ours can, so it says so.
     deferred_credential_endpoint: base + '/oid4vci/deferred_credential',
     notification_endpoint: base + '/oid4vci/notification',
-    batch_credential_issuance: { batch_size: VCI_BATCH_SIZE },
+    batch_credential_issuance: { batch_size: vciBatchSize() },
     // Only what this issuer actually performs. It used to advertise ECDH-ES as
     // well, which nothing implemented — metadata that overstates is worse than
     // metadata that says little.
@@ -841,8 +842,9 @@ const VCI_REQUEST_ENC_VALUES = ['A128GCM', 'A256GCM'];
 // Only an explicit "true" turns the requirement on: a mock that demanded
 // encryption because of a typo in an environment variable would fail every
 // existing test with an error about something the test never mentioned.
-const VCI_REQUEST_ENCRYPTION_REQUIRED =
-  String(process.env.OID4VCI_REQUEST_ENCRYPTION_REQUIRED || '').toLowerCase() === 'true';
+function vciRequestEncryptionRequired() {
+  return config.value('oid4vci.requestEncryptionRequired');
+}
 
 const VCI_REQUEST_ENC_KEY = (function () {
   const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -873,7 +875,7 @@ function credentialRequestEncryptionMetadata() {
     // compression algorithms are supported", and this issuer does not
     // decompress. Advertising a zip it then refused would make the metadata a
     // lie, which is the same rule the response side follows.
-    encryption_required: VCI_REQUEST_ENCRYPTION_REQUIRED
+    encryption_required: vciRequestEncryptionRequired()
   };
 }
 
@@ -984,7 +986,7 @@ function readPossiblyEncryptedRequest(req) {
   const contentType = String(req.get('content-type') || '').toLowerCase();
   const encrypted = contentType.indexOf('application/jwt') === 0;
   if (!encrypted) {
-    if (VCI_REQUEST_ENCRYPTION_REQUIRED) {
+    if (vciRequestEncryptionRequired()) {
       // Section 10: "When encryption of a message was required but the received
       // message is unencrypted, it SHOULD be rejected."
       log.debug("Leaving readPossiblyEncryptedRequest(). Refused: encryption is required.");
@@ -1210,9 +1212,9 @@ app.post('/oid4vci/credential', async function (req, res) {
   if (!proofJwts.length) {
     return vciError(res, 400, 'invalid_proof', 'A JWT proof of possession is required (proofs.jwt).');
   }
-  if (proofJwts.length > VCI_BATCH_SIZE) {
+  if (proofJwts.length > vciBatchSize()) {
     return vciError(res, 400, 'invalid_credential_request',
-      'This issuer accepts at most ' + VCI_BATCH_SIZE + ' proofs in one request ' +
+      'This issuer accepts at most ' + vciBatchSize() + ' proofs in one request ' +
       '(batch_credential_issuance.batch_size); ' + proofJwts.length + ' were sent.');
   }
 
@@ -1253,15 +1255,15 @@ app.post('/oid4vci/credential', async function (req, res) {
       // provided ones win.
       encryption: encryption,
       accessToken: accessToken,
-      readyAt: Date.now() + DEFERRED_READY_MS,
+      readyAt: Date.now() + deferredReadyMs(),
       expires: Date.now() + OFFER_TTL_MS
     });
-    const deferredResponse = { transaction_id: transactionId, interval: DEFERRED_INTERVAL_S };
+    const deferredResponse = { transaction_id: transactionId, interval: deferredIntervalS() };
     logArtifact('OID4VCI Credential Response', 'deferred', deferredResponse);
     res.set('Cache-Control', 'no-store');
     res.status(202).type('application/json').send(JSON.stringify(deferredResponse));
     log.debug("Leaving the OID4VCI credential endpoint. Deferred as " + transactionId +
-              ", ready in " + DEFERRED_READY_MS + "ms.");
+              ", ready in " + deferredReadyMs() + "ms.");
     return;
   }
 
@@ -1311,7 +1313,7 @@ app.post('/oid4vci/deferred_credential', async function (req, res) {
   }
 
   if (Date.now() < record.readyAt) {
-    const pending = { transaction_id: transactionId, interval: DEFERRED_INTERVAL_S };
+    const pending = { transaction_id: transactionId, interval: deferredIntervalS() };
     logArtifact('OID4VCI Deferred Credential Response', 'still pending', pending);
     res.set('Cache-Control', 'no-store');
     res.status(202).type('application/json').send(JSON.stringify(pending));

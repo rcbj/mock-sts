@@ -63,6 +63,7 @@
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
+const config = require('./config');
 const { VC_ATTRIBUTES, isSelected } = require('./vc_claims');
 const { VCI_VCT, VCI_JWT_TYPES, VCI_CONFIG_ID, VCI_DID_CONFIG_ID, VCI_JWT_CONFIG_ID,
         VCI_LDP_CONFIG_ID, VCI_LDP_DID_CONFIG_ID } = require('./vc_configs');
@@ -263,10 +264,17 @@ function parseNames(value) {
 // this Verifier asked for before this page existed if it is not. Kept as the
 // target of Reset rather than the catalogue's defaults, so that a deployment that
 // configured the variable gets ITS list back and not somebody else's.
-const DEFAULT_REQUESTED = parseNames(process.env.OID4VP_CLAIMS || 'given_name,family_name')
-  .filter(function (name) { return name !== ''; });
+// A FUNCTION, because oid4vp.claims is settable at runtime: Reset has to mean
+// "back to what this deployment configured", and a constant captured at
+// require time would mean "back to what it configured when the process
+// started" — which stops being the same sentence the moment /admin/config is
+// used. It returns a fresh array each call, so no caller can mutate it.
+function defaultRequested() {
+  return parseNames(config.value('oid4vp.claims'))
+    .filter(function (name) { return name !== ''; });
+}
 
-let requested = DEFAULT_REQUESTED.slice();
+let requested = defaultRequested();
 
 // The default credential format: what /oid4vp/start asks for when the link it was
 // reached by does not name one. The bar door's three format buttons DO name one,
@@ -378,7 +386,7 @@ function removeRequested(name) {
 
 function resetRequested() {
   log.debug("Entering resetRequested().");
-  const result = setRequested(DEFAULT_REQUESTED);
+  const result = setRequested(defaultRequested());
   log.debug("Leaving resetRequested(). ok=" + result.ok);
   return result;
 }
@@ -525,7 +533,7 @@ module.exports = {
   FORMATS: FORMATS,
   FORMAT_IDS: FORMAT_IDS,
   MAX_REQUESTED: MAX_REQUESTED,
-  DEFAULT_REQUESTED: DEFAULT_REQUESTED,
+  defaultRequested: defaultRequested,
   rowFor: rowFor,
   carriedNow: carriedNow,
   formatById: formatById,
