@@ -95,6 +95,20 @@ const claimAttributes = require('./claim_attributes');
 // for the same reason: a test can walk the log over JSON without going near an
 // HTML page.
 const auditLog = require('./audit');
+// The application registry, whose store is the ou=applications container in the
+// embedded directory. A library that registers no route, so requiring it from
+// the console cannot move anything in the route order — unlike ldap_server.js,
+// which is why the user and group readers below are hooks rather than requires.
+// Nothing is cached on either side: every read here is a directory read, which
+// is what lets this page show an ldapmodify that happened a second ago.
+const applications = require('./applications');
+// The authorization server profiles — what each discovery document publishes.
+// A library that registers no route, so requiring it here moves nothing.
+const authorizationServers = require('./authorization_servers');
+// For the DRIFT report: the document this service would publish, to compare a
+// profile's overrides against. oauth2.js is required before admin.js in
+// server.js (rule 5), so this is a plain require in the ordinary direction.
+const oauth2 = require('./oauth2');
 
 // How many rows of a list a page will draw. A cap is needed — 5,000 token rows is
 // a page no browser enjoys — and what it hid is always stated underneath, because a
@@ -146,6 +160,8 @@ const NAV = [
   { path: '/admin/metrics', label: 'Metrics' },
   { path: '/admin/users', label: 'Users' },
   { path: '/admin/groups', label: 'Groups' },
+  { path: '/admin/applications', label: 'Applications' },
+  { path: '/admin/authorization-servers', label: 'Authorization servers' },
   { path: '/admin/tokens', label: 'Tokens' },
   { path: '/admin/audit', label: 'Audit log' },
   { path: '/admin/claims', label: 'Custom claims' },
@@ -3241,6 +3257,879 @@ function groupsView(req) {
   return { json: list.json, inner: list.inner, title: 'Groups' };
 }
 
+// ---------------------------------------------------------------------------
+// GET /admin/applications
+//
+// The other side of /admin/users. That page lists every identity that has
+// authenticated here; this one lists what they authenticated TO — every OAuth
+// client, OpenID Connect relying party, SAML 2.0 or 1.1 service provider,
+// WS-Federation application, WS-Trust relying party, OpenID4VP verifier and
+// Kerberos service this instance has been asked about.
+//
+// **It reads the directory and holds nothing.** The registry IS the
+// ou=applications container (see applications.js), so this page cannot come to
+// disagree with what an LDAP client sees — there is no second copy for it to
+// disagree with. An `ldapmodify` made a second ago shows up on the next refresh.
+//
+// **There is no form on it, and that is a decision rather than an omission.**
+// The write paths into this registry are the protocol endpoints and LDAP
+// itself, and both are the point: a client is recorded because it turned up, and
+// an operator changes one with `ldapmodify` — which is what makes the directory
+// the source of truth rather than a display of one. A console form would be a
+// third door onto the same store, and the one a reader would then expect to be
+// authoritative. It is the same shape /admin/audit has and for a related
+// reason, so it needs no POST on /admin-api either (see rule 7 in CLAUDE.md:
+// the parity is about CONTROLS, and there are none here).
+// ---------------------------------------------------------------------------
+const APPLICATIONS_CAVEAT =
+  '<p class="note"><strong>An entry here grants nothing.</strong> Being in this ' +
+  'registry does not let an application do anything it could not do before &mdash; ' +
+  'this service issues a token to any client_id that asks. The one place it is READ ' +
+  'is RFC 9700 mode (<code>oauth2.rfc9700</code>), which matches a redirect_uri ' +
+  'against <code>oauthRedirectUri</code> by exact string comparison, decides ' +
+  'public-versus-confidential from <code>oauthTokenEndpointAuthMethod</code>, and ' +
+  'checks <code>oauthClientSecret</code> at the token endpoint. With that mode off, ' +
+  'these entries are a record and nothing more.</p>' +
+  '<p class="note"><strong>Two attributes hold credentials in the clear</strong> ' +
+  '&mdash; <code>oauthClientSecret</code> and <code>appRegistrationAccessToken</code> ' +
+  '&mdash; in a directory where every bind succeeds. That is the same decision ' +
+  '<code>/krb5/principals</code> makes about the Kerberos passwords and it costs more ' +
+  'here than it does there: in RFC 9700 mode that secret is checked, so anyone who can ' +
+  'read this directory can authenticate as that client. They are never written to the ' +
+  'audit log.</p>';
+
+const APPLICATIONS_LINKS =
+  '<p class="sub"><a href="/ldap/applications">the same registry as the directory ' +
+  'sees it, with the schema</a> &middot; <a href="/admin/users">the identities on the ' +
+  'other side of these</a> &middot; <a href="/ldap/directory">every entry in the ' +
+  'directory</a></p>';
+
+// One application's kinds as cells, since a record commonly carries two — an
+// OAuth client that asked for the openid scope is also a relying party, and a
+// wtrealm handed a SAML 2.0 assertion in one request and the 1.1 default in the
+// next is both of those. The registry accumulates rather than choosing, so the
+// cell has to.
+function kindCells(kinds) {
+  if (!kinds.length) {
+    return '<span class="state-none">unstated</span>';
+  }
+  return kinds.map(function (kind) {
+    return '<code>' + esc(kind) + '</code>';
+  }).join('<br>');
+}
+
+// ---------------------------------------------------------------------------
+// POST /admin/applications — the six actions.
+//
+// **The console is not a second door onto this registry**, and that is the whole
+// design of these: every one calls a function in `applications.js` which does
+// the same read-modify-write `seen()` does, through the same two conversions,
+// against the same `ou=applications` entries. The store stays one store; what is
+// added here is a set of controls in front of it. An `ldapmodify` and a form
+// post are the same act arriving by two routes, and both are visible to the
+// other immediately because nothing caches.
+//
+// **What may be changed is DECLARED and not DERIVED**, and that line is drawn in
+// `applications.js`'s EDITABLE table rather than here: redirect URIs, grant
+// types, scopes, the secret, whether the client is confidential — configuration,
+// which is what RFC 9700 mode reads — but never the counters, the sightings, the
+// kinds or the protocols, which are what happened. LDAP can still reach those;
+// the difference between offering an operation and merely not preventing it is
+// the point. This handler renders and decides nothing: it validates that an
+// action exists and hands the rest over, exactly as the console does for groups.
+// ---------------------------------------------------------------------------
+function applicationsAction(body) {
+  log.debug("Entering applicationsAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const identifier = String(body.application || '').trim();
+  const needsOne = ['set', 'add', 'remove', 'revoke-registration', 'forget'];
+  if (needsOne.indexOf(action) >= 0 && !identifier) {
+    log.debug("Leaving applicationsAction(). No application named.");
+    return { ok: false, errors: ['Which application? Send `application` with the identifier ' +
+                                 'exactly as this registry holds it — the client_id, wtrealm, ' +
+                                 'AppliesTo, entityID or service principal name.'] };
+  }
+
+  if (action === 'create') {
+    const result = applications.createApplication({
+      identifier: String(body.identifier || body.application || ''),
+      name: String(body.name || ''),
+      kind: String(body.kind || '')
+    });
+    log.debug("Leaving applicationsAction(). create " + (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, application: result.application,
+             message: '"' + result.application.identifier + '" is in the registry. It has ' +
+                      'authenticated nothing yet — the counters are zero and the entry says ' +
+                      'it was created by hand, so it cannot be mistaken for one that turned ' +
+                      'up once. Give it the redirect URIs and grant types it is allowed, and ' +
+                      'RFC 9700 mode will judge it against them.' };
+  }
+
+  if (action === 'set' || action === 'add' || action === 'remove') {
+    const result = applications.updateApplication(identifier, {
+      mode: action,
+      attribute: String(body.attribute || ''),
+      value: body.value === undefined ? '' : String(body.value)
+    });
+    log.debug("Leaving applicationsAction(). " + action + " " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'revoke-registration') {
+    // Not a delete: the entry stays and its history with it. This is RFC 7592's
+    // delete reached from the console instead of from the client that holds the
+    // registration access token — the same function, so the outcome is the same
+    // one and not a second reading of what "unregistered" means.
+    const before = applications.get(identifier);
+    if (!before) {
+      return { ok: false, errors: ['There is no application called "' + identifier + '" here.'] };
+    }
+    if (!before.registered) {
+      return { ok: false, errors: ['"' + identifier + '" has no registration to revoke. It is ' +
+                                   'a client_id this service has seen rather than one that ' +
+                                   'went through POST /oauth2/register, which RFC 9700 mode ' +
+                                   'already treats as public.'] };
+    }
+    applications.forgetRegistration(identifier);
+    log.debug("Leaving applicationsAction(). The registration was revoked.");
+    return { ok: true, application: applications.get(identifier),
+             message: 'The RFC 7591 registration for "' + identifier + '" is gone, along with ' +
+                      'its client_secret and its registration access token. The ENTRY stays, ' +
+                      'with everything it had recorded — losing that this application was ever ' +
+                      'here because its registration was withdrawn would be losing the fact ' +
+                      'rather than the configuration. RFC 9700 mode now treats it as an ' +
+                      'unregistered, public client and judges its redirect_uri against the ' +
+                      'oauth2.redirectUris setting.' };
+  }
+
+  if (action === 'forget') {
+    const result = applications.deleteApplication(identifier);
+    log.debug("Leaving applicationsAction(). forget " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  log.debug("Leaving applicationsAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The six are: create, set, ' +
+                               'add, remove, revoke-registration, forget.'] };
+}
+
+app.post('/admin/applications', function (req, res) {
+  log.debug("Entering the admin applications action endpoint.");
+  const body = parseBody(req);
+  const result = applicationsAction(body);
+  // Back to the drill-down the form was posted from, when there was one, so a
+  // reader who has just added a redirect URI is looking at the entry that now
+  // carries it rather than at the top of the list.
+  const back = String(body.application || '').trim() && result.ok !== false
+    ? '/admin/applications' + queryWith({ application: String(body.application).trim() }, {})
+    : '/admin/applications';
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin applications action endpoint.");
+});
+
+// The two selects the edit forms offer, built from applications.js's EDITABLE
+// table so that a form cannot offer a field the action would refuse — the same
+// reason the audit page's filters are built from the audit vocabulary.
+function editableOptions(mode, selected) {
+  return applications.editableAttributes(mode).map(function (row) {
+    return '<option value="' + esc(row.name) + '"' +
+      (row.name === selected ? ' selected' : '') + '>' + esc(row.name) +
+      (row.sensitive ? ' (credential)' : '') + '</option>';
+  }).join('');
+}
+
+function applicationsListPage(req) {
+  log.debug("Entering applicationsListPage().");
+  const all = applications.list();
+  const wantedText = String(req.query.q || '').trim();
+  const wantedKind = String(req.query.kind || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (wantedKind && row.kinds.indexOf(wantedKind) < 0) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    // The identifier and the name both, because somebody looking for an
+    // application has one or the other in mind and which one depends on whether
+    // they came from a client's configuration or from this console.
+    return row.identifier.toLowerCase().indexOf(needle) >= 0 ||
+           String(row.name).toLowerCase().indexOf(needle) >= 0;
+  });
+  const paged = pagedRows(req.query, filtered, { noun: 'applications' });
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', kind: wantedKind || '',
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/applications', filterParams, paging);
+
+  const rows = paged.shown.map(function (row) {
+    const href = '/admin/applications' + queryWith({ application: row.identifier }, {});
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.identifier) + '</code></a>' +
+      (row.identifier === row.dnLabel ? '' :
+        '<div class="sub">named <code>cn=' + esc(row.dnLabel) + '</code> &mdash; the ' +
+        'identifier is too long for a readable RDN</div>') +
+      '</td><td>' + esc(row.name) + '</td>' +
+      '<td>' + kindCells(row.kinds) + '</td>' +
+      '<td>' + esc(row.protocols.join(', ')) + '</td>' +
+      '<td>' + (row.registered
+        ? '<span class="state-valid">yes</span>'
+        : '<span class="state-none">no</span>') + '</td>' +
+      '<td class="num">' + row.authentications + '</td>' +
+      '<td class="num">' + row.sessions + '</td>' +
+      '<td class="num">' + row.users + '</td>' +
+      '<td><code>' + esc(row.lastSeen) + '</code></td></tr>';
+  }).join('');
+
+  const kindOptions = ['<option value=""' + (wantedKind ? '' : ' selected') +
+                       '>any kind</option>']
+    .concat(applications.KINDS.map(function (one) {
+      // Counted over EVERYTHING rather than over the filtered set, so the
+      // numbers do not change as the reader narrows the list — a select whose
+      // options renumber themselves on every Filter is one nobody can use to
+      // find out where the rows went.
+      const n = all.filter(function (row) { return row.kinds.indexOf(one.kind) >= 0; }).length;
+      return '<option value="' + esc(one.kind) + '"' +
+             (one.kind === wantedKind ? ' selected' : '') + '>' +
+             esc(one.label) + ' (' + n + ')</option>';
+    })).join('');
+
+  const registeredCount = all.filter(function (row) { return row.registered; }).length;
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(all.length, 'Applications') +
+    tile(registeredCount, 'Registered (RFC 7591)') +
+    tile(all.reduce(function (n, r) { return n + r.authentications; }, 0), 'Authentications') +
+    tile(applications.maxApplications ? applications.maxApplications() : '', 'Maximum held') +
+    '</div>' +
+    '<form method="get" action="/admin/applications"><div class="formrow">' +
+    '<label for="q">Application</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(wantedText) + '" size="28" ' +
+    'placeholder="client_id, wtrealm, entityID, SPN or name">' +
+    '<label for="kind">Kind</label>' +
+    '<select id="kind" name="kind">' + kindOptions + '</select>' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' + perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    ((wantedText || wantedKind)
+      ? ' <a href="/admin/applications">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th><th>Protocols</th>' +
+    '<th>Registered</th><th class="num">Auth</th><th class="num">Sessions</th>' +
+    '<th class="num">Users</th><th>Last seen</th></tr>' +
+    (rows || '<tr><td colspan="9">No application matches. ' +
+             ((wantedText || wantedKind)
+               ? 'The filter above may be hiding some.'
+               : 'One appears the first time a client_id, wtrealm, AppliesTo, entityID ' +
+                 'or service principal name is accepted here.') + '</td></tr>') +
+    '</table>' +
+    nav +
+    '<h2>Add an application</h2>' +
+    '<p class="note">For a relying party that has not connected yet. An entry usually appears ' +
+    'because an identifier was ACCEPTED — a client_id at the token endpoint, a wtrealm on a ' +
+    'sign-in response — and this is how to get one in ahead of that, which is what RFC 9700 ' +
+    'mode needs if it is to judge a client against its own redirect URIs rather than against ' +
+    'the <code>oauth2.redirectUris</code> setting. It records that it was created by hand, so ' +
+    'it cannot be mistaken for one that turned up once and never came back.</p>' +
+    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<input type="hidden" name="action" value="create">' +
+    '<label for="identifier">Identifier</label>' +
+    '<input type="text" id="identifier" name="identifier" size="30" required ' +
+    'placeholder="client_id, wtrealm, entityID or SPN">' +
+    '<label for="newname">Name</label>' +
+    '<input type="text" id="newname" name="name" size="18" placeholder="optional">' +
+    '<label for="newkind">Kind</label>' +
+    '<select id="newkind" name="kind">' +
+    '<option value="">unstated</option>' +
+    applications.KINDS.map(function (one) {
+      return '<option value="' + esc(one.kind) + '">' + esc(one.label) + '</option>';
+    }).join('') +
+    '</select>' +
+    '<button type="submit">Add</button>' +
+    '</div></form>' +
+    '<p class="note"><strong>One entry per identifier, whatever protocol brought it.</strong> ' +
+    'The key is the identifier exactly as it arrived &mdash; not lower-cased and not ' +
+    'namespaced by protocol &mdash; so an application appearing under one name in two ' +
+    'protocols is one row with two kinds rather than two rows. That is the same rule that ' +
+    'makes <code>alice</code>, <code>urn:sts-mock:user:alice</code> and ' +
+    '<code>alice@REALM</code> one person on the users page.</p>' +
+    '<p class="note"><strong>Sessions and Users are counts of CHANGES, not of distinct ' +
+    'sets.</strong> The ids themselves are deliberately not kept on the entry &mdash; an ' +
+    'application used by two thousand people would otherwise carry two thousand values ' +
+    '&mdash; so the count moves when the id differs from the last one recorded. Right for ' +
+    'the ordinary case, and it undercounts somebody alternating between two applications.</p>' +
+    APPLICATIONS_CAVEAT + APPLICATIONS_LINKS;
+
+  log.debug("Leaving applicationsListPage(). " + paged.shown.length + " row(s) of " +
+            filtered.length + " matched.");
+  return {
+    inner: inner,
+    json: {
+      applicationCount: all.length, matched: filtered.length, shown: paged.shown.length,
+      registered: registeredCount,
+      filter: { q: wantedText || null, kind: wantedKind || null },
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      container: applications.containerDn ? applications.containerDn() : null,
+      max: applications.maxApplications ? applications.maxApplications() : null,
+      kinds: applications.KINDS,
+      applications: paged.shown
+    }
+  };
+}
+
+// The drill-down. Its one list is the ATTRIBUTE table, which is paged under a
+// name of its own (`attributesPage`) rather than the bare `page` — the
+// convention pagingOf()'s header describes for a view that holds more than the
+// list views do, and the shape to grow into when this page gains a second list.
+function applicationDetailPage(req, identifier) {
+  log.debug("Entering applicationDetailPage(). identifier=" + identifier);
+  const row = applications.get(identifier);
+  if (!row) {
+    log.debug("Leaving applicationDetailPage(). No such application.");
+    return {
+      inner: messagesOf(req) +
+        '<p class="warn">No application called <code>' + esc(identifier) + '</code> is ' +
+        'recorded here. That is not the same as one this service has refused: an entry ' +
+        'appears the first time an identifier is ACCEPTED, so a client whose every request ' +
+        'was turned away has none.</p>' + APPLICATIONS_LINKS,
+      json: { found: false, identifier: identifier }
+    };
+  }
+  const attributeRows = Object.keys(row.attributes).sort().map(function (name) {
+    const value = row.attributes[name];
+    return { name: name, values: Array.isArray(value) ? value : [String(value)] };
+  });
+  const paged = pagedRows(req.query, attributeRows,
+                          { name: 'attributes', noun: 'attributes' });
+  const paging = paged.paging;
+  const nav = pageNav('/admin/applications', pageParamsOf(req.query), paging);
+
+  const attrHtml = paged.shown.map(function (attr) {
+    // The schema row for this attribute, so the page says what each one MEANS
+    // rather than only what it holds. Read from applications.js's table, which
+    // is the same table the entry was built from — a second description here
+    // would be the one that went stale.
+    const spec = applications.SCHEMA.attributes.filter(function (one) {
+      return one.name.toLowerCase() === String(attr.name).toLowerCase();
+    })[0];
+    return '<tr><td><code>' + esc(attr.name) + '</code>' +
+      (spec && spec.sensitive ? ' <span class="state-revoked">credential</span>' : '') +
+      '</td><td>' + attr.values.map(function (v) {
+        return '<code>' + esc(v) + '</code>';
+      }).join('<br>') + '</td><td class="sub">' +
+      esc(spec ? spec.what : 'Not in the published schema — written by hand into the ' +
+          'directory, which nothing here prevents.') + '</td></tr>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    '<h2><code>' + esc(row.identifier) + '</code></h2>' +
+    '<div class="tiles">' +
+    tile(row.authentications, 'Authentications') +
+    tile(row.sessions, 'Sessions') +
+    tile(row.users, 'Users') +
+    tile(row.registered ? 'yes' : 'no', 'Registered') +
+    '</div>' +
+    '<table><tr><th>Thing</th><th>Value</th></tr>' +
+    '<tr><td>Name</td><td>' + esc(row.name) + '</td></tr>' +
+    '<tr><td>Kind</td><td>' + kindCells(row.kinds) + '</td></tr>' +
+    '<tr><td>Protocols</td><td>' + esc(row.protocols.join(', ')) + '</td></tr>' +
+    '<tr><td>First seen</td><td><code>' + esc(row.firstSeen) + '</code></td></tr>' +
+    '<tr><td>Last seen</td><td><code>' + esc(row.lastSeen) + '</code></td></tr>' +
+    '<tr><td>How it got here</td><td>' + (row.descriptions.length
+      ? row.descriptions.map(function (d) { return esc(d); }).join('<br>')
+      : '<span class="state-none">nothing recorded</span>') + '</td></tr>' +
+    '</table>' +
+    '<h2>Its directory entry</h2>' +
+    '<p class="sub">Every attribute the entry carries, with what the published schema ' +
+    'says each one is. This IS the entry &mdash; the registry is the ' +
+    '<code>ou=applications</code> container and nothing caches it &mdash; so an ' +
+    '<code>ldapmodify</code> shows here on the next refresh, and changes what RFC 9700 ' +
+    'mode enforces at the same moment.</p>' +
+    nav +
+    '<table><tr><th>Attribute</th><th>Value</th><th>What it is</th></tr>' +
+    (attrHtml || '<tr><td colspan="3">This entry carries no protocol attributes yet.</td></tr>') +
+    '</table>' +
+    nav +
+
+    '<h2>Change what it is allowed to do</h2>' +
+    '<p class="note">These write the same entry an <code>ldapmodify</code> writes, through the ' +
+    'same functions &mdash; the console is a set of controls in front of this registry and not ' +
+    'a second copy of it. A change here is what RFC 9700 mode enforces on the very next ' +
+    'request: add to <code>oauthRedirectUri</code> and that URI is accepted by exact match, set ' +
+    '<code>oauthTokenEndpointAuthMethod</code> to <code>none</code> and the client becomes ' +
+    'public, so PKCE is required of it and its secret stops being checked.</p>' +
+    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<input type="hidden" name="action" value="set">' +
+    '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+    '<label for="setattr">Set</label>' +
+    '<select id="setattr" name="attribute">' + editableOptions('set', '') + '</select>' +
+    '<label for="setval">to</label>' +
+    '<input type="text" id="setval" name="value" size="34" placeholder="empty clears it">' +
+    '<button type="submit">Set</button>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<input type="hidden" name="action" value="add">' +
+    '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+    '<label for="addattr">Add to</label>' +
+    '<select id="addattr" name="attribute">' + editableOptions('multi', 'oauthRedirectUri') +
+    '</select>' +
+    '<label for="addval">the value</label>' +
+    '<input type="text" id="addval" name="value" size="34" required>' +
+    '<button type="submit">Add</button>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<input type="hidden" name="action" value="remove">' +
+    '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+    '<label for="remattr">Remove from</label>' +
+    '<select id="remattr" name="attribute">' + editableOptions('multi', 'oauthRedirectUri') +
+    '</select>' +
+    '<label for="remval">the value</label>' +
+    '<input type="text" id="remval" name="value" size="34" required>' +
+    '<button type="submit">Remove</button>' +
+    '</div></form>' +
+    '<p class="note"><strong>What these will not change, and why.</strong> The counters, the ' +
+    'first and last sighting, the kinds and the protocols are DERIVED &mdash; they are what ' +
+    'happened rather than what this application may do &mdash; and a form that could rewrite ' +
+    'them would make this page lie about the service\'s own behaviour, in a way ' +
+    'indistinguishable from the recording being broken. <code>ldapmodify</code> still reaches ' +
+    'every one of them: an operator with an LDAP client is doing something deliberate, and ' +
+    'refusing them HERE is the difference between offering an operation and merely not ' +
+    'preventing it. <code>appRegistrationJson</code> is not offered either &mdash; edit the ' +
+    'attributes beside it instead, which is what the registration is rebuilt from.</p>' +
+
+    '<h2>Take it out of the registry</h2>' +
+    (row.registered
+      ? '<form method="post" action="/admin/applications"><div class="formrow">' +
+        '<input type="hidden" name="action" value="revoke-registration">' +
+        '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+        '<button type="submit">Revoke the RFC 7591 registration</button>' +
+        '<span class="sub">The entry and its history stay; the client_secret, the registration ' +
+        'access token and the registration itself go. Afterwards RFC 9700 mode treats it as an ' +
+        'unregistered, public client.</span>' +
+        '</div></form>'
+      : '<p class="note">It has no RFC 7591 registration to revoke &mdash; it is an identifier ' +
+        'this service has seen rather than a client that registered, which RFC 9700 mode ' +
+        'already treats as public.</p>') +
+    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<input type="hidden" name="action" value="forget">' +
+    '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+    '<button type="submit" class="danger">Delete this entry</button>' +
+    '<span class="sub">The only control here that LOSES a fact: the entry goes and takes its ' +
+    row.authentications + ' recorded authentication(s) with it. It will reappear, empty, the ' +
+    'next time this identifier is accepted by a protocol.</span>' +
+    '</div></form>' +
+    APPLICATIONS_CAVEAT +
+    '<p class="sub"><a href="/admin/applications">back to every application</a> &middot; ' +
+    '<a href="/ldap/applications">the registry as the directory sees it</a></p>';
+
+  log.debug("Leaving applicationDetailPage(). " + paged.shown.length + " attribute row(s).");
+  return {
+    inner: inner,
+    json: Object.assign({ found: true }, row, {
+      attributesShown: paged.shown,
+      attributesPaging: pagingJson(paging)
+    })
+  };
+}
+
+function applicationsView(req) {
+  log.debug("Entering applicationsView().");
+  const wanted = String(req.query.application || '').trim();
+  if (wanted) {
+    const detail = applicationDetailPage(req, wanted);
+    log.debug("Leaving applicationsView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner, title: 'Application ' + wanted };
+  }
+  const list = applicationsListPage(req);
+  log.debug("Leaving applicationsView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Applications' };
+}
+
+app.get('/admin/applications', function (req, res) {
+  log.debug("Entering the admin applications page.");
+  const view = applicationsView(req);
+  respond(req, res, view.json, view.title, '/admin/applications', view.inner);
+  log.debug("Leaving the admin applications page. " + view.title + ".");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/authorization-servers, POST /admin/authorization-servers
+//
+// RFC 9700 section 2.6 asks an authorization server to PUBLISH its metadata so
+// that clients stop hard-coding security capabilities. This page is the other
+// side of that: it decides what the published document SAYS, per authorization
+// server, so that a client which reads the metadata can be shown reading it —
+// and a client which does not can be shown not to.
+//
+// **A profile changes the document and not the endpoints**, and the page says so
+// three times because it is the one thing here that could mislead badly.
+// Everywhere else in this service a document disagreeing with the code is a
+// defect — /sts-metadata exists to report exactly that — and here it is the
+// feature. So every view computes the DRIFT: which overridden members disagree
+// with what this service would actually publish, and which removals hide
+// something real.
+// ---------------------------------------------------------------------------
+const AS_CAVEAT =
+  '<p class="note"><strong>What a document says is what that authorization server DOES.</strong> ' +
+  'Advertise <code>code_challenge_methods_supported: ["S256"]</code> here and this server\'s own ' +
+  'authorization endpoint refuses <code>plain</code> — at <code>/{id}/oauth2/authorize</code>, ' +
+  'and nowhere else. The members marked <em>enforced</em> below drive behaviour; the rest are ' +
+  'published and cannot be made true by this service, which is still useful (a document a ' +
+  'client did not expect is a client error path worth running) and is listed as <em>drift</em> ' +
+  'so that nobody discovers it the hard way.</p>' +
+  '<p class="note"><strong>Every authorization server starts equal.</strong> A new one — or one ' +
+  'created by somebody simply asking for it — has exactly the capabilities the default server ' +
+  'has, and differs only where it has been made to. <strong>Every client may use every one of ' +
+  'them</strong>: nothing here restricts a client to a server, and ' +
+  '<a href="/admin/applications">the applications page</a> records which ones each client has ' +
+  'actually used. What does NOT cross between them is a credential — an authorization code ' +
+  'issued by one is refused at another\'s token endpoint.</p>';
+
+const AS_LINKS =
+  '<p class="sub"><a href="/.well-known/oauth-authorization-server">the default RFC 8414 ' +
+  'document</a> &middot; <a href="/.well-known/openid-configuration">the default OpenID ' +
+  'Provider Configuration</a> &middot; <a href="/admin/applications">the clients that read ' +
+  'them</a></p>';
+
+function asDriftRows(id) {
+  // The document this service would publish for THIS profile if the profile
+  // said nothing — built from the same function the endpoints serve, so the
+  // comparison cannot go stale as that document grows members. `truthFor()`
+  // gives it a request-shaped object because asMetadata() derives every URL in
+  // it from the one the request arrived on.
+  return authorizationServers.driftOf(id, oauth2.asMetadata(asTruthRequest()));
+}
+
+// A request-shaped stand-in, so the document can be built outside a request.
+// The host is this service's own default, which is what /admin/config and
+// /sts-metadata already assume when they name a URL: the console is being read
+// by somebody who reached this process, and the comparison is about MEMBERS
+// rather than about hostnames.
+function asTruthRequest() {
+  return {
+    protocol: config.value('global.https') ? 'https' : 'http',
+    get: function (name) {
+      return String(name).toLowerCase() === 'host'
+        ? 'localhost:' + config.value('global.port') : '';
+    },
+    query: {}
+  };
+}
+
+function asAction(body) {
+  log.debug("Entering asAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const id = String(body.profile || body.id || '').trim();
+
+  if (action === 'create') {
+    const result = authorizationServers.create({
+      id: id, label: String(body.label || ''), description: String(body.description || '')
+    });
+    log.debug("Leaving asAction(). create " + (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, profile: result.profile,
+             message: 'The "' + result.profile.id + '" authorization server is published at ' +
+                      result.profile.urls.oauth + ' and ' + result.profile.urls.oidc + '. It ' +
+                      'has no overrides yet, so both documents say exactly what this service ' +
+                      'says about itself — which is the right place to start from.' };
+  }
+  if (action === 'set') {
+    const result = authorizationServers.setMember(id, body.member, body.value);
+    log.debug("Leaving asAction(). set " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  if (action === 'remove') {
+    const result = authorizationServers.removeMember(id, body.member);
+    log.debug("Leaving asAction(). remove " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  if (action === 'reset') {
+    const result = authorizationServers.resetMember(id, body.member);
+    log.debug("Leaving asAction(). reset " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  if (action === 'delete') {
+    const result = authorizationServers.remove(id);
+    log.debug("Leaving asAction(). delete " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  log.debug("Leaving asAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The five are: create, set, ' +
+                               'remove, reset, delete.'] };
+}
+
+function asMemberOptions(selected) {
+  return authorizationServers.GROUPS.map(function (group) {
+    const inGroup = authorizationServers.MEMBERS.filter(function (row) {
+      return row.group === group;
+    });
+    return '<optgroup label="' + esc(group) + '">' + inGroup.map(function (row) {
+      return '<option value="' + esc(row.name) + '"' +
+        (row.name === selected ? ' selected' : '') + '>' + esc(row.name) + '</option>';
+    }).join('') + '</optgroup>';
+  }).join('');
+}
+
+function asListPage(req) {
+  log.debug("Entering asListPage().");
+  const all = authorizationServers.list();
+  const paged = pagedRows(req.query, all, { noun: 'authorization servers' });
+  const paging = paged.paging;
+  const nav = pageNav('/admin/authorization-servers',
+                      { per: req.query.per ? paging.perPage : '' }, paging);
+
+  const rows = paged.shown.map(function (row) {
+    const drift = asDriftRows(row.id);
+    const href = '/admin/authorization-servers' + queryWith({ profile: row.id }, {});
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.id) + '</code></a></td>' +
+      '<td>' + esc(row.label || '') + '</td>' +
+      '<td class="num">' + Object.keys(row.overrides).length + '</td>' +
+      '<td class="num">' + row.removed.length + '</td>' +
+      '<td class="num">' + (drift.length
+        ? '<span class="state-expired" title="Members whose published value disagrees with ' +
+          'what this service would publish.">' + drift.length + '</span>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td><code>' + esc(row.urls.authorize) + '</code><br><code>' + esc(row.urls.token) +
+      '</code><div class="sub">metadata at <code>' + esc(row.urls.oidc) + '</code></div>' +
+      '</td>' +
+      '<td>' + (row.autoCreated
+        ? '<span class="sub">asked for</span>' : '<span class="sub">configured</span>') +
+      '</td><td class="num">' + esc(row.seen) + '</td></tr>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(all.length, 'Profiles') +
+    tile(all.reduce(function (n, r) { return n + Object.keys(r.overrides).length; }, 0), 'Overrides') +
+    tile(all.reduce(function (n, r) { return n + asDriftRows(r.id).length; }, 0), 'Drifting members') +
+    '</div>' +
+    '<p class="note"><strong>One process, several authorization servers.</strong> The path ' +
+    'component the two discovery shapes already carry now selects a CONFIGURATION as well as ' +
+    'an issuer identifier &mdash; RFC 8414 section 3.1 <em>inserts</em> it after the well-known ' +
+    'segment and OpenID Connect Discovery section 4 <em>appends</em> the well-known segment to ' +
+    'it, which is the commonest reason a discovery fetch 404s, and this service has answered ' +
+    'both for a long time. <strong>A path nobody has configured publishes the document this ' +
+    'service always published</strong>, so nothing that worked before this page existed ' +
+    'behaves differently.</p>' +
+    nav +
+    '<table><tr><th>Authorization server</th><th>Label</th><th class="num">Overrides</th>' +
+    '<th class="num">Removed</th><th class="num">Drift</th><th>Its endpoints</th>' +
+    '<th>Came from</th><th class="num">Asked for</th></tr>' +
+    (rows || '<tr><td colspan="8">No authorization server has been named. Every discovery URL answers with ' +
+             'the document this service builds for itself, which is what RFC 9700 section 2.6 ' +
+             'asks for &mdash; these are for when you need it to say something else.</td></tr>') +
+    '</table>' +
+    nav +
+    '<h2>Add an authorization server</h2>' +
+    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<input type="hidden" name="action" value="create">' +
+    '<label for="asid">Id</label>' +
+    '<input type="text" id="asid" name="id" size="18" required placeholder="tenant1">' +
+    '<label for="aslabel">Label</label>' +
+    '<input type="text" id="aslabel" name="label" size="20" placeholder="optional">' +
+    '<label for="asdesc">Note</label>' +
+    '<input type="text" id="asdesc" name="description" size="28" placeholder="what it is for">' +
+    '<button type="submit">Add</button>' +
+    '</div></form>' +
+    '<p class="note">The id is a single URL path segment &mdash; letters, digits, dot, dash, ' +
+    'underscore or tilde &mdash; because it has to appear in a URL without being escaped. One ' +
+    'that had to be escaped would be one nobody could find again.</p>' +
+    AS_CAVEAT + AS_LINKS;
+
+  log.debug("Leaving asListPage(). " + paged.shown.length + " row(s).");
+  return {
+    inner: inner,
+    json: {
+      profileCount: all.length, shown: paged.shown.length,
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      members: authorizationServers.MEMBERS,
+      authorizationServers: paged.shown.map(function (row) {
+        return Object.assign({}, row, { drift: asDriftRows(row.id) });
+      })
+    }
+  };
+}
+
+function asDetailPage(req, id) {
+  log.debug("Entering asDetailPage(). id=" + id);
+  const profile = authorizationServers.get(id);
+  if (!profile) {
+    log.debug("Leaving asDetailPage(). No such profile.");
+    return {
+      inner: messagesOf(req) +
+        '<p class="warn">There is no authorization server profile called <code>' + esc(id) +
+        '</code>. Its discovery URLs still answer &mdash; with the document this service ' +
+        'builds and the issuer taken from the path &mdash; because an unconfigured path ' +
+        'component has always been served that way rather than 404\'d.</p>' + AS_LINKS,
+      json: { found: false, id: id }
+    };
+  }
+  const drift = asDriftRows(id);
+  // The document this authorization server publishes, which is the same object
+  // its endpoints read their capabilities out of.
+  const capabilities = authorizationServers.capabilitiesOf(id, oauth2.asMetadata(asTruthRequest(), true));
+  const memberRows = Object.keys(profile.overrides).sort().map(function (member) {
+    const spec = authorizationServers.MEMBERS.filter(function (row) {
+      return row.name === member;
+    })[0];
+    const bad = drift.filter(function (d) { return d.member === member; })[0];
+    return '<tr><td><code>' + esc(member) + '</code></td>' +
+      '<td><code>' + esc(JSON.stringify(profile.overrides[member])) + '</code></td>' +
+      '<td>' + (bad
+        ? '<span class="state-expired">' + esc(bad.kind) + '</span><div class="sub">' +
+          esc(bad.what) + '</div>'
+        : '<span class="state-valid">agrees</span>') + '</td>' +
+      '<td class="sub">' + esc(spec ? spec.what : 'Not a member this service recognises — ' +
+        'which is allowed, and is half the point: publishing something a client did not ' +
+        'expect is what this page is for.') + '</td>' +
+      '<td><form method="post" action="/admin/authorization-servers">' +
+      '<input type="hidden" name="action" value="reset">' +
+      '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+      '<input type="hidden" name="member" value="' + esc(member) + '">' +
+      '<button type="submit">Reset</button></form></td></tr>';
+  }).join('');
+
+  const removedRows = profile.removed.map(function (member) {
+    return '<tr><td><code>' + esc(member) + '</code></td><td class="sub">Not published at all. ' +
+      'A client reading this document cannot tell that this server supports it &mdash; which ' +
+      'is not the same as learning that it does not, and is the difference RFC 9700 section ' +
+      '2.6 is arguing about.</td>' +
+      '<td><form method="post" action="/admin/authorization-servers">' +
+      '<input type="hidden" name="action" value="reset">' +
+      '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+      '<input type="hidden" name="member" value="' + esc(member) + '">' +
+      '<button type="submit">Put it back</button></form></td></tr>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    '<h2><code>' + esc(profile.id) + '</code>' +
+    (profile.label ? ' &mdash; ' + esc(profile.label) : '') + '</h2>' +
+    (profile.description ? '<p class="note">' + esc(profile.description) + '</p>' : '') +
+    '<table><tr><th>Thing</th><th>Value</th></tr>' +
+    '<tr><td>RFC 8414 document</td><td><a href="' + esc(profile.urls.oauth) + '"><code>' +
+    esc(profile.urls.oauth) + '</code></a></td></tr>' +
+    '<tr><td>OpenID Provider Configuration</td><td><a href="' + esc(profile.urls.oidc) +
+    '"><code>' + esc(profile.urls.oidc) + '</code></a></td></tr>' +
+    '<tr><td>Last changed</td><td><code>' + esc(profile.changedAt) + '</code></td></tr>' +
+    '</table>' +
+    (drift.length
+      ? '<div class="warn"><strong>' + drift.length + ' member(s) of this document do not ' +
+        'describe this service.</strong> That is allowed and is often the point &mdash; but ' +
+        'a client configured from this document will behave as though these were true.</div>'
+      : '<div class="ok">Every member of this document agrees with what this service would ' +
+        'publish. A client configured from it is configured correctly.</div>') +
+    '<h2>What this authorization server does</h2>' +
+    '<p class="sub">Its effective capabilities — the defaults every authorization server here ' +
+    'starts with, plus whatever this one has been given. This IS the document it publishes and ' +
+    'it IS what its endpoints enforce; there is no second table that could disagree with it.</p>' +
+    '<table><tr><th>Capability</th><th>This server</th><th>Enforced</th></tr>' +
+    authorizationServers.MEMBERS.filter(function (row) { return row.enforces; })
+      .map(function (row) {
+        const value = capabilities[row.name];
+        return '<tr><td><code>' + esc(row.name) + '</code></td>' +
+          '<td>' + (value === undefined
+            ? '<span class="state-none">not published — the check does not run</span>'
+            : '<code>' + esc(JSON.stringify(value)) + '</code>') + '</td>' +
+          '<td class="sub">' + esc(row.enforces) + '</td></tr>';
+      }).join('') +
+    '</table>' +
+    '<h2>Overridden members</h2>' +
+    '<table><tr><th>Member</th><th>Published as</th><th>Agreement</th><th>What it is</th>' +
+    '<th></th></tr>' +
+    (memberRows || '<tr><td colspan="5">Nothing is overridden, so this document says exactly ' +
+                   'what this service says about itself.</td></tr>') + '</table>' +
+    (removedRows
+      ? '<h2>Removed members</h2><table><tr><th>Member</th><th>What that means</th><th></th></tr>' +
+        removedRows + '</table>'
+      : '') +
+    '<h2>Publish a member</h2>' +
+    '<p class="note">The value is read as JSON first and as a plain string if that fails, so ' +
+    '<code>["S256"]</code> is a list, <code>false</code> is a boolean and ' +
+    '<code>https://example.com/token</code> is a string. <strong>Any member name is accepted</strong> ' +
+    '&mdash; the list below is help rather than a schema, and one this service has never heard ' +
+    'of is published just the same.</p>' +
+    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<input type="hidden" name="action" value="set">' +
+    '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+    '<label for="asmember">Member</label>' +
+    '<select id="asmember" name="member">' + asMemberOptions('') + '</select>' +
+    '<label for="asvalue">as</label>' +
+    '<input type="text" id="asvalue" name="value" size="36" placeholder=\'["S256"]\'>' +
+    '<button type="submit">Publish</button>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<input type="hidden" name="action" value="set">' +
+    '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+    '<label for="asother">Or any member</label>' +
+    '<input type="text" id="asother" name="member" size="30" required ' +
+    'placeholder="a name this service has never heard of">' +
+    '<label for="asothervalue">as</label>' +
+    '<input type="text" id="asothervalue" name="value" size="26">' +
+    '<button type="submit">Publish</button>' +
+    '</div></form>' +
+    '<h2>Stop publishing a member</h2>' +
+    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<input type="hidden" name="action" value="remove">' +
+    '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+    '<label for="asrem">Remove</label>' +
+    '<select id="asrem" name="member">' + asMemberOptions('code_challenge_methods_supported') +
+    '</select>' +
+    '<button type="submit">Remove it from the document</button>' +
+    '<span class="sub">Different from resetting it: reset undoes an override, this publishes ' +
+    'an ABSENCE.</span>' +
+    '</div></form>' +
+    '<h2>Delete this authorization server</h2>' +
+    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<input type="hidden" name="action" value="delete">' +
+    '<input type="hidden" name="profile" value="' + esc(id) + '">' +
+    '<button type="submit" class="danger">Delete</button>' +
+    '<span class="sub">The two URLs go on answering &mdash; with this service\'s own document ' +
+    '&mdash; because an unconfigured path has always been served that way.</span>' +
+    '</div></form>' +
+    AS_CAVEAT + AS_LINKS;
+
+  log.debug("Leaving asDetailPage(). " + drift.length + " drifting member(s).");
+  return { inner: inner, json: Object.assign({ found: true }, profile, { drift: drift }) };
+}
+
+function authorizationServersView(req) {
+  log.debug("Entering authorizationServersView().");
+  const wanted = String(req.query.profile || '').trim();
+  if (wanted) {
+    const detail = asDetailPage(req, wanted);
+    log.debug("Leaving authorizationServersView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'Authorization server ' + wanted };
+  }
+  const list = asListPage(req);
+  log.debug("Leaving authorizationServersView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Authorization servers' };
+}
+
+app.get('/admin/authorization-servers', function (req, res) {
+  log.debug("Entering the admin authorization servers page.");
+  const view = authorizationServersView(req);
+  respond(req, res, view.json, view.title, '/admin/authorization-servers', view.inner);
+  log.debug("Leaving the admin authorization servers page.");
+});
+
+app.post('/admin/authorization-servers', function (req, res) {
+  log.debug("Entering the admin authorization servers action endpoint.");
+  const body = parseBody(req);
+  const result = asAction(body);
+  const id = String(body.profile || body.id || '').trim();
+  const back = id && result.ok !== false
+    ? '/admin/authorization-servers' + queryWith({ profile: id }, {})
+    : '/admin/authorization-servers';
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin authorization servers action endpoint.");
+});
+
 app.get('/admin/groups', function (req, res) {
   log.debug("Entering the admin groups page.");
   const view = groupsView(req);
@@ -4758,6 +5647,10 @@ module.exports = {
   auditView: auditView,
   usersView: usersView,
   groupsView: groupsView,
+  applicationsView: applicationsView,
+  applicationsAction: applicationsAction,
+  authorizationServersView: authorizationServersView,
+  authorizationServersAction: asAction,
   claimsJson: claimsJson,
   // Which person the claims page shows attribute values for. Exported for the
   // same reason vcPreviewUser is: GET /admin-api/claims takes the same `user`

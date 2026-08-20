@@ -466,6 +466,120 @@ const SCHEMAS = {
       }
     }),
 
+  AuthorizationServerList: openObject(
+    'Every authorization server profile this process publishes a discovery ' +
+    'document for. The path component the two discovery shapes carry selects ' +
+    'one; a path nobody has configured publishes the document this service ' +
+    'always published. With ?profile= the reply is ONE of them instead.',
+    Object.assign({
+      profileCount: { type: 'integer' },
+      shown: { type: 'integer', description: 'How many are on this page.' },
+      members: {
+        type: 'array',
+        description: 'The catalogue of metadata members this service has ' +
+                     'something to say about, each with why a client cares. ' +
+                     'HELP RATHER THAN SCHEMA: a member outside it is accepted ' +
+                     'and published just the same, which is the difference ' +
+                     'between this resource and the applications registry.',
+        items: openObject('One member: `name`, `group`, `kind`, `what`.', {})
+      },
+      authorizationServers: {
+        type: 'array',
+        description: 'One page of them, by id.',
+        items: openObject(
+          'One profile: `id`, `label`, `description`, `overrides` (member to ' +
+          'published value), `removed` (members this document omits), ' +
+          '`changedAt`, `urls` (the two it is served at) and `drift`.', {})
+      },
+      found: {
+        type: 'boolean',
+        description: 'On the ?profile= reply only. FALSE for a profile that is ' +
+                     'not configured — whose discovery URLs still answer.'
+      },
+      drift: {
+        type: 'array',
+        description: 'THE MEMBERS OF THIS DOCUMENT THAT DO NOT DESCRIBE THIS ' +
+                     'SERVICE. Each carries `member`, `published`, `actual`, ' +
+                     'and `kind` — `differs` where this service would publish ' +
+                     'something else, `invented` where it publishes nothing of ' +
+                     'that name, `removed` where the profile hides something ' +
+                     'real. A profile that lies is often the point; one that ' +
+                     'lied without saying so would be a trap.',
+        items: openObject('One disagreement.', {})
+      }
+    }, PAGING_PROPERTIES)),
+
+  ApplicationList: openObject(
+    'Every application this service has been asked about — an OAuth client, an ' +
+    'OpenID Connect relying party, a SAML 2.0 or 1.1 service provider, a ' +
+    'WS-Federation application, a WS-Trust relying party, the OpenID4VP ' +
+    'verifier, a Kerberos service — one per unique identifier. THE ENTRIES ARE ' +
+    'THE REGISTRY: they live under ou=applications in the embedded LDAP ' +
+    'directory, nothing caches them, and the RFC 7591 client registrations are ' +
+    'those same entries. With ?application= the reply is ONE of them instead, ' +
+    'shaped as the second block of properties below.',
+    Object.assign({
+      applicationCount: { type: 'integer',
+                          description: 'How many the registry holds in all.' },
+      matched: { type: 'integer', description: 'How many the filter matched.' },
+      shown: { type: 'integer', description: 'How many are on this page.' },
+      registered: {
+        type: 'integer',
+        description: 'How many went through POST /oauth2/register. The rest ' +
+                     'are client_ids and realms that simply turned up, which ' +
+                     'RFC 9700 mode treats as PUBLIC and judges against the ' +
+                     'oauth2.redirectUris setting rather than against a ' +
+                     'registration.'
+      },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      container: {
+        type: 'string',
+        description: 'The DN these entries live under, or null when no ' +
+                     'directory is loaded in this process — in which case ' +
+                     'there is no registry at all, because this module keeps ' +
+                     'no store of its own on purpose.'
+      },
+      max: { type: 'integer',
+             description: 'How many entries the container will hold ' +
+                          '(applications.max). Past it a new application is ' +
+                          'REFUSED and warned about rather than an old one ' +
+                          'evicted: a directory that quietly dropped entries ' +
+                          'would be the worst possible source of truth.' },
+      kinds: {
+        type: 'array',
+        description: 'The eight kinds an application can be, each with what ' +
+                     'it means. NOT disjoint — a record commonly carries two ' +
+                     '— so these do not partition the list.',
+        items: openObject('One kind: `kind`, `label`, `what`.', {})
+      },
+      applications: {
+        type: 'array',
+        description: 'One page of them, newest activity first.',
+        items: openObject(
+          'One application: `identifier`, `dnLabel` (the RDN, which is a ' +
+          'digest of the identifier when that is too long to read), `name`, ' +
+          '`kinds`, `protocols`, `registered`, `firstSeen`, `lastSeen`, ' +
+          '`authentications`, `sessions`, `users`, `descriptions`, and ' +
+          '`attributes` — the protocol-specific half of its directory entry.',
+          {})
+      },
+      found: {
+        type: 'boolean',
+        description: 'On the ?application= reply only. FALSE means this ' +
+                     'service has never ACCEPTED that identifier, which is ' +
+                     'not the same as having refused it.'
+      },
+      attributesShown: {
+        type: 'array',
+        description: 'On the ?application= reply only: one page of the ' +
+                     'entry\'s attributes, each `{name, values}`.',
+        items: openObject('One attribute of the directory entry.', {})
+      },
+      attributesPaging: pagingObject('attributesShown')
+    }, PAGING_PROPERTIES, {
+      matched: { type: 'integer', description: 'How many the filter matched.' }
+    })),
+
   GroupList: openObject(
     'Every group in the embedded LDAP directory. A group is an entry under ' +
     'ou=groups OR one carrying a group objectClass wherever it sits, because ' +

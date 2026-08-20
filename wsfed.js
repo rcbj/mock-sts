@@ -94,6 +94,10 @@ const { buildSaml11Assertion } = require('./saml11');
 // lands in has to be the same one — single sign-on between the two protocols
 // is the interesting behaviour, and two stores would each look right alone.
 const { sessionOf, startSession, endSession } = require('./authn');
+// The application registry, which lives under ou=applications in the embedded
+// directory. A library that registers no route, so requiring it here changes
+// nothing about the route order this module's position in server.js fixes.
+const applications = require('./applications');
 
 // --- the vocabulary --------------------------------------------------------
 const WSFED_NS = 'http://docs.oasis-open.org/wsfed/federation/200706';
@@ -499,16 +503,15 @@ const AUTOPOST_SCRIPT = [
 
 app.get('/wsfed/autopost.js', function (req, res) {
   log.debug("Serving the WS-Federation sign-in response auto-post script.");
-  res.set('Content-Security-Policy', "default-src 'none'");
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'style-src': null,
+                                                                 'img-src': null }));
   res.type('application/javascript').set('Cache-Control', 'no-store').send(AUTOPOST_SCRIPT);
 });
 
 function sendSignInResponse(res, inner) {
   // The same shape of exception the WebAuthn page takes, and no wider: a named
   // resource, not 'unsafe-inline'.
-  res.set('Content-Security-Policy',
-          "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
-          "base-uri 'none'; frame-ancestors 'none'");
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'script-src': "'self'" }));
   res.status(200).type('text/html').set('Cache-Control', 'no-store')
      .send(page('Signing in — WS-Federation', inner));
 }
@@ -742,6 +745,29 @@ function signIn(req, res, params) {
 
 function issueSignInResponse(req, res, params, session, realm, wreply, tokenType) {
   log.debug("Entering issueSignInResponse(). tokenType=" + tokenType);
+  // THE APPLICATION. wtrealm is WS-Federation's name for the relying party, and
+  // this is the point at which this service has decided to issue it a token —
+  // every refusal above answered instead. It is recorded here rather than at the
+  // authentication funnel for the reason the OAuth client is: the person signed
+  // in through authn.js, which knows nothing about this protocol.
+  //
+  // The token type decides the KIND, because a wtrealm handed a SAML 2.0
+  // assertion is a SAML 2.0 service provider and one handed the 1.1 default is a
+  // SAML 1.1 relying party — the same realm may be both across two requests, and
+  // the registry accumulates rather than choosing.
+  applications.seen({
+    identifier: realm,
+    kind: tokenType === SAML2_TOKEN_TYPE ? 'saml2-service-provider' : 'saml11-relying-party',
+    protocol: 'WS-Federation',
+    sessionId: session.id || '',
+    user: (session.user && session.user.username) || '',
+    note: 'issued a wsignin1.0 response',
+    fields: {
+      wsfedRealm: realm,
+      samlEntityId: realm,
+      samlAssertionConsumerService: wreply
+    }
+  });
   const user = session.user;
   const methods = authnMethodsFor(session);
   const authnInstant = new Date((session.authTime || 0) * 1000).toISOString();
@@ -831,7 +857,14 @@ app.post('/wsfed/login', function (req, res) {
   // Back to the passive endpoint with the request as it arrived — minus wfresh,
   // which has now been honoured and would otherwise demand a fresh authentication
   // on every pass, forever.
-  res.redirect(302, base + PASSIVE_PATH + '?' + requeryString(signInState.params, ['wfresh']));
+  // 303 rather than 302, and never 307: this redirect follows the POST that
+  // carried a username and a password. RFC 9700 section 4.12 — a 307 would
+  // preserve the method and the body and repeat those credentials to wherever
+  // this points. See the long note at authn.js's returnToCaller(), which is the
+  // OIDC screen's equivalent of this line; the two screens are separate for the
+  // reason section 13.2.1 gives, so the choice has to be made twice, and making
+  // it the same way twice is the point of saying so here.
+  res.redirect(303, base + PASSIVE_PATH + '?' + requeryString(signInState.params, ['wfresh']));
   log.debug("Leaving the sign-in form target. " + username + " is signed in; back to " + PASSIVE_PATH + ".");
 });
 
@@ -895,9 +928,7 @@ function signOut(req, res, params, cleanupOnly) {
       'above load with this page, and a 302 would abandon them before they were sent.</p>';
   }
   // The one response in this service that widens img-src, and only that clause.
-  res.set('Content-Security-Policy',
-          "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src *; " +
-          "base-uri 'none'; frame-ancestors 'none'");
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'img-src': '*' }));
   res.status(200).type('text/html').set('Cache-Control', 'no-store')
      .send(page('Signed out — WS-Federation', inner));
   log.debug("Leaving signOut(). " + names.length + " cleanup request(s) on the page.");

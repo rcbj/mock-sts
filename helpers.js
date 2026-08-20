@@ -323,10 +323,66 @@ function vciError(res, status, error, description) {
   log.debug("Leaving vciError().");
 }
 
+// ---------------------------------------------------------------------------
+// THE URL THIS SERVICE IS BEING REACHED AT, which is the thing every issuer,
+// every endpoint in both discovery documents and every DID here is built from.
+//
+// It comes off the REQUEST rather than out of configuration, which is what
+// makes one process answer correctly as http://localhost:8081 from a host run,
+// as http://sts:8081 on a compose network and through a published port without
+// being told which. That has been true since the beginning and none of it
+// changes here.
+//
+// What is new is the reverse-proxy case RFC 9700 section 2.6 is about. When
+// something terminates TLS in front of this service, the socket sees http and
+// the last hop's host, while the CLIENT used https and a different name — so a
+// document built from the socket publishes URLs no client can use, and an
+// `iss` no client will accept. `X-Forwarded-Proto` and `X-Forwarded-Host` are
+// how a proxy says what the client used.
+//
+// **They are believed only when `global.trustProxy` says a proxy is there.**
+// With nothing in front, those are ordinary request headers and any caller can
+// set them — so believing them would let a client choose what this service
+// thinks its own issuer and endpoints are. The setting is the whole of the
+// difference and it is read per request, so it can be turned on without a
+// restart when somebody puts a proxy in.
+//
+// `forwardedFrom()` is shared with dpop.js's htu derivation, which used to make
+// this decision differently — it honoured the headers unconditionally — so that
+// two functions in one service disagreed about whether a forwarded header was
+// believable. One function now, and one setting.
+// ---------------------------------------------------------------------------
+function trustProxy() {
+  return !!config.value('global.trustProxy');
+}
+
+// The scheme and host a request should be understood as having arrived at:
+// the forwarded ones where a proxy is trusted, the socket's otherwise. A
+// comma-separated list takes its FIRST value, which is the client-facing hop —
+// each proxy appends, so the left-hand end is the one furthest from here.
+function forwardedFrom(req) {
+  const socketProto = (req && req.protocol) || 'http';
+  const socketHost = (req && req.get && req.get('host')) || ('localhost:' + PORT);
+  if (!trustProxy()) {
+    return { proto: socketProto, host: socketHost, forwarded: false };
+  }
+  const headers = (req && req.headers) || {};
+  const proto = String(headers['x-forwarded-proto'] || socketProto)
+    .split(',')[0].trim().toLowerCase() || socketProto;
+  const host = String(headers['x-forwarded-host'] || socketHost)
+    .split(',')[0].trim() || socketHost;
+  return {
+    proto: proto, host: host,
+    forwarded: !!(headers['x-forwarded-proto'] || headers['x-forwarded-host'])
+  };
+}
+
 function baseUrlOf(req) {
   log.debug("Entering baseUrlOf().");
-  const base = (req.protocol || 'http') + '://' + (req.get('host') || ('localhost:' + PORT));
-  log.debug("Leaving baseUrlOf(). base=" + base);
+  const from = forwardedFrom(req);
+  const base = from.proto + '://' + from.host;
+  log.debug("Leaving baseUrlOf(). base=" + base +
+            (from.forwarded ? " (from forwarded headers; global.trustProxy is on)" : ""));
   return base;
 }
 
@@ -376,6 +432,8 @@ module.exports = {
   textByLocal: textByLocal,
   iso: iso,
   baseUrlOf: baseUrlOf,
+  forwardedFrom: forwardedFrom,
+  trustProxy: trustProxy,
   b64u: b64u,
   b64uDecode: b64uDecode,
   jsonFromB64u: jsonFromB64u,

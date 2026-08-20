@@ -82,10 +82,21 @@
 //     client certificate is unverified: on 8443 that is reported, and on 9443 it
 //     means nothing can connect. That is the correct starting state and the
 //     `/tls` page says so.
-//   * the anchors go in over the PLAIN HTTP port, not over TLS. The plain port
-//     is the one that is reachable before anything is trusted, and this is a
-//     mock: an endpoint that could only be called by somebody who had already
-//     been trusted would be a chicken-and-egg with a specification citation.
+//   * the anchors go in over the MAIN port, not over 8443 or 9443. That port is
+//     normally plain HTTP, which is the one reachable before anything is
+//     trusted, and this is a mock: an endpoint that could only be called by
+//     somebody who had already been trusted would be a chicken-and-egg with a
+//     specification citation.
+//
+//     `global.https` — which RFC 9700 mode turns on — takes that property away,
+//     and it is worth knowing rather than discovering: with it on there is no
+//     plain listener in this process at all, so the FIRST fetch of
+//     /tls/server-certificate and the first POST to /tls/trust have to be made
+//     without verifying the certificate (`curl -k`). That is the ordinary
+//     bootstrap for a certificate regenerated on every start — it is the same
+//     act as trusting the PEM this endpoint hands back, done a step earlier —
+//     and `mainPortPhrase()` below is what keeps every page in this module from
+//     claiming a plain port that is not there.
 //
 // ---------------------------------------------------------------------------
 // AND IT AUTHENTICATES NOBODY, like the rest of this service.
@@ -103,7 +114,7 @@ const tls = require('tls');
 const crypto = require('crypto');
 const forge = require('node-forge');
 const app = require('./app');
-const { log, xmlEscape, parseBody } = require('./helpers');
+const { log, xmlEscape, parseBody, baseUrlOf } = require('./helpers');
 // The single funnel every authentication in this service passes through at the
 // moment a credential is ACCEPTED. A verified client certificate is one, and
 // going through here rather than writing to the console and the directory
@@ -198,6 +209,29 @@ function makeServerCertificate() {
 // SHA-256 over the DER, rendered the way every tool renders it, so that what
 // this page prints can be compared with `openssl x509 -fingerprint -sha256`
 // without anybody having to reformat it.
+// What to CALL the port these views answer on. It is the plain HTTP port unless
+// `global.https` has made it TLS as well, and seven sentences in this module
+// used to say "the plain HTTP port" outright — each of them correct until the
+// day somebody turned that setting on, and then quietly wrong in the one place
+// a reader goes when a handshake is failing. Read per call rather than captured:
+// the setting is restart-only, but a captured const here would be a second
+// thing to remember if that ever changed.
+function mainPortPhrase() {
+  return config.value('global.https')
+    ? 'the main HTTPS port' : 'the plain HTTP port';
+}
+
+// The extra sentence a bootstrap instruction needs when there is no plain port
+// left to bootstrap from. Empty in the ordinary case, so it can be appended
+// unconditionally.
+function bootstrapNote() {
+  return config.value('global.https')
+    ? ' That port is HTTPS too (global.https), so the first fetch has to be ' +
+      'made without verifying the certificate — curl -k, or its equivalent — ' +
+      'since this is where the certificate to verify with comes from.'
+    : '';
+}
+
 function fingerprintOf(pem) {
   const der = Buffer.from(String(pem)
       .replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''), 'base64');
@@ -596,9 +630,9 @@ function describeConnection(req, mode) {
         notAfter: SERVER_CERTIFICATE.notAfter,
         selfSigned: true,
         note: 'Self-signed and regenerated on every start, so it is an anchor ' +
-          'nobody can have baked in. GET /tls/server-certificate over the ' +
-          'plain HTTP port for the PEM, and put it in your truststore rather ' +
-          'than switching verification off.'
+          'nobody can have baked in. GET /tls/server-certificate over ' +
+          mainPortPhrase() + ' for the PEM, and put it in your truststore ' +
+          'rather than switching verification off.' + bootstrapNote()
       }
     },
     clientCertificate: {
@@ -637,9 +671,10 @@ function describeConnection(req, mode) {
       anchors: anchors.length,
       subjects: anchors.map(function (anchor) { return anchor.subject; }),
       note: 'The anchors this service verifies CLIENT certificates against. ' +
-        'They are POSTed to /tls/trust at runtime over the plain HTTP port, ' +
-        'because the CA in question is usually generated in a browser minutes ' +
-        'before the connection and exists nowhere else.'
+        'They are POSTed to /tls/trust at runtime over ' + mainPortPhrase() +
+        ', because the CA in question is usually generated in a browser ' +
+        'minutes before the connection and exists nowhere else.' +
+        bootstrapNote()
     },
     authentication: {
       // Still false, and it is the most important false in this report: a
@@ -787,7 +822,7 @@ function reportPage(report) {
       ? '<table><tr><th>Thing</th><th>Value</th></tr>' + rowsFrom([
           ['Recorded as', report.authentication.identity],
           ['In the console', report.authentication.consoleUrl +
-            ' (on the plain HTTP port)'],
+            ' (on ' + mainPortPhrase() + ')'],
           // Not "under ou=users": a subject that already lies inside this
           // directory's own tree keeps its place there, so naming the branch
           // here would be right most of the time and wrong exactly when a
@@ -991,9 +1026,9 @@ strictServer.on('tlsClientError', function (error, socket) {
            ((socket && socket.remoteAddress) || 'an unknown address') + ': ' +
            error.message + '. That listener requires a client certificate ' +
            'that verifies against one of the ' + anchors.length + ' anchor(s) ' +
-           'it holds. POST the issuing CA to /tls/trust on the plain HTTP ' +
-           'port, or use port ' + (boundTlsPort || TLS_PORT) + ', which ' +
-           'answers whatever arrives and says what it made of it.');
+           'it holds. POST the issuing CA to /tls/trust on ' +
+           mainPortPhrase() + ', or use port ' + (boundTlsPort || TLS_PORT) +
+           ', which answers whatever arrives and says what it made of it.');
 });
 
 permissiveServer.on('tlsClientError', function (error, socket) {
@@ -1012,7 +1047,8 @@ permissiveServer.on('tlsClientError', function (error, socket) {
 // These are the only surfaces of this module that /sts-metadata can see, since
 // that page is built by walking the Express router and the two listeners above
 // are sockets. They are also the only way to configure the truststore, and
-// they are on the plain port on purpose — see the header.
+// they are on the MAIN port on purpose — see the header, including what
+// global.https changes about that.
 // ---------------------------------------------------------------------------
 
 function description(req) {
@@ -1111,9 +1147,13 @@ app.get('/tls', function (req, res) {
   const inner = '<h1>A TLS endpoint lives here</h1>' +
     '<p class="sub">Two HTTPS listeners whose only content is what the server ' +
     'saw: the request as it arrived, what TLS negotiated underneath it, and ' +
-    'the client certificate exactly as it was presented. This page is on the ' +
-    'plain HTTP port, which is the one that is reachable before anything is ' +
-    'trusted.</p>' +
+    'the client certificate exactly as it was presented. This page is on ' +
+    xmlEscape(mainPortPhrase()) +
+    (config.value('global.https')
+      ? ', so there is no plain listener in this process: fetch the server ' +
+        'certificate below without verifying it the first time, then trust it.'
+      : ', which is the one that is reachable before anything is trusted.') +
+    '</p>' +
     '<table><tr><th>URL</th><th>Client certificate</th><th>Listener</th>' +
     '<th>What it is for</th></tr>' + listenerRows + '</table>' +
     (info.listenError
@@ -1248,6 +1288,156 @@ app.post('/tls/trust/clear', function (req, res) {
 // and a require that throws takes the whole service down where a route cannot.
 // Callers await `whenReady` rather than reading a port that is not bound yet.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /tls/forwarded — what a reverse proxy told this service, and what was
+// believed of it.
+//
+// RFC 9700 section 2.6 has a paragraph about reverse proxies with two halves.
+// The proxy's half is that it MUST sanitize inbound security-sensitive headers
+// before forwarding — a client must not be able to reach past the proxy by
+// setting a header the proxy is supposed to set. The application's half, which
+// is the one this service can do something about, is that it must not BELIEVE
+// those headers unless it knows a proxy set them.
+//
+// So this page reports the request as it arrived: every forwarding header, every
+// security-sensitive header a proxy might inject, whether this service believed
+// any of it, and what the effective base URL — the thing every issuer and every
+// endpoint in both discovery documents is built from — came out as.
+//
+// It lives in this module for the same reason /tls/whoami does: this file's
+// whole content is what the SERVER saw of a connection, and a forwarding header
+// is what the server was TOLD about a connection it did not see. The difference
+// between those two sentences is the page.
+//
+// **The client certificate headers are the important row.** A proxy that
+// terminates mTLS forwards the certificate in a header — X-Client-Cert,
+// X-Forwarded-Client-Cert, X-SSL-Client-Cert, and a dozen vendor spellings — and
+// an application that believed one would be accepting a certificate anybody can
+// forge, since a header costs nothing to write. THIS SERVICE READS NONE OF THEM,
+// in either mode, and the page says so with the ones it saw listed: a mock that
+// silently ignored a header somebody was relying on would be as bad as one that
+// silently trusted it.
+// ---------------------------------------------------------------------------
+const FORWARDING_HEADERS = [
+  { name: 'x-forwarded-proto', what: 'The scheme the CLIENT used. Believed when ' +
+      'global.trustProxy is on, and then it decides whether every URL this service ' +
+      'publishes says http or https.' },
+  { name: 'x-forwarded-host', what: 'The host the CLIENT used. Believed when ' +
+      'global.trustProxy is on, and then it is the authority in every published URL and in ' +
+      'the issuer of every token.' },
+  { name: 'x-forwarded-port', what: 'READ BY NOTHING HERE. The port is taken from ' +
+      'x-forwarded-host, which carries one where it matters — two sources for one value is ' +
+      'two values that will eventually disagree.' },
+  { name: 'x-forwarded-for', what: 'The client\'s address. READ BY NOTHING HERE, and the ' +
+      'audit log deliberately records the CHANNEL rather than an address: on a mock reached ' +
+      'over a compose bridge an address is a fact about docker, and a column right on a laptop ' +
+      'and quietly wrong everywhere else is worse than none.' },
+  { name: 'forwarded', what: 'RFC 7239\'s single-header form. NOT PARSED — this service ' +
+      'reads the X- forms only, which is what every proxy in front of it emits as well.' }
+];
+
+const SENSITIVE_HEADERS = [
+  { name: 'x-client-cert', what: 'A client certificate forwarded by a proxy that terminated ' +
+      'mTLS.' },
+  { name: 'x-forwarded-client-cert', what: 'The same thing, as Envoy and Istio spell it.' },
+  { name: 'x-ssl-client-cert', what: 'The same thing, as nginx spells it.' },
+  { name: 'x-ssl-client-verify', what: 'A proxy\'s verdict on the certificate it verified.' },
+  { name: 'x-ssl-client-s-dn', what: 'The subject DN of a certificate a proxy verified.' },
+  { name: 'x-amzn-mtls-clientcert', what: 'The same thing, as an AWS load balancer spells it.' }
+];
+
+app.get('/tls/forwarded', function (req, res) {
+  log.debug('Entering GET /tls/forwarded.');
+  const trusted = !!config.value('global.trustProxy');
+  const seen = function (rows) {
+    return rows.map(function (row) {
+      const value = req.headers[row.name];
+      return { header: row.name, present: value !== undefined,
+               value: value === undefined ? null : String(value), what: row.what };
+    });
+  };
+  const forwarding = seen(FORWARDING_HEADERS);
+  const sensitive = seen(SENSITIVE_HEADERS);
+  const presentSensitive = sensitive.filter(function (row) { return row.present; });
+  const payload = {
+    trustProxy: trusted,
+    socket: { scheme: req.protocol, host: req.get('host') || '', encrypted: !!req.secure },
+    effectiveBaseUrl: baseUrlOf(req),
+    what_it_means: trusted
+      ? 'global.trustProxy is ON, so X-Forwarded-Proto and X-Forwarded-Host decide what this ' +
+        'service thinks its own URLs are. That is correct behind a reverse proxy and unsafe ' +
+        'without one, because those are headers any client can set.'
+      : 'global.trustProxy is OFF, so the forwarding headers below are IGNORED and this ' +
+        'service describes the connection it can see. If a proxy is terminating TLS in front ' +
+        'of it, the metadata is publishing the wrong URLs and every DPoP proof is being ' +
+        'refused for naming the real endpoint — turn the setting on.',
+    forwarding: forwarding,
+    clientCertificateHeaders: {
+      readByThisService: false,
+      seen: presentSensitive.map(function (row) { return row.header; }),
+      note: 'THIS SERVICE READS NONE OF THESE, in either mode. A certificate in a header is a ' +
+            'certificate anybody can write, so believing one would let any client claim any ' +
+            'identity — and RFC 8705 binding here reads the certificate off the TLS handshake ' +
+            'itself (see /tls/whoami and mtls.js). A proxy that terminates mTLS in front of ' +
+            'this service therefore cannot pass the certificate through, which is a real ' +
+            'limitation rather than an oversight: the alternative is trusting a header.' +
+            (presentSensitive.length
+              ? ' This request carried ' + presentSensitive.length + ' of them and they were ' +
+                'ignored.'
+              : ''),
+      headers: sensitive
+    },
+    proxyMustSanitize: 'RFC 9700 section 2.6: a reverse proxy MUST strip these headers from ' +
+      'what a CLIENT sent before setting its own, or a client can reach past it by setting ' +
+      'them itself. That is the proxy\'s job and this service cannot do it — what it can do ' +
+      'is not believe them unless told to, which is what the setting above is.'
+  };
+  if (String(req.query.format || '').toLowerCase() === 'json') {
+    log.debug('Leaving GET /tls/forwarded. JSON.');
+    return res.status(200).json(payload);
+  }
+  const rowsOf = function (rows) {
+    return rows.map(function (row) {
+      return '<tr><td><code>' + xmlEscape(row.header) + '</code></td>' +
+        '<td>' + (row.present
+          ? '<code>' + xmlEscape(row.value) + '</code>'
+          : '<span class="none">not sent</span>') + '</td>' +
+        '<td>' + xmlEscape(row.what) + '</td></tr>';
+    }).join('');
+  };
+  const inner = '<h1>What a proxy told this service</h1>' +
+    '<p class="sub">The request as it arrived, and what was believed of it. Every issuer and ' +
+    'every endpoint in both discovery documents is built from the effective base URL below, ' +
+    'so if that is wrong, everything a client reads is wrong with it.</p>' +
+    '<table><tr><th>Thing</th><th>Value</th></tr>' +
+    '<tr><td>global.trustProxy</td><td>' + (trusted
+      ? '<strong>on</strong> — the forwarding headers are believed'
+      : '<strong>off</strong> — the forwarding headers are ignored') + '</td></tr>' +
+    '<tr><td>The socket saw</td><td><code>' + xmlEscape(req.protocol) + '://' +
+    xmlEscape(req.get('host') || '') + '</code>' +
+    (req.secure ? ' (encrypted)' : ' (not encrypted)') + '</td></tr>' +
+    '<tr><td>Effective base URL</td><td><code>' + xmlEscape(baseUrlOf(req)) +
+    '</code></td></tr>' +
+    '</table>' +
+    '<p class="' + (trusted ? 'sub' : 'verdict') + '">' + xmlEscape(payload.what_it_means) +
+    '</p>' +
+    '<h2>Forwarding headers</h2>' +
+    '<table><tr><th>Header</th><th>This request</th><th>What it does here</th></tr>' +
+    rowsOf(forwarding) + '</table>' +
+    '<h2>Client certificate headers</h2>' +
+    '<p class="verdict">' + xmlEscape(payload.clientCertificateHeaders.note) + '</p>' +
+    '<table><tr><th>Header</th><th>This request</th><th>What it is</th></tr>' +
+    rowsOf(sensitive) + '</table>' +
+    '<h2>What the proxy has to do</h2>' +
+    '<p>' + xmlEscape(payload.proxyMustSanitize) + '</p>' +
+    '<p class="sub"><a href="/tls/forwarded?format=json">This page as JSON</a> &middot; ' +
+    '<a href="/tls">what the TLS endpoint is</a> &middot; ' +
+    '<a href="/.well-known/oauth-authorization-server">the document built from that base ' +
+    'URL</a></p>';
+  res.status(200).type('html').send(pageShell('Forwarded headers', inner));
+  log.debug('Leaving GET /tls/forwarded. trustProxy=' + trusted);
+});
+
 function listen() {
   log.debug('Entering listen().');
   function start(server, port, label) {

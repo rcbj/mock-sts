@@ -57,6 +57,10 @@ const { log, logArtifact, STS, xmlEscape, iso,
 const config = require('./config');
 const { buildSamlAssertion, encryptAssertion } = require('./saml2');
 const stats = require('./admin_stats');
+// The application registry (ou=applications in the embedded directory). A
+// library that registers no route, so it cannot move anything in the require
+// order this module sits in.
+const applications = require('./applications');
 const WST_NS = 'http://docs.oasis-open.org/ws-sx/ws-trust/200512';
 
 const SOAP12_NS = 'http://www.w3.org/2003/05/soap-envelope';
@@ -452,6 +456,22 @@ function handleRst(rawBody, contentType, options) {
       log.error('?encrypt=1 requested but no recipient certificate in the request signature; returning plaintext.');
     }
   }
+  // THE RELYING PARTY. AppliesTo is WS-Trust's name for the service a token is
+  // being issued FOR, and this is where one is about to be. It is optional in an
+  // RST — a token with no AppliesTo has no audience restriction, which is a
+  // state this service deliberately allows — so an absent one records nothing
+  // rather than an empty application.
+  if (audience) {
+    applications.seen({
+      identifier: audience,
+      kind: 'wstrust-relying-party',
+      protocol: 'WS-Trust',
+      user: subject || '',
+      note: 'a token was issued for this AppliesTo',
+      fields: { wstrustAppliesTo: audience, samlEntityId: audience }
+    });
+  }
+
   const appliesToOut = audience
     ? '<wsp:AppliesTo xmlns:wsp="http://schemas.xmlsoap.org/ws/2004/09/policy"' +
       ' xmlns:wsa="http://www.w3.org/2005/08/addressing"><wsa:EndpointReference><wsa:Address>' +

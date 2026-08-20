@@ -18,16 +18,30 @@
 //   POST /oauth2/revoke      RFC 7009
 //   *    /oauth2/register    RFC 7591 registration + RFC 7592 management
 //   GET  /oauth2/logout      end_session_endpoint (RP-Initiated Logout)
+//   GET  /oauth2/rfc9700     NON-SPEC: whether the RFC 9700 Security BCP mode
+//                            is on, and every requirement it does and does not
+//                            enforce (oauth2_bcp.js)
 //   GET  /oauth2/jwks        the signing key (above, with the metadata)
 //   GET  /docs /policy /tos  the documents the metadata links to
 //
 // It authenticates NOBODY: the authorization endpoint issues a code for whoever
 // asks (the "user" is the login_hint, or a fixed mock subject), and any client
-// secret is accepted. That is the point — it exists so the debugger's panes have
+// secret is accepted — with ONE exception, and only in RFC 9700 mode: a client
+// that registered HERE as confidential must present the secret this service
+// minted for it (section 2.5, and see `oauth2_bcp.js`). No END USER's password
+// is checked in any mode. That is the point — it exists so the debugger's panes have
 // something complete to talk to, not to enforce anything. What it does do
 // properly is the mechanics a client can check: PKCE verification, single-use
 // authorization codes, real signatures, honest introspection, and revocation
 // that actually takes effect.
+//
+// **And, when it is asked to, the mechanics a client should FAIL.** `oauth2.rfc9700`
+// puts this endpoint set into RFC 9700 mode — exact redirect URI matching, PKCE
+// required of public clients, no implicit grant, no open redirect — which is the
+// other half of exercising a client: one that has only ever met a permissive
+// server has never run the paths it will need in production. The decisions are
+// `oauth2_bcp.js`'s and the refusals are this module's; every call into it is a
+// no-op while the flag is off, which is its default.
 // ===========================================================================
 //
 // It also serves BOTH discovery documents — the RFC 8414 metadata and the OpenID
@@ -52,6 +66,23 @@ const app = require('./app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
         xmlEscape, parseBody, oauthError, signJwt, userFor } = require('./helpers');
 const dpop = require('./dpop');
+// RFC 8705 — certificate-bound access tokens, the other mechanism RFC 9700
+// section 2.2 names. A library like dpop.js, and read here for one thing: the
+// confirmation claim that goes on a token issued over a connection that carried
+// a client certificate. The RESOURCE server's half of it is in dpop.js, at the
+// single check the four protected endpoints share.
+const mtls = require('./mtls');
+// The six client authentication methods, and which of them this service can
+// verify — read here for the metadata, which must not advertise one that would
+// fall through unchecked.
+const clientAuth = require('./client_auth');
+// MORE THAN ONE AUTHORIZATION SERVER out of one process: the path component the
+// two discovery shapes already carry now selects a CONFIGURATION as well as an
+// issuer identifier. A library that registers no route and requires only
+// helpers.js, so it cannot create a cycle. A path nobody has configured
+// publishes the document this service always published, which is what keeps
+// every existing caller unaffected.
+const authorizationServers = require('./authorization_servers');
 // The service's statistics and its ONE set of revoked jtis. It is a library like
 // dpop.js — it registers nothing and requires only helpers.js — so requiring it
 // here cannot create a cycle. The revocation set used to be a Set in this file;
@@ -70,6 +101,21 @@ const config = require('./config');
 // somebody and is handed them back with a session.
 const authn = require('./authn');
 const { sessionOf, endSession } = authn;
+// RFC 9700, the OAuth 2.0 Security Best Current Practice, as a mode this
+// service can be put into. A library like dpop.js — it registers nothing and
+// requires only helpers.js and config.js — so requiring it here cannot create a
+// cycle and its position in the require order does not matter. It DECIDES; what
+// a refusal looks like stays here, because that is protocol knowledge: a bad
+// redirect_uri is answered on this server rather than redirected to, which is
+// the difference between honouring section 2.1 and being the open redirector it
+// forbids. Every call below is a no-op while `oauth2.rfc9700` is off.
+const bcp = require('./oauth2_bcp');
+// The application registry, which lives in the embedded LDAP directory. A
+// library like the two above — it registers no route and requires only
+// helpers.js and audit.js — so requiring it here cannot create a cycle and
+// cannot move a route. It is where the RFC 7591 registrations are kept and
+// where every client_id this endpoint accepts is recorded.
+const applications = require('./applications');
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
 //
@@ -103,19 +149,75 @@ const { sessionOf, endSession } = authn;
 // Only the IDENTIFIER moves. Every endpoint in the document stays on the
 // request's base URL, because an endpoint has to be reachable and a pinned
 // issuer may not be.
+//
+// ---------------------------------------------------------------------------
+// THE ONE THING DONE TO A PINNED VALUE: its SCHEME is upgraded to https when
+// this port is an HTTPS listener (`global.https`, which RFC 9700 mode brings
+// with it).
+//
+// The unpinned case needs nothing — the base URL comes from `req.protocol`, so
+// it is already https and so is every `iss` this module signs, since this
+// function is the single funnel all four of them pass through (the access
+// token, the refresh token, the ID Token and the UserInfo JWT). A PINNED value
+// is a string somebody wrote once, and `http://localhost:8081` written before
+// the mode was turned on is now an identifier for a URL that no longer exists
+// on this machine.
+//
+// It is an upgrade rather than a refusal because of what a client does with it:
+// a conforming relying party MUST reject a discovery document whose `issuer` is
+// not the identifier it fetched from, so a pinned http issuer served over https
+// fails at every client, at configuration time, with a message about the issuer
+// — and the person reading it has to work out that the scheme is the part that
+// moved. Nothing is gained by making that reachable: the mismatch worth being
+// able to produce on purpose is a DIFFERENT HOST or path, and pinning still
+// does that untouched.
+//
+// The upgrade is logged every time rather than done quietly, because a value
+// that comes back out of /admin/config differently from how it went in is worth
+// a line somebody can find.
 // ---------------------------------------------------------------------------
 function issuerOf(base) {
-  return config.value('oauth2.issuer') || base;
+  const pinned = config.value('oauth2.issuer');
+  if (!pinned) {
+    return base;
+  }
+  if (config.value('global.https') && /^http:\/\//i.test(pinned)) {
+    const upgraded = pinned.replace(/^http:\/\//i, 'https://');
+    log.info('oauth2.issuer is pinned to ' + pinned + ', and this port is an ' +
+             'HTTPS listener (global.https), so the issuer identifier is ' +
+             'served as ' + upgraded + '. A client MUST reject a document ' +
+             'whose issuer is not the identifier it fetched from, and the ' +
+             'scheme is part of that identifier.');
+    return upgraded;
+  }
+  return pinned;
 }
 
-function asMetadata(req) {
-  log.debug("Entering asMetadata().");
+// `raw` is set by capabilitiesFor() above and means "build the document this
+// service would publish, without applying a profile" — the DEFAULTS a profile is
+// merged onto. Without it, asking for the capabilities would apply the profile,
+// then merge the profile onto the result again: harmless today and exactly the
+// kind of thing that stops being harmless when a member is computed from
+// another.
+function asMetadata(req, raw) {
+  log.debug("Entering asMetadata(). raw=" + !!raw);
   const base = baseUrlOf(req);
+  // WHERE THIS AUTHORIZATION SERVER'S ENDPOINTS ARE. The default one is at the
+  // unprefixed paths and a named one is under its own name, which is the shape
+  // its routes are registered at — so the document a client reads names the
+  // endpoints that belong to the authorization server it read it from, and a
+  // client that follows the metadata cannot end up at somebody else's.
+  const profileId = profileOf(req);
+  const at = base + (profileId && profileId !== authorizationServers.DEFAULT_ID
+    ? '/' + profileId : '');
   const metadata = {
     // --- REQUIRED ---
-    issuer: issuerOf(base),
-    authorization_endpoint: base + '/oauth2/authorize',
-    token_endpoint: base + '/oauth2/token',
+    // A named authorization server IS its own issuer — `at` carries the path —
+    // so the document and the tokens agree about who issued what. A pinned
+    // oauth2.issuer still wins, for the reason issuerOf() gives.
+    issuer: issuerOf(at),
+    authorization_endpoint: at + '/oauth2/authorize',
+    token_endpoint: at + '/oauth2/token',
     // Every combination the authorization endpoint actually issues: it splits
     // response_type on whitespace and accepts any mixture of code, token and
     // id_token, so `id_token token` belongs here too — OpenID Connect Dynamic
@@ -124,8 +226,8 @@ function asMetadata(req) {
     response_types_supported: ['code', 'token', 'id_token', 'code token', 'code id_token',
                                'id_token token', 'code id_token token'],
     // --- RECOMMENDED / OPTIONAL ---
-    jwks_uri: base + '/oauth2/jwks',
-    registration_endpoint: base + '/oauth2/register',
+    jwks_uri: at + '/oauth2/jwks',
+    registration_endpoint: at + '/oauth2/register',
     // `address` and `phone` were listed here and are gone: OIDC Core section 5.4
     // makes each of these scopes a request for a NAMED set of claims, and userFor()
     // mints no address and no phone_number, so the two were a promise of claims
@@ -133,13 +235,18 @@ function asMetadata(req) {
     // claims_supported list in the OIDC document, which is the whole reason the
     // two documents are built from this one object.
     scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
-    // query and fragment only. `form_post` was advertised here and is NOT
-    // implemented: redirectBack() answers every authorization request with a 302
-    // to the redirect_uri, so a client that asked for form_post would be sent a
-    // redirect anyway and would sit waiting for a POST that never arrives. A
-    // metadata member is a promise the endpoint has to keep, and the failure of
-    // this particular one is silent at the client end, which is the worst kind.
-    response_modes_supported: ['query', 'fragment'],
+    // All three, and form_post is the one that was advertised here and NOT
+    // implemented for a long time — every request got a 302 whatever it asked
+    // for, so a client that requested form_post sat waiting for a POST that
+    // never arrived, which is the worst shape a metadata member can have
+    // because the failure is silent at the client end. The member was removed
+    // rather than left lying; it is back because the mode is now real.
+    //
+    // It is worth asking for: RFC 9700 section 4.3 is about the authorization
+    // response ending up in browser history, in the address bar and in the
+    // Referer of whatever the landing page fetches, and a form POST puts it in
+    // a request body where none of that happens.
+    response_modes_supported: ['query', 'fragment', 'form_post'],
     // Only what the token endpoint below actually implements — the metadata
     // should not promise a grant this server would refuse. (No device_code:
     // there is no device authorization endpoint to start that flow.)
@@ -151,8 +258,15 @@ function asMetadata(req) {
     // RFC 9396. OID4VCI's other way of saying which credential is wanted:
     // authorization_details of type openid_credential, instead of a scope.
     authorization_details_types_supported: ['openid_credential'],
-    token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post',
-                                            'client_secret_jwt', 'private_key_jwt', 'none'],
+    // Built from the list `client_auth.js` can actually VERIFY, rather than
+    // written out here. It used to name private_key_jwt while nothing looked at
+    // an assertion, which is the worst shape a metadata member can have: a
+    // client author reads it as "checked" and configures the asymmetric method
+    // believing it bought something. The two RFC 8705 methods appear only where
+    // there is a TLS handshake to read a certificate from.
+    token_endpoint_auth_methods_supported: clientAuth.METHODS.filter(function (method) {
+      return mtls.available() || method.indexOf('tls_client_auth') < 0;
+    }),
     token_endpoint_auth_signing_alg_values_supported: ['RS256', 'RS384', 'RS512', 'ES256', 'PS256', 'HS256'],
     service_documentation: base + '/docs',
     // One locale, because there is one: the login screen is the only UI this
@@ -162,10 +276,10 @@ function asMetadata(req) {
     ui_locales_supported: ['en-US'],
     op_policy_uri: base + '/policy',
     op_tos_uri: base + '/tos',
-    revocation_endpoint: base + '/oauth2/revoke',
+    revocation_endpoint: at + '/oauth2/revoke',
     revocation_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post', 'private_key_jwt'],
     revocation_endpoint_auth_signing_alg_values_supported: ['RS256', 'ES256', 'PS256'],
-    introspection_endpoint: base + '/oauth2/introspect',
+    introspection_endpoint: at + '/oauth2/introspect',
     introspection_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post', 'private_key_jwt'],
     introspection_endpoint_auth_signing_alg_values_supported: ['RS256', 'ES256', 'PS256'],
     code_challenge_methods_supported: ['S256', 'plain'],
@@ -178,12 +292,123 @@ function asMetadata(req) {
     // RFC 9449 section 5.1. Its presence is how a wallet learns DPoP is on offer
     // at all — there is no other signal, so an authorization server that supports
     // DPoP and does not advertise it will simply never be asked for it.
-    dpop_signing_alg_values_supported: dpop.SIGNING_ALGS
+    dpop_signing_alg_values_supported: dpop.SIGNING_ALGS,
+    // RFC 8705 section 3.3. Advertised only when this deployment can actually
+    // do it — the token endpoint has to be on a TLS listener that ASKS for a
+    // client certificate, which is `global.https` — because a client reads this
+    // as a promise and there is nothing to bind to on a plain HTTP listener.
+    // The alternative, advertising it always, is the shape of drift the two
+    // discovery documents are built from one object to avoid.
+    tls_client_certificate_bound_access_tokens: mtls.available()
     // signed_metadata is added below — it is a JWT OF this object, so it cannot
     // be one of the claims it signs.
   };
+  // RFC 9700 mode, when it is on, narrows three of the members above:
+  // response_types_supported loses everything that would issue an access token
+  // from the authorization endpoint, grant_types_supported loses `implicit`,
+  // and code_challenge_methods_supported becomes S256 alone. It happens HERE
+  // rather than in each document because the OIDC document is this one
+  // extended, and a mode that narrowed one of the two would produce exactly the
+  // drift building them from one object exists to prevent — a client configured
+  // from openid-configuration being refused for a value oauth-authorization-server
+  // never advertised.
+  bcp.applyToMetadata(metadata);
+  // The PROFILE, last, so it can override anything above it — including what
+  // RFC 9700 mode just narrowed. That order is deliberate and it is the one a
+  // reader of the form expects: a profile is somebody saying "publish this",
+  // and a mode quietly winning would make the control appear not to work. It is
+  // also the interesting case — a profile that re-advertises the implicit grant
+  // the mode refuses is a document that lies about this server, which is what
+  // the drift report on /admin/authorization-servers exists to show.
+  if (raw) {
+    log.debug("Leaving asMetadata(). The defaults, without a profile.");
+    return metadata;
+  }
+  authorizationServers.apply(metadata, profileOf(req));
   log.debug("Leaving asMetadata().");
   return metadata;
+}
+
+// Which authorization server profile this request selected. The two discovery
+// shapes carry it in different places — RFC 8414 section 3.1 INSERTS the path
+// after the well-known segment and OpenID Connect Discovery section 4 APPENDS
+// the well-known segment to it — so the routes hand it in rather than this
+// function guessing from the URL.
+function profileOf(req) {
+  return (req && req.__asProfile) || authorizationServers.DEFAULT_ID;
+}
+
+// ---------------------------------------------------------------------------
+// EVERY OAUTH ENDPOINT EXISTS TWICE: once unprefixed, which is the `default`
+// authorization server, and once under `/{id}/…`, which is whichever one the
+// path names. The second form is what a named authorization server's own
+// metadata advertises, so a client that read that document is already using it.
+//
+// The name is CREATED on first sight rather than 404'd — see `ensure()` — so an
+// arbitrary path works immediately, with the default capabilities, and can then
+// be configured. `seen` is counted here because this is the one place every
+// request for a named authorization server passes.
+// ---------------------------------------------------------------------------
+function forProfile(handler) {
+  return function (req, res) {
+    const id = String(req.params.as || '').trim();
+    authorizationServers.ensure(id, { autoCreated: true, seen: true });
+    req.__asProfile = id || authorizationServers.DEFAULT_ID;
+    log.debug("This request is for the " + req.__asProfile + " authorization server.");
+    return handler(req, res);
+  };
+}
+
+// The capabilities THIS request's authorization server has, which are the
+// members of the document it publishes. `asMetadata()` builds the defaults and
+// the profile is applied on top, so there is no second table to disagree with
+// what was advertised.
+// The path prefix this authorization server's endpoints live under: '' for the
+// default one and '/{id}' for a named one. One function, because getting it
+// wrong in one place sends a request to a different authorization server with
+// no sign that it happened.
+function asPathOf(req) {
+  const id = profileOf(req);
+  return (id && id !== authorizationServers.DEFAULT_ID) ? '/' + id : '';
+}
+
+// The base URL of THIS authorization server, which is what its issuer, its
+// tokens' `iss`, its `aud` and the RFC 9207 `iss` on its authorization
+// responses are all built from. A named one is its own issuer — the document it
+// publishes says so, and a token whose `iss` named the process rather than the
+// authorization server that minted it would be one a conforming client refuses
+// for the right reason.
+function asBaseOf(req) {
+  return baseUrlOf(req) + asPathOf(req);
+}
+
+function capabilitiesFor(req) {
+  return authorizationServers.capabilitiesOf(profileOf(req), asMetadata(req, true));
+}
+
+// One list-valued capability, or null where this authorization server says
+// nothing about it. Null means the check does not run: a client cannot learn
+// from an absent member that a capability is unavailable, so refusing on the
+// strength of an absence would be enforcing something never said.
+function capabilityFor(req, member) {
+  return authorizationServers.capabilityList(profileOf(req), asMetadata(req, true), member);
+}
+
+// The path component off whichever shape this route matched, normalised to the
+// first segment: a profile id is one segment by construction (see ID_SHAPE), so
+// `/tenant1/extra/.well-known/...` selects `tenant1` rather than nothing.
+function profileFromPath(raw) {
+  const path = String(raw || '').replace(/^\/+|\/+$/g, '');
+  const id = path ? path.split('/')[0] : authorizationServers.DEFAULT_ID;
+  // FETCHING THE METADATA IS ACCESSING THE AUTHORIZATION SERVER, so a name that
+  // arrives here is created with the defaults exactly as one that arrives at an
+  // endpoint is. It is the commonest way a name appears — a client is pointed at
+  // an issuer and reads its document first — and a name that could be read from
+  // and not seen on the console would be the one somebody is actually using.
+  if (id !== authorizationServers.DEFAULT_ID) {
+    authorizationServers.ensure(id, { autoCreated: true, seen: true });
+  }
+  return id;
 }
 
 // RFC 8414 section 2.1: signed_metadata is a JWT whose claims are the metadata
@@ -217,8 +442,13 @@ function sendAsMetadata(req, res) {
 
 app.get('/.well-known/oauth-authorization-server', sendAsMetadata);
 
-// Issuer-with-path form, e.g. /.well-known/oauth-authorization-server/tenant1.
-app.get('/.well-known/oauth-authorization-server/*', sendAsMetadata);
+// Issuer-with-path form, e.g. /.well-known/oauth-authorization-server/tenant1 —
+// and that path component now names the PROFILE as well as the issuer.
+app.get('/.well-known/oauth-authorization-server/*', function (req, res) {
+  req.__asProfile = profileFromPath(req.params[0]);
+  log.debug("The RFC 8414 inserted-path form selected profile " + req.__asProfile + ".");
+  sendAsMetadata(req, res);
+});
 
 // ---------------------------------------------------------------------------
 // OpenID Connect Discovery 1.0 — GET /.well-known/openid-configuration
@@ -261,6 +491,11 @@ app.get('/.well-known/oauth-authorization-server/*', sendAsMetadata);
 function oidcMetadata(req, issuer) {
   log.debug("Entering oidcMetadata(). issuer=" + (issuer || '(the request base URL)'));
   const base = baseUrlOf(req);
+  // The same rule the RFC 8414 document follows: a named authorization server's
+  // endpoints are under its own name.
+  const profileId = profileOf(req);
+  const at = base + (profileId && profileId !== authorizationServers.DEFAULT_ID
+    ? '/' + profileId : '');
   const metadata = Object.assign(asMetadata(req), {
     // --- REQUIRED by OpenID Connect Discovery 1.0 section 3 -----------------
     // issuer, authorization_endpoint, token_endpoint, jwks_uri and
@@ -271,7 +506,7 @@ function oidcMetadata(req, issuer) {
     // same check as every other protected endpoint in this service, and — unlike
     // them — it verifies the token before answering, because a profile is a
     // statement about somebody this server authenticated.
-    userinfo_endpoint: base + '/oauth2/userinfo',
+    userinfo_endpoint: at + '/oauth2/userinfo',
     // Section 5.3.2's signed response, offered because RFC 7591 registration is
     // offered: a client that registers `userinfo_signed_response_alg: "RS256"`
     // gets `application/jwt` back, signed with the same key as everything else.
@@ -316,7 +551,7 @@ function oidcMetadata(req, issuer) {
     // against anything, so this is the shape of RP-initiated logout rather than
     // its security. It is advertised because the alternative is a client with no
     // way to end a session that this server really does end.
-    end_session_endpoint: base + '/oauth2/logout',
+    end_session_endpoint: at + '/oauth2/logout',
     // Neither logout notification specification is implemented: no front-channel
     // iframe is rendered and no back-channel POST is sent. Both members default
     // to false, and both are stated because "the OP did not mention it" and "the
@@ -334,6 +569,20 @@ function oidcMetadata(req, issuer) {
   // went on answering with its own would leave two documents from one process
   // disagreeing about who issued the tokens they describe.
   if (issuer && !config.value('oauth2.issuer')) metadata.issuer = issuer;
+  // THE PROFILE, AGAIN, and it has to be applied twice.
+  //
+  // asMetadata() applied it already — and then the Object.assign above
+  // overwrote every member OpenID Connect Discovery adds, which is most of the
+  // ones somebody would want to override in an OIDC document:
+  // userinfo_endpoint, end_session_endpoint, id_token_signing_alg_values_
+  // supported. A profile that set one of those would have appeared to work in
+  // the RFC 8414 document and done nothing in the OIDC one, which is the kind
+  // of half-working control somebody debugs for an hour.
+  //
+  // Applying it in both places rather than only here is deliberate: the RFC
+  // 8414 document is served by its own routes and never passes through this
+  // function at all.
+  authorizationServers.apply(metadata, profileOf(req));
   log.debug("Leaving oidcMetadata(). " + Object.keys(metadata).length + " member(s).");
   return metadata;
 }
@@ -380,6 +629,7 @@ app.get('/.well-known/openid-configuration', function (req, res) {
 // ---------------------------------------------------------------------------
 app.get('/.well-known/openid-configuration/*', function (req, res) {
   log.debug("Entering the OpenID Connect Discovery endpoint (RFC 8414 inserted-path form).");
+  req.__asProfile = profileFromPath(req.params[0]);
   sendOidcMetadata(req, res);
   log.debug("Leaving the OpenID Connect Discovery endpoint (RFC 8414 inserted-path form).");
 });
@@ -389,13 +639,14 @@ app.get('/*/.well-known/openid-configuration', function (req, res) {
   // req.params[0] is everything before /.well-known — the issuer's path
   // component, one segment or several.
   const path = String(req.params[0] || '').replace(/^\/+|\/+$/g, '');
+  req.__asProfile = profileFromPath(path);
   sendOidcMetadata(req, res, baseUrlOf(req) + (path ? '/' + path : ''));
   log.debug("Leaving the OpenID Connect Discovery endpoint (issuer-path form). path=" + path);
 });
 
 // The JWKS the metadata advertises, so jwks_uri actually resolves: the STS
 // signing key as a single RS256 JWK.
-app.get('/oauth2/jwks', function (req, res) {
+function jwksEndpoint(req, res) {
   log.debug("Entering the JWKS endpoint.");
   try {
     const pub = forge.pki.certificateFromPem(STS.certPem).publicKey;
@@ -416,7 +667,9 @@ app.get('/oauth2/jwks', function (req, res) {
     res.status(500).type('application/json').send(JSON.stringify({ error: e.message }));
     log.debug("Leaving the JWKS endpoint. It failed.");
   }
-});
+}
+
+app.get('/oauth2/jwks', jwksEndpoint);
 
 const ACCESS_TOKEN_TTL = 3600;
 
@@ -475,10 +728,25 @@ const redeemedCodes = new Map();    // code -> the token set it was redeemed for
 // Read in four places (UserInfo, introspection, the refresh grant, and the console)
 // and written in two (RFC 7009's /oauth2/revoke below, and the console).
 
-const registeredClients = new Map();// client_id -> { metadata, registrationAccessToken }
+// The RFC 7591 registrations used to be a Map here. They are entries under
+// `ou=applications` in the embedded directory now, reached through
+// `applications.js` — one store, and the one the RFC 9700 checks read, so an
+// operator who edits a client's redirect URIs with ldapmodify changes what this
+// endpoint accepts. `registrationOf(id)` is what `registeredClients.get(id)`
+// was; there is no `.set()` any more, because writing goes through
+// `register()`, `updateRegistration()` and `forgetRegistration()`, which know
+// how a registration becomes attributes.
 
-// Client credentials from either client_secret_basic or client_secret_post. No
-// secret is ever checked; what matters is which client is being claimed.
+// Client credentials from either client_secret_basic or client_secret_post.
+//
+// The secret is CARRIED now and still not checked by default — what matters
+// here is which client is being claimed. The one exception is RFC 9700 mode,
+// where a client that registered at /oauth2/register as confidential must
+// present the secret this service minted for it; that check is
+// `bcp.checkClientAuthentication()` and this function is where the value it
+// compares comes from. It is read for every request either way, because a
+// function that returned the secret only in one mode would be two functions
+// with one name.
 function clientFrom(req, body) {
   log.debug("Entering clientFrom().");
   const auth = req.headers['authorization'] || '';
@@ -486,7 +754,27 @@ function clientFrom(req, body) {
     try {
       const decoded = Buffer.from(auth.replace(/^Basic\s+/i, ''), 'base64').toString('utf8');
       const i = decoded.indexOf(':');
-      const client = { client_id: decodeURIComponent(i < 0 ? decoded : decoded.slice(0, i)) };
+      // RFC 6749 section 2.3.1: both halves are form-urlencoded before the pair
+      // is base64'd, so both are decoded — separately, and each falling back to
+      // the raw text if it will not decode. That is not defensiveness for its
+      // own sake: decodeURIComponent THROWS on a lone `%`, and a secret
+      // containing one would otherwise take the whole credential down the catch
+      // below and lose the CLIENT_ID with it, turning "my secret has an odd
+      // character in it" into "this server does not know which client I am".
+      const decodePart = function (text) {
+        try {
+          return decodeURIComponent(text);
+        } catch (e) {
+          // Not percent-encoded, or not validly so. The raw text is what was
+          // sent and is the best available reading of it.
+          return text;
+        }
+      };
+      const client = {
+        client_id: decodePart(i < 0 ? decoded : decoded.slice(0, i)),
+        client_secret: i < 0 ? '' : decodePart(decoded.slice(i + 1)),
+        method: 'client_secret_basic'
+      };
       log.debug("Leaving clientFrom(). client_secret_basic named " + client.client_id + ".");
       return client;
     } catch (e) {
@@ -494,8 +782,37 @@ function clientFrom(req, body) {
       // Fall through to the form parameter.
     }
   }
-  log.debug("Leaving clientFrom(). client_id from the body: " + (body.client_id || '(none)'));
-  return { client_id: body.client_id || '' };
+  // A CLIENT ASSERTION NAMES THE CLIENT, and may be the only thing that does.
+  // OpenID Connect Core section 9 lets a private_key_jwt request omit client_id
+  // entirely, because the assertion's `sub` says which client this is — so the
+  // name is read from there when there is nothing else. It is read UNVERIFIED,
+  // and that is safe for exactly one purpose: choosing which registered client
+  // to check the assertion AGAINST. The assertion is then verified against that
+  // client's keys, and `verifyAssertion()` requires `iss` and `sub` to be the
+  // same name it was given — so a forged `sub` selects a client whose key will
+  // not verify the signature. Believing anything else from an unverified
+  // assertion would be reading a name an attacker wrote.
+  let assertedClientId = '';
+  if (body.client_assertion && !body.client_id) {
+    try {
+      const part = String(body.client_assertion).split('.')[1];
+      const claims = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+      assertedClientId = String((claims && claims.sub) || '');
+    } catch (e) {
+      // Not a readable JWT. The assertion will be refused on its own merits a
+      // moment later, with a message about the assertion rather than about a
+      // missing client_id.
+      log.debug("The client_assertion could not be read for its subject: " + e.message);
+    }
+  }
+  log.debug("Leaving clientFrom(). client_id from the body: " +
+            (body.client_id || assertedClientId || '(none)'));
+  return { client_id: body.client_id || assertedClientId,
+           client_secret: body.client_secret || '',
+           assertion: body.client_assertion || '',
+           assertionType: body.client_assertion_type || '',
+           method: body.client_secret ? 'client_secret_post'
+                                      : (body.client_assertion ? 'assertion' : 'none') };
 }
 
 // What a custom claim's ${placeholders} may refer to. Built from the payload that
@@ -547,6 +864,15 @@ function accessToken(base, opts) {
   // resource server check the binding without asking the authorization server
   // anything — and what stops the wallet nominating its own key.
   if (opts.jkt) payload.cnf = { jkt: opts.jkt };
+  // RFC 8705 section 3 — the other sender constraint. When the Token Request
+  // arrived over a TLS connection carrying a client certificate, the token names
+  // its thumbprint too. MERGED with the DPoP confirmation rather than replacing
+  // it: a client that presented a certificate AND sent a proof demonstrated
+  // both, and a token recording one of them would be discarding a check somebody
+  // performed. `opts.request` is the Token Request, and it is absent for every
+  // token minted without one (the authorization endpoint's implicit responses),
+  // where there is no connection to read a certificate off.
+  if (opts.request) payload.cnf = mtls.confirmationFor(opts.request, payload.cnf);
   // OID4VCI section 6.2: when the authorization was expressed as
   // authorization_details, the token response grants credential_identifiers and
   // the Credential Request must use one of them. They ride in the access token
@@ -570,11 +896,25 @@ function refreshToken(base, opts) {
   log.debug("Entering refreshToken().");
   const iat = nowSec();
   const user = opts.user || userFor(opts.username);
-  const token = signJwt({
+  // Hoisted out of the payload so the LINEAGE can be recorded below. This is
+  // the single function that mints a refresh token — every grant that issues
+  // one goes through tokenSet() and therefore through here — which is why RFC
+  // 9700 mode's family bookkeeping needs no per-grant call site to forget. The
+  // same reasoning keeps signJwt() the one place a token is counted.
+  const refreshJti = randomId(16);
+  const payload = {
     // username travels with the refresh token, so refreshing keeps describing
     // the person who actually signed in.
     iss: issuerOf(base), sub: opts.sub || user.sub, aud: base, client_id: opts.client_id,
-    scope: opts.scope || '', typ: 'Refresh', jti: randomId(16), username: user.username,
+    scope: opts.scope || '', typ: 'Refresh', jti: refreshJti, username: user.username,
+    // RFC 9700 section 2.2.2: a refresh token MUST be bound to the authorized
+    // scope AND RESOURCE SERVERS. The scope was here from the beginning; the
+    // resources were not, and their absence was a hole rather than an omission
+    // — an access token narrowed to one resource server by RFC 8707 could be
+    // refreshed into one carrying this service's DEFAULT audience, which is
+    // wider than what was authorized. A grant cannot widen itself by being
+    // renewed.
+    resources: (opts.resources && opts.resources.length) ? opts.resources : undefined,
     iat: iat, nbf: iat, exp: iat + REFRESH_TOKEN_TTL,
     // RFC 9449 section 5: a refresh token issued to a PUBLIC client alongside a
     // DPoP-bound access token is itself bound to the same key. A wallet is a
@@ -582,6 +922,11 @@ function refreshToken(base, opts) {
     // of the grant would stay a bearer credential and binding the short-lived
     // half would buy very little. The refresh grant enforces it, which is what
     // makes the OID4VCI section 14.5 refresh on step 4 carry a proof of its own.
+    // RFC 9449 section 5's binding, and RFC 8705 section 3's beside it: a refresh
+    // token is the LONG-LIVED half of the grant, so leaving it a bearer
+    // credential while binding the short-lived half buys very little. The
+    // certificate confirmation is added below, after the payload exists, for the
+    // same reason the access token's is.
     cnf: opts.jkt ? { jkt: opts.jkt } : undefined,
     // What this grant authorized in OID4VCI terms — the Credential Dataset
     // identifiers and, where the wallet asked for one, its claims selection.
@@ -590,7 +935,16 @@ function refreshToken(base, opts) {
     // 14.5 refresh would be refused by the credential endpoint for naming an
     // identifier "that was not granted".
     authorization_details: opts.authorization_details || undefined
-  }, issuanceContext(opts));
+  };
+  if (opts.request) {
+    payload.cnf = mtls.confirmationFor(opts.request, payload.cnf);
+  }
+  const token = signJwt(payload, issuanceContext(opts));
+  // RFC 9700 section 2.2.2. `parent_refresh_jti` is set only by the refresh
+  // grant, so an empty one means this token is the root of its own family: an
+  // authorization code or a pre-authorized code redeemed for the first time.
+  // A no-op while the mode is off.
+  bcp.noteRefreshIssued(refreshJti, opts.parent_refresh_jti, opts.client_id);
   log.debug("Leaving refreshToken().");
   return token;
 }
@@ -623,7 +977,29 @@ function idToken(base, opts) {
   // recorded them, and their absence is then meaningful rather than ambiguous.
   if (opts.amr) payload.amr = opts.amr;
   if (opts.acr) payload.acr = opts.acr;
-  if (opts.nonce) payload.nonce = opts.nonce;
+  // The nonce, as the authorization request gave it — unless somebody has asked
+  // for it to be WRONG.
+  //
+  // `oauth2.breakIdTokenNonce` exists for one requirement that cannot be
+  // enforced from here: RFC 9700 sections 2.1.1 and 4.5.3.2 say the CLIENT must
+  // validate this value, and no observation this server can make tells a client
+  // that checks from one that does not. Spoiling it on purpose does: a client
+  // that accepts the result is a client that is not checking. It is the same
+  // device as /spnego's three knobs and the literal password `invalid` — a
+  // reachable negative, off by default, and loud every single time, because an
+  // ID Token that is wrong in a way nobody remembers turning on would be the
+  // most expensive hour in this repository.
+  if (opts.nonce) {
+    if (config.value('oauth2.breakIdTokenNonce')) {
+      payload.nonce = 'broken-' + randomId(8);
+      log.warn('oauth2.breakIdTokenNonce is ON: this ID Token carries the nonce "' +
+               payload.nonce + '" where the authorization request asked for "' + opts.nonce +
+               '". A client that accepts this token is NOT validating the nonce, which RFC ' +
+               '9700 section 4.5.3.2 says it must. Turn the setting off to stop spoiling them.');
+    } else {
+      payload.nonce = opts.nonce;
+    }
+  }
   if (opts.access_token) payload.at_hash = halfHash(opts.access_token);
   if (opts.code) payload.c_hash = halfHash(opts.code);
   // The ID Token's own custom claim set, separate from the access token's: the two
@@ -644,6 +1020,19 @@ function hasScope(scope, name) {
 function tokenSet(base, opts) {
   log.debug("Entering tokenSet(). scope=" + (opts.scope || '(none)'));
   const access = accessToken(base, opts);
+  // RFC 9700 section 2.2, and it refuses nothing: whether a token is
+  // sender-constrained is the CLIENT's decision, since it binds by sending a
+  // DPoP proof. Noted at the one place every grant mints a token set, so that
+  // "this server issued a bearer token" is a line somebody can find rather than
+  // an absence they have to notice. A no-op while the mode is off.
+  bcp.noteTokenBinding({
+    jkt: opts.jkt, clientId: opts.client_id, scope: opts.scope,
+    // Whether the connection this token was minted on carried a client
+    // certificate — a token bound that way is sender-constrained too, and
+    // reporting it as a bearer token would be the note contradicting the cnf on
+    // the token beside it.
+    certificateBound: !!(opts.request && mtls.presentedThumbprint(opts.request))
+  });
   const body = {
     access_token: access,
     // RFC 9449 section 5: `DPoP`, not `Bearer`, when the token is bound. This is
@@ -682,12 +1071,31 @@ function tokenSet(base, opts) {
 // does not prompt again; prompt=login forces it to, and is dropped from the
 // return URL so that it forces it exactly once.
 // the redirect back after login is the same request over again.
+// The request as it arrived, rebuilt — which is what the authentication service
+// is given as a return URL, so that the second pass through the authorization
+// endpoint sees the SAME request the client made.
+//
+// A REPEATED PARAMETER STAYS REPEATED, and that is not a refinement. Express
+// hands back an array when a parameter appears more than once, and
+// `URLSearchParams.set()` stringifies an array by joining it with commas — so
+// `?resource=a&resource=b` came back from the sign-in screen as the single
+// value "a,b", which is one resource indicator that names nothing. It was
+// latent until RFC 8707 gave this endpoint a parameter that is DEFINED to
+// repeat; the same collapse would have happened to any other. `append` per
+// value is the fix, and the array test has to be explicit because a string is
+// iterable too and appending it per character is a worse bug than the one being
+// fixed.
 function queryString(query, omit) {
   log.debug("Entering queryString().");
   const usp = new URLSearchParams();
   Object.keys(query).forEach(function (k) {
     if (omit && omit.indexOf(k) >= 0) return;
-    usp.set(k, query[k]);
+    const value = query[k];
+    if (Array.isArray(value)) {
+      value.forEach(function (one) { usp.append(k, one); });
+      return;
+    }
+    usp.set(k, value);
   });
   log.debug("Leaving queryString().");
   return usp.toString();
@@ -826,7 +1234,69 @@ function parseAuthorizationDetails(raw) {
   return { details: wanted.length ? wanted : null };
 }
 
+// ---------------------------------------------------------------------------
+// RFC 8707 — RESOURCE INDICATORS, which is how a client asks for an
+// audience-restricted access token.
+//
+// RFC 9700 section 2.3 says an access token SHOULD be restricted to one resource
+// server, or to a small set where that is impractical. Every token this service
+// issues has always been audience-restricted — `<base>/resource`, one audience —
+// but the client had no way to say WHICH resource server it wanted, which made
+// the restriction true and useless: one audience that is always the same
+// restricts a token to everything this service protects.
+//
+// So `resource` is read at the authorization endpoint and at the token endpoint,
+// and it becomes the `aud`. Three rules, and each is section 2 of RFC 8707:
+//
+//   * it MUST be an absolute URI with no FRAGMENT. A fragment is the part a
+//     server never sees on a redirect, so an audience carrying one names
+//     something the resource server cannot match.
+//   * it may be repeated, and the token then names several — the "small set"
+//     the BCP allows for when one is impractical.
+//   * at the TOKEN endpoint it may only NARROW what the authorization request
+//     asked for. A grant that let a client widen its own audience afterwards
+//     would be the same privilege escalation the refresh scope check refuses,
+//     one step earlier.
+//
+// A request that names none is unaffected and gets the default audience, which
+// is what keeps this invisible to every existing caller.
+// ---------------------------------------------------------------------------
+function parseResourceIndicators(raw) {
+  log.debug("Entering parseResourceIndicators().");
+  const asked = raw === undefined || raw === null ? []
+    : (Array.isArray(raw) ? raw : [raw]);
+  const wanted = [];
+  for (let i = 0; i < asked.length; i++) {
+    const text = String(asked[i] || '').trim();
+    if (!text) {
+      continue;
+    }
+    let parsed = null;
+    try {
+      parsed = new URL(text);
+    } catch (e) {
+      log.debug("Leaving parseResourceIndicators(). Not an absolute URI.");
+      return { error: 'RFC 8707 section 2: the resource parameter must be an absolute URI. "' +
+                      text + '" is not one.' };
+    }
+    if (parsed.hash) {
+      log.debug("Leaving parseResourceIndicators(). It carries a fragment.");
+      return { error: 'RFC 8707 section 2: the resource parameter must not include a fragment ' +
+                      'component. "' + text + '" does — and a fragment is the part of a URI a ' +
+                      'server never receives, so an audience carrying one names something no ' +
+                      'resource server can match.' };
+    }
+    if (wanted.indexOf(text) < 0) {
+      wanted.push(text);
+    }
+  }
+  log.debug("Leaving parseResourceIndicators(). " + wanted.length + " resource(s).");
+  return { resources: wanted };
+}
+
 function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
+  // Everything minted below is this authorization server's, so the base it is
+  // built from is this authorization server's.
   const amr = (authInfo && authInfo.amr) || null;
   const acr = (authInfo && authInfo.acr) || null;
   // The session this response is being issued ON. Every path into this function has
@@ -836,7 +1306,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   const sessionId = (authInfo && authInfo.id) || '';
   log.debug("Entering issueAuthorizationResponse(). response_type=" + (query.response_type || '(none)') +
             ", user=" + user.username);
-  const base = baseUrlOf(req);
+  const base = asBaseOf(req);
   const redirectUri = String(query.redirect_uri);
   const types = String(query.response_type || '').split(/\s+/).filter(Boolean);
   const scope = String(query.scope || 'openid');
@@ -846,12 +1316,81 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     log.debug("Leaving issueAuthorizationResponse(). " + parsedDetails.error);
     return redirectBack(res, base, redirectUri, query.state,
       { error: 'invalid_authorization_details', error_description: parsedDetails.error },
-      types.length > 1 || types.indexOf('code') < 0);
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
   }
   const authorizationDetails = parsedDetails.details;
   if (authorizationDetails) {
     logArtifact('authorization_details', 'as requested', authorizationDetails);
   }
+
+  // RFC 8707. Refused here rather than at the token endpoint because this is
+  // where the client can still be told: an authorization response goes back to
+  // a redirect_uri the client controls, and a token endpoint refusal for a
+  // parameter sent an interaction earlier is a message nobody is reading for.
+  const parsedResources = parseResourceIndicators(query.resource);
+  if (parsedResources.error) {
+    log.debug("Leaving issueAuthorizationResponse(). " + parsedResources.error);
+    return redirectBack(res, base, redirectUri, query.state,
+      { error: 'invalid_target', error_description: parsedResources.error },
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
+  }
+  const resources = parsedResources.resources;
+  if (resources.length) {
+    logArtifact('RFC 8707 resource indicators', 'as requested', resources);
+  }
+
+  // RFC 9700 section 2.1.1 — the code_challenge and the nonce must be
+  // transaction-specific. Checked HERE, immediately before anything is minted,
+  // and nowhere else: this same request runs through the authorization endpoint
+  // TWICE — once before the sign-in screen and once on the way back with a
+  // session — so a check at the top of that endpoint would refuse every request
+  // in the service for reusing its own values between its own two passes.
+  // Reaching this function is the point at which the values are about to be
+  // spent, which is the thing being made specific.
+  const transactionCheck = bcp.checkTransactionValues({ query: query,
+                                                        clientId: String(query.client_id) });
+  if (!transactionCheck.ok) {
+    log.debug("Leaving issueAuthorizationResponse(). RFC 9700 mode refused a reused " +
+              "transaction value (" + transactionCheck.requirement + ").");
+    return redirectBack(res, base, redirectUri, query.state,
+      { error: transactionCheck.error, error_description: transactionCheck.description },
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
+  }
+
+  // THE APPLICATION. Recorded here and not at the authentication funnel,
+  // because the funnel cannot see it: the person was authenticated in authn.js,
+  // which knows nothing about OAuth by design and never reads a client_id. This
+  // is the first point at which both are in scope, and it is the point at which
+  // this service decides the client is real enough to be issued something.
+  //
+  // `counts: true` — a credential WAS accepted for this application, which is
+  // what appAuthentications means. The token endpoint below records the same
+  // client with counts:false, since redeeming the code is the same transaction
+  // continuing rather than a second acceptance.
+  //
+  // The redirect_uri goes on as appRedirectUriObserved and NOT as
+  // oauthRedirectUri: "registered" and "used" are different facts, and RFC 9700
+  // section 2.1 is entirely about not confusing them — the exact-match check
+  // reads the registered list, and writing an accepted URI into it would make
+  // this endpoint quietly widen its own allow-list.
+  applications.seen({
+    identifier: String(query.client_id),
+    kind: hasScope(scope, 'openid') ? 'oidc-relying-party' : 'oauth2-client',
+    protocol: 'OAuth 2.0 / OIDC',
+    sessionId: sessionId,
+    user: (user && user.username) || '',
+    note: 'issued an authorization response',
+    fields: {
+      oauthClientId: String(query.client_id),
+      // Which of this process's authorization servers it used. Recorded rather
+      // than restricted: every client may use every one of them, so this says
+      // where it has been.
+      appAuthorizationServer: profileOf(req),
+      appRedirectUriObserved: redirectUri,
+      oauthResponseType: types.join(' '),
+      oauthScope: scope.split(/\s+/).filter(Boolean)
+    }
+  });
 
   if (types.indexOf('code') >= 0) {
     const code = randomId(24);
@@ -863,6 +1402,15 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
       // arrives at the token endpoint with no cookie behind it, and a browser session
       // cannot be inferred from a back-channel request.
       session_id: sessionId,
+      // WHICH AUTHORIZATION SERVER ISSUED IT. A code from one is not redeemable
+      // at another's token endpoint, and that is not a formality: they publish
+      // different capabilities, may have different clients configured and are
+      // presented to a client as separate servers. One process serving several
+      // must not let a credential leak between them.
+      authorization_server: profileOf(req),
+      // RFC 8707: what the authorization request asked the token to be for. The
+      // token endpoint may narrow this and may not widen it.
+      resources: resources,
       code_challenge: query.code_challenge, code_challenge_method: query.code_challenge_method || 'plain',
       // RFC 9449 section 10: the JWK Thumbprint of the DPoP key the client
       // intends to use, taken at the authorization request so the code itself is
@@ -884,6 +1432,9 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   const flow = types.indexOf('code') >= 0 ? 'hybrid (authorization endpoint)' : 'implicit';
   if (types.indexOf('token') >= 0) {
     out.access_token = accessToken(base, { user: user, client_id: String(query.client_id), scope: scope,
+                                           audience: resources.length
+                                             ? (resources.length === 1 ? resources[0] : resources)
+                                             : undefined,
                                            session_id: sessionId, grant: flow });
     out.token_type = 'Bearer';
     out.expires_in = ACCESS_TOKEN_TTL;
@@ -896,28 +1447,202 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
       access_token: out.access_token, code: out.code
     });
   }
+  // Remembered now that they have been spent, so the NEXT authorization request
+  // carrying either of them can be told apart from this one being retried. A
+  // response with no code in it ends its transaction here, so it is recorded as
+  // finished rather than left open for a token endpoint call that will never
+  // come.
+  bcp.rememberTransactionValues({ query: query, clientId: String(query.client_id),
+                                  completed: !out.code });
+
   // Only a bare code goes in the query; anything carrying a token uses the
   // fragment, per OAuth 2.0 / OIDC.
   logArtifact('Authorization response', 'as returned to the client', out);
   redirectBack(res, base, redirectUri, query.state, out,
-    types.length > 1 || types.indexOf('code') < 0);
+    types.length > 1 || types.indexOf('code') < 0, query.response_mode);
   log.debug("Leaving issueAuthorizationResponse().");
 }
 
-function redirectBack(res, base, redirectUri, state, params, fragment) {
-  log.debug("Entering redirectBack(). fragment=" + !!fragment);
+// ---------------------------------------------------------------------------
+// THE AUTHORIZATION RESPONSE, in whichever of the three response modes was
+// asked for.
+//
+// `query` and `fragment` are the two OAuth 2.0 and OpenID Connect define
+// positionally: a bare code goes in the query, anything carrying a token goes
+// in the fragment so that it is never sent to a server. FORM_POST is the third
+// (OAuth 2.0 Form Post Response Mode), and until now this service advertised it
+// and did not have it — every request was answered with a 302 whatever it
+// asked for, so a client that requested form_post sat waiting for a POST that
+// never came. That is the worst shape a metadata member can have and the
+// document said so rather than pretending; this is the other way to fix it.
+//
+// **RFC 9700 section 4.3 is why it is worth having.** A redirect puts the
+// response in a URL, and a URL goes into browser history, into the address bar,
+// into any log the browser's own crash reporter keeps, and into the `Referer`
+// of anything the landing page fetches. A form POST puts it in a request body,
+// which does none of those. That is true of a bare authorization code as well
+// as of a token — a code in history is a code somebody can read, which is why
+// section 4.3 asks for it to be single-use and PKCE-bound as well.
+//
+// The page is the SAME SHAPE WS-Federation's has, deliberately: a real form
+// with a real submit button, plus a separate script that submits it. The button
+// is not a fallback nobody sees — this service sets `script-src 'none'` on
+// every response, so with the script blocked the button is the whole mechanism.
+// An inline script would need `'unsafe-inline'`, which is the clause that would
+// make the relaxation matter; a named resource does not.
+//
+// `form-action` is deliberately absent from the policy, for the reason app.js
+// records about the OAuth redirect: the form posts to the client's redirect_uri,
+// which is by definition another origin, and `form-action 'self'` would stop the
+// response ever reaching the client.
+// ---------------------------------------------------------------------------
+const AUTOPOST_SCRIPT = [
+  '(function () {',
+  '  var f = document.getElementById("oauth2-form");',
+  '  if (f) { f.submit(); }',
+  '})();',
+  ''
+].join('\n');
+
+app.get('/oauth2/autopost.js', function (req, res) {
+  log.debug("Entering the authorization form-post script.");
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'style-src': null,
+                                                                 'img-src': null }));
+  res.status(200).type('application/javascript').set('Cache-Control', 'no-store')
+     .send(AUTOPOST_SCRIPT);
+  log.debug("Leaving the authorization form-post script.");
+});
+
+function formPostResponse(res, redirectUri, fields) {
+  log.debug("Entering formPostResponse(). fields=" + Object.keys(fields).join(', '));
+  const inputs = Object.keys(fields).map(function (name) {
+    return '<input type="hidden" name="' + xmlEscape(name) + '" value="' +
+           xmlEscape(String(fields[name])) + '">';
+  }).join('');
+  const rows = Object.keys(fields).map(function (name) {
+    // The VALUES are shown because this is a debugger and seeing what went back
+    // is most of the point — the same reason every artifact here is logged
+    // before and after signing. It is also why this page must never be cached:
+    // it has the response in it.
+    return '<div>' + xmlEscape(name) + ': <code>' + xmlEscape(String(fields[name])) +
+           '</code></div>';
+  }).join('');
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<title>Returning to the client</title>' +
+    '<style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:52rem;color:#222}' +
+    'code{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;background:#f4f4f8;' +
+    'padding:.1rem .25rem;border-radius:3px;word-break:break-all}' +
+    '.sub{color:#666}.meta{margin-top:1.5rem;font-size:.9rem;color:#444}' +
+    'button{font:inherit;padding:.4rem .9rem}</style></head><body>' +
+    '<h1>Returning to the client</h1>' +
+    '<p class="sub">OAuth 2.0 Form Post Response Mode — the authorization response travels in ' +
+    'a form POST rather than in a redirect, so it never appears in a URL, in browser history ' +
+    'or in a <code>Referer</code> header (RFC 9700 section 4.3).</p>' +
+    '<form method="post" action="' + xmlEscape(redirectUri) + '" id="oauth2-form">' + inputs +
+    '<div><button type="submit">Continue to the client</button></div></form>' +
+    '<div class="meta"><div>posting to: <code>' + xmlEscape(redirectUri) + '</code></div>' +
+    rows +
+    '<div>The form submits itself from <code>/oauth2/autopost.js</code>. It is a separate ' +
+    'resource because this service sets <code>script-src \'none\'</code> on every response and ' +
+    'this page relaxes it to <code>\'self\'</code>; with scripting off the button IS the ' +
+    'mechanism.</div></div>' +
+    '<script src="/oauth2/autopost.js"></script></body></html>';
+  // The same shape of exception the WebAuthn and WS-Federation pages take, and
+  // no wider: a named resource, never 'unsafe-inline'. Through the builder, so
+  // the framing clauses survive any future edit to this line.
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'script-src': "'self'" }));
+  // The response is IN this page, so it must not be stored anywhere — which is
+  // the whole reason the caller asked for form_post.
+  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(html);
+  log.debug("Leaving formPostResponse().");
+}
+
+// The URL a redirect WOULD have gone to, built by the same rules `redirectBack()`
+// follows so the interstitial's link and the automatic redirect cannot differ.
+// Errors are always in the query — never the fragment — because an error carries
+// no token.
+function redirectTarget(base, redirectUri, state, params) {
   const usp = new URLSearchParams();
   Object.keys(params).forEach(function (k) { if (params[k] !== undefined) usp.set(k, params[k]); });
   if (state !== undefined) usp.set('state', state);
   usp.set('iss', base);
+  const sep = redirectUri.indexOf('?') >= 0 ? '&' : '?';
+  return redirectUri + sep + usp.toString();
+}
+
+// ---------------------------------------------------------------------------
+// THE PAGE THAT IS SHOWN INSTEAD OF AN AUTOMATIC REDIRECT.
+//
+// It exists because of one sentence in RFC 9700 section 4.11.2 — authenticate
+// the user before redirecting them — and it is written for the PERSON looking
+// at it rather than for the client: they arrived at an authorization server
+// they may never have heard of, something is wrong with a request they did not
+// compose, and the next thing that happens is a hop to another site. Telling
+// them where and letting them choose is the section's own "inform the user and
+// rely on the user to make the correct decision".
+//
+// It carries no script and needs none: the link is a link. That is worth saying
+// because the two other pages here that post somewhere have a script and a
+// button, and this one deliberately has neither — an interstitial that submitted
+// itself would be an automatic redirect with an extra page in front of it.
+// ---------------------------------------------------------------------------
+function sendRedirectInterstitial(res, info) {
+  log.debug("Entering sendRedirectInterstitial(). error=" + info.error);
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<title>This request could not be completed</title>' +
+    '<style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:46rem;color:#222}' +
+    'code{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;background:#f4f4f8;' +
+    'padding:.1rem .25rem;border-radius:3px;word-break:break-all}' +
+    '.sub{color:#666;font-size:.92rem}.warn{background:#fff8e1;border:1px solid #ffe082;' +
+    'padding:.7rem .9rem;border-radius:4px;margin:1rem 0}' +
+    'dt{font-weight:600;margin-top:.7rem}dd{margin:.15rem 0 0 0}</style></head><body>' +
+    '<h1>This request could not be completed</h1>' +
+    '<div class="warn"><strong>' + xmlEscape(info.error) + '</strong><br>' +
+    xmlEscape(info.description) + '</div>' +
+    '<p class="sub">' + xmlEscape(info.why) + '</p>' +
+    '<dl>' +
+    '<dt>The application that sent you here</dt><dd><code>' +
+    xmlEscape(info.clientId || '(it named none)') + '</code></dd>' +
+    '<dt>Where it wants you sent next</dt><dd><code>' + xmlEscape(info.redirectUri) +
+    '</code></dd>' +
+    (info.state !== undefined && info.state !== ''
+      ? '<dt>The state it chose</dt><dd><code>' + xmlEscape(String(info.state)) + '</code></dd>'
+      : '') +
+    '</dl>' +
+    '<p><a href="' + xmlEscape(info.target) + '">Continue to ' +
+    xmlEscape(info.redirectUri) + '</a></p>' +
+    '<p class="sub">Nothing has been sent anywhere yet. Following that link delivers the error ' +
+    'above to the application, which is what would have happened automatically if you were ' +
+    'signed in here.</p>' +
+    '</body></html>';
+  res.status(400).type('text/html').set('Cache-Control', 'no-store').send(html);
+  log.debug("Leaving sendRedirectInterstitial().");
+}
+
+function redirectBack(res, base, redirectUri, state, params, fragment, mode) {
+  log.debug("Entering redirectBack(). fragment=" + !!fragment + ", mode=" + (mode || 'default'));
+  const fields = {};
+  Object.keys(params).forEach(function (k) { if (params[k] !== undefined) fields[k] = params[k]; });
+  if (state !== undefined) fields.state = state;
+  // RFC 9207 on every response, in every mode: a form POST is still an
+  // authorization response and a client that requires `iss` requires it here.
+  fields.iss = base;
+  if (String(mode || '') === 'form_post') {
+    log.debug("Leaving redirectBack(). Answering with a form POST.");
+    return formPostResponse(res, redirectUri, fields);
+  }
+  const usp = new URLSearchParams();
+  Object.keys(fields).forEach(function (k) { usp.set(k, fields[k]); });
   const sep = fragment ? '#' : (redirectUri.indexOf('?') >= 0 ? '&' : '?');
   res.redirect(302, redirectUri + sep + usp.toString());
   log.debug("Leaving redirectBack().");
 }
 
-app.get('/oauth2/authorize', function (req, res) {
+function authorizeEndpoint(req, res) {
   log.debug("Entering the authorization endpoint.");
-  const base = baseUrlOf(req);
+  // This authorization server's own base, so the RFC 9207 `iss` on the response
+  // and every token minted below name the server the client is talking to.
+  const base = asBaseOf(req);
   const q = req.query || {};
   const redirectUri = String(q.redirect_uri || '');
 
@@ -927,15 +1652,186 @@ app.get('/oauth2/authorize', function (req, res) {
     log.debug("Leaving the authorization endpoint. There is no usable redirect_uri to report to.");
     return oauthError(res, 400, 'invalid_request', 'A valid absolute redirect_uri is required.');
   }
+
+  // --- RFC 9700 section 2.1, and it has to be FIRST --------------------------
+  //
+  // Every refusal below this point is reported BY REDIRECTING to redirect_uri,
+  // which is right once that URI is known to be one the client registered and
+  // is an open redirector until then: "error=invalid_request" forwarded to an
+  // arbitrary URL is still the browser being forwarded to an arbitrary URL, and
+  // an attacker does not mind which parameters ride along. So the URI is
+  // matched here, before there is a `fail` to report anything with, and a
+  // refusal is answered ON THIS SERVER as a 400.
+  //
+  // The registered client record is passed in rather than looked up in the
+  // check: the registry lives in the directory and there is exactly one of it.
+  // The lookup misses for every client_id this service has never registered,
+  // which is the ordinary case, and that is not an error — it means the
+  // oauth2.redirectUris setting is what this request is judged against, and it
+  // also means the client is treated as PUBLIC and must therefore use PKCE.
+  // The application's ENTRY, normalised — not its RFC 7591 registration. The
+  // two stopped being the same thing when the console gained the ability to
+  // create an application and give it redirect URIs without a registration
+  // behind it, and this check wants what the client is ALLOWED to do rather
+  // than what it once registered. `clientConfigOf()` reads the attributes, so
+  // an ldapmodify, a console form and a registration all reach it alike.
+  const registeredClient = applications.clientConfigOf(q.client_id);
+  const redirectCheck = bcp.checkRedirectUri({ redirectUri: redirectUri, client: registeredClient });
+  if (!redirectCheck.ok) {
+    log.debug("Leaving the authorization endpoint. RFC 9700 mode refused the redirect_uri (" +
+              redirectCheck.requirement + "), so nothing is redirected anywhere.");
+    return oauthError(res, 400, redirectCheck.error, redirectCheck.description);
+  }
+  if (redirectCheck.how) {
+    log.debug("The redirect_uri was accepted by " + redirectCheck.how + ".");
+  }
+
   const fail = function (error, description) {
-    log.debug("Leaving the authorization endpoint. Reporting " + error + " to the client.");
-    redirectBack(res, base, redirectUri, q.state, { error: error, error_description: description }, false);
+    // RFC 9700 section 4.11.2: an authorization server must authenticate the
+    // user BEFORE redirecting them. With nobody signed in, an error redirected
+    // to a client's registered redirect_uri turns this endpoint into a hop an
+    // attacker can send a victim through with no interaction at all — the URI
+    // is legitimate, which is what makes it worth having.
+    //
+    // The session is read here rather than passed in because this closure is
+    // called from a dozen places above and below the session lookup, and a
+    // policy that depended on WHERE it was called from would be one that
+    // eventually got it wrong.
+    const policy = bcp.redirectPolicyFor({
+      hasSession: !!sessionOf(req), prompt: q.prompt, fromSignIn: !!q.authn_error
+    });
+    if (!policy.redirect) {
+      log.debug("Leaving the authorization endpoint. Showing " + error +
+                " rather than redirecting it (" + policy.requirement + ").");
+      return sendRedirectInterstitial(res, {
+        error: error, description: description, redirectUri: redirectUri,
+        clientId: q.client_id, state: q.state, why: policy.why,
+        // The link the person can choose. It carries the same parameters the
+        // redirect would have — including the RFC 9207 iss — because the point
+        // is to make the redirect a DECISION rather than to change it.
+        target: redirectTarget(base, redirectUri, q.state, { error: error,
+                                                            error_description: description })
+      });
+    }
+    log.debug("Leaving the authorization endpoint. Reporting " + error + " to the client" +
+              (policy.why ? " (" + policy.why + ")" : "") + ".");
+    // The response mode applies to an ERROR as much as to a success: a client
+    // that asked for form_post and got a 302 carrying `error` in a query string
+    // has had the failure put in its browser history, which is the one place
+    // section 4.3 is asking for it not to be.
+    redirectBack(res, base, redirectUri, q.state, { error: error, error_description: description },
+                 false, q.response_mode);
   };
+  // RFC 6749 section 4.1.2.1, cited by section 4.11.2: an invalid combination
+  // of client_id and redirect_uri must not be redirected. A missing client_id is
+  // the plainest one, and this used to be reported BY redirecting to the URI —
+  // which is the thing that paragraph forbids. Answered here instead, ABOVE the
+  // `fail` closure's first use so there is no path where it is reported the old
+  // way.
+  const clientIdCheck = bcp.checkClientIdPresent(q.client_id);
+  if (!clientIdCheck.ok) {
+    log.debug("Leaving the authorization endpoint. " + clientIdCheck.requirement + ".");
+    return oauthError(res, 400, clientIdCheck.error, clientIdCheck.description);
+  }
   if (!q.client_id) return fail('invalid_request', 'client_id is required.');
   const types = String(q.response_type || '').split(/\s+/).filter(Boolean);
   const known = ['code', 'token', 'id_token'];
   if (!types.length || types.some(function (t) { return known.indexOf(t) < 0; })) {
     return fail('unsupported_response_type', 'response_type "' + (q.response_type || '') + '" is not supported.');
+  }
+  // WHAT THIS AUTHORIZATION SERVER SAYS IT DOES. `response_types_supported` in
+  // the document a client read is the list this endpoint answers — the document
+  // is not a description of the server, it IS the server, so a value outside it
+  // is refused here rather than accepted by an endpoint that never read its own
+  // metadata. The comparison is on the whole space-separated value because that
+  // is how the member is defined: `code id_token` is one entry, not two.
+  const advertisedTypes = capabilityFor(req, 'response_types_supported');
+  if (advertisedTypes) {
+    const asked = types.slice(0).sort().join(' ');
+    const offered = advertisedTypes.some(function (one) {
+      return String(one).split(/\s+/).filter(Boolean).sort().join(' ') === asked;
+    });
+    if (!offered) {
+      log.debug("Leaving the authorization endpoint. " + profileOf(req) +
+                " does not advertise that response type.");
+      return fail('unsupported_response_type',
+        'The "' + profileOf(req) + '" authorization server advertises ' +
+        'response_types_supported ' + JSON.stringify(advertisedTypes) + ' and this request ' +
+        'asks for "' + (q.response_type || '') + '". What its metadata says is what it does — ' +
+        'the document is this authorization server rather than a description of one.');
+    }
+  }
+  // ---------------------------------------------------------------------
+  // WHICH RESPONSE MODES THIS AUTHORIZATION SERVER ANSWERS, and why an
+  // unrecognised one has to be refused rather than ignored.
+  //
+  // `redirectBack()` answers `form_post` with a form and everything else with a
+  // redirect. That "everything else" was the hole: a client asking for
+  // `web_message` — the postMessage mode SPAs use for silent renewal, and the
+  // subject of RFC 9700's in-browser communication section — got a 302 and sat
+  // waiting for a message that never arrived. It is the same silent failure
+  // `form_post` itself had while it was advertised and missing, and the same
+  // reason that one was worth fixing: the failure is at the CLIENT end, with
+  // nothing anywhere pointing back at this service.
+  //
+  // Checked against what this authorization server ADVERTISES rather than
+  // against a list here, so the document and the endpoint cannot disagree — and
+  // so a server configured to offer only `form_post` refuses the other two at
+  // its own endpoint. Not gated on RFC 9700 mode, like the other capability
+  // checks: the default document advertises everything this service does, so a
+  // request that would have worked still works.
+  // ---------------------------------------------------------------------
+  if (q.response_mode !== undefined && String(q.response_mode) !== '') {
+    const advertisedModes = capabilityFor(req, 'response_modes_supported');
+    if (advertisedModes && advertisedModes.indexOf(String(q.response_mode)) < 0) {
+      log.debug("Leaving the authorization endpoint. response_mode " + q.response_mode +
+                " is not one " + profileOf(req) + " advertises.");
+      return fail('invalid_request',
+        'The "' + profileOf(req) + '" authorization server advertises ' +
+        'response_modes_supported ' + JSON.stringify(advertisedModes) + ' and this request ' +
+        'asks for "' + q.response_mode + '". It is refused rather than answered with a ' +
+        'redirect, because a client that asked for a mode this server does not perform would ' +
+        'otherwise wait for a response that never arrives — which is a failure with nothing at ' +
+        'this end to point at.' +
+        (String(q.response_mode) === 'web_message'
+          ? ' `web_message` in particular is postMessage-based, and this service has no browser ' +
+            'messaging of any kind: no page here posts a message, receives one, or frames ' +
+            'anything.'
+          : ''));
+    }
+  }
+
+  // The same for the PKCE methods. A server advertising S256 alone refuses
+  // `plain` HERE, whatever the other authorization servers in this process do.
+  if (q.code_challenge_method) {
+    const advertisedPkce = capabilityFor(req, 'code_challenge_methods_supported');
+    if (advertisedPkce && advertisedPkce.indexOf(String(q.code_challenge_method)) < 0) {
+      log.debug("Leaving the authorization endpoint. " + profileOf(req) +
+                " does not advertise that code_challenge_method.");
+      return fail('invalid_request',
+        'The "' + profileOf(req) + '" authorization server advertises ' +
+        'code_challenge_methods_supported ' + JSON.stringify(advertisedPkce) + ' and this ' +
+        'request asks for "' + q.code_challenge_method + '".');
+    }
+  }
+
+  // The rest of what RFC 9700 mode has to say about this request: no response
+  // type that issues an access token here (section 2.1.2), PKCE from any client
+  // this server cannot see to be confidential and S256 when there is one
+  // (section 2.1.1), and a nonce with any id_token. These CAN be reported to
+  // the client, because redirect_uri has been validated above — and they are,
+  // rather than answered as a 400, because a client that asked for something
+  // this server will not do has a protocol error handler and no reason to be
+  // looking at this server's own output.
+  //
+  // Note where this sits: above the session check, so it is answered on the
+  // first pass and the person is never sent to sign in for a request that was
+  // going to be refused when they came back.
+  const requestCheck = bcp.checkAuthorizationRequest({ query: q, types: types,
+                                                       client: registeredClient });
+  if (!requestCheck.ok) {
+    log.debug("RFC 9700 mode refused the authorization request (" + requestCheck.requirement + ").");
+    return fail(requestCheck.error, requestCheck.description);
   }
 
   // issuer_state (OID4VCI section 4.1.1): if this request came from a Credential
@@ -991,7 +1887,14 @@ app.get('/oauth2/authorize', function (req, res) {
   // runs on the return leg has to be the request the client actually made —
   // the PKCE challenge, the nonce, authorization_details and the rest are all
   // read on that second pass.
-  const returnTo = '/oauth2/authorize?' + queryString(q, ['prompt']);
+  // THE PATH OF THIS AUTHORIZATION SERVER'S OWN ENDPOINT, not the default
+  // one's. This was hard-coded to `/oauth2/authorize`, which sent every named
+  // authorization server's second pass — the one after the sign-in screen, the
+  // one that actually issues the code — to the DEFAULT server. The request
+  // looked right the whole way through and the code came out belonging to
+  // somebody else, which is the kind of bug that only shows up as a refusal two
+  // steps later.
+  const returnTo = asPathOf(req) + '/oauth2/authorize?' + queryString(q, ['prompt']);
   // acr_values is how a relying party demands a second factor. Anything naming
   // mfa or a hardware key forces the WebAuthn step and disables the opt-out, so
   // the checkbox cannot be used to answer a request for step-up with a password.
@@ -1015,12 +1918,40 @@ app.get('/oauth2/authorize', function (req, res) {
     forceMfa: forceMfa, protocol: 'OAuth 2.0 / OIDC'
   }));
   log.debug("Leaving the authorization endpoint. Sent to the authentication service first.");
+}
+
+app.get('/oauth2/authorize', authorizeEndpoint);
+
+// ---------------------------------------------------------------------------
+// GET /oauth2/rfc9700 — what this mode is, and whether it is on.
+//
+// NON-SPEC. RFC 9700 defines no discovery member and no endpoint, and there is
+// no way for a client to find out from the protocol whether the server it is
+// talking to enforces it — the metadata narrowing above is a consequence of the
+// mode rather than an announcement of it. So this says so directly, and it says
+// the uncomfortable half too: which requirements are enforced, which are only
+// DETECTED because they are the client's to keep, and the one that is not
+// enforced at all with the reason attached.
+//
+// It is a report and not a switch. The mode is configuration — oauth2.rfc9700
+// — so it is turned on at /admin/config or through POST /admin-api/config like
+// every other setting, which is what gives it a console control, a management
+// API operation and an audit row without a line being written for any of the
+// three. /dpop/nonce-mode is a switch for the opposite reason: it is a per-run
+// testing state rather than configuration, and it predates config.js.
+//
+// Read-only, so there is no console control here and therefore nothing for
+// rule 7 in CLAUDE.md to require of the management API.
+// ---------------------------------------------------------------------------
+app.get('/oauth2/rfc9700', function (req, res) {
+  log.debug("Entering the RFC 9700 mode report.");
+  res.status(200).type('application/json').set('Cache-Control', 'no-store')
+     .send(JSON.stringify(bcp.state(), null, 2));
+  log.debug("Leaving the RFC 9700 mode report. enabled=" + bcp.enabled());
 });
 
-
-
 // Ends the session, so the next authorization request prompts again.
-app.get('/oauth2/logout', function (req, res) {
+function logoutEndpoint(req, res) {
   log.debug("Entering the logout endpoint.");
   // The same session WS-Federation's wsignout1.0 ends, through the same function —
   // one browser session shared by both protocols means signing out of either signs
@@ -1028,12 +1959,29 @@ app.get('/oauth2/logout', function (req, res) {
   endSession(req, res);
   const target = req.query.post_logout_redirect_uri;
   if (target && /^https?:\/\//i.test(String(target))) {
+    // Without RFC 9700 mode this is the plainest open redirector in the
+    // service: any absolute http(s) URL in a query parameter, forwarded, with
+    // no client and no session involved. In the mode it is matched the same way
+    // an authorization request's redirect_uri is — against the client's own
+    // post_logout_redirect_uris when the request names a registered client_id,
+    // and against oauth2.redirectUris otherwise — and a miss is answered here
+    // rather than followed, because forwarding the browser is the whole of what
+    // section 2.1 forbids.
+    const check = bcp.checkPostLogoutRedirectUri({
+      target: String(target), client: applications.clientConfigOf(req.query.client_id)
+    });
+    if (!check.ok) {
+      log.debug("Leaving the logout endpoint. RFC 9700 mode refused the post_logout_redirect_uri.");
+      return oauthError(res, 400, check.error, check.description);
+    }
     log.debug("Leaving the logout endpoint. Redirecting to " + target + ".");
     return res.redirect(302, String(target));
   }
   res.status(200).type('text/plain').send('Signed out of the mock authorization server.\n');
   log.debug("Leaving the logout endpoint.");
-});
+}
+
+app.get('/oauth2/logout', logoutEndpoint);
 
 // ---------------------------------------------------------------------------
 // OpenID Connect Core 1.0 section 5.3 — the UserInfo Endpoint.
@@ -1203,7 +2151,7 @@ function userinfoResponse(req, res) {
   // This is read from the RFC 7591 registration the client already did here, so
   // the two features meet where they should: register asking for a signed
   // response and this endpoint starts signing for that client.
-  const registered = registeredClients.get(String(claims.client_id || '')) || {};
+  const registered = applications.registrationOf(claims.client_id) || {};
   const alg = String(registered.userinfo_signed_response_alg || 'none');
   if (alg !== 'none') {
     if (alg !== 'RS256') {
@@ -1400,6 +2348,44 @@ function replayOrRefuseRedemption(res, code, fingerprint, respond) {
       'replayed here. Start a new authorization request; the refresh token ' +
       'from the first redemption is still good.');
   }
+  // RFC 9700 mode: no relaxation. The repeat is refused and everything the code
+  // bought is revoked (section 4.5, and RFC 6749 section 10.5 for the
+  // revocation). Checked HERE rather than above the two refusals before it,
+  // because those two are more specific — a request that DIFFERS from the one
+  // the code was redeemed with, and a code whose own lifetime has run out, are
+  // both worth their own sentence, and both are already refusals in either
+  // mode. This is the one case the two modes answer differently.
+  //
+  // The jtis come off the token set that was issued: `jwt.decode` rather than
+  // `jwt.verify`, because these are this service's own tokens read back out of
+  // its own store and the signature was made two lines after they were minted.
+  const replay = bcp.checkCodeReplay({
+    clientId: done.client_id, secondsAgo: ago,
+    issuedJtis: ['access_token', 'refresh_token', 'id_token'].map(function (name) {
+      const token = done.response && done.response[name];
+      if (!token) {
+        return '';
+      }
+      try {
+        const claims = jwt.decode(token);
+        return (claims && claims.jti) || '';
+      } catch (e) {
+        // Not decodable, which cannot happen for a token this service minted —
+        // but a jti that cannot be read is a token that cannot be revoked, and
+        // silently revoking nothing would be worse than saying so.
+        log.error('could not read the jti of the ' + name + ' issued for this code: ' + e.message);
+        return '';
+      }
+    })
+  });
+  if (!replay.ok) {
+    (replay.revoke || []).forEach(function (jti) {
+      stats.revoke(jti, 'RFC 9700 section 4.5: an authorization code was presented twice');
+    });
+    log.debug("Leaving replayOrRefuseRedemption(). RFC 9700 mode refused the replay.");
+    return oauthError(res, 400, replay.error, replay.description);
+  }
+
   // Loud, because a client that redeems a code twice is doing something a real
   // authorization server would refuse, and reading this log is how somebody
   // finds that out from a server that did not.
@@ -1414,9 +2400,9 @@ function replayOrRefuseRedemption(res, code, fingerprint, respond) {
   return respond(done.response);
 }
 
-app.post('/oauth2/token', function (req, res) {
+function tokenEndpoint(req, res) {
   log.debug("Entering the token endpoint.");
-  const base = baseUrlOf(req);
+  const base = asBaseOf(req);
   const body = parseBody(req);
   const client = clientFrom(req, body);
   const grant = String(body.grant_type || '');
@@ -1456,9 +2442,109 @@ app.post('/oauth2/token', function (req, res) {
   // request and is answered as one, so turning nonce mode on cannot break the
   // Bearer clients this server also exists to exercise.
 
+  // RFC 9700 section 2.4 — the password grant, refused before anything else is
+  // considered. It is checked here rather than inside that grant's own branch
+  // because the answer does not depend on any of the parameters: this server
+  // will not perform that grant at all, which is what unsupported_grant_type
+  // means and what the metadata says by leaving `password` out.
+  // WHAT THIS AUTHORIZATION SERVER SAYS IT GRANTS. Same rule as the
+  // authorization endpoint's: the document a client read is the list this
+  // endpoint performs.
+  const advertisedGrants = capabilityFor(req, 'grant_types_supported');
+  if (grant && advertisedGrants && advertisedGrants.indexOf(grant) < 0) {
+    log.debug("Leaving the token endpoint. " + profileOf(req) + " does not advertise " + grant + ".");
+    return oauthError(res, 400, 'unsupported_grant_type',
+      'The "' + profileOf(req) + '" authorization server advertises grant_types_supported ' +
+      JSON.stringify(advertisedGrants) + ' and this request asks for "' + grant + '". What its ' +
+      'metadata says is what it does.');
+  }
+  // And which client authentication methods it accepts. A client whose entry
+  // declares a method this authorization server does not advertise is refused
+  // HERE rather than at the verification, so the message is about the server's
+  // capabilities rather than about the credential.
+  const advertisedAuth = capabilityFor(req, 'token_endpoint_auth_methods_supported');
+  const declaredMethod = (applications.clientConfigOf(client.client_id) || {})
+    .token_endpoint_auth_method;
+  if (declaredMethod && advertisedAuth && advertisedAuth.indexOf(String(declaredMethod)) < 0) {
+    log.debug("Leaving the token endpoint. " + profileOf(req) +
+              " does not advertise " + declaredMethod + ".");
+    return oauthError(res, 400, 'invalid_client',
+      'The "' + profileOf(req) + '" authorization server advertises ' +
+      'token_endpoint_auth_methods_supported ' + JSON.stringify(advertisedAuth) + ', and this ' +
+      'client is configured for "' + declaredMethod + '". A client may use any authorization ' +
+      'server here, but only in a way that server offers.');
+  }
+
+  const grantCheck = bcp.checkGrantType(grant);
+  if (!grantCheck.ok) {
+    log.debug("Leaving the token endpoint. RFC 9700 mode refused the grant type (" +
+              grantCheck.requirement + ").");
+    return oauthError(res, 400, grantCheck.error, grantCheck.description);
+  }
+
+  // RFC 9700 section 2.5 — the one credential this service checks, and only for
+  // a client that registered HERE as confidential. Above every grant, because a
+  // client that cannot authenticate has not authenticated whichever grant it
+  // was about to ask for. 401 rather than 400: invalid_client is the one OAuth
+  // error RFC 6749 section 5.2 gives that status, and a client_secret_basic
+  // caller needs the WWW-Authenticate header to know what to retry with.
+  const clientAuth = bcp.checkClientAuthentication({
+    clientId: String(client.client_id || ''),
+    clientSecret: client.client_secret,
+    assertion: client.assertion,
+    assertionType: client.assertionType,
+    // The connection, for the two RFC 8705 methods — the certificate that
+    // authenticates the client is the one this request arrived with.
+    request: req,
+    // What a client assertion may name as its audience. RFC 7523 section 3 says
+    // the token endpoint; OpenID Connect Core section 9 says the ISSUER, and
+    // deployments differ — so both are accepted rather than one being picked and
+    // half the client libraries in the world being refused. The `aud` of an
+    // assertion is about which server it was minted for, and both values name
+    // this one.
+    audiences: [base + '/oauth2/token', issuerOf(base), base],
+    registered: applications.clientConfigOf(client.client_id)
+  });
+  if (!clientAuth.ok) {
+    if (/^Basic\s+/i.test(req.headers['authorization'] || '')) {
+      res.set('WWW-Authenticate', 'Basic realm="sts-mock"');
+    }
+    log.debug("Leaving the token endpoint. RFC 9700 mode refused the client (" +
+              clientAuth.requirement + ").");
+    return oauthError(res, 401, clientAuth.error, clientAuth.description);
+  }
+
+  // The application again, and NOT counted again: redeeming a code is the same
+  // transaction the authorization endpoint already recorded. What this adds is
+  // the grant type actually used, which is a fact only this endpoint has — and
+  // for client_credentials and the pre-authorized code grant it is the FIRST
+  // sight of the client, since neither goes near the authorization endpoint.
+  if (client.client_id) {
+    applications.seen({
+      identifier: String(client.client_id),
+      kind: 'oauth2-client',
+      protocol: 'OAuth 2.0 / OIDC',
+      counts: false,
+      note: 'presented a Token Request',
+      fields: { oauthClientId: String(client.client_id), oauthGrantType: grant,
+                appAuthorizationServer: profileOf(req) }
+    });
+  }
+
   const respond = function (payload) {
     res.status(200).type('application/json').send(JSON.stringify(payload));
     log.debug("Leaving the token endpoint. Issued: " + Object.keys(payload).join(', '));
+  };
+
+  // Every grant below mints its tokens through THIS rather than calling
+  // tokenSet() directly, and the only thing it adds is the request itself. That
+  // is what lets RFC 8705 bind a token to the client certificate this
+  // connection carried without six call sites having to remember to pass it —
+  // and six call sites that must remember is five that will and a sixth added
+  // later that will not, which is the reasoning that keeps signJwt() the single
+  // counter and refreshToken() the single minter.
+  const issue = function (opts) {
+    return tokenSet(base, Object.assign({ request: req }, opts));
   };
 
   // Turn what was authorized into what may be requested: OID4VCI calls these
@@ -1514,9 +2600,36 @@ app.post('/oauth2/token', function (req, res) {
     // code" on the very next attempt — the wrong answer at exactly the moment
     // somebody was acting on the right one. The code is consumed at the bottom,
     // where it is actually redeemed.
+    // A code belongs to the authorization server that issued it. Checked before
+    // anything else about the code, because "that code is not for this server"
+    // is a different fact from every other refusal here and reads as one.
+    const codeServer = record.authorization_server || authorizationServers.DEFAULT_ID;
+    if (codeServer !== profileOf(req)) {
+      log.debug("Leaving the token endpoint. The code belongs to " + codeServer + ".");
+      return oauthError(res, 400, 'invalid_grant',
+        'This authorization code was issued by the "' + codeServer + '" authorization server ' +
+        'and is being redeemed at the "' + profileOf(req) + '" one. They are separate ' +
+        'authorization servers that happen to share a process: they publish different ' +
+        'capabilities and a credential does not cross between them. Redeem it at ' +
+        (codeServer === authorizationServers.DEFAULT_ID ? '/oauth2/token'
+                                                        : '/' + codeServer + '/oauth2/token') + '.');
+    }
     if (body.redirect_uri && body.redirect_uri !== record.redirect_uri) {
       log.debug("Leaving the token endpoint. The grant was refused.");
       return oauthError(res, 400, 'invalid_grant', 'redirect_uri does not match the authorization request.');
+    }
+    // RFC 9700 mode: the PKCE downgrade refusal (section 4.8.2 — a code_verifier
+    // for a code that was issued without a challenge), and the two RFC 6749
+    // section 4.1.3 checks that make "bound to the client and the user-agent
+    // transaction" true rather than merely intended — the code is redeemed by
+    // the client it was issued to, and redirect_uri is PRESENT here rather than
+    // only compared when the client volunteered it. Like everything else above,
+    // it refuses without consuming the code.
+    const bcpCheck = bcp.checkTokenRequest({ record: record, body: body, client: client });
+    if (!bcpCheck.ok) {
+      log.debug("Leaving the token endpoint. RFC 9700 mode refused the Token Request (" +
+                bcpCheck.requirement + ").");
+      return oauthError(res, 400, bcpCheck.error, bcpCheck.description);
     }
     if (record.code_challenge) {
       const verifier = String(body.code_verifier || '');
@@ -1553,8 +2666,44 @@ app.post('/oauth2/token', function (req, res) {
       }
       log.debug("The authorization code's dpop_jkt matches the proof. jkt=" + dpopJkt);
     }
-    const issued = tokenSet(base, {
+    // RFC 8707 section 2.2: the Token Request may name a resource, and it may
+    // only be one the authorization request already asked for. Widening here
+    // would let a client award itself an audience the End-User never approved,
+    // which is the same escalation the refresh grant's scope check refuses one
+    // step later.
+    const askedResources = parseResourceIndicators(body.resource);
+    if (askedResources.error) {
+      log.debug("Leaving the token endpoint. " + askedResources.error);
+      return oauthError(res, 400, 'invalid_target', askedResources.error);
+    }
+    const granted = record.resources || [];
+    const narrowed = askedResources.resources.filter(function (one) {
+      return granted.indexOf(one) >= 0;
+    });
+    if (askedResources.resources.length && narrowed.length !== askedResources.resources.length) {
+      const extra = askedResources.resources.filter(function (one) {
+        return granted.indexOf(one) < 0;
+      });
+      log.debug("Leaving the token endpoint. The Token Request asked for a resource the code " +
+                "does not carry.");
+      return oauthError(res, 400, 'invalid_target',
+        'RFC 8707 section 2.2: a Token Request may narrow the resources the authorization ' +
+        'request asked for and may not add to them. This authorization code carries ' +
+        (granted.length ? granted.join(', ') : 'no resource at all') + ', and the request asks ' +
+        'additionally for: ' + extra.join(', ') + '.');
+    }
+    const forResources = narrowed.length ? narrowed : granted;
+    const issued = issue({
       jkt: dpopJkt,
+      // One value where there is one, an array where the client asked for the
+      // "small set" section 2.3 allows. `aud` takes either, and a single-element
+      // array is a shape some libraries read differently from a string — so the
+      // ordinary case stays a string.
+      audience: forResources.length
+        ? (forResources.length === 1 ? forResources[0] : forResources) : undefined,
+      // Onto the refresh token as well as into the access token's audience, so
+      // that a refresh cannot widen what this grant authorized.
+      resources: forResources,
       user: record.user, client_id: record.client_id, scope: record.scope,
       nonce: record.nonce, auth_time: record.auth_time, amr: record.amr, acr: record.acr,
       // Off the code, which carried it from the authorization endpoint. This is the
@@ -1568,6 +2717,12 @@ app.post('/oauth2/token', function (req, res) {
     // about a code nobody can look up any more.
     authzCodes.delete(code);
     rememberRedemption(code, record, fingerprint, issued);
+    // The transaction this code_challenge and this nonce belonged to is over,
+    // so presenting either of them at the authorization endpoint again is a
+    // second transaction reusing a first one's value rather than this one being
+    // retried. Told from the CODE's record and not from the request body: what
+    // was authorized is the fact, and what a Token Request claims is not.
+    bcp.noteRedeemed(record);
     return respond(issued);
   }
 
@@ -1637,7 +2792,7 @@ app.post('/oauth2/token', function (req, res) {
         notOffered.map(function (d) { return '"' + d.credential_configuration_id + '"'; }).join(', ') +
         ' cannot be authorized by it.');
     }
-    const issued = tokenSet(base, {
+    const issued = issue({
       jkt: dpopJkt,
       user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false,
       grant: 'pre-authorized code',
@@ -1661,6 +2816,30 @@ app.post('/oauth2/token', function (req, res) {
       log.debug("Leaving the token endpoint. The grant was refused.");
       return oauthError(res, 400, 'invalid_grant', 'The refresh token is not valid: ' + e.message);
     }
+    // RFC 9700 section 2.2.2, ABOVE the revocation check and deliberately so.
+    // Rotation revokes the token it retires, so a replayed one is also a
+    // revoked one — and answering it with "the refresh token was revoked" would
+    // be accurate and silent about the fact that a copy of the chain is in
+    // circulation. This check knows the difference; the one below cannot.
+    //
+    // It also covers the two things this grant never checked: that the client
+    // presenting the token is the client it was issued to, and that the scope
+    // asked for is not wider than the scope granted.
+    const refreshCheck = bcp.checkRefreshRequest({
+      claims: claims, body: body, clientId: String(client.client_id || '')
+    });
+    if (!refreshCheck.ok) {
+      // The family, revoked HERE rather than inside the check: that module
+      // decides and this one acts, and `stats.revoke()` is the one revocation
+      // set /oauth2/revoke and the console write to as well. A second set would
+      // look correct alone and never see the others.
+      (refreshCheck.revoke || []).forEach(function (jti) {
+        stats.revoke(jti, 'RFC 9700 section 2.2.2: a replayed refresh token revoked its family');
+      });
+      log.debug("Leaving the token endpoint. RFC 9700 mode refused the refresh (" +
+                refreshCheck.requirement + ").");
+      return oauthError(res, 400, refreshCheck.error, refreshCheck.description);
+    }
     if (stats.isRevoked(claims.jti)) return oauthError(res, 400, 'invalid_grant', 'The refresh token was revoked.');
     // RFC 9449 section 5: a bound refresh token may only be redeemed by its own
     // key. Without this the refresh token would be a bearer credential that
@@ -1682,7 +2861,56 @@ app.post('/oauth2/token', function (req, res) {
           'by ' + dpopJkt + '.');
       }
     }
-    return respond(tokenSet(base, {
+    // RFC 8705 section 3.1, the same rule for the other constraint: a refresh
+    // token bound to a client certificate may only be redeemed on a connection
+    // made with it. Without this the long-lived half of a certificate-bound
+    // grant would be a bearer credential that mints bound tokens for whoever
+    // holds it — worse than not binding at all, because the cnf on what it mints
+    // would imply a guarantee nobody checked. `true` because the token's
+    // signature was verified two lines above.
+    const certificateProblem = mtls.checkBinding(claims, req, true, 'refresh token');
+    if (certificateProblem) {
+      log.debug("Leaving the token endpoint. The refresh token's certificate binding did not hold.");
+      return oauthError(res, 400, 'invalid_grant', certificateProblem.description);
+    }
+    // RFC 8707 again, one grant later: a refresh may NARROW the resources the
+    // original authorization carried and may not add to them. Without this the
+    // resource restriction would last exactly one token — which is the same
+    // escalation the scope check refuses, and the reason the refresh token
+    // carries `resources` at all.
+    const grantedResources = Array.isArray(claims.resources) ? claims.resources : [];
+    const askedOnRefresh = parseResourceIndicators(body.resource);
+    if (askedOnRefresh.error) {
+      log.debug("Leaving the token endpoint. " + askedOnRefresh.error);
+      return oauthError(res, 400, 'invalid_target', askedOnRefresh.error);
+    }
+    const extraResources = askedOnRefresh.resources.filter(function (one) {
+      return grantedResources.indexOf(one) < 0;
+    });
+    if (extraResources.length) {
+      log.debug("Leaving the token endpoint. The refresh asked for a resource the grant " +
+                "does not carry.");
+      return oauthError(res, 400, 'invalid_target',
+        'RFC 9700 section 2.2.2: a refresh token is bound to the resource servers its grant ' +
+        'was authorized for, and this one carries ' +
+        (grantedResources.length ? grantedResources.join(', ') : 'no resource at all') +
+        '. The request asks additionally for: ' + extraResources.join(', ') + '. A grant ' +
+        'cannot widen itself by being renewed.');
+    }
+    const refreshResources = askedOnRefresh.resources.length
+      ? askedOnRefresh.resources : grantedResources;
+
+    const refreshed = issue({
+      // The presented token's jti, so the one it mints belongs to the same
+      // FAMILY. Only this grant sets it; a root refresh token has none.
+      parent_refresh_jti: claims.jti,
+      // Carried forward, and narrowed where the request asked for less. The
+      // AUDIENCE of the access token about to be minted comes from the same
+      // list, so the two cannot come to describe different resource servers.
+      resources: refreshResources,
+      audience: refreshResources.length
+        ? (refreshResources.length === 1 ? refreshResources[0] : refreshResources)
+        : undefined,
       // The same reasoning applies to the OID4VCI half of the grant: the
       // credential_identifiers and the claims selection were authorized by the
       // authorization request this refresh token descends from, so an access
@@ -1701,7 +2929,22 @@ app.post('/oauth2/token', function (req, res) {
       // so without this every second-generation token would show as sessionless and a
       // session's token list would stop growing the moment a client refreshed.
       session_id: stats.sessionIdOfJti(claims.jti), grant: 'refresh_token'
-    }));
+    });
+    // RFC 9700 section 2.2.2 — ROTATION. The token just redeemed is retired:
+    // marked as rotated here (which is what makes a later presentation of it a
+    // detectable REPLAY rather than an ordinary revocation) and revoked through
+    // the one set every other revocation goes through, so it also reports
+    // inactive at /oauth2/introspect.
+    //
+    // After the new token set exists, not before: a failure between the two
+    // would otherwise leave a client with no working refresh token and nothing
+    // to show for it. Both calls are no-ops while the mode is off, which is what
+    // keeps a refresh token reusable for its whole thirty days by default.
+    if (bcp.enabled()) {
+      bcp.noteRefreshRotated(claims.jti);
+      stats.revoke(claims.jti, 'RFC 9700 section 2.2.2: rotated on use');
+    }
+    return respond(refreshed);
   }
 
   if (grant === 'client_credentials') {
@@ -1718,12 +2961,45 @@ app.post('/oauth2/token', function (req, res) {
       note: 'A client authenticating as itself. No human and no browser is behind this token, ' +
             'and no secret was checked.'
     });
-    return respond(tokenSet(base, {
+    // ---------------------------------------------------------------------
+    // RFC 9700 section 4.13 — A CLIENT IS NOT A RESOURCE OWNER, and the token
+    // has to let a resource server tell them apart.
+    //
+    // The `sub` of a client_credentials token was the bare client_id while a
+    // person's is `urn:sts-mock:user:<name>`. Different in practice and not by
+    // any rule: nothing stopped a client registering an id that looked like a
+    // subject, and a resource server keying on `sub` alone had no way to know
+    // which kind of thing it was holding. That is the collision the section is
+    // about, and the MUST beside it asks for "another mechanism allowing
+    // resource servers to distinguish client credentials from resource-owner
+    // credentials".
+    //
+    // In RFC 9700 mode there are TWO such mechanisms and they are different in
+    // kind, which is why both are here:
+    //
+    //   * A SEPARATE NAMESPACE. `urn:sts-mock:client:<id>` beside
+    //     `urn:sts-mock:user:<name>` — two prefixes that cannot collide however
+    //     a client is named, so the ids no longer share a namespace at all,
+    //     which is what the SHOULD asks for.
+    //   * `sub` EQUALS `client_id`. True of a client_credentials token and of
+    //     nothing else here, and it needs no invented claim and no convention a
+    //     resource server has to be told about — RFC 9700 suggests this
+    //     comparison itself. It stays true in BOTH modes, which is why it is
+    //     the one the row recommends.
+    //
+    // The namespace is mode-gated because it changes the `sub` of every
+    // client_credentials token, and a subject identifier is something callers
+    // key on. The comparison costs nothing and is always available.
+    // ---------------------------------------------------------------------
+    const clientSubject = bcp.enabled()
+      ? 'urn:sts-mock:client:' + (client.client_id || 'unknown-client')
+      : (client.client_id || 'unknown-client');
+    return respond(issue({
       jkt: dpopJkt,
-      sub: client.client_id || 'unknown-client', username: client.client_id,
+      sub: clientSubject, username: client.client_id,
       client_id: client.client_id, scope: String(body.scope || ''), withRefresh: false,
       grant: 'client_credentials',
-      user: Object.assign(userFor(client.client_id), { sub: client.client_id || 'unknown-client' })
+      user: Object.assign(userFor(client.client_id), { sub: clientSubject })
     }));
   }
 
@@ -1749,7 +3025,7 @@ app.post('/oauth2/token', function (req, res) {
       note: 'No password is checked here either, except the reserved string "invalid". ' +
             'A password grant creates no browser session.'
     });
-    return respond(tokenSet(base, {
+    return respond(issue({
       jkt: dpopJkt,
       user: userFor(username), client_id: client.client_id, scope: String(body.scope || 'openid'),
       grant: 'password'
@@ -1800,7 +3076,7 @@ app.post('/oauth2/token', function (req, res) {
           'verifying anything, so this is a subject this service has been TOLD about rather than ' +
           'one it authenticated.'
     });
-    const exchanged = tokenSet(base, {
+    const exchanged = issue({
       jkt: dpopJkt,
       sub: subject.sub || 'urn:sts-mock:exchanged',
       user: Object.assign(userFor(subject.username), subject.sub ? { sub: subject.sub } : {}),
@@ -1815,10 +3091,38 @@ app.post('/oauth2/token', function (req, res) {
   log.debug("Leaving the token endpoint.");
   log.debug("Leaving the token endpoint. The grant type is not supported.");
   return oauthError(res, 400, 'unsupported_grant_type', 'grant_type "' + grant + '" is not supported.');
+}
+
+app.post('/oauth2/token', tokenEndpoint);
+
+// ---------------------------------------------------------------------------
+// THE SAME ENDPOINTS, UNDER EVERY AUTHORIZATION SERVER'S OWN NAME.
+//
+// Registered here, in one block, so that the set cannot drift from the set
+// above — an endpoint that existed at `/oauth2/x` and not at `/{id}/oauth2/x`
+// would be one a named authorization server advertises and does not have.
+//
+// The route order rule (rule 1 in CLAUDE.md) is why they are AFTER the
+// unprefixed ones: `/:as/oauth2/authorize` cannot match `/oauth2/authorize`
+// (three segments against two), so the two sets do not overlap and the order is
+// a matter of reading rather than of behaviour — but the block being one block
+// is what makes a missing member visible.
+[
+  ['get', '/:as/oauth2/authorize', authorizeEndpoint],
+  ['post', '/:as/oauth2/token', tokenEndpoint],
+  ['get', '/:as/oauth2/logout', logoutEndpoint],
+  ['get', '/:as/oauth2/userinfo', userinfoResponse],
+  ['post', '/:as/oauth2/userinfo', userinfoResponse],
+  ['post', '/:as/oauth2/introspect', introspectEndpoint],
+  ['post', '/:as/oauth2/revoke', revokeEndpoint],
+  ['post', '/:as/oauth2/register', registerEndpoint],
+  ['get', '/:as/oauth2/jwks', jwksEndpoint]
+].forEach(function (route) {
+  app[route[0]](route[1], forProfile(route[2]));
 });
 
 // --- introspection (RFC 7662) ------------------------------------------------
-app.post('/oauth2/introspect', function (req, res) {
+function introspectEndpoint(req, res) {
   log.debug("Entering the introspection endpoint.");
   const body = parseBody(req);
   res.set('Cache-Control', 'no-store');
@@ -1853,13 +3157,15 @@ app.post('/oauth2/introspect', function (req, res) {
     sub: claims.sub, aud: claims.aud, iss: claims.iss, jti: claims.jti
   }));
   log.debug("Leaving the introspection endpoint. The token is active.");
-});
+}
+
+app.post('/oauth2/introspect', introspectEndpoint);
 
 // --- revocation (RFC 7009) ---------------------------------------------------
 // "The authorization server responds with HTTP 200 for both a successful
 // revocation and an invalid token" — so this always succeeds. A revoked jti
 // stops introspecting as active and stops refreshing.
-app.post('/oauth2/revoke', function (req, res) {
+function revokeEndpoint(req, res) {
   log.debug("Entering the revocation endpoint.");
   const body = parseBody(req);
   const token = String(body.token || '');
@@ -1874,7 +3180,9 @@ app.post('/oauth2/revoke', function (req, res) {
   }
   res.status(200).set('Cache-Control', 'no-store').end();
   log.debug("Leaving the revocation endpoint. " + stats.revokedCount() + " token(s) revoked so far.");
-});
+}
+
+app.post('/oauth2/revoke', revokeEndpoint);
 
 // --- dynamic client registration (RFC 7591) + management (RFC 7592) ----------
 function clientRecord(base, metadata, clientId, secret, token) {
@@ -1891,26 +3199,43 @@ function clientRecord(base, metadata, clientId, secret, token) {
   return record;
 }
 
-app.post('/oauth2/register', function (req, res) {
+function registerEndpoint(req, res) {
   log.debug("Entering the client registration endpoint.");
   const base = baseUrlOf(req);
   const metadata = parseBody(req);
   if (metadata.redirect_uris && !Array.isArray(metadata.redirect_uris)) {
     return oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uris must be an array.');
   }
+  // RFC 9700 mode: this endpoint will not register a client for something the
+  // other endpoints refuse. A registration is a document the client keeps and
+  // acts on, so recording `grant_types: ["password"]` for a server that answers
+  // that grant with unsupported_grant_type would be the discovery document's
+  // promise broken in the other direction — and the client would find out at the
+  // first token request rather than here.
+  const registrationCheck = bcp.checkClientRegistration(metadata);
+  if (!registrationCheck.ok) {
+    log.debug("Leaving the client registration endpoint. RFC 9700 mode refused the metadata (" +
+              registrationCheck.requirement + ").");
+    return oauthError(res, 400, registrationCheck.error, registrationCheck.description);
+  }
   const clientId = 'sts-mock-client-' + randomId(8);
   const record = clientRecord(base, metadata, clientId, randomId(24), randomId(24));
-  registeredClients.set(clientId, record);
+  // Into the directory, under ou=applications. The response below is composed
+  // from `record` rather than read back, because the two are the same object
+  // and a read-back would only be able to differ.
+  applications.register(clientId, record);
   res.status(201).type('application/json').set('Cache-Control', 'no-store')
      .send(JSON.stringify(record, null, 2));
   log.debug("Leaving the client registration endpoint. Registered " + clientId + ".");
-});
+}
+
+app.post('/oauth2/register', registerEndpoint);
 
 // The management calls all authenticate with the registration access token the
 // registration handed out.
 function withRegisteredClient(req, res, handler) {
   log.debug("Entering withRegisteredClient(). client_id=" + req.params.client_id);
-  const record = registeredClients.get(req.params.client_id);
+  const record = applications.registrationOf(req.params.client_id);
   if (!record) {
     log.debug("Leaving withRegisteredClient(). No such client.");
     return oauthError(res, 404, 'invalid_client', 'No such registered client.');
@@ -1945,7 +3270,7 @@ app.put('/oauth2/register/:client_id', function (req, res) {
       registration_access_token: record.registration_access_token,
       registration_client_uri: record.registration_client_uri
     });
-    registeredClients.set(record.client_id, updated);
+    applications.updateRegistration(record.client_id, updated);
     res.status(200).type('application/json').send(JSON.stringify(updated, null, 2));
   });
   log.debug("Leaving the client update endpoint.");
@@ -1954,7 +3279,12 @@ app.put('/oauth2/register/:client_id', function (req, res) {
 app.delete('/oauth2/register/:client_id', function (req, res) {
   log.debug("Entering the client delete endpoint.");
   withRegisteredClient(req, res, function (record) {
-    registeredClients.delete(record.client_id);
+    // The REGISTRATION goes and the application entry stays, with
+    // appRegistered FALSE and the credentials stripped off it. See
+    // forgetRegistration(): this registry records what this service has seen,
+    // and losing that an application was ever here because its registration was
+    // withdrawn would be losing the fact rather than the configuration.
+    applications.forgetRegistration(record.client_id);
     res.status(204).end();
   });
   log.debug("Leaving the client delete endpoint.");
@@ -1986,8 +3316,11 @@ app.get('/tos', function (req, res) {
 module.exports = {
   asMetadata: asMetadata,
   accessToken: accessToken,
-  tokenSet: tokenSet,
-  registeredClients: registeredClients
+  tokenSet: tokenSet
+  // `registeredClients` used to be exported from here. It is not a Map in this
+  // module any more — the registrations are entries under ou=applications, and
+  // `applications.registrationOf()` is how anything reads one. Re-exporting a
+  // second name for that would be the two-stores problem with extra steps.
   // The browser session used to be exported from here, because this module owned
   // the login flow it came out of. It does not any more: `authn.js` does, and
   // wsfed.js and admin.js take it from there. Re-exporting it would leave two

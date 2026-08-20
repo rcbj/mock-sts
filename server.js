@@ -86,6 +86,7 @@
 // route is missing.
 // ---------------------------------------------------------------------------
 
+const https = require('https');
 const app = require('./app');
 const { log, PORT, HOST } = require('./helpers');
 const config = require('./config');
@@ -182,10 +183,59 @@ const tlsServer = require('./tls_server');
 const ldapServer = require('./ldap_server');
 require('./sts_metadata');
 
-app.listen(PORT, HOST, function () {
-  log.info('WS-Trust STS mock listening on ' + HOST + ':' + PORT +
+// ---------------------------------------------------------------------------
+// THE MAIN LISTENER, and the one decision made about it before it binds.
+//
+// `global.https` — whose default is `oauth2.rfc9700`, so RFC 9700 mode brings
+// it with it — makes this an HTTPS listener instead of a plain one. It is not a
+// fourth certificate: `tls_server.js` generates ONE self-signed pair per start
+// and 8443, 9443 and the directory's LDAPS 636 already serve it, so a caller
+// trusts this service once rather than four times. That module has been
+// required above by the time this runs, which is what makes the key available
+// here without moving anything in the require order.
+//
+// Two things follow and neither is hidden.
+//
+// **There is then no plain listener in this process at all.** `POST /tls/trust`
+// and `GET /tls/server-certificate` are on this port on purpose — they are what
+// a caller reaches BEFORE it trusts anything — so with HTTPS on, the first
+// fetch of the certificate has to be made without verifying it (`curl -k`).
+// That is the ordinary bootstrap for a service whose certificate is regenerated
+// every start, and it is said here, on /tls, and in the startup line below
+// rather than left to be discovered as a handshake failure.
+//
+// **The scheme every document here advertises follows the socket by itself.**
+// `baseUrlOf()` builds every issuer, endpoint and metadata URL from
+// `req.protocol` and the Host header, which is what already makes one process
+// answer correctly as localhost, as sts on a compose network and through a
+// published port. An https.Server sets `req.protocol` to https, so the RFC 8414
+// document, the OpenID Provider Configuration, the OID4VCI and OID4VP metadata,
+// the federation metadata and the DID document all move together and none of
+// them had to be told. Do not "fix" this by pinning a scheme anywhere: a
+// hardcoded https is wrong on the default plain listener, and a document whose
+// endpoints disagree with the port they were fetched from is the failure this
+// derivation exists to prevent.
+// ---------------------------------------------------------------------------
+const useHttps = config.value('global.https');
+
+function announce() {
+  log.info('WS-Trust STS mock listening on ' + (useHttps ? 'https' : 'http') +
+           '://' + HOST + ':' + PORT +
            ' (WS-Trust issuer ' + config.value('wstrust.issuer') +
            '); POST SOAP RST to /sts');
+  if (useHttps) {
+    log.info('This port is HTTPS (global.https' +
+             (config.value('oauth2.rfc9700') ? ', which RFC 9700 mode turned on' : '') +
+             '), served with the same self-signed certificate 8443, 9443 and ' +
+             'LDAPS 636 use. It is regenerated on every start, so fetch it ' +
+             'from /tls/server-certificate and trust it — and fetch it WITHOUT ' +
+             'verification the first time (curl -k), because with this on ' +
+             'there is no plain port left to fetch it from.');
+    log.info('It also ASKS for a client certificate and never requires one ' +
+             '(RFC 8705): a Token Request made with one gets an access token ' +
+             'bound to it — cnf["x5t#S256"] — which the protected endpoints ' +
+             'then check. A request with none is unaffected.');
+  }
   log.info('RFC 8414 metadata at /.well-known/oauth-authorization-server; ' +
            'OpenID Provider Configuration at /.well-known/openid-configuration; JWKS at /oauth2/jwks');
   log.info('OID4VCI issuer metadata at /.well-known/openid-credential-issuer; ' +
@@ -274,4 +324,30 @@ app.listen(PORT, HOST, function () {
     // later as a TLS endpoint that never answers.
     log.error('tls: the TLS endpoint could not start: ' + err.message);
   });
-});
+}
+
+// Built rather than started above, because the two shapes differ only in this
+// one expression and writing the whole announcement twice is how the two
+// versions of it come to say different things.
+if (useHttps) {
+  const serverCert = tlsServer.serverCertificate();
+  https.createServer({
+    cert: serverCert.certPem,
+    key: serverCert.privateKeyPem,
+    // RFC 8705 — certificate-bound access tokens. The token endpoint is on this
+    // listener, so a certificate has to be ASKED FOR here or there is never one
+    // to bind to. The posture is 8443's exactly: asked for, never required.
+    //
+    // `rejectUnauthorized: false` looks like a hole and is not. A certificate
+    // that built no chain to a trusted anchor is still thumbprinted and still
+    // binds the token, because RFC 8705 section 3 binds to the CERTIFICATE and
+    // explicitly permits a self-signed one — the proof is that the same key
+    // completed this handshake, not that a CA vouched for it. Requiring
+    // verification would also make the feature unreachable, since the
+    // truststore at /tls/trust starts empty by design.
+    requestCert: true,
+    rejectUnauthorized: false
+  }, app).listen(PORT, HOST, announce);
+} else {
+  app.listen(PORT, HOST, announce);
+}

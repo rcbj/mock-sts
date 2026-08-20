@@ -106,6 +106,10 @@ const config = require('./config');
 // builder, so the two places a ticket is minted say so explicitly — and there are
 // exactly two, the end of handleAsReq() and the end of handleTgsReq().
 const stats = require('./admin_stats');
+// The application registry (ou=applications in the embedded directory). A
+// Kerberos service principal is an application like an OAuth client is, and
+// this is where a ticket for one is issued.
+const applications = require('./applications');
 const asn1 = require('./krb5_asn1.js');
 const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
@@ -1555,6 +1559,20 @@ async function handleTgsReq(request) {
   // asked on their behalf — and recording that as if they had signed in would be the
   // one place this console could libel somebody. So the requester is named in the
   // note and the method says which of the three this was.
+  // THE SERVICE. A TGS-REP is a ticket FOR a named service principal, which is
+  // Kerberos's application identity — the only one in this service that this
+  // process may have created on demand (KRB5_SERVICE_DOMAINS). It is recorded
+  // here rather than at the AS exchange because an AS-REQ names no service but
+  // the krbtgt: a TGT is a ticket for the KDC itself, and filing that as an
+  // application would put this service in its own registry.
+  applications.seen({
+    identifier: body.sname.name.join('/') + '@' + answeringRealm,
+    kind: 'kerberos-service',
+    protocol: 'Kerberos v5',
+    user: clientName.name.join('/') + '@' + clientRealm,
+    note: 'a service ticket was issued for this principal',
+    fields: { krb5ServicePrincipalName: body.sname.name.join('/') + '@' + answeringRealm }
+  });
   stats.recordAuthentication({
     presented: clientName.name.join('/') + '@' + clientRealm,
     protocol: 'Kerberos v5',

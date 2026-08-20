@@ -1186,6 +1186,455 @@ const ROUTES = [
         responseDescription: 'The format now in force.' }
     ] },
 
+  // The authorization server profiles — what each discovery document publishes.
+  //
+  // RFC 9700 section 2.6 asks a server to publish its metadata so that clients
+  // stop hard-coding security capabilities. These operations decide what the
+  // published document SAYS, per authorization server, which is the other side
+  // of that: a client which reads the metadata can be shown reading it, and one
+  // which does not can be shown not to.
+  //
+  // ANY MEMBER IS ACCEPTED, including one this service has never heard of. That
+  // is the difference between this and every other resource here — the
+  // applications registry REFUSES an attribute outside its schema, because that
+  // schema is a published contract about what an entry carries. This has no
+  // schema on purpose: publishing something a client did not expect is half the
+  // point of a mock.
+  { method: 'GET', path: BASE + '/authorization-servers', tag: 'Authorization servers',
+    operationId: 'getAuthorizationServers',
+    summary: 'Every authorization server profile, and what its document says',
+    description: 'One process, several authorization servers. The path ' +
+                 'component the two discovery shapes already carry — RFC 8414 ' +
+                 'section 3.1 INSERTS it after the well-known segment, OpenID ' +
+                 'Connect Discovery section 4 APPENDS the well-known segment ' +
+                 'to it — now selects a CONFIGURATION as well as an issuer ' +
+                 'identifier.\n\n**A path nobody has configured publishes the ' +
+                 'document this service always published**, so nothing that ' +
+                 'worked before behaves differently.\n\nEvery reply carries ' +
+                 '`drift`: the members whose published value disagrees with ' +
+                 'what this service would publish, and the removals that hide ' +
+                 'something real. A profile that lies is often exactly what is ' +
+                 'wanted — it is how you find out whether a client reads the ' +
+                 'metadata — but a mock that let somebody publish a misleading ' +
+                 'document QUIETLY would be a trap.\n\n`?profile=<id>` returns ' +
+                 'one of them with every override, every removal and its ' +
+                 'drift.',
+    mirrors: 'GET /admin/authorization-servers',
+    parameters: [
+      { name: 'profile', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One profile, by the path component that selects it. ' +
+                     'Answers 200 with `found: false` for one that is not ' +
+                     'configured — whose discovery URLs still answer, with ' +
+                     'this service\'s own document.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The profiles with the paging that found them, or one ' +
+                         'profile with its overrides and drift.',
+    responseSchema: { $ref: '#/components/schemas/AuthorizationServerList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API authorization servers endpoint.");
+      sendJson(res, 200, admin.authorizationServersView(req).json);
+      log.debug("Leaving the management API authorization servers endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/authorization-servers/:action',
+    tag: 'Authorization servers',
+    mirrors: 'POST /admin/authorization-servers',
+    handler: function (req, res) {
+      log.debug("Entering the management API authorization servers action endpoint.");
+      const body = parseBody(req);
+      const result = admin.authorizationServersAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API authorization servers action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createAuthorizationServer',
+        summary: 'Add an authorization server profile',
+        description: 'The `id` is a single URL path segment, because it has to ' +
+                     'appear in a discovery URL without being escaped — one ' +
+                     'that had to be escaped would be one nobody could find ' +
+                     'again. A new profile has no overrides, so both its ' +
+                     'documents say exactly what this service says about ' +
+                     'itself, which is the right place to start from.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string',
+                  description: '1-64 characters of letters, digits, dot, dash, ' +
+                               'underscore or tilde, starting with a letter or ' +
+                               'a digit.' },
+            label: { type: 'string', description: 'Optional display name.' },
+            description: { type: 'string', description: 'Optional note.' }
+          },
+          required: ['id'],
+          examples: [{ id: 'tenant1', label: 'Tenant One',
+                       description: 'advertises plain PKCE, to see what a client does' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The profile and the two URLs it is published at.' },
+
+      { action: 'set', operationId: 'setAuthorizationServerMember',
+        summary: 'Publish a metadata member with a chosen value',
+        description: 'The value is read as JSON first and as a plain string if ' +
+                     'that fails, so `["S256"]` is a list, `false` is a boolean ' +
+                     'and `https://example.com/token` is a string.\n\n**Any ' +
+                     'member name is accepted**, including one this service has ' +
+                     'never heard of; the catalogue in the GET reply is help ' +
+                     'for whoever fills the form rather than a constraint. A ' +
+                     'member that is also removed stops being removed, or the ' +
+                     'call would appear to do nothing.\n\nWhat this does NOT ' +
+                     'change is what the endpoints do. Advertise ' +
+                     '`code_challenge_methods_supported: ["plain"]` and the ' +
+                     'token endpoint still verifies S256 — which is the point, ' +
+                     'and is reported as drift rather than left to be ' +
+                     'discovered.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            profile: { type: 'string', description: 'The profile id.' },
+            member: { type: 'string', description: 'Any metadata member name.' },
+            value: { description: 'JSON if it parses as JSON, otherwise the string.' }
+          },
+          required: ['profile', 'member'],
+          examples: [{ profile: 'tenant1',
+                       member: 'code_challenge_methods_supported',
+                       value: ['S256'] }],
+          additionalProperties: false
+        },
+        responseDescription: 'The profile as it now stands.' },
+
+      { action: 'remove', operationId: 'removeAuthorizationServerMember',
+        summary: 'Stop publishing a member at all',
+        description: 'DIFFERENT FROM `reset`, and the difference is the reason ' +
+                     'both exist: reset undoes an override and this publishes ' +
+                     'an ABSENCE. A client that cannot find ' +
+                     '`code_challenge_methods_supported` does not learn that ' +
+                     'PKCE is unavailable — it learns nothing, and RFC 9700 ' +
+                     'section 2.6 is entirely about that difference.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            profile: { type: 'string' },
+            member: { type: 'string' }
+          },
+          required: ['profile', 'member'],
+          examples: [{ profile: 'tenant1',
+                       member: 'code_challenge_methods_supported' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The profile as it now stands.' },
+
+      { action: 'reset', operationId: 'resetAuthorizationServerMember',
+        summary: 'Put one member back to what this service publishes',
+        description: 'Undoes an override or a removal for a single member, ' +
+                     'leaving the rest of the profile alone.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            profile: { type: 'string' },
+            member: { type: 'string' }
+          },
+          required: ['profile', 'member'],
+          examples: [{ profile: 'tenant1', member: 'token_endpoint' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The profile as it now stands.' },
+
+      { action: 'delete', operationId: 'deleteAuthorizationServer',
+        summary: 'Delete a profile',
+        description: 'The two discovery URLs go on answering — with this ' +
+                     'service\'s own document and the issuer taken from the ' +
+                     'path — because an unconfigured path component has always ' +
+                     'been served that way rather than 404\'d.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { profile: { type: 'string' } },
+          required: ['profile'],
+          examples: [{ profile: 'tenant1' }],
+          additionalProperties: false
+        },
+        responseDescription: 'A message saying what still answers.' }
+    ] },
+
+  // The application registry, read and written.
+  //
+  // The write half is NOT a third store beside the protocol endpoints and LDAP:
+  // every action below calls a function in applications.js which does the same
+  // read-modify-write against the same ou=applications entries, so a form post
+  // and an ldapmodify are one act arriving by two routes. That is what keeps the
+  // one-store rule intact with three ways in.
+  //
+  // What may be changed is DECLARED and not DERIVED — configuration, which is
+  // what RFC 9700 mode reads, but never the counters or the sightings, which are
+  // what happened. The line is drawn by applications.js's EDITABLE table, so
+  // this file offers no opinion about it and the console's selects are built
+  // from the same rows these actions validate against.
+  { method: 'GET', path: BASE + '/applications', tag: 'Applications',
+    operationId: 'getApplications',
+    summary: 'Every application this service has been asked about, filtered and paged',
+    description: 'The other side of /admin-api/users. That resource lists ' +
+                 'every identity that has authenticated here; this lists what ' +
+                 'they authenticated TO — every OAuth client, OpenID Connect ' +
+                 'relying party, SAML 2.0 or 1.1 service provider, ' +
+                 'WS-Federation application, WS-Trust relying party, ' +
+                 'OpenID4VP verifier and Kerberos service.\n\n**The entries ' +
+                 'ARE the registry.** They live under `ou=applications` in the ' +
+                 'embedded LDAP directory and nothing caches them, so an ' +
+                 '`ldapmodify` is visible here on the next call — and changes ' +
+                 'what RFC 9700 mode enforces at the same moment. The RFC 7591 ' +
+                 'client registrations are those entries too.\n\n**One entry ' +
+                 'per identifier, whatever protocol brought it.** The key is ' +
+                 'the identifier exactly as it arrived, so an application ' +
+                 'appearing under one name in two protocols is one row with ' +
+                 'two `kinds` rather than two rows.\n\n`?application=<id>` ' +
+                 'returns ONE of them with every attribute of its directory ' +
+                 'entry and what the published schema says each attribute is; ' +
+                 'that reply pages its attribute list under `attributesPage` ' +
+                 'rather than `page`, which is the convention for a reply ' +
+                 'holding a list that is not the top-level one.\n\n**Two ' +
+                 'attributes hold credentials in the clear** — ' +
+                 '`oauthClientSecret` and `appRegistrationAccessToken` — for ' +
+                 'the reason GET /krb5/principals prints the Kerberos ' +
+                 'passwords. In RFC 9700 mode that secret is CHECKED, so ' +
+                 'anyone who can reach this endpoint can authenticate as that ' +
+                 'client.',
+    mirrors: 'GET /admin/applications',
+    parameters: [
+      { name: 'application', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One application, by its identifier exactly — the ' +
+                     'client_id, wtrealm, AppliesTo, entityID or service ' +
+                     'principal name. Answers 200 with `found: false` for one ' +
+                     'this service has never accepted, which is a different ' +
+                     'fact from one it has refused: an entry appears when an ' +
+                     'identifier is ACCEPTED, so a client whose every request ' +
+                     'was turned away has none.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the identifier or the name, ' +
+                     'case-insensitive. Ignored when `application` is given.' },
+      { name: 'kind', in: 'query', required: false,
+        schema: { type: 'string',
+                  enum: ['oauth2-client', 'oidc-relying-party',
+                         'saml2-service-provider', 'saml11-relying-party',
+                         'wsfed-relying-party', 'wstrust-relying-party',
+                         'oid4vp-verifier', 'kerberos-service'] },
+        description: 'One kind. A record carrying SEVERAL matches on any of ' +
+                     'them — an OAuth client that asked for the openid scope ' +
+                     'is also a relying party — so these are not disjoint ' +
+                     'sets and the counts in the reply\'s `kinds` member do ' +
+                     'not sum to the total.' },
+      { name: 'attributesPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of the attribute list, on the ' +
+                     '`?application=` reply only. Named rather than the bare ' +
+                     '`page` because it moves a list inside the reply rather ' +
+                     'than the reply itself.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The matching applications with the paging that ' +
+                         'found them, or one application with its directory ' +
+                         'entry when `application` was given.',
+    responseSchema: { $ref: '#/components/schemas/ApplicationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API applications endpoint.");
+      sendJson(res, 200, admin.applicationsView(req).json);
+      log.debug("Leaving the management API applications endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/applications/:action', tag: 'Applications',
+    mirrors: 'POST /admin/applications',
+    handler: function (req, res) {
+      log.debug("Entering the management API applications action endpoint.");
+      const body = parseBody(req);
+      const result = admin.applicationsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API applications action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createApplication',
+        summary: 'Put an application in the registry before it connects',
+        description: 'An entry usually appears because an identifier was ' +
+                     'ACCEPTED — a client_id at the token endpoint, a wtrealm ' +
+                     'on a sign-in response, an SPN on a TGS-REP. This is how ' +
+                     'to get one in ahead of that, which is what RFC 9700 mode ' +
+                     'needs if a client is to be judged against its OWN ' +
+                     'redirect URIs rather than against the ' +
+                     '`oauth2.redirectUris` setting.\n\nIt is created with ' +
+                     'zero counters and a description saying it was created ' +
+                     'by hand, so it cannot be mistaken for an application ' +
+                     'that turned up once and never came back. Give it its ' +
+                     'redirect URIs and grant types with `add` afterwards.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            identifier: { type: 'string',
+                          description: 'The client_id, wtrealm, AppliesTo, ' +
+                                       'entityID or service principal name. ' +
+                                       'One application per identifier ' +
+                                       'whatever protocol brings it, so this ' +
+                                       'is refused if one is already here.' },
+            name: { type: 'string', description: 'Optional friendly name.' },
+            kind: { type: 'string',
+                    description: 'Optional, one of the eight. It is a claim ' +
+                                 'about what this application IS, which is ' +
+                                 'why a value the registry does not know is ' +
+                                 'refused rather than recorded.' }
+          },
+          required: ['identifier'],
+          examples: [{ identifier: 'urn:example:crm', name: 'CRM',
+                       kind: 'wsfed-relying-party' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, in `application`.' },
+
+      { action: 'set', operationId: 'setApplicationAttribute',
+        summary: 'Set a single-valued attribute',
+        description: 'For the attributes that hold ONE value — `appName`, ' +
+                     '`oauthClientSecret`, `oauthTokenEndpointAuthMethod`, ' +
+                     '`oauthConfidential`, the SAML and Kerberos identifiers. ' +
+                     'An empty `value` CLEARS the attribute.\n\n**What may be ' +
+                     'changed is DECLARED and not DERIVED.** Configuration — ' +
+                     'what this application is allowed to do, which is what ' +
+                     'RFC 9700 mode reads — is editable. The counters, the ' +
+                     'sightings, the kinds and the protocols are what ' +
+                     'HAPPENED, and are refused with a list of what is not: a ' +
+                     'call that could rewrite them would make this registry ' +
+                     'lie about the service\'s own behaviour, in a way ' +
+                     'indistinguishable from the recording being broken. ' +
+                     '`ldapmodify` still reaches every attribute, which is a ' +
+                     'deliberate difference — refusing them HERE is the ' +
+                     'difference between offering an operation and merely not ' +
+                     'preventing it.\n\nThis writes the same entry LDAP ' +
+                     'writes, through the same functions, so it takes effect ' +
+                     'on the very next authorization request.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            application: { type: 'string',
+                           description: 'The identifier, exactly as the ' +
+                                        'registry holds it.' },
+            attribute: { type: 'string',
+                         description: 'One of the editable single-valued ' +
+                                      'attributes. GET /ldap/applications ' +
+                                      'publishes the schema with an ' +
+                                      '`editable` member on every row.' },
+            value: { type: 'string',
+                     description: 'The new value; empty clears the attribute.' }
+          },
+          required: ['application', 'attribute'],
+          examples: [{ application: 'my-web-app',
+                       attribute: 'oauthTokenEndpointAuthMethod',
+                       value: 'none' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, with `changed` ' +
+                             'saying whether anything actually differed.' },
+
+      { action: 'add', operationId: 'addApplicationValue',
+        summary: 'Add a value to a multi-valued attribute',
+        description: 'For the attributes that hold a LIST — `oauthRedirectUri`, ' +
+                     '`oauthPostLogoutRedirectUri`, `oauthGrantType`, ' +
+                     '`oauthResponseType`, `oauthScope`, ' +
+                     '`samlAssertionConsumerService`, `description`.\n\nThis ' +
+                     'is the one that matters most: a value added to ' +
+                     '`oauthRedirectUri` is a redirect URI RFC 9700 mode ' +
+                     'accepts by exact string match on the next authorization ' +
+                     'request. Note that it is the REGISTERED list — ' +
+                     '`appRedirectUriObserved`, which records what a client ' +
+                     'actually used, is not editable, because "registered" and ' +
+                     '"used" are different facts and section 2.1 is entirely ' +
+                     'about not confusing them.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            application: { type: 'string' },
+            attribute: { type: 'string' },
+            value: { type: 'string' }
+          },
+          required: ['application', 'attribute', 'value'],
+          examples: [{ application: 'my-web-app', attribute: 'oauthRedirectUri',
+                       value: 'https://app.example.com/callback' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands.' },
+
+      { action: 'remove', operationId: 'removeApplicationValue',
+        summary: 'Remove a value from a multi-valued attribute',
+        description: 'The inverse of `add`. Removing the LAST value takes the ' +
+                     'attribute with it, which is what the LDAP modify handler ' +
+                     'does for every other entry in this directory and what an ' +
+                     'operator reading it with an LDAP client will expect.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            application: { type: 'string' },
+            attribute: { type: 'string' },
+            value: { type: 'string' }
+          },
+          required: ['application', 'attribute', 'value'],
+          examples: [{ application: 'my-web-app', attribute: 'oauthRedirectUri',
+                       value: 'https://old.example.com/callback' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands.' },
+
+      { action: 'revoke-registration', operationId: 'revokeApplicationRegistration',
+        summary: 'Withdraw an RFC 7591 registration, keeping the entry',
+        description: 'RFC 7592\'s delete reached from here instead of from the ' +
+                     'client that holds the registration access token — the ' +
+                     'same function, so the outcome is the same one rather ' +
+                     'than a second reading of what "unregistered" means.' +
+                     '\n\n**The ENTRY stays**, with everything it had ' +
+                     'recorded; the `client_secret`, the registration access ' +
+                     'token and the registration document go. Losing that an ' +
+                     'application was ever here because its registration was ' +
+                     'withdrawn would be losing the fact rather than the ' +
+                     'configuration.\n\nAfterwards RFC 9700 mode treats it as ' +
+                     'an unregistered, PUBLIC client: PKCE is required of it, ' +
+                     'its secret is no longer checked, and its redirect_uri is ' +
+                     'judged against the `oauth2.redirectUris` setting rather ' +
+                     'than against its own list.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { application: { type: 'string' } },
+          required: ['application'],
+          examples: [{ application: 'sts-mock-client-Ab12Cd34' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, with ' +
+                             '`registered` false.' },
+
+      { action: 'forget', operationId: 'deleteApplication',
+        summary: 'Delete an application entry entirely',
+        description: 'THE ONE OPERATION HERE THAT LOSES A FACT, which is why ' +
+                     'it is separate from `revoke-registration` rather than ' +
+                     'something that one does as well. The entry goes and ' +
+                     'takes its counters, its sightings and its attributes ' +
+                     'with it — for a client_id somebody typed wrong, or a ' +
+                     'realm from a test that is over.\n\nIt will reappear, ' +
+                     'EMPTY, the next time that identifier is accepted by a ' +
+                     'protocol: this registry records what this service has ' +
+                     'seen, and it is still seeing.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { application: { type: 'string' } },
+          required: ['application'],
+          examples: [{ application: 'typo-clientt' }],
+          additionalProperties: false
+        },
+        responseDescription: 'A message saying what went with it.' }
+    ] },
+
   // The audit log. READ ONLY, and that is a decision rather than an operation
   // nobody got round to. Every other resource here has a POST beside it because
   // the console control it mirrors is a form; this one mirrors a page with no

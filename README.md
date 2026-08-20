@@ -37,18 +37,21 @@ are — most of it is the record of something having gone wrong once.
 | **WS-Trust 1.0–1.4** | Issue / Renew / Validate / Cancel, WS-Security, WS-Addressing, optional XML-DSIG and XML-Enc |
 | **SAML 2.0 and SAML 1.1** | signed assertions of both vintages, and the metadata a relying party needs. 1.1 is here because it is what a WS-Federation relying party expects by default |
 | **WS-Federation 1.2** | the Web (Passive) Requestor Profile of section 13 — `wsignin1.0` with `wtrealm`, `wreply`, `wctx`, `wct`, `wfresh`, `wauth`, `whr` and `wreq`, the response as a **form POST**, `wsignout1.0` with front-channel cleanup, signed federation metadata at AD FS's path, and a mock relying party that verifies the response check by check |
-| **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (which redirects to the authentication service when nobody is signed in), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
+| **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (which redirects to the authentication service when nobody is signed in), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)**. It is permissive by design, and it can be told not to be: `oauth2.rfc9700` puts the authorization flow into **RFC 9700** mode — exact-string redirect URI matching with RFC 8252's loopback port exception, no open redirector at either redirecting endpoint, PKCE required of public clients with S256 only, the PKCE downgrade and value reuse refused, and no response type that issues an access token from the authorization endpoint, refresh token rotation with replay detection that revokes the whole chain, no password grant, no CORS at the authorization endpoint, and the one client credential this service checks — and it turns port 8081 itself into an **HTTPS** listener, on the certificate 8443, 9443 and LDAPS 636 already share, so the issuer and every endpoint in every metadata document follow. Off by default; `GET /oauth2/rfc9700` says what it does and does not enforce |
 | **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
 | **WebAuthn Level 3** | the relying party's half, on the login screen, in **both roles**: a second factor after the password, or the **primary credential** with no password at all. Registration and assertion are verified either way, and `amr` / `acr` in the tokens that follow say which happened — `["pwd","hwk"]`/`mfa` for two factors, `["hwk"]`/`1` for a passwordless sign-in, which is one factor however phishing-resistant it is |
 | **DPoP (RFC 9449)** | all twelve section 4.3 proof checks, `cnf.jkt` on access *and* refresh tokens, `dpop_jkt`, replay detection, the nonce handshake |
+| **mTLS client authentication (RFC 8705 §2)** | `tls_client_auth` matches the client certificate's subject DN and `self_signed_tls_client_auth` its thumbprint, beside `private_key_jwt` and `client_secret_jwt` — all six token-endpoint authentication methods are genuinely verified, and the metadata advertises only what the verifier can check |
+| **mTLS-bound tokens (RFC 8705)** | the *other* sender constraint RFC 9700 names: with `global.https` on, the main listener asks for a client certificate and a Token Request made with one is answered with `cnf["x5t#S256"]` — the SHA-256 of its DER — on the access **and** refresh tokens, which the four protected endpoints then check against the certificate the connection was made with. Advertised only where it can actually be done. Section 2's mutual-TLS *client authentication* is deliberately not implemented |
+| **Resource Indicators (RFC 8707)** | `resource` at the authorization and token endpoints becomes the access token's `aud`, so a token can be restricted to one resource server or a small set of them — and the resource server here refuses one issued for a different audience |
 | **OpenID4VCI 1.0** | a Credential Issuer: SD-JWT VC (RFC 9901), `jwt_vc_json`, `ldp_vc` with bbs-2023; Credential Offers, the pre-authorized code grant with `tx_code`, `authorization_details` (including its `claims` member, so a wallet can ask for a subset of the claims), batch issuance, response encryption, deferred issuance, the Notification Endpoint |
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 | **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
-| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — one hook on the single funnel they all already pass |
+| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
-router, so it cannot go stale, and forty-six specifications with how far each one
+router, so it cannot go stale, and fifty specifications with how far each one
 goes. See *The index of itself* below, including the one blind spot that design has:
 a protocol that registers no route, which is exactly what Kerberos, LDAP and the two
 HTTPS listeners are.
@@ -97,10 +100,14 @@ that would have to lie about one.
 ### Configuration
 
 `CONFIG_FILE` selects a configuration from `env/`, and since 2026-08 that file
-carries **every setting this service has** — forty-seven of them, grouped by the
+carries **every setting this service has** — fifty-seven of them, grouped by the
 protocol they belong to: the three issuers, the listeners, the OID4VCI and
 OID4VP tuning, the Kerberos realm, SIDs, passwords and clock, the
-directory's base DN and limits, and the audit log's cap. At the default log level `debug` the service
+directory's base DN and limits, the audit log's cap, and the three that put the
+authorization flow into RFC 9700 mode. (Three of the fifty-one are *derived* from
+a neighbour and are deliberately absent from the file — `global.https` from
+`oauth2.rfc9700`, the Kerberos service domains from the realm, and the OID4VP
+wallet from the OID4VCI one.) At the default log level `debug` the service
 logs every endpoint call (path, request and response headers and bodies, status,
 elapsed time) and every assertion, JWT and SD-JWT VC both before and after
 signing or encryption, which is the point of a mock.
@@ -116,8 +123,8 @@ A value can arrive from four places, and **higher beats lower**:
 
 `config.js` is the table. It is the one place that says, for each setting, what
 it does, what its environment variable is, what the default is and why, and
-**whether changing it while the service runs does anything**. Twenty-five of
-the forty-seven can be changed at runtime; the other twenty-two were consumed by
+**whether changing it while the service runs does anything**. Thirty-three of
+the fifty-seven can be changed at runtime; the other twenty-four were consumed by
 the time the service was listening — a bound socket, the TLS certificate's
 names, the Kerberos principal database and its long-term keys, the directory's
 base DN — and are refused with the reason rather than accepted and ignored.
@@ -151,7 +158,10 @@ produced on purpose. Only the identifier moves: every endpoint in the discovery
 document stays on the request's base URL, because an endpoint has to be
 reachable and a pinned issuer may not be.
 
-**Seven listeners, not one.** 8081 is the HTTP service; the KDC also binds **TCP and
+**Seven listeners, not one.** 8081 is the HTTP service — or the HTTPS one, if
+`global.https` or the `oauth2.rfc9700` it defaults from is set, in which case it
+serves the same certificate as the three TLS sockets below and there is no plain
+port left in the process; the KDC also binds **TCP and
 UDP 88**, the Kerberos-protected service a TCP socket of its own (8888), the
 directory **TCP 389** and — the same directory over TLS — **TCP 636**, and the TLS
 endpoint **8443** and **9443**. Every one of them
@@ -373,6 +383,977 @@ unadvertised — `iss` is on every authorization response, errors included, but 
 may only *require* it, and so refuse a mix-up attacker's response without it, if the
 metadata says the server sends it.
 
+### RFC 9700 mode — the Security BCP, as a switch
+
+This service is permissive on purpose. It authenticates nobody, accepts any client
+secret, and until now would issue a code to any `redirect_uri` a request named. RFC
+9700, *Best Current Practice for OAuth 2.0 Security*, is a list of things a real
+authorization server refuses — and a client that has only ever been pointed at a
+permissive server has never run the code paths it will need in production.
+
+So the BCP is here as a **mode**, `oauth2.rfc9700`, and the contract is one sentence:
+
+* **Off** — the default — every endpoint behaves exactly as it did before
+  `oauth2_bcp.js` existed. Not nearly; nothing in that module runs.
+* **On** — the requirements below are enforced across the whole of the BCP's
+  section 2, both discovery documents stop advertising what would now be refused,
+  and **the main port becomes an HTTPS listener** carrying the certificate the other TLS sockets in this process
+  already serve, so every URL those documents publish — the issuer included —
+  names `https`.
+
+**Why a flag at all, given that RFC 9700 is a list of MUSTs.** Because a client is
+exercised by both answers. One that only ever meets a strict server cannot reproduce
+the loose behaviour it is trying to detect, and one that only ever meets a permissive
+server has never seen its own "the authorization server refused my `redirect_uri`"
+path run. The existing callers of this mock are the second kind: the debugger's own
+panes use an unregistered `redirect_uri`, no PKCE and — in one of them — the implicit
+grant. Turning that on unconditionally would not make them compliant; it would make
+them stop working, at the point of use, with no explanation. Every refusal the mode
+introduces names RFC 9700 and the section, because a 400 saying only
+`invalid_request` is how somebody comes to spend an afternoon in their own code
+looking for a decision this server made.
+
+**`GET /oauth2/rfc9700`** publishes the whole model: whether the mode is on, the
+three settings, and every requirement with its section, its level, whom it binds and
+whether it is *enforced*, only *detected*, *always* true here, or *not* enforced with
+the reason attached. RFC 9700 defines no discovery member and no endpoint of its own,
+so there is otherwise no way for a client to find out which kind of server it is
+talking to.
+
+#### Redirect URIs (section 2.1)
+
+`redirect_uri` is compared to the registered URIs by **exact string match** — RFC 3986
+section 6.2.1, no normalisation, no trailing-slash forgiveness, no case folding of the
+path — and there is no pattern syntax in the comparison at all. That last part is the
+only way to be sure of the *MUST NOT* beside it: a matcher that supports wildcards and
+is configured not to use them is one configuration mistake away from an open
+redirector.
+
+The registered set is the client's own `redirect_uris` when it registered any through
+RFC 7591, and the **`oauth2.redirectUris`** setting otherwise — which is every client
+this service has only ever seen at the authorization endpoint. That setting is empty
+by default, so turning the mode on with nothing configured refuses every authorization
+request; the refusal names the setting and the registration endpoint, so the next step
+is on the page rather than in the source.
+
+The one exception RFC 9700 carves out is **RFC 8252 section 7.3's**: a native
+application cannot reserve a port, so a registered *loopback* URI — `127.0.0.1`,
+`[::1]` or `localhost` — matches on any port. Everything else about it must still
+match exactly and the host must be the same literal: a registration for
+`http://127.0.0.1/cb` does not authorise `http://localhost/cb`, because those are
+different names however alike they resolve, and treating them as one is a pattern
+match wearing a different hat. `oauth2.loopbackPortWildcard` turns that exception off,
+which makes this server deliberately **non**-compliant — that is the point of the
+setting, since it is how a native-app client gets shown what happens when it meets a
+server that got this wrong.
+
+`http` is refused off the loopback (section 2.6), which is also the enforceable half
+of *authorization responses MUST NOT be sent over unencrypted connections*. **The
+other half is not enforced and the report says so**: the request itself arrives on
+this service's plain HTTP listener, which is the only listener carrying
+`/oauth2/authorize` — the two HTTPS listeners are `tls_server.js`'s own and serve the
+connection report and nothing else. Refusing it would make the mode unreachable rather
+than compliant. A compliance mode that quietly skipped a requirement it advertises
+would be the most misleading thing in this repository, which is why that row is in the
+table with `enforced: no` and its reason rather than left out of it.
+
+**The order of the checks is load-bearing, not stylistic.** The `redirect_uri` is
+matched *first*, before there is anything to report an error with, and a failure is
+answered **here** as a 400. Every other refusal is reported by redirecting to
+`redirect_uri` — which is right once that URI is known to be registered and is an open
+redirector until then. `error=invalid_request` forwarded to an arbitrary URL is still
+the browser being forwarded to an arbitrary URL, and an attacker does not mind which
+parameters ride along.
+
+The same comparison now guards **`post_logout_redirect_uri`** at
+`/oauth2/logout`, which without the mode is the plainest open redirector in the
+service: any absolute `http(s)` URL in a query parameter, followed, with no client and
+no session involved. `/sts-metadata` says that about it in both directions rather than
+only the flattering one.
+
+#### The port itself becomes HTTPS
+
+*Authorization responses MUST NOT be sent over unencrypted connections* is the
+requirement in section 2.1 that no check can satisfy: by the time any code here
+runs, the request has already arrived over whatever it arrived over, and
+refusing it would report the problem down the same channel. It is a property of
+the **socket**, so it is settled where the socket is bound.
+
+**`oauth2.rfc9700` turns port 8081 into an HTTPS listener.** It does it through
+`global.https`, whose default *is* that flag — a row of its own so it can be set
+either way independently, which both directions of are a real case. It is not a
+fourth keypair: `tls_server.js` generates **one** self-signed certificate per
+start and 8443, 9443 and the directory's LDAPS 636 already serve it, so a caller
+trusts this service once rather than four times.
+
+Everything a client reads then follows the socket **by itself**. `baseUrlOf()`
+builds every URL from `req.protocol` and the Host header — which is what already
+makes one process answer correctly as `localhost`, as `sts` on a compose network
+and through a published port — so the RFC 8414 document, the OpenID Provider
+Configuration, the OID4VCI and OID4VP metadata, the federation metadata, the DID
+document and the `iss` of every token move together and none of them had to be
+told. Nothing pins a scheme anywhere, and nothing should: a hardcoded `https` is
+wrong on the default plain listener, and a document whose endpoints disagree with
+the port they were fetched from is exactly the failure this derivation prevents.
+
+The **issuer identifier** is the one value that needed a line of code, and only
+when it is *pinned*. `oauth2.issuer` is empty by default, so it is the base URL
+and is already `https`. A pinned `http://…` written before the mode was turned on
+is now an identifier for a URL that no longer exists on this machine, so its
+scheme is upgraded and the upgrade is logged. It is an upgrade rather than a
+refusal because of what a client does with it: a conforming relying party must
+reject a document whose `issuer` is not the identifier it fetched from, so a
+pinned `http` issuer served over `https` fails at *every* client with a message
+about the issuer, leaving the reader to work out that the scheme was the part
+that moved. The mismatch worth producing on purpose is a different **host** or
+path, and pinning still does that untouched.
+
+Two consequences, neither of them hidden:
+
+**`oauth2.rfc9700` is restart-only now.** It used to be a runtime setting and
+stopped being one the moment it grew a consequence that happens before the
+service is listening. A flag that was runtime for its checks and restart-only for
+its socket would report the mode as *on* at `/admin/config` while every
+authorization response still went out over plain HTTP — the silent disagreement
+`config.js` warns about in its own header. Set it in the appconfig file or as
+`STS_OAUTH2_RFC9700` and restart; `POST /admin-api/config/set` refuses it with
+that reason.
+
+**There is then no plain listener in this process at all**, and `POST /tls/trust`
+and `GET /tls/server-certificate` were on one deliberately — they are what a
+caller reaches *before* it trusts anything. So the first fetch has to be made
+without verifying the certificate (`curl -k`), which is the ordinary bootstrap
+for a certificate regenerated on every start: it is the same act as trusting the
+PEM that endpoint hands back, done one step earlier. `/tls`, `/sts-metadata` and
+the startup line all say so rather than leaving it to be met as a handshake
+failure, and the compose healthcheck picks its own scheme from the environment
+for the same reason — a probe that spoke `http` at an HTTPS listener would mark
+the container unhealthy while the service answered every request perfectly.
+
+The session cookie gains `Secure` when — and only when — the port is TLS. It has
+to be conditional: a browser silently drops a `Secure` cookie that arrives over
+plain HTTP, so setting it unconditionally would leave the default deployment with
+a sign-in that appears to succeed and a session that is never there again.
+
+If a client cannot be taught to trust a per-start certificate, `global.https`
+set explicitly to `false` runs every other check over plain HTTP. That case is
+deliberately reachable, and `GET /oauth2/rfc9700` reports it as
+`response-over-tls: no` with the reason rather than letting it pass quietly.
+
+#### The authorization code flow (section 2.1.1)
+
+**PKCE is required of every client this server cannot see to be confidential**, and
+what that means is worth stating because it is the one judgement in here. A client is
+taken to be confidential only when it registered at `/oauth2/register` with a
+`token_endpoint_auth_method` other than `none` — RFC 7591 section 2 makes
+`client_secret_basic` the default, so a registration that omits the member is
+confidential. Everything else, including every `client_id` this service has never seen
+registered, is public and must send a `code_challenge`. For a confidential client PKCE
+is a *SHOULD*: the request is answered and the omission is logged, because a mock a
+client is calibrated against being stricter than the specification is its own kind of
+wrong.
+
+`code_challenge_method=plain` is refused and `code_challenge_methods_supported` drops
+to `S256` alone — the two have to agree, or the discovery document is a promise this
+endpoint breaks. An `S256` challenge is also checked to be 43 characters of base64url,
+which is what SHA-256 produces and nothing else does; it catches a verifier sent as a
+challenge at the authorization request rather than leaving it to fail as a mismatch at
+the token endpoint.
+
+At the token endpoint the mode adds the **PKCE downgrade** refusal (section 4.8.2): a
+`code_verifier` presented for a code that was issued *without* a challenge is rejected
+rather than ignored. Ignoring it is how the downgrade works — an attacker who strips
+`code_challenge` from the authorization request can then supply any verifier and be
+told nothing is wrong. It also adds the two RFC 6749 section 4.1.3 checks this service
+never made: the code is redeemed by the client it was issued to, and `redirect_uri` is
+*present* rather than merely compared when the client volunteered it.
+
+**Transaction-specific values are detected, which is the part a real server generally
+cannot do.** A `code_challenge` or `nonce` is remembered from the moment a code is
+issued for it, with the client it belonged to and whether that code was redeemed.
+Presenting it again for a *new* authorization request after the earlier code was
+redeemed is a second transaction reusing a first one's value, and is refused; so is
+the same value arriving from a different `client_id`. What is deliberately **not**
+refused is the same value while the earlier code is still unredeemed — that is a
+reloaded tab or a retried request, the same transaction, and refusing it is how a
+check like this comes to be turned off by the people it was meant to help. A response
+carrying no code at all ends its transaction where it stands, so its `nonce` is
+recorded as spent immediately; otherwise reuse would be undetectable in the one flow
+where the nonce is the only protection there is.
+
+That check runs **immediately before a code is minted** and nowhere else, for a reason
+particular to this service: an authorization request runs through `/oauth2/authorize`
+*twice*, once before the sign-in screen and once on the way back with a session. A
+check at the top of the endpoint would refuse every request in the service for reusing
+its own values between its own two passes.
+
+A `nonce` is required whenever `response_type` names `id_token`. OpenID Connect Core
+already requires it for the implicit and hybrid flows; the mode requires it always,
+since the nonce is what makes an injected code detectable for a client that has no
+PKCE (section 4.5.3.2).
+
+#### Access token protection — sender constraint (sections 2.2, 2.2.1)
+
+A bearer token is *whoever holds it can use it*. A sender-constrained one is
+*token + proof of key possession*, and the BCP names two mechanisms. This service
+now has **both**.
+
+**DPoP (RFC 9449)** was already here in full — all twelve section 4.3 proof checks,
+`cnf.jkt` on access *and* refresh tokens, `dpop_jkt` at the authorization request,
+`jti` replay detection, and the server-supplied nonce handshake. RFC 9700 notes that
+DPoP works for public clients, which is exactly why the wallet flows here use it.
+
+**RFC 8705 certificate binding is new.** When `global.https` is on — which RFC 9700
+mode turns on — the main listener now *asks* for a client certificate and never
+requires one, the posture port 8443 has. A Token Request made with one comes back
+with `cnf: {"x5t#S256": …}`, the base64url SHA-256 of the certificate's **DER**, and
+the four protected endpoints thumbprint the connection's certificate again and
+compare. Verified against `openssl` end to end: the same certificate is accepted, a
+different one and none at all are refused, and the **refresh token is bound too** —
+otherwise the long-lived half of the grant stays a bearer credential that mints bound
+tokens for whoever holds it, which is worse than not binding at all, because the
+`cnf` on what it mints implies a guarantee nobody checked.
+
+An **unverified** certificate still binds, and that is not a hole: RFC 8705 section 3
+binds to the certificate and explicitly permits a self-signed one — the proof is that
+the same key completed *this* handshake, not that a CA vouched for it. Requiring
+verification would also make the feature unreachable, since `/tls/trust` starts empty
+by design. What is **not** here is section 2, mutual-TLS *client authentication*,
+where the certificate replaces the secret; that is a different feature and its absence
+is stated rather than implied.
+
+`tls_client_certificate_bound_access_tokens` is advertised **only when the deployment
+can actually do it**. A client reads a metadata member as a promise, and there is
+nothing to bind to on a plain HTTP listener.
+
+The two resource-server MUSTs beside it were already true and now have rows saying so:
+the proof of possession is **validated** and its replay is **prevented**, both at
+`presentedAccessToken()` — the single check all four protected endpoints share, which
+is why adding the certificate check there was one edit rather than four. A bound token
+presented as a plain `Bearer` is refused rather than quietly accepted, which is the
+single most likely way to implement DPoP and gain nothing from it.
+
+#### Audience restriction and least privilege (section 2.3)
+
+Every access token here has always carried `aud` — and always the *same* `aud`,
+`<base>/resource`, which is a restriction that is true and buys nothing: one audience
+that never varies restricts a token to everything this service protects.
+
+**Resource Indicators (RFC 8707) fix that.** `resource` is read at the authorization
+endpoint and again at the token endpoint and becomes the audience. It must be an
+absolute URI with **no fragment** (a fragment is the part a server never receives, so
+an audience carrying one names something no resource server can match); repeating it
+asks for the *small set* section 2.3 allows where one is impractical; and the token
+endpoint may **narrow** what the authorization request asked for and never widen it —
+a grant that let a client add an audience afterwards would be the same escalation the
+refresh scope check refuses, one step earlier.
+
+**And the resource server refuses a token meant for somebody else**, which is the MUST
+in that section. Ask for `resource=https://api.example.com/v1` and the token comes back
+with that audience — and presenting it at `/oauth2/userinfo` is now a
+`401 invalid_token` naming the audience it was for. Two details are deliberate: it
+applies only to a token this service **issued**, since the `aud` of a foreign token is
+a string this service cannot check and was never the audience of anyway; and "this
+resource server" is matched on the **path** rather than the whole URL, because a token
+minted at `localhost:8081` and presented at `127.0.0.1:8081` is in every sense that
+matters a token for this service, while a token narrowed to somebody else always has a
+different path.
+
+This is a **feature**, not a mode behaviour: a request that sends no `resource` is
+unaffected in either mode.
+
+For least privilege the enforceable parts are enforced and have rows of their own — a
+refresh may not widen a scope, and the audience is restrictable. What is left is which
+scopes a client asks for, and this service deliberately **grants a scope it does not
+advertise** rather than refusing it, because half its callers are testing exactly that;
+an unadvertised scope is logged as the least-privilege observation it is. RFC 9396
+`authorization_details` is the finer-grained mechanism the section points at and is
+implemented for OID4VCI, where a wallet names the credential and even the subset of
+claims it wants.
+
+#### Authorization code protection (section 4.5)
+
+The code has always been single use here — it is deleted where it is redeemed —
+with one deliberate relaxation on top, described under *A redeemed authorization
+code is replayed, not refused* below: without the mode, an **identical** repeat of a
+Token Request gets back the tokens it already got, because *"your code_verifier does
+not match"* turning into *"already-used code"* on the very next attempt is the wrong
+answer at exactly the moment somebody is acting on the right one.
+
+RFC 6749 section 4.1.2 says a real authorization server refuses that, so **in this
+mode it does** — and it does the SHOULD beside it (section 10.5): the access token,
+the refresh token and the ID Token that code bought are **revoked**, through the same
+set `/oauth2/revoke` writes to, so they report `active: false` at introspection
+immediately. The reasoning is the refresh chain's one step earlier: a code presented
+twice means two holders, one of them is not the client, and nothing here can tell
+which — so the answer is to invalidate what it bought rather than to guess. The
+refusal says how long ago the code was redeemed, by which client, and how many tokens
+went with it.
+
+The two more specific refusals stay ahead of it in both modes, because each is worth
+its own sentence: a repeat that **differs** from the request the code was redeemed
+with names the field that differed, and a code whose own five-minute lifetime has run
+out says so and points at the refresh token from the first redemption.
+
+Binding the code to its client is the same check `transaction-bound` describes,
+cited from both directions because the BCP raises it twice — as a property of the
+code in section 4.5 and as the binding of the PKCE and nonce values in 2.1.1. Before
+the mode existed, this service read the client off the **code** and never compared it
+with the one presenting it.
+
+#### Open redirectors — the part that survives a registered URI (section 4.11.2)
+
+Refusing an unregistered `redirect_uri` closes most of this, and that landed in the
+first iteration. What's left is the half that works **even when every URI is
+registered**, and the BCP is unusually specific about it: *the authorization server
+MUST always authenticate the user first … before redirecting the user.*
+
+The attack needs no invalid URI at all. Send a victim to a legitimate client's
+authorization request with something wrong in it — an unsupported `response_type`, a
+missing parameter — and the authorization server bounces them straight to that client's
+**registered** redirect URI carrying attacker-chosen `state`. Nobody signed in, nobody
+clicked, and the hop through a server the victim trusts is the entire point.
+
+So in mode an error is automatically redirected **only when there is a session**.
+Otherwise the person gets a page naming the application that sent them, where it wants
+them sent next, the `state` it chose, and the error — with a link they can follow if
+they choose to. That is the same section's *"inform the user and rely on the user to
+make the correct decision"*, and it is what stops this server being usable as a
+redirector by somebody who has not signed in. The page carries **no script and no
+button** — an interstitial that submitted itself would be an automatic redirect with an
+extra page in front of it.
+
+Two exceptions, both from the specification rather than convenience:
+
+- **`prompt=none`** — the section names silent authentication itself. That flow exists
+  to be answered with no interaction and `login_required` is the answer it exists to
+  produce; an interstitial would break the one flow whose whole contract is that
+  nothing is shown.
+- **A refusal coming back from the sign-in screen** — the person was at the screen and
+  pressed Cancel, so they are present and have just decided. Asking them to confirm the
+  consequence would be a second question about the same answer.
+
+A **success** is never affected: reaching one means a session exists, which means the
+user was authenticated first, which is what the MUST asks for.
+
+**And a missing `client_id` is no longer redirected.** RFC 6749 §4.1.2.1, which §4.11.2
+cites, says an authorization server MUST NOT redirect for an invalid combination of
+`client_id` and `redirect_uri` — and a request naming no client has no client for the
+URI to belong to. This service reported that *by redirecting to the URI*, which is the
+one thing that paragraph forbids. It's a `400` now, raised above the point where any
+error could be redirected.
+
+*Automatically redirect only to trusted URIs* is the exact-match list: a URI on the
+client's own entry or in `oauth2.redirectUris` is one somebody put there. What the BCP
+suggests beyond that — URI analytics, reputation of the content behind the URI — is not
+something a mock can do or should pretend to, and the row says so: a service claiming to
+have judged a destination's credibility would be teaching a client author that somebody
+had.
+
+The client-side half — *clients MUST NOT expose open redirectors* — is in the table as
+`enforced: no`, because it is on the other side of the redirect.
+
+#### The nonce is the client's job, and there is a way to check it
+
+*The client MUST validate the nonce in the ID Token, and MUST NOT use any token until
+that validation succeeds.* Neither is enforceable from here and both are in the table
+saying so, because a requirement left out of a compliance report reads as one that was
+met. Whether a client compares the nonce it sent with the one it got back happens
+inside the client, and no observation this server can make separates a client that
+checks from one that does not.
+
+What this server can do is the half that is its own — the ID Token carries the nonce
+from the authorization request, always, and the mode refuses a request that asks for
+an `id_token` without one — and it can give a client author a way to find out about
+the other half. **`oauth2.breakIdTokenNonce` puts a deliberately wrong nonce in every
+ID Token that should carry one.** A client that accepts the result is a client that is
+not checking; one that refuses it is. It is the same device as `/spnego`'s three
+knobs and the reserved password `invalid`: a reachable negative, off by default, *not*
+part of RFC 9700 mode — it is useful in either — reported on `GET /oauth2/rfc9700`
+whichever mode is in force, and logged loudly on every token it spoils, because an ID
+Token that is wrong in a way nobody remembers turning on is an expensive afternoon.
+
+#### The implicit grant (section 2.1.2)
+
+Any `response_type` naming `token` — `token`, `code token`, `id_token token`,
+`code id_token token` — is refused with `unsupported_response_type`, and the metadata
+drops all four along with the `implicit` grant type. `id_token` and `code id_token`
+remain: they issue no access token from the authorization endpoint, which is the
+property the section is about. The consequence is worth seeing rather than reading —
+with the mode on, the debugger's implicit pane gets a protocol error where it used to
+get an access token in a fragment.
+
+#### Refresh tokens (section 2.2.2)
+
+*Refresh tokens for public clients MUST be sender-constrained or use refresh token
+rotation.* This service could not authenticate a client it had not registered, so
+"public" is the safe reading of an unknown one and **rotation applies to every
+client**: redeeming a refresh token retires it, through the same revocation set
+`/oauth2/revoke` and the console write to, so the retired token also reports
+`active: false` at `/oauth2/introspect`. Without the mode a refresh token stays
+usable for its whole thirty days, which is the state this requirement is about.
+
+Rotation alone is half of it. The reason a retired token is *remembered* rather than
+merely revoked is **replay detection**: one coming back means the chain has been
+copied, and nothing here can tell whether the legitimate client or the attacker is
+holding it — which is exactly why the answer is to invalidate both. Every refresh
+token descended from one original grant forms a **family**, and a replay revokes the
+family, naming how many and why. Two details are deliberate: the family is recorded
+at *issuance*, so a chain twenty refreshes long is one family and one lookup; and the
+access tokens already minted from it are left alone, because they expire in an hour
+and revoking them would remove the evidence of what the lost credential was used for.
+
+Two checks this grant never made come with it. The client presenting a refresh token
+must be the client it was issued to — `client_id` is required on the request, per RFC
+6749 section 6, and compared — and the requested `scope` must be a **subset** of what
+was granted. Without that second one a client could ask for `openid admin` on a token
+granted `openid` and be given it: privilege escalation by typing, which is the exact
+opposite of section 2.3's *restricted to the minimum required*.
+
+**Bound to the resource servers, too — and that one was a hole I had left open.** The
+section says a refresh token must be bound to the authorized scope *and resource
+servers*. The scope was on the token from the beginning; the resources were not, so an
+access token narrowed to one resource server with RFC 8707 could be **refreshed into
+one carrying this service's default audience** — a grant widening itself by being
+renewed, which is the same escalation the scope check refuses one field over. The
+refresh token now carries `resources`, the refreshed access token takes its audience
+from them, and a refresh asking for a resource the grant does not carry is
+`invalid_target`. Verified end to end: `https://api.example.com/v1` survives a refresh,
+and adding `https://other.example.com` on the way through is refused.
+
+**An idle refresh chain expires.** Section 2.2.2 says a refresh token SHOULD expire
+after a period of client *inactivity* and that the period is deployment-dependent, so
+`oauth2.refreshIdleSeconds` is a setting rather than a constant — measured from the
+last time any token in the **chain** was redeemed, not from issuance, so a client that
+refreshes regularly keeps its grant indefinitely and one that stops is cut off. It
+**refuses** rather than revoking the family: an idle chain is a client that went away,
+not a chain that was copied, and treating the two alike would make the replay
+refusal — which says something serious — indistinguishable from an afternoon off. `0`
+turns it off without touching the rest of the mode.
+
+**Signing out revokes them.** The section's other lifetime rule is a MAY — revoke after
+a security event, and it names logout — and it matters more than a MAY suggests:
+without it, signing out drops a cookie and leaves a *thirty-day credential* in the
+client's hands, while a person who signed out of a shared browser has every reason to
+believe otherwise. It happens in `authn.js`'s `endSession()`, which is the single place
+`/oauth2/logout` and WS-Federation's `wsignout1.0` both end a session — a revocation at
+each would be two that could come to disagree. **Access tokens are deliberately left
+alone**: they expire in an hour, and revoking them would take away the evidence of what
+the session did.
+
+The remaining MUSTs in that section were already true and now have rows saying so. A
+refresh token is an RS256 JWT with a 128-bit random `jti`, signed with a key generated
+per start that never leaves the process — not guessable, not forgeable, not modifiable,
+and the grant verifies that signature before reading a single claim, which is what
+makes the client binding and the resource list on it worth anything. *Protected in
+storage* has an easy answer here: **there is no storage to protect**, because this
+service keeps no copy of a refresh token — only the revocation set, which is jtis
+rather than tokens. And the *risk assessment* is a process requirement, so what it can
+honestly mean in code is a policy written down: a refresh token is issued only where a
+grant has an end-user behind it, which is why `client_credentials` sets
+`withRefresh: false` (RFC 6749 §4.4.3 — there is no resource owner to be absent, so the
+long-lived credential buys nothing a fresh call would not).
+
+#### The password grant is refused (section 2.4)
+
+The one grant RFC 9700 rules out outright, and the reasons are worth keeping in view:
+it hands the End-User's password to the client, and it cannot carry a second factor —
+no WebAuthn, no step-up, nothing that needs a browser. A protocol whose whole shape
+assumes a password and nothing else cannot be extended to the way people actually sign
+in now.
+
+Three things happen in this mode, and the third is the one that is easy to leave out.
+`grant_type=password` is answered with `unsupported_grant_type`. It drops out of
+`grant_types_supported` in **both** discovery documents. And **`POST /oauth2/register`
+refuses to register a client for it** — `invalid_client_metadata`, per RFC 7591
+section 3.2.2 — because a registration recording a grant the token endpoint will always
+refuse is the discovery document's promise broken in the other direction: the client
+keeps that document and acts on it, and would find out at its first token request
+rather than at the moment it asked.
+
+The same registration check covers what the other sections rule out, since the
+argument is identical: `grant_types: ["implicit"]`, any `response_types` naming
+`token`, and an `http://` redirect URI off the loopback are all refused at
+registration rather than recorded and then refused in use. RFC 7591 permits a server
+to return metadata different from what was asked for, and that was the alternative —
+but a client that registered for `password` and got back a registration silently
+without it would have to compare the two documents field by field to notice.
+
+The grant stays available by default, because a client with code for it needs
+somewhere to run that code. That is the whole reason this is a mode rather than a
+deletion: *don't implement it for new systems* is advice about new systems, and the
+old ones still have to be tested against something.
+
+#### Client authentication — all six methods, all verified (section 2.5)
+
+Everywhere else this service checks nothing: any password signs anybody in, any LDAP
+bind succeeds. Section 2.5 is not a blanket *always authenticate clients* — it is
+conditioned on it being feasible to have a **process for issuing credentials**, and
+`POST /oauth2/register` is one. That is the row `client-credential-issuance`, and it is
+what makes the rest of the section applicable at all.
+
+A client whose entry says it is **confidential** — a `token_endpoint_auth_method` other
+than `none`, with RFC 7591's `client_secret_basic` default applying when a registration
+omits it — must authenticate by whichever of the six methods its entry declares:
+
+| method | what proves the client |
+|---|---|
+| `client_secret_basic` / `client_secret_post` | the secret, compared in constant time |
+| `client_secret_jwt` | an assertion signed HS256 with the secret |
+| `private_key_jwt` | an assertion signed with the client's key, verified against its registered `jwks` |
+| `tls_client_auth` | the client certificate's **subject DN** (RFC 8705 §2.1) |
+| `self_signed_tls_client_auth` | the client certificate's **thumbprint** (RFC 8705 §2.2) |
+
+**The three asymmetric ones are the change.** `private_key_jwt` and
+`client_secret_jwt` used to be advertised and *accepted without being looked at* — a
+client author configured the asymmetric method and came away believing an assertion
+had been checked, which is worse than not offering it. They now get the full RFC 7523
+section 3 treatment: signature against the registered keys, `iss` **and** `sub` both
+the client, audience (the token endpoint *or* the issuer, because RFC 7523 and OIDC
+Core §9 differ and half the client libraries in the world pick one each), expiry with
+a configurable skew, and a `jti` remembered until the assertion expires — a signed
+assertion captured off the wire is a credential until then, so a replay is refused.
+
+Two details are worth the ink. **An assertion nominating `HS256` for `private_key_jwt`
+is refused, not verified** — verifying it would use the client's *public* key as an
+HMAC secret, which is the classic JWT forgery and one anybody can perform, since the
+key is public. And **`client_id` may be omitted entirely** with `private_key_jwt`, as
+OIDC Core §9 allows: the `sub` is read from the unverified assertion to *select* which
+client to check against, and the assertion is then verified against that client's keys
+with `iss` and `sub` required to match — so a forged `sub` picks a client whose key
+will not verify the signature.
+
+`jwks_uri` is **recorded and never followed**. Fetching a URL somebody registered in
+order to verify a credential is a server-side request forgery with a specification
+citation attached — the same refusal WS-Federation's `wreqptr` gets here, and holding
+that position in one file and not the other would be no position at all. A client that
+registers only `jwks_uri` is told to register `jwks` by value, by name, when it tries
+to authenticate.
+
+`token_endpoint_auth_methods_supported` is **built from the list the verifier can
+actually check**, and the two certificate methods appear only where there is a TLS
+handshake to read one from. It used to name `private_key_jwt` while nothing verified an
+assertion, which is the worst shape a metadata member can have.
+
+What is left as a *preference* rather than a rule: a client authenticating with a
+shared secret is answered and **logged** as the RECOMMENDED it did not follow — every
+time, not once, because the point is that this server is holding a copy of that secret
+on behalf of the client and a log line that appeared once would leave that fact where
+nobody looks. A SHOULD refused is a server stricter than its specification.
+
+A client with **nothing on its entry** to check against is left alone rather than
+refused — there is nothing to compare, and inventing a refusal would be theatre — and
+so is a `client_id` this service has never seen. **No end user's password is checked in
+this mode or any other.**
+
+#### Authorization server metadata, and more than one of them (section 2.6)
+
+*Publish RFC 8414 metadata; let clients consume it; use it to discover security
+capabilities, to reduce endpoint misconfiguration, and to make key rotation
+possible.* The point behind all four, in the BCP's own framing: **don't make
+clients hard-code what the server can advertise.**
+
+The publishing half was already here — both documents, built from one object so
+they cannot disagree, with `code_challenge_methods_supported` among them (the one
+capability with *no other signal*: a server that supports PKCE and doesn't advertise
+it will simply never be asked for it). What was missing is the interesting question
+about a client, which is not *does it read the metadata* but **what does it do when
+the metadata says something else**.
+
+So a discovery document is now an **authorization server**, selected by the path
+component both shapes already carry:
+
+```
+/.well-known/oauth-authorization-server            the default
+/.well-known/oauth-authorization-server/tenant1    the tenant1 profile   (RFC 8414 §3.1 inserts)
+/tenant1/.well-known/openid-configuration          the same one          (OIDC Discovery §4 appends)
+```
+
+Those two URLs are the commonest reason a discovery fetch 404s, and this service has
+answered both for a long time; what is new is that the path now selects a
+*configuration*. `/admin/authorization-servers` and
+`GET|POST /admin-api/authorization-servers` manage them — create, set a member,
+remove a member, reset a member, delete — paginated, with a drill-down per profile.
+
+**Each one is a real authorization server, not a document about one.** Its endpoints
+live under its own name — `/{id}/oauth2/authorize`, `/{id}/oauth2/token`, and the rest
+of the set — which is exactly what its metadata advertises, so a client that read that
+document is already using them. Its tokens carry **its** issuer and **its** audience,
+and an authorization code issued by one is refused at another's token endpoint: they
+are separate authorization servers that happen to share a process, and a credential
+does not cross between them.
+
+**What the document says is what that server does.** The members marked *enforced* on
+the page drive behaviour — `response_types_supported`, `grant_types_supported`,
+`code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`,
+`dpop_signing_alg_values_supported` — so narrowing one narrows that server's own
+endpoints and nothing else:
+
+```
+POST /admin-api/authorization-servers/set
+  {"profile":"tenant-alpha","member":"grant_types_supported","value":["authorization_code"]}
+
+POST /oauth2/token               grant_type=client_credentials  →  access_token
+POST /tenant-alpha/oauth2/token  grant_type=client_credentials  →  unsupported_grant_type
+```
+
+**Every authorization server starts equal.** One that has never been configured has
+exactly the capabilities the default one has, so `tenant1` and `tenant2` behave
+identically until somebody makes them differ. And **a name nobody configured is created
+on first sight** — by an endpoint or by a metadata fetch, since reading the document
+*is* accessing the server — so an arbitrary path works immediately and can then be
+configured. The console marks which ones were *asked for* and which were *configured*,
+because an authorization server somebody is using and cannot see is worse than one that
+exists with nothing special about it.
+
+**Every client may use every one of them.** Nothing restricts a client to a server;
+`/admin/applications` records which ones each client has actually *used*, on
+`appAuthorizationServer`, so a client that talks to two is one client with two values.
+
+**Any configuration is valid**, and that is the feature rather than a gap. A member
+this service has never heard of is stored and published, because half the value of a
+mock is answering with something a client did not expect. The catalogue on the page is
+*help for whoever fills the form* — what each member is and why a client cares — not a
+schema. That is the deliberate opposite of the applications registry next door, which
+**refuses** an attribute outside its table because that table is a published contract
+about what an entry carries.
+
+**The defaults are what this service already did.** A profile with no overrides
+publishes exactly the document `asMetadata()` builds, and a path nobody has configured
+publishes it too — so nothing that worked before this existed behaves differently.
+
+**Drift changed meaning when the design did**, and the new one is narrower and more
+useful. It used to mean *this document lies about this service*; that cannot happen for
+the enforced members any more, because the document **is** the behaviour. What it means
+now is **a member this service cannot honour however it is set** —
+`require_pushed_authorization_requests: true` with no PAR endpoint,
+`id_token_signing_alg_values_supported: ["ES256"]` on a service that signs RS256, a
+`token_endpoint` pointing at another host, or a member invented outright. Those are
+still publishable, because producing a misconfigured document on purpose is exactly
+what a client's error paths need, and they are still reported:
+
+```
+require_pushed_authorization_requests   invented   Nothing here backs it.
+x_vendor                                invented   Nothing here backs it.
+```
+
+A **removal** is reported too, and for an enforced member it says the useful thing: the
+check that member drives does not run, because a client cannot learn from an absent
+`code_challenge_methods_supported` that PKCE is unavailable — it learns *nothing*, which
+is what section 2.6 is arguing about, and a server that refused every method on the
+strength of having removed the member would be enforcing something it never said.
+
+That is why `remove` and `reset` are separate operations: reset undoes an override,
+remove publishes an **absence**.
+
+`/sts-metadata` lists the authorization servers this process has actually served, with
+each one's metadata URLs and endpoints — it cannot read them off the router, because
+one route (`/:as/oauth2/…`) serves all of them, so they are described by hand the same
+way the Kerberos and LDAP listeners are. Only the ones that have been *asked for* are
+listed: a name becomes an authorization server by being asked for, so the set of
+possible ones is every string and the set of real ones is that list.
+
+One property is a fact about the mock rather than the model, and the page says so:
+**every authorization server here signs with the same key**. They are separate issuers
+sharing one keypair, which a real deployment would not do.
+
+The profiles live in memory, gone on restart, in the same family as the custom claim
+sets and the verifier's request — not in the directory. `ou=applications` holds
+applications because a relying party is a thing in the world that other systems have
+opinions about; an authorization server profile is this service's own configuration.
+
+#### TLS, and what a reverse proxy changes (section 2.6)
+
+*Use TLS. End-to-end between client and resource server is RECOMMENDED. If TLS
+terminates at a proxy, secure the proxy-to-application hop and make the proxy
+sanitize inbound security-sensitive headers.*
+
+The first two are `global.https`, which RFC 9700 mode turns on: every endpoint here —
+authorization, token, both discovery documents, and the resource server at
+`/oauth2/userinfo` and the three credential endpoints — is on one listener, so *end to
+end* is true of everything inside this process. What it cannot be true of is a hop this
+service cannot see, and that is the rest of the paragraph.
+
+**The application's half of the reverse-proxy rule is the part this service can do,
+and it was getting it wrong in two different ways at once.** `X-Forwarded-Proto` and
+`X-Forwarded-Host` decide what this service thinks its own issuer, endpoints and DPoP
+`htu` are. `dpop.js` believed them **unconditionally**; `baseUrlOf()` in `helpers.js`
+**ignored them entirely**. Two functions in one service, answering the same question two
+ways — and each answer was wrong for the deployment the other was written for:
+
+- behind a proxy, the metadata published `http://` URLs to clients that reached the
+  service over `https`, and named the last hop as the issuer;
+- with no proxy, any client could set `X-Forwarded-Host` and choose the `htu` its own
+  DPoP proof would be checked against — which is the whole of what binding a proof to
+  an endpoint is for. A client that picks its own `htu` has unbound its own proof, and
+  can replay one captured at another endpoint by naming that endpoint in a header.
+
+There is one decision now, `global.trustProxy`, shared by both functions and **off by
+default**. Off, the forwarded headers are ignored and this service describes the
+connection it can see. On, they decide. Verified both ways: with it off, a request
+carrying `X-Forwarded-Host: attacker.example` still gets `issuer:
+http://127.0.0.1:8099`; with it on, `X-Forwarded-Host: sts.example.com` produces
+`issuer: https://sts.example.com` and every endpoint with it.
+
+**This is a behaviour change for a proxied deployment.** A DPoP proof made against the
+proxy's URL is now refused unless the setting is on — so that refusal names the setting
+and explains what to do, because a proof refused for a reason nobody can see is an
+afternoon spent in the client.
+
+**No client certificate is ever read from a header**, in either mode. A proxy that
+terminates mTLS forwards the certificate in `X-Client-Cert`, `X-Forwarded-Client-Cert`,
+`X-SSL-Client-Cert` or one of a dozen vendor spellings, and an application that believed
+one would be accepting a certificate anybody can forge — a header costs nothing to
+write. RFC 8705 binding and mTLS client authentication both read the certificate off
+the TLS handshake itself. The cost is real and stated rather than hidden: a proxy
+terminating mTLS in front of this service **cannot pass the certificate through**.
+
+`GET /tls/forwarded` reports all of it — every forwarding header, every certificate
+header, whether any of it was believed, and the effective base URL that every issuer
+and every published endpoint is built from. The certificate headers a request carried
+are **listed even though they are ignored**, because a mock that silently ignored a
+header somebody was relying on would be as bad as one that silently trusted it.
+
+The two things this service genuinely cannot do are in the table saying so rather than
+left out: a proxy MUST strip inbound security-sensitive headers before setting its own
+(otherwise a client reaches straight past it), and the proxy-to-application hop must be
+protected against eavesdropping, injection and replay. Both are decisions about a link
+this process has no view of.
+
+#### CORS is withheld from the authorization endpoint (section 2.6)
+
+`Access-Control-Allow-Origin: *` is right for the token, userinfo, metadata and JWKS
+endpoints an in-browser client fetches with XHR — that is most of what this service is
+for. The authorization endpoint is a different kind of endpoint: a browser *navigates*
+to it, so nothing legitimate ever read those headers there. In this mode they are
+withheld from `/oauth2/authorize` alone, preflight included.
+
+#### Token leakage through the browser (section 4.3)
+
+Three routes out, and this service was already closed on two of them.
+
+**The `Referer` header.** Every response here carries `Referrer-Policy: no-referrer`
+— the strongest of them, suppressing the header entirely rather than trimming it — and
+the pages a browser lands on contain no third-party resource and no external link. That
+is not just discipline: the content security policy is `default-src 'none'` with
+`img-src` limited to `'self'` and `data:`, so a third-party resource could not load if
+one were added by accident. Both are there because a header is something somebody can
+drop and a CSP is not.
+
+**Browser history.** An access token has never been readable from a URI query parameter
+here — the token comes from the `Authorization` header and nowhere else. But *ignored*
+is not *refused*, and that gap was worth closing: a client sending `?access_token=…`
+got a `401` saying a token was required, which is true, unhelpful, and sends somebody
+looking at their credential rather than at where they put it. In mode the query is now
+inspected **only in order to refuse it**, with a message that says why — a URL goes
+into history, the address bar, server logs and the `Referer` of anything the page then
+fetches, so a token in one is a token in all of them. The token is never echoed back:
+it has already been somewhere it should not be, and a response body would be one more
+place. The audit log has redacted `access_token` and eight other query keys all along,
+so it never reaches a row either.
+
+The other direction was always right — a bare code goes in the query and anything
+carrying a token goes in the fragment, which a browser never sends to a server.
+
+**`response_mode=form_post`, which this service advertised and did not have.** The
+metadata used to name it and `redirectBack()` answered every request with a `302`
+regardless, so a client that asked for `form_post` sat waiting for a POST that never
+came; the member had been removed and the reason written down. It is implemented now,
+so the member is back. The response travels in a form body — in no URL, no history
+entry, no `Referer` — and that holds for **error** responses too, because a client that
+asked for `form_post` and got its failure in a query string has had the failure put in
+browser history, which is the one place section 4.3 is asking for it not to be.
+
+The page is the same shape WS-Federation's response is, deliberately: a real form with
+a real submit button, plus a separate script at `/oauth2/autopost.js` that submits it.
+`script-src` is `'none'` across this service, so with the script blocked **the button
+is the whole mechanism** — and a named resource is the smallest exception that works,
+where an inline script would need `'unsafe-inline'`, the clause that would make the
+relaxation matter. `form-action` stays out of the policy for the reason `app.js`
+records: the form posts to the client's `redirect_uri`, which is by definition another
+origin.
+
+It is available in **both** modes, unlike the refusals: a safety feature offered only
+in compliance mode would be backwards, and a client that does not ask for it is
+unaffected.
+
+**A code exposed through history must be useless**, which is the same two mechanisms
+the code-injection work put in — single use with the replay relaxation off, a second
+presentation revoking what the first bought, bound to its client, and worthless without
+the PKCE verifier that never left the client. `form_post` keeps it out of the URL to
+begin with.
+
+#### 307 redirects, and why this one is easy to miss (section 4.12)
+
+A `307` **preserves the method and the body**. The redirect that follows a sign-in POST
+points at a URL the calling protocol composed — so with a 307 the browser would repeat
+that POST, username and password included, to the client. The authorization server hands
+over the user's password and nobody has done anything wrong.
+
+This service has never emitted a 307 or a 308 anywhere. What it emitted after the
+sign-in POST was a **302**, whose behaviour after a POST is historically ambiguous: every
+browser turns it into a GET and no specification says it must. The section asks for
+**303**, which says it. Both sign-in screens use 303 now — `authn.js`'s
+`returnToCaller()`, the single funnel the password step and the WebAuthn step both leave
+through, and WS-Federation's own screen, which is separate for the reason §13.2.1 gives.
+
+**Not mode-gated**, unlike the refusals. No client can tell the difference, so gating it
+would leave the default deployment with the ambiguous one and buy nobody an exercise.
+
+#### Telling a client apart from a person (section 4.13)
+
+`POST /oauth2/register` generates the `client_id` and ignores any the request proposes,
+so a *registered* client cannot pick an identifier that looks like a subject. But this
+service issues to **any** `client_id` that asks, so an unregistered one is whatever
+string a caller put in the query — which is exactly the shared namespace the section
+warns about, and why the MUST beside it asks for *another mechanism allowing resource
+servers to distinguish client credentials from resource-owner credentials*.
+
+There is one in each mode, and they are **different mechanisms** — worth being exact
+about, because a resource server testing for the wrong one would conclude that a client
+credential belonged to a person:
+
+| | how to tell |
+|---|---|
+| mode off | `sub` **equals** `client_id` on a `client_credentials` token and on nothing else. RFC 9700 suggests this comparison itself; it needs no invented claim |
+| mode on | **separate namespaces** — `urn:sts-mock:client:<id>` beside `urn:sts-mock:user:<name>`, so the two cannot collide however a client is named |
+
+The namespace is the stronger answer and it is the mode's, because changing a subject
+identifier is a change and callers key on it. Note the consequence, which the row states
+rather than leaving to be discovered: **with the mode on, `sub` no longer equals
+`client_id`**, so a resource server written against the comparison must read the prefix
+instead. A person's `sub` is untouched in either mode.
+
+#### Clickjacking (section 4.14)
+
+Every response carries **both** countermeasures: `X-Frame-Options: DENY` for the
+browsers that still read it, and CSP Level 2's `frame-ancestors 'none'`, which is the
+one that actually governs. Two rather than one because the first is obsolete and the
+second is not universally old enough to rely on alone, and the cost of both is a header.
+It matters most on the sign-in screen and the authorization endpoint, where the click a
+framed page steals *is* the decision.
+
+That much was already true. Auditing it against the section's own list — *apply the
+protection to the relevant pages, including error pages* — turned up two ways the clause
+could go missing, and the second one was live.
+
+**`frame-ancestors` has no fallback from `default-src`.** A response that sets
+`Content-Security-Policy: default-src 'none'` and nothing else is framable as far as CSP
+is concerned. Five routes here relax the policy so they can load a named script, and each
+one *sets the whole header* — so each could have dropped the clause with nothing failing:
+the page works, the script runs, the protection is quietly gone. They all go through
+`app.contentSecurityPolicy()` now, which re-adds the framing clauses **whatever the
+caller asks for**. A caller cannot turn them off even by passing `frame-ancestors: *`,
+deliberately: no page in an authorization server should be framable.
+
+**And Express's own 404 handler was replacing the policy with `default-src 'none'`.** So
+every unrouted path — every typo, every probe, every error page the framework generated —
+came back with the framing clause gone and only the obsolete header behind it. Nothing in
+this repository could have surfaced that, because the header this service set *was*
+correct; it was overwritten afterwards, on the way out. The policy is re-checked when the
+response is flushed and the base put back if the clause is missing — testing for *"does
+it still carry the clause"* rather than *"is it the value I set"*, so the five legitimate
+relaxations are untouched.
+
+The 404 **body** is left exactly as Express writes it. `Cannot GET /path` is how the
+parent project's `tests/sts_metadata.js` tells an unrouted path from an endpoint
+legitimately answering 404, and a prettier 404 here would have broken that distinction
+without anything saying so.
+
+Device authorization pages get a row saying there are none — this service implements no
+device grant, so there is no `user_code` page to frame. It is a row rather than an
+omission because the section names those pages, and if that grant is ever added its pages
+are covered without anybody doing anything, which is the point of a service-wide default
+that a relaxation cannot weaken.
+
+#### In-browser communication (section 4.17)
+
+This section is conditional — *if the implementation uses in-browser communication* —
+and establishing that the condition is false is the work, rather than assuming it.
+Audited: nothing here calls `postMessage`, listens for a `message` event, opens a
+`BroadcastChannel` or `MessageChannel`, touches `window.opener` or `window.parent`, or
+renders an iframe. There are exactly four scripts served from this service — the WebAuthn
+ceremony, two form auto-posters and the API explorer — and none of them does any of it.
+
+So the requirements cannot be violated because the mechanism is not present, which is a
+different claim from their being met, and the rows say which.
+
+**But the audit found a live hole next door.** The response mode this section is about is
+`web_message` — postMessage-based, and what SPAs use for silent renewal in a hidden
+iframe. This service does not perform it, and a client asking for it got a **302** and sat
+waiting for a message that never arrived. That is the identical silent failure `form_post`
+had while it was advertised and missing, and the same reason that one was worth fixing:
+the failure is at the client end with nothing here to point at.
+
+`response_mode` is now checked against what **this authorization server advertises** in
+`response_modes_supported`, so the document and the endpoint cannot disagree:
+
+```
+response_mode=web_message  →  invalid_request, naming the three it does perform
+response_mode=query|fragment|form_post  →  answered
+```
+
+It is a capability like the others, so it is per authorization server: one configured
+with `response_modes_supported: ["form_post"]` refuses `query` at its own endpoint while
+the default server still answers it. And it is not gated on RFC 9700 mode — the default
+document advertises everything this service does, so a request that would have worked
+still works.
+
+If `web_message` is ever added here, the rows say what it costs: the target origin of
+every message must be the client's **registered** origin matched exactly — never `"*"`,
+which broadcasts an authorization code to whatever document is listening — and the
+exact-match machinery for that already exists, because a registered redirect URI is where
+a client's trusted origin comes from. Every other authorization-response protection
+applies unchanged: single-use codes, PKCE binding, `iss` on the response.
+
+The client's half — *verify `event.origin` against the expected authorization server* —
+is in the table as `enforced: no`. A listener that skips it accepts an authorization
+response from any document that can reach it, which is how an injected message becomes an
+injected code; nothing this service can do about it, and nothing it can even observe.
+
+#### One row that says this service does the wrong thing
+
+*Resource servers MUST treat access tokens as sensitive secrets and MUST NOT store them
+in plaintext.* **This service does neither**, and the row says so rather than being
+left out. It keeps every token it issues, in memory and in full, and prints them on
+`/admin/tokens` — which is what lets the console show somebody the JWT they just
+received, and is the same decision `/krb5/principals` makes about the Kerberos
+passwords. What *is* true is that nothing writes a token to disk, the audit log redacts
+them, and the store dies with the process. A real resource server must do the opposite,
+and the row ends by saying not to copy this part.
+
+#### What is observed rather than refused
+
+Three requirements are the client's to keep, so this server reports them and does not
+refuse. A **reused `code_challenge` or `nonce`** is described above. An **unbound
+access token** is logged at issuance — section 2.2's sender-constraining is a SHOULD,
+DPoP is implemented here in full and advertised, and whether a token is bound is the
+client's decision because it binds by sending a proof. There is deliberately **no
+"DPoP required" mode**: this service exists to exercise Bearer clients too, and a mode
+that refused them would remove the thing half its callers are testing. And a client
+authenticating with a **shared secret** is logged as the asymmetric recommendation it
+did not follow.
+
+#### What the mode does not cover
+
+Stated so the flag is not read as *RFC 9700 compliant* full stop. The whole of section
+2 now has rows, including the requirements this server already satisfied — `iss` on
+every authorization response for mix-up defence, RFC 8414 metadata published, a
+`client_id` a client cannot choose, no access token accepted in a query parameter, and
+access tokens audience-restricted to a single resource server.
+
+The two client-side nonce requirements are in the table with `enforced: no` and the
+reason, rather than left out — see above for the switch that lets a client author test
+the first of them anyway.
+
+Not here: **Pushed Authorization Requests** (RFC 9126), and **mutual-TLS client
+authentication** (RFC 8705 section 2, where the certificate replaces the secret — the
+*token binding* half of that RFC is implemented, see above). Client authentication at
+`/oauth2/introspect` and `/oauth2/revoke` is likewise not enforced: those are called by
+resource servers, which do not register here, so there is no credential to check. And
+the requirements RFC 9700 places on the *client* stay the client's: this service can
+detect several and fix none.
+
 ### A redeemed authorization code is replayed, not refused
 
 RFC 6749 section 4.1.2 makes an authorization code single use and section 10.5 says a
@@ -409,6 +1390,12 @@ them apart.
 
 The **pre-authorized code** grant is deliberately not relaxed — its single use is a
 property of the Credential Offer under test, and the debugger's suite asserts it.
+
+**RFC 9700 mode turns the relaxation off**, which is what section 4.5 asks for: the
+repeat is refused and everything the code bought is revoked. See *Authorization code
+protection* above. The relaxation is the default because this service exists to show
+what happened rather than to be strict about it; the mode is there for when being
+strict is the point.
 
 ### Token Exchange (RFC 8693), and what it deliberately does not check
 
@@ -732,9 +1719,197 @@ The drift check earned its keep immediately: on first run it caught the `OPTIONS
 
 Each path is a **link to that path** — but only where that is honest, which is about half of them. A link is issued as a GET, so a path the router answers only for POST would land the reader on Express's own `Cannot GET /oauth2/token` (reads as a broken service), and a route pattern carrying a `:parameter` or a `*` is not the address of anything. Those are listed unlinked with the reason shown — "POST only", "takes :id", "wildcard" — because that reason is the most useful thing on the row. The five followable endpoints that *do* something when clicked (`/oauth2/authorize`, `/oauth2/logout`, `/oauth2/userinfo`, `/issuer/offer`, `/oid4vp/start`) carry an `effect` note; the first answers **400** when followed bare since it needs `client_id` and `redirect_uri`, and userinfo answers **401** since it is a protected resource. Links are root-relative so they follow whichever host the page was reached at, and open in a new tab so the index survives the click. That test **follows every link** and fails if one does not reach a handler, which is what stops the page advertising a dead one.
 
-Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of forty-six specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
+Two details worth knowing before changing the test. **A 404 is ambiguous and the distinction matters**: several endpoints answer 404 correctly for a resource that does not exist (an unknown offer id, an unknown presentation state), which *proves* the route is registered, while Express's own 404 for an unregistered path is an HTML page reading `Cannot GET /path`. Treating them alike either fails on healthy endpoints or passes on missing ones. And the **coverage notes must start `full`, `partial` or `mock`** and say what is missing, because a list of fifty specifications that did not mention that this service checks no passwords and validates no access tokens would be the most misleading thing in the repository.
 
 **Kerberos is the one blind spot in the whole design, and it is structural.** The page is built by walking the live Express router, which is precisely why it cannot go stale — and the KDC's listeners are raw TCP and UDP sockets, as is the protected service's. A protocol family that registers no route is invisible to a router walk. Three HTTP surfaces are all the walk can see (`/KdcProxy`, `/krb5/principals`, `/krb5/service`), so the sockets are described in the text of those rows rather than left to be inferred from silence — the alternative, a described entry with no route behind it, is the *stale* half of the drift check and would have to be exempted from it by hand. Anything added later that speaks a protocol over a socket needs the same treatment.
+
+### Applications — the other side of every authentication
+
+A person who authenticates here has had a directory entry and a row on
+`/admin/users` since the user observer was written. The thing on the **other**
+side of those authentications had nowhere at all. It was six fragments: a
+`registeredClients` Map in `oauth2.js`, a `client_id` that reached the console and
+was thrown away, a `wtrealm` read and forgotten, an `AppliesTo` echoed into an
+assertion, a service principal created on demand in a principal database, and a
+verifier id in a config row. Each was correct where it stood, and there was no way
+to ask this service *what applications have you seen?*
+
+`ou=applications` is that place, and — this is the part that matters —
+**the entries are the registry, not a copy of one.**
+
+```
+dc=example,dc=com
+├── ou=users          people
+├── ou=groups         groups, which grant nothing
+└── ou=applications   OAuth clients, OIDC relying parties, SAML 2.0 and 1.1
+                      service providers, WS-Federation applications, WS-Trust
+                      relying parties, the OpenID4VP verifier, Kerberos services
+```
+
+`GET /ldap/applications` lists them and publishes the schema; `?format=json` is
+the machine-readable form.
+
+#### One entry per identifier
+
+An entry appears the first time an identifier is **accepted** — a `client_id` at
+the authorization or token endpoint, a `wtrealm` on a `wsignin1.0` response, an
+`AppliesTo` on an issued token, a service principal name on a TGS-REP, the
+Verifier's own `client_id`. The key is the identifier verbatim, not lower-cased
+and not namespaced by protocol, so an application appearing under one name in two
+protocols is **one entry with two kinds** rather than two entries. That is the
+same rule that makes `alice`, `urn:sts-mock:user:alice` and `alice@REALM` one
+person on `/admin/users`, and it is the shape the federation work will need: a
+relying party that federates over both OIDC and SAML is one relationship.
+
+It is recorded where each protocol accepts it rather than at the authentication
+funnel, and that difference is worth knowing. The user side has exactly one
+funnel; this side cannot, because in the authorization code flow the person is
+authenticated in `authn.js`, which knows nothing about OAuth by design and never
+reads a `client_id`. So each protocol records its own application at the point it
+decides that application is real.
+
+#### The directory is the source of truth
+
+There is no Map shadowing these entries. `applications.js` reads them, changes
+them and writes them back; every query is a directory read and nothing is cached.
+Three things follow:
+
+**An `ldapmodify` is a configuration change.** Add a value to `oauthRedirectUri`
+on a client's entry and RFC 9700 mode accepts that redirect URI by exact match on
+the *next* authorization request — no restart, no reload. That is demonstrable in
+four commands and it is the whole point of the arrangement.
+
+**The RFC 7591 registrations live there too.** `POST /oauth2/register` writes an
+entry; RFC 7592's read, update and delete operate on it. The whole registration
+document is kept verbatim in `appRegistrationJson`, because RFC 7591 permits
+arbitrary metadata and no fixed set of attributes can represent it — but when the
+record is rebuilt, that document is the *starting point* and every member with an
+attribute of its own is then overwritten from the attribute. Otherwise an operator
+who edited `oauthRedirectUri` would find the edit ignored by the one check that
+matters, which is the two-stores failure this whole arrangement exists to avoid.
+
+**Deleting a registration keeps the entry.** `appRegistered` goes to `FALSE`, the
+`client_secret` and the registration access token are removed with it, and the
+history stays: this registry records what this service has *seen*, and losing that
+an application was ever here because its registration was withdrawn would be
+losing the fact rather than the configuration.
+
+#### The schema, and what "schema" can honestly mean
+
+`node-ldapjs` has **no schema subsystem**. It is protocol machinery — messages,
+filters, DN parsing, a client and a server — and the only three mentions of
+`objectClass` in its whole `lib/` tree are a default search filter and the names of
+result codes 65 and 69, which a server would have to raise itself. It is also a
+submodule this repository does not modify. So there was nothing to extend and
+nothing to register with: the schema is defined in `applications.js`, published on
+the page, and **enforced by nothing** — a vocabulary, not a constraint, exactly
+like the rest of this deliberately schemaless directory.
+
+Where a standard name exists it is used. `applicationProcess` (RFC 4519) is the one
+registered object class that fits an application at all, and it brings `cn` and
+`description`. What it does not bring is a `client_id`, a set of redirect URIs, an
+`entityID` or a service principal name — no registered LDAP schema has those,
+because every product that stores OAuth clients keeps them in its own database
+rather than in a directory. So `stsApplication` is invented, and its attributes are
+this service's own names in the way `x509subject`, `didSubject` and `authnMethod`
+already are on the user entries next door.
+
+The table is the definition: `GET /ldap/applications` publishes it, the entry is
+built by walking it, and an attribute that is not in it is refused rather than
+written. `multi` accumulates a repeat and `single` is assigned — which is what stops
+a counter growing a value per sign-in, the trap `applyVcAttributes()` writes its
+second rule about. Beside the identity and the counters (`appAuthentications`,
+`appSessions`, `appUsers`) sit the protocol-specific ones: `oauthClientId`,
+`oauthRedirectUri`, `oauthGrantType`, `oauthTokenEndpointAuthMethod`,
+`oauthConfidential`, `samlEntityId`, `samlAssertionConsumerService`, `wsfedRealm`,
+`wstrustAppliesTo`, `krb5ServicePrincipalName`, `oid4vpClientId`.
+
+Two attributes hold **credentials in the clear** — `oauthClientSecret` and
+`appRegistrationAccessToken` — in a directory where every bind succeeds and whose
+contents are printed on an unprotected page. That is the same decision
+`/krb5/principals` makes about the Kerberos passwords and the same reasoning: a
+debugger whose accounts are unusable without reading the source is worse than one
+that says what they are. Be precise about what it costs now that RFC 9700 mode
+*checks* that secret: anyone who can read this directory can authenticate as that
+client. They are never written to the audit log — `audit.js`'s rule that no
+credential is ever recorded stands untouched.
+
+One honest limit. `appSessions` and `appUsers` are counts of distinct ids, and the
+ids themselves are deliberately not on the entry — an application used by two
+thousand people would otherwise carry two thousand values. So the count increments
+when the id differs from the *last* one recorded, which is right for the ordinary
+case and undercounts somebody alternating between two applications. That is the
+trade for not putting an unbounded list in a directory entry, and it is why the
+schema calls them counts rather than lists.
+
+#### The console page and the API
+
+`/admin/applications` is the other side of `/admin/users`: that page lists every
+identity that has authenticated here, this one lists what they authenticated *to*.
+Filter by identifier or name and by kind, page with `?page=` and `?per=`, and
+`?application=<id>` drills into one — every attribute of its directory entry with
+what the published schema says each attribute *is*, paged under `?attributesPage=`
+so the control moves that list rather than the page it sits on. `?format=json` is
+the same data, and `GET /admin-api/applications` is the same view again with the
+same parameters.
+
+Both **write** as well as read: `create`, `set`, `add`, `remove`,
+`revoke-registration` and `forget`, as forms on the page and as
+`POST /admin-api/applications/{action}`. The console is not a third store beside
+the protocol endpoints and LDAP — every action calls a function in
+`applications.js` which does the same read-modify-write against the same
+`ou=applications` entries, so a form post and an `ldapmodify` are one act arriving
+by two routes, and each is visible to the other immediately because nothing caches.
+
+**What may be changed is DECLARED and not DERIVED**, and that line is the whole of
+the design. An entry holds both kinds. *Declared* is what this application is
+allowed to do — its redirect URIs, grant types, scopes, secret, whether it is
+confidential — which is configuration, is what RFC 9700 mode reads, and is
+editable. *Derived* is what happened: the counters, the first and last sighting, the
+kinds and protocols it has been seen in, the redirect URIs it actually used. A form
+that could rewrite those would make the page lie about the service's own behaviour,
+in a way indistinguishable from the recording being broken, so they are refused with
+a list of what is not. `ldapmodify` still reaches every one of them — an operator
+with an LDAP client is doing something deliberate, and refusing them *here* is the
+difference between offering an operation and merely not preventing it.
+
+Two consequences worth having in mind. **`create` is how you configure a relying
+party before it connects** — an entry normally appears because an identifier was
+*accepted*, and without this there was no way to give an unregistered client its own
+redirect URIs short of `/oauth2/register` or the global `oauth2.redirectUris`
+setting. It records that it was created by hand, so it cannot be mistaken for one
+that turned up once and never came back. And **`forget` is the one operation that
+loses a fact**, which is why it is separate from `revoke-registration` rather than
+something that one does as well: revoking keeps the entry and its history and takes
+only the registration, the secret and the registration access token away.
+
+The page marks `oauthClientSecret` and `appRegistrationAccessToken` as credentials
+where it prints them, and says on both the list and the drill-down that an entry
+here **grants nothing**: the one place the registry is read is RFC 9700 mode, and
+with that off these entries are a record and nothing more. Two counting caveats are
+on the page rather than left to be discovered — `Sessions` and `Users` count
+*changes* rather than distinct sets, and `?kind=` does not partition the list,
+because a record commonly carries two kinds.
+
+#### What it is for next
+
+RFC 9700 mode already reads it, and reads it through `clientConfigOf()` — which
+takes the **attributes** rather than the registration document, precisely because
+those two stopped being the same thing once the console could create an application
+and give it redirect URIs with no registration behind it. So the exact-match
+redirect-URI check, the public-versus-confidential determination and the
+client-secret check all resolve to attributes on an entry, and it does not matter
+whether a registration, a console form, the management API or `ldapmodify` put them
+there. `appRegistered` records *how* an application got here, not whether what it
+holds counts.
+
+That is what makes the switch worth having: set `oauthTokenEndpointAuthMethod` to
+`none` and a client becomes public — PKCE required of it, its secret no longer
+checked — and set it back and it does not. One `client_id` exercises both halves of
+section 2.1.1 without restarting anything. The federation work — trust
+relationships with other identity providers over OAuth 2.0, OIDC, SAML 2.0 and
+WS-Federation — is the reason the key is the identifier rather than the protocol,
+and the reason an application accumulates kinds instead of being filed twice.
 
 ### The admin console
 
@@ -781,6 +1956,10 @@ The list is **filtered by family, kind and state and then paged**, newest first,
 **The management API pages the same way and answers with the same words.** `GET /admin-api/users` and `GET /admin-api/groups` take those parameters and reply with a `<name>Paging` object beside each array — `sessionsPaging`, `membersPaging`, and so on — carrying `page`, `pages`, `perPage`, `firstRow`, `lastRow` and `total`: the member names the three flat lists put at the top level, one level down, so a caller that has learned to walk `/admin-api/tokens` walks these without being told anything new. Each session in the reply carries its own `tokensPaging` for the same reason its parameter is named after it. Every array in a drill-down is therefore **one page and not the whole list**, which is what `users` has always been on the list beside it. The counts around them are untouched: a group's `memberCount`, `presentCount` and `danglingCount` stay counts of the whole list, because *seven members, five of which resolve* is the fact that resource exists to report and a per-page count would not be an answer to it. The `session-<id>Page` parameter is described in the operation's prose rather than listed with the others, because OpenAPI has no way to spell a query parameter whose name is built at runtime and a `session-{id}Page` in the parameter list would generate a client that sends a literal `{id}`.
 
 Three further details of that page are worth knowing before changing it. It keeps **the claims and never the credential** — not the signed token, not the assertion XML, not the ticket — because a page rendering a thousand live credentials in a form a browser will display is a page that leaks them, and the `jti` is all any button needs. Pasting a whole token works and **its signature is not verified**, which is safe rather than sloppy: the only thing read out of it is the `jti`, which is then looked up in this service's own registry, and a forged token yields a jti this service never issued — revoking one of those invalidates nothing. RFC 7009's endpoint *does* verify, because there the token is the credential being presented. And **Restore is offered and is labelled NON-SPEC**: no authorization server can undo a revocation, since a resource server may already have cached the refusal, but without it getting back to a working token means restarting the service and losing the signing key with it.
+
+**`/admin/applications`** is the other side of `/admin/users`, and the second page here that reports the *directory* rather than what this service has issued. Where that page lists every identity that has authenticated, this lists what they authenticated **to** — every OAuth client, OpenID Connect relying party, SAML 2.0 or 1.1 service provider, WS-Federation application, WS-Trust relying party, OpenID4VP verifier and Kerberos service, one entry per unique identifier whatever protocol brought it. Filter by identifier or name and by kind, page with `?page=` and `?per=`, and `?application=<id>` drills into one: every attribute of its directory entry, each shown with what the published schema says it *is*, paged under `?attributesPage=`. It differs from `/admin/groups` in one way worth knowing — that page reports the directory, this one reports a **registry** that lives in it, so an `ldapmodify` here changes what the protocol endpoints do. It carries forms as well: create an application before it connects, and add, remove or set the attributes that say what it is allowed to do — never the counters or the sightings, which are what happened rather than what it may do. See *Applications* above.
+
+**`/admin/authorization-servers`** decides what each discovery document *publishes*. One process serves as many authorization servers as somebody configures — the path component both discovery shapes already carry selects a profile, and each can have its own endpoints, capabilities and issuer. Any member is settable, including one this service has never heard of. It is the one page here whose whole purpose is to be able to say something untrue, so every view computes the **drift** between what a profile publishes and what this service actually does. See *Authorization server metadata* above.
 
 **`/admin/audit`** is the one page here that reports *history* rather than *state*, and that distinction is the whole reason it exists. Every other page answers a question about now: how many calls, which tokens are still valid, who is in `cn=developers`. None of them can answer *when*, or *by whom*, or *in what order*. `/admin/metrics` will tell you the directory holds eleven entries; only this page can tell you that a twelfth was created at 14:02 and deleted at 14:03 by somebody bound as `uid=carol`, over LDAPS — and that in the same minute a token was revoked from the console. Those are three rows here and three numbers that each went up by one over there.
 
@@ -852,11 +2031,11 @@ Three things the console deliberately does **not** do. It does not invalidate a 
 
 ### The management API
 
-`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. Forty-one operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
+`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. 54 operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
 
 **It exists because a form is the right shape for a person and the wrong one for anything else.** Every page here has answered `?format=json` since it was written, so reading was never the problem; *changing* something was. A caller that wanted to revoke a token from a script, or narrow the issuer's claim set from a CI job before running a wallet against it, was left either parsing a 303 redirect for the message in its query string or knowing which hidden input a particular form carried. Both are ways of driving a browser without one.
 
-**The rule the API is written under is about the future rather than about the code**: a control added to `/admin` gets an operation on `/admin-api` in the same commit. `GET /admin-api/audit` is what that rule produced for the audit page, and it is the one resource here with **no POST beside it** — not an operation nobody got round to, but the consequence of the page it mirrors having no form on it. An erase control on an unprotected audit log would make it unable to answer the one question it exists for, so there is nothing to change and therefore nothing to document as changeable. An API that covers eight of nine controls is worse than one that covers none, because the ninth is discovered by somebody who has already written the code that assumed it was there. Two things make keeping that rule cheap, and the third thing is why there is a test for it in the parent project.
+**The rule the API is written under is about the future rather than about the code**: a control added to `/admin` gets an operation on `/admin-api` in the same commit. `GET /admin-api/audit` is what that rule produced for the audit page, and it is the one resource here with **no POST beside it** — not an operation nobody got round to, but the consequence of the page it mirrors having no form on it. An erase control on an unprotected audit log would make it unable to answer the one question it exists for, so there is nothing to change and therefore nothing to document as changeable. `GET /admin-api/applications` **has** a POST beside it — six actions — and the thing worth knowing about them is that they are not a third store: each calls the same function in `applications.js` that a protocol path or an `ldapmodify` reaches, against the same `ou=applications` entries. An API that covers eight of nine controls is worse than one that covers none, because the ninth is discovered by somebody who has already written the code that assumed it was there. Two things make keeping that rule cheap, and the third thing is why there is a test for it in the parent project.
 
 The first is that **this API decides nothing**. Every POST calls the same action function the console's form posts to — `tokenAction`, `claimsAction`, `vcAction`, `vpConfigAction` — with the action taken from the URL instead of from a hidden field, and every GET calls the same JSON view the page's `?format=json` answers. Those views became functions in `admin.js` for this reason (`consoleJson`, `metricsJson`, `tokensView`, `auditView`, `usersView`, `groupsView`, `claimsJson`, `vcJson`, `vpConfigJson`); they had been built inline in the route handlers, which was fine while there was one caller and is exactly the shape that produces two objects that agree today and not next month. So `admin_api.js` holds no opinion about what a revocation means that `admin.js` does not, and the way to see that is not to read the code: revoke a token through the API and RFC 7662 introspection calls it inactive, because there is one set of revoked jtis in this service and it is the same one `/oauth2/revoke` writes to.
 

@@ -15,7 +15,8 @@ DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw T
 over TLS, on raw TCP 636 as **LDAPS**, one set of handlers and one store behind
 both, built on the node-ldapjs SUBMODULE and used unmodified), and **TLS / mutual TLS**
 (two HTTPS listeners of its own, 8443 and 9443, whose whole content is what the
-SERVER saw of the connection — see README.md). It exists to exercise *clients*: it
+SERVER saw of the connection — see README.md; and, when `global.https` is set,
+the main port too, on the same certificate). It exists to exercise *clients*: it
 authenticates nobody, checks no password and validates no access token.
 
 **There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
@@ -54,6 +55,8 @@ express app and every middleware), `authn.js` (the authentication service), `sam
 `krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
 messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
 `sts_metadata.js`, and the libraries that register nothing: `dpop.js`,
+`mtls.js`, `client_auth.js`, `oauth2_bcp.js`, `applications.js`,
+`authorization_servers.js`,
 `admin_stats.js`, `audit.js`, `vc_claims.js`, `vc_verifier_config.js`,
 `claim_attributes.js`, and
 `admin_api_spec.js` and `admin_api_docs.js` beside the management API. One file in the tree is not a
@@ -162,14 +165,23 @@ not fanned out. There is no StartTLS to add instead: it is an extended operation
 ldapjs implements none, and this repository does not patch that submodule.
 
 `tls_server.js` is the newest of the four and the one whose sockets are easiest to
-forget are sockets — and there is now a FOURTH TLS socket in this process that is not
-its own: the directory's LDAPS listener serves `serverCertificate()`'s certificate and
-key rather than generating a second pair, so one anchor covers 8443, 9443 and 636 and
-a caller trusts this service once per start rather than twice. That is what makes
-`ldap_server.js` require this module, and therefore what fixes their order in
-`server.js` (rule 6). The private key crosses a module boundary and no network one:
-it is generated per start, held in memory, and `GET /tls/server-certificate` publishes
-the certificate alone.
+forget are sockets — and there are now TWO MORE TLS sockets in this process that are
+not its own, both on `serverCertificate()`'s certificate and key rather than a second
+pair: the directory's LDAPS listener on 636, and — when `global.https` is set, which
+`oauth2.rfc9700` does by default — THE MAIN PORT ITSELF, bound as HTTPS from
+`listen()` in `server.js`. So one anchor covers 8443, 9443, 636 and 8081, and a
+caller trusts this service once per start rather than four times. The LDAPS half is
+what makes `ldap_server.js` require this module, and therefore what fixes their order
+in `server.js` (rule 6); the main-port half needs no require order at all, because
+`server.js` already has this module in hand by the time it listens. The private key
+crosses a module boundary and no network one: it is generated per start, held in
+memory, and `GET /tls/server-certificate` publishes the certificate alone.
+
+**One thing that arrangement costs, and it is stated on the page rather than left to
+be met as a handshake failure**: with the main port TLS there is no plain listener in
+this process, so `POST /tls/trust` and `GET /tls/server-certificate` — which exist to
+be reachable BEFORE anything is trusted — have to be called the first time with
+verification off.
 
 Its own sockets: they speak **HTTP**, so they look as though they belong on the
 plain listener — but they are HTTPS on 8443 and 9443, and `GET /sts-metadata` walks
@@ -177,8 +189,14 @@ the plain listener's router, which cannot see them. Its four rows there are the
 plain-HTTP views only, and the listeners are described in their text. Its truststore
 for CLIENT certificates is empty at startup and is filled at runtime through
 `POST /tls/trust`, because the CA it verifies is generated in somebody's browser
-minutes before the connection; that endpoint is on the plain port on purpose, since
-that is the one reachable before anything is trusted.
+minutes before the connection; that endpoint is on the MAIN port on purpose, since
+that is normally the one reachable before anything is trusted. `global.https` —
+which `oauth2.rfc9700` turns on — takes that property away by making the main port
+TLS as well, so the first fetch of the certificate and the first POST of an anchor
+then have to be made with verification off. Every sentence in that module which
+names the port goes through `mainPortPhrase()` for exactly that reason; seven of
+them used to say "the plain HTTP port" outright, which would be quietly wrong in
+the one place a reader goes when a handshake is failing.
 
 1. **Requiring a module registers its endpoints.** Each calls `app.get(...)` at its
    top level against the shared app from `app.js`, rather than exporting a
@@ -370,6 +388,431 @@ that is the one reachable before anything is trusted.
    for when a require would close a cycle or move a route, and it costs a reader
    an indirection every time.
 
+3f. **`oauth2_bcp.js` is a library like `dpop.js`, and it is a MODE rather than a
+   change of behaviour.** It holds this service's model of RFC 9700 (the OAuth 2.0
+   Security Best Current Practice) — the whole of that BCP's section 2, as a table
+   of requirements with a check citing each by id. It registers nothing and
+   requires only `crypto`, `helpers.js` and `config.js`, so it cannot join a cycle
+   and its position in the require order does not matter. **`app.js` requires it
+   too**, for one decision (section 2.6's "no CORS at the authorization
+   endpoint"), which is safe for exactly that reason and is the only middleware
+   this mode touches. Six things in it are load-bearing:
+
+   **The flag is the whole contract, and it is RESTART-ONLY.** `oauth2.rfc9700`
+   is OFF by default and every entry point in the module returns "no opinion"
+   while it is, so the service behaves EXACTLY as it did before the file
+   existed. That is not timidity: every existing caller of this mock uses an
+   unregistered `redirect_uri`, no PKCE or the implicit grant, and a client is
+   exercised by both answers — one that has only met a permissive server has
+   never run its own refusal paths, and one that has only met a strict server
+   cannot reproduce the behaviour it is trying to detect. It stopped being a
+   runtime setting the moment it grew a consequence that happens before the
+   service is listening: `global.https` derives its default from it, so it binds
+   the main port as HTTPS. A flag that was runtime for its checks and
+   restart-only for its socket is the silent disagreement the config.js header
+   warns about — /admin/config would report the mode as on while every
+   authorization response still went out over plain HTTP.
+
+   **It decides; `oauth2.js` answers.** This module never touches `res`. What a
+   refusal LOOKS like is protocol knowledge and stays there — the same split
+   `authn.js` has — and the order is load-bearing rather than stylistic: the
+   `redirect_uri` is matched FIRST and a failure is answered as a 400 on this
+   service, because reporting `error=invalid_request` by redirecting to an
+   unvalidated URI is still the browser being forwarded to an arbitrary URI, and
+   an attacker does not mind which parameters ride along. Everything after that
+   check may be reported to the client.
+
+   **THREE THINGS OUTSIDE THE AUTHORIZATION ENDPOINT, and each is at a funnel
+   rather than a call site.** Refresh token lineage is recorded inside
+   `refreshToken()` in `oauth2.js` — the one function that mints one, so no
+   grant can issue a refresh token outside its family; the sender-constraining
+   note is inside `tokenSet()`, the one place a grant mints a token set; and the
+   client-authentication and grant-type checks are ABOVE the grant switch at the
+   token endpoint, because a client that cannot authenticate has not
+   authenticated whichever grant it was about to ask for. Do not move any of
+   them into a branch — five branches means a sixth added later with none, which
+   is the same reasoning that keeps `signJwt()` the single counter.
+
+   **A REFRESH TOKEN CARRIES ITS RESOURCES, and forgetting that was a hole.**
+   RFC 8707 narrows an access token's audience; the refresh token has to carry
+   the same list or the grant WIDENS ITSELF BY BEING RENEWED — the refreshed
+   access token would get this service's default audience, which is broader than
+   what was authorized. `refreshToken()` records `resources`, the refresh grant
+   reads them back for the new audience, and a refresh naming one the grant does
+   not carry is `invalid_target`. The same shape as the scope check one field
+   over.
+
+   **THE IDLE TIMEOUT IS ON THE FAMILY AND REFUSES RATHER THAN REVOKING.**
+   `lastUsedAt` lives on the family and is touched at `noteRefreshRotated()` —
+   at the SUCCESSFUL redemption, so a run of refused attempts cannot keep a
+   chain alive. It refuses without revoking the family because an idle chain is
+   a client that went away and a replayed one is a chain that was copied;
+   collapsing the two would make the replay refusal, which says something
+   serious, indistinguishable from an afternoon off.
+
+   **REVOCATION IS STILL `stats.revoke()` AND THIS MODULE NEVER CALLS IT.**
+   `checkRefreshRequest()` returns the jtis a replay should kill and `oauth2.js`
+   revokes them, which keeps both rules intact at once: the one-store rule (the
+   revocation set `/oauth2/revoke` and the console write to is the only one), and
+   this module's own — it decides, the protocol acts. A rotated token is revoked
+   through the same call, which is why a retired refresh token also reports
+   inactive at `/oauth2/introspect` rather than merely failing to refresh.
+
+   **The transaction check runs where the values are SPENT.** An authorization
+   request runs through `/oauth2/authorize` twice — once before the sign-in
+   screen and once on the way back with a session — so a reuse check at the top
+   of that endpoint refuses every request in the service for reusing its own
+   values between its own two passes. It is called from
+   `issueAuthorizationResponse()` immediately before a code is minted, and the
+   token endpoint marks the transaction finished when the code is redeemed. A
+   value presented again BEFORE that is a reloaded tab, not a second
+   transaction, and refusing it is how a check like this gets turned off.
+
+   **What the mode refuses, the metadata stops advertising**, and it happens in
+   `asMetadata()` for the reason the two discovery documents are built from one
+   object at all: narrowing one of them would produce exactly the drift that
+   arrangement exists to prevent.
+
+   **A REFUSAL AT AN ENDPOINT NEEDS THE MATCHING REFUSAL AT REGISTRATION.**
+   `checkClientRegistration()` refuses metadata the other endpoints would refuse
+   in use — the password grant, the implicit grant, a response type naming
+   `token`, an `http` redirect URI off the loopback — because a registration is
+   a document the client KEEPS and acts on, and recording a permission this
+   server will always refuse is the discovery document's promise broken in the
+   other direction. It refuses rather than silently returning different
+   metadata, which RFC 7591 also permits: a client that registered for
+   `password` and got a registration quietly without it would have to diff two
+   documents to notice. **When a new refusal is added to an endpoint, look for
+   the registration member that would have recorded it.**
+
+   **ONE DECISION ABOUT FORWARDED HEADERS, SHARED.** `helpers.forwardedFrom()`
+   decides whether `X-Forwarded-Proto`/`X-Forwarded-Host` are believed, and both
+   `baseUrlOf()` and `dpop.js`'s `htuOf()` go through it. They used to disagree
+   — dpop believed them unconditionally and baseUrlOf ignored them — and each
+   answer was wrong for the deployment the other was written for: behind a proxy
+   the metadata published the last hop's URLs, and without one a client could
+   choose the `htu` its own proof was checked against, which unbinds the proof.
+   `global.trustProxy` is OFF by default and the htu refusal NAMES it. Do not
+   let a third function make this decision a third way.
+
+   **NO CLIENT CERTIFICATE IS EVER READ FROM A HEADER.** `X-Client-Cert` and its
+   dozen vendor spellings are listed on `/tls/forwarded` and read by nothing:
+   a certificate in a header is one anybody can forge, so RFC 8705 binding and
+   mTLS client authentication both take it off the TLS handshake. The cost —
+   a proxy terminating mTLS cannot pass the certificate through — is stated
+   rather than hidden, and the headers a request carried are SHOWN so that
+   ignoring them is visible rather than silent.
+
+   **RESOURCE INDICATORS AND THE AUDIENCE CHECK ARE FEATURES, NOT MODE
+   BEHAVIOUR.** RFC 8707 `resource` is honoured in both modes and the protected
+   endpoints refuse a token issued for another audience in both, because a
+   request that sends no `resource` is unaffected either way — the flag contract
+   ("mode off changes nothing") is about existing callers and no existing caller
+   sends it. Two details in the check are easy to get wrong: it applies only to
+   a token this service VERIFIED (a foreign token's `aud` is a string nobody can
+   check), and it matches on the PATH rather than the whole URL, because every
+   token carries `<base>/resource` where the base is whatever URL minted it — a
+   whole-URL comparison refuses a token minted at localhost and presented at
+   127.0.0.1, while a token narrowed to somebody else always has a different
+   path.
+
+   **THE REPLAY RELAXATION IS THE ONE THING THE TWO MODES ANSWER DIFFERENTLY
+   ABOUT A CODE.** `redeemedCodes` in `oauth2.js` answers an IDENTICAL repeat
+   with the tokens it already bought, for the reason written where it is
+   declared. RFC 9700 section 4.5 says a real server refuses that, so
+   `checkCodeReplay()` does — and revokes the access, refresh and ID Tokens that
+   code bought (RFC 6749 section 10.5), through `stats.revoke()` called by
+   `oauth2.js`, never by this module. It sits BELOW the two refusals that are
+   more specific — a repeat that differs, and a code whose lifetime ran out —
+   because those are already refusals in both modes and each deserves its own
+   sentence.
+
+   **TWO REQUIREMENTS ARE IN THE TABLE AS `enforced: 'no'` BECAUSE THEY ARE THE
+   CLIENT'S**, not because they were skipped: the client must validate the ID
+   Token's nonce and must not use a token before that succeeds. Nothing this
+   server observes separates a client that checks from one that does not. What
+   it can do instead is `oauth2.breakIdTokenNonce` — a deliberately wrong nonce,
+   off by default, NOT part of this mode (it is useful in either), reported on
+   `GET /oauth2/rfc9700` and logged on every token it spoils. That is the same
+   device as `/spnego`'s three knobs and the reserved password `invalid`: a
+   reachable negative. Do not fold it into the mode — a compliance flag that
+   also breaks tokens is a flag nobody will turn on.
+
+   **THE TLS REQUIREMENT IS NOT A CHECK AND MUST NOT BE MADE ONE.** "An
+   authorization response MUST NOT be sent over an unencrypted connection"
+   cannot be refused per request — by the time anything here runs the request
+   has already arrived, and refusing it would report the problem down the same
+   channel. It is a property of the SOCKET, so `global.https` settles it at
+   `listen()` in `server.js`, using `tls_server.js`'s ONE per-start certificate
+   rather than a second pair (see rule 6: that is the same reasoning that put
+   LDAPS 636 on it). The row in `REQUIREMENTS` therefore has FUNCTIONS for
+   `enforced` and `note` — the only row that does — and `state()` calls them, so
+   the table stays the single source rather than half of that row's meaning
+   moving into the view. It reports `deployment` when the port is TLS and `no`
+   with the reason when somebody has set `global.https` false to run the checks
+   over plain http, which is a case that must stay reachable: a client that
+   cannot trust a certificate regenerated every start should still be able to
+   exercise the rest. `GET /oauth2/rfc9700` publishes every row with `enforced`
+   as yes / detected / always / deployment / no, and a compliance mode that
+   quietly skipped a requirement it advertises would be the most misleading
+   thing in this repository. New requirements are rows in `REQUIREMENTS` and the
+   checks cite them by id; do not add a check with no row.
+
+   **The SCHEME is derived and nothing pins it.** `baseUrlOf()` builds every URL
+   from `req.protocol` and the Host header, so an https.Server moves the RFC
+   8414 document, the OpenID Provider Configuration, the OID4VCI and OID4VP
+   metadata, the federation metadata, the DID document and the `iss` of every
+   token together, with no module told about any of it. Do not "fix" that by
+   hardcoding a scheme anywhere — it would be wrong on the default plain
+   listener. The ONE exception is a PINNED `oauth2.issuer`: `issuerOf()` in
+   `oauth2.js` upgrades an `http://` pin to `https://` when the port is TLS and
+   logs it, because a client MUST reject a document whose issuer is not the
+   identifier it fetched from, and that failure names the issuer rather than the
+   scheme. Pinning a different HOST still produces the mismatch it exists for.
+
+3j. **`authorization_servers.js` makes one process BE several authorization
+   servers, and the document is the server rather than a description of one.**
+   The path component both discovery shapes carry selects one; its endpoints
+   live under that name (`/{id}/oauth2/…`, registered in one block in
+   `oauth2.js` so the prefixed set cannot drift from the unprefixed one); and
+   the capabilities in its document DRIVE those endpoints. A library requiring
+   only `helpers.js`. Nine things:
+
+   **EVERY AUTHORIZATION SERVER STARTS EQUAL, and every name is one.** An
+   unconfigured profile has the defaults `asMetadata()` builds, and a name
+   nobody has configured is CREATED on first sight — by an endpoint or by a
+   metadata fetch, since reading the document is accessing the server. It is
+   marked `autoCreated` so the console can tell the two apart. Bounded at
+   `MAX_PROFILES`, past which a name is still SERVED with the defaults and
+   simply not recorded: the id comes off a URL path, so any caller can invent
+   one, and a load generator must not take the feature away from the names that
+   matter.
+
+   **`capabilitiesOf()` IS READ BY BOTH THE DOCUMENT AND THE ENDPOINTS.** That
+   is the whole of how they are kept in step — there is no second table of what
+   `tenant1` does that could disagree with what `tenant1` advertises. An
+   enforceable member is marked `enforces` on its catalogue row; anything else
+   is published and not read.
+
+   **A REMOVED MEMBER MEANS THE CHECK DOES NOT RUN**, and that is the honest
+   reading rather than a gap: a client cannot learn from an absent
+   `code_challenge_methods_supported` that PKCE is unavailable, so a server that
+   refused every method on the strength of having removed the member would be
+   enforcing something it never said. `capabilityList()` returns null for it and
+   every caller distinguishes null from an empty list.
+
+   **A CREDENTIAL DOES NOT CROSS BETWEEN THEM.** The authorization code carries
+   `authorization_server` and the token endpoint refuses one issued by another.
+   They publish different capabilities and are presented to a client as separate
+   servers; one process serving several must not let a credential leak between
+   them.
+
+   **`asBaseOf(req)` IS WHAT EVERY ISSUER AND AUDIENCE IS BUILT FROM.** A named
+   authorization server is its own issuer, so its tokens' `iss`, their `aud`,
+   and the RFC 9207 `iss` on its authorization responses all carry its path —
+   and its document says the same, which is what a conforming client checks.
+   **The sign-in return URL has to carry it too**: `returnTo` was hard-coded to
+   `/oauth2/authorize`, which sent every named server's SECOND pass — the one
+   that issues the code — to the default server, and the code came out belonging
+   to somebody else with nothing on the way through looking wrong.
+
+   And five things from before:
+
+   **A CATALOGUE, NOT A SCHEMA.** Any member is settable, including one this
+   service has never heard of, because publishing something a client did not
+   expect is half the point of a mock. That is the deliberate OPPOSITE of
+   `applications.js`, which refuses an attribute outside its table — that table
+   is a published contract about what an entry carries, and this is a way to lie
+   on purpose. Do not add validation here.
+
+   **THE PROFILE IS APPLIED TWICE, and it has to be.** `asMetadata()` applies it,
+   and then `oidcMetadata()`'s `Object.assign` overwrites every member OpenID
+   Connect Discovery adds — so it is applied again at the end of that function.
+   A profile that set `userinfo_endpoint` would otherwise work in the RFC 8414
+   document and do nothing in the OIDC one.
+
+   **IT IS APPLIED LAST, AFTER `bcp.applyToMetadata()`.** A profile is somebody
+   saying "publish this", and a mode quietly winning would make the control
+   appear not to work. A profile re-advertising the implicit grant the mode
+   refuses is a document that lies about this server, which is the case the
+   drift report exists for.
+
+   **DRIFT MEANS SOMETHING NARROWER NOW.** It used to be "this document lies
+   about this service", which cannot happen for an enforced member any more —
+   the document IS the behaviour. `driftOf()` therefore SKIPS a member with an
+   `enforces` row and reports the rest: what this service cannot honour however
+   it is set. Those stay publishable, because a misconfigured document is a
+   client error path worth running, and they stay reported.
+
+   **AN UNCONFIGURED PATH IS NOT AN ERROR.** It publishes the ordinary document
+   with the issuer taken from the path, which is what this service has always
+   done — so adding this feature changed nothing for any existing caller, and a
+   deleted profile leaves its URLs answering.
+
+3i. **`client_auth.js` verifies all six token-endpoint methods, and it is the
+   PROTOCOL half of section 2.5.** `oauth2_bcp.js` decides whether a client has
+   to authenticate at all (the policy); this decides whether what arrived proves
+   it (the mechanics). It registers nothing and requires `helpers.js`,
+   `config.js` and `mtls.js`, so it cannot join a cycle. Four things:
+
+   **NOTHING FALLS THROUGH UNCHECKED ANY MORE.** `private_key_jwt` and
+   `client_secret_jwt` used to be advertised and ACCEPTED without an assertion
+   being looked at — worse than not offering them, because a client author came
+   away believing a check had happened. A method this file cannot verify is now
+   REFUSED, and `token_endpoint_auth_methods_supported` is built from
+   `METHODS` so the metadata cannot advertise one that would not be.
+
+   **THE METHOD DECIDES THE ALGORITHM FAMILY, NOT THE HEADER.** An assertion
+   nominating `HS256` for `private_key_jwt` is refused rather than verified —
+   verifying it would use the client's PUBLIC key as an HMAC secret, which is
+   the classic JWT forgery and one anybody can perform.
+
+   **THE UNVERIFIED `sub` SELECTS, IT DOES NOT ESTABLISH.** OIDC Core section 9
+   lets a `private_key_jwt` request omit `client_id`, so `clientFrom()` reads
+   the assertion's `sub` unverified — safe for exactly one purpose, choosing
+   which registered client to check AGAINST, because the assertion is then
+   verified against that client's keys with `iss` and `sub` required to match.
+   Do not read anything else out of an unverified assertion.
+
+   **`jwks_uri` IS RECORDED AND NEVER FOLLOWED**, which is the same refusal
+   `wsfed.js` gives `wreqptr`: fetching a URL somebody registered in order to
+   verify a credential is a server-side request forgery with a citation
+   attached. Holding that position in one file and not the other would be no
+   position at all.
+
+3h. **`mtls.js` is a library like `dpop.js`, and it is the OTHER half of RFC
+   9700 section 2.2.** `dpop.js` binds a token to a KEY proved per request;
+   this binds it to the CLIENT CERTIFICATE the TLS connection was made with (RFC
+   8705 section 3). It registers nothing and requires only `helpers.js` and
+   `config.js`, so it cannot join a cycle. Five things are load-bearing:
+
+   **`dpop.js` REQUIRES IT, and that is where the resource-server check goes.**
+   `presentedAccessToken()` there is the single check `/oauth2/userinfo` and the
+   three credential endpoints share — the same reasoning that put that function
+   in `dpop.js` rather than in `vc_issuer.js`. A second check beside it would be
+   a fourth caller nobody updated.
+
+   **The thumbprint is of the DER**, base64url, unpadded — not the PEM, not the
+   public key, not hex. Every other spelling looks right in a log and matches
+   nothing, so `thumbprintOf()` is the only place it is computed and both ends
+   of the comparison go through it.
+
+   **An UNVERIFIED certificate still binds.** `server.js` sets
+   `rejectUnauthorized: false` on the main listener, and that is not a hole: RFC
+   8705 section 3 binds to the CERTIFICATE and permits a self-signed one
+   explicitly — the proof is that the same key completed this handshake, not
+   that a CA vouched for it. Requiring verification would make the feature
+   unreachable, since `/tls/trust` starts empty by design.
+
+   **The confirmation is MERGED with the DPoP one, never replaces it.** A client
+   that presented a certificate AND sent a proof demonstrated both, and a token
+   recording one would discard a check somebody performed. The REFRESH token is
+   bound too — otherwise the long-lived half of the grant stays a bearer
+   credential that mints bound tokens for whoever holds it, which is worse than
+   not binding at all because the `cnf` on what it mints implies a guarantee
+   nobody checked.
+
+   **The request reaches `accessToken()` through ONE funnel.** The token
+   endpoint's `issue()` adds `request: req` to every grant's options, so six
+   call sites did not have to remember it — five that would and a sixth added
+   later that would not, the reasoning that keeps `signJwt()` the single counter.
+   Only available where the main port is TLS, and
+   `tls_client_certificate_bound_access_tokens` is advertised only there: a
+   client reads a metadata member as a promise.
+
+3g. **`applications.js` is a library like `dpop.js`, and THE DIRECTORY IS ITS
+   STORE.** It holds every application this service has been asked about — an
+   OAuth client, an OIDC relying party, a SAML 2.0 or 1.1 service provider, a
+   WS-Federation application, a WS-Trust relying party, the OID4VP verifier, a
+   Kerberos service — as entries under `ou=applications`. It registers no route
+   and requires only `helpers.js` and `audit.js`, so it cannot join a cycle;
+   `admin_stats.js`, `oauth2.js`, `wsfed.js`, `wstrust.js` and `krb5_kdc.js`
+   require it in the ordinary direction, and `ldap_server.js` fills its
+   `setDirectory()` slot at require time for the reason `vc_claims.js`'s is
+   filled (rule 6). Six things are load-bearing:
+
+   **THERE IS NO MAP SHADOWING THE ENTRIES.** Every read is a directory read and
+   nothing is cached, which is what makes an `ldapmodify` of `oauthRedirectUri`
+   change what RFC 9700 mode accepts on the NEXT request. A cache added for
+   speed would quietly undo the whole design, and on a mock whose store is a Map
+   in this process there is nothing to gain by one. `oauth2.js`'s
+   `registeredClients` Map is GONE for the same reason — the RFC 7591
+   registrations are entries, reached through `registrationOf()`.
+
+   **THE ATTRIBUTES WIN OVER THE STORED DOCUMENT.** RFC 7591 permits arbitrary
+   metadata and RFC 7592's read must return what was registered, which no fixed
+   attribute set can represent — so the whole registration is kept verbatim in
+   `appRegistrationJson`. When the record is rebuilt that document is the
+   STARTING POINT and every member with an attribute of its own is overwritten
+   from the attribute. Reverse those and an operator's edit is silently ignored
+   by the one check that matters, which is the two-stores failure in miniature.
+
+   **THE SCHEMA IS A TABLE AND IT IS A VOCABULARY, NOT A CONSTRAINT.** node-ldapjs
+   has no schema subsystem (its whole `lib/` mentions objectClass three times: a
+   default filter and two result-code names) and it is a submodule this repo does
+   not modify, so there was nothing to register with. `SCHEMA.attributes` is the
+   definition: the entry is built by WALKING it, `/ldap/applications` publishes
+   it, and an attribute not in it is REFUSED rather than written. `multi`
+   accumulates and `single` is assigned — get that backwards on a counter and the
+   entry grows a value per sign-in, which is `applyVcAttributes()`'s second rule.
+   Where a registered class fits it is used (`applicationProcess`, RFC 4519);
+   `stsApplication` is invented because nothing standard has a `client_id`.
+
+   **THE APPLICATION FUNNEL IS NOT THE USER FUNNEL, and cannot be.** A person is
+   recorded at `recordAuthentication()`; an application is recorded where its own
+   protocol accepts it, because in the authorization code flow the person is
+   authenticated in `authn.js`, which knows nothing about OAuth and never reads a
+   `client_id`. `counts: true` exactly where a credential was accepted FOR that
+   application — the authorization endpoint counts, the token endpoint does not,
+   since redeeming the code is the same transaction continuing.
+
+   **`ou=applications` IS ITS OWN CONTAINER AND MUST STAY OUT OF THE ou=users
+   SWEEPS.** `populateVcAttributes()` would give an OAuth client a birthdate and
+   `/admin/groups` reports membership from there; both already walk `ou=users`
+   only. This is the OPPOSITE decision from `didPlan()`, where being outside
+   those sweeps was the bug because a DID names a person.
+
+   **THE CONSOLE IS NOT A THIRD DOOR.** `/admin/applications` and
+   `POST /admin-api/applications/{action}` both call functions in THIS module —
+   `createApplication`, `updateApplication`, `deleteApplication`,
+   `forgetRegistration` — which do the same read-modify-write `seen()` does
+   against the same entries. A form post and an `ldapmodify` are one act
+   arriving by two routes, which is what keeps the one-store rule intact with
+   three ways in. `applicationsView()` builds the HTML and the JSON together and
+   the API throws the markup away, the way `usersView()`/`groupsView()` already
+   do; the drill-down pages its ATTRIBUTE list under `attributesPage` rather
+   than the bare `page`, which is `pagingOf()`'s convention for a view holding a
+   list that is not the top-level one.
+
+   **WHAT MAY BE CHANGED IS DECLARED AND NOT DERIVED, and the line is the
+   `EDITABLE` table here rather than a judgement at each call site.** Declared is
+   what the application may DO — redirect URIs, grant types, scopes, secret,
+   auth method — which is configuration and is what RFC 9700 mode reads. Derived
+   is what HAPPENED — the counters, the sightings, the kinds, the protocols,
+   `appRedirectUriObserved` — and a form that could rewrite it would make the
+   page lie about this service's own behaviour, indistinguishably from the
+   recording being broken. `ldapmodify` still reaches everything: refusing it
+   HERE is the difference between offering an operation and merely not
+   preventing it. The console's selects are built from the same table the
+   actions validate against, so a form cannot offer a field the action refuses.
+
+   **`clientConfigOf()` IS WHAT THE SECURITY CHECKS READ, NOT `registrationOf()`.**
+   The two answer different questions — "what may this client do" versus "what
+   did it register" — and they stopped coinciding the moment the console could
+   create an application with redirect URIs and no registration behind it. So
+   the RFC 9700 checks in `oauth2.js` pass `clientConfigOf()`, which is built
+   from the ATTRIBUTES; `appRegistered` records how an application got here and
+   not whether what it holds counts. `registrationOf()` is still what RFC 7592
+   and the UserInfo signing algorithm read, because those are genuinely
+   questions about the registration.
+
+   **TWO ATTRIBUTES HOLD CREDENTIALS IN THE CLEAR** — `oauthClientSecret` and
+   `appRegistrationAccessToken` — which is the `/krb5/principals` decision about
+   the Kerberos passwords, made again and for the same reason. Now that RFC 9700
+   mode CHECKS that secret, anyone who can read the directory can authenticate as
+   that client; that is the honest state of a service that authenticates nobody.
+   They are never given to `audit.js`, whose no-credential rule is untouched.
+
 4. **`wsfed.js` must stay after `oauth2.js` in the require order**, and that is a
    dependency rather than a preference: it signs users in to the browser session
    `oauth2.js` owns, through the `startSession` / `sessionOf` / `endSession` it
@@ -448,6 +891,19 @@ that is the one reachable before anything is trusted.
    be able to fail an authentication. Do not "simplify" that into a require in the
    other direction, and do not seed the entry at each authentication site instead:
    fourteen call sites means a fifteenth that is not.
+
+   **A container it does NOT sweep, and that is the point of it.**
+   `ou=applications` is `applications.js`'s store (rule 3g) and this module is
+   what makes it one — `readApplication`, `writeApplication`, `allApplications`
+   and `countApplications`, filled into that module's `setDirectory()` slot at
+   require time, plus `GET /ldap/applications`. The division is exact and worth
+   keeping: THAT module owns the schema and both conversions, THIS one owns
+   where the container is, how an entry is created and what the cap is. Note
+   that `writeApplication()` REPLACES rather than merging, which is the one
+   place this file breaks `applyVcAttributes()`'s fill-only-what-is-absent rule
+   — deliberately, because the record being written was read from that entry a
+   moment ago, so merging would make it impossible ever to REMOVE a value and a
+   redirect URI deleted with `ldapmodify` would come back on the next request.
 
    **A SECOND hook runs the other way, and it is the console that offers it.**
    `/admin/users?user=<name>` shows that user's directory object — every attribute,
@@ -541,13 +997,13 @@ WS-Trust 1.0 through 1.4 instead of four.
    registers no wildcard and collides with no path.
 
    The rule that does matter is **a control added to `/admin` gets an operation
-   on `/admin-api` in the same commit**. Not eventually, and not when somebody
+   on `/admin-api` in the same commit** — a CONTROL, which is why a page with no
+   form on it needs only its GET. Not eventually, and not when somebody
    asks: an API that covers eight of nine controls is worse than one that covers
    none, because the ninth is found by a caller who has already written the code
    that assumed it. A page with no form on it still needs its GET —
-   `/admin-api/audit` is that, and it is the one resource here with no POST
-   beside it, which is the audit page having nothing to change rather than an
-   operation nobody got round to.
+   `/admin-api/audit` is the one, and it is the audit page having nothing to
+   change rather than an operation nobody got round to.
 
    Two things make that cheap rather than a matter of discipline, and one thing
    cannot be made cheap at all:
@@ -581,7 +1037,50 @@ WS-Trust 1.0 through 1.4 instead of four.
    on a mock, and the alternative — a second set of builders for the same data —
    is the thing this whole arrangement exists to prevent.
 
-## `/admin-api/docs` is the only page here with a script on it
+## `frame-ancestors` is the one CSP clause a page may not drop
+
+RFC 9700 section 4.14. `app.js` sets the policy on every response, and five routes
+relax it to load a named script by SETTING THE WHOLE HEADER — so each of them could
+lose the framing clause with nothing failing: the page works, the script runs, and
+the protection is gone. **`frame-ancestors` has no fallback from `default-src`**,
+which is why `default-src 'none'` alone is not enough and why this needs saying.
+
+Two rules come out of it:
+
+* **A relaxation goes through `app.contentSecurityPolicy(overrides)`**, which re-adds
+  `frame-ancestors` and `base-uri` whatever the caller asked for. A caller cannot turn
+  them off — that is deliberate, not an oversight in the API.
+* **The policy is re-checked when the response is flushed.** Express's own 404 handler
+  REPLACES the header with `default-src 'none'`, so every unrouted path was framable
+  as far as CSP was concerned; nothing here could have shown it, because the header
+  this service set was correct and something else overwrote it. The check is "does it
+  still carry the clause", not "is it the value I set", so the five relaxations are
+  untouched.
+
+**Do not replace Express's 404 body.** `Cannot GET /path` is how the parent project's
+`tests/sts_metadata.js` tells an unrouted path from an endpoint legitimately answering
+404. Fixing the header was the whole fix; a prettier 404 would break that test
+silently.
+
+## Three pages here have a script on them, and each is the same exception
+
+`app.js` sets `script-src 'none'` for the whole service, and the reason is in its
+own comment: it is what makes the family of reflected-content problems moot rather
+than merely unlikely. Three pages need a script and each takes the SAME shape of
+exception — `script-src 'self'` naming one resource, never `'unsafe-inline'`:
+
+* `/authn/webauthn` and its `/authn/webauthn.js` — the ceremony cannot be performed
+  without one.
+* WS-Federation's sign-in response and `/wsfed/autopost.js` — section 13.2.1's form POST.
+* the `response_mode=form_post` authorization response and `/oauth2/autopost.js` —
+  RFC 9700 section 4.3's answer to a response that would otherwise be in a URL.
+
+**Each of those pages carries a REAL SUBMIT BUTTON as well**, and that is not a
+fallback nobody sees: with the script blocked the button is the whole mechanism, so
+it is labelled for a person rather than hidden. A fourth scripted page needs the
+same argument made again — do not add one by analogy.
+
+## `/admin-api/docs` is the only page here with an *explorer* script
 
 `app.js` sets `script-src 'none'` for the whole service, and the reason is in its
 own comment: it is what makes the family of reflected-content problems moot rather
@@ -625,8 +1124,9 @@ which is the state this file exists to end.
 consumed before the service was listening, so changing it now would do nothing — and
 `set` refuses it with the `restartReason` rather than accepting it, because an
 accepted change that does nothing reads as having worked. Three kinds qualify and it
-is worth knowing which: a **bound socket** (the HTTP port, both TLS ports, both LDAP
-ports, both Kerberos ports); **material derived at startup** (the TLS certificate is
+is worth knowing which: a **bound socket** (the HTTP port AND ITS SCHEME — see
+`global.https`, which is why `oauth2.rfc9700` is restart-only — both TLS ports,
+both LDAP ports, both Kerberos ports); **material derived at startup** (the TLS certificate is
 issued for `tls.hostnames`/`tls.ips` at boot, and the Kerberos principal database and
 every long-term key in it comes from the realm, the SIDs and the passwords at require
 time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
@@ -685,7 +1185,7 @@ the directory's two, plain 389 and LDAPS 636. Those
 have to be described by hand or they go unlisted with nothing failing.
 
 Coverage notes in that file **must start `full`, `partial` or `mock`** and say what is
-missing. A list of thirty-eight specifications that did not mention that this service
+missing. A list of fifty specifications that did not mention that this service
 checks no passwords and validates no access tokens would be the most misleading thing
 in the repository.
 
@@ -792,6 +1292,35 @@ looks finished and proves almost nothing.
 
 Worth knowing before "fixing" one of them:
 
+* **It is permissive on purpose, and it can be told not to be.** Everything in this
+  list is the default; `oauth2.rfc9700` turns the OAuth 2.0 / OIDC authorization
+  flow into an RFC 9700-conforming one (see rule 3f and `oauth2_bcp.js`) and, with
+  it, **turns the main port into an HTTPS listener** on the certificate 8443, 9443
+  and LDAPS 636 already share — so there is then no plain listener in this process
+  and `/tls/trust` has to be bootstrapped with verification off. The flag is OFF by
+  default, changes nothing until it is set, and is RESTART-ONLY because of that
+  socket. What it does and does not enforce is published at `GET /oauth2/rfc9700`
+  rather than left to be read out of the code. Nothing else here has such a mode.
+* **An OAuth client is not a person, and now it has somewhere to be.** It is still
+  skipped by `autoCreateUser()` — `ou=users` is for people — but every client,
+  relying party, service provider and Kerberos service gets an entry under
+  `ou=applications` instead (rule 3g). That container is a REGISTRY rather than a
+  record: the RFC 7591 registrations live there, nothing caches them, and an
+  `ldapmodify` — or a form on `/admin/applications`, or a POST to
+  `/admin-api/applications/{action}`, which are the same functions — changes what
+  the protocol endpoints do. What those two will NOT change is the derived half:
+  the counters and the sightings are what happened, and only LDAP reaches them.
+* **It checks ONE credential, and only in RFC 9700 mode: a registered client's
+  secret.** Section 2.5 conditions its requirement on a process for issuing
+  credentials existing, and `POST /oauth2/register` is one — so a client that
+  registered HERE as confidential must present the `client_secret` this service
+  minted for it at the token endpoint. Nothing else changes: a `client_id` this
+  service never registered has no credential on file and is untouched, a
+  registered public client has nothing to authenticate with, and a client
+  declaring `private_key_jwt` is ACCEPTED AND NOT VERIFIED (reported as such,
+  because an unverified assertion that is accepted looks exactly like a verified
+  one from the client's side). **No end user's password is checked in that mode
+  or any other**, which is the next bullet and is not affected by this one.
 * **It checks no password.** The username typed at `/authn/login` — or at
   `/wsfed/login`, which creates the same session — becomes the identity in every
   token and every assertion.

@@ -57,6 +57,10 @@ const { log, setJwtRecorder, userFor } = require('./helpers');
 // normalised the identity, which is what lets an audit row and a /admin/users
 // row name the same person.
 const audit = require('./audit');
+// The application registry — what was on the OTHER side of an authentication.
+// See the note where it is called, below, for why this is a plain require and
+// not the fifth inverted hook on this module.
+const applications = require('./applications');
 
 // When this process started answering. Everything on the metrics page is "since"
 // this instant, and the page prints it, because a rate with no window is a number
@@ -626,6 +630,36 @@ function recordAuthentication(detail) {
       note: info.note || ''
     }
   });
+  // THE APPLICATION on the other side of this authentication, where the caller
+  // named one. A plain require in the ordinary direction rather than a fifth
+  // hook (rule 3e): applications.js registers no route and requires only
+  // helpers.js, config.js and audit.js, so nothing about requiring it from here
+  // closes a cycle or moves a route, and a slot would cost a reader an
+  // indirection for nothing.
+  //
+  // This covers the grants where a client_id rides on the authentication —
+  // client_credentials, the password grant, token exchange. It does NOT cover
+  // the authorization code flow, and it cannot: the person is authenticated in
+  // authn.js, which knows nothing about OAuth by design, so the client_id is
+  // never in scope at this funnel. Those protocols call applications.seen()
+  // where their own identifier is accepted; the header of that function says so.
+  //
+  // Wrapped like the observer below and for the same reason.
+  try {
+    applications.recordAuthentication({
+      client_id: info.client_id || '',
+      protocol: protocol,
+      sessionId: info.sessionId || '',
+      user: identity.key,
+      applicationKind: info.applicationKind || '',
+      note: info.isClient
+        ? 'authenticated as itself (the client IS the identity)'
+        : 'a credential was accepted for this application'
+    });
+  } catch (e) {
+    log.error('the application registry threw and was ignored; the ' +
+              'authentication itself stands: ' + e.message);
+  }
   // The embedded LDAP directory, if it is loaded. Wrapped for the same reason the
   // JWT recorder is: a throw out here would fail the request that was accepting a
   // credential, which is the tail wagging the dog. It is given the NORMALISED

@@ -26,12 +26,62 @@ var config = {
   // --- Global ------------------------------------------------------------
   global: {
     host: "0.0.0.0", // restart to apply
-    port: 8081       // restart to apply
+    port: 8081,      // restart to apply
+
+    // Believe X-Forwarded-Proto and X-Forwarded-Host. OFF: with nothing in
+    // front of this service they are headers any client can set, and believing
+    // them lets a caller choose what this service thinks its own issuer,
+    // endpoints and DPoP htu are. Turn it ON behind a reverse proxy — see
+    // GET /tls/forwarded, which shows what arrived and what was believed.
+    trustProxy: false
   },
 
   // --- OAuth 2.0 / OIDC --------------------------------------------------
   oauth2: {
-    issuer: ""
+    issuer: "",
+
+    // RFC 9700 (OAuth 2.0 Security BCP) enforcement on the authorization flow.
+    // OFF, which is what keeps every existing caller working: the debugger's
+    // own panes use an unregistered redirect_uri, no PKCE and — in one of them
+    // — the implicit grant, all of which this mode refuses. Turn it on to
+    // exercise a client against a server that behaves like a real deployment.
+    // GET /oauth2/rfc9700 lists what it does and does not enforce.
+    rfc9700: false,
+
+    // What the mode compares redirect_uri against, by exact string match, for
+    // any client that did not register its own. Empty, so the mode refuses
+    // every authorization request until this is filled in; the refusal says so.
+    redirectUris: "",
+
+    // RFC 8252 section 7.3's exception, which RFC 9700 says a server MUST
+    // honour. Off makes this server non-compliant on purpose.
+    loopbackPortWildcard: true,
+
+    // Put a deliberately WRONG nonce in every ID Token, so that a client which
+    // accepts one is shown not to be validating it — the one part of RFC 9700's
+    // nonce requirement this server cannot enforce. Not part of RFC 9700 mode;
+    // useful in either. Off, and loud when on.
+    breakIdTokenNonce: false,
+
+    // How far out a client assertion's exp/nbf/iat may be (private_key_jwt and
+    // client_secret_jwt), and how long past expiry its jti is remembered.
+    clientAssertionSkewS: 60,
+
+    // RFC 9700 mode only. How long a refresh CHAIN may go unused before it
+    // stops working (0 turns it off), and whether ending a sign-on session
+    // revokes the refresh tokens issued on it.
+    refreshIdleSeconds: 86400,
+    revokeRefreshOnLogout: true
+  },
+
+  // --- Applications ------------------------------------------------------
+  // The registry of every OAuth client, relying party, service provider and
+  // Kerberos service this instance has been asked about. It IS the
+  // ou=applications container in the embedded directory — see /ldap/applications
+  // — so this is a directory limit: past it a new application is refused rather
+  // than an old one evicted.
+  applications: {
+    max: 500
   },
 
   // --- SAML --------------------------------------------------------------

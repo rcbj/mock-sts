@@ -24,6 +24,11 @@
 
 const express = require('express');
 const cors = require('cors');
+// For one decision only: whether CORS is withheld from the authorization
+// endpoint (RFC 9700 section 2.6). It registers no route and requires only
+// helpers.js and config.js, so requiring it from the module every protocol
+// module requires cannot create a cycle or reorder anything.
+const bcp = require('./oauth2_bcp');
 const bodyParser = require('body-parser');
 const { log, headersOf, bodyOf } = require('./helpers');
 // The service's own record of what it has done. Required HERE, and the position is
@@ -110,26 +115,130 @@ app.use(function (req, res, next) {
 // tests/sd_jwt_vc_issuance.js is what catches it (H.1 signs in here).
 // Enumerating allowed redirect origins is not a fix either: this mock accepts
 // arbitrary redirect_uris on purpose.
-const CONTENT_SECURITY_POLICY = [
-  "default-src 'none'",
-  "script-src 'none'",
-  "style-src 'unsafe-inline'",
-  "img-src 'self' data:",
-  "base-uri 'none'",
-  "frame-ancestors 'none'"
-].join('; ');
+const CSP_DIRECTIVES = {
+  'default-src': "'none'",
+  'script-src': "'none'",
+  'style-src': "'unsafe-inline'",
+  'img-src': "'self' data:",
+  'base-uri': "'none'",
+  'frame-ancestors': "'none'"
+};
+
+// ---------------------------------------------------------------------------
+// THE CLAUSES NO PAGE MAY DROP — RFC 9700 section 4.14, clickjacking.
+//
+// A page framed invisibly over another one collects a click the person meant
+// for something else, and on a sign-in screen or an authorization page that
+// click IS the decision. `frame-ancestors 'none'` is what prevents it —
+// X-Frame-Options is set beside it for the browsers that still read it, but
+// that header is obsolete and the CSP directive is the one that governs.
+//
+// **`frame-ancestors` HAS NO FALLBACK.** `default-src` covers most fetch
+// directives and not this one, so a page that sets `Content-Security-Policy:
+// default-src 'none'` and nothing else is framable as far as CSP is concerned.
+// That is the trap this list exists to close: five routes here relax the policy
+// so they can load a named script, each by SETTING THE WHOLE HEADER, and any of
+// them could have left this clause out without anything failing — the page
+// works, the script runs, and the protection is quietly gone.
+//
+// So a relaxation goes through `contentSecurityPolicy()` below, which starts
+// from the base and re-adds the framing clauses whatever the caller asked for.
+// A caller CANNOT turn them off, which is deliberate: there is no page in an
+// authorization server that should be framable, and a mock that let one be
+// would be teaching the opposite of what section 4.14 is for.
+// ---------------------------------------------------------------------------
+const UNDROPPABLE = ['frame-ancestors', 'base-uri'];
+
+function contentSecurityPolicy(overrides) {
+  const merged = Object.assign({}, CSP_DIRECTIVES, overrides || {});
+  UNDROPPABLE.forEach(function (name) {
+    merged[name] = CSP_DIRECTIVES[name];
+  });
+  return Object.keys(merged).filter(function (name) {
+    return merged[name] !== null && merged[name] !== undefined;
+  }).map(function (name) {
+    return name + ' ' + merged[name];
+  }).join('; ');
+}
+
+const CONTENT_SECURITY_POLICY = contentSecurityPolicy({});
 
 app.use(function (req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  // ---------------------------------------------------------------------
+  // NO RESPONSE LEAVES THIS SERVICE WITHOUT `frame-ancestors`, INCLUDING THE
+  // ONES THIS SERVICE DID NOT WRITE.
+  //
+  // Setting the header above is not enough, and the gap is one nothing in this
+  // repository could have shown: **Express's own 404 handler replaces the
+  // Content-Security-Policy with `default-src 'none'`** on its way out.
+  // `frame-ancestors` has no fallback from `default-src`, so every unrouted
+  // path — every typo, every probe, and every error page a framework generates
+  // — came back framable as far as CSP was concerned, protected only by the
+  // obsolete X-Frame-Options. RFC 9700 section 4.14 names error pages
+  // specifically, and this is why.
+  //
+  // So the header is re-checked at the moment it is flushed. The test is
+  // deliberately "does it still carry the clause" rather than "is it still the
+  // value I set": five routes here legitimately relax the policy to load a
+  // named script, and every one of them goes through contentSecurityPolicy(),
+  // which cannot drop the framing clauses — so a policy without them was set by
+  // something that is not us, and the base policy is put back.
+  //
+  // Wrapping writeHead rather than adding a final 404 handler is deliberate
+  // too. A handler would have to reproduce Express's body byte for byte:
+  // `Cannot GET /path` is how the parent project's tests/sts_metadata.js tells
+  // an unrouted path from an endpoint legitimately answering 404, and a
+  // prettier 404 here would silently break that distinction.
+  // ---------------------------------------------------------------------
+  const writeHead = res.writeHead;
+  res.writeHead = function () {
+    const current = String(res.getHeader('Content-Security-Policy') || '');
+    if (current.indexOf('frame-ancestors') < 0) {
+      res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
+    return writeHead.apply(res, arguments);
+  };
   next();
 });
 
-app.use(cors({ origin: '*' }));
+// ---------------------------------------------------------------------------
+// CORS, with one endpoint carved out of it in RFC 9700 mode.
+//
+// `origin: '*'` everywhere is right for a mock whose token, userinfo, metadata
+// and JWKS endpoints are fetched with XHR by in-browser clients — that is most
+// of what this service is for. RFC 9700 section 2.6 says CORS MUST NOT be
+// supported at the AUTHORIZATION endpoint, which is a different kind of
+// endpoint: a browser NAVIGATES to it, so nothing legitimate ever read those
+// headers there, and offering them only widens what a script on another origin
+// can do with it.
+//
+// The decision is `oauth2_bcp.js`'s rather than this file's, and that is not
+// ceremony: this module installs middleware and has no business knowing which
+// of this service's paths is an authorization endpoint. It asks. The require is
+// safe from here — that module registers no route and requires only helpers.js
+// and config.js, so it cannot join a cycle and cannot move anything in the route
+// order.
+//
+// `origin: false` makes the cors package send no headers at all, which is what
+// "not supported" means. The same options function serves the preflight, or a
+// browser would be told by OPTIONS that a request is allowed and then find the
+// answer unreadable.
+const corsOptions = function (req, callback) {
+  if (bcp.corsForbidden(req)) {
+    callback(null, { origin: false });
+    return;
+  }
+  callback(null, { origin: '*' });
+};
 
-app.options('*', cors({ origin: '*' }));
+app.use(cors(corsOptions));
+
+app.options('*', cors(corsOptions));
 
 // Accept any content-type as raw text (SOAP arrives as text/xml or
 // application/soap+xml).
@@ -229,3 +338,9 @@ app.get('/healthcheck', function (req, res) {
 });
 
 module.exports = app;
+// The policy builder, for the five routes that relax it. Exported off the app
+// object rather than as a second module because every one of them already
+// requires this file — and because a relaxation belongs beside the policy it
+// relaxes, where the next reader will find both.
+module.exports.contentSecurityPolicy = contentSecurityPolicy;
+module.exports.CONTENT_SECURITY_POLICY = CONTENT_SECURITY_POLICY;
