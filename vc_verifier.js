@@ -65,6 +65,13 @@ const { log, logArtifact, STS, baseUrlOf, b64u, b64uDecode, jsonFromB64u, nowSec
         randomId, xmlEscape, bbsKeyPair, parseBody, oauthError, signJwt,
         walletBaseUrl } = require('./helpers');
 const config = require('./config');
+// The identity registry, for ONE call: a presentation that verified names a
+// holder, and this is the funnel every other family here already goes through at
+// the moment a credential is accepted. A library like dpop.js — it registers no
+// route and requires only helpers.js — so requiring it cannot move a route or
+// make a cycle. See the call site in the response endpoint for what it does and
+// does NOT claim about the holder.
+const stats = require('./admin_stats');
 const { VCI_JWT_TYPES, VCI_VCT } = require('./vc_configs');
 // What this Verifier asks for, and which credential format it asks for it in.
 // Configuration rather than a constant since /admin/vc-verifier-config existed: a
@@ -975,6 +982,39 @@ app.post('/oid4vp/response', async function (req, res) {
     }));
     log.debug("Leaving the OID4VP response endpoint. Refused " + failed.length + " check(s).");
     return;
+  }
+  // ---------------------------------------------------------------------------
+  // The holder, recorded — and a directory entry for them, which is the whole of
+  // what this call is for.
+  //
+  // BELOW the refusal above, deliberately: this is the funnel that means "a
+  // credential was accepted", so a presentation that failed a check gets no
+  // record, exactly as a wrong password does not. That is what keeps
+  // /admin/users a list of identities that got somewhere rather than of ones
+  // that were tried.
+  //
+  // AND IT IS STILL NOT A SIGN-ON, which is the claim this endpoint's own header
+  // makes and this call must not quietly undo. No session starts, no token is
+  // issued, and nothing else in this service reads what was presented. What is
+  // recorded is narrower and true: an identity presented a credential here and it
+  // verified. tls_server.js draws the same line for a verified client certificate
+  // — recorded, never a login — and the two are the same distinction.
+  //
+  // The identity is the credential's SUBJECT, which is usually a DID (an ldp_vc
+  // names its subject `did:jwk:…`) and is whatever the credential says otherwise.
+  // A presentation with no readable subject records nothing rather than a blank:
+  // recordAuthentication() drops an empty identity, so the guard here is only to
+  // save the call.
+  if (verified.sub) {
+    stats.recordAuthentication({
+      presented: verified.sub,
+      protocol: 'OpenID4VP',
+      method: 'verifiable presentation (' + (record.format || 'dc+sd-jwt') + ')',
+      client_id: record.clientId || '',
+      note: 'A presentation that verified against every check this Verifier makes. ' +
+            'It is not a sign-on: no session was created, no token was issued, and ' +
+            'nothing else in this service reads what was presented.'
+    });
   }
   res.status(200).type('application/json').send(JSON.stringify({
     redirect_uri: baseUrlOf(req) + '/oid4vp/done?state=' + encodeURIComponent(state)

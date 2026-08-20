@@ -2651,7 +2651,15 @@ function usersListPage(req) {
 
   const rows = shown.map(function (row) {
     const href = '/admin/users' + queryWith({ user: row.key }, {});
-    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.name) + '</code></a></td>' +
+    // Shortened for the same reason the metrics page's Who column is, and the
+    // Decentralized Identity endpoints are what made it reach this table too: a
+    // did:jwk is a couple of hundred characters of base64url with not one place
+    // in it a browser will break a line, so drawn in full it sets this cell's
+    // minimum width and pushes every column after it off the card — including
+    // the rows of people whose names are three letters long. 40 keeps
+    // `urn:sts-mock:user:alice` and an ordinary DID whole; shortened() puts the
+    // rest in the title attribute, so nothing is lost, only hidden.
+    return '<tr><td><a href="' + esc(href) + '">' + shortened(row.name, 40) + '</a></td>' +
       '<td>' + (row.isClient ? 'client' : 'user') + '</td>' +
       '<td class="' + (row.authenticated ? 'state-valid' : 'state-none') + '">' +
         (row.authenticated ? row.authentications + '&times;' : 'never') + '</td>' +

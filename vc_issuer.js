@@ -641,12 +641,43 @@ async function buildCredentialFor(configId, subjectClaims, holderJwk, credential
   const payload = built.payload || {};
   const expiresAt = payload.exp ? payload.exp * 1000
                                 : (Date.parse((built.credential && built.credential.validUntil) || '') || 0);
+  const subject = payload.sub || (payload.credentialSubject && payload.credentialSubject.id) ||
+                  subjectClaims.sub || '';
   stats.recordCredential(format, {
     configId: configId,
-    subject: payload.sub || (payload.credentialSubject && payload.credentialSubject.id) ||
-             subjectClaims.sub || '',
+    subject: subject,
     expiresAt: expiresAt
   });
+  // The credential's subject identifier, when it is a DECENTRALIZED IDENTIFIER,
+  // is a SECOND identity and gets its own record — and its own directory entry.
+  //
+  // It is not the same person as the one recorded in subjectClaimsFrom(): that is
+  // whoever the access token named, and this is the holder key the wallet proved
+  // possession of, turned into a did:jwk by buildLdpVc(). One wallet asking for
+  // credentials for one person can hold several, and a directory that filed them
+  // all under the access token's name could not tell them apart.
+  //
+  // Guarded on `did:` deliberately, and the two formats that are NOT DIDs are why:
+  // an SD-JWT VC's subject is the access token's own `sub` (already recorded
+  // above, so a second call would only double the count), and where the token
+  // carries no sub at all it is a `urn:uuid:` minted fresh for this one
+  // credential. Recording those would put a directory entry per issuance in a
+  // store with a fixed maximum, and evict real people to hold identifiers nothing
+  // will ever present again.
+  //
+  // One call per credential rather than per request, which is the right grain
+  // here: a batch of three proofs is three holder keys and therefore three DIDs.
+  if (/^did:[a-z0-9]+:/i.test(subject)) {
+    stats.recordAuthentication({
+      presented: subject,
+      protocol: 'OpenID4VCI',
+      method: 'credential subject (' + format + ', bound to the holder key the ' +
+              'wallet proved possession of)',
+      note: 'The subject identifier of an issued credential. It is a DID rather ' +
+            'than a name, and nobody authenticated as it — the wallet proved ' +
+            'possession of the key it is derived from.'
+    });
+  }
   log.debug("Leaving buildCredentialFor(). Minted one " + format + " credential.");
   return built;
 }
@@ -676,6 +707,42 @@ function subjectClaimsFrom(accessToken, configId) {
     log.debug("The access token is not a readable JWT; using the default claims.");
   }
   const user = t.preferred_username || t.sub || 'mock-holder';
+  // ---------------------------------------------------------------------------
+  // AND THAT PERSON IS RECORDED, which is the one funnel this subsystem was
+  // missing.
+  //
+  // Every other family here calls stats.recordAuthentication() at the moment a
+  // credential is ACCEPTED, and the embedded directory grows an entry off the
+  // back of it (admin_stats.js's user observer). Issuance never did, and the cost
+  // was visible in this function's own leaving-log: "with no directory entry to
+  // read from". The people who reach this endpoint through THIS service's
+  // authorization server were covered by accident — oauth2.js records them at the
+  // token endpoint — but nobody else was, and "anybody else" is not an edge case
+  // at a Credential Issuer: OID4VCI lets the authorization server be somebody
+  // else entirely, so a FOREIGN access token is the ordinary case and its subject
+  // had never been seen here.
+  //
+  // What is being recorded is a credential being ACCEPTED and not a sign-on, and
+  // the method and note say so rather than leaving a reader of /admin/users to
+  // assume otherwise — the same distinction tls_server.js draws for a verified
+  // client certificate. Nobody authenticated here; an access token was presented
+  // and this issuer does not verify tokens it did not issue.
+  //
+  // HERE rather than at the two endpoints, because this function is the single
+  // point that decides who a credential is about: it is called once per credential
+  // request and once when an issuance is deferred, so a batch of five proofs is
+  // one record and not five, and a deferred credential is not recorded twice.
+  // ---------------------------------------------------------------------------
+  stats.recordAuthentication({
+    presented: user,
+    protocol: 'OpenID4VCI',
+    method: 'credential request (the subject named by the presented access token)',
+    sub: t.sub || '',
+    client_id: t.client_id || t.azp || '',
+    note: 'An access token was presented at the Credential Endpoint and the ' +
+          'credential describes this subject. Nobody authenticated here, and this ' +
+          'issuer does not verify access tokens it did not issue.'
+  });
   // What the wallet asked for in its authorization_details, if it asked at all
   // (OID4VCI section 5.1.1). Null means it did not, which is not the same as an
   // empty selection: the whole configured set is issued, exactly as before.

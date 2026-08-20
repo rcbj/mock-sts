@@ -39,7 +39,7 @@ are — most of it is the record of something having gone wrong once.
 | **WS-Federation 1.2** | the Web (Passive) Requestor Profile of section 13 — `wsignin1.0` with `wtrealm`, `wreply`, `wctx`, `wct`, `wfresh`, `wauth`, `whr` and `wreq`, the response as a **form POST**, `wsignout1.0` with front-channel cleanup, signed federation metadata at AD FS's path, and a mock relying party that verifies the response check by check |
 | **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (which redirects to the authentication service when nobody is signed in), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)** |
 | **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
-| **WebAuthn Level 3** | the relying party's half of a second factor on the login screen: registration and assertion both verified, and `amr` / `acr` in the tokens that follow saying a hardware key was used |
+| **WebAuthn Level 3** | the relying party's half, on the login screen, in **both roles**: a second factor after the password, or the **primary credential** with no password at all. Registration and assertion are verified either way, and `amr` / `acr` in the tokens that follow say which happened — `["pwd","hwk"]`/`mfa` for two factors, `["hwk"]`/`1` for a passwordless sign-in, which is one factor however phishing-resistant it is |
 | **DPoP (RFC 9449)** | all twelve section 4.3 proof checks, `cnf.jkt` on access *and* refresh tokens, `dpop_jkt`, replay detection, the nonce handshake |
 | **OpenID4VCI 1.0** | a Credential Issuer: SD-JWT VC (RFC 9901), `jwt_vc_json`, `ldp_vc` with bbs-2023; Credential Offers, the pre-authorized code grant with `tx_code`, `authorization_details` (including its `claims` member, so a wallet can ask for a subset of the claims), batch issuance, response encryption, deferred issuance, the Notification Endpoint |
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
@@ -521,17 +521,28 @@ own screen for now: section 13.2.1 lets its sign-in request arrive as a cross-si
 form POST, `SameSite=Lax` keeps the cookie off that, and a redirect chain would
 lose the request.
 
-### WebAuthn as the second factor a mock is allowed to have
+### WebAuthn: a second factor, or the only one
 
-The login screen carries a "use a security key" checkbox, and an authorization request
-whose `acr_values` names `mfa`, `hwk`, `phr` or `phrh` ticks it and disables it — that
+The login screen carries **two** security-key boxes, because a key is two different
+things here and the difference is the whole of what the tokens afterwards claim. Ticked
+beside a password it is a **second factor**; ticked on its own it is the **primary
+credential** and no password is read at all. An authorization request whose `acr_values`
+names `mfa`, `hwk`, `phr` or `phrh` ticks the first and disables both opt-outs — that
 parameter is how a relying party *demands* a second factor, and a mock that ignored it
-would let a client's step-up request appear to work while proving nothing. The step
-itself is `POST /authn/webauthn`: first use for a username **enrols** a credential
-(section 7.1), every later sign-in **asserts** with it (section 7.2), against a
-challenge minted server-side and held for five minutes with the interrupted
-request, which the person is returned to exactly as the password-only path returns
-them.
+would let a client's step-up request appear to work while proving nothing. The
+passwordless box is refused outright under that demand, and refused **server-side**:
+`disabled` is a property of a browser and not of an HTTP request, and one factor does
+not answer a request for two however phishing-resistant that factor is.
+
+The step itself is `POST /authn/webauthn` in both roles: first use for a username
+**enrols** a credential (section 7.1), every later sign-in **asserts** with it (section
+7.2), against a challenge minted server-side and held for five minutes with the
+interrupted request, which the person is returned to exactly as the password-only path
+returns them. The ceremony the two roles perform is the same bytes — what differs is
+what the session then says, and it is decided in one place from one boolean carried on
+the pending record. Which role was chosen is not re-read from the ceremony's own POST,
+because that POST is the browser's result and nothing in it says what somebody chose a
+screen ago.
 
 **This is a relying party, and the ceremony is genuinely verified**: the challenge, the
 origin, the RP ID hash, the user-presence and user-verification flags, a signature
@@ -558,11 +569,31 @@ the button doing nothing and no error anywhere. And **the RP ID is this origin's
 and is not configurable** — WebAuthn binds a ceremony to the calling origin, and that is
 the whole of its phishing resistance.
 
-What comes out the other side is the point: a hardware-key sign-in records
-`amr: ["pwd","hwk"]` and `acr: "mfa"` on the session, a password-only one
-`amr: ["pwd"]` and `acr: "1"`, and those (RFC 8176) go into the id_token whenever the
-session recorded them — so their *absence* means something too, which is why they are
-not emitted unconditionally.
+What comes out the other side is the point: a key **after a password** records
+`amr: ["pwd","hwk"]` and `acr: "mfa"` on the session, a key **instead of one** records
+`amr: ["hwk"]` and `acr: "1"`, and a password alone records `amr: ["pwd"]` and
+`acr: "1"`. Those (RFC 8176) go into the id_token whenever the session recorded them —
+so their *absence* means something too, which is why they are not emitted
+unconditionally.
+
+**`acr: "1"` for the passwordless sign-in is the conservative reading and it is
+deliberate.** This ceremony asks for user verification as `preferred` rather than
+`required`, so the key proves possession and nothing about the person holding it;
+calling that `mfa` because it is phishing-resistant would be exactly the fake this
+service refuses in WS-Federation's `wauth`, one screen away. WS-Federation reads the
+same session and now distinguishes the two demands: `wauth` asking for a **hardware
+token** is answered by a key in either role, `wauth` asking for **multi-factor** is
+answered only by a session that really had two factors. That test used to be "does the
+session carry `hwk`", which was right while every session carrying a key had been
+through a password step first and became wrong the moment one had not.
+
+**And both roles reach the directory, differently.** A passwordless sign-in is an
+authentication in its own right, so it goes through `recordAuthentication()` like every
+other accepted credential and the embedded LDAP directory grows an entry for the person
+exactly as a password sign-in makes one. A second factor authenticates nobody new — the
+person is the one the password step named — so it creates nothing and writes a **flag**
+on the entry that already exists. See the directory's own section for the three
+attributes that carries.
 
 ### WS-Federation — the profile that joins the pieces
 
@@ -1176,7 +1207,7 @@ are five look untouched.
 `LDAP_AUTOCREATE_USERS`, on by default, grows an entry at
 `uid=<name>,ou=users,<base>` the first time anybody authenticates through **any** of the
 other twelve families here — the OAuth2 login screen, WS-Trust, WS-Federation, a Kerberos
-AS-REQ, a WebAuthn assertion.
+AS-REQ, a passwordless WebAuthn assertion.
 
 That is **one hook and not twelve**, because `admin_stats.recordAuthentication()` is
 already the single funnel every one of those call sites goes through at the moment a
@@ -1187,6 +1218,33 @@ and not three — so `admin_stats.js` cannot require it back without a cycle. It
 slot instead, and `ldap_server.js` fills it at require time. The observer's return value is
 ignored and a throw from it is caught: a directory must never be able to fail an
 authentication.
+
+**The entry also records HOW they authenticated, where the protocol says.** Most families
+here say nothing: `amr` is an OIDC vocabulary and a Kerberos AS-REQ, a WS-Trust
+UsernameToken and an LDAP bind have nothing to put in it, so nothing is written for them
+— an absent attribute is "this service was never told", which is a different claim from
+"this service checked and it was one factor" and must not be written as one. What the
+sign-in screen does say arrives on the same observer as everything else and lands in
+three attributes, which are separate because merging them loses one of the three:
+`authnMethod`, every RFC 8176 method this person has *ever* used here, accumulated;
+`mfaAuthenticated`, `TRUE` or `FALSE` for the **most recent** authentication and so
+overwritten rather than appended; and `mfaLastAuthTime`, when multi-factor last happened
+and never cleared. So a person who used a key yesterday and a password today reads
+`FALSE` with the timestamp still there, which is the honest answer to both questions.
+
+That is what a **WebAuthn second factor** adds to this directory and the whole of it: the
+password step already named the person, their entry already exists, and the key writes
+`mfaAuthenticated: TRUE` rather than a second entry for a second identity that is not
+one. A **passwordless** WebAuthn sign-in is the other case and needs nothing special —
+it is an authentication, so the entry is created the ordinary way, and what these
+attributes then record is that the single factor was a key: `authnMethod: hwk` with no
+`pwd` beside it, which is the only place a reader can tell it from a password sign-in
+afterwards. Two factors means two: `["hwk"]` alone is `FALSE`. Like the `x509*` and
+`did*` names these are **this service's own and not schema** — there is no standard
+attribute type for "this account used more than one factor", and the nearest things in
+the wild are Active Directory's `msDS-*` attributes, which name something else. And
+like a group here, they **grant nothing**: no token carries them, no endpoint reads
+them, nothing decides anything on them.
 
 The admin console shows each user their entry, on `/admin/users?user=<name>`, and reads it
 through a **second inverted hook** — `admin.setDirectoryReader()`, filled by this module at
@@ -1229,6 +1287,49 @@ not one of those attributes. The `x509subject` value is also how the admin conso
 finds the entry again: an identity that is a DN is looked up by the subject the entry
 recorded rather than by a name, which is exact and stays right if the naming rule ever
 changes.
+
+**And a third identity is not a name either: a DECENTRALIZED IDENTIFIER.** Three
+places in this service hand one over — the subject of an issued `ldp_vc`, which is a
+`did:jwk` built from the holder key the wallet proved possession of; whatever DID
+presents a credential to the OID4VP Verifier; and the `did:jwk` that `/did/generate`
+mints on request. None of the three used to reach `recordAuthentication()`, so none of
+them had a directory entry, and the cost was visible in this issuer's own log line:
+*"the credential will describe … with no directory entry to read from"*. A Credential
+Issuer is exactly where that matters, because OID4VCI lets the authorization server be
+somebody else — so a **foreign** access token, whose subject this service has never
+seen, is the ordinary case rather than the edge one.
+
+They are placed by `didPlan()`, and the placement is the opposite problem from a
+certificate's: a certificate subject is already a DN and needs a *place*, while a DID is
+neither a DN nor a name but one long opaque string. Writing it out — `uid=<the
+did>,ou=users` — is correct and unusable, because a `did:jwk` carries a base64url-encoded
+JWK and the DN runs to several hundred characters of key material; giving them a
+container of their own, `ou=dids`, is tidy and would put them outside the two sweeps that
+matter, since `populateVcAttributes()` walks `ou=users` and `/admin/groups` reports
+membership from there. So the entry goes under `ou=users` with everybody else and is
+**named by a short digest** — `uid=did-<12 hex of the SHA-256 of the DID>` — with the
+identifier itself kept whole as `didSubject` and its method as `didMethod`. Those are
+this service's own attribute names for the same reason the `x509*` ones are: DID Core
+postdates the LDAP schema documents by two decades and nobody has registered one.
+
+What that costs is worth stating plainly: **on those entries the `uid` is not the
+identity**. Everywhere else here it is what the person typed; on a DID entry it is a
+name this service made up. `didSubject` is the identity — the admin console finds the
+entry by it, exactly as it finds a certificate's by `x509subject`, and the persona that
+fills in a credential's claims is invented from it rather than from the digest, so the
+startup sweep and the authentication path describe one person and not two.
+
+**None of the three is a sign-on**, and each says so on its own record. A presentation
+that verifies still starts no session and issues no token — the Verifier's own section
+says why, and this is the same distinction a verified client certificate draws: it is
+*recorded*, which is a narrower claim and must not be merged with the other. A credential
+request records that an access token was presented, not that anybody authenticated; this
+service does not verify tokens it did not issue. And `/did/generate` records an identity
+this service *created*, with nothing presented at all. The one DID deliberately left out
+is the `did:web` that endpoint returns for `?method=web`: that is this service's OWN
+identity, already published at `/.well-known/did.json`, and an entry for it would file
+the issuer among the people with an invented given name and a fictional mailbox attached
+to the thing that signs every credential.
 
 **What the entry holds is now decided partly by `/admin/vc`.** The attributes that make it
 a person — its `objectClass`, `uid`, `cn`, `sn`, `givenName`, `displayName` and `mail` — are

@@ -139,6 +139,24 @@ const AC_PASSWORD_SAML2 = 'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtec
 
 const AM_MULTIFACTOR = 'http://schemas.microsoft.com/claims/multipleauthn';
 
+// And the THIRD thing a session here can now say, which the two above cannot:
+// a security key used PASSWORDLESS, at /authn/login with the passwordless box
+// ticked. That session has amr ["hwk"] and one factor, so `multipleauthn` would
+// be a lie in the direction this profile refuses everywhere else — and
+// `PasswordProtectedTransport` would be a lie in the other direction, since no
+// password was presented at all.
+//
+// SAML 1.1's own list has a value for exactly this and it is used as it stands.
+// SAML 2.0's authentication context classes do not — SmartcardPKI, X509 and
+// TimeSyncToken each name a mechanism this service did not perform — so the
+// SAML 2.0 assertion says `unspecified`, which is the one member of that list
+// that overstates nothing. A relying party that needs to know what happened
+// reads the SAML 1.1 method or the amr in an OIDC token; it does not get a
+// guess dressed up as a class reference.
+const AM_HARDWARE_SAML11 = 'urn:oasis:names:tc:SAML:1.0:am:HardwareToken';
+
+const AC_UNSPECIFIED_SAML2 = 'urn:oasis:names:tc:SAML:2.0:ac:classes:unspecified';
+
 // What `wauth` may ask for (13.2.1). A request for anything else is refused rather
 // than quietly answered with a password assertion: `wauth` is how a relying party
 // DEMANDS an authentication type, and an IdP that ignores it lets the demand appear
@@ -153,8 +171,17 @@ const WAUTH_PASSWORD = [
 ];
 
 const WAUTH_MULTIFACTOR = [
-  AM_MULTIFACTOR,
-  'urn:oasis:names:tc:SAML:1.0:am:HardwareToken'
+  AM_MULTIFACTOR
+];
+
+// A demand for a HARDWARE TOKEN, which used to sit in the list above and is a
+// different question now that a session can have a key and no password. Asking
+// for HardwareToken asks whether a key was used; asking for multipleauthn asks
+// whether there were two factors. A passwordless session answers the first and
+// not the second, and lumping them together answered the first one wrong —
+// refusing a session that had done precisely what was asked for.
+const WAUTH_HARDWARE = [
+  AM_HARDWARE_SAML11
 ];
 
 const PASSIVE_PATH = '/wsfed';
@@ -284,17 +311,33 @@ function claimsFor(user, authnMethod, authnInstant) {
   return claims;
 }
 
-// What the session says actually happened, in each token type's vocabulary. A
-// session that recorded `hwk` produces the multi-factor value; a password-only one
-// produces the password value. Nothing here is configurable by the request, which
-// is the point: `wauth` asks, the session answers.
+// What the session says actually happened, in each token type's vocabulary.
+// THREE outcomes rather than two, because /authn/login can now use a security
+// key in either of two roles: after a password (two factors) or instead of one
+// (one factor, and a key). Nothing here is configurable by the request, which is
+// the point: `wauth` asks, the session answers.
+//
+// The multi-factor test is `hwk` AND `pwd`, not `hwk` alone. It used to be the
+// latter, which was right while every session carrying a key had been through a
+// password step first and is wrong the moment one has not: a passwordless
+// sign-in would have produced `multipleauthn`, which is the one claim this
+// profile refuses to fake — and it would have satisfied a wauth demanding two
+// factors with a session that had one.
 function authnMethodsFor(session) {
-  const mfa = (session.amr || []).indexOf('hwk') >= 0 || session.acr === 'mfa';
-  return {
-    saml11: mfa ? AM_MULTIFACTOR : AM_PASSWORD_SAML11,
-    saml2: mfa ? AM_MULTIFACTOR : AC_PASSWORD_SAML2,
-    multiFactor: mfa
-  };
+  const amr = session.amr || [];
+  const hardwareKey = amr.indexOf('hwk') >= 0;
+  const password = amr.indexOf('pwd') >= 0;
+  const mfa = (hardwareKey && password) || session.acr === 'mfa';
+  if (mfa) {
+    return { saml11: AM_MULTIFACTOR, saml2: AM_MULTIFACTOR,
+             multiFactor: true, hardwareKey: hardwareKey };
+  }
+  if (hardwareKey) {
+    return { saml11: AM_HARDWARE_SAML11, saml2: AC_UNSPECIFIED_SAML2,
+             multiFactor: false, hardwareKey: true };
+  }
+  return { saml11: AM_PASSWORD_SAML11, saml2: AC_PASSWORD_SAML2,
+           multiFactor: false, hardwareKey: false };
 }
 
 // The token type asked for. Three ways, in precedence order, and the first two are
@@ -476,13 +519,14 @@ function sendSignInResponse(res, inner) {
 // a screen that showed `client_id: (none)` for a WS-Federation sign-in would be
 // describing a request that does not exist.
 //
-// It has no security-key checkbox, and that is a real limitation rather than an
-// omission: the WebAuthn step lives in oauth2.js because it needs that module's
-// pendingMfa and returns to the authorization endpoint, and reaching into it from
-// here is the import cycle this service's split exists to prevent. What replaces it
-// is the shared session — sign in once through the OIDC screen with a key and the
-// session carries `hwk` here — which is also what `wauth` asking for multi-factor
-// is answered from.
+// It has no security-key checkbox — neither of the two that /authn/login now
+// offers — and that is a real limitation rather than an omission: the WebAuthn
+// step lives in authn.js with the pending record it shares with the password
+// step, and this screen exists at all only because section 13.2.1 lets a
+// sign-in request arrive as a cross-site POST that SameSite=Lax keeps a cookie
+// off. What replaces it is the shared session — sign in once through
+// /authn/login with a key, in either role, and the session carries `hwk` here —
+// which is what both `wauth` demands are answered from.
 function signInPage(base, signIn, error) {
   log.debug("Entering signInPage(). wtrealm=" + (signIn.params.wtrealm || '(none)'));
   const p = signIn.params;
@@ -608,7 +652,8 @@ function signIn(req, res, params) {
 
   // wauth: what authentication method the relying party is demanding.
   const wauth = params.wauth ? String(params.wauth) : '';
-  if (wauth && WAUTH_PASSWORD.indexOf(wauth) < 0 && WAUTH_MULTIFACTOR.indexOf(wauth) < 0) {
+  if (wauth && WAUTH_PASSWORD.indexOf(wauth) < 0 && WAUTH_MULTIFACTOR.indexOf(wauth) < 0 &&
+      WAUTH_HARDWARE.indexOf(wauth) < 0) {
     log.debug("Leaving signIn(). wauth named a method this service cannot perform.");
     return wsfedError(res, 400, 'That authentication method is not available',
       'wauth asked for "' + wauth + '". This identity provider can perform a password sign-in, and it ' +
@@ -635,6 +680,26 @@ function signIn(req, res, params) {
       'and it is not a boolean.');
   }
   if (session && fresh.ok) {
+    // A demand for a HARDWARE TOKEN, which is answered by a key in EITHER role:
+    // the second factor after a password, or the passwordless sign-in. It is a
+    // separate question from the multi-factor one below and is checked first
+    // because a two-factor session satisfies both, while a passwordless session
+    // satisfies this one only.
+    if (WAUTH_HARDWARE.indexOf(wauth) >= 0 && !authnMethodsFor(session).hardwareKey) {
+      log.debug("Leaving signIn(). wauth asked for a hardware token and the session has none.");
+      return wsfedError(res, 400, 'This session used no security key',
+        'wauth asked for "' + wauth + '", and the browser session here was established with a ' +
+        'password alone. This service will not claim a key that was never presented.',
+        '<h2>Two ways forward</h2><ul>' +
+        '<li>Get a session that used one: sign in at <code>/oauth2/authorize</code> with either ' +
+        'security-key box ticked — as a second factor, or passwordless. The session is shared, so ' +
+        'coming back here then produces an assertion whose AuthenticationMethod is <code>' +
+        xmlEscape(AM_HARDWARE_SAML11) + '</code> (passwordless) or <code>' +
+        xmlEscape(AM_MULTIFACTOR) + '</code> (with a password).</li>' +
+        '<li>Or ask for what this session has: ' +
+        '<a href="' + PASSIVE_PATH + '?' + xmlEscape(requeryString(params, ['wauth'])) + '">the same ' +
+        'request without wauth</a>.</li></ul>');
+    }
     if (WAUTH_MULTIFACTOR.indexOf(wauth) >= 0 && !authnMethodsFor(session).multiFactor) {
       // The one place this profile has to refuse something it could have faked. The
       // screen below cannot run a WebAuthn ceremony (see signInPage), so answering
@@ -643,13 +708,16 @@ function signIn(req, res, params) {
       // something false about how the person signed in.
       log.debug("Leaving signIn(). wauth asked for multi-factor and the session has one factor.");
       return wsfedError(res, 400, 'This session has one factor',
-        'wauth asked for "' + wauth + '", and the browser session here was established with a ' +
-        'password alone. This service will not claim a second factor that did not happen.',
+        'wauth asked for "' + wauth + '", and the browser session here was established with ONE ' +
+        'factor — a password alone, or a security key alone. This service will not claim a second ' +
+        'factor that did not happen, and a phishing-resistant single factor is still a single one.',
         '<h2>Two ways forward</h2><ul>' +
         '<li>Get a multi-factor session first: sign in at <code>/oauth2/authorize</code> with the ' +
-        'security-key box ticked (or with <code>acr_values=mfa</code>, which ticks it and disables ' +
-        'the opt-out). The session is shared, so coming back here then produces an assertion whose ' +
-        'AuthenticationMethod is <code>' + xmlEscape(AM_MULTIFACTOR) + '</code>.</li>' +
+        'SECOND-FACTOR security-key box ticked (or with <code>acr_values=mfa</code>, which ticks it ' +
+        'and disables both opt-outs). The passwordless box is not the one to tick here: it replaces ' +
+        'the password rather than adding to it. The session is shared, so coming back here then ' +
+        'produces an assertion whose AuthenticationMethod is <code>' +
+        xmlEscape(AM_MULTIFACTOR) + '</code>.</li>' +
         '<li>Or ask for what this session has: ' +
         '<a href="' + PASSIVE_PATH + '?' + xmlEscape(requeryString(params, ['wauth'])) + '">the same ' +
         'request without wauth</a>.</li></ul>');
@@ -932,9 +1000,11 @@ function descriptionPage(base) {
      ['wct', 'The request timestamp. Recorded with its skew from this clock; not enforced.'],
      ['wfresh', 'The maximum age of the authentication, in MINUTES. 0 forces the screen; N re-shows ' +
                 'it when the session authenticated longer than N minutes ago.'],
-     ['wauth', 'The authentication method demanded. A password method is honoured; a multi-factor ' +
-               'one is honoured only when the session really was established with a security key, ' +
-               'and refused otherwise rather than answered with a claim that did not happen.'],
+     ['wauth', 'The authentication method demanded. A password method is honoured; a HARDWARE ' +
+               'TOKEN one is honoured when the session used a security key in either role; a ' +
+               'MULTI-FACTOR one is honoured only when the session really had two factors, so a ' +
+               'passwordless key does not answer it. Anything else is refused rather than answered ' +
+               'with a claim that did not happen.'],
      ['whr', 'The home realm. Recorded and shown on the screen; this service is the only identity ' +
              'provider here, so nothing is forwarded.'],
      ['wreq', 'An RST by value. Its <code>TokenType</code> selects the token; an <code>AppliesTo</code> ' +
@@ -1289,7 +1359,10 @@ app.get(RP_PATH, function (req, res) {
     '<li><a href="' + xmlEscape(request({ wfresh: '0' })) + '">wfresh=0</a> — forces the sign-in ' +
     'screen even when a session already exists.</li>' +
     '<li><a href="' + xmlEscape(request({ wauth: AM_MULTIFACTOR })) + '">wauth=multipleauthn</a> — ' +
-    'refused unless the browser session was established with a security key.</li>' +
+    'refused unless the browser session really had two factors. A passwordless security key does ' +
+    'not answer it.</li>' +
+    '<li><a href="' + xmlEscape(request({ wauth: AM_HARDWARE_SAML11 })) + '">wauth=HardwareToken</a> ' +
+    '— refused unless a security key was used, in either role.</li>' +
     '</ul>' +
     '<h2>Then</h2><ul>' +
     '<li><a href="' + PASSIVE_PATH + '?wa=wsignout1.0&amp;wreply=' + encodeURIComponent(base + RP_PATH) +
