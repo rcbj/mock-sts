@@ -807,6 +807,67 @@ function resolvedSamlAttributes(id, context) {
 }
 
 // ---------------------------------------------------------------------------
+// A SECOND SLOT, AND WHY IT IS NOT A FIFTH HOOK ADDED BY ANALOGY.
+//
+// CLAUDE.md rule 3e says the hooks on this file are four different problems
+// rather than a pattern, and that a fifth must not be added because the fourth
+// exists. The test it gives is the one that matters — a slot is what you reach
+// for when a require would CLOSE A CYCLE or MOVE A ROUTE — and this one fails
+// both ways round, which is why it is here:
+//
+//   * group_claims.js requires THIS file (for the four set ids, the reserved
+//     names and identityKeyOf()), so a require in the other direction closes a
+//     loop and hands back a half-initialised module.
+//   * what it needs is the DIRECTORY's group membership, and only
+//     ldap_server.js can answer that — the last module server.js requires, so
+//     any require reaching it drags every /ldap route to the front of the
+//     express router that /sts-metadata is built by walking.
+//
+// What it buys is the same thing the attribute resolver above buys: NO
+// ISSUANCE SITE CHANGED. oauth2.js's calls to jwtClaims() and the two assertion
+// builders' calls to samlAttributes() are the lines they always were.
+//
+// It stays null in a process that never loaded that module, and every set is
+// then its typed claims and its directory attributes alone — a smaller service,
+// not a broken one.
+// ---------------------------------------------------------------------------
+let groupResolver = null;
+
+function setGroupResolver(hooks) {
+  groupResolver = hooks || null;
+  log.debug("A group-claim resolver was installed; tokens and assertions can " +
+            "now carry the directory groups their subject is a member of.");
+}
+
+// Wrapped for the reason the two above are wrapped: a directory this service
+// consults must never be able to fail the issuance it was consulted during.
+function resolvedGroupClaims(id, context) {
+  if (!groupResolver || typeof groupResolver.jwtClaims !== 'function') {
+    return {};
+  }
+  try {
+    return groupResolver.jwtClaims(id, context) || {};
+  } catch (e) {
+    log.error('the group-claim resolver threw and was ignored; the token is ' +
+              'issued without its groups claim: ' + e.message);
+    return {};
+  }
+}
+
+function resolvedGroupAttributes(id, context) {
+  if (!groupResolver || typeof groupResolver.samlAttributes !== 'function') {
+    return [];
+  }
+  try {
+    return groupResolver.samlAttributes(id, context) || [];
+  } catch (e) {
+    log.error('the group-claim resolver threw and was ignored; the assertion ' +
+              'is issued without its groups claim: ' + e.message);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The placeholders a value may contain.
 //
 // Without them every configured claim would be a constant, and a constant claim
@@ -983,7 +1044,17 @@ function jwtClaims(id, context) {
   // service sets. The merge at the CALL SITE is the third defence: oauth2.js
   // assigns the protocol's own payload over this object, so a collision that
   // somehow got past both loses there.
-  const out = resolvedJwtClaims(id, context);
+  //
+  // THREE LAYERS, and the groups claim is the bottom one. A name somebody typed
+  // wins over an attribute they ticked, and both win over the groups claim,
+  // which is the only one of the three nobody named on a page — it comes from a
+  // setting and a directory. So somebody who typed `groups = none` or ticked an
+  // attribute called `groups` has said something specific about THIS service,
+  // and the specific thing beats the general one. Written as an assignment
+  // ORDER here because a JWT payload is an object; samlAttributes() below has
+  // to write the same rule as a filter, for the reason stated there.
+  const out = resolvedGroupClaims(id, context);
+  Object.assign(out, resolvedJwtClaims(id, context));
   claimSet(id).forEach(function (claim) {
     out[claim.name] = typedValue(expandValue(claim.value, context));
   });
@@ -1017,9 +1088,19 @@ function samlAttributes(id, context) {
   const fromDirectory = resolvedSamlAttributes(id, context).filter(function (attribute) {
     return !names.has(attribute.name);
   });
-  const out = fromDirectory.concat(typed);
+  // The third layer, filtered against BOTH of the two above it — the same
+  // precedence jwtClaims() writes as an assignment order, and it has to be a
+  // filter here for the same reason the second layer does: two <Attribute>
+  // elements with one Name is not an overwrite, it is a relying party reading
+  // whichever the builder happened to emit first.
+  fromDirectory.forEach(function (attribute) { names.add(attribute.name); });
+  const fromGroups = resolvedGroupAttributes(id, context).filter(function (attribute) {
+    return !names.has(attribute.name);
+  });
+  const out = fromGroups.concat(fromDirectory, typed);
   log.debug("Leaving samlAttributes(). " + out.length + " attribute(s), " +
-            fromDirectory.length + " of them from the directory.");
+            fromDirectory.length + " of them from the directory and " +
+            fromGroups.length + " of them the groups claim.");
   return out;
 }
 
@@ -1499,6 +1580,7 @@ module.exports = {
   // Filled by claim_attributes.js at its require time; see the note above it.
   // The inversion is what keeps the four issuance sites unchanged.
   setAttributeResolver: setAttributeResolver,
+  setGroupResolver: setGroupResolver,
   jwtClaims: jwtClaims,
   samlAttributes: samlAttributes,
   expandValue: expandValue,

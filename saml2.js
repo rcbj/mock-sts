@@ -56,6 +56,30 @@ function signAssertion(xml) {
   return signed;
 }
 
+// ---------------------------------------------------------------------------
+// One <Attribute>'s values.
+//
+// A SAML Attribute is MULTI-VALUED — several <AttributeValue> children under
+// one <Attribute> — and until the groups claim there was nothing here that
+// needed to be. `value` stays the single-value spelling every existing caller
+// uses and is untouched; `values` is the array spelling, and a caller that
+// passes both (group_claims.js does, so that anything reading `.value` still
+// sees a group rather than undefined) gets the array.
+//
+// The alternative was one <Attribute> element per group carrying the same
+// name, which is precisely the defect admin_stats.samlAttributes()'s dedup
+// filter exists to prevent: that is not a multi-valued attribute, it is a
+// relying party reading the first element and silently seeing one group where
+// the person is in four.
+// ---------------------------------------------------------------------------
+function attributeValuesOf(a) {
+  const values = Array.isArray(a.values) ? a.values : [a.value];
+  return values.map(function (value) {
+    return '<saml:AttributeValue>' + xmlEscape(String(value == null ? '' : value)) +
+           '</saml:AttributeValue>';
+  }).join('');
+}
+
 // The optional fourth argument is what WS-Federation needs and WS-Trust does not,
 // and it is an argument rather than a second builder on purpose: one assertion
 // writer means one place where the element order, the namespace and the signature
@@ -69,6 +93,7 @@ function signAssertion(xml) {
 //   attributes            [{ name, nameFormat, value }] replacing the default two.
 //                         A WS-Federation relying party keys off the claim URIs
 //                         from the Microsoft claim namespaces, not off `name`.
+
 function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   log.debug("Entering buildSamlAssertion().");
   opts = opts || {};
@@ -104,7 +129,7 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   const attributeEls = attributes.concat(configured).map(function (a) {
     return '<saml:Attribute Name="' + xmlEscape(a.name) + '"' +
       (a.nameFormat ? ' NameFormat="' + xmlEscape(a.nameFormat) + '"' : '') + '>' +
-      '<saml:AttributeValue>' + xmlEscape(a.value) + '</saml:AttributeValue></saml:Attribute>';
+      attributeValuesOf(a) + '</saml:Attribute>';
   }).join('');
   const xml =
     '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"' +

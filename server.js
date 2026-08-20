@@ -101,6 +101,16 @@ const config = require('./config');
 // process that loads the protocol modules without the console.
 require('./claim_attributes');
 
+// The groups claim: for anybody who is a member of a group in the embedded
+// directory, a claim naming those groups in every access token, ID Token and
+// both SAML assertions. A LIBRARY too, required HERE for exactly the reason the
+// line above is: requiring it is what fills admin_stats.js's group-resolver
+// slot, and an empty slot means tokens issued without the claim with nothing
+// looking wrong. It must come before the modules that issue; the directory it
+// reads arrives later, through its own slot, and until then it simply reports
+// that no directory is loaded.
+require('./group_claims');
+
 require('./wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
 // person to, and the session store it fills. FIRST of the modules that use it,

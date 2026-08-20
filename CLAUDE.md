@@ -58,7 +58,7 @@ messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
 `mtls.js`, `client_auth.js`, `oauth2_bcp.js`, `applications.js`,
 `authorization_servers.js`,
 `admin_stats.js`, `audit.js`, `vc_claims.js`, `vc_verifier_config.js`,
-`claim_attributes.js`, and
+`claim_attributes.js`, `group_claims.js`, and
 `admin_api_spec.js` and `admin_api_docs.js` beside the management API. One file in the tree is not a
 node module at all — `admin_api_explorer.js` is BROWSER code, read off disk by
 `admin_api_docs.js` and served verbatim; its own header says so at length.
@@ -374,6 +374,76 @@ the one place a reader goes when a handshake is failing.
    NAMESPACE AND NAME together, since that profile splits a claim URI into the
    two.
 
+3d-ii. **`group_claims.js` is the FOURTH library over that catalogue's
+   territory, and it is the only one that reads the directory's GROUPS.**
+   `vc_claims.js` says what a CREDENTIAL carries, `vc_verifier_config.js` what
+   the Verifier ASKS FOR, `claim_attributes.js` which ATTRIBUTES a token
+   carries; this puts the GROUPS somebody is a member of into all four claim
+   sets at once. It registers no route and requires `helpers.js`, `config.js`
+   and `admin_stats.js`, none of which requires it back.
+
+   **IT IS AUTOMATIC AND THEREFORE NOT A SELECTION.** There is nothing to tick
+   per user and nothing to tick per set — with `groups.claim` on, all four
+   carry it. That is the deliberate opposite of `/admin/claims`'s three
+   selections, and it is why the control is a `config.js` ROW rather than a
+   form: four settings on `/admin/config`, which already has a page and already
+   has `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
+   satisfied by there being no new control. **A second form on `/admin/claims`
+   would be a second door to one setting**, which is the two-stores mistake
+   rule 5 exists for.
+
+   **ON BY DEFAULT IS DEFENSIBLE ONLY BECAUSE THE CLAIM IS OMITTED FOR SOMEBODY
+   IN NO GROUP** — absent, not an empty array. On a fresh start the only people
+   in a group are the three the directory seeds, so a caller who never touched
+   `ou=groups` gets exactly the tokens it got before. An empty array would be a
+   new member in every token every existing client parses, which is what
+   `claim_attributes.js` defaults its selection to nothing to avoid.
+
+   **TWO INVERSIONS, and each fails rule 3e's test in a different direction.**
+   `admin_stats.js` offers `setGroupResolver()` and this module fills it (a
+   require the other way closes a cycle, since this module requires that one for
+   `identityKeyOf()`, the set ids and the reserved names); and this module offers
+   `setDirectory()`, which `ldap_server.js` fills with `groupsOfUser()` — a
+   require reaching THAT module would drag every `/ldap` route to the front of
+   the router. What it buys is the thing every inversion here buys: NO ISSUANCE
+   SITE CHANGED.
+
+   **`ldap_server.js` OWNS WHAT A GROUP IS; THIS OWNS WHAT A TOKEN BELIEVES.**
+   `groupsOfUser()` applies both group rules and resolves `member`,
+   `uniqueMember` and `memberUid` exactly as the console's member list does —
+   `memberUid` holds a bare name and the other two hold a DN, and treating them
+   alike is how every `posixGroup` membership silently stops reaching a token.
+   It reports BOTH directions (`via` for the group's own attributes,
+   `viaMemberOf` for the person's claim) and applies neither, because which one
+   a token believes is `groups.claimFromMemberOf` and that is a policy. Same
+   split as `oauth2_bcp.js` and `oauth2.js`. **An entry is not required**: a
+   group listing a DN nothing is stored at is a dangling member from the group's
+   side and is still the group saying so.
+
+   **PRECEDENCE IS NOW THREE DEEP IN A SECOND SENSE**, under the one rule 3d
+   describes: a typed claim wins over a directory attribute, and both win over
+   the groups claim — which is the only one of the three nobody named on a page.
+   In `samlAttributes()` that is a FILTER for the reason stated there, and the
+   groups layer is filtered against BOTH layers above it. A `groups.claimName`
+   naming something this service sets itself is REFUSED AT ISSUANCE, not at
+   configuration time, because `config.js` requires nothing from this repository
+   and a copied reserved list is one that goes wrong.
+
+   **A SAML ATTRIBUTE IS MULTI-VALUED and both builders now say so.** `values`
+   is an array of `<AttributeValue>` children under one `<Attribute>`; `value`
+   is untouched and is what every existing caller passes. One element per group
+   with the same name is not a multi-valued attribute — it is a relying party
+   reading the first and silently seeing one group where the person is in four,
+   the exact defect `samlAttributes()`'s dedup filter exists to prevent.
+
+   **CARRYING A GROUP IS NOT GRANTING ONE.** No endpoint here reads this claim
+   and nothing decides anything on one, which is the same distinction this
+   service already draws between an identity being RECORDED and one being
+   AUTHENTICATED. What stopped being true is the OTHER half of the old sentence
+   — "no token carries a group from this directory" — and the two halves are
+   split on `/admin/groups`, on `/admin/claims` and in README.md rather than
+   merged back into one claim that is now half wrong.
+
 3e. **`admin_stats.js` now has three inverted hooks and one require of a
    library, and they are four different problems rather than a pattern.**
    `helpers.js` offers `setJwtRecorder()` and this file fills it, because
@@ -382,11 +452,15 @@ the one place a reader goes when a handshake is failing.
    that seeding a directory entry cannot drag `/ldap`'s routes to the front of
    the router. `admin_stats.js` offers `setAttributeResolver()` and
    `claim_attributes.js` fills it, because `vc_claims.js` requires this file.
-   And `audit.js` is a plain require in the ordinary direction, because it
-   requires nothing here. Each is justified by a specific thing that would
-   otherwise break; **do not add a fifth by analogy** — a slot is what you reach
-   for when a require would close a cycle or move a route, and it costs a reader
-   an indirection every time.
+   `admin_stats.js` offers `setGroupResolver()` and `group_claims.js` fills it,
+   because that module requires this file AND what it needs is the directory,
+   which only `ldap_server.js` can answer. And `audit.js` is a plain require in
+   the ordinary direction, because it requires nothing here. Each is justified
+   by a specific thing that would otherwise break; **do not add a sixth by
+   analogy** — a slot is what you reach for when a require would close a cycle
+   or move a route, and it costs a reader an indirection every time. The group
+   resolver is the one to check a new proposal against: it was added only after
+   showing it failed that test BOTH ways round.
 
 3f. **`oauth2_bcp.js` is a library like `dpop.js`, and it is a MODE rather than a
    change of behaviour.** It holds this service's model of RFC 9700 (the OAuth 2.0
@@ -760,6 +834,42 @@ the one place a reader goes when a handshake is failing.
    `registeredClients` Map is GONE for the same reason — the RFC 7591
    registrations are entries, reached through `registrationOf()`.
 
+   **THE SPELLING TABLE IS TWO LISTS AND ONE DOOR.** `ldap_server.js`'s
+   `CANONICAL_NAMES` puts the conventional capitalisation back on a name the
+   store lower-cased. It is `STANDARD_NAMES` (types somebody else defined, the
+   specification named per group) plus `OWN_NAMES` (this service's inventions),
+   each written ONCE as the canonical spelling with the lookup key derived by
+   `toLowerCase()` — never as `lower: 'Mixed'` pairs, where a typo in the key is
+   invisible and the table fails silently at its only job. It covers ~150 names
+   rather than the ~30 this service writes, deliberately: the directory is
+   schemaless and a certificate subject arrives as attributes nobody here chose,
+   so a table that knew only its own writes would be wrong exactly where a reader
+   needs it. FOUR SOURCES merge — the two lists, `vc_claims.js`'s catalogue and
+   `applications.js`'s schema — and all four go through `learnName()`, which
+   keeps the first spelling and WARNS on a second rather than letting merge order
+   decide silently. Add a name to a list, never to the map; `memberOf` is in
+   neither category and says so where it sits.
+
+   **THE STORE'S TWO DIRECTIONS ARE NOT SYMMETRICAL, and that is the fix for
+   the DN.** A WRITE speaks in attribute objects — all a record has to say — but
+   `readApplication()` and `allApplications()` hand back the whole ENTRY (`dn`,
+   `origin`, `createdAt`, `modifiedAt`, `operational`, `attributes`), the same
+   shape `objectFor()` gives the console for a person. It has to be the entry,
+   because THE DN IS NOT AN ATTRIBUTE — it is the key the entry is stored under
+   — so a caller handed only the attributes had no way to learn where the
+   application lives, and every applications page could show the `cn` and
+   nothing else. The DN is published inside `attributes` as `entryDN` (RFC 5020,
+   and what `matchable()` already calls it) and SYNTHESISED on every read: a
+   stored copy is a second definition of one fact and the one that goes stale,
+   which `applicationEntry()`'s rename fallback shows is a case that happens.
+   Two consequences to keep. `view()` exposes `attributes` as the WHOLE entry
+   and `fields` as the schema half `recordFromAttributes()` understands — they
+   are different questions and the narrow one was being served under the wide
+   one's name. And every attribute lookup in `applications.js` goes through
+   `byLowerName()`, because names now arrive canonically spelled on the way out
+   and lower-cased in the store; an index assuming either produces a record with
+   an empty identifier rather than an error.
+
    **THE ATTRIBUTES WIN OVER THE STORED DOCUMENT.** RFC 7591 permits arbitrary
    metadata and RFC 7592's read must return what was registered, which no fixed
    attribute set can represent — so the whole registration is kept verbatim in
@@ -996,12 +1106,20 @@ the one place a reader goes when a handshake is failing.
    passwordless `["hwk"]` is FALSE.
 
    **A GROUP HERE GRANTS NOTHING**, and both pages say so where a reader will see
-   it. The same is true of those three attributes — nothing reads them back. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos
-   PAC carries a group from this directory and no endpoint reads one. On a service
-   that authenticates nobody it could hardly be otherwise — but a console that
-   listed groups beside the tokens page without saying it would let somebody
+   it. No endpoint reads a group and nothing decides anything on one. The same is
+   true of those three authentication-factor attributes, and of them it is true
+   twice over — nothing reads them back and no token carries them either. On a
+   service that authenticates nobody it could hardly be otherwise — but a console
+   that listed groups beside the tokens page without saying it would let somebody
    conclude that adding a user to `cn=directory-admins` changed what their token
    could do.
+
+   **A TOKEN DOES CARRY A GROUP NOW, WHICH IS A DIFFERENT SENTENCE** — see rule
+   3d-ii and `groups.claim`, which is ON by default. `groupsOfUser()` here is
+   what answers it, filled into `group_claims.js`'s `setDirectory()` slot at
+   require time beside the four hooks above; it is the FIFTH and the same shape
+   as the fourth. Do not merge the two sentences back together: carrying a fact
+   is not acting on it, and no Kerberos PAC carries a group either way.
 
 `userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
@@ -1496,6 +1614,15 @@ Worth knowing before "fixing" one of them:
   mock reached over a compose bridge that is a fact about docker, and a column
   right on a laptop and quietly wrong everywhere else is worse than none. It
   records the CHANNEL instead (`http`, `ldap`, `ldaps`, `internal`).
+* **A group in the directory now reaches a token, and still grants nothing.**
+  `groups.claim` (ON by default) puts a claim naming somebody's group membership
+  in every access token, ID Token and both SAML assertions; `groups.claimName`,
+  `groups.claimValue` (`cn` or the whole DN) and `groups.claimFromMemberOf`
+  shape it. It is the one feature here that reads `ou=groups` back out. Nothing
+  reads the claim: no endpoint checks it and nothing decides anything on it, so
+  the two sentences are kept apart everywhere they appear. It is defensible as
+  ON by default only because the claim is OMITTED ENTIRELY for somebody in no
+  group — see rule 3d-ii.
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every

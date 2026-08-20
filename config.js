@@ -863,6 +863,75 @@ const SETTINGS = [
     description: 'The server-side size limit for a search, which is what ' +
                  'produces LDAP_SIZE_LIMIT_EXCEEDED.' },
 
+  // --- The group claim -----------------------------------------------------
+  //
+  // The one feature in this service that reads the directory's GROUPS back out
+  // and puts them somewhere a protocol client can see. Everything else about a
+  // group here is still true — see /admin/groups: a group GRANTS nothing, no
+  // endpoint checks one, and nothing decides anything on the claim. What
+  // changed is that a token can now CARRY it, which is a different sentence
+  // and the two must not be merged; it is the same distinction this service
+  // already draws between an identity being RECORDED and an identity being
+  // authenticated.
+  //
+  // All four are runtime and honestly so: group_claims.js reads each of them
+  // per token rather than capturing it at require time, which is the rule a
+  // runtime setting has to be able to defend. There is nothing derived at
+  // startup here — the membership is read out of the live directory at the
+  // moment a token is minted, so an `ldapadd` of a member changes the very next
+  // one.
+  { key: 'groups.claim', group: 'Group claim', label: 'Carry a groups claim',
+    env: 'STS_GROUPS_CLAIM', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, every OAuth 2.0 access token, OIDC ID Token, SAML ' +
+                 '2.0 assertion and SAML 1.1 assertion this service issues ' +
+                 'carries a claim naming the directory groups the person is a ' +
+                 'member of. ON by default and yet it changes nothing for most ' +
+                 'callers: the claim is OMITTED ENTIRELY for anybody who is in ' +
+                 'no group, which on a fresh start is everybody except the ' +
+                 'seeded people, so a client that never touched ou=groups sees ' +
+                 'the tokens it saw before. Turning it off is how a client\'s ' +
+                 '"no groups claim" path stays reachable. The membership is ' +
+                 'read from the live directory per token, so an ldapmodify ' +
+                 'changes the next one.' },
+
+  { key: 'groups.claimName', group: 'Group claim', label: 'Claim name',
+    env: 'STS_GROUPS_CLAIM_NAME', type: 'string', dflt: 'groups', runtime: true,
+    description: 'What the claim is called: the JWT member name, the SAML 2.0 ' +
+                 'Attribute Name and the SAML 1.1 AttributeName. `groups` is ' +
+                 'the conventional spelling and what most relying parties look ' +
+                 'for, but `roles` and a URI are both common and both worth ' +
+                 'being able to produce. A name this service sets itself is ' +
+                 'REFUSED at issuance time rather than allowed to collide — ' +
+                 'see the reserved list on /admin/claims, which is the same ' +
+                 'rule a typed custom claim follows.' },
+
+  { key: 'groups.claimValue', group: 'Group claim', label: 'What names a group',
+    env: 'STS_GROUPS_CLAIM_VALUE', type: 'enum', enumValues: ['cn', 'dn'],
+    dflt: 'cn', runtime: true,
+    description: 'Whether each value is the group\'s common name ' +
+                 '(`developers`) or its whole DN ' +
+                 '(`cn=developers,ou=groups,dc=example,dc=com`). Both are what ' +
+                 'somebody\'s real identity provider does — an OIDC provider ' +
+                 'usually sends names and Active Directory sends DNs — and a ' +
+                 'client that has only ever parsed one of them has never run ' +
+                 'the other path.' },
+
+  { key: 'groups.claimFromMemberOf', group: 'Group claim',
+    label: 'Believe an entry\'s own memberOf',
+    env: 'STS_GROUPS_CLAIM_FROM_MEMBEROF', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Whether a group named by the PERSON\'S own `memberOf` counts ' +
+                 'as membership when the group entry does not list them back. ' +
+                 'Nothing in this directory maintains memberOf — it is not even ' +
+                 'a standard attribute — so a client that writes it creates ' +
+                 'exactly that disagreement, and /admin/groups exists partly to ' +
+                 'SHOW it. This setting is which side of it a token believes. ' +
+                 'On by default, because a client that wrote memberOf and got no ' +
+                 'claim has been told nothing about why; off is how the ' +
+                 'group entry stays the only authority. Either way the group ' +
+                 'has to EXIST here — a memberOf naming nothing does not ' +
+                 'invent a group to put in a token.' },
+
   // --- Audit log -----------------------------------------------------------
   //
   // Both are runtime and both are honestly so: audit.js reads them per event

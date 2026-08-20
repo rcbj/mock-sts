@@ -164,6 +164,20 @@ var config = {
     sizeLimit: 500
   },
 
+  // --- The group claim ---------------------------------------------------
+  //
+  // A groups claim in every access token, ID Token and SAML assertion, for
+  // anybody who is a member of a group in the embedded directory. Omitted
+  // entirely for somebody who is in none, which is why ON by default changes
+  // nothing for a caller who never touched ou=groups. A group still GRANTS
+  // nothing here — see /admin/groups — the token merely carries it.
+  groups: {
+    claim: true,
+    claimName: "groups",
+    claimValue: "cn",       // "cn" or "dn"
+    claimFromMemberOf: true
+  },
+
   // --- Audit log ---------------------------------------------------------
   audit: {
     maxEvents: 5000,

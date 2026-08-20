@@ -556,11 +556,21 @@ const SCHEMAS = {
         type: 'array',
         description: 'One page of them, newest activity first.',
         items: openObject(
-          'One application: `identifier`, `dnLabel` (the RDN, which is a ' +
+          'One application: `identifier`, `dn` (WHERE THE ENTRY IS — the key it ' +
+          'is stored under, and what an ldapsearch or ldapmodify is aimed at; ' +
+          'null only where no directory is loaded in this process, in which ' +
+          'case there is no registry at all), `dnLabel` (the RDN, which is a ' +
           'digest of the identifier when that is too long to read), `name`, ' +
           '`kinds`, `protocols`, `registered`, `firstSeen`, `lastSeen`, ' +
-          '`authentications`, `sessions`, `users`, `descriptions`, and ' +
-          '`attributes` — the protocol-specific half of its directory entry.',
+          '`authentications`, `sessions`, `users`, `descriptions`, `origin`, ' +
+          '`createdAt` and `modifiedAt` (the ENTRY\'s own, which an ldapmodify ' +
+          'moves and firstSeen/lastSeen do not), `operational` (which of the ' +
+          'attributes a SEARCH would have withheld unless asked for by name, ' +
+          'RFC 4511 section 4.5.1.8 — this is a dump of the store rather than a ' +
+          'search, so it carries them always), `attributes` — EVERY attribute ' +
+          'the entry carries, canonically spelled, the operational ones and ' +
+          '`entryDN` included — and `fields`, which is the narrower question of ' +
+          'what this registry has recorded about it.',
           {})
       },
       found: {
@@ -572,7 +582,12 @@ const SCHEMAS = {
       attributesShown: {
         type: 'array',
         description: 'On the ?application= reply only: one page of the ' +
-                     'entry\'s attributes, each `{name, values}`.',
+                     'entry\'s attributes, each `{name, values, operational}`. ' +
+                     'EVERY attribute the entry carries, not the ' +
+                     'protocol-specific half — objectClass, cn, appIdentifier, ' +
+                     'both timestamps and `entryDN` are among them, and so is ' +
+                     'anything an ldapmodify wrote by hand, because this ' +
+                     'directory is schemaless.',
         items: openObject('One attribute of the directory entry.', {})
       },
       attributesPaging: pagingObject('attributesShown')
@@ -835,6 +850,113 @@ const SCHEMAS = {
             'Which of the four sets carries it, keyed by set id.', {})
         })
       },
+      groups: openObject(
+        'The groups claim. The one thing on this page that is not chosen per ' +
+        'set: with groups.claim on, ALL FOUR carry a claim naming the ' +
+        'directory groups the subject is a member of, and somebody in no ' +
+        'group gets no claim at all rather than an empty list. There is no ' +
+        'operation beside this: its four settings are config.js\'s, so POST ' +
+        '/admin-api/config/set is the door and a second one would be a ' +
+        'second store for one setting.',
+        {
+          enabled: { type: 'boolean', description: 'groups.claim.' },
+          loaded: {
+            type: 'boolean',
+            description: 'Whether the embedded directory is loaded in this ' +
+                         'process. False means there are no groups to read ' +
+                         'and nothing else is affected.'
+          },
+          claim: {
+            type: 'string',
+            description: 'What the claim is called (groups.claimName): the ' +
+                         'JWT member name and the SAML Attribute name. A ' +
+                         'name this service sets itself is refused at ' +
+                         'issuance and `problem` says so.'
+          },
+          valueForm: {
+            type: 'string',
+            description: '`cn` or `dn` (groups.claimValue) — whether each ' +
+                         'value is the group\'s common name or its whole DN. ' +
+                         'Both are what somebody\'s real identity provider ' +
+                         'does, and a client that has only parsed one has ' +
+                         'never run the other path.'
+          },
+          memberOfCounts: {
+            type: 'boolean',
+            description: 'groups.claimFromMemberOf — whether a group named ' +
+                         'by the PERSON\'s own memberOf counts when the group ' +
+                         'entry does not list them back. Nothing here ' +
+                         'maintains memberOf, so that disagreement is ' +
+                         'reachable in one operation and this is which side ' +
+                         'a token believes.'
+          },
+          sets: {
+            type: 'array', items: { type: 'string' },
+            description: 'The sets that carry it, which is all four.'
+          },
+          problem: {
+            type: 'string',
+            description: 'Why a claim that is switched ON is not arriving. ' +
+                         'Empty when there is nothing wrong.'
+          },
+          grants: { type: 'string' },
+          precedence: { type: 'string' },
+          settings: { type: 'array', items: { type: 'string' } },
+          preview: openObject(
+            'What the claim would carry for the previewed person, built by ' +
+            'the function the ISSUANCE path calls so it cannot disagree with ' +
+            'the token.',
+            {
+              user: { type: 'string' },
+              key: { type: 'string' },
+              dn: {
+                type: 'string',
+                description: 'Where this person\'s entry is, or would be. ' +
+                             'Reported either way: a group can list a DN ' +
+                             'nothing is stored at, and that is still the ' +
+                             'group saying so.'
+              },
+              entryFound: { type: 'boolean' },
+              reason: {
+                type: 'string',
+                description: 'Why the claim is empty, when it is. Usually ' +
+                             'the ordinary answer — this person is in no ' +
+                             'group — rather than a fault.'
+              },
+              values: {
+                type: 'array', items: { type: 'string' },
+                description: 'Exactly what the claim would carry. Absent ' +
+                             'from the token entirely when this is empty.'
+              },
+              groups: {
+                type: 'array',
+                description: 'Every group naming this person, and how.',
+                items: openObject('One group.', {
+                  dn: { type: 'string' },
+                  cn: { type: 'string' },
+                  rule: {
+                    type: 'string',
+                    description: 'What made it a group: `placement` (under ' +
+                                 'ou=groups), `objectClass`, or `both`.'
+                  },
+                  via: {
+                    type: 'array', items: { type: 'string' },
+                    description: 'The group\'s own membership attributes ' +
+                                 'that name this person — member, ' +
+                                 'uniqueMember, memberUid. Empty when only ' +
+                                 'memberOf found it.'
+                  },
+                  viaMemberOf: {
+                    type: 'boolean',
+                    description: 'Whether the PERSON\'s own memberOf names ' +
+                                 'this group. Counted only when ' +
+                                 'memberOfCounts is true.'
+                  }
+                })
+              }
+            })
+        }),
+
       preview: openObject(
         'One person\'s value for every attribute in the catalogue, selected ' +
         'or not, so a caller can see what selecting one WOULD produce.',
