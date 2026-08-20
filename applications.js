@@ -736,7 +736,10 @@ function setField(record, name, value) {
 // `detail` carries whatever that protocol knows:
 //
 //   identifier  REQUIRED — the client_id, wtrealm, AppliesTo, SPN, entityID
-//   kind        one of KIND_IDS
+//   kind        one of KIND_IDS, or a LIST of them where an application is
+//               genuinely several things at once — a wtrealm is both a
+//               WS-Federation application and the audience of the assertion it
+//               was handed. A list is one sighting and counts once
 //   protocol    the family name, as /admin/users spells it
 //   name        a friendly name, where there is one
 //   fields      {schemaAttribute: value}, applied through setField()
@@ -760,8 +763,13 @@ function setField(record, name, value) {
 function seen(detail) {
   const info = detail || {};
   const identifier = String(info.identifier == null ? '' : info.identifier).trim();
+  // Normalised ONCE, because three lines below print it and a bare `info.kind`
+  // renders a list as "a,b" in one of them and not in the others.
+  const statedKinds = (Array.isArray(info.kind) ? info.kind : [info.kind])
+    .filter(Boolean).map(function (one) { return String(one); });
+  const kindPhrase = statedKinds.length ? ' (' + statedKinds.join(', ') + ')' : '';
   log.debug("Entering seen(). identifier=" + (identifier || '(none)') +
-            ", kind=" + (info.kind || '(unstated)'));
+            ", kind=" + (statedKinds.join(', ') || '(unstated)'));
   if (!identifier) {
     log.debug("Leaving seen(). There was no identifier to record.");
     return null;
@@ -772,15 +780,22 @@ function seen(detail) {
   const now = Date.now();
   let changed = !known;
 
-  if (info.kind) {
-    if (KIND_IDS.indexOf(String(info.kind)) < 0) {
-      log.warn('applications: "' + info.kind + '" is not one of the kinds this registry ' +
+  // ONE SIGHTING MAY NAME SEVERAL KINDS, and two protocols need it to. A
+  // wtrealm handed a SAML 1.1 assertion is a WS-Federation application AND the
+  // audience of that assertion — both are true of the same request, and the
+  // registry accumulates rather than choosing. Passing a list rather than
+  // calling seen() twice matters: a second call would count a second
+  // authentication for one act, which is the trap `counts: false` exists for
+  // one field over.
+  statedKinds.forEach(function (kind) {
+    if (KIND_IDS.indexOf(kind) < 0) {
+      log.warn('applications: "' + kind + '" is not one of the kinds this registry ' +
                'knows (' + KIND_IDS.join(', ') + '). It is recorded as given, which is ' +
                'how one application comes to be listed under two spellings — fix the ' +
                'caller or add a row to KINDS.');
     }
-    if (addTo(record.kinds, info.kind)) changed = true;
-  }
+    if (addTo(record.kinds, kind)) changed = true;
+  });
   if (info.protocol && addTo(record.protocols, info.protocol)) changed = true;
   if (info.name) {
     const name = String(info.name);
@@ -823,7 +838,7 @@ function seen(detail) {
 
   if (!known) {
     log.info('applications: first sight of "' + identifier + '"' +
-             (info.kind ? ' (' + info.kind + ')' : '') + '. ' + count() +
+             kindPhrase + '. ' + count() +
              ' application(s) in the directory.');
   }
 
@@ -843,7 +858,7 @@ function seen(detail) {
     target: identifier,
     summary: (known ? 'Application "' : 'A new application "') + identifier +
              (known ? '" recorded something new' : '" was seen for the first time') +
-             (info.kind ? ' (' + info.kind + ')' : ''),
+             kindPhrase,
     detail: {
       identifier: identifier,
       kinds: record.kinds.join(', '),

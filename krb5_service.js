@@ -54,6 +54,11 @@ const prim = require('./krb5_primitives.js');
 const gss = require('./krb5_gss.js');
 const principals = require('./krb5_principals.js');
 const stats = require('./admin_stats');
+// The application registry. A plain require in the ordinary direction and safe
+// in the way rule 3g describes: applications.js registers no route and requires
+// only helpers.js, config.js and audit.js, so nothing about requiring it here
+// closes a cycle or moves an endpoint in the router.
+const applications = require('./applications');
 
 const SERVICE_PORT = config.value('krb5.servicePort');
 const SERVICE_PRINCIPAL = config.value('krb5.servicePrincipal').split('/');
@@ -322,6 +327,34 @@ async function accept(tokenBytes, opts) {
           '(' + ticketProfile.name + ').' +
           (mutualWanted ? '' : ' Mutual authentication was not requested, so the client has no ' +
                                'proof it reached the real service.')
+  });
+  // THE SERVICE, which is the application half of this exchange and was missing
+  // until now. The KDC records an SPN when it ISSUES a service ticket
+  // (krb5_kdc.js's TGS handler), and that covered the ordinary case so
+  // completely that the gap was invisible: every ticket presented here had been
+  // minted here a moment earlier, so the entry already existed. It stops being
+  // true the moment a ticket comes from somewhere else — a real Active
+  // Directory KDC, which the parent project's real-DC and relay jobs use — and
+  // then a service that decrypted a ticket under its own key appeared in no
+  // registry at all while the CLIENT was recorded one line above.
+  //
+  // Recorded HERE rather than in spnego.js as well, because that module calls
+  // this function for every check it makes and adds none of its own: one
+  // acceptor is one recording site, and a second call over there would count one
+  // ticket twice. `via` says which transport it arrived on.
+  //
+  // The identifier is the SPN AS PRESENTED with the ticket's realm, which is the
+  // same string the KDC files it under, so a ticket from this KDC lands on the
+  // entry that already exists rather than beside it. Where the name was
+  // registered on demand it is not this service's canonical SPN, and the note
+  // says so rather than quietly recording `wanted`.
+  applications.seen({
+    identifier: presented + '@' + apReq.ticket.realm,
+    kind: 'kerberos-service',
+    protocol: 'Kerberos v5',
+    user: clientName,
+    note: 'a service ticket was accepted for this principal (' + via + ')',
+    fields: { krb5ServicePrincipalName: presented + '@' + apReq.ticket.realm }
   });
   log.info('krb5-service: ACCEPTED ' + clientName + ' for ' + wanted + ' (' + ticketProfile.name +
     ', flags [' + msgs.ticketFlagNames(ticketPart.flags).join(', ') + ']' +

@@ -726,10 +726,31 @@ the one place a reader goes when a handshake is failing.
    WS-Federation application, a WS-Trust relying party, the OID4VP verifier, a
    Kerberos service — as entries under `ou=applications`. It registers no route
    and requires only `helpers.js` and `audit.js`, so it cannot join a cycle;
-   `admin_stats.js`, `oauth2.js`, `wsfed.js`, `wstrust.js` and `krb5_kdc.js`
-   require it in the ordinary direction, and `ldap_server.js` fills its
-   `setDirectory()` slot at require time for the reason `vc_claims.js`'s is
-   filled (rule 6). Six things are load-bearing:
+   `admin_stats.js`, `oauth2.js`, `wsfed.js`, `wstrust.js`, `krb5_kdc.js` and
+   `krb5_service.js` require it in the ordinary direction, and `ldap_server.js`
+   fills its `setDirectory()` slot at require time for the reason
+   `vc_claims.js`'s is filled (rule 6). Six things are load-bearing:
+
+   **A SIGHTING MAY NAME SEVERAL KINDS, AND TWO PROTOCOLS NEED IT TO.** `seen()`
+   takes a list as readily as a string and accumulates them. A `wtrealm` is a
+   WS-FEDERATION application AND the audience of whichever assertion it was
+   handed; an `AppliesTo` handed a SAML 2.0 assertion is a WS-Trust relying party
+   AND that assertion's service provider. Recording only the second of each left
+   `wsfed-relying-party` a kind NO code path produced — offered by the console's
+   filter and by the management API's enum, and matching nothing, forever. Pass a
+   list rather than calling `seen()` twice: two calls count two authentications
+   for one act, which is what `counts: false` exists to prevent one field over.
+
+   **A KERBEROS SERVICE IS RECORDED AT BOTH ENDS, AND THAT IS NOT A DOUBLE
+   ENTRY.** The KDC records an SPN when it ISSUES a service ticket
+   (`krb5_kdc.js`'s TGS handler) and `krb5_service.js` records it again when it
+   ACCEPTS one, under the same `SPN@REALM` identifier, so the two land on one
+   entry with two descriptions. The acceptor's half is not redundant: it is the
+   only one that fires for a ticket some OTHER KDC issued — a real Active
+   Directory, which the parent project's real-DC and relay jobs use — where the
+   client was recorded and the service was not. It goes in `accept()` and NOT in
+   `spnego.js`, which calls that function for every check it makes and adds none
+   of its own; a second call there would count one ticket twice.
 
    **THERE IS NO MAP SHADOWING THE ENTRIES.** Every read is a directory read and
    nothing is cached, which is what makes an `ldapmodify` of `oauthRedirectUri`
@@ -1036,6 +1057,47 @@ WS-Trust 1.0 through 1.4 instead of four.
    what `/admin/users?format=json` has always done, it is a string concatenation
    on a mock, and the alternative — a second set of builders for the same data —
    is the thing this whole arrangement exists to prevent.
+
+7a. **THE BREADCRUMB TRAIL IS IN THE SHELL AND IT IS ON EVERY PAGE.**
+   `page()` draws `trailBar()` under the nav on all of them — `Admin console ›
+   Applications › rfc9700-debugger`, and on `/admin` itself the one crumb. It is
+   not the nav said twice: the nav answers "what else is there", the trail
+   answers "where am I and how do I get back", and the tab for the section a
+   reader is standing IN is exactly the tab that says nothing about the page they
+   are standing ON. That was the original bug — `item.path === active` is true on
+   `/admin/applications` and on `/admin/applications?application=x` alike, and the
+   active tab is drawn as plain text, so the one control pointing at the list was
+   the one control the shell had turned off.
+
+   A drill-down view returns `up` — `upTo(section, leaf, listView)` — and
+   `respond()` threads it to `page()`. It makes the active tab a LINK as well.
+   **The section label comes from `NAV`**, so a renamed tab cannot leave a trail
+   naming the old one. **The last crumb is never a link**: a crumb that reloads
+   the page you are on teaches a reader not to trust the ones beside it.
+
+   **WHAT MAKES IT A BREADCRUMB RATHER THAN A LINK TO THE SECTION IS
+   `listViewOf()`.** A drill-down link carries the list's filter and page, and the
+   section crumb spends it, so back lands where the reader was. `LIST_PARAMS` is a
+   WHITELIST PER SECTION and must stay one — what comes out of it goes into a URL
+   this service hands to a browser, which is the rule `backTo()` already follows.
+
+   **THREE PLACES DROP IT IF NOBODY CARRIES IT, and they are already handled.**
+   A drill-down's own controls carry the whole query (`pageParamsOf()`), so they
+   are free. `perPageForm()` is a GET form — it posts its own fields and nothing
+   else — so the filter is spelt out as hidden inputs, and its PAGE deliberately
+   is not: `per` is what that form changes. And every form on the applications and
+   authorization-server drill-downs carries one opaque `back` field, which the
+   POST handler REBUILDS through `listViewFromBack()` rather than echoing. **A new
+   form on either of those pages needs `carryBack` in it**, or an edit made
+   through it silently costs the reader their place in the list.
+
+   **A NEW DRILL-DOWN NEEDS `up` AND NOTHING CAN CHECK THAT IT HAS ONE**, the same
+   gap rule 7 describes: no code here can see a page appear. The four are
+   `?user=`, `?group=`, `?application=` and `?profile=`, and every branch of those
+   views sets it — the not-found branches included, since a page saying "no such
+   group" is the page a reader most needs a way off. A parameter that merely
+   FILTERS a list is not a drill-down and must not pass `up`: the section crumb
+   would then point at the page the reader is already on.
 
 ## `frame-ancestors` is the one CSP clause a page may not drop
 

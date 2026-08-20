@@ -145,7 +145,9 @@ const MAX_WHO = 12;
 // The page shell.
 //
 // One for all five pages, with the nav in it, so a page cannot be added without a
-// way back. The CSS is inline because app.js sets `default-src 'none'` with
+// way back — which held for the SECTIONS and did not hold for the pages under them
+// until `up` existed, because the nav's answer on a drill-down was the section's
+// own tab, drawn as text. See navBar(). The CSS is inline because app.js sets `default-src 'none'` with
 // `style-src 'unsafe-inline'`: a stylesheet as its own resource would need its own
 // exception and would buy nothing.
 //
@@ -180,11 +182,192 @@ function codeList(names) {
   return names.map(function (name) { return '<code>' + esc(name) + '</code>'; }).join(', ');
 }
 
-function navBar(active) {
+// WHICH QUERY PARAMETERS BELONG TO A SECTION'S LIST rather than to the page under
+// it — the filter the reader typed and the page they had reached.
+//
+// It is a WHITELIST per section rather than "everything that is not ours", for the
+// same reason the tokens page rebuilds its `back` field from a list of names
+// instead of echoing it: what comes out of here is put into a URL this service
+// hands to a browser, so the set of names has to be one this file wrote. It is
+// also why a section that cannot be drilled into has no row — carrying a filter
+// through a page nothing hangs under would be state nobody can get back to.
+const LIST_PARAMS = {
+  '/admin/users': ['q', 'protocol', 'per', 'page'],
+  '/admin/groups': ['q', 'per', 'page'],
+  '/admin/applications': ['q', 'kind', 'per', 'page'],
+  '/admin/authorization-servers': ['per', 'page']
+};
+
+// The list AS THE READER LEFT IT, picked out of a query by that table.
+//
+// This is what makes the trail a way back to where somebody was rather than to the
+// top of an unfiltered list. A drill-down link carries it, every control on the
+// drill-down carries it onward (pageParamsOf() takes the whole query through), and
+// the trail's section crumb spends it. Nothing on the drill-down reads these keys
+// for anything else: their names belong to the list's filter form, and a page
+// showing one application has no `q`.
+function listViewOf(section, query) {
+  log.debug("Entering listViewOf(). section=" + section);
+  const out = {};
+  (LIST_PARAMS[section] || []).forEach(function (key) {
+    const raw = (query || {})[key];
+    // Express hands back an array when a parameter is repeated, and String() on one
+    // is "a,b" — a filter nothing matches, reached by a link somebody clicked twice.
+    // The same first-wins rule pageParamsOf() uses.
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (value !== undefined && value !== null && String(value) !== '') {
+      out[key] = String(value);
+    }
+  });
+  log.debug("Leaving listViewOf(). " + Object.keys(out).length + " parameter(s) carried.");
+  return out;
+}
+
+// The same thing out of a form's `back` field, which is a query string a browser
+// sent us rather than one we are looking at.
+//
+// It is REBUILT and never echoed: the names come from LIST_PARAMS, the values are
+// re-encoded by queryWith(), and anything else in the field is dropped. That is
+// the guarantee backTo() gives the tokens page and it is needed here for the same
+// reason — a redirect target taken out of a request body is an open redirect, and
+// one carrying a newline is a header injection. The worst a hand-written `back`
+// can now reach is another page of the same list.
+function listViewFromBack(section, raw) {
+  log.debug("Entering listViewFromBack(). section=" + section);
+  let params = null;
+  try {
+    params = new URLSearchParams(String(raw || '').replace(/^\?/, ''));
+  } catch (e) {
+    // Unparseable; the bare list is the right answer and is what a form carrying no
+    // `back` at all gets anyway.
+    log.debug("Leaving listViewFromBack(). Unparseable: " + e.message);
+    return {};
+  }
+  const query = {};
+  params.forEach(function (value, key) {
+    // First wins, for the reason listViewOf() takes the first of a repeated
+    // parameter: a field sent twice is one value, not "a,b".
+    if (!Object.prototype.hasOwnProperty.call(query, key)) {
+      query[key] = value;
+    }
+  });
+  log.debug("Leaving listViewFromBack().");
+  return listViewOf(section, query);
+}
+
+// The section a DRILL-DOWN hangs under: where "back" goes, what that section is
+// called, and what the reader has drilled INTO.
+//
+// The label comes out of NAV rather than the call site, so a renamed tab cannot
+// leave a way back that names the old one. A path with no NAV row falls back to
+// the path itself, which is visible rather than silent — a drill-down under a
+// section that is not in the nav is worth noticing.
+//
+// `listView` is listViewOf()'s answer, and it is what the href carries: the reader
+// goes back to page 3 of the filter they were looking at rather than to the top of
+// everything. `leaf` is the thing drilled into, for the last crumb.
+function upTo(path, leaf, listView) {
+  log.debug("Entering upTo(). path=" + path);
+  const item = NAV.filter(function (row) { return row.path === path; })[0];
+  const view = listView || {};
+  log.debug("Leaving upTo(). " + (item ? "labelled " + item.label : "no nav row") +
+            ", " + Object.keys(view).length + " list parameter(s).");
+  return { href: path + queryWith(view, {}), label: item ? item.label : path,
+           leaf: leaf, filtered: Object.keys(view).length > 0 };
+}
+
+// `up` is set on a drill-down — a page reached from a link on one of the sections
+// below rather than one of the sections itself — and what it changes is the ACTIVE
+// TAB.
+//
+// That tab was drawn as plain text on every page whose `active` matched, and
+// `active` is the section's path on the list page and on every page underneath it
+// alike. So on a drill-down the one control that pointed at the list was the one
+// control this shell had turned off, and the only way back from
+// /admin/applications?application=x was the browser's own Back button or a link at
+// the foot of a long page. On a drill-down the tab is a LINK: still bold, because
+// the reader is inside that section, and underlined so that "the section you are
+// in" cannot be read as "not clickable".
+function navBar(active, up) {
   return '<nav>' + NAV.map(function (item) {
-    if (item.path === active) return '<span class="here">' + esc(item.label) + '</span>';
+    if (item.path === active) {
+      if (up) {
+        return '<a class="here" href="' + esc(up.href) + '" title="Back to ' +
+               esc(up.label) + '">' + esc(item.label) + '</a>';
+      }
+      return '<span class="here">' + esc(item.label) + '</span>';
+    }
     return '<a href="' + esc(item.path) + '">' + esc(item.label) + '</a>';
   }).join('') + '</nav>';
+}
+
+// How long a leaf crumb may be before it is cut. A group's leaf is a DN and a
+// user's can be a did:jwk — a few hundred characters of base64url with nowhere a
+// browser will break a line — and a trail that wraps to four lines is not a trail.
+// The full name is in the <h1> immediately below it and in the `title` here, so
+// nothing is lost by cutting: what the crumb is for is the LINKS to its left.
+const MAX_CRUMB = 44;
+
+function shortCrumb(text) {
+  const value = String(text == null ? '' : text);
+  return value.length > MAX_CRUMB ? value.slice(0, MAX_CRUMB - 1) + '…' : value;
+}
+
+// THE BREADCRUMB TRAIL, AND IT IS ON EVERY PAGE RATHER THAN ONLY ON A DRILL-DOWN.
+//
+// One line under the nav saying where the reader is and offering every level above
+// them: `Admin console › Applications › rfc9700-debugger`. The nav answers "what
+// else is there"; the trail answers "where am I and how do I get back", which are
+// different questions — the tab for the section you are standing in is exactly the
+// tab that tells you nothing about the page you are standing on.
+//
+// Three things about it are deliberate.
+//
+// The section crumb on a drill-down is `up.href`, which carries THE FILTER AND THE
+// PAGE the reader clicked in from (see listViewOf()), so the trail goes back to
+// where they were rather than to the top of an unfiltered list. That is the whole
+// difference between a breadcrumb and a link to the section.
+//
+// The last crumb is NOT a link. It is the page being drawn, and a crumb that
+// reloads the page you are on is a control that does nothing — which teaches a
+// reader not to trust the ones beside it.
+//
+// The root crumb is `Admin console` on every page including `/admin` itself, where
+// it is the only crumb and is not a link. A trail that appeared on some pages and
+// not others would be a trail nobody looks for.
+function trailBar(active, up, title) {
+  log.debug("Entering trailBar(). active=" + active);
+  const crumbs = [{ label: 'Admin console', href: active === '/admin' ? null : '/admin' }];
+  if (active !== '/admin') {
+    const item = NAV.filter(function (row) { return row.path === active; })[0];
+    const label = item ? item.label : active;
+    if (up) {
+      crumbs.push({ label: label, href: up.href,
+                    // Said in the tooltip rather than in the crumb, because "as you
+                    // left it" is reassurance for somebody who wonders and noise for
+                    // everybody else — and a crumb whose text changes with the
+                    // filter is a crumb that moves under the pointer.
+                    title: up.filtered
+                      ? 'Back to ' + label + ' — the filter and page you came from'
+                      : 'Back to ' + label });
+      crumbs.push({ label: shortCrumb(up.leaf || title), title: String(up.leaf || title) });
+    } else {
+      crumbs.push({ label: label });
+    }
+  }
+  const html = '<p class="crumb">' + crumbs.map(function (crumb, index) {
+    const sep = index ? '<span class="sep">&rsaquo;</span>' : '';
+    if (!crumb.href) {
+      return sep + '<span class="leaf"' +
+        (crumb.title ? ' title="' + esc(crumb.title) + '"' : '') + '>' +
+        esc(crumb.label) + '</span>';
+    }
+    return sep + '<a href="' + esc(crumb.href) + '"' +
+      (crumb.title ? ' title="' + esc(crumb.title) + '"' : '') + '>' +
+      esc(crumb.label) + '</a>';
+  }).join('') + '</p>';
+  log.debug("Leaving trailBar(). " + crumbs.length + " crumb(s).");
+  return html;
 }
 
 // The banner every page carries. It is repeated on all of them rather than shown
@@ -197,8 +380,8 @@ const OPEN_BANNER =
   'token and change what the next one contains. That is fine on a laptop or a compose network ' +
   'and is not fine on a public address.</div>';
 
-function page(title, active, inner) {
-  log.debug("Entering page(). title=" + title);
+function page(title, active, inner, up) {
+  log.debug("Entering page(). title=" + title + ", up=" + (up ? up.href : "none"));
   const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>' + esc(title) + ' — mock STS admin</title><style>' +
@@ -213,6 +396,18 @@ function page(title, active, inner) {
     'nav{margin:0 0 16px;padding-bottom:10px;border-bottom:1px solid #eee;font-size:.85em}' +
     'nav a,nav .here{display:inline-block;margin-right:.9em;text-decoration:none}' +
     'nav a{color:#12107c}nav .here{font-weight:700;color:#222}' +
+    // The active tab on a DRILL-DOWN. It keeps the weight `.here` gives it, because
+    // the reader is still inside that section, and takes back the link colour and an
+    // underline, because it is a link again and a bold black tab reads as text
+    // nobody can click — which is exactly what it was.
+    'nav a.here{color:#12107c;text-decoration:underline}' +
+    '.crumb{font-size:.82em;margin:0 0 14px;color:#666}' +
+    '.crumb a{text-decoration:none;font-weight:600}' +
+    '.crumb a:hover{text-decoration:underline}' +
+    '.crumb .sep{margin:0 .45em;color:#aaa}' +
+    // The last crumb is the page being drawn. It is not a link and must not look
+    // like one, or the one crumb that does nothing is the one a reader clicks.
+    '.crumb .leaf{color:#222;font-weight:600}' +
     '.warn{background:#fff8e1;border:1px solid #ffe082;padding:9px 12px;border-radius:5px;' +
     'font-size:.82em;margin:0 0 16px}' +
     '.ok{background:#e8f5e9;border:1px solid #a5d6a7;padding:8px 11px;border-radius:5px;' +
@@ -259,7 +454,7 @@ function page(title, active, inner) {
     '<h1>' + esc(title) + '</h1>' +
     '<p class="sub">Mock STS admin console — issuer <code>' +
       esc(config.value('wstrust.issuer')) + '</code></p>' +
-    navBar(active) + OPEN_BANNER + inner +
+    navBar(active, up) + trailBar(active, up, title) + OPEN_BANNER + inner +
     '<div class="meta">' +
     '<div>Everything on these pages is held in memory and dies with the process, like the signing ' +
     'key this service regenerates on every start. There is nothing to persist and a statistics file ' +
@@ -276,7 +471,11 @@ function page(title, active, inner) {
 
 // Both response shapes for a page, chosen by ?format=json. `no-store` on all of
 // them: they describe live state, and a cached metrics page is a wrong one.
-function respond(req, res, json, title, active, html) {
+// `up`, when given, is what upTo() returned for the section this page hangs
+// under. Only a drill-down passes it; a section's own list page does not, and the
+// JSON answer ignores it either way — a way back up is a property of a page a
+// person is reading, and a caller of ?format=json has the URL it asked for.
+function respond(req, res, json, title, active, html, up) {
   log.debug("Entering respond(). title=" + title);
   res.set('Cache-Control', 'no-store');
   if (String(req.query.format || '') === 'json') {
@@ -284,7 +483,7 @@ function respond(req, res, json, title, active, html) {
     log.debug("Leaving respond(). Answered JSON.");
     return;
   }
-  res.status(200).type('text/html').send(page(title, active, html));
+  res.status(200).type('text/html').send(page(title, active, html, up));
   log.debug("Leaving respond(). Answered HTML.");
 }
 
@@ -704,10 +903,20 @@ function perPageOptions(perPage) {
 // oversight of the hidden inputs: a GET form posts its own fields and nothing else,
 // and page 4 of fifty-row pages is not page 4 of anything after the size changes.
 // Going back to the top of each list is the only answer that is true of all of them.
-function perPageForm(path, key, value, perPage, extraNote) {
+//
+// `carry` is the list's FILTER, and it has to be spelt out as hidden inputs for the
+// reason above: a GET form posts its own fields and nothing else, so without them
+// this control quietly empties the breadcrumb's way back to the list the reader
+// came from. Its PAGE is deliberately not carried — `per` is the thing this form
+// changes, and page 4 of fifty-row pages is not page 4 of anything afterwards,
+// which is the same sentence as the paragraph above about the tables below.
+function perPageForm(path, key, value, perPage, extraNote, carry) {
   log.debug("Entering perPageForm(). path=" + path);
+  const carried = Object.keys(carry || {}).map(function (name) {
+    return '<input type="hidden" name="' + esc(name) + '" value="' + esc(carry[name]) + '">';
+  }).join('');
   const html = '<form method="get" action="' + esc(path) + '"><div class="formrow">' +
-    '<input type="hidden" name="' + esc(key) + '" value="' + esc(value) + '">' +
+    '<input type="hidden" name="' + esc(key) + '" value="' + esc(value) + '">' + carried +
     '<label for="per">Rows per table</label>' +
     '<select id="per" name="per">' + perPageOptions(perPage) + '</select>' +
     '<button class="secondary">Apply</button>' +
@@ -717,6 +926,21 @@ function perPageForm(path, key, value, perPage, extraNote) {
     '</div></form>';
   log.debug("Leaving perPageForm().");
   return html;
+}
+
+// The FILTER half of a carried list view — everything except the two parameters
+// that describe how the list was being paged. Written once because both of the
+// controls that need it need the same half: a form that changes the page size, and
+// anything else that lands the reader at the top of a list rather than where they
+// were in it.
+function filterOnly(view) {
+  const out = {};
+  Object.keys(view || {}).forEach(function (key) {
+    if (key !== 'page' && key !== 'per') {
+      out[key] = view[key];
+    }
+  });
+  return out;
 }
 
 // A query string built from what the caller is already looking at plus an override.
@@ -2536,7 +2760,8 @@ function userDetailPage(req, key) {
     perPageForm('/admin/users', 'user', key, artifactPage.paging.perPage,
                 'The session BLOCKS below start at ' + DEFAULT_BLOCKS_PER_PAGE +
                 ' rather than ' + DEFAULT_PER_PAGE + ', because each of them is ' +
-                'itself a table; setting a size here applies to those too.') +
+                'itself a table; setting a size here applies to those too.',
+                filterOnly(listViewOf('/admin/users', req.query))) +
 
     '<h2>Sessions, and what was issued on each</h2>' +
     '<p class="note">A <strong>sign-on session</strong> is a browser holding the ' +
@@ -2665,8 +2890,12 @@ function usersListPage(req) {
     liveByUser[key] = (liveByUser[key] || 0) + 1;
   });
 
+  const listView = listViewOf('/admin/users', req.query);
   const rows = shown.map(function (row) {
-    const href = '/admin/users' + queryWith({ user: row.key }, {});
+    // The link carries the list AS IT IS BEING VIEWED, which is what lets the
+    // trail on the other side come back to this page of this filter rather than to
+    // the top of everything. See listViewOf().
+    const href = '/admin/users' + queryWith(listView, { user: row.key });
     // Shortened for the same reason the metrics page's Who column is, and the
     // Decentralized Identity endpoints are what made it reach this table too: a
     // did:jwk is a couple of hundred characters of base64url with not one place
@@ -2781,14 +3010,21 @@ function usersView(req) {
         'and nothing has been issued naming them. Either the name is not one this service has ' +
         'seen, or it has been forgotten — the registry holds the most recent ' + stats.MAX_USERS +
         ' identities, and everything in it dies with the process.</p>' +
-        '<p class="note"><a href="/admin/users">Back to the list</a>.</p>';
+        // The same href the trail's section crumb carries, so the two ways back off
+        // this page cannot land in different places.
+        '<p class="note"><a href="' +
+        esc('/admin/users' + queryWith(listViewOf('/admin/users', req.query), {})) +
+        '">Back to the list</a>.</p>';
       log.debug("Leaving usersView(). No such user.");
       return { json: { user: wantedUser, known: false }, inner: inner,
-               title: 'User' };
+               title: 'User',
+               up: upTo('/admin/users', wantedUser, listViewOf('/admin/users', req.query)) };
     }
     log.debug("Leaving usersView(). The drill-down.");
     return { json: Object.assign({ known: true }, detail.json),
-             inner: detail.inner, title: 'User ' + wantedUser };
+             inner: detail.inner, title: 'User ' + wantedUser,
+             up: upTo('/admin/users', wantedUser,
+                      listViewOf('/admin/users', req.query)) };
   }
   const list = usersListPage(req);
   log.debug("Leaving usersView(). The list.");
@@ -2798,7 +3034,7 @@ function usersView(req) {
 app.get('/admin/users', function (req, res) {
   log.debug("Entering the admin users page.");
   const view = usersView(req);
-  respond(req, res, view.json, view.title, '/admin/users', view.inner);
+  respond(req, res, view.json, view.title, '/admin/users', view.inner, view.up);
   log.debug("Leaving the admin users page. " + view.title + ".");
 });
 
@@ -2957,8 +3193,12 @@ function groupsListPage(req) {
                          per: req.query.per ? paging.perPage : '' };
   const nav = pageNav('/admin/groups', filterParams, paging);
 
+  const listView = listViewOf('/admin/groups', req.query);
   const rows = shown.map(function (group) {
-    const href = '/admin/groups' + queryWith({ group: group.dn }, {});
+    // The link carries the list AS IT IS BEING VIEWED, which is what lets the
+    // trail on the other side come back to this page of this filter rather than to
+    // the top of everything. See listViewOf().
+    const href = '/admin/groups' + queryWith(listView, { group: group.dn });
     return '<tr><td><a href="' + esc(href) + '">' + esc(groupLabel(group)) + '</a></td>' +
       '<td class="who"><code>' + esc(group.dn) + '</code></td>' +
       '<td>' + groupRuleCell(group.rule) + '</td>' +
@@ -3052,7 +3292,11 @@ function groupsListPage(req) {
 function groupDetailPage(req, wantedDn) {
   log.debug("Entering groupDetailPage(). dn=" + wantedDn);
   const info = groupReader(wantedDn);
-  const back = '<p class="note"><a href="/admin/groups">Back to the groups</a>.</p>';
+  // The same href the trail's section crumb carries — see listViewOf(). Two ways
+  // back off one page that land in different places is worse than one.
+  const back = '<p class="note"><a href="' +
+    esc('/admin/groups' + queryWith(listViewOf('/admin/groups', req.query), {})) +
+    '">Back to the groups</a>.</p>';
 
   if (!info.found) {
     // Three ways to be here and they are different answers, so they get different
@@ -3162,7 +3406,8 @@ function groupDetailPage(req, wantedDn) {
     esc(info.port) + '</code> reading <code>' + esc(group.dn) + '</code> sees exactly the object ' +
     'below, because it <em>is</em> that object and not a copy of it.</p>' +
 
-    perPageForm('/admin/groups', 'group', group.dn, memberPage.paging.perPage, '') +
+    perPageForm('/admin/groups', 'group', group.dn, memberPage.paging.perPage, '',
+                filterOnly(listViewOf('/admin/groups', req.query))) +
 
     '<h2>Members</h2>' +
     '<div class="tiles">' +
@@ -3250,7 +3495,14 @@ function groupsView(req) {
     const detail = groupDetailPage(req, wantedDn);
     log.debug("Leaving groupsView(). The drill-down.");
     return { json: detail.json, inner: detail.inner,
-             title: 'Group ' + wantedDn };
+             title: 'Group ' + wantedDn,
+             // The whole DN is the leaf and shortCrumb() cuts it if it has to,
+             // rather than being cut to its first RDN here: a leaf trimmed at the
+             // shell keeps its full text in the tooltip, and a DN cut here would
+             // lose the container it is in with nowhere left to say so. What the
+             // cut drops is the tail, which is the part every entry shares.
+             up: upTo('/admin/groups', wantedDn,
+                      listViewOf('/admin/groups', req.query)) };
   }
   const list = groupsListPage(req);
   log.debug("Leaving groupsView(). The list.");
@@ -3420,10 +3672,15 @@ app.post('/admin/applications', function (req, res) {
   const result = applicationsAction(body);
   // Back to the drill-down the form was posted from, when there was one, so a
   // reader who has just added a redirect URI is looking at the entry that now
-  // carries it rather than at the top of the list.
+  // carries it rather than at the top of the list — and carrying the list state
+  // that came in on the form's `back` field either way, so the breadcrumb on the
+  // page they land on still offers the filter and page they came from. Without
+  // that, editing an application silently costs the reader their place in the
+  // list, which is exactly what the trail exists to keep.
+  const listView = listViewFromBack('/admin/applications', body.back);
   const back = String(body.application || '').trim() && result.ok !== false
-    ? '/admin/applications' + queryWith({ application: String(body.application).trim() }, {})
-    : '/admin/applications';
+    ? '/admin/applications' + queryWith(listView, { application: String(body.application).trim() })
+    : '/admin/applications' + queryWith(listView, {});
   respondToAction(req, res, back, result);
   log.debug("Leaving the admin applications action endpoint.");
 });
@@ -3464,8 +3721,12 @@ function applicationsListPage(req) {
                          per: req.query.per ? paging.perPage : '' };
   const nav = pageNav('/admin/applications', filterParams, paging);
 
+  const listView = listViewOf('/admin/applications', req.query);
   const rows = paged.shown.map(function (row) {
-    const href = '/admin/applications' + queryWith({ application: row.identifier }, {});
+    // The link carries the list AS IT IS BEING VIEWED, which is what lets the
+    // trail on the other side come back to this page of this filter rather than to
+    // the top of everything. See listViewOf().
+    const href = '/admin/applications' + queryWith(listView, { application: row.identifier });
     return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.identifier) + '</code></a>' +
       (row.identifier === row.dnLabel ? '' :
         '<div class="sub">named <code>cn=' + esc(row.dnLabel) + '</code> &mdash; the ' +
@@ -3587,6 +3848,19 @@ function applicationsListPage(req) {
 // list views do, and the shape to grow into when this page gains a second list.
 function applicationDetailPage(req, identifier) {
   log.debug("Entering applicationDetailPage(). identifier=" + identifier);
+  // THE LIST THE READER CAME FROM, carried on every form on this page as one
+  // opaque field. A form POST answers with a redirect, and a redirect built from
+  // the identifier alone lands back here with the list state gone — so the
+  // breadcrumb above would then offer the top of an unfiltered list to somebody
+  // who arrived from page 3 of a filter. It is one field rather than four because
+  // an action reads its own body by name, and `q` or `kind` loose in there is a
+  // field an action added later could pick up by accident. The handler REBUILDS a
+  // query from it through listViewOf()'s whitelist rather than echoing it, which
+  // is what backTo() does with the tokens page's and for the same reason: a
+  // redirect target taken out of a request body is an open redirect, and one
+  // carrying a newline is a header injection.
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listViewOf('/admin/applications', req.query), {})) + '">';
   const row = applications.get(identifier);
   if (!row) {
     log.debug("Leaving applicationDetailPage(). No such application.");
@@ -3662,7 +3936,7 @@ function applicationDetailPage(req, identifier) {
     'request: add to <code>oauthRedirectUri</code> and that URI is accepted by exact match, set ' +
     '<code>oauthTokenEndpointAuthMethod</code> to <code>none</code> and the client becomes ' +
     'public, so PKCE is required of it and its secret stops being checked.</p>' +
-    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="setattr">Set</label>' +
@@ -3671,7 +3945,7 @@ function applicationDetailPage(req, identifier) {
     '<input type="text" id="setval" name="value" size="34" placeholder="empty clears it">' +
     '<button type="submit">Set</button>' +
     '</div></form>' +
-    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="add">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="addattr">Add to</label>' +
@@ -3681,7 +3955,7 @@ function applicationDetailPage(req, identifier) {
     '<input type="text" id="addval" name="value" size="34" required>' +
     '<button type="submit">Add</button>' +
     '</div></form>' +
-    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="remove">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="remattr">Remove from</label>' +
@@ -3703,7 +3977,7 @@ function applicationDetailPage(req, identifier) {
 
     '<h2>Take it out of the registry</h2>' +
     (row.registered
-      ? '<form method="post" action="/admin/applications"><div class="formrow">' +
+      ? '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
         '<input type="hidden" name="action" value="revoke-registration">' +
         '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
         '<button type="submit">Revoke the RFC 7591 registration</button>' +
@@ -3714,7 +3988,7 @@ function applicationDetailPage(req, identifier) {
       : '<p class="note">It has no RFC 7591 registration to revoke &mdash; it is an identifier ' +
         'this service has seen rather than a client that registered, which RFC 9700 mode ' +
         'already treats as public.</p>') +
-    '<form method="post" action="/admin/applications"><div class="formrow">' +
+    '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="forget">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<button type="submit" class="danger">Delete this entry</button>' +
@@ -3723,7 +3997,9 @@ function applicationDetailPage(req, identifier) {
     'next time this identifier is accepted by a protocol.</span>' +
     '</div></form>' +
     APPLICATIONS_CAVEAT +
-    '<p class="sub"><a href="/admin/applications">back to every application</a> &middot; ' +
+    '<p class="sub"><a href="' +
+    esc('/admin/applications' + queryWith(listViewOf('/admin/applications', req.query), {})) +
+    '">back to the list</a> &middot; ' +
     '<a href="/ldap/applications">the registry as the directory sees it</a></p>';
 
   log.debug("Leaving applicationDetailPage(). " + paged.shown.length + " attribute row(s).");
@@ -3742,7 +4018,9 @@ function applicationsView(req) {
   if (wanted) {
     const detail = applicationDetailPage(req, wanted);
     log.debug("Leaving applicationsView(). The drill-down.");
-    return { json: detail.json, inner: detail.inner, title: 'Application ' + wanted };
+    return { json: detail.json, inner: detail.inner, title: 'Application ' + wanted,
+             up: upTo('/admin/applications', wanted,
+                      listViewOf('/admin/applications', req.query)) };
   }
   const list = applicationsListPage(req);
   log.debug("Leaving applicationsView(). The list.");
@@ -3752,7 +4030,7 @@ function applicationsView(req) {
 app.get('/admin/applications', function (req, res) {
   log.debug("Entering the admin applications page.");
   const view = applicationsView(req);
-  respond(req, res, view.json, view.title, '/admin/applications', view.inner);
+  respond(req, res, view.json, view.title, '/admin/applications', view.inner, view.up);
   log.debug("Leaving the admin applications page. " + view.title + ".");
 });
 
@@ -3882,9 +4160,13 @@ function asListPage(req) {
   const nav = pageNav('/admin/authorization-servers',
                       { per: req.query.per ? paging.perPage : '' }, paging);
 
+  const listView = listViewOf('/admin/authorization-servers', req.query);
   const rows = paged.shown.map(function (row) {
     const drift = asDriftRows(row.id);
-    const href = '/admin/authorization-servers' + queryWith({ profile: row.id }, {});
+    // The link carries the list AS IT IS BEING VIEWED, which is what lets the
+    // trail on the other side come back to this page of this filter rather than to
+    // the top of everything. See listViewOf().
+    const href = '/admin/authorization-servers' + queryWith(listView, { profile: row.id });
     return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.id) + '</code></a></td>' +
       '<td>' + esc(row.label || '') + '</td>' +
       '<td class="num">' + Object.keys(row.overrides).length + '</td>' +
@@ -3957,6 +4239,19 @@ function asListPage(req) {
 
 function asDetailPage(req, id) {
   log.debug("Entering asDetailPage(). id=" + id);
+  // THE LIST THE READER CAME FROM, carried on every form on this page as one
+  // opaque field. A form POST answers with a redirect, and a redirect built from
+  // the identifier alone lands back here with the list state gone — so the
+  // breadcrumb above would then offer the top of an unfiltered list to somebody
+  // who arrived from page 3 of a filter. It is one field rather than four because
+  // an action reads its own body by name, and `q` or `kind` loose in there is a
+  // field an action added later could pick up by accident. The handler REBUILDS a
+  // query from it through listViewOf()'s whitelist rather than echoing it, which
+  // is what backTo() does with the tokens page's and for the same reason: a
+  // redirect target taken out of a request body is an open redirect, and one
+  // carrying a newline is a header injection.
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listViewOf('/admin/authorization-servers', req.query), {})) + '">';
   const profile = authorizationServers.get(id);
   if (!profile) {
     log.debug("Leaving asDetailPage(). No such profile.");
@@ -3987,7 +4282,7 @@ function asDetailPage(req, id) {
       '<td class="sub">' + esc(spec ? spec.what : 'Not a member this service recognises — ' +
         'which is allowed, and is half the point: publishing something a client did not ' +
         'expect is what this page is for.') + '</td>' +
-      '<td><form method="post" action="/admin/authorization-servers">' +
+      '<td><form method="post" action="/admin/authorization-servers">' + carryBack +
       '<input type="hidden" name="action" value="reset">' +
       '<input type="hidden" name="profile" value="' + esc(id) + '">' +
       '<input type="hidden" name="member" value="' + esc(member) + '">' +
@@ -3999,7 +4294,7 @@ function asDetailPage(req, id) {
       'A client reading this document cannot tell that this server supports it &mdash; which ' +
       'is not the same as learning that it does not, and is the difference RFC 9700 section ' +
       '2.6 is arguing about.</td>' +
-      '<td><form method="post" action="/admin/authorization-servers">' +
+      '<td><form method="post" action="/admin/authorization-servers">' + carryBack +
       '<input type="hidden" name="action" value="reset">' +
       '<input type="hidden" name="profile" value="' + esc(id) + '">' +
       '<input type="hidden" name="member" value="' + esc(member) + '">' +
@@ -4053,7 +4348,7 @@ function asDetailPage(req, id) {
     '<code>https://example.com/token</code> is a string. <strong>Any member name is accepted</strong> ' +
     '&mdash; the list below is help rather than a schema, and one this service has never heard ' +
     'of is published just the same.</p>' +
-    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<form method="post" action="/admin/authorization-servers">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="profile" value="' + esc(id) + '">' +
     '<label for="asmember">Member</label>' +
@@ -4062,7 +4357,7 @@ function asDetailPage(req, id) {
     '<input type="text" id="asvalue" name="value" size="36" placeholder=\'["S256"]\'>' +
     '<button type="submit">Publish</button>' +
     '</div></form>' +
-    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<form method="post" action="/admin/authorization-servers">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="profile" value="' + esc(id) + '">' +
     '<label for="asother">Or any member</label>' +
@@ -4073,7 +4368,7 @@ function asDetailPage(req, id) {
     '<button type="submit">Publish</button>' +
     '</div></form>' +
     '<h2>Stop publishing a member</h2>' +
-    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<form method="post" action="/admin/authorization-servers">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="remove">' +
     '<input type="hidden" name="profile" value="' + esc(id) + '">' +
     '<label for="asrem">Remove</label>' +
@@ -4084,7 +4379,7 @@ function asDetailPage(req, id) {
     'an ABSENCE.</span>' +
     '</div></form>' +
     '<h2>Delete this authorization server</h2>' +
-    '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
+    '<form method="post" action="/admin/authorization-servers">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="delete">' +
     '<input type="hidden" name="profile" value="' + esc(id) + '">' +
     '<button type="submit" class="danger">Delete</button>' +
@@ -4104,7 +4399,9 @@ function authorizationServersView(req) {
     const detail = asDetailPage(req, wanted);
     log.debug("Leaving authorizationServersView(). The drill-down.");
     return { json: detail.json, inner: detail.inner,
-             title: 'Authorization server ' + wanted };
+             title: 'Authorization server ' + wanted,
+             up: upTo('/admin/authorization-servers', wanted,
+                      listViewOf('/admin/authorization-servers', req.query)) };
   }
   const list = asListPage(req);
   log.debug("Leaving authorizationServersView(). The list.");
@@ -4114,7 +4411,8 @@ function authorizationServersView(req) {
 app.get('/admin/authorization-servers', function (req, res) {
   log.debug("Entering the admin authorization servers page.");
   const view = authorizationServersView(req);
-  respond(req, res, view.json, view.title, '/admin/authorization-servers', view.inner);
+  respond(req, res, view.json, view.title, '/admin/authorization-servers', view.inner,
+          view.up);
   log.debug("Leaving the admin authorization servers page.");
 });
 
@@ -4123,9 +4421,11 @@ app.post('/admin/authorization-servers', function (req, res) {
   const body = parseBody(req);
   const result = asAction(body);
   const id = String(body.profile || body.id || '').trim();
+  // The list state the form carried, for the reason the applications action gives.
+  const listView = listViewFromBack('/admin/authorization-servers', body.back);
   const back = id && result.ok !== false
-    ? '/admin/authorization-servers' + queryWith({ profile: id }, {})
-    : '/admin/authorization-servers';
+    ? '/admin/authorization-servers' + queryWith(listView, { profile: id })
+    : '/admin/authorization-servers' + queryWith(listView, {});
   respondToAction(req, res, back, result);
   log.debug("Leaving the admin authorization servers action endpoint.");
 });
@@ -4133,7 +4433,7 @@ app.post('/admin/authorization-servers', function (req, res) {
 app.get('/admin/groups', function (req, res) {
   log.debug("Entering the admin groups page.");
   const view = groupsView(req);
-  respond(req, res, view.json, view.title, '/admin/groups', view.inner);
+  respond(req, res, view.json, view.title, '/admin/groups', view.inner, view.up);
   log.debug("Leaving the admin groups page. " + view.title + ".");
 });
 

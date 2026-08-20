@@ -461,10 +461,21 @@ function handleRst(rawBody, contentType, options) {
   // RST — a token with no AppliesTo has no audience restriction, which is a
   // state this service deliberately allows — so an absent one records nothing
   // rather than an empty application.
+  //
+  // The SECOND kind is the mirror of wsfed.js's: where the token issued is a
+  // SAML 2.0 assertion, this AppliesTo is also its audience, which is exactly
+  // what `saml2-service-provider` is defined as in KINDS. Recording only the
+  // WS-Trust kind left that one reachable through WS-Federation alone, so the
+  // console's filter answered "no SAML 2.0 service providers" for a service
+  // that had just issued one. A JWT gets no second kind — there is no row for
+  // it, and inventing a spelling here is how one application comes to be listed
+  // under two.
   if (audience) {
     applications.seen({
       identifier: audience,
-      kind: 'wstrust-relying-party',
+      kind: tok.tokenType === SAML2_TOKEN_TYPE
+        ? ['wstrust-relying-party', 'saml2-service-provider']
+        : 'wstrust-relying-party',
       protocol: 'WS-Trust',
       user: subject || '',
       note: 'a token was issued for this AppliesTo',
