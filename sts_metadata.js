@@ -39,6 +39,10 @@
 const app = require('./app');
 const { log, xmlEscape, baseUrlOf, PORT } = require('./helpers');
 const config = require('./config');
+// The named authorization servers this process has served. They cannot be read
+// off the router — one route serves all of them — so they are listed by hand,
+// the same way the Kerberos and LDAP listeners are.
+const authorizationServers = require('./authorization_servers');
 
 // ---------------------------------------------------------------------------
 // The specifications this service implements, and how far.
@@ -205,7 +209,11 @@ const SPECS = [
               'other — it is Microsoft\'s and OpenLDAP\'s, maintained by the server in the ' +
               'directories that have it and maintained by nothing here, so a client can write it ' +
               'onto an entry and disagree with the group. /admin/groups reports that ' +
-              'disagreement rather than hiding it.' },
+              'disagreement rather than hiding it. Its applicationProcess class is the one ' +
+              'REGISTERED class an application entry under ou=applications carries: it brings ' +
+              'cn and description, and there is nothing standard anywhere for a client_id, a ' +
+              'set of redirect URIs or a service principal name, so the rest of that schema is ' +
+              'invented here and published at /ldap/applications rather than implied.' },
   { id: 'rfc8446', name: 'TLS 1.3 (RFC 8446), and TLS 1.2 (RFC 5246)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc8446',
@@ -280,8 +288,12 @@ const SPECS = [
   { id: 'rfc6749', name: 'RFC 6749 — OAuth 2.0',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc6749',
-    coverage: 'partial: authorization_code, implicit, password, client_credentials and refresh_token. ' +
-              'Client authentication is accepted, not verified.' },
+    coverage: 'partial: authorization_code, implicit, password, client_credentials and ' +
+              'refresh_token. Client authentication is accepted, not verified — EXCEPT in RFC ' +
+              '9700 mode, where a client registered here as confidential must present the ' +
+              'client_secret this service issued it (section 2.5, the one credential checked ' +
+              'anywhere in this service). That mode also refuses the password and implicit ' +
+              'grants outright and rotates refresh tokens.' },
   { id: 'rfc6750', name: 'RFC 6750 — Bearer Token Usage',
     where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc6750',
     coverage: 'partial: bearer tokens are read from the Authorization header. Credential endpoints ' +
@@ -347,6 +359,103 @@ const SPECS = [
     coverage: 'full: every authorization response carries iss, errors included, and both discovery ' +
               'documents advertise authorization_response_iss_parameter_supported so a client knows ' +
               'it may require it.' },
+  { id: 'rfc8705', name: 'RFC 8705 — Mutual-TLS Client Authentication and Certificate-Bound Access Tokens',
+    where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc8705',
+    coverage: 'partial, and the split is the point: SECTION 3 — certificate-bound access ' +
+              'tokens — is implemented and section 2 — mutual-TLS client authentication, where ' +
+              'the certificate replaces the client_secret — is not. A Token Request made over ' +
+              'a connection carrying a client certificate is answered with cnf["x5t#S256"] on ' +
+              'the access AND refresh tokens, the base64url SHA-256 of the certificate\'s DER, ' +
+              'and the four protected endpoints thumbprint the connection\'s certificate and ' +
+              'compare. An UNVERIFIED certificate still binds, which section 3 permits ' +
+              'explicitly — the proof is that the same key completed the handshake, not that a ' +
+              'CA vouched for it. Only available where the main port is TLS (global.https), ' +
+              'since that is where the token endpoint is, and advertised as ' +
+              'tls_client_certificate_bound_access_tokens only there.' },
+  { id: 'rfc8707', name: 'RFC 8707 — Resource Indicators for OAuth 2.0',
+    where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc8707',
+    coverage: 'full for the authorization code flow: `resource` is read at the authorization ' +
+              'endpoint and again at the token endpoint and becomes the access token\'s aud. ' +
+              'It must be an absolute URI with no fragment, it may be repeated for the small ' +
+              'set of resource servers RFC 9700 section 2.3 allows, and the token endpoint may ' +
+              'NARROW what the authorization request asked for and never widen it. The ' +
+              'resource server here then refuses a token issued for another audience. Not ' +
+              'implemented: the parameter on the other grants, and there is no metadata member ' +
+              'for it to advertise — the RFC defines none.' },
+  { id: 'oauth-form-post', name: 'OAuth 2.0 Form Post Response Mode',
+    where: 'OpenID Foundation',
+    url: 'https://openid.net/specs/oauth-v2-form-post-response-mode-1_0.html',
+    coverage: 'full: response_mode=form_post is answered with a self-submitting form POSTing ' +
+              'every response parameter — code or token, state, and the RFC 9207 iss — to the ' +
+              'redirect_uri, so the response is in no URL, no browser history entry and no ' +
+              'Referer header (RFC 9700 section 4.3). ERROR responses honour it too, which is ' +
+              'the half that is easy to miss: a failure delivered in a query string is a ' +
+              'failure in browser history. The page carries a real submit button as well as ' +
+              'the script, because script-src is \'none\' here and with the script blocked the ' +
+              'button is the whole mechanism. It was ADVERTISED AND MISSING for a long time — ' +
+              'every request got a 302 whatever it asked for — which is why the member was ' +
+              'removed from the metadata until this existed.' },
+  { id: 'rfc7523', name: 'RFC 7523 — JWT Profile for OAuth 2.0 Client Authentication',
+    where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc7523',
+    coverage: 'full for section 2.2 and section 3, which is CLIENT AUTHENTICATION by assertion: ' +
+              'private_key_jwt is verified against the JWKS the client registered and ' +
+              'client_secret_jwt against its secret, with iss and sub both required to be the ' +
+              'client, the audience allowed to be the token endpoint or the issuer (RFC 7523 ' +
+              'and OpenID Connect Core section 9 name different ones and deployments differ), ' +
+              'expiry with a configurable skew, and a jti remembered until the assertion ' +
+              'expires so a replay is refused. An assertion nominating an HMAC alg for ' +
+              'private_key_jwt is REFUSED rather than verified with the public key as a ' +
+              'secret — the classic forgery, and one anybody can perform because the key is ' +
+              'public. NOT implemented: section 2.1, the JWT authorization GRANT, which is a ' +
+              'way of getting a token rather than of authenticating a client.' },
+  { id: 'rfc9700', name: 'RFC 9700 — OAuth 2.0 Security Best Current Practice',
+    where: 'IETF', url: 'https://www.rfc-editor.org/rfc/rfc9700',
+    coverage: 'partial, AND OFF BY DEFAULT — it is a MODE (oauth2.rfc9700) rather than how this ' +
+              'service behaves, because a client is exercised by both answers and every existing ' +
+              'caller of this mock uses an unregistered redirect_uri, no PKCE, the implicit grant ' +
+              'or the password grant. Turned on it covers the whole of section 2. ' +
+              '2.1: exact-string redirect URI matching with RFC 8252\'s loopback port exception, ' +
+              'no open redirector at the authorization endpoint OR at end_session_endpoint, no ' +
+              'http redirect URI off the loopback, and the main port bound as HTTPS so an ' +
+              'authorization response is not sent over an unencrypted connection. ' +
+              '2.1.1: PKCE required of every client not registered as confidential, S256 only, ' +
+              'the section 4.8.2 downgrade refusal, a nonce with any id_token, and the RFC 6749 ' +
+              'section 4.1.3 client and redirect_uri checks at the token endpoint. ' +
+              '2.1.2: no response type that issues an access token from the authorization ' +
+              'endpoint. 2.2.2: refresh token ROTATION, replay detection that revokes the whole ' +
+              'chain, and the client binding this grant never checked. 2.3: a refresh may narrow ' +
+              'a scope and never widen it; access tokens were already audience-restricted to one ' +
+              'resource server. 2.4: the password grant refused. 2.5: a client registered here ' +
+              'as confidential must authenticate, by any of the six token-endpoint methods — ' +
+              'client_secret_basic and _post, client_secret_jwt, private_key_jwt against a ' +
+              'registered JWKS, and RFC 8705 section 2\'s tls_client_auth and ' +
+              'self_signed_tls_client_auth — all verified, which is the one credential this ' +
+              'service checks anywhere. 2.6: CORS withheld from the authorization endpoint. ' +
+              'Both discovery documents stop advertising whatever the mode would refuse. Three ' +
+              'things are DETECTED rather than enforced, because they are the client\'s to keep: ' +
+              'reuse of a code_challenge or nonce across transactions (which a real server ' +
+              'generally cannot see and a mock that remembers can), an unbound access token ' +
+              '(section 2.2 is a SHOULD and there is deliberately no "DPoP required" mode), and ' +
+              'symmetric client authentication where 2.5 recommends asymmetric — the ' +
+              'preference is detected, but all SIX methods are now genuinely verified, the ' +
+              'three asymmetric ones included. Section 4.5 ' +
+              'Sections 2.2 and 2.3 are covered as far as an authorization server can cover ' +
+              'them: BOTH sender-constraining mechanisms are implemented (DPoP, and RFC 8705 ' +
+              'certificate binding wherever the main port is TLS), the resource server ' +
+              'validates the proof and prevents its replay, RFC 8707 resource indicators make ' +
+              'the audience restrictable to one resource server or a small set, and a token ' +
+              'issued for another audience is refused at the protected endpoints. Section 4.5 ' +
+              'is covered too: the code is single use with the replay relaxation turned off, a ' +
+              'second presentation REVOKES the access, refresh and ID Tokens it bought, and the ' +
+              'code is bound to the client that redeems it. TWO REQUIREMENTS ARE STATED AS ' +
+              'UNENFORCEABLE rather than omitted — the client must validate the ID Token nonce ' +
+              'and must not use a token before that succeeds, neither of which this server can ' +
+              'observe; oauth2.breakIdTokenNonce spoils the nonce on purpose so a client author ' +
+              'can find out whether their own code checks it. NOT covered: ' +
+              'Pushed Authorization Requests (RFC 9126) and Resource Indicators (RFC 8707), ' +
+              'which are features this service does not have rather than constraints it declines ' +
+              'to enforce. GET /oauth2/rfc9700 lists every requirement with which of those it ' +
+              'is.' },
   { id: 'webauthn', name: 'Web Authentication (WebAuthn) Level 3',
     where: 'W3C',
     url: 'https://www.w3.org/TR/webauthn-3/',
@@ -498,13 +607,29 @@ const ENDPOINTS = [
           'TCP 636 for LDAPS by default — RAW SOCKETS this page cannot see, so it reports ' +
           'whether each one actually bound), its base DN, the bind policy — every bind ' +
           'succeeds, any DN and any password, except the literal "invalid" — and the fact ' +
-          'that it has NO SCHEMA. The two listeners are one directory: the same handlers ' +
+          'that it has NO SCHEMA (which is why the application entries under ou=applications ' +
+          'come with a published vocabulary of their own; see /ldap/applications). The two listeners are one directory: the same handlers ' +
           'and the same store, so TLS changes what is on the wire and nothing about the ' +
           'answers, and a certificate presented to 636 is not asked for and would not be a ' +
           'login if it were. Also the structural rules it does still enforce and the ' +
           'one it deliberately does not (referential integrity: deleting a user leaves its ' +
           'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
           'the machine-readable half of it. Add ?format=json.' },
+  { path: '/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591'],
+    what: 'EVERY APPLICATION THIS SERVICE HAS BEEN ASKED ABOUT — an OAuth client, an OpenID ' +
+          'Connect relying party, a SAML 2.0 or 1.1 service provider, a WS-Federation ' +
+          'application, a WS-Trust relying party, the OpenID4VP verifier, a Kerberos service ' +
+          '— one entry per unique identifier under ou=applications, so an application that ' +
+          'speaks two protocols under one name is one row with two kinds. THE ENTRIES ARE ' +
+          'THE REGISTRY rather than a copy of one: the RFC 7591 registrations live there, ' +
+          'nothing caches them, and an ldapmodify of oauthRedirectUri changes which redirect ' +
+          'URI RFC 9700 mode accepts on the next request. The page also publishes the SCHEMA ' +
+          '— the object classes, the attributes and which protocol sets each — because ' +
+          'node-ldapjs has no schema subsystem and this directory is schemaless: it is a ' +
+          'vocabulary, not a constraint, and one nothing would enforce is worth reading ' +
+          'rather than inferring. Two attributes hold credentials in the clear, for the ' +
+          'reason /krb5/principals prints the Kerberos passwords. Add ?format=json.' },
   { path: '/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
     specs: ['rfc4511', 'rfc4514'],
     what: 'The whole store, DN by DN, with where each entry came from — seeded, added over ' +
@@ -536,6 +661,19 @@ const ENDPOINTS = [
           'is visible to this page, which walks the plain listener\'s router. This row is the ' +
           'description; GET /tls/whoami over either listener is the report itself. Add ' +
           '?format=json.' },
+  { path: '/tls/forwarded', group: 'TLS', name: 'What a proxy told this service',
+    specs: ['rfc9700', 'rfc8446'],
+    what: 'NON-SPEC. The request as it ARRIVED and what was believed of it: every forwarding ' +
+          'header, every client-certificate header a proxy might inject, whether ' +
+          'global.trustProxy made this service believe any of it, and what the effective base ' +
+          'URL came out as — which every issuer and every endpoint in both discovery documents ' +
+          'is built from, so if that is wrong everything a client reads is wrong with it. RFC ' +
+          '9700 section 2.6 has two halves here: a proxy MUST strip inbound security-sensitive ' +
+          'headers before setting its own, which this service cannot do for it, and an ' +
+          'application must not BELIEVE them unless a proxy is really there, which is what the ' +
+          'setting is. NO CLIENT CERTIFICATE IS EVER READ FROM A HEADER in either mode — a ' +
+          'certificate in a header is one anybody can forge — and the ones a request carried ' +
+          'are listed so that ignoring them is visible rather than silent. Add ?format=json.' },
   { path: '/tls/server-certificate', group: 'TLS', name: 'The server certificate (PEM)',
     specs: ['rfc5280'],
     what: 'The self-signed certificate every TLS socket in this process presents, as PEM — ' +
@@ -618,6 +756,46 @@ const ENDPOINTS = [
           'urn:sts-mock:user:alice and alice@REALM are one identity — and subjects that never ' +
           'authenticated at all (an exchanged foreign token, OnBehalfOf, S4U) are listed and ' +
           'marked as such. Add ?format=json.' },
+  { path: '/admin/applications', group: 'Admin', name: 'Applications',
+    // rfc7591 because the client registrations this page shows ARE the entries under
+    // ou=applications, and rfc4519 because applicationProcess — the one registered
+    // object class that fits an application — is its. NOT rfc4512, for the reason the
+    // groups row gives: this directory has no schema, and the vocabulary these entries
+    // use is invented and published rather than registered.
+    specs: ['rfc4511', 'rfc4519', 'rfc7591'],
+    what: 'NON-SPEC page over the embedded LDAP directory, and the other side of ' +
+          '/admin/users: that page lists every identity that has authenticated here, this ' +
+          'one lists what they authenticated TO — every OAuth client, OpenID Connect relying ' +
+          'party, SAML 2.0 or 1.1 service provider, WS-Federation application, WS-Trust ' +
+          'relying party, OpenID4VP verifier and Kerberos service. One entry per unique ' +
+          'identifier whatever protocol brought it, so an application appearing under one ' +
+          'name in two protocols is one row with two kinds. Filtered by identifier or name ' +
+          'and by kind, and paged with ?page= and ?per=; ?application=<id> drills into one ' +
+          'and pages its attributes under ?attributesPage=. THE ENTRIES ARE THE REGISTRY ' +
+          'rather than a display of one — the RFC 7591 registrations live in them, nothing ' +
+          'caches them, and an ldapmodify of oauthRedirectUri changes which redirect URI RFC ' +
+          '9700 mode accepts on the next request. IT WRITES AS WELL: create an application ' +
+          'before it has ever connected, and add, remove or set the attributes that say what ' +
+          'it is ALLOWED to do — but never the counters or the sightings, which are what ' +
+          'HAPPENED and which only ldapmodify reaches, because a form that could rewrite them ' +
+          'would make the page lie about this service\'s own behaviour. The forms call the ' +
+          'same functions a protocol path and an LDAP modify call, so they are not a third ' +
+          'store. Two attributes hold credentials in the clear, marked as such, for the reason ' +
+          '/krb5/principals prints the Kerberos passwords. Add ?format=json.' },
+  { path: '/admin/authorization-servers', group: 'Admin', name: 'Authorization servers',
+    specs: ['rfc8414', 'oidc-discovery', 'rfc9700'],
+    what: 'NON-SPEC page over the two discovery documents. ONE PROCESS, SEVERAL AUTHORIZATION ' +
+          'SERVERS: the path component both shapes already carry — RFC 8414 section 3.1 ' +
+          'INSERTS it, OpenID Connect Discovery section 4 APPENDS the well-known segment to it ' +
+          '— now selects a CONFIGURATION as well as an issuer identifier, so each can publish ' +
+          'its own endpoints, capabilities and issuer. Any member is settable, including one ' +
+          'this service has never heard of: publishing something a client did not expect is ' +
+          'half the point, which is why this has a CATALOGUE rather than a schema. A path ' +
+          'nobody configured publishes the document this service always published, so nothing ' +
+          'that worked before behaves differently. It changes what the document SAYS and not ' +
+          'what the endpoints DO — advertise plain PKCE and the token endpoint still verifies ' +
+          'S256 — so every view computes the DRIFT and names the members that do not describe ' +
+          'this service. Add ?format=json; ?profile=<id> drills into one.' },
   { path: '/admin/groups', group: 'Admin', name: 'Directory groups',
     // rfc4519 is linked because member, uniqueMember and the groupOfNames class are its,
     // and rfc4511 because what this page reports is the state that protocol's operations
@@ -839,6 +1017,58 @@ const ENDPOINTS = [
           'consults this service about an assertion or a ticket. restore is ' +
           'NON-SPEC even here: no real authorization server can undo a ' +
           'revocation. Mirrors POST /admin/tokens.' },
+  { path: '/admin-api/applications/:action', group: 'Management API',
+    name: 'Application actions',
+    specs: ['rfc4511', 'rfc7591', 'rfc7592', 'rfc9700'],
+    effect: 'creates, edits or deletes an entry under ou=applications, which is what RFC 9700 ' +
+            'mode then enforces',
+    what: 'NON-SPEC path over the embedded directory. Six URLs behind one pattern: create, ' +
+          'set, add, remove, revoke-registration, forget. NOT A THIRD STORE — each calls the ' +
+          'same function in applications.js that a protocol path and an LDAP modify reach, ' +
+          'against the same entries, so a POST here and an ldapmodify are one act arriving by ' +
+          'two routes. WHAT MAY BE CHANGED IS DECLARED AND NOT DERIVED: the redirect URIs, ' +
+          'grant types, scopes, secret and auth method say what an application is ALLOWED to ' +
+          'do and are editable; the counters, the sightings, the kinds and the protocols are ' +
+          'what HAPPENED and are refused with a list of what is not, because a call that could ' +
+          'rewrite them would make this registry lie about the service\'s own behaviour. ' +
+          'ldapmodify still reaches everything, which is deliberate. `create` is how a relying ' +
+          'party is configured BEFORE it connects — otherwise an entry only appears when an ' +
+          'identifier is accepted — and `forget` is the one operation that loses a fact, which ' +
+          'is why it is separate from revoke-registration. Mirrors POST /admin/applications.' },
+  { path: '/admin-api/applications', group: 'Management API', name: 'Applications',
+    specs: ['rfc4511', 'rfc7591'],
+    what: 'NON-SPEC. Every application this service has been asked about, as JSON: OAuth ' +
+          'clients, OpenID Connect relying parties, SAML 2.0 and 1.1 service providers, ' +
+          'WS-Federation applications, WS-Trust relying parties, the OpenID4VP verifier and ' +
+          'Kerberos services, one per unique identifier. Filtered by ?q= and ?kind= and paged ' +
+          'with ?page= and ?per=; ?application=<id> answers with one of them, every attribute ' +
+          'of its directory entry and what the published schema says each attribute is, its ' +
+          'own list paged under ?attributesPage=. The entries ARE the registry — they live ' +
+          'under ou=applications and nothing caches them — so this reply reflects an ' +
+          'ldapmodify made a second earlier. POST /admin-api/applications/{action} writes: ' +
+          'create, set, add, remove, revoke-registration and forget, each calling the same ' +
+          'function a protocol path or an LDAP modify reaches, so they are not a third store. ' +
+          'What they will not change is the derived half — the counters and the sightings — ' +
+          'which is refused with a list of what is editable. Note that ?kind= does not ' +
+          'partition the list, since a record commonly carries two. Mirrors ' +
+          'GET and POST /admin/applications.' },
+  { path: '/admin-api/authorization-servers', group: 'Management API',
+    name: 'Authorization servers', specs: ['rfc8414', 'oidc-discovery', 'rfc9700'],
+    what: 'NON-SPEC. Every authorization server profile as JSON, paged, each with its ' +
+          'overrides, its removals, the two URLs it is published at and its DRIFT — the ' +
+          'members whose published value does not describe this service. ?profile=<id> returns ' +
+          'one. Mirrors GET /admin/authorization-servers.' },
+  { path: '/admin-api/authorization-servers/:action', group: 'Management API',
+    name: 'Authorization server actions', specs: ['rfc8414', 'rfc9700'],
+    effect: 'changes what a discovery document publishes, on the next fetch',
+    what: 'NON-SPEC. Five URLs behind one pattern: create, set, remove, reset, delete. ANY ' +
+          'MEMBER NAME IS ACCEPTED, including one this service has never heard of — the ' +
+          'difference between this and the applications registry, which refuses an attribute ' +
+          'outside its schema, and it is deliberate: that schema is a contract about what an ' +
+          'entry carries and this is a way to publish something a client did not expect. ' +
+          '`remove` and `reset` are not the same operation: reset undoes an override, remove ' +
+          'publishes an ABSENCE, and a client that cannot find a member learns nothing rather ' +
+          'than learning the capability is missing. Mirrors POST /admin/authorization-servers.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +
@@ -1017,17 +1247,42 @@ const ENDPOINTS = [
     what: 'The signing key as a single RS256 JWK with its x5c. Regenerated on every start, so it is ' +
           'served no-store.' },
   { path: '/oauth2/authorize', group: 'OAuth 2.0 / OIDC', name: 'Authorization endpoint',
-    specs: ['rfc6749', 'oidc', 'rfc7636', 'rfc9396', 'rfc9207'], effect: 'needs client_id and redirect_uri — answers 400 when followed bare, then redirects to the sign-in screen once they are supplied',
+    specs: ['rfc6749', 'oidc', 'rfc7636', 'rfc9396', 'rfc9207', 'rfc9700'], effect: 'needs client_id and redirect_uri — answers 400 when followed bare, then redirects to the sign-in screen once they are supplied',
     what: 'Redirects to the authentication service when there is no session, and is entered a ' +
           'second time when the person comes back signed in — the same request over again, which ' +
           'is why this endpoint keeps no state between the two. Then issues a code, token and/or ' +
           'id_token per response_type. Carries PKCE, nonce, authorization_details and OID4VCI ' +
-          'issuer_state.' },
+          'issuer_state, response_mode (query, fragment and form_post — the last answers with ' +
+          'a self-submitting form so the response is in no URL, no history entry and no ' +
+          'Referer, errors included; a mode this authorization server does not advertise is ' +
+          'REFUSED rather than answered with a redirect, because `web_message` silently ' +
+          'answered with a 302 leaves a client waiting for a postMessage that never comes), ' +
+          'and RFC 8707 `resource` — which becomes the access token\'s audience, ' +
+          'may be repeated for a small set of resource servers, and must be an absolute URI ' +
+          'with no fragment. In RFC 9700 mode (oauth2.rfc9700, off by default) it also refuses ' +
+          'what ' +
+          'that BCP says to refuse: a redirect_uri that is not registered — answered HERE as a ' +
+          '400 rather than redirected, since redirecting an error to an unvalidated URI is the ' +
+          'open redirector section 2.1 forbids — an http redirect URI off the loopback, a public ' +
+          'client with no PKCE, code_challenge_method=plain, an id_token with no nonce, and any ' +
+          'response type that would issue an access token from here. Section 4.11.2 closes the ' +
+          'rest of the open-redirector question: a request naming NO client_id is answered here ' +
+          'rather than redirected (RFC 6749 section 4.1.2.1), and an error is only AUTOMATICALLY ' +
+          'redirected when somebody is signed in — otherwise the person is shown the client, ' +
+          'the destination and the error and follows a link if they choose, because an ' +
+          'authorization server that bounces an unauthenticated browser to a legitimate ' +
+          'client\'s registered URI is a hop an attacker can send a victim through with no ' +
+          'interaction. prompt=none and a refusal coming back from the sign-in screen are the ' +
+          'two exceptions, both from the specification.' },
   { path: '/authn/login', group: 'Authentication', name: 'Sign-in screen',
     specs: ['oidc'],
     effect: 'shows the sign-in screen for a request another endpoint sent here; needs an ?authn= id, ' +
             'so following it bare answers 400',
-    what: 'THE AUTHENTICATION SERVICE. Every protocol here that needs a person identified sends ' +
+    what: 'THE AUTHENTICATION SERVICE. The POST that carries a username and a password is ' +
+          'answered with a 303 and never a 307 (RFC 9700 section 4.12): a 307 preserves the ' +
+          'method and the body, so the browser would repeat those credentials to whatever the ' +
+          'redirect points at — which after a sign-in is a URL the calling protocol composed. ' +
+          'Every protocol here that needs a person identified sends ' +
           'them to this one screen with a return URL carrying its own request whole, and gets them ' +
           'back with a session cookie established — GET renders the screen, POST takes what was ' +
           'typed. No password is checked; the username typed becomes the identity in every token, ' +
@@ -1065,27 +1320,129 @@ const ENDPOINTS = [
           'one page relaxes it to \'self\', which is the smallest exception that works. An inline ' +
           'script there would simply not run, with the button doing nothing and no error anywhere.' },
   { path: '/oauth2/logout', group: 'OAuth 2.0 / OIDC', name: 'Session end (end_session_endpoint)',
-    specs: ['oidc', 'oidc-logout'], effect: 'drops the mock session cookie',
+    specs: ['oidc', 'oidc-logout', 'rfc9700'],
+    effect: 'drops the mock session cookie, and in RFC 9700 mode revokes the refresh tokens ' +
+            'issued on that session',
     what: 'What end_session_endpoint in the OIDC discovery document points at. Drops the session ' +
           'cookie and returns to post_logout_redirect_uri. id_token_hint is neither required nor ' +
-          'checked and the redirect target is not validated.' },
+          'checked. The redirect target is not validated either — this is an OPEN REDIRECTOR, and ' +
+          'the plainest one in this service — UNLESS RFC 9700 mode is on, which matches it against ' +
+          'the client\'s registered post_logout_redirect_uris (or the oauth2.redirectUris setting) ' +
+          'exactly as an authorization request\'s redirect_uri, and answers a miss with a 400 ' +
+          'rather than following it. That mode also makes signing out mean something to the ' +
+          'BACK channel: every refresh token issued on the session is revoked (RFC 9700 ' +
+          'section 2.2.2\'s security-event MAY), since otherwise a sign-out drops a cookie and ' +
+          'leaves a thirty-day credential in the client\'s hands. Access tokens are left alone ' +
+          '— they expire in an hour, and revoking them would remove the evidence of what the ' +
+          'session did.' },
   { path: '/oauth2/token', group: 'OAuth 2.0 / OIDC', name: 'Token endpoint',
-    specs: ['rfc6749', 'oidc', 'rfc8693', 'rfc9396', 'oid4vci', 'rfc9449', 'rfc7800'],
+    specs: ['rfc6749', 'oidc', 'rfc8693', 'rfc9396', 'oid4vci', 'rfc9449', 'rfc7800', 'rfc9700',
+            'rfc8705', 'rfc8707', 'rfc7523'],
     what: 'authorization_code, refresh_token, client_credentials, password, token-exchange, and ' +
           "OID4VCI's pre-authorized_code with tx_code enforcement. A DPoP proof on the request " +
           'binds the issued access and refresh tokens to its key (cnf.jkt) and makes token_type ' +
-          'DPoP; without one the response is an ordinary Bearer token.' },
+          'DPoP; without one the response is an ordinary Bearer token. A Token Request made ' +
+          'over a connection carrying a CLIENT CERTIFICATE binds the access and refresh tokens ' +
+          'to it as well (RFC 8705 cnf["x5t#S256"]), which needs the main port to be TLS. RFC ' +
+          '8707 `resource` narrows the audience, and may only narrow what the authorization ' +
+          'request asked for. In RFC 9700 mode a client whose entry says it is CONFIDENTIAL ' +
+          'must authenticate here, by any of the six methods — the two secret ones, the two ' +
+          'assertion ones (RFC 7523, verified against a registered JWKS or the secret, with a ' +
+          'jti replay refused) and RFC 8705 section 2\'s two certificate ones. In RFC 9700 mode the ' +
+          'authorization_code grant additionally refuses a code_verifier for a code that was ' +
+          'issued without a challenge (the section 4.8.2 downgrade), a code redeemed by a client ' +
+          'it was not issued to, and a Token Request with no redirect_uri on it. That mode also ' +
+          'refuses the PASSWORD grant outright (section 2.4), ROTATES refresh tokens and revokes ' +
+          'the whole chain when a retired one is presented again (section 2.2.2), refuses a ' +
+          'refresh from another client, for a wider scope than was granted or for a RESOURCE ' +
+          'SERVER the grant was not authorized for — a refresh token carries the RFC 8707 ' +
+          'resources its grant had, so a renewal cannot widen its own audience — expires a ' +
+          'refresh CHAIN that has been idle (oauth2.refreshIdleSeconds, measured from the last ' +
+          'redemption rather than from issuance), and requires a client whose entry says it is ' +
+          'confidential to authenticate by any of the six methods (section 2.5). ' +
+          'And it turns off the REPLAY RELAXATION above: a code presented a second time is ' +
+          'refused rather than answered with the tokens it already bought, and those tokens ' +
+          'are revoked (section 4.5, and RFC 6749 section 10.5 for the revocation).' },
   { path: '/dpop/nonce-mode', group: 'OAuth 2.0 / OIDC',
     name: 'DPoP nonce switch (not a spec endpoint)', specs: [],
     what: 'NON-SPEC, for tests and for trying the handshake by hand: turns the RFC 9449 section ' +
           '8/9 server-supplied nonce requirement on and off at runtime, so the 401/retry exchange ' +
           'can be exercised without restarting the service. GET reports the current state; POST ' +
           '{"required": true|false} sets it.' },
+  { path: '/oauth2/autopost.js', group: 'OAuth 2.0 / OIDC',
+    name: 'The form-post response script', specs: ['oauth-form-post', 'rfc9700'],
+    what: 'The script that submits the form on a response_mode=form_post authorization ' +
+          'response. A SEPARATE RESOURCE because this service sets script-src \'none\' on ' +
+          'every response and that one page relaxes it to \'self\' — an inline script would ' +
+          'simply not run, and the button would be the only thing that worked. With scripting ' +
+          'off the button IS the mechanism, which is why it is a real button with a label ' +
+          'rather than a hidden fallback. The same arrangement /wsfed/autopost.js has, for the ' +
+          'same reason.' },
+  { path: '/:as/oauth2/authorize', group: 'OAuth 2.0 / OIDC',
+    name: 'Authorization endpoint (a named authorization server)',
+    specs: ['rfc6749', 'oidc', 'rfc7636', 'rfc9396', 'rfc9207', 'rfc9700', 'rfc8414'],
+    effect: 'needs client_id and redirect_uri, like the unprefixed one',
+    what: 'ONE ROUTE, AS MANY AUTHORIZATION SERVERS AS HAVE BEEN NAMED. The path component ' +
+          'selects one and CREATES it on first sight with the same capabilities the default ' +
+          'server has, so an arbitrary name works immediately and can then be configured at ' +
+          '/admin/authorization-servers. What that configuration publishes is what this ' +
+          'endpoint enforces — a server advertising code_challenge_methods_supported ["S256"] ' +
+          'refuses `plain` HERE and nowhere else — so the document is the authorization server ' +
+          'rather than a description of one. A code issued by one is not redeemable at ' +
+          'another\'s token endpoint. The section above lists the ones this process has ' +
+          'actually served.' },
+  { path: '/:as/oauth2/token', group: 'OAuth 2.0 / OIDC',
+    name: 'Token endpoint (a named authorization server)',
+    specs: ['rfc6749', 'oidc', 'rfc8693', 'rfc9396', 'rfc9449', 'rfc9700', 'rfc8414'],
+    what: 'The same grants the unprefixed token endpoint performs, restricted to the ones THIS ' +
+          'authorization server advertises in grant_types_supported — and to the client ' +
+          'authentication methods it advertises. Its tokens carry its own issuer and audience, ' +
+          'so a conforming client that read its metadata finds them agreeing.' },
+  { path: '/:as/oauth2/userinfo', group: 'OAuth 2.0 / OIDC',
+    name: 'UserInfo endpoint (a named authorization server)', specs: ['oidc', 'rfc6750'],
+    what: 'The same endpoint under a named authorization server\'s own path, which is what its ' +
+          'OpenID Provider Configuration advertises.' },
+  { path: '/:as/oauth2/introspect', group: 'OAuth 2.0 / OIDC',
+    name: 'Introspection (a named authorization server)', specs: ['rfc7662'],
+    what: 'As above. The revocation set is one set across every authorization server here, ' +
+          'because a revoked token is revoked.' },
+  { path: '/:as/oauth2/revoke', group: 'OAuth 2.0 / OIDC',
+    name: 'Revocation (a named authorization server)', specs: ['rfc7009'],
+    what: 'As above.' },
+  { path: '/:as/oauth2/register', group: 'OAuth 2.0 / OIDC',
+    name: 'Registration (a named authorization server)', specs: ['rfc7591', 'rfc9700'],
+    what: 'Registers a client, which may then use ANY authorization server here — nothing ' +
+          'restricts a client to the one it registered at, and /admin/applications records ' +
+          'which ones it has actually used.' },
+  { path: '/:as/oauth2/logout', group: 'OAuth 2.0 / OIDC',
+    name: 'Session end (a named authorization server)', specs: ['oidc', 'oidc-logout'],
+    what: 'The session is ONE session across every authorization server in this process, ' +
+          'because it is one browser and one cookie.' },
+  { path: '/:as/oauth2/jwks', group: 'OAuth 2.0 / OIDC',
+    name: 'JWKS (a named authorization server)', specs: ['rfc7515', 'rfc7519'],
+    what: 'The same signing key. Every authorization server in this process signs with it, ' +
+          'which is a property of the mock rather than of the model — they are separate ' +
+          'issuers sharing one key, and a real deployment would not do that.' },
+  { path: '/oauth2/rfc9700', group: 'OAuth 2.0 / OIDC',
+    name: 'RFC 9700 mode report (not a spec endpoint)', specs: ['rfc9700'],
+    what: 'NON-SPEC, because RFC 9700 defines no discovery member and no endpoint: a client has ' +
+          'no way to learn from the protocol whether the server it is talking to enforces the ' +
+          'Security BCP. So this says so, and says the uncomfortable half too — every requirement ' +
+          'the mode has an opinion about, and whether it is ENFORCED, only DETECTED (the ones ' +
+          'that are the client\'s to keep, which this server can see broken but cannot fix), ' +
+          'ALWAYS true here, or NOT enforced with the reason attached. Read-only: the mode is ' +
+          'the oauth2.rfc9700 setting, so it is turned on at /admin/config or through ' +
+          'POST /admin-api/config like everything else configurable.' },
   { path: '/oauth2/userinfo', group: 'OAuth 2.0 / OIDC', name: 'UserInfo endpoint',
-    specs: ['oidc', 'rfc6750', 'rfc9449', 'rfc7591'],
+    specs: ['oidc', 'rfc6750', 'rfc9449', 'rfc7591', 'rfc8705', 'rfc8707'],
     effect: 'answers 401 with a WWW-Authenticate challenge when followed bare — it is a protected ' +
             'resource and needs the access token from an OIDC flow',
-    what: 'OIDC Core section 5.3, on GET and POST. The claims about whoever the access token was ' +
+    what: 'THE SENDER CONSTRAINT AND THE AUDIENCE ARE CHECKED HERE and at the three credential ' +
+          'endpoints, through the one function all four share: a DPoP-bound token gets its ' +
+          'proof verified and replay-checked, a certificate-bound one gets the connection\'s ' +
+          'certificate thumbprinted and compared, and a token issued for a DIFFERENT audience ' +
+          '(RFC 8707 `resource`) is refused. OIDC Core section 5.3, on GET and POST. The ' +
+          'claims about whoever the access token was ' +
           'issued for, gated by its scope (section 5.4) — which is the only place in this mock a ' +
           'scope changes the answer. THE ONE PROTECTED ENDPOINT HERE THAT REFUSES A TOKEN IT DID NOT ' +
           'ISSUE: it verifies the signature, the typ (so a refresh token or an id_token is refused), ' +
@@ -1097,8 +1454,15 @@ const ENDPOINTS = [
   { path: '/oauth2/revoke', group: 'OAuth 2.0 / OIDC', name: 'Revocation endpoint',
     specs: ['rfc7009'], what: 'Revocation that takes effect: introspection then reports inactive.' },
   { path: '/oauth2/register', group: 'OAuth 2.0 / OIDC', name: 'Dynamic client registration',
-    specs: ['rfc7591'], what: 'Registers a client and returns its credentials plus a registration ' +
-                              'access token.' },
+    specs: ['rfc7591', 'rfc9700'],
+    what: 'Registers a client and returns its credentials plus a registration access token. The ' +
+          'registration IS the application entry under ou=applications — there is no second ' +
+          'store — so /admin/applications and an ldapsearch see the same client. In RFC 9700 ' +
+          'mode it REFUSES metadata the other endpoints would refuse in use: the password grant ' +
+          '(section 2.4), the implicit grant and any response type naming token (2.1.2), and an ' +
+          'http redirect URI off the loopback (2.6), each with invalid_client_metadata and the ' +
+          'section. Recording a permission the token endpoint will always refuse is the ' +
+          'discovery document\'s promise broken in the other direction.' },
   { path: '/oauth2/register/:client_id', group: 'OAuth 2.0 / OIDC',
     name: 'Registered client management', specs: ['rfc7592', 'rfc6750'],
     what: 'Read, update or delete a registered client, guarded by its registration access token.' },
@@ -1378,13 +1742,87 @@ function renderPage(base, report) {
     'from a list kept by hand, so it cannot claim an endpoint that is not there or miss one that ' +
     'is. Issuer identifier <code>' + esc(base) + '</code>; WS-Trust issuer <code>' +
     esc(config.value('wstrust.issuer')) +
-    '</code>; listening on port ' + esc(PORT) + '.</p>';
+    '</code>; listening on port ' + esc(PORT) +
+    // The scheme, said out loud, because the issuer above and every endpoint
+    // below are built from the URL this request arrived on — so they follow the
+    // socket by themselves, and a reader comparing this page against a
+    // configuration file needs to know which socket that was. It is also the
+    // one requirement RFC 9700 mode cannot settle with a check.
+    (config.value('global.https')
+      ? ' over <strong>HTTPS</strong> (global.https' +
+        (config.value('oauth2.rfc9700')
+          ? ', which RFC 9700 mode turns on — section 2.1 says an authorization ' +
+            'response must not be sent over an unencrypted connection'
+          : '') +
+        '), with the same self-signed certificate ports 8443, 9443 and LDAPS ' +
+        '636 serve. It is regenerated on every start, so fetch it from ' +
+        '<code>/tls/server-certificate</code> and trust it — without ' +
+        'verification the first time, since there is no plain port left to ' +
+        'fetch it from.'
+      : ' over plain HTTP.') + '</p>';
 
   html += '<p class="lead"><strong>This is a test double.</strong> It signs everything with a key ' +
     'generated fresh at each start, it never checks a password, and it does not validate access ' +
     'tokens issued by a separate authorization server. The <em>coverage</em> column below says where ' +
     'each specification is implemented in full and where the shape is right but the enforcement is ' +
     'deliberately absent.</p>';
+
+  // ---------------------------------------------------------------------
+  // THE NAMED AUTHORIZATION SERVERS, which this page cannot read off the router.
+  //
+  // The same blind spot the Kerberos and LDAP listeners have, arrived at from
+  // the other direction: those are sockets the walk cannot see, and these are
+  // ONE route — `/:as/oauth2/…` — serving as many authorization servers as have
+  // been asked for. A reader counting rows would conclude there is one
+  // authorization server here, and there are as many as somebody has named.
+  //
+  // Only the ones that have actually been ACCESSED are listed, because the set
+  // is unbounded by construction: a name becomes an authorization server by
+  // being asked for, so listing "all of them" would mean listing every string.
+  // What is here is what this process has actually served.
+  // ---------------------------------------------------------------------
+  const namedServers = authorizationServers.list().filter(function (one) {
+    return one.id !== authorizationServers.DEFAULT_ID;
+  });
+  if (namedServers.length) {
+    html += '<h2>Authorization servers</h2>' +
+      '<p class="lead">This process publishes <strong>' + (namedServers.length + 1) +
+      '</strong> authorization servers, and only the endpoint PATTERN is on the list below — ' +
+      'the walk that builds this page sees <code>/:as/oauth2/…</code> as one route however ' +
+      'many names have been served through it. Each has its own metadata, its own capabilities ' +
+      'and its own issuer, and <strong>what its document advertises is what its endpoints ' +
+      'do</strong>. A name that has never been asked for is not here: a name becomes an ' +
+      'authorization server BY being asked for, with the same capabilities the default one ' +
+      'has, so the set of possible ones is every string and the set of real ones is this.</p>' +
+      '<table><thead><tr><th class="p">Authorization server</th><th>Metadata</th>' +
+      '<th>Endpoints</th><th class="s">Asked for</th></tr></thead><tbody>' +
+      '<tr><td><code>' + esc(authorizationServers.DEFAULT_ID) + '</code>' +
+      '<div class="why">the unprefixed endpoints</div></td>' +
+      '<td><a href="/.well-known/oauth-authorization-server" target="_blank" ' +
+      'rel="noopener noreferrer"><code>/.well-known/oauth-authorization-server</code></a><br>' +
+      '<a href="/.well-known/openid-configuration" target="_blank" rel="noopener noreferrer">' +
+      '<code>/.well-known/openid-configuration</code></a></td>' +
+      '<td><code>/oauth2/authorize</code><br><code>/oauth2/token</code></td>' +
+      '<td>always</td></tr>' +
+      namedServers.map(function (one) {
+        return '<tr><td><code>' + esc(one.id) + '</code>' +
+          (one.autoCreated
+            ? '<div class="why">created by being asked for</div>'
+            : '<div class="why">configured here</div>') + '</td>' +
+          '<td><a href="' + esc(one.urls.oauth) + '" target="_blank" rel="noopener noreferrer">' +
+          '<code>' + esc(one.urls.oauth) + '</code></a><br>' +
+          '<a href="' + esc(one.urls.oidc) + '" target="_blank" rel="noopener noreferrer">' +
+          '<code>' + esc(one.urls.oidc) + '</code></a></td>' +
+          '<td><code>' + esc(one.urls.authorize) + '</code><br><code>' +
+          esc(one.urls.token) + '</code></td>' +
+          '<td>' + esc(one.seen) + ' time(s)</td></tr>';
+      }).join('') +
+      '</tbody></table>' +
+      '<p class="lead"><a href="/admin/authorization-servers">Configure them</a> — what a ' +
+      'profile publishes is what that authorization server enforces, so narrowing ' +
+      '<code>code_challenge_methods_supported</code> there refuses the other method at that ' +
+      'server\'s own authorization endpoint and nowhere else.</p>';
+  }
 
   // Drift, if any. Shown at the top because it is the thing a reader most needs
   // to know about the rest of the page.

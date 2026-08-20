@@ -39,6 +39,12 @@ const { log, xmlEscape } = require('./helpers');
 // may fetch the document and call the operations. Written out in full rather
 // than patched from the other one, because a policy assembled by string surgery
 // is a policy nobody can read.
+// NOT built through app.js's contentSecurityPolicy(): this file is read off
+// disk by admin_api.js and requires nothing from this repository, which is what
+// keeps it a leaf. The framing clause is here explicitly for that reason, and
+// it is the one line in this list that must never be removed — see the note
+// above contentSecurityPolicy() in app.js for why frame-ancestors has no
+// fallback and cannot be inherited from default-src.
 const CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "script-src 'self'",

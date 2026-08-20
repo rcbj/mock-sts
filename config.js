@@ -251,6 +251,85 @@ const SETTINGS = [
                  'endpoints, the console and this API. The two TLS listeners ' +
                  'are separate and are under TLS below.' },
 
+  // ---------------------------------------------------------------------
+  // The scheme the port above answers on, and it is DERIVED (`derived: true`,
+  // so the shipped env/*.js files do not carry it): its default is whatever
+  // `oauth2.rfc9700` is, because RFC 9700 section 2.1 says an authorization
+  // response must not be sent over an unencrypted connection and this service's
+  // authorization endpoint lives on this port.
+  //
+  // It is a row of its own rather than a line inside server.js for the two
+  // reasons that make anything a row here: it can be set INDEPENDENTLY, both
+  // ways round, and each direction is a real case. HTTPS with the checks off
+  // exercises a client's TLS handling against a certificate it has to fetch and
+  // trust; the checks on over plain HTTP is for a client that cannot be taught
+  // to trust a certificate regenerated on every start, and it is why the mode
+  // does not simply refuse an insecure request instead of publishing the fact.
+  // `GET /oauth2/rfc9700` reports which of the two is in force.
+  //
+  // WHAT IT COSTS, because it is not free: there is then NO plain listener in
+  // this process at all, and `POST /tls/trust` and `GET /tls/server-certificate`
+  // were on one deliberately — they are what a caller reaches BEFORE it trusts
+  // anything. The certificate is self-signed and regenerated every start, so
+  // the first fetch has to be made without verification (`curl -k`), which is
+  // the ordinary bootstrap for a mock and is stated on /tls rather than left to
+  // be discovered.
+  { key: 'global.https', group: 'Global', label: 'HTTPS on the main port',
+    env: 'STS_HTTPS', type: 'bool', derived: true,
+    dflt: function () { return value('oauth2.rfc9700'); },
+    runtime: false,
+    restartReason: 'the listener is bound when the process starts, and its ' +
+                   'scheme is decided there',
+    description: 'Serve the main port over HTTPS, with the SAME certificate ' +
+                 'and key the 8443, 9443 and LDAPS 636 listeners use — one ' +
+                 'self-signed pair generated per start, so a caller trusts ' +
+                 'this service once rather than four times. Defaults to ' +
+                 'whatever oauth2.rfc9700 is; set it explicitly to run RFC ' +
+                 '9700 mode over plain http (for a client that cannot trust a ' +
+                 'per-start certificate) or to serve HTTPS without the mode\'s ' +
+                 'refusals. Fetch the certificate from ' +
+                 '/tls/server-certificate — with verification off the first ' +
+                 'time, since with this on there is no plain port left to ' +
+                 'fetch it from.' },
+
+  // ---------------------------------------------------------------------
+  // WHETHER A FORWARDED HEADER IS BELIEVABLE, which is the server's half of
+  // RFC 9700 section 2.6's reverse-proxy paragraph.
+  //
+  // `X-Forwarded-Proto` and `X-Forwarded-Host` are how a TLS-terminating proxy
+  // tells the application what the CLIENT actually used. Believing them is
+  // necessary behind a proxy and dangerous without one, because they are
+  // ordinary request headers: with no proxy in front, any client can set them
+  // and choose what this service thinks its own URLs are.
+  //
+  // What that changes here: the `iss` of every token and every URL in both
+  // discovery documents (baseUrlOf), and the `htu` a DPoP proof is checked
+  // against (dpop.js). The second is the one with teeth — if a client controls
+  // the expected htu, it can replay a proof captured from another endpoint by
+  // naming that endpoint in a header, and RFC 9449's binding of a proof to its
+  // target stops meaning anything.
+  //
+  // OFF by default, which is the secure reading and a CHANGE: dpop.js used to
+  // honour those headers unconditionally. A deployment behind a proxy turns it
+  // on, and until it does, a DPoP refusal names this setting rather than
+  // leaving somebody to guess.
+  { key: 'global.trustProxy', group: 'Global', label: 'Trust forwarded headers',
+    env: 'STS_TRUST_PROXY', type: 'bool', dflt: false, runtime: true,
+    description: 'Believe X-Forwarded-Proto and X-Forwarded-Host — which is ' +
+                 'what a TLS-terminating reverse proxy sets to say what the ' +
+                 'CLIENT used. Turn it ON when something is in front of this ' +
+                 'service, or the metadata will publish http:// URLs to ' +
+                 'clients that reached it over https and every DPoP proof will ' +
+                 'be refused for naming the real endpoint. Leave it OFF when ' +
+                 'nothing is: with no proxy, those are ordinary headers any ' +
+                 'client can set, and believing them lets a caller choose what ' +
+                 'this service thinks its own issuer and endpoints are. ' +
+                 'GET /tls/forwarded shows what a request actually carried and ' +
+                 'what was believed of it. NOTE that this service never reads ' +
+                 'a client certificate out of a header (X-Client-Cert and its ' +
+                 'relatives) in either mode — a forwarded certificate is a ' +
+                 'certificate anybody can forge.' },
+
   { key: 'global.logLevel', group: 'Global', label: 'Log level',
     path: 'logLevel', env: 'STS_LOG_LEVEL', type: 'enum',
     enumValues: ['trace', 'debug', 'info', 'warn', 'error', 'fatal'],
@@ -279,6 +358,170 @@ const SETTINGS = [
                  'reproducing a mismatch on purpose, and a conforming client ' +
                  'MUST reject a document whose issuer is not the one it ' +
                  'fetched from.' },
+
+  // --- RFC 9700, the OAuth 2.0 Security Best Current Practice --------------
+  //
+  // Three rows rather than one, and the two below the flag are not sub-flags of
+  // it: `redirectUris` is the DATA the mode compares against and is useless
+  // without it, and `loopbackPortWildcard` is the one exception RFC 9700 itself
+  // carves out, which a native-app client author needs to be able to remove in
+  // order to see what their code does against a server that got it wrong.
+  //
+  // All three are runtime, and they have to be: `oauth2_bcp.js` reads each one
+  // per request for exactly the reason the runtime rule at the top of this file
+  // gives. A mode you have to restart to turn on is one nobody turns on twice.
+  //
+  // RESTART-ONLY, and that is new: this flag used to be runtime and stopped
+  // being one the moment it grew a consequence that happens before the service
+  // is listening. `global.https` derives its default from it, so turning it on
+  // turns the MAIN PORT into an HTTPS listener — a bound socket, which is the
+  // first of the three restart-only kinds at the top of this file. A flag that
+  // was runtime for its checks and restart-only for its socket would be the
+  // exact silent disagreement the note up there warns about: /admin/config
+  // would report the mode as on while every authorization response still went
+  // out over plain HTTP.
+  { key: 'oauth2.rfc9700', group: 'OAuth 2.0 / OIDC', label: 'RFC 9700 mode',
+    env: 'STS_OAUTH2_RFC9700', type: 'bool', dflt: false, runtime: false,
+    restartReason: 'it decides whether the main port is bound as HTTPS ' +
+                   '(global.https), and a listener is bound when the process ' +
+                   'starts',
+    description: 'Enforce RFC 9700 (OAuth 2.0 Security Best Current ' +
+                 'Practice) on the authorization flow: exact-string redirect ' +
+                 'URI matching with the loopback port exception, no open ' +
+                 'redirects, no http redirect URI off the loopback, PKCE ' +
+                 'required of public clients with S256 only, PKCE downgrade ' +
+                 'and value-reuse refused, a nonce required with any ' +
+                 'id_token, and no response type that issues an access token ' +
+                 'from the authorization endpoint. OFF by default: this ' +
+                 'service exists to exercise clients, and a client is ' +
+                 'exercised by both answers — with the mode on it also stops ' +
+                 'advertising in both discovery documents what it would now ' +
+                 'refuse. It also turns THE MAIN PORT INTO AN HTTPS LISTENER ' +
+                 '— see global.https, whose default it is — because ' +
+                 'section 2.1 says an authorization response must not be sent ' +
+                 'over an unencrypted connection, and that was the one ' +
+                 'requirement this mode could not enforce while its own ' +
+                 'endpoint was only reachable over http. GET /oauth2/rfc9700 ' +
+                 'lists every requirement and says which are enforced, which ' +
+                 'are only detected, and which are true of the deployment ' +
+                 'rather than of a request.' },
+
+  // NOT part of RFC 9700 mode, and deliberately separate from it: it is a
+  // testing aid rather than a policy, and it is useful in both modes. It is the
+  // only way this service can help with a requirement it cannot enforce — the
+  // CLIENT must validate the ID Token's nonce, and nothing observable from here
+  // distinguishes a client that does from one that does not.
+  { key: 'oauth2.breakIdTokenNonce', group: 'OAuth 2.0 / OIDC',
+    label: 'Break the ID Token nonce',
+    env: 'STS_OAUTH2_BREAK_ID_TOKEN_NONCE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'Put a DELIBERATELY WRONG nonce in every ID Token that ' +
+                 'should carry one. RFC 9700 sections 2.1.1 and 4.5.3.2 make ' +
+                 'validating it the CLIENT\'s job and this server cannot see ' +
+                 'whether it happens — so this is how to find out: a client ' +
+                 'that accepts the result is not checking, and one that ' +
+                 'refuses it is. The same device as /spnego\'s three knobs ' +
+                 'and the reserved password "invalid". OFF by default, ' +
+                 'reported on GET /oauth2/rfc9700 whichever mode is in force, ' +
+                 'and every spoiled token is logged as spoiled — an ID Token ' +
+                 'that is wrong in a way nobody remembers turning on is an ' +
+                 'expensive afternoon.' },
+
+  // RFC 9700 section 2.2.2's lifetime paragraph. Read only in RFC 9700 mode —
+  // like every other refusal that mode adds — because a refresh token that
+  // stops working after a quiet afternoon is a surprise nobody asked for on a
+  // service whose default is to be permissive.
+  { key: 'oauth2.refreshIdleSeconds', group: 'OAuth 2.0 / OIDC',
+    label: 'Refresh token idle timeout (s)',
+    env: 'STS_OAUTH2_REFRESH_IDLE_SECONDS', type: 'int', dflt: 86400,
+    runtime: true,
+    description: 'In RFC 9700 mode, how long a refresh CHAIN may go unused ' +
+                 'before it stops working — section 2.2.2 says a refresh ' +
+                 'token SHOULD expire after a period of client inactivity, ' +
+                 'and says the period is deployment-dependent, which is why ' +
+                 'this is a setting rather than a constant. It is measured ' +
+                 'from the last time any token in the chain was redeemed, not ' +
+                 'from issuance, so a client that refreshes every hour keeps ' +
+                 'its grant indefinitely and one that stops is cut off a day ' +
+                 'later. 0 turns it off while leaving the rest of the mode ' +
+                 'alone. The absolute thirty-day expiry on the token itself ' +
+                 'is unaffected and still applies in both modes.' },
+
+  // Also section 2.2.2, and its own setting because "expire after inactivity"
+  // and "revoke after a security event" are different policies a deployment
+  // chooses separately — one is about a client that went away and the other
+  // about a person who signed out.
+  { key: 'oauth2.revokeRefreshOnLogout', group: 'OAuth 2.0 / OIDC',
+    label: 'Revoke refresh tokens on sign-out',
+    env: 'STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'In RFC 9700 mode, end a browser sign-on session and every ' +
+                 'refresh token issued ON that session is revoked — the ' +
+                 'section MAY that names logout and a password change as the ' +
+                 'examples. It is what makes /oauth2/logout and ' +
+                 'WS-Federation\'s wsignout1.0 mean something to the back ' +
+                 'channel: without it, signing out ends the cookie and leaves ' +
+                 'a thirty-day credential in the client\'s hands. ON by ' +
+                 'default WITHIN that mode, which is off by default — so ' +
+                 'nothing changes until the mode is turned on. A token is ' +
+                 'found by the session it was ISSUED on, which is recorded ' +
+                 'beside it rather than carried as a claim.' },
+
+  { key: 'oauth2.clientAssertionSkewS', group: 'OAuth 2.0 / OIDC',
+    label: 'Client assertion clock skew (s)',
+    env: 'STS_OAUTH2_CLIENT_ASSERTION_SKEW_S', type: 'int', dflt: 60,
+    runtime: true,
+    description: 'How far out a client assertion\'s exp, nbf and iat may be ' +
+                 'and still be accepted (RFC 7523 section 3, private_key_jwt ' +
+                 'and client_secret_jwt). Sixty seconds is the usual ' +
+                 'allowance for two machines that are not synchronised. It ' +
+                 'is also how long past its expiry an assertion\'s jti is ' +
+                 'remembered, so the replay cache and the expiry check cover ' +
+                 'exactly the same span with no gap between them.' },
+
+  { key: 'oauth2.redirectUris', group: 'OAuth 2.0 / OIDC',
+    label: 'Registered redirect URIs',
+    env: 'STS_OAUTH2_REDIRECT_URIS', type: 'csv', dflt: '', runtime: true,
+    description: 'The redirect URIs RFC 9700 mode compares an authorization ' +
+                 'request against, by EXACT STRING MATCH — for every client ' +
+                 'that did not register its own redirect_uris at ' +
+                 'POST /oauth2/register, which is every client this service ' +
+                 'has only ever seen at the authorization endpoint. Read ' +
+                 'only when oauth2.rfc9700 is on, and EMPTY by default, so ' +
+                 'turning the mode on with nothing here refuses every ' +
+                 'authorization request — the refusal names this setting. ' +
+                 'There is no pattern syntax and there must not be one: a ' +
+                 'matcher that supports wildcards and is configured not to ' +
+                 'use them is one mistake away from an open redirector.' },
+
+  { key: 'oauth2.loopbackPortWildcard', group: 'OAuth 2.0 / OIDC',
+    label: 'Loopback port wildcard',
+    env: 'STS_OAUTH2_LOOPBACK_PORT_WILDCARD', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'In RFC 9700 mode, allow a registered LOOPBACK redirect URI ' +
+                 '(127.0.0.1, [::1] or localhost) to match on any port — ' +
+                 'RFC 8252 section 7.3, because a native application cannot ' +
+                 'reserve one. Everything else about the URI must still match ' +
+                 'exactly, and the host must be the same literal. ON by ' +
+                 'default because RFC 9700 says an authorization server MUST ' +
+                 'allow it; turning it OFF makes this server deliberately ' +
+                 'non-compliant, which is how a native-app client is shown ' +
+                 'what happens when it meets a server that got this wrong.' },
+
+  // --- Applications --------------------------------------------------------
+  { key: 'applications.max', group: 'Applications',
+    label: 'Applications remembered',
+    env: 'STS_APPLICATIONS_MAX', type: 'int', dflt: 500, runtime: true,
+    description: 'How many entries may live under ou=applications — an OAuth ' +
+                 'client_id, a WS-Federation wtrealm, a SAML entityID, a ' +
+                 'WS-Trust AppliesTo, a Kerberos SPN. The registry IS that ' +
+                 'container, so this is a directory limit and behaves like ' +
+                 'one: past it a new application is REFUSED and warned about ' +
+                 'rather than an old one being evicted, because a directory ' +
+                 'that quietly dropped entries would be the worst possible ' +
+                 'source of truth. It is separate from ldap.maxEntries, which ' +
+                 'caps the whole tree, so a runaway client_id generator ' +
+                 'cannot fill the directory and stop people being created.' },
 
   // --- SAML ----------------------------------------------------------------
   { key: 'saml.issuer', group: 'SAML', label: 'Assertion issuer',

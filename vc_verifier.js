@@ -1011,6 +1011,11 @@ app.post('/oid4vp/response', async function (req, res) {
       protocol: 'OpenID4VP',
       method: 'verifiable presentation (' + (record.format || 'dc+sd-jwt') + ')',
       client_id: record.clientId || '',
+      // Which kind of application that client_id names. Without it the funnel
+      // files every client_id it is handed as an OAuth client, and the mock
+      // Verifier is not one — it is the OID4VP verifier this service configures
+      // at oid4vp.clientId.
+      applicationKind: 'oid4vp-verifier',
       note: 'A presentation that verified against every check this Verifier makes. ' +
             'It is not a sign-on: no session was created, no token was issued, and ' +
             'nothing else in this service reads what was presented.'

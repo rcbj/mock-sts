@@ -60,6 +60,15 @@ const app = require('./app');
 const { log, logArtifact, baseUrlOf, nowSec, randomId, xmlEscape, parseBody,
         oauthError, userFor } = require('./helpers');
 const stats = require('./admin_stats');
+// For one thing only: whether the main port is an HTTPS listener, which decides
+// the Secure attribute on the session cookie below.
+const config = require('./config');
+// For one decision: whether ending a session should revoke the refresh tokens
+// issued on it (RFC 9700 section 2.2.2). The policy is that module's, with the
+// rest of the mode; the session and the token registry are here, which is why
+// the act is here. A library that registers no route, so requiring it cannot
+// move anything in the require order.
+const bcp = require('./oauth2_bcp');
 // The audit log. Two things happen here that no other module can see: a session
 // is created, and a session is ended. Neither is an authentication —
 // admin_stats.js records that, at the funnel every protocol family shares — and
@@ -224,7 +233,17 @@ function startSession(res, username, amr, acr, via) {
     amr: amr, acr: acr
   };
   sessions.set(sessionId, session);
-  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax');
+  // `Secure` when — and only when — this port is TLS (global.https, which RFC
+  // 9700 mode brings with it). It has to be conditional rather than always on:
+  // a browser silently DROPS a Secure cookie that arrives over plain http, so
+  // setting it unconditionally would leave the default deployment with a
+  // sign-in that appears to succeed and a session that is never there again —
+  // which is the same symptom as a session that expired and points nowhere near
+  // the cookie. `SameSite=Lax` stays as it is: WS-Federation section 13.2.1
+  // sends its sign-in request as a cross-site form POST, and None would be the
+  // change that needs its own argument.
+  res.set('Set-Cookie', SESSION_COOKIE + '=' + sessionId + '; Path=/; HttpOnly; SameSite=Lax' +
+                        (config.value('global.https') ? '; Secure' : ''));
   // One of the two places a person is authenticated by typing a name at a screen —
   // this one covers both, since WS-Federation signs in through here.
   stats.recordAuthentication({
@@ -279,7 +298,38 @@ function endSession(req, res) {
   const id = cookiesOf(req)[SESSION_COOKIE];
   const session = id ? sessions.get(id) : null;
   if (id) sessions.delete(id);
-  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0');
+  // RFC 9700 section 2.2.2: an authorization server MAY revoke refresh tokens
+  // after a security event, and the section names LOGOUT as one. In RFC 9700
+  // mode it does — every refresh token issued ON this session, through the same
+  // revocation set /oauth2/revoke and the console write to, so introspection
+  // reports them inactive immediately.
+  //
+  // HERE and not at the two protocols' own sign-out endpoints, because this
+  // function is the single place both of them end a session: /oauth2/logout and
+  // WS-Federation's wsignout1.0 are two words for one act, and a revocation at
+  // each would be two that could come to disagree.
+  //
+  // Only the REFRESH tokens. An access token issued on this session expires in
+  // an hour and revoking it would take away the evidence of what the session
+  // did; the refresh token is the thirty-day credential a sign-out is supposed
+  // to be about, and leaving it live is what made signing out mean nothing to
+  // the back channel.
+  if (id && bcp.revokeRefreshOnLogout()) {
+    const revoked = stats.revokeWhere(function (record) {
+      return record.sessionId === id && String(record.typ || '') === 'Refresh';
+    }, 'RFC 9700 section 2.2.2: the sign-on session it was issued on ended');
+    if (revoked) {
+      log.info('RFC 9700 section 2.2.2: signing out of session ' + id + ' revoked ' + revoked +
+               ' refresh token(s) issued on it. Without that, a sign-out drops a cookie and ' +
+               'leaves a thirty-day credential in the client\'s hands.');
+    }
+  }
+  // The same attributes the cookie was SET with, Secure included: a browser
+  // matches an expiry against the cookie it holds, and one that disagrees about
+  // Secure can leave the original in place — a sign-out that reports success
+  // and ends nothing.
+  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0' +
+                        (config.value('global.https') ? '; Secure' : ''));
   // The sign-out, recorded here because this is the one place both of them
   // reach: /oauth2/logout and WS-Federation's wsignout1.0 are two protocols'
   // words for ending the one session this service holds, and a row per caller
@@ -375,8 +425,34 @@ function returnToCaller(res, record, error, description) {
       'authn_error=' + encodeURIComponent(error) +
       '&authn_error_description=' + encodeURIComponent(description || '');
   }
-  res.redirect(302, target);
-  log.debug("Leaving returnToCaller(). Sent the browser to " + target + ".");
+  // ---------------------------------------------------------------------
+  // 303, NOT 302, AND NEVER 307 — RFC 9700 section 4.12.
+  //
+  // This is the redirect that follows the POST carrying somebody's username and
+  // password, and it is the one place in this service where the choice of
+  // status code is a security question rather than a formality. A 307 PRESERVES
+  // the method and the body, so the browser would repeat the POST — credentials
+  // and all — to wherever this points, which is a URL the CALLING PROTOCOL
+  // composed. That is the section's whole point: the authorization server hands
+  // the user's password to the client without either of them doing anything
+  // wrong.
+  //
+  // This service has never used 307. What it used was 302, whose behaviour after
+  // a POST is historically ambiguous — every browser turns it into a GET, and
+  // the specification does not say they must. 303 says it: change the method to
+  // GET. The section asks for 303 by name and there is no reason not to give it.
+  //
+  // It is NOT gated on RFC 9700 mode, unlike the refusals that mode adds. No
+  // client can tell the difference — a browser does the same thing with both —
+  // so gating it would leave the default deployment with the ambiguous one and
+  // buy nobody an exercise.
+  //
+  // `returnToCaller()` is the single funnel: the password step and the WebAuthn
+  // step both leave through here, so there is one place where this is decided
+  // rather than two that could come to differ.
+  // ---------------------------------------------------------------------
+  res.redirect(303, target);
+  log.debug("Leaving returnToCaller(). Sent the browser to " + target + " with a 303.");
 }
 
 // The record a request names, or null — expired ones are dropped on the way
@@ -728,15 +804,21 @@ const WEBAUTHN_SCRIPT = [
 // is a named resource rather than a hole. app.js sets script-src 'none' on
 // everything by default and that default is worth keeping.
 function sendWebauthnPage(res, html) {
-  res.set('Content-Security-Policy',
-          "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
-          "base-uri 'none'; frame-ancestors 'none'");
+  // Through the builder, so the framing clauses cannot be lost by editing this
+  // line — see the note above contentSecurityPolicy() in app.js. What is being
+  // relaxed is script-src and nothing else.
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'script-src': "'self'" }));
   res.status(200).type('text/html').set('Cache-Control', 'no-store').send(html);
 }
 
 app.get('/authn/webauthn.js', function (req, res) {
   log.debug("Serving the WebAuthn ceremony script.");
-  res.set('Content-Security-Policy', "default-src 'none'");
+  // A script resource cannot be clicked through, so framing it is not the
+  // clickjacking vector the page it belongs to is — but it goes through the
+  // builder anyway, because "this one does not need it" is the reasoning that
+  // ends with a PAGE that does not have it.
+  res.set('Content-Security-Policy', app.contentSecurityPolicy({ 'style-src': null,
+                                                                 'img-src': null }));
   res.type('application/javascript').set('Cache-Control', 'no-store').send(WEBAUTHN_SCRIPT);
 });
 

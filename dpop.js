@@ -46,6 +46,16 @@ const crypto = require('crypto');
 // project dependency, so the no-cycle property is unchanged.
 const jwt = require('jsonwebtoken');
 const helpers = require('./helpers');
+// RFC 8705 — the other sender constraint. A library like this one: it registers
+// nothing and requires only helpers.js and config.js, so requiring it here
+// cannot create a cycle. It is required HERE rather than at the four protected
+// endpoints because presentedAccessToken() below is the single check they share.
+const mtls = require('./mtls');
+// For one decision: whether to REFUSE an access token in a query string rather
+// than merely ignore it (RFC 9700 section 4.3.2). A library that registers no
+// route and requires only helpers.js, config.js and client_auth.js, so
+// requiring it here cannot create a cycle.
+const bcp = require('./oauth2_bcp');
 const log = helpers.log;
 const b64u = helpers.b64u;
 const jsonFromB64u = helpers.jsonFromB64u;
@@ -53,6 +63,9 @@ const nowSec = helpers.nowSec;
 const randomId = helpers.randomId;
 const STS = helpers.STS;
 const vciError = helpers.vciError;
+// The one decision about whether a forwarded header is believable, shared with
+// baseUrlOf() so that two functions in this service cannot answer it two ways.
+const forwardedFrom = helpers.forwardedFrom;
 
 const PROOF_TYP = 'dpop+jwt';
 
@@ -182,15 +195,30 @@ function athOf(accessToken) {
 // the way section 4.3 asks (RFC 3986 syntax- and scheme-based normalization).
 //
 // Behind a proxy this has to be the URI the CLIENT used, not the one the socket
-// saw, which is why the forwarded headers are honoured: with the api or a CORS
-// proxy in front of this service, `req.protocol` and `req.get('host')` describe
-// the last hop and every proof would be refused for naming the real endpoint.
+// saw: with the api or a CORS proxy in front of this service, `req.protocol`
+// and `req.get('host')` describe the last hop and every proof would be refused
+// for naming the real endpoint.
+//
+// **THE FORWARDED HEADERS ARE HONOURED ONLY WHERE A PROXY IS TRUSTED**, and
+// that is a change — this function used to believe them unconditionally, while
+// `baseUrlOf()` in helpers.js ignored them, so two functions in one service
+// disagreed about whether a forwarded header was believable. They share
+// `forwardedFrom()` now and one setting decides.
+//
+// It is the htu check that makes the setting matter rather than the metadata.
+// `htu` binds a proof to the endpoint it was made for, which is what stops a
+// proof captured at one endpoint being replayed at another — and if a CLIENT
+// can set the expected value with a header, it can name the endpoint it stole
+// the proof from and the binding stops meaning anything. So with
+// `global.trustProxy` off, what the socket saw is what a proof must name; the
+// refusal in check 9 says so, and names the setting, because a proof refused
+// for a reason nobody can see is an afternoon.
 // ---------------------------------------------------------------------------
 function htuOf(req) {
   log.debug('Entering htuOf().');
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
-    .split(',')[0].trim().toLowerCase();
-  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '').trim().toLowerCase();
+  const from = forwardedFrom(req);
+  const proto = String(from.proto || 'http').toLowerCase();
+  const host = String(from.host || '').trim().toLowerCase();
   // req.originalUrl carries the query; the path alone is what belongs here.
   const path = String(req.originalUrl || req.url || '/').split('?')[0].split('#')[0];
   let hostname = host;
@@ -358,8 +386,22 @@ function verifyProof(rawHeader, opts) {
   const presented = normalizeHtu(claims.htu);
   const expected = normalizeHtu(options.htu);
   if (presented !== expected) {
+    // The commonest cause of this on a deployment that works everywhere else is
+    // a reverse proxy: the client made the request to the proxy's URL, the
+    // socket here saw the last hop's, and the two differ in scheme, host or
+    // both. So the setting is named rather than left to be discovered — a proof
+    // refused for a reason nobody can see is an afternoon, and this refusal
+    // would otherwise read as the client's bug.
     return fail('The DPoP proof was made for ' + claims.htu + ', but this request went to ' +
-                options.htu + '.');
+                options.htu + '.' +
+                (helpers.trustProxy()
+                  ? ''
+                  : ' If something is terminating TLS in front of this service, that is why: ' +
+                    'global.trustProxy is OFF, so X-Forwarded-Proto and X-Forwarded-Host are ' +
+                    'ignored and this server describes the LAST HOP rather than the URL the ' +
+                    'client used. Turn it on where a proxy really is in front — and leave it ' +
+                    'off where one is not, because those are headers any client can set, and ' +
+                    'a client that chooses its own htu has unbound its own proof.'));
   }
 
   // Check 11: iat within an acceptable window.
@@ -486,8 +528,96 @@ function forgetProofs() {
 // there is nothing it can honestly say about the subject of a signature it
 // cannot check.
 // ---------------------------------------------------------------------------
+// The audiences a token issued here carries, as this service's own resource
+// server. `<base>/resource` is what accessToken() mints when nothing narrows
+// it; anything else on the token came from an RFC 8707 `resource` parameter and
+// names a resource server that is not this one.
+//
+// The path ENDS WITH `/resource` rather than equalling it, because this process
+// publishes several authorization servers and a named one issues for
+// `<base>/{id}/resource` — its own resource server, under its own name. Testing
+// for equality refused every token any named authorization server had ever
+// issued, at every protected endpoint, with a message about audience
+// restriction that was true and completely misleading.
+//
+// What it still refuses is what it was written for: an audience from a
+// `resource` parameter, which names somebody else's server and does not end
+// there.
+function isOwnResourceAudience(value) {
+  const text = String(value || '');
+  if (!text) {
+    return false;
+  }
+  try {
+    const path = new URL(text).pathname;
+    return path === '/resource' || path.endsWith('/resource');
+  } catch (e) {
+    // Not a URL. RFC 8707 requires an absolute URI, and the default audience is
+    // one — so an audience that does not parse was not minted by this service's
+    // own default and is not this resource server.
+    return false;
+  }
+}
+
+function audienceRefusal(claims, verified) {
+  log.debug("Entering audienceRefusal().");
+  if (!verified || !claims || claims.aud === undefined) {
+    log.debug("Leaving audienceRefusal(). Not ours, or it names no audience.");
+    return null;
+  }
+  const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (audiences.some(isOwnResourceAudience)) {
+    log.debug("Leaving audienceRefusal(). This token is for this resource server.");
+    return null;
+  }
+  log.debug("Leaving audienceRefusal(). It names " + audiences.join(', ') + ".");
+  return {
+    error: 'invalid_token',
+    description: 'RFC 9700 section 2.3: an access token is audience-restricted and a resource ' +
+                 'server must refuse one issued for a different audience. This token names ' +
+                 audiences.map(function (one) { return '"' + one + '"'; }).join(', ') +
+                 ', and the endpoints here are the resource server this service issues for. A ' +
+                 'token narrowed with the RFC 8707 `resource` parameter is usable at THAT ' +
+                 'resource server and nowhere else, which is the whole of what the restriction ' +
+                 'buys.'
+  };
+}
+
 function presentedAccessToken(req, res, where) {
   log.debug("Entering presentedAccessToken(). where=" + where);
+  // RFC 9700 section 4.3.2 — an access token MUST NOT travel in a URI query
+  // parameter. RFC 6750 section 2.3 defines a form that does, and this service
+  // has never read it: the token comes from the Authorization header and
+  // nowhere else, so one in the query has always been simply ignored.
+  //
+  // IGNORED IS NOT THE SAME AS REFUSED, and the difference is what this adds.
+  // A client that sends `?access_token=...` gets a 401 saying a token is
+  // required — which is true, unhelpful, and sends somebody looking at their
+  // credential rather than at where they put it. In RFC 9700 mode the query is
+  // looked at ONLY to say so, and the refusal names the reason: a URL goes into
+  // browser history, into the address bar, into server logs and into the
+  // Referer of anything the page then fetches, and a token in one is a token in
+  // all of those.
+  //
+  // The token itself is never echoed back. It has already been somewhere it
+  // should not be; putting it in a response body would be one more place.
+  const inQuery = req.query && (req.query.access_token !== undefined ||
+                                req.query.token !== undefined);
+  if (inQuery && bcp.enabled()) {
+    res.set('WWW-Authenticate', 'Bearer error="invalid_request"');
+    log.warn('RFC 9700 section 4.3.2: a request to ' + (where || 'a protected endpoint') +
+             ' carried an access token in the QUERY STRING. Refused. That URL is now in this ' +
+             'client\'s browser history and in whatever logged the request.');
+    log.debug("Leaving presentedAccessToken(). A token was in the query string.");
+    vciError(res, 400, 'invalid_request',
+      'RFC 9700 section 4.3.2: an access token must not be sent in a URI query parameter. ' +
+      'RFC 6750 section 2.3 defines that form and its own specification does not recommend it, ' +
+      'because a URL ends up in browser history, in the address bar, in server logs and in the ' +
+      'Referer header of anything the page goes on to fetch — so the token is in all of those ' +
+      'too. This endpoint reads the Authorization header only, and treat the token you just ' +
+      'sent as disclosed.');
+    return null;
+  }
   const auth = String(req.headers['authorization'] || '');
   const match = /^(Bearer|DPoP)\s+(\S+)\s*$/i.exec(auth);
   if (!match) {
@@ -524,6 +654,40 @@ function presentedAccessToken(req, res, where) {
     }
   }
   const boundTo = jktOf(claims);
+
+  // RFC 8705 section 3.1 — the OTHER sender constraint, checked here for the
+  // same reason the DPoP one is: this function is the single check the four
+  // protected endpoints share, and a second one beside it would be a fourth
+  // caller nobody updated. It refuses nothing on a token that carries no
+  // certificate confirmation, so a Bearer or DPoP request is untouched.
+  const certificateProblem = mtls.checkBinding(claims, req, verified);
+  if (certificateProblem) {
+    res.set('WWW-Authenticate', 'Bearer error="invalid_token"');
+    log.debug("Leaving presentedAccessToken(). The certificate binding did not hold.");
+    vciError(res, 401, certificateProblem.error, certificateProblem.description);
+    return null;
+  }
+
+  // RFC 9700 section 2.3 — an access token is audience-restricted, and a
+  // resource server MUST refuse one that names a different audience. Only for a
+  // token this service ISSUED, which is the same judgement made about cnf above:
+  // the `aud` of a token signed by somebody else is a string this service cannot
+  // check and was never the audience of anyway.
+  //
+  // What counts as "this resource server" is deliberately the PATH and not the
+  // whole URL. Every token issued here carries `<base>/resource`, and the base
+  // is whatever URL the request that minted it arrived on — so a token minted at
+  // localhost:8081 and presented at 127.0.0.1:8081 would fail a whole-URL
+  // comparison while being, in every sense that matters, a token for this
+  // service. What the check is FOR is a token narrowed to somebody else by an
+  // RFC 8707 `resource` parameter, and that always has a different path.
+  const audienceProblem = audienceRefusal(claims, verified);
+  if (audienceProblem) {
+    res.set('WWW-Authenticate', 'Bearer error="invalid_token"');
+    log.debug("Leaving presentedAccessToken(). The audience is somebody else's.");
+    vciError(res, 401, audienceProblem.error, audienceProblem.description);
+    return null;
+  }
 
   // A bound token presented as Bearer is a protocol error even though the bytes
   // are the same. Accepting it would throw the binding away silently, which is

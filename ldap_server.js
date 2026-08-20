@@ -113,6 +113,12 @@ const app = require('./app');
 const { log, xmlEscape } = require('./helpers');
 const config = require('./config');
 const stats = require('./admin_stats');
+// The application registry. This module is its STORE — see the applications
+// section below — so the dependency runs both ways in the shape rule 6
+// describes: a plain require here for the schema and the two conversions, and
+// an inverted slot filled at the bottom of this file for the four functions
+// that read and write the container.
+const applications = require('./applications');
 // The audit log. A plain require and it cannot become anything else: audit.js
 // requires helpers.js and config.js only, so it can be reached from the deepest
 // module here without dragging a graph behind it.
@@ -191,6 +197,9 @@ const BASE_DN = config.value('ldap.baseDn');
 // BASE_DN would produce entries in a tree nobody is searching.
 const USERS_DN = 'ou=users,' + BASE_DN;
 const GROUPS_DN = 'ou=groups,' + BASE_DN;
+// The third container, and the one whose entries are a REGISTRY rather than a
+// description of one. See the applications section further down.
+const APPLICATIONS_DN = 'ou=applications,' + BASE_DN;
 
 // Only an explicit "0" or "false" turns the auto-creation off, so a missing or
 // misspelled variable leaves it ON — the safe direction here, because the
@@ -216,6 +225,15 @@ function maxEntries() {
 // client ask for fewer with sizeLimit and lets the server impose its own; a
 // search of a directory this small will never reach it, but a client that has
 // never seen LDAP_SIZE_LIMIT_EXCEEDED has never handled a paged result either.
+// How many entries may live under ou=applications. A directory limit, so it
+// REFUSES rather than evicting: the applications container is the source of
+// truth for what this service knows about a client, and a store that quietly
+// dropped the oldest entry to make room would be the worst possible one. Read
+// per call, like every other runtime setting.
+function maxApplications() {
+  return config.value('applications.max');
+}
+
 function maxSearchResults() {
   return config.value('ldap.sizeLimit');
 }
@@ -576,6 +594,17 @@ function seed() {
     ou: 'groups',
     description: 'Groups, as groupOfNames — membership is the multi-valued ' +
       '`member` attribute holding the DN of each member.'
+  }, { origin: 'seed' });
+  putEntry(APPLICATIONS_DN, {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'applications',
+    description: 'Applications: the OAuth clients, OpenID Connect relying ' +
+      'parties, SAML service providers, WS-Federation applications, WS-Trust ' +
+      'relying parties, OpenID4VP verifiers and Kerberos services this ' +
+      'service has been asked about. THIS CONTAINER IS THE REGISTRY — it is ' +
+      'not a copy of one kept elsewhere — so an ldapmodify here changes what ' +
+      'the protocol endpoints do. applications.js holds the schema; GET ' +
+      '/ldap/applications publishes it.'
   }, { origin: 'seed' });
   putEntry('cn=admin,' + BASE_DN, {
     objectClass: ['top', 'person', 'organizationalRole'],
@@ -2855,7 +2884,19 @@ app.get('/ldap', function (req, res) {
     '<p>And one thing it does <em>not</em>: deleting a user leaves its DN in ' +
     'every group that lists it as a <code>member</code>. Referential ' +
     'integrity is a directory feature, not a protocol rule.</p>' +
+    '<p>The tree has three containers. <code>ou=users</code> holds people, one ' +
+    'per identity that has authenticated here through any protocol. ' +
+    '<code>ou=groups</code> holds groups, which grant nothing. ' +
+    '<code>ou=applications</code> holds the OTHER side of those ' +
+    'authentications — every OAuth client, relying party, service provider and ' +
+    'Kerberos service this service has been asked about — and it is different ' +
+    'from the other two in one way worth knowing: <strong>it is a registry ' +
+    'rather than a record</strong>. The RFC 7591 client registrations live ' +
+    'there and nothing caches them, so an <code>ldapmodify</code> of an ' +
+    'application entry changes what the protocol endpoints do. ' +
+    '<a href="/ldap/applications">What is in it, and the schema it uses</a>.</p>' +
     '<p class="sub"><a href="/ldap?format=json">This page as JSON</a> ' +
+    '&middot; <a href="/ldap/applications">the application registry</a> ' +
     '&middot; <a href="/ldap/directory">every entry in the directory</a> ' +
     '&middot; <a href="/sts-metadata">everything this service speaks</a></p>';
   res.status(200).type('html').send(pageShell('LDAP directory', inner));
@@ -2914,6 +2955,306 @@ app.get('/ldap/directory', function (req, res) {
 // that throws takes the whole service down where a route cannot. Callers await
 // `whenReady` rather than reading a port that is not bound yet.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE APPLICATIONS CONTAINER, AND THE FOUR FUNCTIONS THAT MAKE IT A STORE.
+//
+// `applications.js` owns the SCHEMA — what an application entry carries and how
+// a record converts to and from attributes. This file owns the DIRECTORY: where
+// the container is, how an entry is created, what the cap is, and what an audit
+// row for one says. Neither knows the other's half, and the boundary is these
+// four functions plus the two conversions they call.
+//
+// The hook is INVERTED for the reason `vcClaims.setDirectory()` is: this module
+// is LAST in the require order because requiring it pulls every `/ldap` route
+// into the express router at that point, and `oauth2.js` — which reads the
+// registry on every authorization request in RFC 9700 mode — cannot drag those
+// routes to the front of it. So `applications.js` offers the slot and this file
+// fills it below.
+//
+// **There is no cache on the other side of this.** Every read the registry does
+// is a read of these entries, which is what makes an `ldapmodify` take effect on
+// the next request rather than after a restart. That is the whole point of the
+// directory being the source of truth, and a cache added for speed would quietly
+// undo it — on a mock, where the whole store is a Map in this process, there is
+// nothing to be gained by one anyway.
+//
+// **An application entry is not a person and must not be swept as one.**
+// `populateVcAttributes()` walks `ou=users` and would otherwise give an OAuth
+// client a birthdate; `/admin/groups` walks the same container and reports
+// membership. Both are already limited to `ou=users`, which is why this
+// container is a container of its own rather than a corner of that one — the
+// opposite decision from `didPlan()`, where being outside those sweeps was the
+// bug because a DID names a person.
+// ---------------------------------------------------------------------------
+function applicationDn(identifier) {
+  return 'cn=' + escapeDnValue(applications.labelFor(identifier)) + ',' + APPLICATIONS_DN;
+}
+
+// Find an application by its IDENTIFIER rather than by its DN, because the DN
+// may be a digest of it — an identifier longer than a readable RDN is named
+// `cn=app-<12 hex>`, the same device didPlan() uses, with the same consequence
+// that the cn is not the identity. `appIdentifier` is.
+function applicationEntry(identifier) {
+  log.debug('Entering applicationEntry(). identifier=' + identifier);
+  const direct = getEntry(applicationDn(identifier));
+  if (direct) {
+    log.debug('Leaving applicationEntry(). Found at its DN.');
+    return direct;
+  }
+  // The DN did not match, which happens when somebody renamed the entry. The
+  // identifier is still on it, so a walk finds it — and a walk is affordable
+  // here in a way it would not be in a real directory: the cap is a few hundred
+  // entries in one process.
+  const wanted = String(identifier);
+  let found = null;
+  entries.forEach(function (stored) {
+    if (found || !isUnder(stored.dn, APPLICATIONS_DN)) {
+      return;
+    }
+    if ((stored.attributes.appidentifier || [])[0] === wanted) {
+      found = stored;
+    }
+  });
+  log.debug('Leaving applicationEntry(). ' + (found ? 'Found by appIdentifier.' : 'Not here.'));
+  return found;
+}
+
+function readApplication(identifier) {
+  const stored = applicationEntry(identifier);
+  return stored ? stored.attributes : null;
+}
+
+function applicationCount() {
+  let n = 0;
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, APPLICATIONS_DN) && normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
+      n++;
+    }
+  });
+  return n;
+}
+
+function allApplications() {
+  log.debug('Entering allApplications().');
+  const rows = [];
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, APPLICATIONS_DN) &&
+        normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
+      rows.push(stored.attributes);
+    }
+  });
+  log.debug('Leaving allApplications(). ' + rows.length + ' application(s).');
+  return rows;
+}
+
+// Create or replace an application entry. REPLACE rather than merge, and that
+// is the one place this differs from `applyVcAttributes()`'s "fill only what is
+// absent" rule — deliberately, and for a reason particular to a registry: the
+// record being written was READ FROM THIS ENTRY a moment ago and then changed,
+// so it already contains whatever the entry had, an operator's own edits
+// included. Merging on top of that would make it impossible ever to REMOVE a
+// value — a redirect URI deleted with ldapmodify would come back on the next
+// authorization request, which is the opposite of the directory being the
+// source of truth.
+//
+// The operational attributes are the exception and are preserved: createTimestamp
+// belongs to the entry rather than to the record, and an entry that reported
+// being created afresh on every sign-in would make the audit log unreadable.
+function writeApplication(identifier, attributes) {
+  log.debug('Entering writeApplication(). identifier=' + identifier);
+  const existing = applicationEntry(identifier);
+  const dn = existing ? existing.dn : applicationDn(identifier);
+  if (!existing && applicationCount() >= maxApplications()) {
+    // Warned rather than thrown, exactly as a full directory is when somebody
+    // authenticates: whatever this application was doing succeeded, and a
+    // registry that could fail a token request would be the tail wagging the
+    // dog.
+    log.warn('ldap: not creating ' + dn + '; ou=applications holds its maximum of ' +
+             maxApplications() + ' entry/entries (applications.max). The application ' +
+             'itself is unaffected — it simply goes unrecorded.');
+    log.debug('Leaving writeApplication(). The container is full.');
+    return false;
+  }
+  if (entries.size >= maxEntries() && !existing) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
+             maxEntries() + ' entries.');
+    log.debug('Leaving writeApplication(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, attributes, { origin: existing ? existing.origin : 'application' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  auditDirectory(existing ? 'entry.update' : 'entry.create', dn, attributes, !existing);
+  log.debug('Leaving writeApplication(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+// Remove an application entry. The container itself is never a candidate —
+// applicationEntry() only ever returns something under it — and a delete here
+// does not touch anything else in the tree: an application entry has no
+// children and nothing in this directory references one, so there is no
+// dangling member to leave behind the way deleting a user does.
+function deleteApplicationEntry(identifier) {
+  log.debug('Entering deleteApplicationEntry(). identifier=' + identifier);
+  const stored = applicationEntry(identifier);
+  if (!stored) {
+    log.debug('Leaving deleteApplicationEntry(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  auditDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving deleteApplicationEntry(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// The directory's own audit row for an application entry, which is a DIFFERENT
+// fact from applications.js's `application.create`: that one says an application
+// was seen, this one says an entry in the tree changed. Both are recorded
+// because /admin/audit's directory filter would otherwise show every entry this
+// service writes except these, and a blind spot in a directory log is worse than
+// a row somebody has to read past.
+//
+// NO VALUES ARE NAMED, only attribute names — the same rule every other LDAP
+// row here follows, and it matters more on these entries than on any other:
+// oauthClientSecret and appRegistrationAccessToken are among the attributes.
+function auditDirectory(action, dn, attributes, created) {
+  audit.audit({
+    action: action,
+    actor: '',
+    protocol: 'LDAP',
+    channel: 'internal',
+    target: dn,
+    summary: 'The application entry ' + dn + ' was ' +
+             (action === 'entry.delete' ? 'deleted' : (created ? 'created' : 'updated')),
+    detail: { attributes: Object.keys(attributes || {}).sort().join(', ') }
+  });
+}
+
+// The slot, filled at require time. Its four functions are all this file
+// exposes of the container; everything else about an application — what it is,
+// what it carries, how a record becomes attributes — is applications.js's.
+applications.setDirectory({
+  readApplication: readApplication,
+  writeApplication: writeApplication,
+  allApplications: allApplications,
+  countApplications: applicationCount,
+  deleteApplication: deleteApplicationEntry,
+  // Two facts about the container itself, for the pages that report where these
+  // entries live and how many will fit. They are here rather than in that module
+  // because that module deliberately does not know where the container is.
+  containerDn: function () { return APPLICATIONS_DN; },
+  maxApplications: maxApplications
+});
+
+// ---------------------------------------------------------------------------
+// GET /ldap/applications — the registry, and the schema that defines it.
+//
+// Two things on one page because they answer one question. The TABLE is what
+// this service has been asked about; the SCHEMA below it is what an entry may
+// carry and where each attribute comes from — published rather than left to be
+// read out of the source, for the reason `GET /ldap` publishes the bind policy:
+// a directory whose shape you have to infer is one every client infers
+// differently.
+//
+// It is a view of the store rather than a store of its own: every row is read
+// through applications.js, which reads these very entries. The page cannot
+// disagree with the directory because it has nothing to disagree with.
+// ---------------------------------------------------------------------------
+app.get('/ldap/applications', function (req, res) {
+  log.debug('Entering GET /ldap/applications.');
+  const rows = applications.list();
+  const payload = {
+    baseDn: BASE_DN,
+    container: APPLICATIONS_DN,
+    count: rows.length,
+    max: maxApplications(),
+    sourceOfTruth: 'These entries ARE the registry. An ldapmodify here changes what the ' +
+      'protocol endpoints do — adding a value to oauthRedirectUri adds a redirect URI ' +
+      'that RFC 9700 mode will then accept by exact match.',
+    kinds: applications.KINDS,
+    schema: applications.SCHEMA,
+    applications: rows
+  };
+  if (String(req.query.format || '').toLowerCase() === 'json') {
+    log.debug('Leaving GET /ldap/applications. JSON, ' + rows.length + ' application(s).');
+    return res.status(200).json(payload);
+  }
+  const appRows = rows.map(function (row) {
+    const attrs = Object.keys(row.attributes).sort().map(function (name) {
+      const value = row.attributes[name];
+      return '<code>' + xmlEscape(name) + '</code>: ' +
+        xmlEscape(Array.isArray(value) ? value.join(' | ') : String(value));
+    }).join('<br>');
+    return '<tr><td><code>' + xmlEscape(row.identifier) + '</code>' +
+      (row.identifier === row.dnLabel ? '' :
+        '<br><span class="sub">named <code>cn=' + xmlEscape(row.dnLabel) +
+        '</code> &mdash; too long for a readable RDN</span>') +
+      '</td><td>' + xmlEscape(row.name) + '</td><td>' +
+      xmlEscape(row.kinds.join(', ') || '(unstated)') + '<br><span class="sub">' +
+      xmlEscape(row.protocols.join(', ')) + '</span></td><td>' +
+      (row.registered ? 'yes' : 'no') + '</td><td>' + row.authentications +
+      ' auth<br>' + row.sessions + ' session(s)<br>' + row.users + ' user(s)</td><td>' +
+      attrs + '</td></tr>';
+  }).join('');
+  const classRows = applications.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.where) + (one.standard ? '' : ' <strong>(invented here)</strong>') +
+      '</td><td>' + xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = applications.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code>' +
+      (row.sensitive ? ' <strong>(credential)</strong>' : '') +
+      '</td><td>' + xmlEscape(row.kind) + '</td><td>' + xmlEscape(row.from) +
+      '</td><td>' + xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+  const kindRows = applications.KINDS.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.kind) + '</code></td><td>' +
+      xmlEscape(one.label) + '</td><td>' + xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const inner = '<h1>Applications</h1>' +
+    '<p class="sub">' + rows.length + ' of a maximum ' + maxApplications() +
+    ' under <code>' + xmlEscape(APPLICATIONS_DN) + '</code>: every OAuth client, ' +
+    'OpenID Connect relying party, SAML service provider, WS-Federation application, ' +
+    'WS-Trust relying party, OpenID4VP verifier and Kerberos service this instance has ' +
+    'been asked about. One entry per unique identifier, so an application that speaks ' +
+    'two protocols under one name is one row with two kinds rather than two rows.</p>' +
+    '<p class="sub"><strong>These entries are the registry, not a copy of one.</strong> ' +
+    'An <code>ldapmodify</code> here changes what the protocol endpoints do: add a value ' +
+    'to <code>oauthRedirectUri</code> and RFC 9700 mode accepts that redirect URI by exact ' +
+    'match on the next authorization request. Nothing caches them.</p>' +
+    (rows.length
+      ? '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th><th>Registered</th>' +
+        '<th>Seen</th><th>Attributes</th></tr>' + appRows + '</table>'
+      : '<p class="sub">Nothing yet. An entry appears the first time a client_id, ' +
+        'wtrealm, AppliesTo, entityID or service principal name is accepted.</p>') +
+    '<h2>What an application can be</h2>' +
+    '<table><tr><th>Kind</th><th>Label</th><th>What it means</th></tr>' + kindRows +
+    '</table>' +
+    '<h2>The object classes</h2>' +
+    '<p class="sub">node-ldapjs has no schema subsystem &mdash; it is protocol machinery, ' +
+    'and it is a submodule this repository does not modify &mdash; and this directory is ' +
+    'schemaless on purpose. So this is a VOCABULARY rather than a constraint: nothing ' +
+    'rejects an entry for disobeying it. Where a registered class fits, it is used.</p>' +
+    '<table><tr><th>Class</th><th>Where from</th><th>What it brings</th></tr>' +
+    classRows + '</table>' +
+    '<h2>The attributes</h2>' +
+    '<p class="sub"><code>multi</code> accumulates a repeat, <code>single</code> is ' +
+    'assigned &mdash; which is what stops a counter growing a value per sign-in. Two ' +
+    'attributes hold CREDENTIALS in the clear, for the reason ' +
+    '<code>/krb5/principals</code> prints the Kerberos passwords; they are never written ' +
+    'to the audit log.</p>' +
+    '<table><tr><th>Attribute</th><th>Values</th><th>Set by</th><th>What it is</th></tr>' +
+    attrRows + '</table>' +
+    '<p class="sub"><a href="/ldap/applications?format=json">This page as JSON</a> ' +
+    '&middot; <a href="/ldap/directory">every entry in the directory</a> &middot; ' +
+    '<a href="/ldap">what this directory is</a></p>';
+  res.status(200).type('html').send(pageShell('Applications', inner));
+  log.debug('Leaving GET /ldap/applications. ' + rows.length + ' application(s).');
+});
+
 function listen() {
   log.debug('Entering listen().');
   const whenPlain = new Promise(function (resolve, reject) {
@@ -3030,5 +3371,7 @@ module.exports = {
   entries: entries,
   autoCreateUser: autoCreateUser,
   objectFor: objectFor,
-  groupsFor: groupsFor
+  groupsFor: groupsFor,
+  APPLICATIONS_DN: APPLICATIONS_DN,
+  maxApplications: maxApplications
 };

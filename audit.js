@@ -124,6 +124,13 @@ const CATEGORIES = [
           'posted. Includes the request that drew the page you are reading.' },
   { category: 'api', label: 'Management API',
     what: 'Every call into /admin-api, read and write alike.' },
+  { category: 'application', label: 'Applications',
+    what: 'An application — an OAuth client, an OIDC relying party, a SAML ' +
+          'service provider, a WS-Federation application, a WS-Trust relying ' +
+          'party, a Kerberos service — was seen for the first time, or ' +
+          'recorded something new. The counterpart of the authentication row ' +
+          'above: that one says WHO, this one says WHAT THEY WERE SIGNING IN ' +
+          'TO. One act commonly writes both.' },
   { category: 'protocol', label: 'Protocol endpoints',
     what: 'Every other HTTP endpoint: the token endpoint, the KDC proxy, the ' +
           'credential endpoint, the metadata documents, all of it.' }
@@ -167,6 +174,19 @@ const ACTIONS = [
   { action: 'directory.compare', category: 'directory',
     label: 'An attribute value was compared' },
   { action: 'directory.bind', category: 'directory', label: 'A bind' },
+
+  // Two rather than one, because "this application exists" and "this
+  // application did something again" are different facts and a reader filtering
+  // for the first does not want the second. An unchanged repeat writes NEITHER:
+  // every token request would otherwise produce a row saying nothing happened.
+  { action: 'application.create', category: 'application',
+    label: 'An application was seen for the first time' },
+  { action: 'application.update', category: 'application',
+    label: 'An application recorded something new' },
+  // Only ever from the console or the management API: no protocol path deletes
+  // an application, because a protocol only ever learns that one EXISTS.
+  { action: 'application.delete', category: 'application',
+    label: 'An application was deleted from the registry' },
 
   { action: 'admin.view', category: 'admin', label: 'A console page was viewed' },
   { action: 'admin.change', category: 'admin',

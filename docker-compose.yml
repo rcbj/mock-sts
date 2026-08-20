@@ -75,8 +75,18 @@ services:
     # more than it looks: this service is eleven modules and server.js only
     # requires them, so a module missing from the image is not a lost feature but
     # a MODULE_NOT_FOUND before anything listens.
+    #
+    # IT PICKS ITS OWN SCHEME, and that is not defensiveness. STS_HTTPS — and
+    # STS_OAUTH2_RFC9700, which is its default — turn 8081 into an HTTPS
+    # listener, and a probe that spoke http at it would fail on every poll: the
+    # container would go `unhealthy` while the service answered every request
+    # perfectly, which is the worst shape a healthcheck failure can take. The
+    # certificate is self-signed and regenerated on every start, so verification
+    # is off for the same reason a first `curl -k` is needed: there is nothing to
+    # verify against until somebody fetches it. This probe asks whether the
+    # process is alive, not whether its certificate is trustworthy.
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8081/healthcheck',function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
+      test: ["CMD-SHELL", "node -e \"var tls=process.env.STS_HTTPS==='true'||(process.env.STS_HTTPS===undefined&&process.env.STS_OAUTH2_RFC9700==='true');var m=tls?require('https'):require('http');m.get({host:'localhost',port:8081,path:'/healthcheck',rejectUnauthorized:false},function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
       interval: 10s
       timeout: 5s
       retries: 5
