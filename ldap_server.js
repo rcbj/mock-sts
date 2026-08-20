@@ -105,6 +105,9 @@
 // riding along beside the identity.
 // ---------------------------------------------------------------------------
 
+// For one thing only: the short, stable uid a DID-named entry is placed at.
+// See didPlan().
+const crypto = require('crypto');
 const ldap = require('ldapjs');
 const app = require('./app');
 const { log, xmlEscape } = require('./helpers');
@@ -280,7 +283,25 @@ const CANONICAL_NAMES = {
   // `userCertificate`, which is binary — is not what these are.
   x509subject: 'x509subject', x509issuer: 'x509issuer',
   x509serialnumber: 'x509serialNumber', x509notbefore: 'x509notBefore',
-  x509notafter: 'x509notAfter', x509fingerprint256: 'x509fingerprint256'
+  x509notafter: 'x509notAfter', x509fingerprint256: 'x509fingerprint256',
+  // This service's own names too, on the entries a DECENTRALIZED IDENTIFIER
+  // seeds — and they are load-bearing rather than decorative: the entry is
+  // NAMED by a hash of the DID (didPlan() says why), so `didSubject` is the only
+  // place the identifier itself survives and the only thing locateEntry() can
+  // find the entry by. There is no standard attribute type for "the DID this
+  // entry is", which is unsurprising: DID Core postdates the LDAP schema
+  // documents by two decades and nobody has registered one.
+  didsubject: 'didSubject', didmethod: 'didMethod',
+  // And this service's own names again, on any entry whose person authenticated
+  // somewhere that STATES how they did it — which today is the sign-in screen
+  // and nothing else, because amr is an OIDC vocabulary and a Kerberos AS-REQ
+  // has nothing to put in it. There is no standard attribute type for "this
+  // account authenticated with more than one factor": the nearest things in the
+  // wild are Active Directory's msDS-* attributes, which are Microsoft's own
+  // names for something else entirely, and pretending to be one of those would
+  // be worse than obviously not being one.
+  authnmethod: 'authnMethod', mfaauthenticated: 'mfaAuthenticated',
+  mfalastauthtime: 'mfaLastAuthTime'
 };
 
 // The attribute types /admin/vc can put on a person so that a credential has
@@ -679,6 +700,15 @@ function addValues(stored, name, values) {
 // single knob turning both would couple two decisions that only look alike.
 const DN_SHAPED = /^[A-Za-z][A-Za-z0-9-]*=/;
 
+// And is it a DECENTRALIZED IDENTIFIER? A third shape of identity, arriving from
+// the Decentralized Identity endpoints — an ldp_vc's `did:jwk:…` subject, whatever
+// DID the OID4VP Verifier was shown, the one /did/generate mints. Like DN_SHAPED
+// this is deliberately not shared with admin_stats.js's identical-looking test:
+// that one decides whether to split an identity at an '@', this one decides where
+// an entry goes, and one knob turning both would couple two decisions that only
+// look alike.
+const DID_SHAPED = /^did:[a-z0-9]+:/i;
+
 // The CN out of a DN, unescaped, or '' where there is none. Used when the
 // certificate's own commonName was not passed — the DN always carries it if the
 // subject has one, so there is no second source to disagree with.
@@ -833,6 +863,220 @@ function certificatePlan(info) {
 }
 
 // ---------------------------------------------------------------------------
+// WHERE A NAME'S ENTRY GOES, which is the easy one and the shape every other
+// protocol here produces: `uid=<name>,ou=users`.
+//
+// The invented person behind the name is what the entry gets — where it used to
+// get `dave`, `Mock` and `dave@sts-mock.example`, one string three times over.
+//
+// The change is deliberate and it is not cosmetic: those three are attributes a
+// credential asserts, so a directory that derived all of them from the login
+// name made every issued credential say the login name back. `given_name:
+// "dave"` is not a given name, and a wallet developer testing what their UI does
+// with a person's name learned nothing from it. What the entry keeps from the
+// login name is the two things that ARE the identity — the DN and the `uid` —
+// which is also how a real directory looks: somebody's uid rarely is their name.
+//
+// `(mock)` stays on the displayName. Every value here is invented, and the one
+// place a person reads before the others should say so.
+// ---------------------------------------------------------------------------
+function namePlan(name) {
+  log.debug('Entering namePlan(). name=' + name);
+  const persona = vcClaims.personaFor(name);
+  log.debug('Leaving namePlan().');
+  return {
+    dn: 'uid=' + name + ',' + USERS_DN,
+    attributes: {
+      objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
+      uid: name,
+      cn: persona.display,
+      sn: persona.family,
+      givenName: persona.given,
+      displayName: persona.display + ' (mock)',
+      mail: persona.email
+    },
+    merge: {}
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WHERE A DECENTRALIZED IDENTIFIER'S ENTRY GOES, which is the second placement
+// decision in this module with no obviously right answer — and it is the
+// OPPOSITE problem from a certificate's.
+//
+// A certificate subject is already a DN and needs a PLACE. A DID is neither a DN
+// nor a name: it is one long opaque string, and the two obvious things to do
+// with it are both wrong in a way worth writing down.
+//
+//   * `uid=<the did>,ou=users` verbatim. Correct, and unusable: a did:jwk
+//     carries a base64url-encoded JWK, so the DN runs to several hundred
+//     characters and every page, every log line and every ldapsearch output
+//     naming this person is mostly key material.
+//   * A container of its own, `ou=dids`. Tidy, and it would put these people
+//     outside the two sweeps that matter: populateVcAttributes() walks ou=users,
+//     and /admin/groups reports membership from there. A DID subject that no
+//     credential claim reaches is a DID subject this service cannot issue a
+//     credential about, which is the one thing it exists to do.
+//
+// So the entry goes under ou=users with everybody else and is NAMED by a short,
+// stable digest of the DID — `uid=did-<12 hex>` — with the identifier itself
+// kept whole on the entry as `didSubject`. Twelve hex characters is 48 bits; at
+// the few thousand entries maxEntries() allows, a collision is not a risk worth
+// a longer name for.
+//
+// What that costs is one thing and it is worth saying plainly: THE UID IS NOT
+// THE IDENTITY. Everywhere else here `uid` is what the person typed and what
+// /admin/users files them under; on these entries it is a name this service made
+// up. `didSubject` is the identity — locateEntry() finds the entry by it, and
+// personaKeyOf() invents the person FROM it, so the startup sweep and the
+// authentication path seed one invented person rather than two.
+// ---------------------------------------------------------------------------
+function didUid(did) {
+  return 'did-' + crypto.createHash('sha256').update(String(did), 'utf8')
+    .digest('hex').slice(0, 12);
+}
+
+function didPlan(info) {
+  log.debug('Entering didPlan().');
+  const did = String(info.key || '').trim();
+  // The method name — `jwk`, `web`, `key`. Kept because it is the one fact about
+  // a DID that is readable without resolving it, so "which methods has this
+  // service seen" becomes an ordinary filter on /ldap/directory rather than a
+  // question nobody can ask.
+  const method = (did.split(':')[1] || '').toLowerCase();
+  const persona = vcClaims.personaFor(did);
+  const uid = didUid(did);
+  // The description says how this entry came to exist, and for a DID the default
+  // — "authenticated through X" — would be the wrong sentence in both halves:
+  // nobody typed a password, and at /did/generate nobody presented anything at
+  // all. So this plan carries its own.
+  const note = 'named by a decentralized identifier presented through ' +
+    String(info.protocol || 'an unstated protocol') +
+    (info.method ? ' (' + info.method + ')' : '');
+  log.debug('Leaving didPlan(). uid=' + uid + ' for ' + did.slice(0, 48));
+  // Nothing to merge onto an entry that already exists. Unlike a certificate,
+  // which is reissued with a new serial and a new validity for the same person,
+  // a DID presented a second time is byte-for-byte the DID that named this entry
+  // in the first place.
+  return {
+    dn: 'uid=' + escapeDnValue(uid) + ',' + USERS_DN,
+    attributes: {
+      objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
+      uid: uid,
+      cn: persona.display,
+      sn: persona.family,
+      givenName: persona.given,
+      // Marked (DID) rather than (mock). Every value on every entry here is
+      // invented, and what this one needs to say first is the thing that is
+      // different about it: the person is named by a decentralized identifier
+      // and not by anything anybody typed.
+      displayName: persona.display + ' (DID)',
+      mail: persona.email,
+      didSubject: did,
+      didMethod: method
+    },
+    merge: {},
+    note: note
+  };
+}
+
+// ---------------------------------------------------------------------------
+// HOW SOMEBODY AUTHENTICATED, WRITTEN ONTO THE ENTRY THEY ALREADY HAVE.
+//
+// The case this exists for is WebAuthn, which is TWO things on one screen and
+// must not become one thing in the directory:
+//
+//   * used as a SECOND FACTOR, after a password, it authenticates nobody new.
+//     The person is the one the password step named, their entry is the one
+//     that already exists (or the one autoCreateUser() is creating on this same
+//     pass), and what the key adds is the FACT that a second factor was used.
+//     That fact is a flag here — `mfaAuthenticated: TRUE` — and not an entry.
+//   * used as the PRIMARY credential, passwordless, it is an authentication in
+//     its own right and the entry is created for it exactly as a password
+//     sign-in's is. Nothing special is needed for that: it reaches
+//     recordAuthentication() like every other accepted credential, so
+//     autoCreateUser() runs and namePlan() puts `uid=<name>,ou=users` there.
+//     What this function then records is that the single factor was a key —
+//     `authnMethod: hwk` with no `pwd` beside it — which is the only place a
+//     reader can tell a passwordless sign-in from a password one afterwards.
+//
+// Three attributes, and each answers a different question. They are separate
+// because merging them loses one of the three:
+//
+//   authnMethod        every RFC 8176 method this person has EVER used here,
+//                      accumulated. Appended, so `pwd` and `hwk` both survive.
+//   mfaAuthenticated   TRUE or FALSE for the MOST RECENT authentication, so it
+//                      is overwritten rather than appended. A person who used a
+//                      key yesterday and a password today reads FALSE, which is
+//                      the honest answer to "did they just use two factors".
+//   mfaLastAuthTime    when multi-factor last happened, and it is never cleared
+//                      — that is the history the flag above deliberately does
+//                      not keep.
+//
+// Two rules hold it up:
+//
+//   * NOTHING IS WRITTEN WHERE NOTHING WAS STATED. Most families here set no
+//     amr at all — a Kerberos AS-REQ, a WS-Trust UsernameToken and an LDAP bind
+//     have nothing to say in that vocabulary — and an absent attribute is the
+//     honest answer for them. Writing `mfaAuthenticated: FALSE` on everybody
+//     would turn "this service has never been told" into "this service checked
+//     and it was one factor", which are not the same claim.
+//   * TWO FACTORS MEANS TWO. `amr` with a single member is one factor whatever
+//     that member is, so a passwordless `["hwk"]` is FALSE. acr is honoured as
+//     well because it is what a relying party actually reads, and the two are
+//     set together by the one caller that sets either.
+//
+// A GROUP GRANTS NOTHING here and neither does this: no endpoint reads these
+// attributes, no token carries them, and nothing decides anything on them. They
+// are a record of what happened, on the page an LDAP client can see it from.
+// ---------------------------------------------------------------------------
+function applyAuthenticationFactors(stored, info) {
+  log.debug('Entering applyAuthenticationFactors(). dn=' + (stored && stored.dn));
+  if (!stored) {
+    log.debug('Leaving applyAuthenticationFactors(). There is no entry.');
+    return false;
+  }
+  const amr = (Array.isArray(info.amr) ? info.amr : []).map(function (value) {
+    return String(value || '').trim();
+  }).filter(function (value) {
+    return value !== '';
+  });
+  const acr = String(info.acr || '').trim();
+  if (!amr.length && !acr) {
+    log.debug('Leaving applyAuthenticationFactors(). This protocol states no ' +
+              'authentication method, so nothing is written.');
+    return false;
+  }
+  let changed = addValues(stored, 'authnMethod', amr);
+  // More than one factor, or a caller that said so outright. `mfa` is the acr
+  // this service's own sign-in screen sets; the comparison is lower-cased
+  // because acr is an opaque string to everybody except whoever minted it and
+  // this is the one minter.
+  const multiFactor = amr.length > 1 || acr.toLowerCase() === 'mfa';
+  const flag = multiFactor ? 'TRUE' : 'FALSE';
+  if ((stored.attributes.mfaauthenticated || [])[0] !== flag) {
+    // Assigned rather than appended: an entry that accumulated one TRUE per
+    // sign-in would be the visible symptom of a bug nobody could locate, which
+    // is the same trap applyVcAttributes() writes its second rule about.
+    stored.attributes.mfaauthenticated = [flag];
+    changed = true;
+  }
+  if (multiFactor) {
+    stored.attributes.mfalastauthtime = [generalizedTime()];
+    changed = true;
+  }
+  if (!changed) {
+    log.debug('Leaving applyAuthenticationFactors(). It already said this.');
+    return false;
+  }
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  log.info('ldap: ' + stored.dn + ' records authentication with ' +
+           (amr.length ? amr.join(', ') : acr) + '; mfaAuthenticated is ' + flag + '.');
+  log.debug('Leaving applyAuthenticationFactors(). The entry was updated.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // An entry for whoever authenticated, anywhere in this service.
 // ---------------------------------------------------------------------------
 function autoCreateUser(detail) {
@@ -857,42 +1101,25 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). That identity is a client, not a person.');
     return null;
   }
-  // A client CERTIFICATE identity is a DN and is placed accordingly; everything
-  // else is a name and becomes `uid=<name>,ou=users`. See certificatePlan().
-  // The invented person behind the name. Their given name, family name and
-  // mailbox are what the entry gets — where it used to get `dave`, `Mock` and
-  // `dave@sts-mock.example`, one string three times over.
+  // Three shapes of identity and one placement function each, chosen here and
+  // decided there. A client CERTIFICATE identity is a DN (certificatePlan()); a
+  // DECENTRALIZED IDENTIFIER is one long opaque string (didPlan()); everything
+  // else is a name and becomes `uid=<name>,ou=users` (namePlan()).
   //
-  // The change is deliberate and it is not cosmetic: those three are attributes a
-  // credential asserts, so a directory that derived all of them from the login
-  // name made every issued credential say the login name back. `given_name:
-  // "dave"` is not a given name, and a wallet developer testing what their UI does
-  // with a person's name learned nothing from it. What the entry keeps from the
-  // login name is the two things that ARE the identity — the DN and the `uid` —
-  // which is also how a real directory looks: somebody's uid rarely is their name.
-  //
-  // `(mock)` stays on the displayName. Every value here is invented, and the one
-  // place a person reads before the others should say so.
-  const persona = vcClaims.personaFor(name);
+  // The order matters in one direction only: a certificate's identity is a
+  // subject DN, so it is tested first and the DID test never sees it. Nothing
+  // else here can be both — a DN begins `<attributetype>=` and a DID begins
+  // `did:`.
   const plan = info.certificate
     ? certificatePlan(info)
-    : {
-        dn: 'uid=' + name + ',' + USERS_DN,
-        attributes: {
-          objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
-          uid: name,
-          cn: persona.display,
-          sn: persona.family,
-          givenName: persona.given,
-          displayName: persona.display + ' (mock)',
-          mail: persona.email
-        },
-        merge: {}
-      };
+    : (DID_SHAPED.test(name) ? didPlan(info) : namePlan(name));
   const dn = plan.dn;
   const existing = getEntry(dn);
-  const note = 'authenticated through ' + String(info.protocol || 'an ' +
-    'unstated protocol');
+  // What the entry's description says about why it exists. A plan may state its
+  // own — didPlan() does, because "authenticated through W3C DID Core" would be
+  // the wrong sentence for an identifier nobody signed in with.
+  const note = plan.note || ('authenticated through ' + String(info.protocol || 'an ' +
+    'unstated protocol'));
   if (existing) {
     // Already here. Record the protocol if it is one this entry has not seen —
     // which is what makes the entry say something a second sign-in did not
@@ -912,6 +1139,13 @@ function autoCreateUser(detail) {
     // sweep), and this is what covers the person who authenticates for the first
     // time after that but whose entry was created before it.
     if (applyVcAttributes(existing, name)) {
+      changed = true;
+    }
+    // And how they authenticated this time, where the protocol says. This is
+    // the whole of what a WebAuthn SECOND FACTOR adds to a directory: the
+    // person already has this entry — the password step named them — so the
+    // key writes a flag and creates nothing.
+    if (applyAuthenticationFactors(existing, info)) {
       changed = true;
     }
     if (changed) {
@@ -941,6 +1175,11 @@ function autoCreateUser(detail) {
   // because it fills only what is ABSENT, and the plan's own attributes — uid,
   // cn, sn, the certificate's RDNs — are the ones that must win.
   applyVcAttributes(created, name);
+  // Before the audit row below, so that the attributes it lists are the ones the
+  // entry actually has. On a PASSWORDLESS WebAuthn sign-in this is what says the
+  // single factor was a key rather than a password, on an entry that exists
+  // because that sign-in was an authentication in its own right.
+  applyAuthenticationFactors(created, info);
   log.info('ldap: created ' + dn + ' because ' + name + ' ' + note + '.');
   // A user created by the SERVICE rather than by a client, and the audit row
   // says so through `channel: 'internal'` — no LDAP client asked for this. It
@@ -1036,12 +1275,21 @@ function applyVcAttributes(stored, key) {
 }
 
 // The name to invent a person from, for an entry nobody handed us a key for —
-// which is every entry the sweep below walks. The uid is what autoCreateUser()
-// built the DN from and what /admin/users files the person under, so it is the
-// one that keeps the sweep's values identical to the ones an authentication
-// would have written; the CN is the fallback for a certificate-seeded entry,
-// which has no uid; the DN is the last resort and is at least stable.
+// which is every entry the sweep below walks. Four sources, in the order that
+// keeps the sweep's values identical to the ones an authentication would have
+// written: `didSubject` where there is one, because on those entries it is the
+// identity and the uid is only a digest of it; then the uid, which is what
+// namePlan() built the DN from and what /admin/users files the person under;
+// then the CN, the fallback for a certificate-seeded entry, which has no uid;
+// then the DN, which is the last resort and is at least stable.
 function personaKeyOf(stored) {
+  // The DID first, where there is one, and this line is load-bearing: on a
+  // DID-named entry the uid is a DIGEST of the identity rather than the identity
+  // (see didPlan()), so seeding from it would invent a SECOND person for
+  // somebody the authentication path had already invented one for — and the two
+  // would disagree on every attribute the sweep filled in.
+  const did = (stored.attributes.didsubject || [])[0];
+  if (did) return String(did);
   const uid = (stored.attributes.uid || [])[0];
   if (uid) return String(uid);
   const cn = (stored.attributes.cn || [])[0];
@@ -1156,14 +1404,17 @@ function vcAttributesFor(key) {
 // function states the facts it needs to do that.
 // ---------------------------------------------------------------------------
 //
-// Finding it is two rules, because there are two shapes of identity here. A NAME
-// is `uid=<name>,ou=users` and always was. A DN — which is what a TLS client
+// Finding it is three rules, because there are three shapes of identity here. A
+// NAME is `uid=<name>,ou=users` and always was. A DN — which is what a TLS client
 // certificate's identity is — is looked up by the subject the entry RECORDED,
 // in `x509subject`, because that is exact and stays right if certificatePlan()'s
 // naming rule ever changes; and where the subject lies inside this directory's
-// own tree, the entry it names directly is the answer. Failing both, the DN
-// certificatePlan() WOULD have built is reported, so the page can say where the
-// entry would have gone rather than naming a place nothing was ever going to be.
+// own tree, the entry it names directly is the answer. A DECENTRALIZED
+// IDENTIFIER is looked up the same way and for the same reason, by `didSubject`,
+// which on those entries is the identity where the uid is only a digest of it.
+// Failing all of that, the DN the matching plan WOULD have built is reported, so
+// the page can say where the entry would have gone rather than naming a place
+// nothing was ever going to be.
 function locateEntry(key) {
   log.debug('Entering locateEntry(). key=' + key);
   if (DN_SHAPED.test(key)) {
@@ -1189,6 +1440,31 @@ function locateEntry(key) {
     log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
     return { dn: plan.dn, stored: null };
   }
+  // A DECENTRALIZED IDENTIFIER, which is the third shape and the one that CANNOT
+  // be looked up by rebuilding its name and reading the store. It could — the
+  // digest is deterministic — but doing it that way would make didPlan()'s naming
+  // rule impossible to change without orphaning every entry already written under
+  // the old one. So the entry is found by what it RECORDED, exactly as a
+  // certificate's is, and didPlan() is consulted only to say where an entry
+  // WOULD go when there is none.
+  if (DID_SHAPED.test(key)) {
+    let found = null;
+    entries.forEach(function (entry) {
+      if (found) {
+        return;
+      }
+      if ((entry.attributes.didsubject || []).indexOf(key) >= 0) {
+        found = entry;
+      }
+    });
+    if (found) {
+      log.debug('Leaving locateEntry(). Found by didSubject: ' + found.dn);
+      return { dn: found.dn, stored: found };
+    }
+    const plan = didPlan({ key: key });
+    log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
+    return { dn: plan.dn, stored: null };
+  }
   const dn = 'uid=' + key + ',' + USERS_DN;
   log.debug('Leaving locateEntry(). A name, so ' + dn);
   return { dn: dn, stored: getEntry(dn) };
@@ -1208,9 +1484,12 @@ function objectFor(name) {
   //
   // Skipped for a DN identity: `uid` holds names, so matching a whole DN against
   // it can only ever find nothing, and the entry for that identity was found by
-  // its subject above rather than by a name at all.
+  // its subject above rather than by a name at all. Skipped for a DID for the
+  // same reason and one more — the uid on a DID-named entry is a DIGEST of the
+  // identity, so comparing the identity against it would find nothing even on
+  // the entry that is this person's.
   const alsoNamed = [];
-  if (key && !DN_SHAPED.test(key)) {
+  if (key && !DN_SHAPED.test(key) && !DID_SHAPED.test(key)) {
     entries.forEach(function (entry) {
       if (normalizeDn(entry.dn) === normalizeDn(dn)) {
         return;
@@ -2453,7 +2732,29 @@ function description(req) {
       'leaf RDN — cn=alice,' + USERS_DN + ' for CN=alice,O=Example — or the ' +
       'whole subject where that already lies under ' + BASE_DN + ', and the ' +
       'full subject, issuer, serial and validity are on the entry as x509* ' +
-      'attributes, which are this service\'s own names and not schema.',
+      'attributes, which are this service\'s own names and not schema. A ' +
+      'DECENTRALIZED IDENTIFIER is the third shape and is neither a name nor a ' +
+      'DN: an issued credential\'s did:jwk subject, whatever DID presents to ' +
+      'the OID4VP Verifier, the one /did/generate mints. Its entry goes at ' +
+      'uid=did-<12 hex of the SHA-256 of the DID>,' + USERS_DN + ' — a ' +
+      'did:jwk written out in full is a DN of several hundred characters, ' +
+      'most of it key material — with the identifier itself kept whole on the ' +
+      'entry as didSubject, and its method as didMethod. Search for the ' +
+      'person by didSubject, not by uid: on those entries the uid is a digest ' +
+      'and the didSubject is the identity.',
+    authenticationFacts: 'where the protocol that accepted the credential says ' +
+      'HOW it was presented — which today is the sign-in screen and nothing ' +
+      'else, since amr is an OIDC vocabulary — the entry also carries ' +
+      'authnMethod (every RFC 8176 method this person has used here, ' +
+      'accumulated), mfaAuthenticated (TRUE or FALSE for the MOST RECENT ' +
+      'authentication, overwritten each time) and mfaLastAuthTime (when ' +
+      'multi-factor last happened, never cleared). These are this service\'s ' +
+      'own names and not schema. A WebAuthn ceremony after a password writes ' +
+      'TRUE; the same ceremony used passwordless writes authnMethod hwk with ' +
+      'no pwd beside it and mfaAuthenticated FALSE, because one factor is one ' +
+      'factor however phishing-resistant it is. Nothing here READS them: no ' +
+      'token carries them and no endpoint decides anything on them, exactly as ' +
+      'a group here grants nothing.',
     enforcedRules: [
       'an add whose parent does not exist is LDAP_NO_SUCH_OBJECT (32)',
       'a delete of an entry with children is LDAP_NOT_ALLOWED_ON_NONLEAF (66)',
@@ -2521,6 +2822,10 @@ app.get('/ldap', function (req, res) {
     '<table><tr><th>Thing</th><th>Value</th></tr>' + rows + '</table>' +
     '<h2>It authenticates nobody</h2>' +
     '<p>' + xmlEscape(info.bindPolicy) + '.</p>' +
+    '<h2>Where an identity&rsquo;s entry goes</h2>' +
+    '<p>' + xmlEscape(info.autoCreateRule) + '</p>' +
+    '<h2>And how they authenticated</h2>' +
+    '<p>' + xmlEscape(info.authenticationFacts) + '</p>' +
     '<h2>LDAPS, and what it does not change</h2>' +
     '<p>Port ' + (info.tls.port || LDAPS_PORT) + ' is the same directory over ' +
     'TLS &mdash; the same entries, the same handlers, the same every-bind-' +

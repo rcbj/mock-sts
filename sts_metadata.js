@@ -1037,23 +1037,31 @@ const ENDPOINTS = [
           'into whatever its own specification says a refusal looks like. The return URL is checked ' +
           'to be a path on this service — an authentication service that will redirect anywhere ' +
           'after signing somebody in is a phishing tool with a login screen in front of it.' },
-  { path: '/authn/webauthn', group: 'Authentication', name: 'WebAuthn second factor',
+  { path: '/authn/webauthn', group: 'Authentication', name: 'WebAuthn security-key step',
     specs: ['oidc', 'webauthn'],
     effect: 'enrols or asserts a security key, then completes the sign-in',
-    what: 'The second-factor step of the login flow, reached when the authorization request named ' +
-          'mfa in acr_values or the user ticked the box. First use ENROLS a key for that username; ' +
-          'later sign-ins ASSERT with it. The ceremony is verified here — challenge, origin, RP ID ' +
-          'hash, flags and the signature over authenticatorData || SHA-256(clientDataJSON) — by an ' +
-          'implementation written independently of the debugger\'s own, so the two can be checked ' +
-          'against each other. On success the session records amr ["pwd","hwk"] and acr "mfa", which ' +
-          'is how the tokens show that a hardware key was used; a password-only sign-in records ' +
-          'amr ["pwd"] and acr "1" instead. The RP ID is this origin\'s host and is not ' +
-          'configurable: WebAuthn binds a ceremony to the calling origin, and that is the whole of ' +
-          'its phishing resistance.' },
+    what: 'The security-key step of the login flow, in EITHER of its two roles — as a SECOND ' +
+          'FACTOR after the password step (reached when the authorization request named mfa in ' +
+          'acr_values or the user ticked that box), or as the PRIMARY credential with no password ' +
+          'at all (the passwordless box, which the caller can forbid by demanding a second ' +
+          'factor). First use ENROLS a key for that username; later sign-ins ASSERT with it. The ' +
+          'ceremony is verified here — challenge, origin, RP ID hash, flags and the signature over ' +
+          'authenticatorData || SHA-256(clientDataJSON) — by an implementation written ' +
+          'independently of the debugger\'s own, so the two can be checked against each other. The ' +
+          'roles differ in what the session then claims and in nothing else: a second factor ' +
+          'records amr ["pwd","hwk"] and acr "mfa", a passwordless sign-in records amr ["hwk"] and ' +
+          'acr "1" — ONE factor, since this ceremony asks for user verification as preferred ' +
+          'rather than required — and a password-only sign-in records amr ["pwd"] and acr "1". ' +
+          'Both key paths are authentications in their own right, so both appear on /admin/users ' +
+          'and seed a directory entry; the second factor additionally flags that entry ' +
+          'mfaAuthenticated TRUE. The RP ID is this origin\'s host and is not configurable: ' +
+          'WebAuthn binds a ceremony to the calling origin, and that is the whole of its phishing ' +
+          'resistance.' },
   { path: '/authn/webauthn.js', group: 'Authentication', name: 'WebAuthn ceremony script',
     specs: ['webauthn'],
-    what: 'The script the second-factor page runs. It is a separate resource rather than an inline ' +
-          'script because this service sets script-src \'none\' on every response by default; that ' +
+    what: 'The script the security-key page runs, in both of its roles — the ceremony a second ' +
+          'factor performs and the one a passwordless sign-in performs are the same bytes. It is a ' +
+          'separate resource rather than an inline script because this service sets script-src \'none\' on every response by default; that ' +
           'one page relaxes it to \'self\', which is the smallest exception that works. An inline ' +
           'script there would simply not run, with the button doing nothing and no error anywhere.' },
   { path: '/oauth2/logout', group: 'OAuth 2.0 / OIDC', name: 'Session end (end_session_endpoint)',

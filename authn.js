@@ -89,17 +89,39 @@ const sessions = new Map();         // session id -> the signed-in user
 // they have signed in, and what to tell them they are signing in FOR.
 const pending = new Map();          // authn id -> { returnTo, details, ... }
 
-// WebAuthn as a second factor. The verifier is ./webauthn — written from the
-// specification and sharing no code with the debugger's own decoder, which is
-// what makes tests/webauthn_cross_impl.js over there a real check rather than
-// an implementation agreeing with itself.
+// WebAuthn, IN EITHER OF ITS TWO ROLES. The verifier is ./webauthn — written
+// from the specification and sharing no code with the debugger's own decoder,
+// which is what makes tests/webauthn_cross_impl.js over there a real check
+// rather than an implementation agreeing with itself.
 //
-// It lives HERE, with the password step it follows: the two are one act of
-// authentication, they share the pending record, and a second factor is the
-// first thing a centralized authentication service is asked for.
+// It lives HERE, with the password step it follows or replaces: the two are one
+// act of authentication, they share the pending record, and a second factor is
+// the first thing a centralized authentication service is asked for.
+//
+// **The two roles are one ceremony and three consequences, and they are worth
+// keeping straight because everything downstream reads them off the session.**
+//
+//   * SECOND FACTOR (`use_webauthn`): a password step has already happened, so
+//     the session records amr ["pwd","hwk"] and acr "mfa". The person is not a
+//     new identity — they are the one the password step named — so the
+//     directory entry that the funnel seeds is theirs either way, and what the
+//     key adds to it is a FLAG saying multi-factor happened. See
+//     ldap_server.js's applyAuthenticationFactors().
+//   * PRIMARY (`webauthn_only`): no password was presented at all, so the
+//     session records amr ["hwk"] and acr "1" — ONE factor, and a
+//     phishing-resistant one is still one. This is an authentication in its own
+//     right, so it goes through stats.recordAuthentication() like every other
+//     accepted credential and the directory grows an entry for the person the
+//     same way a password sign-in makes one.
+//
+// The distinction is refused rather than fudged in one place: a caller that
+// demanded a second factor (`forceMfa`) does not get the passwordless path,
+// because answering "two factors" with one would be exactly the lie wauth and
+// acr_values exist to prevent.
 const webauthnVerifier = require('./webauthn');
 const webauthnCredentials = new Map();  // username -> { credentialId, publicKeyJwk, signCount }
-const pendingMfa = new Map();           // mfa id -> { authn, username, challenge, expires }
+// mfa id -> { authn, username, challenge, passwordless, expires }
+const pendingMfa = new Map();
 const MFA_TTL_MS = 5 * 60 * 1000;
 
 // --- the browser session -----------------------------------------------------
@@ -168,6 +190,25 @@ function sessionOf(req) {
 // why the admin console would otherwise report every WS-Federation sign-in as an
 // OIDC one. beginAuthentication() carries it from the caller as `protocol`; it
 // still defaults to OIDC, so a call site that omits it says what it always meant.
+// What the console and the audit log call this sign-in. A function because
+// there are THREE of them now and the two-way conditional this replaced could
+// not say the third: it asked whether `hwk` was present, so a passwordless
+// ceremony — amr ["hwk"] and no password anywhere — was reported as a password
+// sign-in with a security key beside it, which is the one thing the two roles
+// must not be confused about.
+function methodPhraseFor(amr) {
+  const factors = amr || [];
+  const key = factors.indexOf('hwk') >= 0;
+  const password = factors.indexOf('pwd') >= 0;
+  if (key && password) {
+    return 'sign-in screen (password and a security key)';
+  }
+  if (key) {
+    return 'sign-in screen (a security key alone, passwordless)';
+  }
+  return 'sign-in screen (password)';
+}
+
 function startSession(res, username, amr, acr, via) {
   log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
   const sessionId = randomId(24);
@@ -188,8 +229,7 @@ function startSession(res, username, amr, acr, via) {
   // this one covers both, since WS-Federation signs in through here.
   stats.recordAuthentication({
     presented: username, protocol: via || 'OAuth 2.0 / OIDC',
-    method: (amr || []).indexOf('hwk') >= 0 ? 'sign-in screen (password and a security key)'
-                                            : 'sign-in screen (password)',
+    method: methodPhraseFor(amr),
     sub: session.user.sub, amr: amr, acr: acr, sessionId: sessionId,
     note: 'No password was checked; the name typed is the identity.'
   });
@@ -391,13 +431,30 @@ function loginPage(base, record, error) {
     ' value="' + xmlEscape(record.hint) + '">' +
     '<label for="password">Password</label>' +
     '<input type="password" id="password" name="password" autocomplete="current-password">' +
+    // Two checkboxes rather than one, because a security key is two different
+    // things here and the difference is what the tokens end up claiming: ticked
+    // with a password it is a SECOND factor (amr ["pwd","hwk"], acr "mfa"), and
+    // on its own it is the PRIMARY one (amr ["hwk"], acr "1"). They cannot be
+    // made exclusive in the browser — this screen runs no script, by design, and
+    // an inline one would not run under script-src 'none' — so the POST handler
+    // decides between them and `webauthn_only` wins. Under forceMfa the
+    // passwordless box is disabled: one factor does not answer a request for
+    // two, however phishing-resistant that factor is.
     '<label class="chk"><input type="checkbox" id="use_webauthn" name="use_webauthn" value="1"' +
-    (record.forceMfa ? ' checked disabled' : '') + '> Use a security key (WebAuthn)</label>' +
+    (record.forceMfa ? ' checked disabled' : '') + '> Use a security key (WebAuthn) as a second factor</label>' +
     (record.forceMfa ? '<input type="hidden" name="use_webauthn" value="1">' : '') +
+    '<label class="chk"><input type="checkbox" id="webauthn_only" name="webauthn_only" value="1"' +
+    (record.forceMfa ? ' disabled' : '') + '> Sign in with the security key alone (passwordless — ' +
+    'no password step, and the tokens will say one factor)' +
+    (record.forceMfa ? ' — not available: this request demands two factors' : '') + '</label>' +
     '<div class="row"><button type="submit" id="kc-login" name="action" value="login">Sign In</button>' +
     '<button type="submit" id="kc-cancel" name="action" value="cancel" class="secondary">Cancel</button></div>' +
     '</form><div class="meta">' +
     '<div>No password is checked. The username you enter is the identity the issued tokens describe.</div>' +
+    '<div>Passwordless: the password field is not read at all, and the security key becomes the ' +
+    'only factor — a key is enrolled for this username on first use, so the first person to claim ' +
+    'a name here gets it. This service authenticates nobody; that is the same statement as the ' +
+    'line above and not a weaker one.</div>' +
     '<div>Signing in for: <code>' + xmlEscape(record.protocol) + '</code></div>' +
     record.details.map(function (d) {
       return '<div>' + xmlEscape(d.label) + ': <code>' + xmlEscape(d.value == null ? '' : d.value) +
@@ -459,30 +516,64 @@ app.post(LOGIN_PATH, function (req, res) {
       'Enter a username. It does not have to exist — it is the identity the issued tokens will ' +
       'describe.'));
   }
-  if (String(body.password || '') === 'invalid') {
+  // Which role the security key is in, if it is in one at all. The two boxes
+  // cannot be made exclusive on a screen that runs no script, so a POST can
+  // carry both — and `webauthn_only` wins, because the two mean different
+  // things and answering "both" with the second-factor path would put somebody
+  // through a password step they explicitly asked not to have.
+  const passwordless = String(body.webauthn_only || '') === '1';
+  const secondFactor = !passwordless && String(body.use_webauthn || '') === '1';
+
+  // A caller that demanded a second factor does not get the passwordless path.
+  // The checkbox is rendered disabled for this reason and THIS is the check that
+  // matters: `disabled` is a property of a browser, not of an HTTP request, and
+  // the whole value of acr_values and wauth is that the answer cannot be chosen
+  // by whoever is answering.
+  if (passwordless && record.forceMfa) {
+    log.debug("Leaving the authentication endpoint. Passwordless was asked for where the caller " +
+              "demands a second factor, so the form is shown again.");
+    return sendLoginPage(res, loginPage(base, record,
+      'This request asked for a second factor, so a security key on its own cannot answer it — ' +
+      'one factor is one factor. Sign in with a password and the key together.'));
+  }
+
+  // The reserved password the rest of this mock also refuses. It is not read at
+  // all on the passwordless path: no password was presented there, so there is
+  // nothing to refuse, and failing a field the screen says it will ignore would
+  // make the screen wrong about what it does.
+  if (!passwordless && String(body.password || '') === 'invalid') {
     log.debug("Leaving the authentication endpoint. The reserved password was used, so the form is shown again.");
     return sendLoginPage(res, loginPage(base, record, 'Authentication failed for ' + username + '.'));
   }
 
-  // The second factor, if this request asked for one. The password step has
-  // succeeded; the session is NOT created yet, because a session created here
-  // and upgraded later would be a valid single-factor session in the window
-  // between — and a request arriving in that window would be answered with
-  // tokens that claim one factor's worth of assurance and carry none of the
-  // second's.
-  if (String(body.use_webauthn || '') === '1') {
+  // The security key, in whichever role. On the second-factor path the password
+  // step has succeeded and the session is NOT created yet, because a session
+  // created here and upgraded later would be a valid single-factor session in
+  // the window between — and a request arriving in that window would be answered
+  // with tokens that claim one factor's worth of assurance and carry none of the
+  // second's. On the passwordless path there is nothing to upgrade FROM, and the
+  // rule holds for the same reason: nothing has been authenticated until the
+  // ceremony verifies.
+  if (passwordless || secondFactor) {
     pending.delete(record.id);
     const mfaId = randomId(24);
     pendingMfa.set(mfaId, {
       authn: record, username: username,
       challenge: crypto.randomBytes(32).toString('base64url'),
+      // Which role, carried on the pending record rather than re-read from the
+      // POST at the other end: that POST is the browser's ceremony result and
+      // nothing in it says what the person chose a screen ago. Everything the
+      // session then claims — amr, acr, and whether the directory entry is
+      // flagged as multi-factor — is decided from this one boolean.
+      passwordless: passwordless,
       expires: Date.now() + MFA_TTL_MS
     });
     pendingMfa.forEach(function (v, k) {
       if (v.expires < Date.now()) pendingMfa.delete(k);
     });
-    log.debug("Leaving the authentication endpoint. " + username + " passed the password step; asking for " +
-              "the security key.");
+    log.debug("Leaving the authentication endpoint. " + username +
+              (passwordless ? " asked for a passwordless sign-in; asking for the security key."
+                            : " passed the password step; asking for the security key."));
     return sendWebauthnPage(res, webauthnPage(base, mfaId, username, ''));
   }
 
@@ -497,18 +588,29 @@ app.post(LOGIN_PATH, function (req, res) {
             record.returnTo + ".");
 });
 
-// The second-factor screen. It performs the ceremony in the browser against
-// THIS origin — the RP ID is the STS's own host, because WebAuthn binds a
-// ceremony to the calling origin and no amount of configuration changes that.
+// The security-key screen, and it is ONE screen for both roles. It performs the
+// ceremony in the browser against THIS origin — the RP ID is the STS's own host,
+// because WebAuthn binds a ceremony to the calling origin and no amount of
+// configuration changes that.
 //
 // Registration on first use, assertion afterwards: a mock authorization server
 // that demanded an already-enrolled key would be untestable without a manual
 // enrolment step, and the interesting artifacts are the same either way.
+//
+// What differs between the roles is what the page SAYS, not what it does — the
+// ceremony a second factor performs and the one a passwordless sign-in performs
+// are the same bytes. It says it anyway, because the difference is what the
+// session ends up claiming and a person reading the tokens afterwards has to be
+// able to tell which one they did.
 function webauthnPage(base, mfaId, username, error) {
   log.debug("Entering webauthnPage(). username=" + username);
   const known = webauthnCredentials.get(username);
   const mode = known ? 'get' : 'create';
   const step = pendingMfa.get(mfaId);
+  // Absent where the step has already gone — an expired id reaches this
+  // function through one of the error paths — and false is the safe reading:
+  // the page then describes the more cautious of the two roles.
+  const passwordless = !!(step && step.passwordless);
   const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<title>Security key — mock authentication service</title><style>' +
     'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
@@ -522,7 +624,9 @@ function webauthnPage(base, mfaId, username, error) {
     'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}' +
     'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}</style></head><body>' +
     '<div class="card"><h1>' + (mode === 'create' ? 'Enrol a security key' : 'Use your security key') + '</h1>' +
-    '<p class="sub">Second factor for <code>' + xmlEscape(username) + '</code></p>' +
+    '<p class="sub">' + (passwordless
+      ? 'Passwordless sign-in as <code>' + xmlEscape(username) + '</code> — the key is the only factor'
+      : 'Second factor for <code>' + xmlEscape(username) + '</code>') + '</p>' +
     (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
     '<button id="wa-go" type="button">' +
     (mode === 'create' ? 'Enrol security key' : 'Authenticate with security key') + '</button>' +
@@ -549,6 +653,13 @@ function webauthnPage(base, mfaId, username, error) {
     '<div>' + (mode === 'create'
       ? 'No key is enrolled for this user yet, so this step registers one.'
       : 'A key is already enrolled for this user, so this step is an assertion.') + '</div>' +
+    '<div>' + (passwordless
+      ? 'No password was presented. On success the session records amr ["hwk"] and acr "1" — ' +
+        'ONE factor — and this counts as an authentication in its own right, so it appears on ' +
+        '/admin/users and the directory grows an entry for ' + xmlEscape(username) + '.'
+      : 'A password step has already succeeded. On success the session records amr ["pwd","hwk"] ' +
+        'and acr "mfa", and the directory entry for ' + xmlEscape(username) + ' is flagged as ' +
+        'having authenticated with more than one factor.') + '</div>' +
     '</div></div>' +
     '<script src="/authn/webauthn.js"></script></body></html>\n';
   log.debug("Leaving webauthnPage(). mode=" + mode);
@@ -652,7 +763,8 @@ app.post('/authn/webauthn', function (req, res) {
     pendingMfa.delete(String(body.mfa_id || ''));
     log.debug("Leaving the WebAuthn endpoint. The step had expired.");
     return oauthError(res, 400, 'invalid_request',
-      'This second-factor step has expired. Start the authorization request again.');
+      'This security-key step has expired. Start the request again from the application that ' +
+      'sent you here.');
   }
 
   let credential;
@@ -732,14 +844,35 @@ app.post('/authn/webauthn', function (req, res) {
   }
 
   pendingMfa.delete(String(body.mfa_id));
-  // Two factors, and the tokens say so. `hwk` is the RFC 8176 value for proof of
-  // possession of a hardware key, which is what a WebAuthn assertion is.
-  startSession(res, step.username, ['pwd', 'hwk'], 'mfa', step.authn.protocol);
+  // What the session claims, which is the whole difference between the two roles
+  // and the only place it is decided. `hwk` is the RFC 8176 value for proof of
+  // possession of a hardware key, which is what a WebAuthn assertion is; `pwd`
+  // is on the list only where a password step actually happened.
+  //
+  // acr "1" for the passwordless sign-in is deliberate and it is the
+  // conservative reading: this ceremony is performed with userVerification
+  // "preferred" rather than "required" (see the script above), so the key proves
+  // possession and nothing about the person holding it. Calling that "mfa"
+  // because it is phishing-resistant would be the fake this profile refuses
+  // everywhere else — a relying party that asked for two factors would be told
+  // it got them.
+  const amr = step.passwordless ? ['hwk'] : ['pwd', 'hwk'];
+  const acr = step.passwordless ? '1' : 'mfa';
+  // The single funnel, reached through startSession() as every sign-in at these
+  // screens is. It is what puts the person on /admin/users and what seeds their
+  // entry in the embedded directory — so a PRIMARY WebAuthn sign-in creates that
+  // entry exactly as a password one does, and a SECOND FACTOR adds no second
+  // identity, because the person it authenticates is the one the password step
+  // already named. What the second factor adds to the entry is a flag; see
+  // ldap_server.js's applyAuthenticationFactors(), which reads the amr below.
+  startSession(res, step.username, amr, acr, step.authn.protocol);
   // Back to the caller, exactly as the password-only path returns: the
-  // session now records two factors, and the request that was interrupted
+  // session now records what happened, and the request that was interrupted
   // runs again and sees it.
   returnToCaller(res, step.authn, null, null);
-  log.debug("Leaving the WebAuthn endpoint. " + step.username + " completed the second factor.");
+  log.debug("Leaving the WebAuthn endpoint. " + step.username +
+            (step.passwordless ? " signed in with a security key alone."
+                               : " completed the second factor."));
 });
 // ---------------------------------------------------------------------------
 // WHO POSTED THAT FORM: the audit log's actor, filled from here.

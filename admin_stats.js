@@ -427,6 +427,21 @@ let usersForgotten = 0;
 // it cannot match a name somebody typed at a sign-in screen.
 const DN_SHAPED = /^[A-Za-z][A-Za-z0-9-]*=/;
 
+// And is it a DECENTRALIZED IDENTIFIER? The same question as the one above, asked
+// for the same reason and about a different shape: `did:web:sts.example.com%3A8443`
+// and `did:jwk:eyJrdHkiOi…` are single opaque identifiers, and the ':' separators
+// are part of the syntax rather than a name and a realm. Splitting one at an '@'
+// would be splitting inside a method-specific id — a did:web whose domain carries
+// a userinfo component, or a base64url payload that happens to decode with one —
+// and the part before it names nothing.
+//
+// It matters here because the Decentralized Identity endpoints present identities
+// of exactly this shape: an ldp_vc names its subject `did:jwk:…`, the OID4VP
+// Verifier reports whatever DID presented to it, and /did/generate mints one. RFC
+// 3986 says the method name is lowercase ALPHA and DIGIT; the `i` flag is here
+// because this test is deciding how to file a person and not validating a DID.
+const DID_SHAPED = /^did:[a-z0-9]+:/i;
+
 // A presented identity, split into the part that identifies a person here and the
 // parts that merely say where it was presented. Without entering/leaving logs: it is
 // called for every token and artifact on every users page view, so a pair of lines
@@ -457,7 +472,10 @@ function identityOf(value) {
   // else here can look like that: a username, a `urn:` subject and a mail address
   // all fail the test, and a Kerberos principal cannot contain '=' before its
   // first character run ends.
-  const at = DN_SHAPED.test(rest) ? -1 : rest.lastIndexOf('@');
+  //
+  // A DID is the other exception and arrives from the Decentralized Identity
+  // endpoints; see DID_SHAPED above for why it is taken whole.
+  const at = (DN_SHAPED.test(rest) || DID_SHAPED.test(rest)) ? -1 : rest.lastIndexOf('@');
   if (at > 0) {
     realm = rest.slice(at + 1);
     rest = rest.slice(0, at);
@@ -534,6 +552,8 @@ function userRecord(identity) {
 //   sessionId   the browser sign-on session this created or ran on, when there is
 //               one. It is what lets the drill-down put tokens under a session.
 //   amr/acr, client_id, note, isClient — all optional, all shown where present.
+//               amr and acr are also handed to the user observer, which is how
+//               the directory comes to know that a sign-in had two factors.
 //
 // It returns the record so a caller can log what it now knows, and it NEVER throws
 // on a missing field: a statistics call that could fail an authentication would be
@@ -617,6 +637,16 @@ function recordAuthentication(detail) {
         key: identity.key, name: identity.name, realm: identity.realm,
         presented: identity.form, protocol: protocol, method: method,
         isClient: record.isClient, sub: info.sub || '',
+        // HOW they authenticated, in RFC 8176's vocabulary, passed through
+        // untouched for the same reason `certificate` is: this file counts and
+        // the directory decides what to do about it. It is what lets an entry
+        // record that a second factor was used — a WebAuthn ceremony after a
+        // password arrives here as ["pwd","hwk"], and the same ceremony used as
+        // the PRIMARY credential arrives as ["hwk"] alone, which is one factor
+        // and must not be flagged as two. Most families set neither: a Kerberos
+        // AS-REQ and a UsernameToken have no amr to state, and an entry with no
+        // factors recorded is the honest answer for them rather than a default.
+        amr: info.amr || [], acr: info.acr || '',
         // Passed through untouched, and only the TLS listeners set it: a client
         // certificate's identity IS a DN, so the entry the directory seeds for it
         // is not `uid=<name>` and the facts that go in it — issuer, serial,

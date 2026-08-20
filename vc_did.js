@@ -21,6 +21,11 @@ const jwt = require('jsonwebtoken');
 const app = require('./app');
 const bbs2023 = require('./bbs2023.js');
 const { log, logArtifact, PORT, STS, baseUrlOf, bbsKeyPair } = require('./helpers');
+// The identity registry, for ONE call at the generator endpoint below: a DID this
+// service mints is an identity it has created, and this is the funnel the embedded
+// directory grows an entry off. A library — it registers no route and requires only
+// helpers.js — so requiring it here cannot move a route or make a cycle.
+const stats = require('./admin_stats');
 const { VCI_CONFIGS } = require('./vc_configs');
 // ---------------------------------------------------------------------------
 // This issuer's DECENTRALIZED IDENTIFIER (W3C DID Core 1.0).
@@ -304,6 +309,32 @@ app.get('/did/generate', async function (req, res) {
   let body;
   if (method === 'jwk') {
     const generated = generatedDidJwk();
+    // -------------------------------------------------------------------------
+    // The DID this endpoint just minted, recorded — which is what gives it a
+    // directory entry, through the observer admin_stats.js installs for
+    // ldap_server.js.
+    //
+    // It is the weakest of the recording sites in this service and it is worth
+    // being explicit about why it is here at all: nothing was PRESENTED and
+    // nobody was authenticated. What happened is that this service created an
+    // identity, which is the same act as seeding a Kerberos principal on first
+    // sight, and an identity this service created that appears in no directory is
+    // the gap this endpoint had. The method says plainly that it was generated.
+    //
+    // The `web` branch below gets NO such call, and that is a difference rather
+    // than an omission: the DID there is this service's OWN — the issuer's
+    // identity, already published at /.well-known/did.json — and a directory entry
+    // for it would file the issuer among the people, with an invented given name
+    // and a fictional mailbox attached to the thing that signs every credential.
+    // -------------------------------------------------------------------------
+    stats.recordAuthentication({
+      presented: generated.did,
+      protocol: 'W3C DID Core',
+      method: 'did:jwk generated at /did/generate',
+      note: 'Minted by this service on request. Nothing was presented and nobody ' +
+            'was authenticated; the key pair behind it was generated here and is ' +
+            'returned to the caller.'
+    });
     body = {
       method: 'jwk',
       did: generated.did,

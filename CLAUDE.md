@@ -102,6 +102,23 @@ Four things about that are load-bearing:
   writes one. The WebAuthn second factor moved with it for the same reason: it
   is the other half of one act of authentication, and it shares the pending
   record.
+* **WEBAUTHN IS TWO ROLES ON ONE SCREEN and the ceremony cannot tell them
+  apart.** `use_webauthn` is the second factor after a password (session
+  `amr ["pwd","hwk"]`, `acr "mfa"`); `webauthn_only` is the PRIMARY credential
+  with no password read at all (`amr ["hwk"]`, `acr "1"` — ONE factor, since
+  the ceremony asks for user verification as `preferred` rather than
+  `required`). Four things there are load-bearing. The choice is made at the
+  password screen and CARRIED on the pending record, because the ceremony's own
+  POST is the browser's result and nothing in it says what somebody chose a
+  screen ago. `webauthn_only` WINS where a hand-made POST sets both, since the
+  boxes cannot be made exclusive on a screen that runs no script. A caller that
+  demanded a second factor (`forceMfa`, from `acr_values`) is refused the
+  passwordless path SERVER-SIDE — `disabled` is a property of a browser and not
+  of a request. And `methodPhraseFor()` exists because there are three outcomes
+  now: the two-way conditional it replaced asked whether `hwk` was present and
+  called a passwordless sign-in a password one. Anything downstream that reads
+  `hwk` to mean "two factors" is wrong for the same reason — `wsfed.js`'s
+  `authnMethodsFor()` was, and now tests for `hwk` AND `pwd`.
 
 WS-Federation still has a sign-in screen of its own, deliberately: section
 13.2.1 lets the sign-in request arrive as a cross-site form POST, which
@@ -389,6 +406,39 @@ that is the one reachable before anything is trusted.
    on beside them as `x509*` attributes that are this service's own names and not
    schema. `certificatePlan()` carries the placement rules and what they cost.
 
+   **A DECENTRALIZED IDENTIFIER is the THIRD shape and there is one plan per
+   shape** — `certificatePlan()`, `didPlan()`, `namePlan()`, chosen in
+   `autoCreateUser()` and decided in each. A DID is neither a DN nor a name but
+   one long opaque string, so its entry is named by a DIGEST of it —
+   `uid=did-<12 hex>,ou=users` — with the identifier whole on the entry as
+   `didSubject` and its method as `didMethod`. Written out, a `did:jwk` is a DN
+   of several hundred characters of key material; given a container of its own,
+   `ou=dids`, it would sit outside `populateVcAttributes()`'s sweep and
+   `/admin/groups`, which both walk `ou=users`. **On those entries the `uid` is
+   NOT the identity**, which is the one thing that does not generalise from the
+   other two plans: `didSubject` is, `locateEntry()` finds the entry by it (the
+   same way it finds a certificate's by `x509subject`), and `personaKeyOf()`
+   invents the person FROM it — seed the persona from the digest instead and the
+   startup sweep describes a different person from the one the authentication
+   path already wrote.
+
+   **The three DIDs come from the Decentralized Identity endpoints, and each
+   reaches the funnel at the point its own credential is accepted.**
+   `subjectClaimsFrom()` in `vc_issuer.js` records the person an access token
+   names — HERE and not at the two credential endpoints, because it is the single
+   point that decides who a credential is about, so a batch of five proofs is one
+   record and a deferred issuance is not counted twice. `buildCredentialFor()`
+   records the credential's SUBJECT when it is DID-shaped, one per credential,
+   because a batch is several holder keys and therefore several DIDs; the `did:`
+   guard is load-bearing rather than tidy — the other two formats name their
+   subject with the token's own `sub`, or with a `urn:uuid:` minted fresh per
+   credential, and recording those would evict real people from a store with a
+   fixed maximum to hold identifiers nothing will present again.
+   `/oid4vp/response` records the holder BELOW the refusal, so a presentation
+   that failed a check records nothing. And `/did/generate` records what it
+   MINTED, but only for `?method=jwk`: the `web` branch returns this service's
+   own DID, and an entry for it would file the issuer among the people.
+
    But this module requires `admin_stats.js` (it needs
    `identityOf`'s normalisation, so `alice`, `urn:sts-mock:user:alice` and
    `alice@REALM` seed ONE entry), which means `admin_stats.js` cannot require it
@@ -448,8 +498,28 @@ that is the one reachable before anything is trusted.
    are attributes a credential asserts, and `given_name: "dave"` taught a wallet
    nothing — while the `uid` and the DN stay the login name, which is the identity.
 
+   **HOW SOMEBODY AUTHENTICATED IS WRITTEN ONTO THE ENTRY THEY ALREADY HAVE,
+   and that is what a WebAuthn SECOND FACTOR adds to this directory.** The two
+   roles land differently and neither needs a call site of its own:
+   passwordless WebAuthn is an authentication, so it reaches the funnel and
+   `autoCreateUser()` creates the entry exactly as a password sign-in does; a
+   second factor authenticates nobody new — the person is the one the password
+   step named — so it creates nothing and `applyAuthenticationFactors()` writes
+   a FLAG on the entry that exists. It reads the `amr`/`acr` that
+   `recordAuthentication()` now passes through on the observer, beside
+   `certificate`, and writes three of this service's own attribute names:
+   `authnMethod` (every RFC 8176 method ever used here, APPENDED),
+   `mfaAuthenticated` (TRUE/FALSE for the MOST RECENT authentication,
+   ASSIGNED — appending would accumulate one value per sign-in, the trap
+   `applyVcAttributes()`'s second rule is about) and `mfaLastAuthTime` (when
+   multi-factor last happened, never cleared). Two rules: NOTHING IS WRITTEN
+   WHERE NOTHING WAS STATED, because most families here set no `amr` at all and
+   `mfaAuthenticated: FALSE` on everybody would turn "never told" into
+   "checked, and it was one factor"; and TWO FACTORS MEANS TWO, so a
+   passwordless `["hwk"]` is FALSE.
+
    **A GROUP HERE GRANTS NOTHING**, and both pages say so where a reader will see
-   it. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos
+   it. The same is true of those three attributes — nothing reads them back. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos
    PAC carries a group from this directory and no endpoint reads one. On a service
    that authenticates nobody it could hardly be otherwise — but a console that
    listed groups beside the tokens page without saying it would let somebody
@@ -808,7 +878,13 @@ Worth knowing before "fixing" one of them:
   Binding JWT including `sd_hash`, the nonce, the audience, the validity window and
   whether the claims asked for arrived — and then says yes on a web page and stops.
   No session starts, no token is issued and nothing else in this service reads what
-  was presented. What it asks for is configuration (`/admin/vc-verifier-config`) and
+  was presented. **It IS recorded, which is a different claim and the two must
+  not be merged** — the same distinction a verified TLS client certificate
+  draws. The holder goes through `recordAuthentication()` like every other
+  accepted credential, so it appears on `/admin/users` and the directory seeds
+  an entry for it; what the row says is that an identity presented a credential
+  here and it verified, and nothing more. What it asks for is configuration
+  (`/admin/vc-verifier-config`) and
   is deliberately a SEPARATE setting from what the issuer mints (`/admin/vc`), so
   that asking for a claim no credential here carries stays reachable: that is the
   only way to exercise a wallet's "I cannot satisfy this request" path, and one page
