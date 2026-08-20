@@ -88,6 +88,14 @@ const vpConfig = require('./vc_verifier_config');
 // what the directory says into an access token. See its header for why the
 // selection is per-set and why nothing is selected on a fresh start.
 const claimAttributes = require('./claim_attributes');
+// The groups claim: which directory groups reach a token, whether it is on, and
+// what it would say about one person. A LIBRARY like the line above — it
+// registers no route, so requiring it here cannot reorder the router
+// /sts-metadata is built by walking, and it requires helpers.js, config.js and
+// admin_stats.js, none of which requires this file. It is required for the same
+// reason claim_attributes.js is: the page and the management API both report
+// this feature, and neither should be reading its four settings itself.
+const groupClaims = require('./group_claims');
 // The audit log: what happened here, in order, as rows rather than as counters.
 // A library like the three above — it registers no route — so requiring it here
 // neither moves a route nor makes a cycle. It holds the events and this file
@@ -1086,7 +1094,8 @@ app.get('/admin', function (req, res) {
     'it holds and everybody in it, each member linked back to their row on the users page. It is ' +
     'the one page here that reports the directory rather than what this service has issued, and ' +
     'the one thing to know about it is that <strong>a group here grants nothing</strong>: no ' +
-    'token, assertion or ticket this service issues carries a group, and no endpoint reads one.' +
+    'endpoint reads one and nothing decides anything on one. A token can CARRY one &mdash; see ' +
+    '<code>groups.claim</code> &mdash; which is a different sentence.' +
     '</li>' +
     '<li><a href="/admin/tokens">Tokens</a> — everything issued, in one table: every JWT, every ' +
     'SAML assertion (WS-Trust\'s and WS-Federation\'s alike) and every Kerberos ticket, newest ' +
@@ -3151,13 +3160,27 @@ function usersPageCell(userKey, known) {
 // What this directory's groups are and are not, said on both pages. Repeated
 // rather than shown once on the list, for the reason the open-console banner is
 // repeated: the page somebody arrives at directly is exactly the one that needs it.
+// It used to say the two halves as one sentence — nothing reads a group AND no
+// token carries one — and the second half stopped being true when the groups
+// claim was added. They are split now, in that order, because the one a reader
+// most needs is still the first: CARRYING a fact and ACTING on it are different
+// claims, and this is the same line this service already draws between an
+// identity being recorded and an identity being authenticated.
 const GROUPS_CAVEAT =
-  '<p class="note"><strong>A group here grants nothing.</strong> Nothing in this service reads ' +
-  'them: no access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries ' +
-  'a group from this directory, and no endpoint checks one. They exist for an LDAP client to ' +
-  'read, write and search. Adding somebody to <code>cn=directory-admins</code> changes what a ' +
-  'directory client sees and changes nothing at all about what their token can do &mdash; on a ' +
-  'service that authenticates nobody, it could hardly be otherwise.</p>';
+  '<p class="note"><strong>A group here grants nothing.</strong> No endpoint in this service ' +
+  'checks one, and nothing decides anything on one. Adding somebody to ' +
+  '<code>cn=directory-admins</code> changes what a directory client sees, and what a token ' +
+  '<em>says</em>, and changes nothing at all about what that token can DO &mdash; on a service ' +
+  'that authenticates nobody, it could hardly be otherwise.</p>' +
+  '<p class="note"><strong>A token can now carry one.</strong> With ' +
+  '<code>groups.claim</code> on &mdash; it is on by default &mdash; every OAuth 2.0 access ' +
+  'token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries ' +
+  'a claim naming the groups its subject is in, read from these entries at the moment it is ' +
+  'minted. Somebody in no group gets no claim at all rather than an empty list. What it is ' +
+  'called, whether each value is a <code>cn</code> or a whole DN, and whether a person\'s own ' +
+  '<code>memberOf</code> counts are on <a href="/admin/config">the configuration page</a>; ' +
+  '<a href="/admin/claims">the claims page</a> shows what it would say about one person. No ' +
+  'Kerberos PAC and no WS-Federation-specific token carries a group either way.</p>';
 
 function noGroupDirectorySection() {
   return '<p class="note">No LDAP directory is loaded in this process, so there are no groups to ' +
@@ -3696,6 +3719,69 @@ function editableOptions(mode, selected) {
   }).join('');
 }
 
+// What one attribute of an application entry IS, as the drill-down's third
+// column. Split out of that page because the entry carries FOUR kinds of
+// attribute and the table only ever described one of them — so everything else
+// came out as "not in the published schema", which is true of `objectClass` and
+// `createTimestamp` in the narrowest sense and useless as an explanation.
+//
+// The order is the order of certainty: the registry's own table first, since it
+// is the same table the entry was written from; then the operational ones, which
+// the DIRECTORY sets and no schema of this module's would ever mention; then the
+// object classes, published one heading further down `/ldap/applications`; and
+// only then the honest "somebody wrote this by hand", which is a real state —
+// this directory is schemaless and an ldapmodify can put anything on an entry.
+//
+// No description is invented for an attribute nothing here knows. Saying
+// something confident about a name written by hand is how a page starts lying.
+function applicationAttributeNote(name, operational) {
+  const lower = String(name).toLowerCase();
+  const spec = applications.SCHEMA.attributes.filter(function (one) {
+    return one.name.toLowerCase() === lower;
+  })[0];
+  if (spec) {
+    return { text: spec.what, sensitive: !!spec.sensitive };
+  }
+  if (lower === 'entrydn') {
+    return { text: 'WHERE THE ENTRY IS. RFC 5020, and the directory synthesises it ' +
+                   'rather than storing it: the DN is the key the entry is held under, ' +
+                   'so a stored copy would be a second definition of the same fact and ' +
+                   'the one that goes stale the moment the entry is renamed. It is the ' +
+                   'name an ldapsearch filter matches this by, which is why the dump ' +
+                   'calls it the same thing.' };
+  }
+  if (lower === 'createtimestamp' || lower === 'modifytimestamp') {
+    return { text: 'The directory\'s own, not the registry\'s: when this ENTRY was ' +
+                   (lower === 'createtimestamp' ? 'created' : 'last written') + '. ' +
+                   'Different from appFirstSeen and appLastSeen one row up, which are ' +
+                   'when the APPLICATION was seen — an ldapmodify moves this one and ' +
+                   'not those.' };
+  }
+  if (lower === 'objectclass') {
+    return { text: 'The classes this entry claims, from the registry\'s vocabulary: ' +
+                   applications.SCHEMA.objectClasses.map(function (one) {
+                     return one.name;
+                   }).join(', ') + '. A VOCABULARY and not a constraint — node-ldapjs ' +
+                   'has no schema subsystem and this directory is schemaless on ' +
+                   'purpose, so nothing rejects an entry for disobeying it.' };
+  }
+  if (operational) {
+    // An operational attribute this function has no sentence for, which means
+    // ldap_server.js's OPERATIONAL list grew and this one did not. Saying so is
+    // better than the "written by hand" answer below, which would be flatly
+    // wrong about an attribute the directory sets itself.
+    return { text: 'An operational attribute the directory sets. A search returns it only ' +
+                   'when it is asked for by name (RFC 4511 section 4.5.1.8); this dump is ' +
+                   'not a search, so it is here. This page has nothing more specific to ' +
+                   'say about it.' };
+  }
+  return { text: 'Not in the published schema and not one the directory sets — written ' +
+                 'by hand into this entry, which nothing here prevents and which is what ' +
+                 'a schemaless directory means. The registry\'s own writes REPLACE the ' +
+                 'entry, so a value here survives only until the next time this ' +
+                 'application is seen.' };
+}
+
 function applicationsListPage(req) {
   log.debug("Entering applicationsListPage().");
   const all = applications.list();
@@ -3728,9 +3814,14 @@ function applicationsListPage(req) {
     // the top of everything. See listViewOf().
     const href = '/admin/applications' + queryWith(listView, { application: row.identifier });
     return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.identifier) + '</code></a>' +
-      (row.identifier === row.dnLabel ? '' :
-        '<div class="sub">named <code>cn=' + esc(row.dnLabel) + '</code> &mdash; the ' +
-        'identifier is too long for a readable RDN</div>') +
+      // The DN on every row rather than only where the RDN is a digest. These
+      // entries ARE the registry, so the DN is what an ldapsearch or ldapmodify
+      // is aimed at; showing it only in the odd case made it look like a note
+      // about a special entry instead of the address of every one of them.
+      (row.dn ? '<div class="sub"><code>' + esc(row.dn) + '</code>' +
+        (row.identifier === row.dnLabel ? '' :
+          ' &mdash; the identifier is too long for a readable RDN, so the ' +
+          '<code>cn</code> is a digest of it') + '</div>' : '') +
       '</td><td>' + esc(row.name) + '</td>' +
       '<td>' + kindCells(row.kinds) + '</td>' +
       '<td>' + esc(row.protocols.join(', ')) + '</td>' +
@@ -3873,9 +3964,16 @@ function applicationDetailPage(req, identifier) {
       json: { found: false, identifier: identifier }
     };
   }
+  // EVERY attribute the entry carries, operational ones and entryDN included.
+  // This used to be the schema half minus the twelve names applications.js reads
+  // into named members, under a heading that said "every attribute the entry
+  // carries" — so objectClass, cn, appIdentifier, both timestamps and the DN
+  // itself were all missing from the one table on this service whose whole job
+  // is to be complete.
   const attributeRows = Object.keys(row.attributes).sort().map(function (name) {
     const value = row.attributes[name];
-    return { name: name, values: Array.isArray(value) ? value : [String(value)] };
+    return { name: name, values: Array.isArray(value) ? value : [String(value)],
+             operational: (row.operational || []).indexOf(name) >= 0 };
   });
   const paged = pagedRows(req.query, attributeRows,
                           { name: 'attributes', noun: 'attributes' });
@@ -3883,20 +3981,21 @@ function applicationDetailPage(req, identifier) {
   const nav = pageNav('/admin/applications', pageParamsOf(req.query), paging);
 
   const attrHtml = paged.shown.map(function (attr) {
-    // The schema row for this attribute, so the page says what each one MEANS
-    // rather than only what it holds. Read from applications.js's table, which
-    // is the same table the entry was built from — a second description here
-    // would be the one that went stale.
-    const spec = applications.SCHEMA.attributes.filter(function (one) {
-      return one.name.toLowerCase() === String(attr.name).toLowerCase();
-    })[0];
+    // What each attribute MEANS rather than only what it holds. The registry's
+    // own table is the first answer and is the same table the entry was written
+    // from — a second description here would be the one that went stale — and
+    // applicationAttributeNote() carries the other three cases.
+    const note = applicationAttributeNote(attr.name, attr.operational);
     return '<tr><td><code>' + esc(attr.name) + '</code>' +
-      (spec && spec.sensitive ? ' <span class="state-revoked">credential</span>' : '') +
+      (note.sensitive ? ' <span class="state-revoked">credential</span>' : '') +
+      (attr.operational
+        ? ' <span class="state-none" title="An operational attribute. A search returns it ' +
+          'only when it is asked for by name (RFC 4511 section 4.5.1.8) — this dump shows ' +
+          'it always.">(operational)</span>'
+        : '') +
       '</td><td>' + attr.values.map(function (v) {
         return '<code>' + esc(v) + '</code>';
-      }).join('<br>') + '</td><td class="sub">' +
-      esc(spec ? spec.what : 'Not in the published schema — written by hand into the ' +
-          'directory, which nothing here prevents.') + '</td></tr>';
+      }).join('<br>') + '</td><td class="sub">' + esc(note.text) + '</td></tr>';
   }).join('');
 
   const inner = messagesOf(req) +
@@ -3908,6 +4007,18 @@ function applicationDetailPage(req, identifier) {
     tile(row.registered ? 'yes' : 'no', 'Registered') +
     '</div>' +
     '<table><tr><th>Thing</th><th>Value</th></tr>' +
+    // FIRST, because it is the thing this page could not previously answer:
+    // where in the tree this application lives. The registry is the directory,
+    // so the DN is what an ldapsearch or an ldapmodify is aimed at, and a
+    // console that showed only the cn made an operator reconstruct it.
+    '<tr><td>Distinguished name</td><td>' + (row.dn
+      ? '<code>' + esc(row.dn) + '</code>' +
+        (row.identifier === row.dnLabel ? '' :
+          '<div class="sub">The RDN is a digest &mdash; <code>' + esc(row.identifier) +
+          '</code> is longer than 64 characters, which is not a readable RDN. ' +
+          '<code>appIdentifier</code> is the identity, not the <code>cn</code>.</div>')
+      : '<span class="state-none">no directory is loaded in this process, so there is ' +
+        'no entry and no registry</span>') + '</td></tr>' +
     '<tr><td>Name</td><td>' + esc(row.name) + '</td></tr>' +
     '<tr><td>Kind</td><td>' + kindCells(row.kinds) + '</td></tr>' +
     '<tr><td>Protocols</td><td>' + esc(row.protocols.join(', ')) + '</td></tr>' +
@@ -3918,14 +4029,29 @@ function applicationDetailPage(req, identifier) {
       : '<span class="state-none">nothing recorded</span>') + '</td></tr>' +
     '</table>' +
     '<h2>Its directory entry</h2>' +
-    '<p class="sub">Every attribute the entry carries, with what the published schema ' +
-    'says each one is. This IS the entry &mdash; the registry is the ' +
-    '<code>ou=applications</code> container and nothing caches it &mdash; so an ' +
-    '<code>ldapmodify</code> shows here on the next refresh, and changes what RFC 9700 ' +
-    'mode enforces at the same moment.</p>' +
+    '<p class="sub">Every attribute the entry carries &mdash; the operational ones and ' +
+    '<code>entryDN</code> included, which a SEARCH would return only when asked for by ' +
+    'name (RFC 4511 section 4.5.1.8) &mdash; with what each one is. This IS the entry ' +
+    '&mdash; the registry is the <code>ou=applications</code> container and nothing ' +
+    'caches it &mdash; so an <code>ldapmodify</code> shows here on the next refresh, and ' +
+    'changes what RFC 9700 mode enforces at the same moment.</p>' +
+    (row.dn
+      ? '<p class="sub"><code>' + esc(row.dn) + '</code>' +
+        (row.createdAt ? ' &middot; created <code>' + esc(row.createdAt) + '</code>' : '') +
+        (row.modifiedAt ? ' &middot; last written <code>' + esc(row.modifiedAt) +
+                          '</code>' : '') +
+        (row.origin ? ' &middot; written by <code>' + esc(row.origin) + '</code>' : '') +
+        '</p>'
+      : '') +
     nav +
     '<table><tr><th>Attribute</th><th>Value</th><th>What it is</th></tr>' +
-    (attrHtml || '<tr><td colspan="3">This entry carries no protocol attributes yet.</td></tr>') +
+    // Reachable only where no directory is loaded in this process. Every real
+    // entry carries objectClass, cn, appIdentifier and its two timestamps at the
+    // least, so "no attributes" is now a statement about the STORE rather than
+    // about this application — which is what it says.
+    (attrHtml || '<tr><td colspan="3">No directory is loaded in this process, so there ' +
+     'is no <code>ou=applications</code> container and no entry to show. This module ' +
+     'keeps no store of its own on purpose.</td></tr>') +
     '</table>' +
     nav +
 
@@ -4756,6 +4882,97 @@ function claimSetSection(setId, previewUser, values, pageUrl) {
     claimAttributeSection(setId, previewUser, values, pageUrl);
 }
 
+// ---------------------------------------------------------------------------
+// THE GROUPS CLAIM, on the page that already answers "what will the next token
+// carry".
+//
+// READ-ONLY here, and that is a decision rather than an omission. Its four
+// settings live in config.js's table, which means /admin/config and POST
+// /admin-api/config/set already change them — a second form here would be a
+// second door to one setting, which is exactly the two-stores mistake this
+// service keeps out of everything else. So this section reports and links; the
+// parity rule (a control gets an API operation in the same commit) is satisfied
+// by there being no new control.
+//
+// What it does add is the thing no configuration page can: what the claim WOULD
+// say about the person being previewed, built by groupsOf() — the same function
+// the issuance path calls — so a preview that agreed with the page and
+// disagreed with the token is not possible.
+// ---------------------------------------------------------------------------
+function groupClaimSection(previewUser) {
+  log.debug("Entering groupClaimSection(). user=" + previewUser);
+  const state = groupClaims.state();
+  const answer = groupClaims.groupsOf(previewUser);
+  const rows = answer.groups.map(function (group) {
+    // WHY this group is in the list, which is the whole of the memberOf
+    // disagreement in one cell: `member` and its two siblings are the GROUP
+    // saying so, memberOf is the PERSON saying so, and this directory maintains
+    // neither from the other.
+    const how = group.via.length
+      ? group.via.map(function (name) { return '<code>' + esc(name) + '</code>'; }).join(', ')
+      : '';
+    const counted = group.via.length || state.memberOfCounts;
+    return '<tr><td><code>' + esc(group.dn) + '</code></td>' +
+      '<td>' + esc(group.cn) + '</td>' +
+      '<td>' + (how || '&mdash;') +
+      (group.viaMemberOf
+        ? (how ? ', ' : '') + 'the person\'s own <code>memberOf</code>' +
+          (state.memberOfCounts ? '' : ' <em>(not counted)</em>')
+        : '') + '</td>' +
+      '<td>' + (counted ? 'yes' : 'no') + '</td></tr>';
+  }).join('');
+
+  const values = answer.values.length
+    ? '<p class="note">The claim <code>' + esc(state.claim) + '</code> would carry ' +
+      codeList(answer.values) + '.</p>'
+    : '<p class="note">No claim at all for this person &mdash; not an empty list, absent. ' +
+      esc(answer.reason) + '</p>';
+
+  log.debug("Leaving groupClaimSection(). " + answer.values.length + " value(s).");
+  return '<h2>The groups claim</h2>' +
+    '<p class="note">The one thing on this page that is <strong>not</strong> chosen per set: ' +
+    'with <code>groups.claim</code> on, all four carry it, for anybody who is a member of a ' +
+    'group in <a href="/admin/groups">the embedded directory</a>. The membership is read at the ' +
+    'moment a token is minted, so an <code>ldapmodify</code> changes the next one, and somebody ' +
+    'in no group gets no claim rather than an empty list &mdash; which is why this can be on by ' +
+    'default without changing what an existing client receives.</p>' +
+
+    '<div class="' + (state.enabled && !state.problem ? 'note' : 'warn') + '">' +
+    (state.enabled
+      ? (state.problem
+          ? '<strong>On, and not arriving.</strong> ' + esc(state.problem)
+          : '<strong>On.</strong> Every access token, ID Token and both SAML assertions carry ' +
+            '<code>' + esc(state.claim) + '</code>, each value being ' +
+            (state.valueForm === 'dn' ? 'the group\'s whole DN' : 'the group\'s <code>cn</code>') +
+            '. A person\'s own <code>memberOf</code> ' +
+            (state.memberOfCounts ? 'counts' : 'does NOT count') + ' as membership.')
+      : '<strong>Off.</strong> No token or assertion carries a groups claim. ' +
+        'Turn it on with <code>groups.claim</code>.') +
+    ' Change any of it on <a href="/admin/config">the configuration page</a>: ' +
+    codeList(state.settings) + '.' +
+    (state.loaded ? '' : ' <strong>The embedded directory is not loaded in this process</strong>, ' +
+                         'so there are no groups to read.') +
+    '</div>' +
+
+    '<div class="warn"><strong>Carrying a group is not granting one.</strong> No endpoint here ' +
+    'reads this claim and nothing decides anything on it &mdash; the same sentence ' +
+    '<a href="/admin/groups">the groups page</a> has always carried, and the half of it that ' +
+    'changed is that a token now says so out loud.</div>' +
+
+    '<p class="note">A typed claim above, and a ticked directory attribute above, both win over ' +
+    'this one where the names collide: those were named on this page about this service, and ' +
+    'this comes from a setting and a directory.</p>' +
+
+    '<h3>What ' + esc(previewUser) + ' would get</h3>' +
+    values +
+    (answer.groups.length
+      ? '<table><tr><th>Group</th><th>cn</th><th>Named by</th><th>Counted</th></tr>' +
+        rows + '</table>'
+      : '<p class="note">' + esc(previewUser) + ' is named by no group here' +
+        (answer.entryFound ? '' : ', and has no entry in the directory either') + '. ' +
+        'The entry would be at <code>' + esc(answer.dn) + '</code>.</p>');
+}
+
 // The four sets and the rules that govern them. The rules are in the reply and
 // not only on the page because the first thing a caller of POST .../claims/add
 // needs is the list of names it will refuse.
@@ -4796,7 +5013,19 @@ function claimsJson(previewUser) {
     // set with nothing selected reports no entry: that is the right answer to
     // "what does this set carry" and the wrong answer to "is this person in the
     // directory".
-    preview: Object.assign({ user: user }, claimAttributes.catalogueValuesFor(user))
+    preview: Object.assign({ user: user }, claimAttributes.catalogueValuesFor(user)),
+    // The groups claim, which is the one thing here that is not chosen per set:
+    // all four carry it or none does. Its settings are config.js's, so this is
+    // a report and there is no operation beside it — POST
+    // /admin-api/config/set is the door, and a second one would be a second
+    // store for one setting.
+    //
+    // `preview` is built by the function the ISSUANCE path calls, for the
+    // reason every other preview here is: a caller with no browser has no other
+    // way to ask "what would this token carry", and a second walk of the
+    // directory would be a preview that can disagree with the token.
+    groups: Object.assign(groupClaims.state(),
+                          { preview: groupClaims.groupsOf(user) })
   };
   log.debug("Leaving claimsJson(). " + json.sets.length + " set(s).");
   return json;
@@ -4853,6 +5082,8 @@ app.get('/admin/claims', function (req, res) {
       return claimSetSection(id, previewUser, values, pageUrl);
     }).join('') +
 
+    groupClaimSection(previewUser) +
+
     '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
     '<p class="note">The catalogue is of <strong>LDAP attribute types</strong> and not of claim ' +
     'names, and it is the same catalogue <a href="/admin/vc">the credential claims page</a> ' +
@@ -4893,8 +5124,9 @@ app.get('/admin/claims', function (req, res) {
     '<p class="note"><strong>None of it is verified and none of it grants anything.</strong> This ' +
     'service authenticates nobody — the username typed at the sign-in screen is the identity in ' +
     'every token it issues — so a birthdate from here is a birthdate from a web form. No endpoint ' +
-    'here reads one of these claims back or decides anything on one, and a group on that person\'s ' +
-    'entry still grants nothing: see <a href="/admin/groups">the groups page</a>.</p>' +
+    'here reads one of these claims back or decides anything on one. That is true of the groups ' +
+    'claim below as well: a token carries it, and a group on that person\'s entry still grants ' +
+    'them nothing &mdash; see <a href="/admin/groups">the groups page</a>.</p>' +
 
     '<h2>Values</h2>' +
     '<p class="note">A value may contain <code>${placeholders}</code>, because a claim that can only ' +

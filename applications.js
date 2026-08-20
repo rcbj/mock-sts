@@ -452,13 +452,27 @@ function editableAttributes(mode) {
 //
 // `ldap_server.js` fills this at its require time with four functions:
 //
-//   readApplication(identifier)   the entry's attributes, or null
+//   readApplication(identifier)   the entry, or null
 //   writeApplication(identifier, attributes)  create or update it
-//   allApplications()             every entry's attributes, in tree order
+//   allApplications()             every entry, in tree order
 //   countApplications()           how many there are, for the cap message
 //
-// They speak in ATTRIBUTE OBJECTS ({name: [values]}), not in records: the
-// conversion both ways is this module's, because this module owns the schema.
+// The two directions are DELIBERATELY NOT SYMMETRICAL, which is worth saying
+// because it looks like an oversight. A WRITE speaks in ATTRIBUTE OBJECTS
+// ({name: [values]}) — that is all a record has to say, and the conversion is
+// this module's because this module owns the schema. A READ hands back the
+// whole ENTRY:
+//
+//   { dn, origin, createdAt, modifiedAt, operational: [...], attributes: {...} }
+//
+// the same shape ldap_server.js's objectFor() gives the console for a person.
+// It has to be the entry rather than the attributes, because THE DN IS NOT AN
+// ATTRIBUTE — it is the key the entry is stored under — so a caller handed only
+// `attributes` had no way to learn where in the tree the application lives, and
+// every applications page could show the `cn` and nothing else. That was the
+// bug. `attributes` now also arrives CANONICALLY SPELLED and with the
+// operational attributes included, `entryDN` among them, which is why every
+// lookup below goes through byLowerName() rather than indexing the map.
 // ---------------------------------------------------------------------------
 let directory = null;
 let warnedAboutNoDirectory = false;
@@ -583,9 +597,25 @@ function attributesFor(record) {
   return attributes;
 }
 
-// Attribute names arrive from the directory lower-cased, because that is how it
-// stores them — every lookup here goes through this rather than through the
-// mixed-case name in the schema.
+// Attribute names arrive from the directory in one of TWO spellings and every
+// lookup here has to survive both. The store lower-cases them, because
+// @ldapjs/attribute lower-cases a type on the way in; readApplication() then
+// puts the CANONICAL spelling back so that a page does not show `oauthclientid`
+// beside a published schema that says `oauthClientId`. So an index that assumed
+// either one would silently find nothing — and finding nothing here does not
+// throw, it produces a record with an empty identifier and no fields, which
+// reads as an application that lost its attributes rather than as a lookup that
+// missed. LDAP attribute descriptions are case-insensitive anyway (RFC 4512
+// section 2.5), so folding is the correct answer and not merely the defensive
+// one.
+function byLowerName(attributes) {
+  const index = {};
+  Object.keys(attributes || {}).forEach(function (name) {
+    index[String(name).toLowerCase()] = attributes[name];
+  });
+  return index;
+}
+
 function firstValue(attributes, name) {
   const values = attributes[String(name).toLowerCase()];
   return (values && values.length) ? String(values[0]) : '';
@@ -598,7 +628,7 @@ function allValues(attributes, name) {
 
 function recordFromAttributes(attributes) {
   log.debug("Entering recordFromAttributes().");
-  const attrs = attributes || {};
+  const attrs = byLowerName(attributes);
   const record = {
     identifier: firstValue(attrs, 'appIdentifier'),
     label: firstValue(attrs, 'cn'),
@@ -661,16 +691,24 @@ function blankRecord(identifier) {
 // Read one application out of the directory, or a blank record if it is not
 // there yet. `known` says which, because the caller has to tell a first sight
 // from a repeat and cannot infer it from an empty record.
+//
+// `entry` is the third thing it returns and it is NOT derivable from the other
+// two: it carries the DN, the origin and the timestamps, none of which is an
+// attribute of the record. Callers that only want to write ignore it — a write
+// is built from the record — and the two callers that render an application read
+// it, because "where does this entry live" is the question the pages could not
+// answer. It is null when there is no directory, which is a different state from
+// an entry with nothing on it and the pages say so.
 function load(identifier) {
   const backing = store();
   if (!backing) {
-    return { record: blankRecord(identifier), known: false };
+    return { record: blankRecord(identifier), known: false, entry: null };
   }
-  const attributes = backing.readApplication(String(identifier));
-  if (!attributes) {
-    return { record: blankRecord(identifier), known: false };
+  const entry = backing.readApplication(String(identifier));
+  if (!entry) {
+    return { record: blankRecord(identifier), known: false, entry: null };
   }
-  return { record: recordFromAttributes(attributes), known: true };
+  return { record: recordFromAttributes(entry.attributes), known: true, entry: entry };
 }
 
 function save(record) {
@@ -1247,7 +1285,19 @@ function createApplication(detail) {
   log.info('applications: "' + identifier + '" was created by hand. ' + count() +
            ' application(s) in the directory.');
   log.debug("Leaving createApplication(). Created.");
-  return { ok: true, application: view(record) };
+  return { ok: true, application: viewAfterWrite(identifier, record) };
+}
+
+// What an action hands back about the application it just wrote: the ENTRY as
+// the directory now holds it, re-read rather than reconstructed from the record
+// in hand. Re-reading is not ceremony — the record does not know the DN, the
+// origin or modifyTimestamp, all three of which the directory decides, so a
+// reply built from it would be missing exactly the facts this shape was widened
+// to carry. The fallback covers the one case where the write did not land (no
+// directory attached, or the container full): the caller still gets the
+// application it asked about, with `dn` null saying why.
+function viewAfterWrite(identifier, record) {
+  return get(identifier) || view(record, null);
 }
 
 // One attribute changed, in the mode its schema row allows. `mode` is checked
@@ -1353,7 +1403,7 @@ function updateApplication(identifier, change) {
 
   if (!changed) {
     log.debug("Leaving updateApplication(). Nothing changed.");
-    return { ok: true, changed: false, application: view(record),
+    return { ok: true, changed: false, application: viewAfterWrite(identifier, record),
              message: 'Nothing changed: ' + attribute + ' already said that.' };
   }
   record.lastAt = record.lastAt || Date.now();
@@ -1372,7 +1422,8 @@ function updateApplication(identifier, change) {
   });
   log.info('applications: "' + identifier + '" — ' + what + '.');
   log.debug("Leaving updateApplication(). " + what + ".");
-  return { ok: true, changed: true, application: view(record), message: what + '.' };
+  return { ok: true, changed: true, application: viewAfterWrite(identifier, record),
+           message: what + '.' };
 }
 
 // The entry goes entirely. Different from forgetRegistration(), which keeps it
@@ -1419,10 +1470,42 @@ function deleteApplication(identifier, options) {
 // cache, which is what keeps an ldapmodify effective on the next request rather
 // than after a restart.
 // ---------------------------------------------------------------------------
-function view(record) {
+// ---------------------------------------------------------------------------
+// ONE APPLICATION AS EVERY PAGE AND EVERY API REPLY SEES IT.
+//
+// `record` is what this module understands about it; `entry` is what the
+// directory holds. Both, because they are not the same set and the difference
+// was invisible from outside:
+//
+//   * `attributes` IS THE WHOLE ENTRY now, canonically spelled, operational
+//     attributes and `entryDN` included. It used to be `record.fields`, which is
+//     the schema half MINUS the twelve names recordFromAttributes() reads into
+//     named members instead — so `objectClass`, `cn`, `appIdentifier`,
+//     `appName`, `appKind`, `appProtocol`, `description`, both timestamps, the
+//     three counters and `appRegistered` were all missing from a table headed
+//     "every attribute the entry carries", and so was anything an ldapmodify had
+//     written by hand. The named members are still here beside it: a caller that
+//     wants the identifier should not have to know which attribute holds it.
+//   * `dn` is where the entry IS. Not an attribute — the key it is stored under
+//     — so it could not have appeared in the old map however complete that map
+//     was. It is repeated inside `attributes` as `entryDN`, the RFC 5020 name,
+//     because that is the name an ldapsearch filter matches it by here and a
+//     dump that called the same fact two things would teach the reader a wrong
+//     one.
+//   * `operational` names which attributes a SEARCH would have withheld unless
+//     asked for by name (RFC 4511 section 4.5.1.8), so a page can mark them
+//     rather than pretend the distinction does not exist. This is a dump of the
+//     store and not a search, so it shows them always.
+//
+// `entry` is absent — null — only when no directory is loaded in this process,
+// which is the state store() warns about once and in which there is no registry
+// at all. It is not the same as an entry carrying nothing.
+// ---------------------------------------------------------------------------
+function view(record, entry) {
   return {
     identifier: record.identifier,
     dnLabel: record.label,
+    dn: entry ? entry.dn : null,
     name: record.name,
     kinds: record.kinds.slice(0),
     protocols: record.protocols.slice(0),
@@ -1433,7 +1516,19 @@ function view(record) {
     sessions: record.sessionCount,
     users: record.userCount,
     descriptions: record.descriptions.slice(0),
-    attributes: record.fields
+    // The entry's own facts, which are facts about the ENTRY rather than about
+    // the application: when the directory created it, when it last changed, and
+    // whether this service wrote it or a client did.
+    origin: entry ? entry.origin : null,
+    createdAt: entry ? entry.createdAt : null,
+    modifiedAt: entry ? entry.modifiedAt : null,
+    operational: entry ? entry.operational.slice(0) : [],
+    attributes: entry ? entry.attributes : {},
+    // The schema half on its own, kept because it is a different question —
+    // "what has this module recorded about it" rather than "what does the entry
+    // carry" — and because dropping it would silently change what a caller of
+    // this API had already parsed.
+    fields: record.fields
   };
 }
 
@@ -1442,8 +1537,8 @@ function list() {
   if (!backing) {
     return [];
   }
-  const rows = backing.allApplications().map(function (attributes) {
-    return view(recordFromAttributes(attributes));
+  const rows = backing.allApplications().map(function (entry) {
+    return view(recordFromAttributes(entry.attributes), entry);
   });
   // Newest activity first. `lastSeen` comes off the entry as GeneralizedTime,
   // which has ONE-SECOND resolution, so applications touched in the same second
@@ -1457,7 +1552,7 @@ function list() {
 
 function get(identifier) {
   const loaded = load(identifier);
-  return loaded.known ? view(loaded.record) : null;
+  return loaded.known ? view(loaded.record, loaded.entry) : null;
 }
 
 function count() {

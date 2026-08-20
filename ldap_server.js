@@ -163,6 +163,16 @@ const tlsServer = require('./tls_server');
 // slot: see the setDirectory() install further down.
 const vcClaims = require('./vc_claims');
 
+// The groups claim: which directory groups reach an access token, an ID Token
+// and both SAML assertions. A plain require for exactly the reasons above —
+// it is a LIBRARY (it registers no route, so it cannot reorder /sts-metadata)
+// and it requires helpers.js, config.js and admin_stats.js, none of which
+// requires this file. The traffic in the other direction, groupsOfUser(), goes
+// through its setDirectory() slot further down, because THAT module must not
+// require this one: it is read from admin_stats.js's resolver, which every
+// issuance site reaches long before the directory's routes should exist.
+const groupClaims = require('./group_claims');
+
 // The port. 389 is the assigned one and this process is root in the container,
 // so it binds it directly; a host run is not root, which is why the variable
 // exists. Changing it means the parent project's api has to allow the new port
@@ -270,67 +280,227 @@ let boundTlsPort = LDAPS_PORT;
 // ---------------------------------------------------------------------------
 const entries = new Map();
 
-const CANONICAL_NAMES = {
-  objectclass: 'objectClass', dc: 'dc', o: 'o', ou: 'ou', cn: 'cn', sn: 'sn',
-  uid: 'uid', mail: 'mail', givenname: 'givenName', displayname: 'displayName',
-  telephonenumber: 'telephoneNumber', title: 'title', description: 'description',
-  member: 'member', memberof: 'memberOf', uniquemember: 'uniqueMember',
-  // RFC 2307's, and the one a posixGroup's membership is written in. It holds a
-  // bare user name where the other three hold a DN, which is why /admin/groups
-  // resolves it differently — see MEMBER_ATTRIBUTES.
-  memberuid: 'memberUid',
-  userpassword: 'userPassword', employeenumber: 'employeeNumber',
-  employeetype: 'employeeType', departmentnumber: 'departmentNumber',
-  postaladdress: 'postalAddress', l: 'l', st: 'st', c: 'c', gidnumber: 'gidNumber',
-  uidnumber: 'uidNumber', homedirectory: 'homeDirectory',
-  createtimestamp: 'createTimestamp', modifytimestamp: 'modifyTimestamp',
-  // PKCS#9, and it arrives on this directory inside a certificate subject.
-  emailaddress: 'emailAddress',
-  // The root DSE's own attributes (RFC 4512 section 5.1). They are here for the
-  // same reason as the rest: a client showing `namingcontexts` where every
-  // document says `namingContexts` looks like the client is broken.
-  namingcontexts: 'namingContexts', supportedldapversion: 'supportedLDAPVersion',
-  supportedcontrol: 'supportedControl', supportedextension: 'supportedExtension',
-  supportedsaslmechanisms: 'supportedSASLMechanisms', vendorname: 'vendorName',
-  vendorversion: 'vendorVersion', subschemasubentry: 'subschemaSubentry',
-  entrydn: 'entryDN',
-  // This service's OWN names, on the entries a TLS client certificate seeds.
-  // They are listed here for the display, not to suggest they are standard:
-  // there is no standard attribute type for "the DN inside the certificate",
-  // and certificatePlan() says why the standard one that does exist —
-  // `userCertificate`, which is binary — is not what these are.
-  x509subject: 'x509subject', x509issuer: 'x509issuer',
-  x509serialnumber: 'x509serialNumber', x509notbefore: 'x509notBefore',
-  x509notafter: 'x509notAfter', x509fingerprint256: 'x509fingerprint256',
-  // This service's own names too, on the entries a DECENTRALIZED IDENTIFIER
-  // seeds — and they are load-bearing rather than decorative: the entry is
-  // NAMED by a hash of the DID (didPlan() says why), so `didSubject` is the only
-  // place the identifier itself survives and the only thing locateEntry() can
-  // find the entry by. There is no standard attribute type for "the DID this
-  // entry is", which is unsurprising: DID Core postdates the LDAP schema
-  // documents by two decades and nobody has registered one.
-  didsubject: 'didSubject', didmethod: 'didMethod',
-  // And this service's own names again, on any entry whose person authenticated
-  // somewhere that STATES how they did it — which today is the sign-in screen
-  // and nothing else, because amr is an OIDC vocabulary and a Kerberos AS-REQ
-  // has nothing to put in it. There is no standard attribute type for "this
-  // account authenticated with more than one factor": the nearest things in the
-  // wild are Active Directory's msDS-* attributes, which are Microsoft's own
-  // names for something else entirely, and pretending to be one of those would
-  // be worse than obviously not being one.
-  authnmethod: 'authnMethod', mfaauthenticated: 'mfaAuthenticated',
-  mfalastauthtime: 'mfaLastAuthTime'
-};
+// ---------------------------------------------------------------------------
+// TWO LISTS OF SPELLINGS, AND THE SPLIT IS WHO DEFINED THE NAME.
+//
+// `STANDARD_NAMES` are attribute types somebody else defined and published; the
+// specification is named above each group. `OWN_NAMES` are this service's own
+// inventions, here for the display and NOT to suggest they are standard — the
+// comments on those groups say so individually, because that distinction is the
+// one a reader of a mock most needs and the one a table like this most easily
+// blurs.
+//
+// Both are written as THE CANONICAL SPELLING ALONE, with the lower-cased lookup
+// key derived from it. This used to be a map of `lower: 'Mixed'` pairs, and the
+// trouble with that shape is that a typo in the KEY is invisible: the entry
+// simply never matches, the name renders lower-cased, and that is exactly the
+// symptom this table exists to prevent — so it would be failing silently at the
+// only job it has. `toLowerCase()` cannot disagree with itself. It is also the
+// shape `vc_claims.js` already derives its own table in, which is why merging
+// the two costs nothing.
+//
+// WHY THE STANDARD SET IS LONG, when this service writes perhaps thirty of
+// them. The directory is SCHEMALESS on purpose: a client can `add` any attribute
+// it likes to any entry, and two of the families here write entries nobody
+// typed — a TLS client certificate's subject becomes attributes RDN by RDN, so
+// whichever types are in that subject arrive whether or not this service has
+// ever heard of them. A table holding only what this service happens to write
+// would be right about its own entries and wrong about everybody else's, which
+// is worse than having none: the reader who most needs the conventional spelling
+// is the one looking at an attribute this service did not write. `seeAlso` is
+// what made the point — a perfectly ordinary RFC 4519 type, rendering as
+// `seealso` on the one page whose job is to show an entry faithfully.
+//
+// WHAT IS NOT HERE. No spelling is invented for a name nobody published. Where
+// two specifications disagree about the capitalisation of one name the older
+// registered one wins and the disagreement is noted, because picking silently is
+// how a table like this becomes a third opinion.
+// ---------------------------------------------------------------------------
+const STANDARD_NAMES = [
+  // RFC 4519 — the standard directory attribute types, in full. `name` is in
+  // here because it is a real type (section 2.18): the supertype cn, sn, ou and
+  // the rest derive from, which a client may perfectly well ask for by name.
+  'businessCategory', 'c', 'cn', 'dc', 'description', 'destinationIndicator',
+  'distinguishedName', 'dnQualifier', 'enhancedSearchGuide',
+  'facsimileTelephoneNumber', 'generationQualifier', 'givenName',
+  'houseIdentifier', 'initials', 'internationalISDNNumber', 'l', 'member',
+  'name', 'o', 'ou', 'owner', 'physicalDeliveryOfficeName', 'postalAddress',
+  'postalCode', 'postOfficeBox', 'preferredDeliveryMethod', 'registeredAddress',
+  'roleOccupant', 'searchGuide', 'seeAlso', 'serialNumber', 'sn', 'st',
+  'street', 'telephoneNumber', 'teletexTerminalIdentifier', 'telexNumber',
+  'title', 'uid', 'uniqueMember', 'userPassword', 'x121Address',
+  // RFC 4519 section 2.40 spells this with a lower-case x, and RFC 2798's
+  // inetOrgPerson definition spells the same type `x500uniqueIdentifier`. The
+  // registered directory-schema spelling wins here; the two differ only in a
+  // letter LDAP does not distinguish anyway, so nothing matches differently —
+  // one of them just has to be chosen for the display.
+  'x500UniqueIdentifier',
+
+  // RFC 4524 — COSINE. The types still in ordinary use; the specification also
+  // carries a dozen marked obsolete or historic (janetMailbox, dITRedirect,
+  // the three *Quality types) and those are deliberately left out rather than
+  // listed, since publishing a spelling suggests the name is worth writing.
+  'associatedDomain', 'associatedName', 'buildingName', 'co', 'documentAuthor',
+  'documentIdentifier', 'documentLocation', 'documentPublisher',
+  'documentTitle', 'documentVersion', 'drink', 'homePhone', 'homePostalAddress',
+  'host', 'info', 'mail', 'manager', 'organizationalStatus', 'otherMailbox',
+  'personalTitle', 'roomNumber', 'secretary', 'uniqueIdentifier', 'userClass',
+
+  // RFC 2798 — inetOrgPerson, which is the class most of the people in this
+  // directory would carry in a real one. `labeledURI` is RFC 2079's rather than
+  // this one's; it is grouped here because inetOrgPerson is where it is met.
+  'audio', 'carLicense', 'departmentNumber', 'displayName', 'employeeNumber',
+  'employeeType', 'jpegPhoto', 'labeledURI', 'mobile', 'pager', 'photo',
+  'preferredLanguage', 'userCertificate', 'userPKCS12', 'userSMIMECertificate',
+
+  // RFC 2307 — NIS. `memberUid` is the one that earns its place beyond the
+  // display: it holds a BARE USER NAME where member and uniqueMember hold a DN,
+  // which is why /admin/groups resolves it differently — see MEMBER_ATTRIBUTES.
+  'bootFile', 'bootParameter', 'gecos', 'gidNumber', 'homeDirectory',
+  'ipHostNumber', 'ipNetmaskNumber', 'ipNetworkNumber', 'ipProtocolNumber',
+  'ipServicePort', 'ipServiceProtocol', 'loginShell', 'macAddress',
+  'memberNisNetgroup', 'memberUid', 'nisMapEntry', 'nisMapName',
+  'nisNetgroupTriple', 'oncRpcNumber', 'shadowExpire', 'shadowFlag',
+  'shadowInactive', 'shadowLastChange', 'shadowMax', 'shadowMin',
+  'shadowWarning', 'uidNumber',
+
+  // RFC 4512 — the object class attribute, the operational attributes every
+  // entry has, and the subschema ones. A SEARCH withholds the operational ones
+  // unless they are asked for by name (section 4.5.1.8) and toSearchEntry()
+  // honours that; being withheld is no reason to be unable to spell them, since
+  // asking for one by name is exactly when a client sees it.
+  'aliasedObjectName', 'attributeTypes', 'createTimestamp', 'creatorsName',
+  'dITContentRules', 'dITStructureRules', 'governingStructureRule',
+  'ldapSyntaxes', 'matchingRules', 'matchingRuleUse', 'modifiersName',
+  'modifyTimestamp', 'nameForms', 'objectClass', 'objectClasses',
+  'structuralObjectClass', 'subschemaSubentry',
+
+  // RFC 4512 again — the root DSE's own attributes (section 5.1), plus the two
+  // vendor ones from RFC 3045. They are here for the same reason as the rest: a
+  // client showing `namingcontexts` where every document says `namingContexts`
+  // looks like the client is broken.
+  'altServer', 'namingContexts', 'supportedControl', 'supportedExtension',
+  'supportedFeatures', 'supportedLDAPVersion', 'supportedSASLMechanisms',
+  'vendorName', 'vendorVersion',
+
+  // RFC 5020 and RFC 4530 — the two operational attributes that name an entry
+  // rather than describe it. `entryDN` is load-bearing beyond the display: it is
+  // what matchable() calls the DN when a filter matches on it, and what
+  // applicationObject() publishes the DN as, so those two and this table have to
+  // agree or an ldapsearch filter and a console page name one fact two things.
+  'entryDN', 'entryUUID',
+
+  // PKCS#9, and it arrives on this directory inside a certificate subject —
+  // certificatePlan() turns every RDN of a verified client certificate's subject
+  // into an attribute, so which types turn up is decided by whoever issued the
+  // certificate and not by anything here.
+  'emailAddress',
+
+  // NOT REGISTERED ANYWHERE, and here anyway. `memberOf` is the reverse of
+  // group membership as Active Directory and most directories in the wild
+  // implement it, and it has never been standardised — draft-ietf-ldapext-memberof
+  // expired. It cannot go in this service's own list either, because this
+  // service did not invent it: a client writes it, and /admin/groups reports the
+  // disagreement when an entry's own memberOf names a group that does not list
+  // it back. NOTHING HERE MAINTAINS IT — that page says so, and the spelling
+  // being conventional must not be read as the attribute being managed.
+  'memberOf'
+];
+
+// ---------------------------------------------------------------------------
+// This service's own names. Not standard, and listed here for the display only.
+// Each group says why nothing standard was used instead, because "we invented an
+// attribute type" is a claim that needs one.
+// ---------------------------------------------------------------------------
+const OWN_NAMES = [
+  // On the entries a TLS client certificate seeds. There is no standard
+  // attribute type for "the DN inside the certificate", and the standard one
+  // that does exist — `userCertificate`, which is binary — is not what these
+  // are; certificatePlan() says the rest.
+  'x509subject', 'x509issuer', 'x509serialNumber', 'x509notBefore',
+  'x509notAfter', 'x509fingerprint256',
+
+  // On the entries a DECENTRALIZED IDENTIFIER seeds, and load-bearing rather
+  // than decorative: the entry is NAMED by a hash of the DID (didPlan() says
+  // why), so `didSubject` is the only place the identifier itself survives and
+  // the only thing locateEntry() can find the entry by. There is no standard
+  // attribute type for "the DID this entry is", which is unsurprising — DID Core
+  // postdates the LDAP schema documents by two decades and nobody registered
+  // one.
+  'didSubject', 'didMethod',
+
+  // On any entry whose person authenticated somewhere that STATES how they did
+  // it — which today is the sign-in screen and nothing else, because amr is an
+  // OIDC vocabulary and a Kerberos AS-REQ has nothing to put in it. There is no
+  // standard attribute type for "this account authenticated with more than one
+  // factor": the nearest things in the wild are Active Directory's msDS-*
+  // attributes, which are Microsoft's own names for something else entirely, and
+  // pretending to be one of those would be worse than obviously not being one.
+  'authnMethod', 'mfaAuthenticated', 'mfaLastAuthTime'
+];
+
+// The table itself, built from the two lists. `learnName()` is the ONE way in,
+// so the disagreement check below cannot be bypassed by a later merge — and
+// there are three of those.
+const CANONICAL_NAMES = {};
+
+// A name is learnt once. A SECOND spelling of the same name is a real defect and
+// is reported rather than silently resolved: the two lists here, the credential
+// claim catalogue and the applications schema are four independently maintained
+// sets of spellings, and "whichever was merged first wins" is how one of them
+// comes to be quietly wrong about `schacDateOfBirth` while all four look right
+// read alone. Reported and not thrown, because a table of how to CAPITALISE a
+// name must never be able to stop this service starting.
+function learnName(spelling, source) {
+  const canonical = String(spelling);
+  const lower = canonical.toLowerCase();
+  const known = CANONICAL_NAMES[lower];
+  if (known === undefined) {
+    CANONICAL_NAMES[lower] = canonical;
+    return;
+  }
+  if (known !== canonical) {
+    log.warn('ldap: two spellings of the attribute type "' + lower + '" — "' + known +
+             '" is already known and ' + source + ' says "' + canonical + '". Keeping "' +
+             known + '". They match identically either way (RFC 4512 section 2.5 makes ' +
+             'attribute descriptions case-insensitive) so nothing is found or missed ' +
+             'differently; it is only the spelling shown on a page, and one of the two ' +
+             'lists is wrong.');
+  }
+}
+
+STANDARD_NAMES.forEach(function (spelling) { learnName(spelling, 'the standard list'); });
+OWN_NAMES.forEach(function (spelling) { learnName(spelling, "this service's own list"); });
 
 // The attribute types /admin/vc can put on a person so that a credential has
 // something to carry. They are MERGED rather than typed out a second time: that
 // catalogue already spells each one the way its schema document spells it
 // (`schacDateOfBirth`, `labeledURI`, `departmentNumber`), and two lists of
-// spellings is one list that will eventually be wrong. Anything already named
-// above keeps its spelling — Object.assign's later argument wins, so the merge
-// is written in the order that makes the table above authoritative.
+// spellings is one list that will eventually be wrong. Through learnName(), so
+// that a catalogue disagreeing with the standard list above is REPORTED rather
+// than resolved by merge order — several of its rows are RFC 4519 and RFC 2798
+// types this file now spells itself, and those two lists agreeing is a thing to
+// find out about rather than to assume.
 Object.keys(vcClaims.CANONICAL_NAMES).forEach(function (lower) {
-  if (!CANONICAL_NAMES[lower]) CANONICAL_NAMES[lower] = vcClaims.CANONICAL_NAMES[lower];
+  learnName(vcClaims.CANONICAL_NAMES[lower], 'the credential claim catalogue');
+});
+
+// And the applications registry's, for the same reason and from the same kind of
+// source: `applications.js` owns that schema and spells every attribute the way
+// `/ldap/applications` publishes it — `oauthClientId`, `appRegistrationJson`,
+// `samlEntityId`. Without this merge every applications page and every reply from
+// the management API showed `oauthclientid` beside a published schema that says
+// `oauthClientId`, which reads as a bug in the page rather than as what it is:
+// the store lower-casing a name because @ldapjs/attribute does.
+//
+// FIRST SPELLING WINS, and that matters here more than above. That schema
+// carries `cn` and `description`, which the standard list at the top of this
+// file already spells; a merge that overwrote would let the registry's table
+// decide how a standard attribute looks on a PERSON's entry too, since there is
+// one map for the whole directory. Both spell those two the same way, so the
+// check stays quiet — which is the point of having it rather than assuming.
+applications.SCHEMA.attributes.forEach(function (row) {
+  learnName(row.name, 'the applications schema');
 });
 
 // A DN as a comparison key. Case-folded, and the whitespace around each comma
@@ -1872,6 +2042,118 @@ function groupsFor(dn) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// THE OTHER DIRECTION: WHICH GROUPS IS THIS PERSON IN?
+//
+// groupsFor() above answers "who is in this group", which is what a page asks.
+// A CLAIM asks the inverse, once per token, about one person — so it is a
+// different walk and not a filter over that one: groupsFor('') resolves every
+// member of every group and builds the console's counts, which is most of a
+// page's worth of work to answer one yes/no per group.
+//
+// It is here rather than in group_claims.js for the reason objectFor() and
+// groupsFor() are here: WHAT COUNTS AS A GROUP is this module's decision (both
+// rules — placement under ou=groups, or a group objectClass wherever it sits),
+// and a second implementation over there would be the second definition that
+// eventually disagrees. group_claims.js decides what to DO with the answer;
+// this decides what the answer IS. Same split as oauth2_bcp.js and oauth2.js.
+//
+// THREE THINGS ARE LOAD-BEARING.
+//
+// **A member value is resolved exactly as resolveMember() resolves it**, which
+// is why `holds` is read from MEMBER_ATTRIBUTES rather than assumed: `member`
+// and `uniqueMember` hold a DN and `memberUid` holds a bare name. Treating
+// them alike is how every posixGroup membership silently stops reaching a
+// token, which is the same defect the console's member list was written to
+// avoid.
+//
+// **AN ENTRY IS NOT REQUIRED.** The person is matched by the DN their identity
+// resolves to, whether or not anything is stored there. A group that lists
+// `uid=bob,ou=users` while bob has no entry is a DANGLING member from the
+// group's side and is still the group SAYING bob is in it — and with
+// ldap.autocreateUsers on, bob's entry appears at the moment he authenticates
+// and a token is minted in the same breath. Requiring the entry would make the
+// claim depend on the order of two things that happen together.
+//
+// **BOTH ANSWERS COME BACK AND NEITHER IS APPLIED HERE.** A group can name this
+// person, or this person's own `memberOf` can name the group, and this
+// directory maintains neither from the other — that disagreement is a thing
+// /admin/groups exists to display and not a defect to paper over. So each row
+// says HOW it was found, `via` for the group's own member attributes and
+// `viaMemberOf` for the person's claim, and group_claims.js applies
+// groups.claimFromMemberOf to decide which of them a token believes. A memberOf
+// naming something that is not a group here is dropped: it would otherwise
+// invent a group out of a string somebody typed.
+// ---------------------------------------------------------------------------
+function groupsOfUser(key) {
+  log.debug('Entering groupsOfUser(). key=' + key);
+  const wanted = String(key == null ? '' : key).trim();
+  const out = { key: wanted, dn: '', entryFound: false, groups: [],
+                baseDn: BASE_DN, groupsDn: GROUPS_DN };
+  if (!wanted) {
+    log.debug('Leaving groupsOfUser(). There was no identity to look up.');
+    return out;
+  }
+
+  // The same three-shaped lookup every other reader here uses, so a name, a
+  // certificate's subject DN and a decentralized identifier all land on the one
+  // entry this service files that person under. Where nothing is stored, the DN
+  // the matching plan WOULD have built comes back — which is exactly what the
+  // dangling-member case above needs.
+  const located = locateEntry(wanted);
+  out.dn = located.dn;
+  out.entryFound = !!located.stored;
+  const personDn = normalizeDn(located.dn);
+
+  // The person's own claim, normalised once rather than per group.
+  const claimed = {};
+  if (located.stored) {
+    (located.stored.attributes.memberof || []).forEach(function (value) {
+      claimed[normalizeDn(value)] = true;
+    });
+  }
+
+  entries.forEach(function (entry) {
+    const rule = groupRuleFor(entry);
+    if (!rule) {
+      return;
+    }
+    const via = [];
+    MEMBER_ATTRIBUTES.forEach(function (attribute) {
+      const listed = (entry.attributes[attribute.name] || []).some(function (value) {
+        const raw = String(value == null ? '' : value);
+        const dn = attribute.holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
+        return normalizeDn(dn) === personDn;
+      });
+      if (listed) {
+        via.push(canonicalName(attribute.name));
+      }
+    });
+    const viaMemberOf = !!claimed[normalizeDn(entry.dn)];
+    if (!via.length && !viaMemberOf) {
+      return;
+    }
+    out.groups.push({
+      dn: entry.dn,
+      // The same two sources groupsFor() uses and in the same order, so the cn
+      // in a token is the cn on the page. An entry under ou=groups with no cn
+      // still has a name — its RDN — and a group with no name in a claim would
+      // be an empty string in a list.
+      cn: (entry.attributes.cn || [])[0] || commonNameOf(entry.dn),
+      rule: rule,
+      via: via,
+      viaMemberOf: viaMemberOf
+    });
+  });
+
+  out.groups.sort(function (a, b) {
+    return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
+  });
+  log.debug('Leaving groupsOfUser(). ' + located.dn + ' is in ' +
+            out.groups.length + ' group(s).');
+  return out;
+}
+
 // The inverted hook. See the header for why the direction is this way round.
 stats.setUserObserver(autoCreateUser);
 
@@ -1916,6 +2198,27 @@ if (typeof vcClaims.setDirectory === 'function') {
   log.warn('ldap: vc_claims.js offers no setDirectory(), so issued credentials ' +
            'will carry invented values rather than what this directory holds. The ' +
            'directory itself is unaffected.');
+}
+
+// The FIFTH, and it is the same shape as the fourth: a module this file also
+// requires outright, calling back into one function here through a slot because
+// IT must not require THIS module. group_claims.js is reached from
+// admin_stats.js's resolver, which every token and both assertion builders go
+// through — so a require from there would drag this directory's routes ahead of
+// almost the whole router. Guarded like the four above: an older
+// group_claims.js without the slot costs a warning, not a service that will not
+// start.
+//
+// What crosses is deliberately ONE function and not the membership rules
+// themselves. What counts as a group, and how a member value is resolved, are
+// decisions of this module (see groupsOfUser()); which of its two answers a
+// token believes, and what the claim is called, are that module's.
+if (typeof groupClaims.setDirectory === 'function') {
+  groupClaims.setDirectory({ groupsOfUser: groupsOfUser });
+} else {
+  log.warn('ldap: group_claims.js offers no setDirectory(), so no token or ' +
+           'assertion will carry a groups claim. The directory itself is ' +
+           'unaffected.');
 }
 
 // And once, now. The seeded people were written before any of this existed and
@@ -3019,9 +3322,58 @@ function applicationEntry(identifier) {
   return found;
 }
 
+// ---------------------------------------------------------------------------
+// ONE APPLICATION ENTRY AS THE REGISTRY AND THE CONSOLE SEE IT.
+//
+// The same shape objectFor() hands the console for a person's entry, and it is
+// the same shape deliberately: `/admin/users` and `/admin/groups` already draw
+// an entry with attributeTable(), and an application entry that arrived in some
+// other shape would have needed a second renderer that could then disagree with
+// the first about what a dump of an entry looks like.
+//
+// Three things it carries that the raw attribute map did not, and each is a
+// thing the applications pages were missing because of it:
+//
+//   * THE DN. It is not an attribute — it is the key the entry is stored under —
+//     so a caller handed `stored.attributes` had no way to learn where the entry
+//     lives, and every applications page could show the `cn` and nothing else.
+//     It is published as `entryDN` (RFC 5020) because matchable() already uses
+//     that name for the same fact, so an ldapsearch filter and this dump agree
+//     about what the DN is called.
+//   * THE OPERATIONAL ATTRIBUTES, createTimestamp and modifyTimestamp. A SEARCH
+//     withholds those unless they are asked for by name (RFC 4511 section
+//     4.5.1.8) and toSearchEntry() honours it — but this is not a search, it is
+//     this service showing its own store, and `operational` names which ones a
+//     search would have withheld so a page can say so rather than pretend the
+//     distinction does not exist.
+//   * THE CANONICAL SPELLING. The store lower-cases every attribute name because
+//     that is how @ldapjs/attribute delivers it; a page showing `oauthclientid`
+//     where the published schema says `oauthClientId` reads as a bug in the
+//     page. canonicalName() now knows the applications schema's names too —
+//     see the merge beside CANONICAL_NAMES.
+// ---------------------------------------------------------------------------
+function applicationObject(stored) {
+  const attributes = {};
+  Object.keys(stored.attributes).sort().forEach(function (attribute) {
+    attributes[canonicalName(attribute)] = stored.attributes[attribute].slice(0);
+  });
+  // Synthesised rather than stored, exactly as matchable() does it: the DN is
+  // where the entry IS, so holding a copy of it on the entry would be a second
+  // definition of the same fact and the one that goes stale on a rename.
+  attributes[canonicalName('entrydn')] = [stored.dn];
+  return {
+    dn: stored.dn,
+    origin: stored.origin || 'unstated',
+    createdAt: stored.createdAt,
+    modifiedAt: stored.modifiedAt,
+    operational: OPERATIONAL.map(canonicalName),
+    attributes: attributes
+  };
+}
+
 function readApplication(identifier) {
   const stored = applicationEntry(identifier);
-  return stored ? stored.attributes : null;
+  return stored ? applicationObject(stored) : null;
 }
 
 function applicationCount() {
@@ -3040,7 +3392,7 @@ function allApplications() {
   entries.forEach(function (stored) {
     if (isUnder(stored.dn, APPLICATIONS_DN) &&
         normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
-      rows.push(stored.attributes);
+      rows.push(applicationObject(stored));
     }
   });
   log.debug('Leaving allApplications(). ' + rows.length + ' application(s).');
@@ -3183,15 +3535,25 @@ app.get('/ldap/applications', function (req, res) {
     return res.status(200).json(payload);
   }
   const appRows = rows.map(function (row) {
+    // EVERY attribute, which now includes the operational ones and entryDN. A
+    // search would withhold those unless they were asked for by name (RFC 4511
+    // section 4.5.1.8); this is the service showing its own store, so it shows
+    // them, and the column heading below says so.
     const attrs = Object.keys(row.attributes).sort().map(function (name) {
       const value = row.attributes[name];
       return '<code>' + xmlEscape(name) + '</code>: ' +
         xmlEscape(Array.isArray(value) ? value.join(' | ') : String(value));
     }).join('<br>');
+    // The DN on every row. This is the page headed "the registry as the
+    // directory sees it", and the directory sees an entry by its DN — a row that
+    // named only the identifier left the one address an ldapsearch needs to be
+    // reconstructed by the reader from a naming rule published nowhere.
     return '<tr><td><code>' + xmlEscape(row.identifier) + '</code>' +
-      (row.identifier === row.dnLabel ? '' :
-        '<br><span class="sub">named <code>cn=' + xmlEscape(row.dnLabel) +
-        '</code> &mdash; too long for a readable RDN</span>') +
+      (row.dn ? '<br><span class="sub"><code>' + xmlEscape(row.dn) + '</code>' +
+        (row.identifier === row.dnLabel ? '' :
+          ' &mdash; the identifier is too long for a readable RDN, so the cn is a ' +
+          'digest of it and <code>appIdentifier</code> is the identity') +
+        '</span>' : '') +
       '</td><td>' + xmlEscape(row.name) + '</td><td>' +
       xmlEscape(row.kinds.join(', ') || '(unstated)') + '<br><span class="sub">' +
       xmlEscape(row.protocols.join(', ')) + '</span></td><td>' +
@@ -3227,7 +3589,7 @@ app.get('/ldap/applications', function (req, res) {
     'match on the next authorization request. Nothing caches them.</p>' +
     (rows.length
       ? '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th><th>Registered</th>' +
-        '<th>Seen</th><th>Attributes</th></tr>' + appRows + '</table>'
+        '<th>Seen</th><th>Every attribute</th></tr>' + appRows + '</table>'
       : '<p class="sub">Nothing yet. An entry appears the first time a client_id, ' +
         'wtrealm, AppliesTo, entityID or service principal name is accepted.</p>') +
     '<h2>What an application can be</h2>' +
@@ -3372,6 +3734,7 @@ module.exports = {
   autoCreateUser: autoCreateUser,
   objectFor: objectFor,
   groupsFor: groupsFor,
+  groupsOfUser: groupsOfUser,
   APPLICATIONS_DN: APPLICATIONS_DN,
   maxApplications: maxApplications
 };

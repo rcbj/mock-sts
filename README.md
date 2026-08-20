@@ -246,7 +246,7 @@ And TLS's, the third thing here that is not on the HTTP listener:
 
 ## How it is put together
 
-A mock Security Token Service used by the test suite, **split across forty-three files at its root** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the modules that register routes, and listens: `authn.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `admin_api.js`, `ldap_server.js`, `tls_server.js`, `sts_metadata.js`. The rest are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `vc_claims.js`, `vc_verifier_config.js`, `dpop.js`, `admin_stats.js`, `audit.js`, `bbs2023.js`, `webauthn.js`, `admin_api_spec.js`, `admin_api_docs.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below. One file among them is **not a module at all**: `admin_api_explorer.js` is browser code, read off disk by `admin_api_docs.js` and served verbatim at `/admin-api/docs/explorer.js`, and nothing in node ever requires it.
+A mock Security Token Service used by the test suite, **split across forty-nine files at its root** (it was one 4,489-line `server.js` until 2026-08-03; eight protocol families in one file meant no way to see what was in it short of reading it). `server.js` is now the shell — it requires `app.js` (the express app and every middleware, which must load before any route) and `helpers.js` (the log, the keys, and the helpers more than one protocol needs), then the modules that register routes, and listens: `authn.js`, `wstrust.js`, `oauth2.js`, `wsfed.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`, `vc_verifier.js`, `krb5_kdc.js`, `krb5_service.js`, `spnego.js`, `admin.js`, `admin_api.js`, `ldap_server.js`, `tls_server.js`, `sts_metadata.js`. The rest are reached through those rather than named there — `saml2.js`, `saml11.js`, `vc_configs.js`, `vc_claims.js`, `vc_verifier_config.js`, `claim_attributes.js`, `group_claims.js`, `dpop.js`, `admin_stats.js`, `audit.js`, `bbs2023.js`, `webauthn.js`, `admin_api_spec.js`, `admin_api_docs.js` and the nine `krb5_*.js` files under the KDC and the negotiation — which is not a hierarchy so much as the consequence of the rule below. One file among them is **not a module at all**: `admin_api_explorer.js` is browser code, read off disk by `admin_api_docs.js` and served verbatim at `/admin-api/docs/explorer.js`, and nothing in node ever requires it.
 
 The Kerberos files are a stack rather than a feature list, bottom up: `krb5_primitives.js`
 (what no runtime gives you — CTS, RC4, MD4, MD5), `krb5_crypto.js` (the RFC 3961
@@ -1740,7 +1740,8 @@ to ask this service *what applications have you seen?*
 ```
 dc=example,dc=com
 ├── ou=users          people
-├── ou=groups         groups, which grant nothing
+├── ou=groups         groups, which grant nothing (a token carries them, see
+│                     groups.claim; nothing here reads one back)
 └── ou=applications   OAuth clients, OIDC relying parties, SAML 2.0 and 1.1
                       service providers, WS-Federation applications, WS-Trust
                       relying parties, the OpenID4VP verifier, Kerberos services
@@ -1868,6 +1869,38 @@ so the control moves that list rather than the page it sits on. `?format=json` i
 the same data, and `GET /admin-api/applications` is the same view again with the
 same parameters.
 
+**"Every attribute" is meant literally, and for a while it was not true.** The
+registry handed these pages the record it had reconstructed rather than the entry
+it had read, and a record has no room for three kinds of fact: the DN, because
+that is not an attribute at all but the key the entry is stored under; the
+operational attributes `createTimestamp` and `modifyTimestamp`, which the
+directory sets and no schema of the registry's would ever mention; and anything an
+`ldapmodify` had written by hand, which a schemaless directory permits and this one
+therefore has to be able to show. On top of that, twelve attributes were read into
+named members of the record — `cn`, `objectClass`, `appIdentifier`, both sighting
+times, the three counters — and so were absent from a table headed *every attribute
+the entry carries*. The read side of the store now hands back the whole entry, the
+same shape the console already gets for a person's, and the pages show what is
+there.
+
+The DN is published as **`entryDN`** — RFC 5020's name, and the name an
+`ldapsearch` filter matches it by here — and it is **synthesised on every read
+rather than stored**. A stored copy would be a second definition of the same fact,
+and the one that goes stale: `applicationEntry()` exists precisely because somebody
+can rename one of these entries, and it finds it again by `appIdentifier`
+afterwards. It appears at the top of the drill-down, on every row of the list, on
+`/ldap/applications`, and as `dn` on every application in the API's reply — because
+these entries *are* the registry, so the DN is the address an `ldapsearch` or an
+`ldapmodify` is aimed at, and a console that showed only the `cn` left an operator
+reconstructing it from a naming rule published nowhere.
+
+The names come back **canonically spelled** — `oauthClientId`, not
+`oauthclientid`. The applications schema is one of the four sources the
+directory's spelling table is built from; *How an attribute name is spelt*, in
+the LDAP section below, is the rest of it. A page showing `oauthclientid` beside a
+published schema that says `oauthClientId` reads as a bug in the page rather than
+as what it is.
+
 Both **write** as well as read: `create`, `set`, `add`, `remove`,
 `revoke-registration` and `forget`, as forms on the page and as
 `POST /admin-api/applications/{action}`. The console is not a third store beside
@@ -1960,7 +1993,20 @@ Where there is no entry the section says **which** of the five reasons it is, be
 
 **A member links to `/admin/users` only for somebody this service has actually seen authenticate**, and is marked *never here* otherwise. The two lists answer different questions and it is worth being deliberate about the difference: the directory holds an entry for whoever somebody wrote one for — including `alice`, `bob` and `carol`, who are seeded at startup — while the users page holds whoever has presented a credential to this process. A link drawn unconditionally would usually land on "nothing here has authenticated as alice", which reads as a broken link rather than as the answer it is.
 
-**A group here grants nothing**, and both pages say so where a reader will see it rather than leaving it to be discovered. No access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries a group from this directory, and no endpoint checks one; they exist for an LDAP client to read, write and search. On a service that authenticates nobody it could hardly be otherwise — but a console that listed groups a click away from the tokens page without saying it would let somebody conclude that adding a user to `cn=directory-admins` had changed what their token could do.
+**A group here grants nothing**, and both pages say so where a reader will see it rather than leaving it to be discovered. No endpoint in this service checks a group and nothing decides anything on one. On a service that authenticates nobody it could hardly be otherwise — but a console that listed groups a click away from the tokens page without saying it would let somebody conclude that adding a user to `cn=directory-admins` had changed what their token could do.
+
+**A token can carry one, which is a different sentence and the two must not be merged.** That half of the paragraph used to read "no access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries a group from this directory", and `groups.claim` is what made it false. With that setting on — it is **on by default** — every OAuth 2.0 access token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries a claim naming the groups its subject is in, read out of these entries at the moment the token is minted. It is the same distinction this service already draws between an identity being **recorded** and an identity being **authenticated**, and it is drawn here for the same reason: carrying a fact is not acting on it. No Kerberos PAC carries a group either way.
+
+Why it is worth carrying at all is the usual argument in this repository. A groups claim is one of the two or three things a relying party actually branches on, and until `group_claims.js` existed there was no way to produce one here — so a client whose authorization code has never seen a `groups` member, or has only ever seen names where the next identity provider will send DNs, has never run that code.
+
+Four things about it are deliberate:
+
+* **The claim is omitted entirely for somebody in no group** — not sent as an empty array, absent. That is what makes ON a defensible default: on a fresh start the only people in a group are the three the directory seeds, so a caller who has never touched `ou=groups` gets exactly the tokens it got before. An empty array would be a new member in every token every existing client parses.
+* **The membership is read per token and never cached**, the same rule the applications registry follows and for the same reason: an `ldapmodify` changes the very next token, which is the thing somebody came here to watch.
+* **Both membership rules are read** — `member`, `uniqueMember` and `memberUid` from the group's side, and the person's own `memberOf` from theirs. Nothing here maintains one from the other (that disagreement is a thing this page exists to *show*), so `groups.claimFromMemberOf` is which side a token believes; it is on by default, and either way the group has to exist here, since a `memberOf` naming nothing must not invent a group to put in a token. A group listing a DN nothing is stored at still counts: that is a **dangling** member from the group's side and is still the group saying so.
+* **`groups.claimValue` chooses `cn` or the whole DN.** Both are what somebody's real identity provider does — an OIDC provider usually sends names and Active Directory sends DNs — and a client that has only ever parsed one has never run the other path.
+
+A typed custom claim and a ticked directory attribute of the same name both **win over** it, because those were named on `/admin/claims` about this service and this comes from a setting and a directory. `groups.claimName` naming something this service sets itself (`exp`, `scope`, …) is **refused at issuance** and `/admin/claims` says why — the same rule a typed claim of that name meets at configuration time, made in the only place that can reach the reserved list. The claim reaches a SAML assertion as **one `<Attribute>` with several `<AttributeValue>` children**, which is what the content model means by multi-valued; one element per group with the same name is a relying party reading the first and silently seeing one group where the person is in four.
 
 **`/admin/tokens`** lists what was issued and invalidates what can be. What it lists is **every JWT, every SAML assertion and every Kerberos ticket, in one table, newest first** — the assertions whether WS-Trust issued them or a WS-Federation sign-in did, since both go through the two builders and both are counted there. One table rather than three because a WS-Federation sign-in that produces an ID Token and a SAML 1.1 assertion is *one event*, and three tables would leave it to be reassembled by comparing timestamps. The three families are declared in `admin_stats.js` (`ISSUED_FAMILIES`) and `issuedList()` merges them, because which artifact belongs beside a token and what "still valid" means for each are statements about the state that file holds; `admin.js` renders what it is handed. Two things had to be made common to merge them at all: the state, which comes from one function per family against one clock, and the expiry, which is **normalised to milliseconds** — a JWT's `exp` is seconds and an artifact's `expiresAt` already is not, and one table cannot sort two units. A filter for the family sits beside the one for the kind, and the kind list is grouped by family and built from that same structure, so the two cannot come to disagree about which kind is which.
 
@@ -2441,8 +2487,9 @@ afterwards. Two factors means two: `["hwk"]` alone is `FALSE`. Like the `x509*` 
 `did*` names these are **this service's own and not schema** — there is no standard
 attribute type for "this account used more than one factor", and the nearest things in
 the wild are Active Directory's `msDS-*` attributes, which name something else. And
-like a group here, they **grant nothing**: no token carries them, no endpoint reads
-them, nothing decides anything on them.
+like a group here, they **grant nothing**: no endpoint reads them and nothing decides
+anything on them. Unlike a group, no token carries them either — `groups.claim` puts
+membership in a token and there is no equivalent for these three.
 
 The admin console shows each user their entry, on `/admin/users?user=<name>`, and reads it
 through a **second inverted hook** — `admin.setDirectoryReader()`, filled by this module at
@@ -2542,6 +2589,49 @@ one person. Nothing already on the entry is ever overwritten, which is why the t
 people keep their own names, and why an operator's `ldapmodify` survives every later sweep.
 The console's own section above carries the rest of it, including what the sweep walks and
 what it deliberately does not.
+
+#### How an attribute name is spelt
+
+The store lower-cases every attribute name, because `@ldapjs/attribute` lower-cases a
+type on the way in — an entry added as `objectClass` comes back as `objectclass`. That is
+harmless for matching, since LDAP attribute descriptions are case-insensitive anyway
+(RFC 4512 section 2.5), and it is not harmless for *reading*: a page showing `givenname`
+where every schema document says `givenName` reads as a bug in the page. So the directory
+keeps a table of conventional spellings and puts them back on the way out.
+
+The table covers about a hundred and fifty names, which is far more than this service ever
+writes, and that is the point. **The directory is schemaless on purpose**, so a client can
+`add` any attribute it likes to any entry; and two of the families here write entries
+nobody typed — a verified TLS client certificate's subject becomes attributes RDN by RDN,
+so which types arrive is decided by whoever issued the certificate. A table holding only
+what this service happens to write would be right about its own entries and wrong about
+everybody else's, which is worse than having none, because the reader who most needs the
+conventional spelling is the one looking at an attribute this service did not write.
+`seeAlso` is what made the point: an ordinary RFC 4519 type, rendering as `seealso` on the
+one page whose job is to show an entry faithfully.
+
+It is **two lists split by who defined the name** — the standard types, with the
+specification named per group (RFC 4519, RFC 4524's COSINE, RFC 2798's inetOrgPerson,
+RFC 2307's NIS, RFC 4512's operational and root-DSE attributes, RFC 4530, RFC 5020,
+RFC 3045, PKCS#9), and this service's own inventions, which say individually why nothing
+standard was used instead. `memberOf` sits in neither and is called out as such: it is
+ubiquitous in the wild and was never registered by anybody, and the spelling being
+conventional must not be read as the attribute being maintained — nothing here maintains
+it, which is exactly what `/admin/groups` reports on.
+
+Each name is written **once, as the canonical spelling**, and the lower-cased lookup key is
+derived from it. It used to be a map of `lower: 'Mixed'` pairs, and the trouble with that
+shape is that a typo in the *key* is invisible: the entry never matches, the name renders
+lower-cased, and the table is failing silently at the only job it has. `toLowerCase()`
+cannot disagree with itself.
+
+Four independently maintained sets of spellings reach that table — the two lists, the
+credential claim catalogue in `vc_claims.js` and the applications schema in
+`applications.js` — so they all go in through one function, and a **second spelling of a
+name already known is reported rather than silently resolved by merge order**. First
+spelling wins; the warning names both and says which list to fix. It is a warning and not a
+throw, because a table of how to capitalise a name must never be able to stop the service
+starting.
 
 #### Two ldapjs defects this code routes around
 
