@@ -751,13 +751,23 @@ function issueSignInResponse(req, res, params, session, realm, wreply, tokenType
   // authentication funnel for the reason the OAuth client is: the person signed
   // in through authn.js, which knows nothing about this protocol.
   //
-  // The token type decides the KIND, because a wtrealm handed a SAML 2.0
-  // assertion is a SAML 2.0 service provider and one handed the 1.1 default is a
-  // SAML 1.1 relying party — the same realm may be both across two requests, and
+  // TWO KINDS, because a wtrealm is two things at once and recording only the
+  // second lost the first. It is a WS-FEDERATION APPLICATION — that is what
+  // `wtrealm` means, and it is true of every request that reaches here — and it
+  // is ALSO the audience of whichever assertion it was handed, which the token
+  // type decides: a SAML 2.0 service provider, or a SAML 1.1 relying party on
+  // the default. The same realm may be both of those across two requests, and
   // the registry accumulates rather than choosing.
+  //
+  // This is what made `wsfed-relying-party` a kind nothing produced: the
+  // console's filter and the management API's enum both offered it, and no
+  // protocol path ever assigned it, so filtering by it always came back empty.
+  // A list rather than two calls, because two calls would count two
+  // authentications for one sign-in response.
   applications.seen({
     identifier: realm,
-    kind: tokenType === SAML2_TOKEN_TYPE ? 'saml2-service-provider' : 'saml11-relying-party',
+    kind: ['wsfed-relying-party',
+           tokenType === SAML2_TOKEN_TYPE ? 'saml2-service-provider' : 'saml11-relying-party'],
     protocol: 'WS-Federation',
     sessionId: session.id || '',
     user: (session.user && session.user.username) || '',

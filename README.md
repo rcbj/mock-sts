@@ -1753,10 +1753,25 @@ the machine-readable form.
 
 An entry appears the first time an identifier is **accepted** — a `client_id` at
 the authorization or token endpoint, a `wtrealm` on a `wsignin1.0` response, an
-`AppliesTo` on an issued token, a service principal name on a TGS-REP, the
-Verifier's own `client_id`. The key is the identifier verbatim, not lower-cased
-and not namespaced by protocol, so an application appearing under one name in two
-protocols is **one entry with two kinds** rather than two entries. That is the
+`AppliesTo` on an issued token, a service principal name on a TGS-REP *and again
+when a ticket for it is accepted*, the Verifier's own `client_id`. The key is the
+identifier verbatim, not lower-cased and not namespaced by protocol, so an
+application appearing under one name in two protocols is **one entry with two
+kinds** rather than two entries.
+
+The Kerberos service being recorded at both ends is not a double entry: both
+halves write `SPN@REALM`, so they land on one record, and the acceptor's half is
+the only one that fires for a ticket **some other KDC issued** — a real Active
+Directory — where the client used to be recorded and the service it presented the
+ticket to was not.
+
+One sighting can also name **more than one kind at once**, because some
+applications genuinely are two things in the same request. A `wtrealm` is a
+WS-Federation application *and* the audience of the SAML 1.1 or 2.0 assertion it
+was handed; an `AppliesTo` handed a SAML 2.0 assertion is a WS-Trust relying party
+*and* that assertion's service provider. Recording only one of each is how
+`wsfed-relying-party` came to be a kind the console offered as a filter and no
+protocol path ever produced. That is the
 same rule that makes `alice`, `urn:sts-mock:user:alice` and `alice@REALM` one
 person on `/admin/users`, and it is the shape the federation work will need: a
 relying party that federates over both OIDC and SAML is one relationship.
@@ -1914,6 +1929,10 @@ and the reason an application accumulates kinds instead of being filed twice.
 ### The admin console
 
 `GET /admin` is an operator's view of the running service, and the pages under it exist for a reason the protocol endpoints cannot serve: the interesting behaviour of a client is what it does when something changes *underneath* it. A client that gets a good token and reads it correctly is a client that has been tested against the easy half. What happens when the token it is holding stops being valid, or when the token it reads grows a claim it was not expecting, is the other half, and until now there was no way to cause either without editing this service and restarting it. Every page also answers `?format=json` and every form also accepts a JSON body, because a console reachable only by clicking is a console no test can assert against.
+
+**Every page here carries a breadcrumb trail, and on a drill-down it goes back to the list *as you left it*.** One line under the nav — `Admin console › Applications › rfc9700-debugger` — on every page including `/admin` itself, where it is the single crumb. The nav answers *what else is there*; the trail answers *where am I and how do I get back*, and those are different questions: the tab for the section you are standing in is exactly the tab that tells you nothing about the page you are standing on. That was the whole of the original bug — the active tab is drawn as plain text, and the page it names is the section's path on the list page and on every drill-down beneath it alike, so on `/admin/applications?application=rfc9700-debugger` the one control pointing at the list of applications was the one control the shell had switched off. On a drill-down that tab is now a link too, still bold because the reader is inside that section and underlined so that *the section you are in* cannot be read as *not clickable*. The last crumb is never a link: it is the page being drawn, and a crumb that reloads the page you are on teaches a reader not to trust the ones beside it. A long leaf is cut to 44 characters with the whole of it in the tooltip, because a `did:jwk` is a few hundred characters of base64url with nowhere a browser will break a line and a trail that wraps to four lines is not a trail.
+
+**What makes it a breadcrumb rather than a link to the section is the list state it carries.** A drill-down link is built with the filter and the page the reader is looking at — `?q=client&per=25&page=3&application=beta` — and the trail's section crumb spends exactly that, so *back* lands on page 3 of that filter instead of the top of everything. Which parameters belong to a list is a **whitelist per section** (`LIST_PARAMS`) rather than *everything that is not ours*, for the reason the tokens page rebuilds its `back` field from a list of names: what comes out of it goes into a URL this service hands to a browser. Three things would otherwise drop it and each is handled where it is. Every control on a drill-down carries the whole current query already, so paging the five tables on a user's page keeps it for free. The *rows per table* form is a GET form, which posts its own fields and nothing else, so the filter is spelt out as hidden inputs — but deliberately **not** the list's page, since `per` is the thing that form changes and page 4 of fifty-row pages is not page 4 of anything afterwards. And every form on the applications and authorization-server drill-downs carries the list as one opaque `back` field, which the POST handler **rebuilds** through the same whitelist rather than echoing — a redirect target taken out of a request body is an open redirect and one carrying a newline is a header injection, so the worst a hand-written `back` can reach is another page of the same list. Without that last one, editing an application would silently cost the reader their place, which is the one thing the trail exists to keep. Four views take a trail leaf, the four that drill in: `?user=`, `?group=`, `?application=` and `?profile=`. A parameter that only *filters* a list does not, because there the tab already goes to the unfiltered page and the filter has its own **clear** link. `?format=json` ignores all of it — a way back up is a property of a page somebody is reading, and a caller has the URL it asked for.
 
 **`/admin/metrics`** counts endpoint calls by the route Express matched — the pattern, `/oauth2/register/:client_id`, not the URL, or every registered client would get a row of its own — with the status classes, the average and worst latency and when it was last called. Then every token by `typ`, with how many are valid, expired, revoked, not yet valid and DPoP-bound; every assertion, ticket and credential the same way. All of it is computed **when the page is drawn** rather than kept up to date as things happen, and that is the load-bearing choice: "valid" and "expired" are functions of the clock, so a counter incremented at issuance is wrong a second later and would need a sweeper to stay right.
 

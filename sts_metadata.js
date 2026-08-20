@@ -1404,11 +1404,19 @@ const ENDPOINTS = [
           'OpenID Provider Configuration advertises.' },
   { path: '/:as/oauth2/introspect', group: 'OAuth 2.0 / OIDC',
     name: 'Introspection (a named authorization server)', specs: ['rfc7662'],
-    what: 'As above. The revocation set is one set across every authorization server here, ' +
-          'because a revoked token is revoked.' },
+    what: 'The same honest active/inactive the unprefixed endpoint gives, under a named ' +
+          'authorization server\'s own path. The REVOCATION SET is one set across every ' +
+          'authorization server in this process, because a revoked token is revoked — so this ' +
+          'reports inactive for a token revoked at any of them. That is deliberately unlike a ' +
+          'credential, which does not cross between them: a code issued by one is refused at ' +
+          'another\'s token endpoint.' },
   { path: '/:as/oauth2/revoke', group: 'OAuth 2.0 / OIDC',
     name: 'Revocation (a named authorization server)', specs: ['rfc7009'],
-    what: 'As above.' },
+    what: 'Revocation that takes effect, under a named authorization server\'s own path: ' +
+          'introspection then reports inactive, at every authorization server here and not ' +
+          'only this one, for the reason given one row above. The console\'s revoke control ' +
+          'writes to that same set — two sets would each look correct alone and never see ' +
+          'each other.' },
   { path: '/:as/oauth2/register', group: 'OAuth 2.0 / OIDC',
     name: 'Registration (a named authorization server)', specs: ['rfc7591', 'rfc9700'],
     what: 'Registers a client, which may then use ANY authorization server here — nothing ' +
