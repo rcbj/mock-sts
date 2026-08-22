@@ -914,6 +914,173 @@ const SETTINGS = [
                  'refused at a different size than the document names would be ' +
                  'the drift this arrangement exists to prevent.' },
 
+  // --- SCIM authentication -------------------------------------------------
+  //
+  // The SCIM endpoints are the ONE surface in this service that refuses a
+  // caller who presents nothing, and the reason is what they do: they create
+  // and delete accounts in a directory fifteen other things read. RFC 7644
+  // section 2 defines no credential of its own — it delegates to RFC 7235 and
+  // names six schemes — so what these rows configure is which of those six are
+  // offered, and what the access control policy behind them is. All of it is
+  // still permissive: anybody can get a token, any password but one works over
+  // Basic, anybody can register a HOBA key. It is a turnstile rather than a
+  // lock, and GET /scim says so in those words.
+  //
+  // Every row is RUNTIME, which is only true because scim_auth.js reads each
+  // one through a function called per request rather than capturing it in a
+  // const at require time. Turning a scheme off removes it from the
+  // WWW-Authenticate challenge AND from the published ServiceProviderConfig
+  // together, because both are built from one table.
+  { key: 'scim.authRequired', group: 'SCIM', label: 'Require authentication',
+    env: 'SCIM_AUTH_REQUIRED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, every SCIM endpoint refuses a request that carries ' +
+                 'no credential with 401 and a WWW-Authenticate header per ' +
+                 'offered scheme (RFC 7644 section 2 makes that header a ' +
+                 'SHALL). Turning it OFF restores the behaviour these ' +
+                 'endpoints had before authentication existed — unauthenticated ' +
+                 'provisioning — which stays reachable on purpose, because a ' +
+                 'client is exercised by both answers and because a mock that ' +
+                 'could not reproduce the permissive case would have lost ' +
+                 'something. A credential that IS presented is still checked ' +
+                 'either way: a broken token is a 401 whether or not one was ' +
+                 'required, or a client testing its expired-token path would ' +
+                 'get a 200.' },
+
+  { key: 'scim.authDiscovery', group: 'SCIM', label: 'Authenticate discovery too',
+    env: 'SCIM_AUTH_DISCOVERY', type: 'bool', dflt: false, runtime: true,
+    description: 'Whether /ServiceProviderConfig, /ResourceTypes and /Schemas ' +
+                 'need a credential as well. OFF by default, which is the ' +
+                 'bootstrapping argument /tls/trust already makes: the ' +
+                 'ServiceProviderConfig is where a client READS which ' +
+                 'authentication schemes exist, so requiring a credential to ' +
+                 'fetch it means a client must already know the answer to the ' +
+                 'question it is asking. RFC 7644 section 4 says nothing ' +
+                 'either way, so both are conforming and both are worth being ' +
+                 'able to try.' },
+
+  { key: 'scim.authRealm', group: 'SCIM', label: 'Authentication realm',
+    env: 'SCIM_AUTH_REALM', type: 'string', dflt: 'SCIM', runtime: true,
+    description: 'The protection space named in every WWW-Authenticate ' +
+                 'challenge, and — for HTTP Digest and HOBA — a value that is ' +
+                 'hashed or signed OVER, so changing it invalidates every ' +
+                 'credential computed against the old one. Quotes and ' +
+                 'non-ASCII are stripped before it reaches a header, because ' +
+                 'node throws on the second and the first would close the ' +
+                 'quoted string early.' },
+
+  { key: 'scim.scopeRead', group: 'SCIM', label: 'OAuth scope to read',
+    env: 'SCIM_SCOPE_READ', type: 'string', dflt: 'scim:read', runtime: true,
+    description: 'The OAuth 2.0 scope an access token must carry to read at ' +
+                 '/scim/v2 — the first scope requirement anywhere in this ' +
+                 'service. It is published in scopes_supported in both ' +
+                 'discovery documents, so a client can find the name it needs ' +
+                 'rather than being told it out of band. Any grant will get ' +
+                 'it: this authorization server grants what it is asked, so ' +
+                 'what the requirement exercises is the CLIENT\'s handling of ' +
+                 'a scope rather than this service\'s willingness to withhold ' +
+                 'one.' },
+
+  { key: 'scim.scopeWrite', group: 'SCIM', label: 'OAuth scope to write',
+    env: 'SCIM_SCOPE_WRITE', type: 'string', dflt: 'scim:write', runtime: true,
+    description: 'The scope needed to create, replace, patch, delete or bulk. ' +
+                 'It does NOT imply the read scope and the read scope does not ' +
+                 'imply it, deliberately: a read-only provisioning credential ' +
+                 'is a thing a client has to handle and a server that treated ' +
+                 'one scope as both could not produce it.' },
+
+  { key: 'scim.authBearer', group: 'SCIM', label: 'Offer OAuth 2.0 tokens',
+    env: 'SCIM_AUTH_BEARER', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether an access token is accepted, as Bearer (RFC 6750) ' +
+                 'or — when it is bound — as DPoP (RFC 9449). Both are ' +
+                 'checked by the same function /oauth2/userinfo and the three ' +
+                 'OID4VCI credential endpoints use, so an RFC 8705 ' +
+                 'certificate-bound token and the DPoP nonce handshake work ' +
+                 'here exactly as they do there. This is the only scheme with ' +
+                 'scopes behind it; the others authenticate and may then do ' +
+                 'everything.' },
+
+  { key: 'scim.authBasic', group: 'SCIM', label: 'Offer HTTP Basic',
+    env: 'SCIM_AUTH_BASIC', type: 'bool', dflt: true, runtime: true,
+    description: 'Any username with any password except the reserved ' +
+                 '"invalid", which is refused so that a 401 stays reachable. ' +
+                 'RFC 7644 section 2 DISCOURAGES this scheme in those words, ' +
+                 'and it is offered anyway because it is what a provisioning ' +
+                 'client most often meets. No password is checked, so what it ' +
+                 'authenticates is a name — and that name is recorded as an ' +
+                 'authentication, so it appears on /admin/users and gains a ' +
+                 'directory entry like any other identity here.' },
+
+  { key: 'scim.authDigest', group: 'SCIM', label: 'Offer HTTP Digest',
+    env: 'SCIM_AUTH_DIGEST', type: 'bool', dflt: true, runtime: true,
+    description: 'RFC 7616, with SHA-256, SHA-512-256 and MD5 offered in that ' +
+                 'order and the -sess variants accepted. This is the one ' +
+                 'scheme here where the password really is checked, because ' +
+                 'the response IS a hash over it — so it does what Kerberos ' +
+                 'does for the same reason: any username, one shared password. ' +
+                 'It makes three otherwise unreachable negatives available: a ' +
+                 'wrong password, a stale nonce, and a replayed nonce count.' },
+
+  { key: 'scim.digestPassword', group: 'SCIM', label: 'The shared Digest password',
+    env: 'SCIM_DIGEST_PASSWORD', type: 'string', dflt: 'password!', runtime: true,
+    description: 'The password every username shares for HTTP Digest — the ' +
+                 'same value KRB5_USER_PASSWORD defaults to, so that there is ' +
+                 'one fact to remember rather than two. It cannot be "anything ' +
+                 'goes" the way a bind or a Basic credential can: a digest ' +
+                 'response is a hash over the password, so a server with no ' +
+                 'password would not be performing the exchange at all and a ' +
+                 'client\'s digest code would go unexercised.' },
+
+  { key: 'scim.digestNonceSeconds', group: 'SCIM', label: 'Digest nonce lifetime',
+    env: 'SCIM_DIGEST_NONCE_SECONDS', type: 'int', dflt: 300, runtime: true,
+    description: 'How long a Digest nonce stays usable. After it a credential ' +
+                 'is refused with stale=true, which RFC 7616 section 3.3 says ' +
+                 'a client should retry with the same credentials rather than ' +
+                 'prompting a person — a path most hand-written clients have ' +
+                 'never run. Lower it to a few seconds to make it happen on ' +
+                 'demand.' },
+
+  { key: 'scim.authHoba', group: 'SCIM', label: 'Offer HOBA',
+    env: 'SCIM_AUTH_HOBA', type: 'bool', dflt: true, runtime: true,
+    description: 'HTTP Origin-Bound Authentication (RFC 7486), the ' +
+                 'signature-based scheme RFC 7644 section 2 names and the only ' +
+                 'one of the six with no shared secret in it. Also turns ' +
+                 'POST /.well-known/hoba/register on or off. The signature is ' +
+                 'REALLY verified — RSA with SHA-256, algorithm 0 — for the ' +
+                 'reason the Digest password really is checked; what is ' +
+                 'permissive is that anybody may register any key for any ' +
+                 'name.' },
+
+  { key: 'scim.hobaMaxAgeSeconds', group: 'SCIM', label: 'HOBA challenge lifetime',
+    env: 'SCIM_HOBA_MAX_AGE_SECONDS', type: 'int', dflt: 600, runtime: true,
+    description: 'The max-age published in the HOBA challenge and enforced on ' +
+                 'the signature. RFC 7486 lets a client reuse a challenge ' +
+                 'until it expires, so a repeat is NOT a replay here — what is ' +
+                 'refused is a repeated (key id, challenge, nonce) triple, ' +
+                 'which is a copied credential.' },
+
+  { key: 'scim.authCookie', group: 'SCIM', label: 'Offer the session cookie',
+    env: 'SCIM_AUTH_COOKIE', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether the browser sign-on session this service already ' +
+                 'has — the one /authn/login creates and WS-Federation shares ' +
+                 '— authenticates a SCIM request. RFC 7644 section 2 names ' +
+                 'cookies explicitly. There is no challenge for it, because a ' +
+                 'server cannot ask for a cookie in WWW-Authenticate, and it ' +
+                 'is consulted only when there is no Authorization header: a ' +
+                 'request that presents a credential is judged on that ' +
+                 'credential rather than quietly falling back.' },
+
+  { key: 'scim.authClientCert', group: 'SCIM', label: 'Offer TLS client certificates',
+    env: 'SCIM_AUTH_CLIENT_CERT', type: 'bool', dflt: true, runtime: true,
+    description: 'Mutual TLS, the first scheme RFC 7644 section 2 names. It ' +
+                 'applies only where the request arrived over TLS with a ' +
+                 'certificate that VERIFIED against an anchor POSTed to ' +
+                 '/tls/trust, so on the main port only when global.https is on. ' +
+                 'This is the first place in this service where a client ' +
+                 'certificate is a CREDENTIAL rather than an observation — on ' +
+                 'the /tls listeners a verified certificate is reported and ' +
+                 'grants nothing; here it authenticates somebody who may then ' +
+                 'write to the directory.' },
+
   // --- The group claim -----------------------------------------------------
   //
   // The one feature in this service that reads the directory's GROUPS back out

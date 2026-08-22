@@ -153,13 +153,36 @@ var config = {
   //
   // SCIM 2.0 provisions into the directory above — the same entries, the same
   // cap — so `ldap.maxEntries` is what a POST /scim/v2/Users runs out of and
-  // there is nothing here about storage. Nothing on these endpoints checks a
-  // credential.
+  // there is nothing here about storage. What IS here is authentication: see
+  // the second half of the block, and GET /scim for what each scheme costs a
+  // caller (which is very little — it is a turnstile, not a lock).
   scim: {
     enabled: true,
     maxResults: 200,
     bulkMaxOperations: 100,
-    bulkMaxPayloadSize: 1048576
+    bulkMaxPayloadSize: 1048576,
+
+    // The SCIM endpoints are the one surface here that refuses a caller who
+    // presents nothing — they create and delete accounts. All six schemes RFC
+    // 7644 section 2 names are offered and every one of them is permissive:
+    // anybody can get a token with either scope, any password but "invalid"
+    // works over Basic, any username works over Digest with the shared
+    // password below, and anybody may register a HOBA key. Turn authRequired
+    // off to get the unauthenticated behaviour these endpoints used to have.
+    authRequired: true,
+    authDiscovery: false,
+    authRealm: "SCIM",
+    scopeRead: "scim:read",
+    scopeWrite: "scim:write",
+    authBearer: true,
+    authBasic: true,
+    authDigest: true,
+    digestPassword: "password!",
+    digestNonceSeconds: 300,
+    authHoba: true,
+    hobaMaxAgeSeconds: 600,
+    authCookie: true,
+    authClientCert: true
   },
 
   // --- The group claim ---------------------------------------------------

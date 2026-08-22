@@ -1715,7 +1715,8 @@ const ROUTES = [
                  'does not do, and which LDAP attribute each SCIM member ' +
                  'is.\n\nTHERE IS NO POST BESIDE THIS ONE and that is not a ' +
                  'gap: everything about SCIM that can be changed is a ' +
-                 'configuration row — `scim.enabled` and the three limits — ' +
+                 'configuration row — `scim.enabled`, the three limits and ' +
+                 'the authentication settings — ' +
                  'so POST /admin-api/config/set is already the operation for ' +
                  'it. The console page has no form on it either, which is ' +
                  'the parity rule holding rather than being broken.\n\nWHAT ' +

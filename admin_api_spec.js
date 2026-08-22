@@ -1118,6 +1118,93 @@ const SCHEMAS = {
                      'published port names an address the caller can use.'
       },
       specifications: { type: 'array', items: { type: 'string' } },
+      authentication: openObject(
+        'WHO MAY CALL THESE ENDPOINTS. The SCIM surface is the one place in ' +
+        'this service that refuses a caller who presents nothing, because it ' +
+        'creates and deletes accounts. All six schemes RFC 7644 section 2 ' +
+        'names are offered and every one of them is permissive — it is a ' +
+        'turnstile rather than a lock. Null when the SCIM module is not ' +
+        'loaded, which is not the same as every scheme being off.',
+        {
+          required: {
+            type: 'boolean',
+            description: 'The `scim.authRequired` setting. When false these ' +
+                         'endpoints answer an unauthenticated request, which ' +
+                         'is the behaviour they had before authentication ' +
+                         'existed and stays reachable on purpose. A ' +
+                         'credential that IS presented is checked either way.'
+          },
+          discoveryOpen: {
+            type: 'boolean',
+            description: 'Whether /ServiceProviderConfig, /ResourceTypes and ' +
+                         '/Schemas answer without a credential. True by ' +
+                         'default: a client has to be able to read which ' +
+                         'schemes exist before it can use one.'
+          },
+          realm: { type: 'string',
+                   description: 'The protection space in every challenge — ' +
+                                'and a value Digest hashes and HOBA signs ' +
+                                'OVER, so changing it invalidates every ' +
+                                'credential computed against the old one.' },
+          scopes: openObject(
+            'The two OAuth scopes, which are the first scope requirement ' +
+            'anywhere in this service. Neither implies the other.',
+            { read: { type: 'string' }, write: { type: 'string' } }),
+          digestAlgorithms: {
+            type: 'array', items: { type: 'string' },
+            description: 'The Digest algorithms this process can compute, ' +
+                         'strongest first — checked against the openssl this ' +
+                         'build actually has rather than assumed.'
+          },
+          hobaRegistration: {
+            type: 'string',
+            description: 'Where a HOBA public key is registered (RFC 7486 ' +
+                         'section 7). Unauthenticated, because it is how a ' +
+                         'caller GETS a credential.'
+          },
+          schemes: {
+            type: 'array',
+            description: 'Every scheme, including the ones turned off — the ' +
+                         'same table that builds the WWW-Authenticate ' +
+                         'challenge and the ServiceProviderConfig, so this ' +
+                         'cannot describe a scheme a client would not be ' +
+                         'offered.',
+            items: openObject('One scheme.', {
+              id: { type: 'string' },
+              type: { type: 'string',
+                      description: 'The ServiceProviderConfig `type`. Three ' +
+                                   'of the seven have no canonical value in ' +
+                                   'RFC 7643 section 5 and carry an honest ' +
+                                   'one of their own; `canonical` says which.' },
+              canonical: { type: 'boolean' },
+              name: { type: 'string' },
+              enabled: { type: 'boolean' },
+              setting: { type: 'string' },
+              primary: { type: 'boolean' },
+              scoped: { type: 'boolean',
+                        description: 'Whether it carries OAuth scopes. Only ' +
+                                     'the two token schemes do; every other ' +
+                                     'accepted credential may do both.' },
+              recorded: { type: 'boolean',
+                          description: 'Whether accepting it reaches ' +
+                                       'recordAuthentication(). True for the ' +
+                                       'three that present a credential per ' +
+                                       'request; the others continue an ' +
+                                       'authentication recorded elsewhere.' },
+              challenged: { type: 'boolean' },
+              spec: { type: 'string' },
+              specUri: { type: 'string' },
+              description: { type: 'string' }
+            })
+          },
+          policy: {
+            type: 'array', items: { type: 'string' },
+            description: 'The access control policy RFC 7644 section 2 ' +
+                         'requires a provider to be able to map an ' +
+                         'authenticated client to. It is two lines, which is ' +
+                         'the honest length for a mock.'
+          }
+        }),
       store: openObject(
         'The directory it provisions into, and how full it is. The cap is ' +
         '`ldap.maxEntries`: SCIM has no cap of its own because it has no ' +
@@ -1134,11 +1221,12 @@ const SCHEMAS = {
       doesNotDo: {
         type: 'array',
         items: { type: 'string' },
-        description: 'The four sentences worth reading before pointing a ' +
-                     'provisioning client at this. It authenticates nobody; ' +
-                     '`active: false` deactivates nobody; there is no ETag ' +
-                     'and no changePassword; a member naming nothing is ' +
-                     'accepted.'
+        description: 'The sentences worth reading before pointing a ' +
+                     'provisioning client at this. It authenticates and ' +
+                     'checks almost nothing; a scope grants only here and ' +
+                     'nothing else reads one; `active: false` deactivates ' +
+                     'nobody; there is no ETag and no changePassword; a ' +
+                     'member naming nothing is accepted.'
       },
       reachableNegatives: {
         type: 'array',

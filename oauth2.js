@@ -64,7 +64,8 @@ const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const app = require('./app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
-        xmlEscape, parseBody, oauthError, signJwt, userFor } = require('./helpers');
+        xmlEscape, parseBody, oauthError, signJwt, userFor,
+        hasScope } = require('./helpers');
 const dpop = require('./dpop');
 // RFC 8705 — certificate-bound access tokens, the other mechanism RFC 9700
 // section 2.2 names. A library like dpop.js, and read here for one thing: the
@@ -234,7 +235,20 @@ function asMetadata(req, raw) {
     // that could never arrive. It reads as an omission next to the
     // claims_supported list in the OIDC document, which is the whole reason the
     // two documents are built from this one object.
-    scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
+    // The two SCIM scopes are here because /scim/v2 now READS them: it is the
+    // first surface in this service to require a scope for anything, and a
+    // client that cannot discover the name of the scope it needs has to be told
+    // it out of band. They are advertised only while SCIM is on, for the reason
+    // `tls_client_certificate_bound_access_tokens` is advertised only where the
+    // port is TLS — a client reads a metadata member as a promise, and a scope
+    // that opens nothing is a promise with nothing behind it. Their NAMES come
+    // from config.js rather than being written here, so that changing
+    // `scim.scopeRead` moves the advertisement and the check together.
+    scopes_supported: ['openid', 'profile', 'email', 'offline_access'].concat(
+      config.value('scim.enabled') !== false
+        ? [String(config.value('scim.scopeRead') || 'scim:read'),
+           String(config.value('scim.scopeWrite') || 'scim:write')]
+        : []),
     // All three, and form_post is the one that was advertised here and NOT
     // implemented for a long time — every request got a 302 whatever it asked
     // for, so a client that requested form_post sat waiting for a POST that
@@ -1011,10 +1025,6 @@ function idToken(base, opts) {
   const token = signJwt(payloadWithCustom, issuanceContext(opts));
   log.debug("Leaving idToken().");
   return token;
-}
-
-function hasScope(scope, name) {
-  return String(scope || '').split(/\s+/).indexOf(name) >= 0;
 }
 
 function tokenSet(base, opts) {

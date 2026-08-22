@@ -254,6 +254,25 @@ async function bbsKeyPair() {
 
 // Request bodies arrive as raw text (the SOAP parser takes every content type),
 // so form-encoded and JSON are both decoded here.
+// ---------------------------------------------------------------------------
+// DOES THIS SCOPE STRING CARRY THAT SCOPE.
+//
+// Here rather than in oauth2.js, where it was written, for the reason
+// everything else in this file is here: more than one protocol needs it now.
+// `scim_auth.js` reads it to decide whether an access token may write to the
+// directory, and a second copy over there would be a second answer to "is
+// `scim:write ` with a trailing space the write scope" — which is the kind of
+// disagreement that shows up as one endpoint accepting a token another refuses.
+//
+// RFC 6749 section 3.3: a scope is a space-delimited, case-SENSITIVE list.
+// Split on any run of whitespace rather than a single space, because a client
+// that joined its scopes with a tab or sent one across a folded header is
+// asking for exactly what it looks like it is asking for.
+// ---------------------------------------------------------------------------
+function hasScope(scope, name) {
+  return String(scope || '').split(/\s+/).indexOf(name) >= 0;
+}
+
 function parseBody(req) {
   log.debug("Entering parseBody(). content-type=" + (req.headers['content-type'] || '(none)'));
   const raw = typeof req.body === 'string' ? req.body : '';
@@ -446,5 +465,6 @@ module.exports = {
   vciError: vciError,
   signJwt: signJwt,
   setJwtRecorder: setJwtRecorder,
-  userFor: userFor
+  userFor: userFor,
+  hasScope: hasScope
 };

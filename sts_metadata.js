@@ -239,16 +239,69 @@ const SPECS = [
     coverage: 'partial: create, read, list, replace, PATCH (section 3.5.2 in full, ' +
               'value-filter paths included), delete, both shapes of .search, bulk, and ' +
               'the three discovery endpoints — with filtering (3.4.2.2), sorting, ' +
-              'pagination, attribute projection and the section 3.12 error shape. NOT ' +
-              'covered, each on purpose and each said on /scim: NO AUTHENTICATION OF ANY ' +
-              'KIND, which the ServiceProviderConfig states with an empty ' +
-              'authenticationSchemes rather than by omission; no ETag or If-Match ' +
-              '(section 3.14), advertised as unsupported because a version built over a ' +
-              'one-second timestamp would be a concurrency control a client trusts and ' +
-              'that is wrong; no changePassword, there being no password here that is ' +
-              'checked; and /Me (section 3.11) answers 501, because it aliases the ' +
-              'authenticated subject and nothing here authenticates. active:false is ' +
-              'stored and DEACTIVATES NOBODY.' },
+              'pagination, attribute projection and the section 3.12 error shape. ' +
+              'Section 2 is covered in full and is the only place in this service where ' +
+              'a credential is REQUIRED: all six schemes it names are offered (OAuth 2.0 ' +
+              'bearer and DPoP tokens, HTTP Basic, HTTP Digest, HOBA, the session cookie ' +
+              'and a TLS client certificate), its SHALL about WWW-Authenticate is on ' +
+              'every 401, and its MUST about an access control policy is two OAuth ' +
+              'scopes — scim:read and scim:write — with every other scheme granting ' +
+              'both. Section 3.11 (/Me) is covered too, as an alias onto the same User ' +
+              'handlers, and still answers 501 where there is genuinely no subject. NOT ' +
+              'covered, each on purpose and each said on /scim: NOTHING IS REALLY ' +
+              'CHECKED ABOUT A CREDENTIAL — anybody can get a token with either scope, ' +
+              'any password but "invalid" passes Basic, anybody can register a HOBA key ' +
+              '— so it is a turnstile rather than a lock, and what it buys is that a ' +
+              'client\'s 401, 403 and challenge-response paths can be run at all; no ' +
+              'ETag or If-Match (section 3.14), advertised as unsupported because a ' +
+              'version built over a one-second timestamp would be a concurrency control ' +
+              'a client trusts and that is wrong; and no changePassword, there being no ' +
+              'password here that is checked. active:false is stored and DEACTIVATES ' +
+              'NOBODY.' },
+
+  // The four authentication schemes SCIM delegates to that are not already
+  // described elsewhere in this list. RFC 6750 and RFC 9449 are further down
+  // with the rest of OAuth, because the token a SCIM caller presents is the
+  // same token this service's own authorization server issues — which is the
+  // whole reason the scope requirement is worth anything.
+  { id: 'rfc7235', name: 'HTTP/1.1 Authentication (RFC 7235)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7235',
+    coverage: 'partial: the framework RFC 7644 section 2 delegates to — the 401 status, ' +
+              'the WWW-Authenticate challenge with one header per offered scheme, and the ' +
+              'Authorization credential. Used by the SCIM endpoints only; no other ' +
+              'surface in this service refuses a caller who presents nothing.' },
+  { id: 'rfc7617', name: 'The Basic HTTP Authentication Scheme (RFC 7617)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7617',
+    coverage: 'full as a scheme, and it verifies nothing: any username with any password ' +
+              'is accepted except the reserved "invalid", which keeps a 401 reachable. ' +
+              'charset="UTF-8" is in the challenge. RFC 7644 section 2 DISCOURAGES this ' +
+              'scheme in those words; it is offered because it is what a provisioning ' +
+              'client most often meets.' },
+  { id: 'rfc7616', name: 'HTTP Digest Access Authentication (RFC 7616)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7616',
+    coverage: 'partial, and it is the ONE scheme here that really checks a password — it ' +
+              'cannot not, since the response is a hash over it, so every username shares ' +
+              'one password exactly as they do in Kerberos. SHA-256, SHA-512-256 and MD5 ' +
+              'with their -sess variants, qop=auth, stale=true on an expired nonce, nonce ' +
+              'count replay refused, and the section 3.5 Authentication-Info response so ' +
+              'a client can authenticate this server back. NOT covered: qop=auth-int (the ' +
+              'body has been through this service\'s own parser, so an integrity check ' +
+              'computed over it could disagree with what was sent) and userhash (there is ' +
+              'no user list to search by hash — every name here is created on sight).' },
+  { id: 'rfc7486', name: 'HOBA: HTTP Origin-Bound Authentication (RFC 7486)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7486',
+    coverage: 'partial: client public key registration at /.well-known/hoba/register, the ' +
+              'challenge with max-age and realm, and signature verification over the ' +
+              'section 5 length-prefixed to-be-signed blob — RSA with SHA-256, algorithm ' +
+              '0. THE SIGNATURE IS REALLY VERIFIED; what is permissive is that anybody ' +
+              'may register any key for any name. NOT covered: algorithm 1 (RSA-SHA1), ' +
+              'the javascript client conventions of section 8, and any binding to a ' +
+              'device identifier — the did/didtype registration parameters are accepted ' +
+              'and ignored.' },
 
   { id: 'rfc4511', name: 'LDAP v3: the protocol (RFC 4511)',
     where: 'IETF',
@@ -794,13 +847,14 @@ const ENDPOINTS = [
     what: 'NOT a SCIM endpoint — a real server publishes none of this. What the ' +
           'provisioning surface is, what it writes into (the embedded directory, entry ' +
           'for entry), what a SCIM id is here (the entry\'s DN, and what that costs on a ' +
-          'rename), the four things it deliberately does not do, and the five things you ' +
-          'can do to make it fail. The first of those four is worth reading before ' +
-          'pointing anything at it: THESE ENDPOINTS CREATE AND DELETE ACCOUNTS AND ' +
-          'NOTHING ON THEM CHECKS A CREDENTIAL, which the ServiceProviderConfig states ' +
-          'with an EMPTY authenticationSchemes rather than by leaving the member out. ' +
-          'The second is that active:false DEACTIVATES NOBODY — it is stored as ' +
-          'scimActive and read by nothing here. Add ?format=json.' },
+          'rename), every authentication scheme it offers with the access control policy ' +
+          'behind them, the things it deliberately does not do, and the dozen things you ' +
+          'can do to make it fail. Two are worth reading before pointing anything at it: ' +
+          'THESE ENDPOINTS CREATE AND DELETE ACCOUNTS AND ARE THE ONE SURFACE HERE THAT ' +
+          'REQUIRES A CREDENTIAL — while checking almost nothing about it, since anybody ' +
+          'can get a token with either scope, any password but "invalid" passes Basic and ' +
+          'anybody can register a HOBA key; and active:false DEACTIVATES NOBODY — it is ' +
+          'stored as scimActive and read by nothing here. Add ?format=json.' },
   { path: '/scim/v2/ServiceProviderConfig', group: 'SCIM',
     name: 'What this SCIM server supports',
     specs: ['rfc7643', 'rfc7644'],
@@ -810,7 +864,14 @@ const ENDPOINTS = [
           'concurrency control a client trusts and that is wrong, and no password here is ' +
           'checked so there is none to change. THE DOCUMENT IS THE SERVER: the same object ' +
           'the endpoints read their limits from builds it, so it cannot advertise a page ' +
-          'size or a bulk limit that is not the one enforced.' },
+          'size or a bulk limit that is not the one enforced — and the same table that ' +
+          'builds every WWW-Authenticate challenge builds authenticationSchemes, so a ' +
+          'scheme that is turned off disappears from both together. THREE of the seven ' +
+          'schemes published have no canonical `type` in RFC 7643 section 5 (a client ' +
+          'certificate, a cookie and HOBA, all three named by RFC 7644 section 2) and ' +
+          'carry an honest type of their own rather than being left out. READABLE ' +
+          'WITHOUT A CREDENTIAL, unless scim.authDiscovery says otherwise: it is where a ' +
+          'client learns which schemes exist.' },
   { path: '/scim/v2/ResourceTypes', group: 'SCIM', name: 'The resource types',
     specs: ['rfc7643'],
     what: 'User and Group, with the schema and the endpoint of each (RFC 7643 section 6).' },
@@ -886,14 +947,31 @@ const ENDPOINTS = [
           'is checked against the number the ServiceProviderConfig ADVERTISES rather than ' +
           'against the express body parser\'s service-wide one, because a client reads a ' +
           'published limit as a promise.' },
-  { path: '/scim/v2/Me', group: 'SCIM', name: '/Me, which is a refusal',
-    specs: ['rfc7644'],
-    what: 'Section 3.11 defines /Me as an alias for the subject the request authenticated ' +
-          'as, and NOTHING HERE AUTHENTICATES — so there is never a subject to alias. ' +
-          'Answers 501 saying exactly that, on every method, which is a REACHABLE ' +
-          'NEGATIVE of the same kind as the reserved password "invalid": better than a ' +
-          '404, which would say the route is not there, and far better than a guess at ' +
-          'who is asking.' },
+  { path: '/scim/v2/Me', group: 'SCIM', name: '/Me, the authenticated subject',
+    specs: ['rfc7644', 'rfc7235'],
+    what: 'Section 3.11\'s alias for the subject the request authenticated as. GET, PUT, ' +
+          'PATCH and DELETE resolve the credential to a directory entry and delegate to ' +
+          'the SAME User handlers /Users/{id} uses, so there is no second read or write ' +
+          'path to keep in step. It used to answer 501 on every method because nothing ' +
+          'here authenticated, and TWO OF THOSE 501s ARE STILL RIGHT and are kept: an ' +
+          'ANONYMOUS caller has no subject to alias (the alias is unavailable, which is ' +
+          'not the same as the resource being missing), and POST would create a subject ' +
+          'that by definition already exists. A credential naming somebody with no entry ' +
+          '— a client_credentials token, a client certificate — gets 404 instead.' },
+  { path: '/.well-known/hoba/register', group: 'SCIM',
+    name: 'Register a HOBA public key',
+    specs: ['rfc7486'],
+    what: 'RFC 7486 section 7. A form-encoded POST carrying pub=<PEM public key> and (this ' +
+          'service\'s own parameter) username=<who it is for>, answered with 201 and the ' +
+          'Hobareg: regok header. UNAUTHENTICATED on purpose, for the reason POST ' +
+          '/tls/trust is: it is how a caller GETS a credential, so requiring one to reach ' +
+          'it would make the scheme unusable by anybody who did not already have another. ' +
+          'Anybody may register any key for any name — the SIGNATURE is then really ' +
+          'verified, which is the half that makes the scheme worth implementing. The key ' +
+          'lands on the person\'s own entry under ou=users as hobaPublicKey, so an ' +
+          'ldapsearch and /admin/users show it. GET describes the endpoint, because a ' +
+          'well-known path that 404s to a browser is indistinguishable from one nobody ' +
+          'implemented.' },
 
   // --- TLS ---
   //
@@ -1214,7 +1292,7 @@ const ENDPOINTS = [
           'rather than as counters — which is the difference from /admin/metrics: that page can ' +
           'say the directory holds eleven entries, and only this one can say a twelfth was created ' +
           'at 14:02 and deleted at 14:03 by somebody bound as uid=carol, over LDAPS. Six ' +
-          'categories: a credential ACCEPTED in any of the fourteen families here; a sign-on ' +
+          'categories: a credential ACCEPTED in any of the fifteen families here; a sign-on ' +
           'session created or ended; every LDAP operation over 389 and 636 alike (an entry ' +
           'created, deleted, updated, renamed, searched, compared, bound to), with a user, a group ' +
           'and an entry told apart by PLACEMENT because this directory is schemaless; every ' +
