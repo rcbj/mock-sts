@@ -136,6 +136,12 @@ const authorizationServers = require('./authorization_servers');
 // justified by rule 3e's test in exactly the same way.
 const spiffeCa = require('./spiffe_ca');
 const spiffeRegistry = require('./spiffe_registry');
+// WHO MAY CALL THE SPIRE SERVER API. A library like the two above it — it
+// registers nothing and starts nothing — so neither thing that forces a slot
+// applies, and it is required directly rather than read through
+// `setSpiffeReader()`. What DOES need the slot is which of the four sockets
+// bound, which is a fact about a socket and only `spiffe_server.js` knows it.
+const spiffeAuth = require('./spiffe_auth');
 const spiffeIdLib = require('./spiffe_id');
 // For the DRIFT report: the document this service would publish, to compare a
 // profile's overrides against. oauth2.js is required before admin.js in
@@ -1879,10 +1885,12 @@ app.get('/admin/tokens', function (req, res) {
 // funnels rather than from a recording site per feature:
 //
 //   authentication   admin_stats.recordAuthentication(), the single point all
-//                    fifteen protocol families already pass through when a
+//                    sixteen protocol families already pass through when a
 //                    credential is ACCEPTED — SCIM being the fifteenth, for
 //                    the three of its schemes that present a credential per
-//                    request
+//                    request, and SPIFFE the sixteenth, for an X509-SVID
+//                    presented over mutual TLS, an agent attesting and a
+//                    JWT-SVID validated
 //   session          authn.js's startSession / endSession, which is where both
 //                    OAuth 2.0 / OIDC and WS-Federation sign in and out
 //   directory        the seven LDAP handlers in ldap_server.js, plus the
@@ -6715,17 +6723,48 @@ app.get('/admin/config', function (req, res) {
 // analogue of the "a group here grants nothing" line on /admin/groups, and it
 // matters more, because what comes out of these pages is a credential another
 // service will believe.
-const SPIFFE_POSTURE_NOTE =
-  '<div class="warn"><strong>Nothing here is attested and nobody is ' +
-  'authenticated.</strong> A real SPIFFE agent reads the peer credentials of ' +
-  'its socket, turns them into selectors, and hands a workload only the ' +
-  'identities those selectors match. This service hands every caller EVERY ' +
-  'identity in the trust domain, and its SPIRE Server API lets any caller ' +
-  'create a registration entry granting one. So the selectors below are ' +
-  'recorded, reported, and used for <code>GetAuthorizedEntries</code> and the ' +
-  '&ldquo;what would match&rdquo; view — and they restrict nothing. ' +
-  '<a href="/spiffe">GET /spiffe</a> has the full list of what is and is not ' +
-  'checked.</div>';
+// The banner every SPIFFE page carries. It is a FUNCTION rather than a constant
+// now, because half of what it says depends on a setting that can be off: a
+// fixed string would go on describing mutual TLS on a port that had been bound
+// plain, which is the silent disagreement this repository keeps warning about.
+//
+// TWO PARAGRAPHS, and the split is the point — the two surfaces are
+// authenticated differently because their specifications say opposite things,
+// and a single sentence covering both was what made the old note wrong in one
+// direction as soon as one of them changed.
+function spiffePostureNote() {
+  const enforced = spiffeAuth.authRequired();
+  return '<div class="warn"><strong>Nothing here is attested.</strong> A real ' +
+    'SPIFFE agent reads the peer credentials of its socket — pid, uid, gid, ' +
+    'and from those the executable, the container, the pod — and hands a ' +
+    'workload only the identities those selectors match. Node cannot read ' +
+    'them at all, so this service identifies a Workload API caller by the ' +
+    'transport it arrived on, the endpoint it reached and its peer address, ' +
+    'and nothing else. Those DO now decide which entries answer ' +
+    '(<code>spiffe.attestWorkloads</code>), and they prove nothing about who ' +
+    'is calling: anybody who can reach the socket can still get an identity. ' +
+    'Node attestation is taken on trust too, which is why every agent below ' +
+    'carries an <code>unverified:true</code> selector.</div>' +
+    '<div class="' + (enforced ? 'note' : 'warn') + '">' +
+    (enforced
+      ? '<strong>The SPIRE Server API is the exception.</strong> Its TCP port ' +
+        'is mutual TLS: a caller presents an X509-SVID from this trust ' +
+        'domain, and every method is authorized against SPIRE\'s own table — ' +
+        'so an entry marked <code>admin</code> or <code>downstream</code> ' +
+        'below now decides what its holder may do. Its Unix socket is the ' +
+        '<code>local</code> entity and needs no credential. The Workload API ' +
+        'is deliberately untouched: its specification says a client MUST NOT ' +
+        'be required to authenticate.'
+      : '<strong>And nobody is authenticated on the SPIRE Server API either, ' +
+        'because <code>spiffe.authRequired</code> is off.</strong> That port ' +
+        'is plain gRPC, any caller can create a registration entry granting ' +
+        'any identity here and then collect an SVID for it, and the ' +
+        '<code>admin</code> and <code>downstream</code> flags below are ' +
+        'recorded and read by nothing. It is restart-only, because it decides ' +
+        'how the socket is bound.') +
+    ' <a href="/spiffe">GET /spiffe</a> has the whole table and the full list ' +
+    'of what is and is not checked.</div>';
+}
 
 function spiffeSelectorText(selector) {
   return spiffeRegistry.selectorText(selector);
@@ -6760,6 +6799,11 @@ function spiffeJson(req) {
               maxAgents: spiffeRegistry.maxAgents(),
               maxFederatedBundles: config.value('spiffe.maxFederatedBundles') },
     keyTypes: state.keyTypes,
+    // WHO MAY CALL, from the one table `GET /spiffe` and the management API
+    // read too. Built there rather than here for the reason the two discovery
+    // documents are built from one object: three surfaces describing what is
+    // enforced three ways is two of them eventually wrong.
+    authentication: spiffeAuth.state(),
     // Which settings shape this, so that a reader who wants to change something
     // knows where to go rather than hunting /admin/config. The same courtesy
     // /admin/scim pays.
@@ -6767,6 +6811,9 @@ function spiffeJson(req) {
                'spiffe.jwtKeyType', 'spiffe.caTtl', 'spiffe.svidTtl',
                'spiffe.jwtSvidTtl', 'spiffe.refreshHint', 'spiffe.svidSubject',
                'spiffe.autoCreateEntries', 'spiffe.requireSecurityHeader',
+               'spiffe.authRequired', 'spiffe.trustLocalSocket',
+               'spiffe.adminIds', 'spiffe.clockSkew',
+               'spiffe.attestWorkloads', 'spiffe.acceptAssertedSelectors',
                'spiffe.maxEntries', 'spiffe.maxAgents',
                'spiffe.maxFederatedBundles', 'spiffe.bundlePath',
                'spiffe.workloadSocketEnabled', 'spiffe.workloadSocket',
@@ -6780,17 +6827,23 @@ function spiffeJson(req) {
   return json;
 }
 
+// A listener row, and the fourth column is WHAT A CALLER HAS TO PRESENT ON IT.
+// Not decoration: the four sockets have three different postures — plain,
+// plain-and-trusted-as-local, and mutual TLS — and a reader who cannot see
+// which is which meets the difference as a handshake failure with no message.
+// The same courtesy /tls says about which port needs verification turned off.
 function spiffeListenerRows(bindings, what) {
   if (!bindings.length) {
-    return '<tr><td colspan="3">Nothing bound for ' + esc(what) + '. Either ' +
+    return '<tr><td colspan="4">Nothing bound for ' + esc(what) + '. Either ' +
       'both transports are off in configuration, or the process has not ' +
       'finished starting.</td></tr>';
   }
   return bindings.map(function (binding) {
     return '<tr><td>' + esc(what) + '</td><td><code>' + esc(binding.address) +
-      '</code></td><td>' + (binding.listening ? 'listening'
+      '</code>' + (binding.tls ? ' <span class="note">(mutual TLS)</span>' : '') +
+      '</td><td>' + (binding.listening ? 'listening'
         : '<strong>did not bind</strong> &mdash; ' + esc(binding.error)) +
-      '</td></tr>';
+      '</td><td>' + esc(binding.authentication || '') + '</td></tr>';
   }).join('');
 }
 
@@ -6827,7 +6880,7 @@ function spiffePage(req) {
   }).join('') || '<tr><td colspan="5">None. This trust domain federates with ' +
     'nobody.</td></tr>';
 
-  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+  const inner = messagesOf(req) + spiffePostureNote() +
     (json.enabled ? '' : '<div class="warn">SPIFFE is turned OFF ' +
       '(<code>spiffe.enabled</code>): the bundle endpoint answers 404 and every ' +
       'gRPC call is refused with <code>Unavailable</code>. Turn it back on from ' +
@@ -6880,10 +6933,63 @@ function spiffePage(req) {
     '<p>Neither <code>/sts-metadata</code> nor this page can see a socket, so ' +
     'this table is the only place that reports whether each one actually ' +
     'bound. All four are restart-only.</p>' +
-    '<table><tr><th>Surface</th><th>Address</th><th>State</th></tr>' +
+    '<table><tr><th>Surface</th><th>Address</th><th>State</th>' +
+    '<th>What a caller presents</th></tr>' +
     spiffeListenerRows(json.listeners.workloadApi, 'Workload API') +
     spiffeListenerRows(json.listeners.serverApi, 'SPIRE Server API') +
     '</table>' +
+
+    '<h2>Who may call the SPIRE Server API</h2>' +
+    '<p>' + esc(json.authentication.what || '') + '</p>' +
+    '<p>A caller may be several of these at once and the check asks whether it ' +
+    'is <em>any</em> of the ones a method allows, which is what SPIRE\'s own ' +
+    'policy does: the <code>spire-server</code> CLI on this host is ' +
+    '<code>local</code>, and an agent that also holds an entry marked ' +
+    '<code>admin</code> is both.</p>' +
+    '<table><tr><th>Entity</th><th>What it means</th></tr>' +
+    json.authentication.entities.map(function (entity) {
+      return '<tr><td><code>' + esc(entity.id) + '</code></td><td>' +
+        esc(entity.what) + '</td></tr>';
+    }).join('') + '</table>' +
+    '<p>Administrators by configuration ' +
+    '(<a href="/admin/config"><code>spiffe.adminIds</code></a>): ' +
+    (json.authentication.adminIds.length
+      ? json.authentication.adminIds.map(function (id) {
+          return '<code>' + esc(id) + '</code>';
+        }).join(', ') + '. '
+      : 'none. ') +
+    'The other way to make one is to mark a registration entry ' +
+    '<code>admin</code> on <a href="/admin/spiffe/entries">the entries ' +
+    'page</a>; SPIRE has both, and neither is cached, so either takes effect ' +
+    'on the next call.</p>' +
+    '<p class="note">Workload API selectors: a caller there is identified as ' +
+    '<code>transport:</code>, <code>endpoint:</code> and <code>peer:</code>, ' +
+    'and ' + (json.authentication.attestWorkloads
+      ? 'those decide which entries answer it ' +
+        '(<code>spiffe.attestWorkloads</code>).'
+      : 'that decides nothing at the moment &mdash; ' +
+        '<code>spiffe.attestWorkloads</code> is off, so every caller is ' +
+        'answered with every entry.') +
+    ' Asserted selectors (<code>' +
+    esc(json.authentication.assertedSelectorHeader) + '</code>) are ' +
+    (json.authentication.acceptAssertedSelectors
+      ? '<strong>believed</strong>, and nothing verifies them.'
+      : 'ignored (<code>spiffe.acceptAssertedSelectors</code> is off).') +
+    '</p>' +
+    '<h3>The per-method table</h3>' +
+    '<p>Copied from SPIRE\'s own <code>policy_data.json</code> rather than ' +
+    'reasoned out: a table derived from what each method &ldquo;obviously&rdquo; ' +
+    'needs disagrees with SPIRE in two or three places, and the client author ' +
+    'who meets the disagreement cannot tell which end is wrong. ' +
+    '<code>any</code> means the method is open here and in a real server too ' +
+    '&mdash; <code>AttestAgent</code> because an agent has no SVID until that ' +
+    'call gives it one, <code>GetBundle</code> because a trust bundle is ' +
+    'public.</p>' +
+    '<table><tr><th>Method</th><th>Allowed to</th></tr>' +
+    json.authentication.policy.map(function (row) {
+      return '<tr><td><code>' + esc(row.method) + '</code></td><td>' +
+        esc(row.allow.join(', ')) + '</td></tr>';
+    }).join('') + '</table>' +
 
     '<h2>Federated trust domains</h2>' +
     '<p><strong>A foreign bundle is given to this service and never fetched by ' +
@@ -6992,7 +7098,7 @@ function spiffeEntriesListPage(req) {
         (json.filter.origin === name ? ' selected' : '') + '>' + esc(name) +
         '</option>';
     })).join('');
-  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+  const inner = messagesOf(req) + spiffePostureNote() +
     '<p>' + esc(json.total) + ' registration entry/entries, of at most ' +
     esc(json.max) + ' (<code>spiffe.maxEntries</code>). The store is the ' +
     'embedded directory under <code>' + esc(json.container) + '</code>: ' +
@@ -7082,7 +7188,7 @@ function spiffeEntryDetailPage(req, id) {
   const json = { entry: entry, editable: spiffeRegistry.EDITABLE };
   const carried = '<input type="hidden" name="back" value="' + esc(back) + '">' +
                   '<input type="hidden" name="entry" value="' + esc(entry.id) + '">';
-  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+  const inner = messagesOf(req) + spiffePostureNote() +
     '<h2><code>' + esc(entry.spiffeId) + '</code></h2>' +
     '<p>Entry <code>' + esc(entry.id) + '</code>, revision ' +
     esc(entry.revisionNumber) + ', created by <code>' + esc(entry.origin) +
@@ -7214,7 +7320,7 @@ function spiffeAgentsListPage(req) {
   }).join('') || '<tr><td colspan="5">No agent has attested here. An agent ' +
     'appears when it calls <code>AttestAgent</code> on the SPIRE Server ' +
     'API.</td></tr>';
-  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+  const inner = messagesOf(req) + spiffePostureNote() +
     '<p>' + esc(json.total) + ' agent(s), of at most ' + esc(json.max) +
     ' (<code>spiffe.maxAgents</code>). These entries are a RECORD rather than ' +
     'configuration &mdash; everything on them was written by this service when ' +
@@ -7261,7 +7367,7 @@ function spiffeAgentDetailPage(req, id) {
     }).join('');
   const carried = '<input type="hidden" name="back" value="' + esc(back) + '">' +
                   '<input type="hidden" name="agent" value="' + esc(agent.id) + '">';
-  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+  const inner = messagesOf(req) + spiffePostureNote() +
     '<h2><code>' + esc(agent.id) + '</code></h2>' +
     '<p>Attested with <code>' + esc(agent.attestationType) + '</code>, ' +
     esc(agent.attestations) + ' time(s), first at ' + esc(agent.firstSeen) +

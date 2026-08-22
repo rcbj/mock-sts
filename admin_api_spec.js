@@ -1344,10 +1344,10 @@ const SCHEMAS = {
                              'session id.' },
       protocol: { type: 'string',
                   description: 'The family, where one applies. Free text: the ' +
-                               'fourteen families here spell themselves ' +
+                               'sixteen families here spell themselves ' +
                                'differently in the places this is read from, ' +
                                'and an enum would be a lookup table that ' +
-                               'silently drops the fifteenth.' },
+                               'silently drops the seventeenth.' },
       channel: {
         type: 'string',
         enum: ['http', 'ldap', 'ldaps', 'internal'],
@@ -1446,12 +1446,16 @@ const DESCRIPTION = [
   'shows and everything it can change, over JSON, with no browser.',
 
   '**Nothing here is protected, and that is a decision rather than an ' +
-  'oversight.** This service checks no password anywhere — the username ' +
-  'typed at its sign-in screen simply becomes the identity in every token ' +
-  'it issues — so a console or an API with a credential on it would be the ' +
-  'only authenticated surface in a service whose whole premise is that it ' +
-  'authenticates nobody, and the only one a test would have to hold a ' +
-  'secret for. What follows is worth stating plainly: anyone who can reach ' +
+  'oversight.** This service checks no end-user password anywhere — the ' +
+  'username typed at its sign-in screen simply becomes the identity in every ' +
+  'token it issues — so a console or an API with a credential on it would be ' +
+  'a surface a test would have to hold a secret for, in a service whose ' +
+  'premise is that it authenticates nobody. Two surfaces are the exception ' +
+  'and neither is this one: the SCIM endpoints, which create and delete ' +
+  'accounts, and the SPIRE Server API, whose callers present an X509-SVID ' +
+  'over mutual TLS. Both are turnstiles rather than locks — anybody can get ' +
+  'the credential — and both exist so that a client\'s refusal paths can be ' +
+  'exercised at all. What follows is worth stating plainly: anyone who can reach ' +
   'this port can revoke every token this service has issued and change ' +
   'what the next one contains. That is fine on a laptop or a compose ' +
   'network and is not fine on a public address, which was already true of ' +

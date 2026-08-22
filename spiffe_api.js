@@ -21,26 +21,44 @@
 // `spiffe_ca.js`, `spiffe_registry.js`, `spiffe_grpc.js`) is below it.
 //
 // ---------------------------------------------------------------------------
-// EVERY CALLER IS AN ADMINISTRATOR, AND THAT IS THE WHOLE SECURITY MODEL
+// THIS IS THE ONE SURFACE IN THE SPIFFE FAMILY THAT AUTHENTICATES ITS CALLER
 //
 // A real SPIRE server authorizes this API against the caller's own SVID: an
 // agent may call `GetAuthorizedEntries` and `BatchNewX509SVID` and nothing
 // else, an entry marked `admin` may create entries, a `downstream` entry may
-// ask for an intermediate CA, and everybody else is refused.
+// ask for an intermediate CA, and everybody else is refused. **This service now
+// does the same**, and none of it is decided in this file: `spiffe_auth.js`
+// builds the caller from the mutual-TLS X509-SVID and authorizes each method
+// against SPIRE's own `policy_data.json`, and `spiffe_grpc.js`'s wrappers apply
+// it before any handler here runs. So there is no authorization check in any of
+// the forty-two handlers below, and there must not be one — a check beside the
+// funnel is how a method comes to be guarded twice and differently.
 //
-// This service checks none of it, for the same reason it checks no password and
-// accepts every LDAP bind. **So anybody who can reach this port can create a
-// registration entry granting any identity in this trust domain, and then
-// collect an SVID for it.** That is stated here, on `GET /spiffe`, on
-// `/admin/spiffe` and beside `spiffe.grpcHost` in `config.js`, because it is
-// the single most important thing to know before binding this to anything but
-// a loopback address.
+// Three things follow that are easy to miss:
 //
-// The `admin` and `downstream` flags on an entry are still RECORDED and
-// reported — they are part of what an entry says, and a client author reading
-// entries back expects them — and nothing here reads them. Recording a fact is
-// not acting on it, which is the distinction this service draws in six other
-// places.
+//   * **The `admin` and `downstream` flags on an entry are now READ.** They
+//     used to be recorded, reported, and consulted by nothing — this file's
+//     header said so. `spiffe_auth.classify()` reads them on every call, so
+//     marking an entry `admin` on /admin/spiffe/entries, or with an
+//     `ldapmodify`, changes what that identity may do on the NEXT call.
+//
+//   * **The Unix socket is the `local` entity and needs no credential**, which
+//     is how the `spire-server` CLI reaches a real server. Two methods are open
+//     to everybody — `AttestAgent`, because an agent has no SVID until that
+//     call gives it one, and `GetBundle`, because a trust bundle is public —
+//     and both are open in a real SPIRE server too.
+//
+//   * **`spiffe.authRequired` off restores the old posture completely**: the
+//     TCP port binds plain, nothing is verified, and anybody who can reach it
+//     can create a registration entry granting any identity in this trust
+//     domain and then collect an SVID for it. That is still worth having, and
+//     it is still what `GET /spiffe`, `/admin/spiffe` and `spiffe.grpcHost`
+//     warn about — for that setting rather than for every deployment.
+//
+// **WHAT IS STILL NOT ATTESTED IS THE WORKLOAD API AND NODE ATTESTATION.** See
+// `spiffe_workload.js`'s header for the first, which is the specification's
+// requirement rather than this service's laxity, and `AttestAgent` below for
+// the second.
 //
 // ---------------------------------------------------------------------------
 // THE BATCH METHODS ANSWER PER ITEM AND DO NOT FAIL AS A WHOLE
@@ -67,6 +85,9 @@ const spiffeId = require('./spiffe_id');
 const ca = require('./spiffe_ca');
 const registry = require('./spiffe_registry');
 const rpc = require('./spiffe_grpc');
+// For the caller on a call — see the header. This module never authorizes;
+// it reads WHO, where a method's answer depends on it.
+const auth = require('./spiffe_auth');
 
 const status = rpc.grpc.status;
 
@@ -593,6 +614,57 @@ const agentHandlers = {
                                 'its own private key, so there is nothing to ' +
                                 'issue against without one.');
     }
+    // ---------------------------------------------------------------------
+    // A JOIN TOKEN IS A CREDENTIAL, SO IT IS CHECKED.
+    //
+    // It is the one attestation payload here that this service ISSUED and can
+    // therefore verify: `CreateJoinToken` minted it, it has a lifetime, and it
+    // is single-use. A server that accepted a join token it never issued would
+    // be accepting a forgery of its own credential, which is a different thing
+    // from being permissive about a payload somebody else's attestor would
+    // have verified.
+    //
+    // Gated on `spiffe.authRequired` like everything else this file gained, so
+    // the old behaviour — any token attests — stays reachable. The refusals
+    // are three and they are deliberately distinguishable: a token nobody
+    // minted, a token that ran out, and a token already spent are three
+    // different bugs in a client and reading one message for all three would
+    // send somebody looking in the wrong place.
+    // ---------------------------------------------------------------------
+    if (attestationType === 'join_token' && auth.authRequired()) {
+      const presented = String(Buffer.from(data.payload || []).toString('utf8')).trim();
+      const held = joinTokens.get(presented);
+      if (!presented) {
+        throw rpc.invalidArgument('A join_token attestation carries the token ' +
+                                  'as params.data.payload, and this one is ' +
+                                  'empty.');
+      }
+      if (!held) {
+        throw rpc.permissionDenied('That join token was not issued by this ' +
+                                   'server, or it has already been spent — a ' +
+                                   'join token is single-use, and the one it ' +
+                                   'attested is on /admin/spiffe/agents. Ask ' +
+                                   'for a new one with CreateJoinToken. Note ' +
+                                   'that tokens do not survive a restart: ' +
+                                   'nothing here is persisted.');
+      }
+      if (held.expiresAt && held.expiresAt < nowSec()) {
+        joinTokens.delete(presented);
+        throw rpc.permissionDenied('That join token expired at ' +
+          new Date(held.expiresAt * 1000).toISOString() + '. It has been ' +
+          'discarded; ask for another with CreateJoinToken, which takes a ' +
+          'ttl.');
+      }
+      if (held.agentId && held.agentId !== agentId) {
+        // A token minted FOR a named agent, presented by another. SPIRE binds
+        // the two; without this the `agent_id` argument to CreateJoinToken
+        // would be a note rather than a constraint.
+        throw rpc.permissionDenied('That join token was issued for ' +
+          held.agentId + ' and this attestation would produce ' + agentId +
+          '. A join token created for a named agent may only attest that ' +
+          'agent.');
+      }
+    }
     const svid = await ca.signCsr(Buffer.from(csr), agentId, { ttl: 0 });
     const recorded = registry.recordAttestation(agentId, {
       attestationType: attestationType,
@@ -621,6 +693,35 @@ const agentHandlers = {
       subject: agentId, entryId: '', serial: svid.serialHex,
       expiresAt: svid.expiresAt
     });
+    // ---------------------------------------------------------------------
+    // THE ATTESTED AGENT IS AN IDENTITY, AND IT REACHES THE FUNNEL HERE.
+    //
+    // Here rather than at the top of the handler, because a row must mean "a
+    // credential was ACCEPTED" — the same rule `recordAuthentication()` itself
+    // follows by returning early on an identity it could not read, and the
+    // same reason `/oid4vp/response` records the holder BELOW its refusals. An
+    // agent that was banned, or whose join token was refused, threw several
+    // lines above and records nothing.
+    //
+    // **WHAT WAS ACCEPTED IS NAMED, AND FOR A NODE ATTESTOR IT SAYS
+    // `unverified`.** A join token this server minted and spent is a real
+    // credential; a `k8s_psat` payload is a document nothing here verified, and
+    // its agent entry carries `unverified:true` for exactly that reason. Both
+    // create the identity — an agent that attested is an agent that is here —
+    // but a page that reported them identically would be claiming a check that
+    // did not happen.
+    // ---------------------------------------------------------------------
+    auth.recordIdentity({
+      presented: agentId,
+      protocol: 'SPIFFE',
+      method: attestationType === 'join_token'
+        ? 'agent attestation (join token)'
+        : 'agent attestation (' + attestationType + ', unverified)',
+      note: attestationType === 'join_token'
+        ? 'attested with a join token this server minted and has now spent'
+        : 'attested with a ' + attestationType + ' payload; NOTHING VERIFIED ' +
+          'IT, which is why the agent\'s selectors carry unverified:true'
+    });
     return {
       result: {
         svid: {
@@ -634,6 +735,26 @@ const agentHandlers = {
     };
   }),
 
+  // ---------------------------------------------------------------------
+  // RenewAgent — THE ONE METHOD AUTHENTICATION TURNED FROM A REFUSAL INTO AN
+  // ANSWER, and the refusal it replaced is worth keeping in view.
+  //
+  // It used to be `Unimplemented`, and the message said why in terms: "a real
+  // SPIRE server knows which agent is calling from the SVID on the mTLS
+  // connection and renews THAT agent. Nothing here authenticates the caller,
+  // so answering would mean either guessing which agent to renew or renewing
+  // whichever one the caller named — and the second is a way for any caller to
+  // obtain any agent's identity."
+  //
+  // Something here authenticates the caller now. The agent being renewed is
+  // the one on the connection — `caller.spiffeId`, off the mutual-TLS SVID,
+  // which `spiffe_auth.js` verified against this trust domain's bundle and
+  // classified as an attested, unbanned agent — and it is NEVER read from the
+  // request. The policy table already refuses this method to anybody who is
+  // not an agent, so by the time this runs the caller is one; the check below
+  // is for the OTHER mode, where `spiffe.authRequired` is off and the old
+  // objection stands word for word.
+  // ---------------------------------------------------------------------
   RenewAgent: rpc.unary('server', 'Agent.RenewAgent', async function (call) {
     await ca.ready();
     const csr = ((call.request || {}).params || {}).csr;
@@ -641,21 +762,67 @@ const agentHandlers = {
       throw rpc.invalidArgument('RenewAgent needs a certificate signing ' +
                                 'request in params.csr.');
     }
-    // A real server knows which agent is calling, from the SVID on the
-    // connection. Nothing here does — so the agent is identified from the CSR's
-    // own subjectAltName if it carries one, and otherwise this is refused
-    // rather than guessed at. Renewing "whichever agent" would hand an agent
-    // SVID to any caller with a CSR, which is a step further than even this
-    // service goes: everything else here at least names what it is issuing.
-    throw rpc.statusError(status.UNIMPLEMENTED,
-      'RenewAgent cannot be answered by this service, and the reason is worth ' +
-      'stating rather than papering over. A real SPIRE server knows which ' +
-      'agent is calling from the SVID on the mTLS connection and renews THAT ' +
-      'agent. Nothing here authenticates the caller, so answering would mean ' +
-      'either guessing which agent to renew or renewing whichever one the ' +
-      'caller named — and the second is a way for any caller to obtain any ' +
-      'agent\'s identity. Call AttestAgent again instead: it is not refused, ' +
-      'it re-issues, and it records the attestation.');
+    const caller = call.spiffeCaller || {};
+    if (!caller.authenticated || !caller.entities.agent) {
+      throw rpc.statusError(status.UNIMPLEMENTED,
+        'RenewAgent renews the agent on the CONNECTION, and this connection ' +
+        'has no agent on it: ' + auth.describeCaller(caller) + '. With ' +
+        'spiffe.authRequired off there is nothing to identify a caller by, so ' +
+        'answering would mean renewing whichever agent the caller named — a ' +
+        'way for anybody to obtain any agent\'s identity. Turn the setting ' +
+        'on and present the agent\'s X509-SVID, or call AttestAgent again, ' +
+        'which is not refused, re-issues, and records the attestation.');
+    }
+    const agent = registry.agentById(caller.spiffeId);
+    if (!agent) {
+      // Classified as an agent a moment ago and gone now: somebody deleted it
+      // from /admin/spiffe/agents between the handshake and this call. NOT
+      // FOUND rather than an invented re-attestation — a renewal is for an
+      // agent that exists, and re-attesting one somebody has just removed
+      // would undo the delete from the other end.
+      throw rpc.notFound('The agent ' + caller.spiffeId + ' is no longer ' +
+                         'recorded on this server — it was deleted between ' +
+                         'this connection being made and this call. Call ' +
+                         'AttestAgent to come back.');
+    }
+    if (agent.banned) {
+      throw rpc.permissionDenied('The agent ' + caller.spiffeId + ' is banned ' +
+                                 'on this server. Unban it from ' +
+                                 '/admin/spiffe/agents or with the ' +
+                                 'management API.');
+    }
+    const svid = await ca.signCsr(Buffer.from(csr), caller.spiffeId, { ttl: 0 });
+    // The renewal is recorded as an attestation of the SAME kind the agent
+    // already had. It is not a new attestation — nothing was attested here,
+    // the agent proved possession of an SVID this server issued — so the
+    // attestation type is carried over rather than invented, and the selectors
+    // are left exactly as they were.
+    registry.recordAttestation(caller.spiffeId, {
+      attestationType: agent.attestationType,
+      selectors: agent.selectors,
+      canReattest: agent.canReattest,
+      svidHash: crypto.createHash('sha256').update(svid.certificateDer)
+        .digest('hex').slice(0, 32),
+      expiresAt: svid.expiresAt
+    });
+    stats.recordSvid('X.509', {
+      subject: caller.spiffeId, entryId: '', serial: svid.serialHex,
+      expiresAt: svid.expiresAt
+    });
+    audit.audit({
+      action: 'spiffe.agent.attest', actor: caller.spiffeId,
+      protocol: 'SPIRE Server API', channel: 'grpc', target: caller.spiffeId,
+      summary: 'An agent renewed its own SVID',
+      detail: { serial: svid.serialHex, expiresAt: svid.expiresAt }
+    });
+    return {
+      svid: {
+        cert_chain: [svid.certificateDer],
+        id: spiffeId.toProto(caller.spiffeId),
+        expires_at: String(svid.expiresAt),
+        hint: ''
+      }
+    };
   }),
 
   // A join token. Single-use (see `joinTokens`), and with a real TTL, because
@@ -1455,10 +1622,16 @@ const debugHandlers = {
 // follow, and the same rule that makes `oauth2_bcp.js` publish `enforced: 'no'`
 // rows rather than omitting them.
 // ===========================================================================
+// The methods that answer `Unimplemented`, each with the reason it does —
+// published on `GET /spiffe` and on the console, because a table reporting
+// forty-two of forty-two would be the most misleading thing in this repository.
+//
+// **`Agent.RenewAgent` USED TO BE IN HERE AND IS NOT ANY MORE.** Its reason was
+// that nothing authenticated the caller, so there was no way to know which
+// agent to renew; mutual TLS on the SPIRE Server API answered that, and the
+// method now renews the agent on the connection. It still refuses, with the
+// same argument, when `spiffe.authRequired` is off — see the handler.
 const NOT_IMPLEMENTED = {
-  'Agent.RenewAgent':
-    'Nothing here authenticates the caller, so there is no way to know which ' +
-    'agent to renew. Call AttestAgent again.',
   'Bundle.AppendBundle':
     'It would publish an authority this server holds no key for, which every ' +
     'workload in the trust domain would then trust. Rotate instead.',

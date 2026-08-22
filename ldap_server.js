@@ -469,6 +469,19 @@ const OWN_NAMES = [
   // one.
   'didSubject', 'didMethod',
 
+  // On the entries a SPIFFE identity seeds, and load-bearing for exactly the
+  // reason the two above it are: the entry is NAMED by a hash of the SPIFFE ID
+  // (spiffePlan() says why), so `spiffeSubject` is the only place the
+  // identifier itself survives and the only thing locateEntry() can find the
+  // entry by. `spiffePath` and `spiffeTrustDomain` are the two halves of it a
+  // reader actually wants to filter on. Note that these are DIFFERENT NAMES
+  // from `spiffeId` and `spiffeAgentId` one container over: those are on
+  // REGISTRATION entries under ou=spiffe and mean "the identity this entry
+  // configures", where these are on a PERSON under ou=users and mean "an
+  // identity that authenticated here". Merging the two spellings would file a
+  // registration entry and its holder under one name.
+  'spiffeSubject', 'spiffePath', 'spiffeTrustDomain',
+
   // On any entry whose person authenticated somewhere that STATES how they did
   // it — which today is the sign-in screen and nothing else, because amr is an
   // OIDC vocabulary and a Kerberos AS-REQ has nothing to put in it. There is no
@@ -997,6 +1010,14 @@ const DN_SHAPED = /^[A-Za-z][A-Za-z0-9-]*=/;
 // look alike.
 const DID_SHAPED = /^did:[a-z0-9]+:/i;
 
+// A SPIFFE ID, which is the FOURTH shape of identity this directory files. The
+// test is the scheme and nothing more: `spiffe_id.js` owns what a valid one is,
+// and a second grammar here would be a second definition that eventually
+// disagrees with it. Anything scheme-shaped and invalid never reaches this
+// module — recordAuthentication() is only called with an identity a credential
+// was accepted for, and spiffe_auth.js parses before it accepts.
+const SPIFFE_SHAPED = /^spiffe:\/\//i;
+
 // The CN out of a DN, unescaped, or '' where there is none. Used when the
 // certificate's own commonName was not passed — the DN always carries it if the
 // subject has one, so there is no second source to disagree with.
@@ -1079,6 +1100,29 @@ function entryByDidSubject(did) {
       return;
     }
     if ((entry.attributes.didsubject || []).indexOf(wanted) >= 0) {
+      found = entry;
+    }
+  });
+  return found;
+}
+
+// The entry that already records this SPIFFE identity, wherever it is and
+// whatever it is named — the same lookup `entryByDidSubject()` performs and for
+// the same reason. An SVID presented at the SPIRE Server API, a JWT-SVID
+// validated at the Workload API and an agent attesting can all name one
+// identity, and rebuilding the digest would be a second definition of where the
+// entry lives.
+function entryBySpiffeSubject(id) {
+  const wanted = String(id == null ? '' : id).trim();
+  if (!wanted) {
+    return null;
+  }
+  let found = null;
+  entries.forEach(function (entry) {
+    if (found) {
+      return;
+    }
+    if ((entry.attributes.spiffesubject || []).indexOf(wanted) >= 0) {
       found = entry;
     }
   });
@@ -1468,6 +1512,110 @@ function didPlan(info) {
 }
 
 // ---------------------------------------------------------------------------
+// THE FOURTH SHAPE: A SPIFFE IDENTITY.
+//
+// `spiffe://sts.mock/ns/default/sa/db` is not a name, not a DN and not a DID.
+// It is closest to a DID — one opaque identifier with structure inside it that
+// this service must not try to read as a person's name — so it is filed the
+// same way and for the same reasons, which are worth restating because each one
+// was a decision:
+//
+//   **NAMED BY A DIGEST.** `uid=spiffe-<12 hex>,ou=users`. Written out as a DN
+//   the identity would carry `//` and `:`, and the last path segment (`db`,
+//   `web`, `api`) is exactly the kind of short common word that collides with a
+//   person somebody signed in as. A workload called `db` and a DBA called `db`
+//   are not the same identity and must not fold onto one entry — which is the
+//   opposite of what `existingUserEntry()` does for names, deliberately, and is
+//   why this plan does not consult it.
+//
+//   **FOUND BY WHAT IT RECORDED.** `spiffeSubject` is multi-valued and
+//   `entryBySpiffeSubject()` is what `locateEntry()` uses, so the naming rule
+//   can change without orphaning every entry written under the old one. It also
+//   means the same identity arriving three ways — an X509-SVID at the SPIRE
+//   Server API, an agent attesting, a JWT-SVID validated at the Workload API —
+//   REUSES one entry rather than creating three. That is the whole of "if the
+//   identity is already present, reuse it".
+//
+//   **THE TRUST DOMAIN AND THE PATH ARE SPLIT OUT**, because those are the two
+//   questions somebody browsing this directory asks — "who is from example.org"
+//   and "what is under /spire/agent" — and neither is answerable by substring
+//   matching on the identifier without also matching things that merely contain
+//   it.
+//
+// **A WORKLOAD IS FILED WITH THE PEOPLE, WHICH IS A DECISION AND NOT AN
+// OVERSIGHT.** `ou=applications` exists (rule 3g) and a workload is arguably
+// one. But `ou=users` here is not "humans" — it is every identity that
+// PRESENTED A CREDENTIAL AND HAD IT ACCEPTED, which is what /admin/users lists
+// and what a TLS client certificate for a machine already lands in.
+// `ou=applications` is the registry of things this service was ASKED ABOUT, and
+// an application there is the audience of a token rather than the subject of
+// one. A SPIFFE identity is a subject.
+// ---------------------------------------------------------------------------
+function spiffeUid(id) {
+  return 'spiffe-' + crypto.createHash('sha256').update(String(id), 'utf8')
+    .digest('hex').slice(0, 12);
+}
+
+function spiffePlan(info) {
+  log.debug('Entering spiffePlan().');
+  const id = String(info.key || '').trim();
+  // The two halves, taken apart HERE and not by a second parser. Anything that
+  // is not `spiffe://<trust domain>/<path>` cannot reach this — see
+  // SPIFFE_SHAPED — so the split is arithmetic rather than validation.
+  const withoutScheme = id.slice('spiffe://'.length);
+  const slash = withoutScheme.indexOf('/');
+  const domain = slash >= 0 ? withoutScheme.slice(0, slash) : withoutScheme;
+  const path = slash >= 0 ? withoutScheme.slice(slash) : '';
+  const persona = vcClaims.personaFor(id);
+  const uid = spiffeUid(id);
+  // Its own sentence, like didPlan()'s, because the default — "authenticated
+  // through X" — is not quite what happened: a workload presented a credential
+  // this service or another part of this trust domain issued, and no human was
+  // anywhere near it.
+  const note = 'named by a SPIFFE identity presented through ' +
+    String(info.protocol || 'an unstated protocol') +
+    (info.method ? ' (' + info.method + ')' : '');
+  // An entry that already records this identity, wherever it is. This is what
+  // makes the three acceptance points — an X509-SVID over mutual TLS, an agent
+  // attesting, a JWT-SVID validated — land on ONE entry.
+  const recorded = entryBySpiffeSubject(id);
+  const dn = recorded ? recorded.dn
+                      : 'uid=' + escapeDnValue(uid) + ',' + USERS_DN;
+  log.debug('Leaving spiffePlan(). ' + (recorded ? 'Already recorded at ' + dn + '.'
+                                                 : 'uid=' + uid + ' for ' + id));
+  return {
+    dn: dn,
+    // See didPlan(): the persona on an entry that already exists is that
+    // entry's own, or the sweep fills it from a second invented person.
+    personaKey: recorded ? personaKeyOf(recorded) : id,
+    attributes: {
+      objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
+      uid: uid,
+      cn: persona.display,
+      sn: persona.family,
+      givenName: persona.given,
+      // Marked (SPIFFE) for didPlan()'s reason: every value on every entry here
+      // is invented, and what this one needs to say first is that this is a
+      // WORKLOAD identity and not somebody who typed a password.
+      displayName: persona.display + ' (SPIFFE)',
+      mail: persona.email,
+      spiffeSubject: id,
+      spiffeTrustDomain: domain,
+      spiffePath: path
+    },
+    // Nothing to merge onto an entry that already exists: a SPIFFE ID
+    // presented a second time is byte-for-byte the one that named this entry.
+    // The certificate it arrived on differs — a new serial, a new validity —
+    // and is deliberately NOT recorded here: an SVID is minted afresh every
+    // hour, and an entry that accumulated one value per rotation would be an
+    // entry that grows for as long as the workload runs. That is
+    // applyVcAttributes()'s second rule, met in a new place.
+    merge: {},
+    note: note
+  };
+}
+
+// ---------------------------------------------------------------------------
 // HOW SOMEBODY AUTHENTICATED, WRITTEN ONTO THE ENTRY THEY ALREADY HAVE.
 //
 // The case this exists for is WebAuthn, which is TWO things on one screen and
@@ -1588,18 +1736,29 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). That identity is a client, not a person.');
     return null;
   }
-  // Three shapes of identity and one placement function each, chosen here and
+  // FOUR shapes of identity and one placement function each, chosen here and
   // decided there. A client CERTIFICATE identity is a DN (certificatePlan()); a
-  // DECENTRALIZED IDENTIFIER is one long opaque string (didPlan()); everything
-  // else is a name and becomes `uid=<name>,ou=users` (namePlan()).
+  // DECENTRALIZED IDENTIFIER is one long opaque string (didPlan()); a SPIFFE
+  // IDENTITY is another (spiffePlan()); everything else is a name and becomes
+  // `uid=<name>,ou=users` (namePlan()).
   //
   // The order matters in one direction only: a certificate's identity is a
-  // subject DN, so it is tested first and the DID test never sees it. Nothing
-  // else here can be both — a DN begins `<attributetype>=` and a DID begins
-  // `did:`.
+  // subject DN, so it is tested first and the other two tests never see it.
+  // Nothing else here can be more than one — a DN begins `<attributetype>=`, a
+  // DID begins `did:` and a SPIFFE ID begins `spiffe://`.
+  //
+  // A SPIFFE identity arriving with a client certificate is the one case worth
+  // stating: `info.certificate` means a TLS client certificate on this
+  // service's OWN listeners, where the identity is the subject DN. An X509-SVID
+  // presented to the SPIRE Server API does not set it — `spiffe_auth.js` passes
+  // the SPIFFE ID, which is what the certificate NAMES rather than what it is —
+  // so an SVID holder is filed by identity and not by `C=US,O=SPIRE`, which is
+  // the subject every SVID here shares and would fold every workload in the
+  // trust domain onto one entry.
   const plan = info.certificate
     ? certificatePlan(info)
-    : (DID_SHAPED.test(name) ? didPlan(info) : namePlan(name));
+    : (DID_SHAPED.test(name) ? didPlan(info)
+       : (SPIFFE_SHAPED.test(name) ? spiffePlan(info) : namePlan(name)));
   const dn = plan.dn;
   // Whose invented person fills what this entry lacks. It is the identity by
   // default and the plan's own where it has one: a DID that arrived with a
@@ -1787,6 +1946,22 @@ function createUser(name, options) {
                                  'it is the identifier goes onto that person\'s ' +
                                  'entry as didSubject.'] };
   }
+  if (SPIFFE_SHAPED.test(wanted)) {
+    log.debug('Leaving createUser(). That is a SPIFFE ID.');
+    return { ok: false, errors: ['"' + wanted.slice(0, 64) + '" is a SPIFFE ' +
+                                 'identity and not a username. A workload ' +
+                                 'identity reaches this directory by being ' +
+                                 'PRESENTED — an X509-SVID over mutual TLS at ' +
+                                 'the SPIRE Server API, an agent attesting, a ' +
+                                 'JWT-SVID validated at the Workload API — ' +
+                                 'and its entry is named by a digest with the ' +
+                                 'identity on it as spiffeSubject. What you ' +
+                                 'probably want instead is a REGISTRATION ' +
+                                 'ENTRY, which is a different thing in a ' +
+                                 'different container: /admin/spiffe/entries, ' +
+                                 'POST /admin-api/spiffe/entries/create, or ' +
+                                 'BatchCreateEntry.'] };
+  }
   if (!nameUsableInDn(wanted)) {
     log.debug('Leaving createUser(). The name carries DN syntax.');
     return { ok: false, errors: ['"' + wanted + '" cannot be a username here: ' +
@@ -1933,6 +2108,15 @@ function personaKeyOf(stored) {
   const did = (stored.attributes.didsubject || [])[0];
   const uid = (stored.attributes.uid || [])[0];
   if (did && (!uid || String(uid) === didUid(String(did)))) return String(did);
+  // The same test for a SPIFFE identity, and it has to be the same shape rather
+  // than "does this entry carry a spiffeSubject": the identifier is
+  // multi-valued and an entry could hold one without having been NAMED by it,
+  // and seeding a person from an identity that did not name them is the second
+  // invented person this paragraph exists to prevent.
+  const spiffe = (stored.attributes.spiffesubject || [])[0];
+  if (spiffe && (!uid || String(uid) === spiffeUid(String(spiffe)))) {
+    return String(spiffe);
+  }
   if (uid) return String(uid);
   const cn = (stored.attributes.cn || [])[0];
   if (cn) return String(cn);
@@ -2099,6 +2283,19 @@ function locateEntry(key) {
     log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
     return { dn: plan.dn, stored: null };
   }
+  // A SPIFFE IDENTITY, the fourth shape, found the same way a DID is and never
+  // by rebuilding the digest — see spiffePlan(). This is what makes the same
+  // workload reached through three different acceptance points one entry.
+  if (SPIFFE_SHAPED.test(key)) {
+    const found = entryBySpiffeSubject(key);
+    if (found) {
+      log.debug('Leaving locateEntry(). Found by spiffeSubject: ' + found.dn);
+      return { dn: found.dn, stored: found };
+    }
+    const plan = spiffePlan({ key: key });
+    log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
+    return { dn: plan.dn, stored: null };
+  }
   // A NAME, and it is asked of the store rather than answered by rebuilding the
   // DN. `uid=<name>,ou=users` is where namePlan() puts one and is still the
   // answer for almost everybody — but a person whose entry was created by a
@@ -2132,9 +2329,11 @@ function objectFor(name) {
   // its subject above rather than by a name at all. Skipped for a DID for the
   // same reason and one more — the uid on a DID-named entry is a DIGEST of the
   // identity, so comparing the identity against it would find nothing even on
-  // the entry that is this person's.
+  // the entry that is this person's. A SPIFFE identity is skipped for exactly
+  // that second reason.
   const alsoNamed = [];
-  if (key && !DN_SHAPED.test(key) && !DID_SHAPED.test(key)) {
+  if (key && !DN_SHAPED.test(key) && !DID_SHAPED.test(key) &&
+      !SPIFFE_SHAPED.test(key)) {
     entries.forEach(function (entry) {
       if (normalizeDn(entry.dn) === normalizeDn(dn)) {
         return;

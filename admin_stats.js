@@ -50,10 +50,10 @@ const { log, setJwtRecorder, userFor } = require('./helpers');
 //
 // It is called from ONE place in here, recordAuthentication() below, and that
 // is the point: that function is already the single funnel every one of the
-// fifteen protocol families passes through at the moment a credential is
+// sixteen protocol families passes through at the moment a credential is
 // accepted, so the audit log gets its authentication events from one line
-// rather than from fifteen call sites, the sixteenth of which would be the one
-// nobody adds. It is also the only place in this service that has already
+// rather than from sixteen call sites, the seventeenth of which would be the
+// one nobody adds. It is also the only place in this service that has already
 // normalised the identity, which is what lets an audit row and a /admin/users
 // row name the same person.
 const audit = require('./audit');

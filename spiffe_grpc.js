@@ -57,6 +57,15 @@ const { log } = require('./helpers');
 const config = require('./config');
 const audit = require('./audit');
 const stats = require('./admin_stats');
+// WHO IS CALLING. A library that decides and never answers — see its header —
+// which is why this module maps its refusal descriptors onto statuses below
+// rather than that one building a gRPC error. The require is the ordinary
+// direction and closes no cycle: nothing it requires reaches back here.
+const auth = require('./spiffe_auth');
+// For the server's own SVID and the roots it verifies clients against. Both
+// register nothing, so neither can move a route or close a cycle.
+const spiffeId = require('./spiffe_id');
+const ca = require('./spiffe_ca');
 
 // ---------------------------------------------------------------------------
 // LOADING.
@@ -260,32 +269,122 @@ function requireSecurityHeader() {
   return !!config.value('spiffe.requireSecurityHeader');
 }
 
-function checkCallable(call, surface) {
+// A refusal descriptor from `spiffe_auth.js` — `{ status, message }` where
+// `status` is the NAME of a grpc-js status — becomes a status error here. The
+// mapping is in one place so that module can stay ignorant of the transport,
+// and an unknown name becomes PERMISSION_DENIED rather than UNKNOWN: a
+// misspelt status in a refusal must still refuse.
+function fromDescriptor(descriptor) {
+  const code = grpc.status[descriptor.status];
+  if (typeof code !== 'number') {
+    log.error('spiffe: spiffe_auth.js returned the status name "' +
+              descriptor.status + '", which grpc-js does not have. Refusing ' +
+              'with PERMISSION_DENIED; this is a defect in this service.');
+    return statusError(grpc.status.PERMISSION_DENIED, descriptor.message);
+  }
+  return statusError(code, descriptor.message);
+}
+
+// ---------------------------------------------------------------------------
+// EVERY CALL PASSES THROUGH HERE, AND IT IS THE ONLY PLACE AUTHORIZATION
+// HAPPENS.
+//
+// Four checks and one side effect, in an order that matters:
+//
+//   1. is SPIFFE on at all;
+//   2. the Workload API's security header (that surface only — the SPIRE
+//      Server API has no such requirement and adding one would refuse every
+//      real `spire-server` client);
+//   3. WHO IS CALLING, built once and attached to the call as `spiffeCaller`
+//      so a handler can read it without building it a second way;
+//   4. whether that caller may call THIS method, against SPIRE's own table.
+//
+// The side effect is the identity: an ACCEPTED credential reaches
+// `stats.recordAuthentication()` through `auth.recordCaller()`, once per
+// connection, so the holder of an SVID appears on /admin/users and in the
+// directory beside everybody else who has authenticated here.
+//
+// **It is here rather than in forty-two handlers** for the reason
+// `helpers.signJwt()` is the single token counter: forty-two call sites is
+// forty-one that are right and a forty-second added later with no check at all.
+// A caller is built for the Workload API too, even though nothing authorizes on
+// it there, because that surface derives its SELECTORS from the same object.
+// ---------------------------------------------------------------------------
+function prepareCall(call, surface, method) {
+  log.debug('Entering prepareCall(). surface=' + surface + ', method=' + method);
   if (!enabled()) {
-    return unavailable('SPIFFE is turned off on this service ' +
+    log.debug('Leaving prepareCall(). SPIFFE is off.');
+    return { caller: null,
+             refusal: unavailable('SPIFFE is turned off on this service ' +
                        '(spiffe.enabled). The listeners are still bound and ' +
                        'GET /spiffe still says what this is; nothing will be ' +
                        'issued until it is turned back on, which needs no ' +
-                       'restart.');
+                       'restart.') };
   }
   if (surface === 'workload' && requireSecurityHeader() &&
       !securityHeaderPresent(call)) {
-    return invalidArgument('Every call to the SPIFFE Workload API must carry ' +
-                           'the metadata header "' + SECURITY_HEADER + ': ' +
-                           'true" (SPIFFE Workload Endpoint specification). ' +
-                           'This one did not. Every conforming Workload API ' +
-                           'will refuse it, which is why this mock does too; ' +
+    log.debug('Leaving prepareCall(). No security header.');
+    return { caller: null,
+             refusal: invalidArgument('Every call to the SPIFFE Workload API ' +
+                           'must carry the metadata header "' +
+                           SECURITY_HEADER + ': true" (SPIFFE Workload ' +
+                           'Endpoint specification). This one did not. Every ' +
+                           'conforming Workload API will refuse it, which is ' +
+                           'why this mock does too; ' +
                            'spiffe.requireSecurityHeader turns the check off ' +
-                           'if you are deliberately testing something else.');
+                           'if you are deliberately testing something else.') };
   }
-  return null;
+  const caller = auth.callerOf(call, surface);
+  if (surface === 'workload') {
+    // What this service can see about a Workload API caller, as selectors.
+    // Built HERE rather than in the handlers because all four issuing methods
+    // must answer the same question the same way — a FetchX509SVID that
+    // returned three identities and a FetchJWTSVID that returned one would be
+    // a mock contradicting itself.
+    caller.selectors = auth.workloadSelectors(call, caller);
+  }
+  // Attached to the call rather than threaded through every handler signature.
+  // `call` is the one object every handler already has, the property name says
+  // whose it is, and a handler that does not care is unaffected.
+  try {
+    call.spiffeCaller = caller;
+  } catch (e) {
+    // A frozen call object would be a grpc-js change rather than anything a
+    // caller did. The check still runs; only the handlers lose the detail.
+    log.error('spiffe: the caller could not be attached to the call (' +
+              e.message + '), so handlers will see none.');
+  }
+  if (surface === 'server') {
+    const refusal = auth.authorize(caller, method);
+    if (refusal) {
+      // The refusal is audited with the identity that was refused, which is
+      // the row somebody debugging "why can my agent not list entries" needs.
+      // No credential goes in it — a SPIFFE ID is a name, not a secret, and
+      // the certificate itself is never recorded.
+      audit.audit({
+        action: 'spiffe.call.refuse', actor: caller.spiffeId || '',
+        protocol: 'SPIRE Server API', channel: 'grpc', target: method,
+        summary: method + ' was refused for ' + auth.describeCaller(caller),
+        detail: { status: refusal.status, caller: auth.describeCaller(caller) }
+      });
+      log.debug('Leaving prepareCall(). Not authorized.');
+      return { caller: caller, refusal: fromDescriptor(refusal) };
+    }
+  }
+  // An accepted credential is an authentication, and this is where it is
+  // recorded — at the moment it was ACCEPTED, which is the rule every other
+  // family here follows. A caller that presented nothing records nothing:
+  // being allowed because a method is open is not authenticating.
+  auth.recordCaller(caller);
+  log.debug('Leaving prepareCall(). Allowed.');
+  return { caller: caller, refusal: null };
 }
 
 // The audit and metrics row for one gRPC call. `channel: 'grpc'` is a new one
 // beside http, ldap, ldaps and internal, and it is a channel rather than a
 // protocol for the same reason those are: it says HOW the call arrived, which
 // is the question a reader of a mixed log is asking.
-function recordCall(surface, method, ok, detail) {
+function recordCall(surface, method, ok, detail, caller) {
   try {
     stats.recordCall('grpc:' + method, ok ? 200 : 500, 0);
   } catch (e) {
@@ -295,7 +394,10 @@ function recordCall(surface, method, ok, detail) {
   }
   audit.audit({
     action: 'protocol.call',
-    actor: '',
+    // The identity that made the call, where one was accepted. Empty for an
+    // anonymous or local caller, which is most of the Workload API — an audit
+    // row must not imply an identity nothing established.
+    actor: (caller && caller.authenticated) ? caller.spiffeId : '',
     protocol: surface === 'workload' ? 'SPIFFE Workload API' : 'SPIRE Server API',
     channel: 'grpc',
     target: method,
@@ -307,23 +409,24 @@ function recordCall(surface, method, ok, detail) {
 function unary(surface, method, handler) {
   return function (call, callback) {
     log.debug('Entering the ' + method + ' handler.');
-    const refusal = checkCallable(call, surface);
-    if (refusal) {
-      recordCall(surface, method, false, { refused: refusal.message });
+    const prepared = prepareCall(call, surface, method);
+    if (prepared.refusal) {
+      recordCall(surface, method, false, { refused: prepared.refusal.message },
+                 prepared.caller);
       log.debug('Leaving the ' + method + ' handler. Refused.');
-      callback(errorToStatus(refusal, method));
+      callback(errorToStatus(prepared.refusal, method));
       return;
     }
     Promise.resolve()
       .then(function () { return handler(call); })
       .then(function (reply) {
-        recordCall(surface, method, true, {});
+        recordCall(surface, method, true, {}, prepared.caller);
         callback(null, reply || {});
         log.debug('Leaving the ' + method + ' handler.');
       })
       .catch(function (err) {
         const status = errorToStatus(err, method);
-        recordCall(surface, method, false, { status: status.code });
+        recordCall(surface, method, false, { status: status.code }, prepared.caller);
         callback(status);
         log.debug('Leaving the ' + method + ' handler. ' + status.details);
       });
@@ -340,10 +443,11 @@ function unary(surface, method, handler) {
 function serverStream(surface, method, handler) {
   return function (call) {
     log.debug('Entering the ' + method + ' stream handler.');
-    const refusal = checkCallable(call, surface);
-    if (refusal) {
-      recordCall(surface, method, false, { refused: refusal.message });
-      call.emit('error', errorToStatus(refusal, method));
+    const prepared = prepareCall(call, surface, method);
+    if (prepared.refusal) {
+      recordCall(surface, method, false, { refused: prepared.refusal.message },
+                 prepared.caller);
+      call.emit('error', errorToStatus(prepared.refusal, method));
       log.debug('Leaving the ' + method + ' stream handler. Refused.');
       return;
     }
@@ -372,14 +476,14 @@ function serverStream(surface, method, handler) {
       })
       .then(function (first) {
         if (first && open) call.write(first);
-        recordCall(surface, method, true, { streaming: true });
+        recordCall(surface, method, true, { streaming: true }, prepared.caller);
         log.debug('Leaving the ' + method + ' stream handler. The stream ' +
                   'stays open; a Workload API client treats it ending as a ' +
                   'fault.');
       })
       .catch(function (err) {
         const status = errorToStatus(err, method);
-        recordCall(surface, method, false, { status: status.code });
+        recordCall(surface, method, false, { status: status.code }, prepared.caller);
         open = false;
         call.emit('error', status);
         log.debug('Leaving the ' + method + ' stream handler. ' + status.details);
@@ -395,10 +499,11 @@ function serverStream(surface, method, handler) {
 function bidiStream(surface, method, handler) {
   return function (call) {
     log.debug('Entering the ' + method + ' bidi handler.');
-    const refusal = checkCallable(call, surface);
-    if (refusal) {
-      recordCall(surface, method, false, { refused: refusal.message });
-      call.emit('error', errorToStatus(refusal, method));
+    const prepared = prepareCall(call, surface, method);
+    if (prepared.refusal) {
+      recordCall(surface, method, false, { refused: prepared.refusal.message },
+                 prepared.caller);
+      call.emit('error', errorToStatus(prepared.refusal, method));
       log.debug('Leaving the ' + method + ' bidi handler. Refused.');
       return;
     }
@@ -410,12 +515,13 @@ function bidiStream(surface, method, handler) {
         })
         .catch(function (err) {
           const status = errorToStatus(err, method);
-          recordCall(surface, method, false, { status: status.code });
+          recordCall(surface, method, false, { status: status.code },
+                     prepared.caller);
           call.emit('error', status);
         });
     });
     call.on('end', function () {
-      recordCall(surface, method, true, { streaming: true });
+      recordCall(surface, method, true, { streaming: true }, prepared.caller);
       call.end();
       log.debug('Leaving the ' + method + ' bidi handler. The client ended it.');
     });
@@ -513,6 +619,81 @@ function bindOne(server, address, credentials) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// THE SPIRE SERVER API'S TLS CREDENTIALS — and the two things about them that
+// are easy to get wrong in opposite directions.
+//
+// A real `spire-server` binds its TCP port as mutual TLS: it presents its own
+// X509-SVID (`spiffe://<trust domain>/spire/server`) and asks the client for
+// one. So this mints exactly that, from the same authority every other SVID
+// here comes from, per start.
+//
+// **THE SERVER SVID IS NOT `tls_server.js`'S CERTIFICATE**, and must not become
+// it. That one is a leaf with `serverAuth` for a host; this one is an identity
+// in a trust domain. The two are unrelated trust decisions, which is the same
+// argument that keeps the SPIFFE CA separate from that module's — see rule 3k.
+// A client verifies this handshake against the TRUST BUNDLE, which it fetched
+// from the bundle endpoint, and not against any web PKI.
+//
+// **THE HANDSHAKE ASKS FOR A CERTIFICATE AND DOES NOT REQUIRE ONE.** grpc-js's
+// `createSsl(roots, pairs, checkClientCertificate)` sets `requestCert` from
+// that third argument and leaves node's default `rejectUnauthorized: true` in
+// place, which would refuse the handshake of any client that presented nothing
+// — and `AttestAgent` is open to a caller with no SVID, because an agent HAS no
+// SVID until that call gives it one. A port that could not be bootstrapped
+// against is a port with no purpose. So the constructor options are reached for
+// and `rejectUnauthorized` is turned off, which is `tls.RequestClientCert` —
+// exactly what SPIRE does — and `spiffe_auth.js` then verifies what arrived
+// itself, against the trust bundle rather than against a system CA store.
+// `mtls.js` makes the same arrangement on the main HTTPS listener and the note
+// there says the same thing.
+//
+// A failure to mint is REPORTED and the caller falls back to plain: a listener
+// that did not come up at all would take the whole surface away for a reason
+// nobody could see, and `GET /spiffe` says which of the two it got.
+// ---------------------------------------------------------------------------
+async function serverApiCredentials() {
+  log.debug('Entering serverApiCredentials().');
+  await ca.ready();
+  const identity = spiffeId.serverId(ca.trustDomain());
+  const svid = await ca.mintX509Svid(identity, {});
+  const roots = await ca.x509BundleDer();
+  const credentials = grpc.ServerCredentials.createSsl(
+    // The roots are handed over as PEM: node's `ca` option takes PEM or DER,
+    // and the bundle here is concatenated DER, which node reads as ONE
+    // certificate and silently ignores the rest of. Every authority has to be
+    // its own PEM block or a client signed by the second one is refused with
+    // no way to tell why.
+    Buffer.from(ca.state().x509Authorities.map(function (authority) {
+      return authority.certificatePem;
+    }).join('\n'), 'utf8'),
+    [{ private_key: Buffer.from(svid.privateKeyPem, 'utf8'),
+       cert_chain: Buffer.from(svid.chainPem.join('\n'), 'utf8') }],
+    true);
+  try {
+    // See the header. This is a reach into grpc-js's own options object and it
+    // is deliberate: there is no argument for "request but do not require", the
+    // difference matters here more than anywhere else in this service, and the
+    // alternative is a bespoke ServerCredentials subclass that would have to be
+    // kept in step with a library we do not otherwise touch.
+    credentials._getConstructorOptions().rejectUnauthorized = false;
+  } catch (e) {
+    log.error('spiffe: the SPIRE Server API TLS listener could not be set to ' +
+              'request-but-not-require a client certificate (' + e.message +
+              '). It will REFUSE any client that presents none, which means ' +
+              'AttestAgent cannot be reached over TCP. This is a grpc-js ' +
+              'change rather than anything a caller did.');
+  }
+  log.info('spiffe: the SPIRE Server API TCP listener is mutual TLS as ' +
+           identity + ' (serial ' + svid.serialHex + ', ' + roots.length +
+           ' bytes of trust bundle). A client verifies it against the bundle ' +
+           'at the bundle endpoint, presents its own X509-SVID, and is ' +
+           'authorized per method against SPIRE\'s own table — see ' +
+           'GET /spiffe.');
+  log.debug('Leaving serverApiCredentials().');
+  return credentials;
+}
+
 module.exports = {
   grpc: grpc,
   SERVICES: SERVICES,
@@ -529,5 +710,6 @@ module.exports = {
   prepareSocketPath: prepareSocketPath,
   buildServer: buildServer,
   bindOne: bindOne,
+  serverApiCredentials: serverApiCredentials,
   enabled: enabled
 };

@@ -249,6 +249,18 @@ var config = {
     autoCreateEntries: true,
     // Refuse a Workload API call with no workload.spiffe.io: true header, as every conforming implementation does.
     requireSecurityHeader: true,
+    // Mutual TLS and SPIRE's own per-method authorization on the SPIRE Server API's TCP port. Restart-only: it decides how the socket is bound.
+    authRequired: true,
+    // Trust a caller on the SPIRE Server API's Unix socket as the `local` entity, the way a real spire-server trusts its private socket.
+    trustLocalSocket: true,
+    // SPIFFE IDs that are administrators of the SPIRE Server API, comma-separated. SPIRE's admin_ids; no registration entry needed.
+    adminIds: '',
+    // How far out a caller's clock may be when its X509-SVID is checked, in seconds.
+    clockSkew: 60,
+    // Answer a Workload API caller with the entries its observable selectors match, rather than with every entry.
+    attestWorkloads: true,
+    // Believe selectors a workload sends in a metadata header. NOT attestation; it exists so selector matching can be exercised at all.
+    acceptAssertedSelectors: false,
     // How many registration entries may live under ou=spiffe.
     maxEntries: 500,
     // How many attested agents are held.

@@ -1311,6 +1311,97 @@ const SETTINGS = [
                  'will ever tell them about. Off is for the case where you ' +
                  'are deliberately testing something else.' },
 
+  { key: 'spiffe.authRequired', group: 'SPIFFE',
+    label: 'Authenticate the SPIRE Server API',
+    env: 'STS_SPIFFE_AUTH_REQUIRED', type: 'bool', dflt: true,
+    runtime: false,
+    restartReason: 'the SPIRE Server API\'s TCP port is bound as mutual TLS ' +
+                   'or as plain gRPC when the process starts, and a setting ' +
+                   'that changed the checks without changing the socket ' +
+                   'would report a mode this service was not in',
+    description: 'ON, the SPIRE Server API behaves the way a real ' +
+                 'spire-server does: its TCP port is MUTUAL TLS, a caller ' +
+                 'presents an X509-SVID from this trust domain, and every ' +
+                 'method is authorized against SPIRE\'s own table — local, ' +
+                 'agent, admin, downstream — which GET /spiffe publishes in ' +
+                 'full. The Unix socket stays plain and is the `local` ' +
+                 'entity, which is how the spire-server CLI reaches a real ' +
+                 'one. OFF, the port is plain gRPC and every method is open ' +
+                 'to everybody, which is what this service did before this ' +
+                 'setting existed. **This does not touch the Workload API**, ' +
+                 'whose specification says a client MUST NOT be required to ' +
+                 'authenticate — see spiffe.attestWorkloads for the only ' +
+                 'thing that decides who gets what there.' },
+
+  { key: 'spiffe.trustLocalSocket', group: 'SPIFFE',
+    label: 'Trust the SPIRE Server API socket as local',
+    env: 'STS_SPIFFE_TRUST_LOCAL_SOCKET', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'A real SPIRE server trusts its private Unix socket ' +
+                 'outright — the access control is the socket\'s filesystem ' +
+                 'permissions — and a caller there is the `local` entity, ' +
+                 'which may do everything an admin may and two things an ' +
+                 'admin may not. Off, the socket demands an X509-SVID like ' +
+                 'the TCP port, which is the only way to exercise a client\'s ' +
+                 '"I was refused on the local socket" path. Read per call, so ' +
+                 'it needs no restart.' },
+
+  { key: 'spiffe.adminIds', group: 'SPIFFE', label: 'Administrator SPIFFE IDs',
+    env: 'STS_SPIFFE_ADMIN_IDS', type: 'string', dflt: '', runtime: true,
+    description: 'SPIFFE IDs whose holders are administrators of the SPIRE ' +
+                 'Server API, separated by commas or spaces — SPIRE\'s own ' +
+                 '`admin_ids`, and like SPIRE\'s it needs NO registration ' +
+                 'entry behind it. The other way to make an administrator is ' +
+                 'to mark a registration entry `admin`, which is what the ' +
+                 'form on /admin/spiffe/entries does; both are read on every ' +
+                 'call, so either takes effect at once. An id here that is ' +
+                 'not in this trust domain or a federated one can never ' +
+                 'match, because nothing else would verify its certificate.' },
+
+  { key: 'spiffe.clockSkew', group: 'SPIFFE', label: 'Clock skew (s)',
+    env: 'STS_SPIFFE_CLOCK_SKEW', type: 'int', dflt: 60, runtime: true,
+    description: 'How far out a caller\'s clock may be when its X509-SVID is ' +
+                 'checked for validity. It matters more here than it looks: ' +
+                 'an SVID lives for spiffe.svidTtl — an hour by default — so ' +
+                 'a machine a few minutes fast meets the not-yet-valid ' +
+                 'refusal constantly, and a refusal that did not name the ' +
+                 'skew reads as a broken certificate.' },
+
+  { key: 'spiffe.attestWorkloads', group: 'SPIFFE',
+    label: 'Match Workload API callers on selectors',
+    env: 'STS_SPIFFE_ATTEST_WORKLOADS', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'ON, a Workload API caller is IDENTIFIED from what this ' +
+                 'service can actually see about it — the transport, the ' +
+                 'endpoint it reached, its peer address — and is answered ' +
+                 'with the registration entries whose selectors that ' +
+                 'identification matches, which is what a real agent does. ' +
+                 'OFF, every caller is answered with every entry, which is ' +
+                 'what this service did before. **NOTHING KERNEL-LEVEL IS ' +
+                 'READ EITHER WAY**: node cannot read a Unix socket\'s peer ' +
+                 'credentials, so there is no uid, no pid, no container and no ' +
+                 'pod here, and the selectors this service produces are spelt ' +
+                 '`transport:`, `endpoint:` and `peer:` so that they cannot ' +
+                 'be mistaken for an attestor\'s. spiffe.autoCreateEntries ' +
+                 'still invents an entry for a caller that matches nothing, ' +
+                 'so the default experience is unchanged.' },
+
+  { key: 'spiffe.acceptAssertedSelectors', group: 'SPIFFE',
+    label: 'Believe selectors a workload asserts',
+    env: 'STS_SPIFFE_ACCEPT_ASSERTED_SELECTORS', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, and it is the one setting here that is not ' +
+                 'attestation of any kind. On, a Workload API caller may send ' +
+                 'the metadata header `x-sts-mock-workload-selector: ' +
+                 'unix:uid:1000` (repeatable, or comma-separated) and those ' +
+                 'selectors are matched against registration entries as ' +
+                 'though something had verified them. NOTHING HAS. It exists ' +
+                 'because selector matching is the interesting behaviour of a ' +
+                 'Workload API and there is otherwise no way to exercise a ' +
+                 'client\'s "these matched and those did not" path on a ' +
+                 'service that cannot read peer credentials. The header is ' +
+                 'deliberately spelt like nothing in any specification.' },
+
   { key: 'spiffe.maxEntries', group: 'SPIFFE', label: 'Maximum registration entries',
     env: 'STS_SPIFFE_MAX_ENTRIES', type: 'int', dflt: 500, runtime: true,
     description: 'How many entries may live under ou=spiffe. Past it a new ' +
@@ -1418,8 +1509,11 @@ const SETTINGS = [
                  'interface, which is what a container needs; 127.0.0.1 ' +
                  'confines them to the machine this runs on. Worth a thought ' +
                  'here rather than elsewhere: the SPIRE Server API can create ' +
-                 'registration entries, and nothing in this service ' +
-                 'authenticates anybody.' }
+                 'registration entries granting any identity in this trust ' +
+                 'domain. Its TCP port demands an X509-SVID and authorizes ' +
+                 'every method while spiffe.authRequired is on, which is the ' +
+                 'default; with it off, or on the Workload API port either ' +
+                 'way, anybody who can reach these addresses is answered.' }
 ];
 
 // Indexed once. A linear scan per read would be invisible on a mock and the

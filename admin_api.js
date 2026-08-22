@@ -1822,11 +1822,20 @@ const ROUTES = [
                  'path and its sequence, every federated trust domain, and ' +
                  'whether each of the four gRPC listeners actually bound — ' +
                  'which nothing else can tell you, because neither this API ' +
-                 'nor GET /sts-metadata can see a socket.\n\n**Nothing here ' +
-                 'is attested.** Any caller that reaches the Workload API ' +
-                 'socket is handed every identity in the trust domain, and any ' +
-                 'caller that reaches the SPIRE Server API port can create a ' +
-                 'registration entry granting one. GET /spiffe carries the ' +
+                 'nor GET /sts-metadata can see a socket.\n\nThe reply also ' +
+                 'carries `authentication`: whether the SPIRE Server API is ' +
+                 'enforcing mutual TLS (`spiffe.authRequired`), which ' +
+                 'identities are administrators, and the whole per-method ' +
+                 'authorization table, which is SPIRE\'s own ' +
+                 '`policy_data.json` row for row.\n\n**Nothing here attests ' +
+                 'a workload or a node.** A Workload API caller is identified ' +
+                 'only by the transport it arrived on, the endpoint it ' +
+                 'reached and its peer address — node cannot read a Unix ' +
+                 'socket\'s peer credentials — and an agent\'s attestation ' +
+                 'payload is taken on trust. With `spiffe.authRequired` off, ' +
+                 'the SPIRE Server API authenticates nobody either and any ' +
+                 'caller that reaches its port can create a registration ' +
+                 'entry granting any identity here. GET /spiffe carries the ' +
                  'full list of what is and is not checked.\n\nNo private key ' +
                  'is in this reply. The authority CERTIFICATE is published, as ' +
                  'GET /tls/server-certificate publishes that one.',

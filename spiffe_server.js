@@ -52,6 +52,9 @@ const registry = require('./spiffe_registry');
 const rpc = require('./spiffe_grpc');
 const workload = require('./spiffe_workload');
 const serverApi = require('./spiffe_api');
+// What is enforced, for the page and for the decision above about which
+// socket gets TLS. A library that registers nothing.
+const auth = require('./spiffe_auth');
 // The console, for one slot and nothing else. `admin.js` cannot require THIS
 // module — server.js requires it first, so the require would pull the bundle
 // endpoint and /spiffe into the express router ahead of every /admin route, and
@@ -174,8 +177,12 @@ function description(req) {
   const state = ca.state();
   const document = {
     what: 'A SPIFFE issuing authority: the bundle endpoint, the Workload API ' +
-          'and the SPIRE Server API. It attests nobody and authenticates ' +
-          'nobody.',
+          'and the SPIRE Server API. The SPIRE Server API authenticates its ' +
+          'caller with mutual TLS and an X509-SVID and authorizes every ' +
+          'method against SPIRE\'s own table; the Workload API authenticates ' +
+          'nobody, because its specification says it MUST NOT, and identifies ' +
+          'a caller only by what this service can see of the connection. ' +
+          'Nothing attests a workload or a node.',
     enabled: enabled(),
     trustDomain: state.trustDomain,
     trustDomainId: state.trustDomainId,
@@ -264,29 +271,57 @@ function description(req) {
     // longer than the rest of the document.
     notChecked: [
       'NO WORKLOAD ATTESTATION. A real agent reads the peer credentials of ' +
-      'the Unix socket, turns them into selectors, and answers with the ' +
-      'entries those selectors match. This answers with EVERY registration ' +
-      'entry, so any caller that can reach the socket can obtain any identity ' +
-      'in this trust domain.',
+      'the Unix socket — pid, and from that uid, gid, executable path, ' +
+      'container, pod — and turns them into selectors. Node has no portable ' +
+      'way to read SO_PEERCRED, so this service identifies a caller only by ' +
+      'the transport it arrived on, the endpoint it reached and its peer ' +
+      'address, and the selectors it produces are spelt `transport:`, ' +
+      '`endpoint:` and `peer:` rather than `unix:` so that they cannot be ' +
+      'mistaken for an attestor\'s. Those DO decide which entries answer ' +
+      '(spiffe.attestWorkloads), but nothing proves who the caller is: any ' +
+      'caller that can reach the socket can still obtain an identity here.',
+      'NO CREDENTIAL AT ALL ON THE WORKLOAD API, and that is the ' +
+      'specification rather than this service being permissive. The SPIFFE ' +
+      'Workload Endpoint specification says the endpoint "MUST NOT require ' +
+      'any direct authentication of its clients" and that "Transport Layer ' +
+      'Security MUST NOT be required" — a workload has no root of trust until ' +
+      'this call gives it one. So spiffe.authRequired deliberately does not ' +
+      'reach this surface.',
+      'NOTHING VERIFIES AN ASSERTED SELECTOR. With ' +
+      'spiffe.acceptAssertedSelectors on, a Workload API caller may send its ' +
+      'own selectors in a metadata header and they are matched as though ' +
+      'something had checked them. It is off by default and it exists ' +
+      'because selector matching is the interesting behaviour of a Workload ' +
+      'API and there is otherwise no way to exercise a client\'s "these ' +
+      'matched and those did not" path here.',
       'NO NODE ATTESTATION. Whatever attestor an agent names and whatever ' +
       'payload it sends are written down as claimed and never verified. The ' +
       'agent selectors on /admin/spiffe/agents carry an `unverified:true` ' +
-      'value for exactly this reason.',
-      'NO CALLER AUTHORIZATION ON THE SPIRE SERVER API. A real server ' +
-      'authorizes every method against the caller\'s own SVID. Anybody who ' +
-      'can reach that port here can create a registration entry granting any ' +
-      'identity and then collect an SVID for it.',
-      'THE `admin` AND `downstream` FLAGS ON AN ENTRY ARE RECORDED AND NEVER ' +
-      'READ. They are part of what an entry says and a client reading entries ' +
-      'back expects them; nothing here decides anything on one.',
+      'value for exactly this reason. The ONE exception is a join token, ' +
+      'which this server minted and therefore checks: see `refused` below.',
       'A CSR SIGNATURE IS NOT VERIFIED. Only the public key is read out of a ' +
       'CSR — which is what stops a caller naming itself something it is not — ' +
       'but proof of possession is not checked.',
       'NO REVOCATION, ANYWHERE. SPIFFE has none: the answer is a short ' +
       'lifetime and rotation. The CRL fields in the Workload API responses ' +
       'are empty because that is the conforming value, not because they are ' +
-      'unimplemented.'
-    ],
+      'unimplemented. An SVID presented to the SPIRE Server API is checked ' +
+      'against its validity window and the trust bundle and against no ' +
+      'revocation list, because there is none to check.'
+    ].concat(auth.authRequired() ? [] : [
+      'AND, RIGHT NOW, NOTHING ON THE SPIRE SERVER API EITHER. ' +
+      'spiffe.authRequired is OFF, so that port is plain gRPC, no caller is ' +
+      'identified, the per-method table below is not applied, and anybody who ' +
+      'can reach it can create a registration entry granting any identity in ' +
+      'this trust domain and then collect an SVID for it. The `admin` and ' +
+      '`downstream` flags on an entry are recorded and read by nothing while ' +
+      'it is off.'
+    ]),
+    // WHO IS ASKING, on the surface that asks. The whole table comes from
+    // spiffe_auth.js so that this page, /admin/spiffe and the management API
+    // cannot disagree about what is enforced — the same reason the two
+    // discovery documents are built from one object.
+    authentication: auth.state(),
     // And the short list of what IS refused, because a page that only said
     // "nothing is checked" would be wrong.
     refused: [
@@ -300,7 +335,25 @@ function description(req) {
       'domain whose key verified it.',
       'A registration entry whose SPIFFE ID is invalid, belongs to another ' +
       'trust domain, or sits under the reserved /spire path.',
-      'AttestAgent for a banned agent, and a join token presented twice.',
+      'AttestAgent for a banned agent, and — with spiffe.authRequired on — a ' +
+      'join token this server did not mint, one that has expired, one ' +
+      'presented twice, and one minted for a named agent and presented by ' +
+      'another. A join token is the one attestation payload here this ' +
+      'service ISSUED and can therefore verify.',
+      'Every method on the SPIRE Server API that the caller\'s entity is not ' +
+      'allowed, with UNAUTHENTICATED when nothing was presented and ' +
+      'PERMISSION_DENIED when something was and it was not enough. The two ' +
+      'are different instructions to a client and SPIRE distinguishes them. ' +
+      'Note that Debug.GetInfo is LOCAL-ONLY, so even an admin SVID is ' +
+      'refused it over TCP — that is SPIRE\'s row and the surprise is the ' +
+      'point.',
+      'An X509-SVID that no authority in this trust domain or a federated ' +
+      'one signed, one outside its validity window (spiffe.clockSkew), one ' +
+      'with no URI subjectAltName, one with several, and one whose SPIFFE ID ' +
+      'names a different trust domain from the authority that signed it.',
+      'RenewAgent for a caller that is not the agent it would renew — which ' +
+      'with spiffe.authRequired off is every caller, so the method answers ' +
+      'Unimplemented in that mode with the reason it used to give always.',
       'Appending an authority to this trust domain\'s own bundle, which would ' +
       'publish a signing key nothing here holds.',
       'RefreshBundle, which would have this service fetch a URL somebody ' +
@@ -346,18 +399,25 @@ app.get('/spiffe', function (req, res) {
 
 function esc(value) { return xmlEscape(value == null ? '' : String(value)); }
 
+// A listener, and WHAT A CALLER HAS TO PRESENT ON IT. The third column is not
+// decoration: the four sockets have three different postures — plain, plain and
+// trusted as `local`, and mutual TLS — and a reader who cannot see which is
+// which meets the difference as a handshake failure. Same reason
+// `tls_server.js` says on the page which port needs verification turned off.
 function listenerRows(bindings) {
   if (!bindings.length) {
-    return '<tr><td colspan="2">Nothing bound. Either this listener is ' +
+    return '<tr><td colspan="3">Nothing bound. Either this listener is ' +
            'turned off in configuration, or <code>listen()</code> has not ' +
            'run yet.</td></tr>';
   }
   return bindings.map(function (binding) {
-    return '<tr><td><code>' + esc(binding.address) + '</code></td><td>' +
+    return '<tr><td><code>' + esc(binding.address) + '</code>' +
+      (binding.tls ? ' <span class="note">(mutual TLS)</span>' : '') +
+      '</td><td>' +
       (binding.listening
         ? 'listening'
         : '<strong>did not bind</strong>: ' + esc(binding.error)) +
-      '</td></tr>';
+      '</td><td>' + esc(binding.authentication || '') + '</td></tr>';
   }).join('');
 }
 
@@ -398,14 +458,30 @@ function page(document) {
           'issue an SVID: ' + esc(state.error)
         : 'The issuing authority is still being generated. An RSA-4096 key ' +
           'takes a few seconds; reload.') + '</p>') +
-    '<p class="warn"><strong>Nothing here is attested and nobody is ' +
-    'authenticated.</strong> Any caller that can reach the Workload API socket ' +
-    'can obtain any identity in this trust domain, and any caller that can ' +
-    'reach the SPIRE Server API port can create a registration entry granting ' +
-    'one. That is this service\'s posture everywhere — it checks no password ' +
-    'and accepts every LDAP bind — but it matters more here than anywhere ' +
-    'else, because what comes out is a credential another service will ' +
-    'believe. The full list is below.</p>' +
+    '<p class="warn"><strong>NOTHING HERE IS ATTESTED.</strong> No workload ' +
+    'and no node: any caller that can reach the Workload API socket can ' +
+    'obtain an identity in this trust domain, and an agent\'s attestation ' +
+    'payload is written down as claimed. That is this service\'s posture ' +
+    'everywhere — it checks no password and accepts every LDAP bind — and it ' +
+    'matters more here than anywhere else, because what comes out is a ' +
+    'credential another service will believe.</p>' +
+    '<p class="' + (document.authentication.enforced ? 'note' : 'warn') + '">' +
+    (document.authentication.enforced
+      ? '<strong>The SPIRE Server API is the exception, and it is on.</strong> ' +
+        'Its TCP port is mutual TLS, a caller presents an X509-SVID from this ' +
+        'trust domain, and every method is authorized against SPIRE\'s own ' +
+        'table — the whole of which is below. Its Unix socket is the ' +
+        '<code>local</code> entity and needs no credential. The Workload API ' +
+        'is deliberately untouched by this: its specification says a client ' +
+        'MUST NOT be required to authenticate.'
+      : '<strong>And the SPIRE Server API is not authenticating anybody ' +
+        'either, because <code>spiffe.authRequired</code> is off.</strong> ' +
+        'That port is plain gRPC and anybody who can reach it can create a ' +
+        'registration entry granting any identity here and then collect an ' +
+        'SVID for it. Turn the setting on — it needs a restart, because it ' +
+        'decides how the socket is bound — to get the behaviour of a real ' +
+        'spire-server.') +
+    '</p>' +
 
     '<h2>The bundle endpoint</h2>' +
     '<p><a href="' + esc(document.bundle.url) + '"><code>' +
@@ -435,7 +511,7 @@ function page(document) {
     '<p class="note">' + esc(document.authorities.note) + '</p>' +
 
     '<h2>The Workload API</h2>' +
-    '<table><tr><th>Address</th><th>State</th></tr>' +
+    '<table><tr><th>Address</th><th>State</th><th>What a caller presents</th></tr>' +
     listenerRows(document.workloadApi.listeners) + '</table>' +
     '<p>Every call must carry the metadata header <code>' +
     esc(document.workloadApi.securityHeader) + '</code>' +
@@ -449,13 +525,47 @@ function page(document) {
     methodRows(document.workloadApi.methods) + '</table>' +
 
     '<h2>The SPIRE Server API</h2>' +
-    '<table><tr><th>Address</th><th>State</th></tr>' +
+    '<table><tr><th>Address</th><th>State</th><th>What a caller presents</th></tr>' +
     listenerRows(document.serverApi.listeners) + '</table>' +
     document.serverApi.services.map(function (service) {
       return '<h3>' + esc(service.name) + '</h3><p>' + esc(service.what) + '</p>' +
         '<table><tr><th>Method</th><th>Implemented</th><th>What</th></tr>' +
         methodRows(service.methods) + '</table>';
     }).join('') +
+
+    '<h2>Who may call the SPIRE Server API</h2>' +
+    '<p>' + esc(document.authentication.what) + '</p>' +
+    '<p class="note">' + esc(document.authentication.bootstrapping) + '</p>' +
+    '<p class="note">' + esc(document.authentication.identityNote) + '</p>' +
+    (document.authentication.adminIds.length
+      ? '<p>Administrators by configuration (<code>spiffe.adminIds</code>): ' +
+        document.authentication.adminIds.map(function (id) {
+          return '<code>' + esc(id) + '</code>';
+        }).join(', ') + '. A registration entry marked <code>admin</code> is ' +
+        'the other way, and both are read on every call.</p>'
+      : '<p>No SPIFFE ID is an administrator by configuration ' +
+        '(<code>spiffe.adminIds</code> is empty). The other way in is a ' +
+        'registration entry marked <code>admin</code>, which the form on ' +
+        '<a href="/admin/spiffe/entries">/admin/spiffe/entries</a> sets, and ' +
+        'the <code>local</code> Unix socket, which needs no credential at ' +
+        'all.</p>') +
+    '<table><tr><th>Entity</th><th>What it means</th></tr>' +
+    document.authentication.entities.map(function (entity) {
+      return '<tr><td><code>' + esc(entity.id) + '</code></td><td>' +
+        esc(entity.what) + '</td></tr>';
+    }).join('') + '</table>' +
+    '<h3>The per-method table</h3>' +
+    '<p>Copied from SPIRE\'s own <code>policy_data.json</code> rather than ' +
+    'reasoned out, because a table somebody derived from what each method ' +
+    '"obviously" needs is one that disagrees with SPIRE in two or three ' +
+    'places — and the client author who meets the disagreement has no way to ' +
+    'tell which end is wrong. <code>any</code> means the method is open here ' +
+    'and in a real server too.</p>' +
+    '<table><tr><th>Method</th><th>Allowed to</th></tr>' +
+    document.authentication.policy.map(function (row) {
+      return '<tr><td><code>' + esc(row.method) + '</code></td><td>' +
+        esc(row.allow.join(', ')) + '</td></tr>';
+    }).join('') + '</table>' +
 
     '<h2>What is not checked</h2><ul>' +
     document.notChecked.map(function (line) {
@@ -519,25 +629,88 @@ function addressesFor(surface) {
 }
 
 async function bindAll(server, surface) {
+  log.debug('Entering bindAll(). surface=' + surface);
   const results = [];
   const addresses = addressesFor(surface);
+  // ---------------------------------------------------------------------
+  // WHICH SOCKET GETS TLS, AND WHY IT IS EXACTLY ONE OF THE FOUR.
+  //
+  // The two specifications ask for opposite things and this is where that
+  // becomes four sockets with three different postures. See
+  // `spiffe_auth.js`'s header for the argument; the shape of it here:
+  //
+  //   Workload API, socket AND TCP   PLAIN, always. The Workload Endpoint
+  //                                  specification says "Transport Layer
+  //                                  Security MUST NOT be required", because a
+  //                                  workload has no root of trust until this
+  //                                  call gives it one. TLS here would refuse
+  //                                  every conforming client.
+  //   SPIRE Server API, socket       PLAIN, always. It is the `local` entity —
+  //                                  the private socket a real `spire-server`
+  //                                  CLI uses, whose access control is the
+  //                                  filesystem.
+  //   SPIRE Server API, TCP          MUTUAL TLS when `spiffe.authRequired` is
+  //                                  on, which is the default, and plain when
+  //                                  it is not.
+  //
+  // That last line is the one that changes what an existing caller sees, which
+  // is why the setting is RESTART-ONLY: a flag that was runtime for its checks
+  // and restart-only for its socket is the silent disagreement config.js's
+  // header warns about — /admin/config would report mutual TLS while a plain
+  // listener went on answering. The same reasoning `oauth2.rfc9700` carries
+  // about `global.https`.
+  // ---------------------------------------------------------------------
+  let secure = null;
+  if (surface === 'server' && auth.authRequired()) {
+    try {
+      secure = await rpc.serverApiCredentials();
+    } catch (e) {
+      // REPORTED, never thrown, and the port still comes up — plain. A
+      // listener that refused to bind because its certificate could not be
+      // minted would take the surface away for a reason nothing could show,
+      // and `GET /spiffe` reports which of the two each address got.
+      log.error('spiffe: the SPIRE Server API could not be given a TLS ' +
+                'identity (' + e.message + '), so its TCP port is binding ' +
+                'PLAIN and nothing on it is authenticated. GET /spiffe says ' +
+                'so; this is a fault here rather than a configuration ' +
+                'problem.');
+      secure = null;
+    }
+  }
   for (let i = 0; i < addresses.length; i++) {
     const entry = addresses[i];
     if (entry.socketPath) rpc.prepareSocketPath(entry.socketPath);
-    // INSECURE credentials, on both transports, and it is worth saying why
-    // rather than leaving it to be discovered.
-    //
-    // The Workload API is meant to be reached over a Unix socket whose
-    // FILESYSTEM PERMISSIONS are the access control; the specification permits
-    // tcp:// and says in terms that the deployment must secure it by other
-    // means. The SPIRE Server API in a real deployment is mutual TLS with SVIDs
-    // on both ends — which this service cannot do, because the whole point of
-    // it is that it authenticates nobody. Offering TLS with no verification
-    // would look like security and provide none, which is worse than plain.
+    // The socket is the `local` entity and is never TLS; see above. `secure`
+    // is null for every address but one.
+    const tls = !entry.socketPath && secure;
     const bound = await rpc.bindOne(server, entry.address,
-                                    rpc.grpc.ServerCredentials.createInsecure());
+      tls ? secure : rpc.grpc.ServerCredentials.createInsecure());
+    bound.tls = !!tls;
+    bound.socket = !!entry.socketPath;
+    // What a caller has to do to use this address, said on the page rather
+    // than left to be met as a handshake failure — the rule `tls_server.js`
+    // follows about the main port.
+    bound.authentication = entry.socketPath
+      ? (surface === 'server'
+          ? (auth.trustLocalSocket()
+              ? 'No credential. This socket is the `local` entity and is ' +
+                'trusted outright, which is how the spire-server CLI works.'
+              : 'An X509-SVID is required even here ' +
+                '(spiffe.trustLocalSocket is off).')
+          : 'None, and there must be none: the Workload Endpoint ' +
+            'specification forbids requiring one.')
+      : (tls
+          ? 'Mutual TLS. Verify this server against the trust bundle, present ' +
+            'your own X509-SVID, and expect to be authorized per method.'
+          : (surface === 'server'
+              ? 'None — spiffe.authRequired is off, so this port is plain ' +
+                'gRPC and every method is open to everybody.'
+              : 'None, and there must be none: the Workload Endpoint ' +
+                'specification forbids requiring one. The deployment secures ' +
+                'this port by other means or does not expose it.'));
     results.push(bound);
   }
+  log.debug('Leaving bindAll(). ' + results.length + ' address(es).');
   return results;
 }
 
