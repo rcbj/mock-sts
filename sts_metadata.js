@@ -860,7 +860,8 @@ const ENDPOINTS = [
   // walk can see all of them. That is why the routes are registered against the shared
   // app one by one rather than behind a mounted express Router, which this walk skips.
   { path: '/scim', group: 'SCIM', name: 'What the SCIM surface is',
-    specs: ['rfc7642', 'rfc7643', 'rfc7644', 'rfc4511', 'rfc4519'],
+    specs: ['rfc7642', 'rfc7643', 'rfc7644', 'rfc7235', 'rfc7617', 'rfc7616',
+            'rfc7486', 'rfc4511', 'rfc4519'],
     what: 'NOT a SCIM endpoint — a real server publishes none of this. What the ' +
           'provisioning surface is, what it writes into (the embedded directory, entry ' +
           'for entry), what a SCIM id is here (the entry\'s DN, and what that costs on a ' +
@@ -874,7 +875,7 @@ const ENDPOINTS = [
           'stored as scimActive and read by nothing here. Add ?format=json.' },
   { path: '/scim/v2/ServiceProviderConfig', group: 'SCIM',
     name: 'What this SCIM server supports',
-    specs: ['rfc7643', 'rfc7644'],
+    specs: ['rfc7643', 'rfc7644', 'rfc7235', 'rfc7617', 'rfc7616', 'rfc7486'],
     what: 'RFC 7643 section 5. Filtering, sorting, PATCH and bulk are supported; ETag and ' +
           'changePassword are NOT, and are advertised as unsupported rather than ' +
           'half-implemented — a version built over a one-second timestamp would be a ' +
@@ -891,7 +892,9 @@ const ENDPOINTS = [
           'client learns which schemes exist.' },
   { path: '/scim/v2/ResourceTypes', group: 'SCIM', name: 'The resource types',
     specs: ['rfc7643'],
-    what: 'User and Group, with the schema and the endpoint of each (RFC 7643 section 6).' },
+    what: 'User and Group, with the schema and the endpoint of each (RFC 7643 section 6) — ' +
+          'and, on User, the enterprise extension as a schemaExtension, because the ' +
+          'extension is DECLARED here rather than only mapped.' },
   { path: '/scim/v2/ResourceTypes/:id', group: 'SCIM', name: 'One resource type',
     specs: ['rfc7643'],
     what: 'One of the two above, by name.' },

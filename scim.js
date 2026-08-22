@@ -630,7 +630,20 @@ function userResourceFor(entry, req) {
   });
 }
 
+// EXTENDED WITH THE ENTERPRISE USER SCHEMA (RFC 7643 section 4.3), and the
+// extension has to be DECLARED rather than merely mapped. scim_map.js has
+// carried employeeNumber, department, organization, division and manager since
+// SCIM arrived here, but an attribute scimmy's schema definition does not know
+// about is dropped by its coercion in both directions — so those five went out
+// of a POST and came back as nothing, and /Schemas listed two documents while
+// this service claimed three. Declaring it puts the URN in /Schemas and in the
+// User resource type's schemaExtensions, and makes the namespaced member on the
+// wire the one the mapping writes.
+//
+// `required` is left false: RFC 7643 section 4.3 defines the extension, and a
+// User carrying none of it is an ordinary User rather than an invalid one.
 SCIMMY.Resources.declare(SCIMMY.Resources.User)
+  .extend(SCIMMY.Schemas.EnterpriseUser)
   .egress(function (resource, ctx) {
     log.debug("Entering the SCIM User egress handler. id=" + (resource.id || '(a list)'));
     const req = (ctx || {}).req;
