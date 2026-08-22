@@ -88,6 +88,14 @@ const vpConfig = require('./vc_verifier_config');
 // what the directory says into an access token. See its header for why the
 // selection is per-set and why nothing is selected on a fresh start.
 const claimAttributes = require('./claim_attributes');
+// The FOURTH library over that catalogue's territory: which LDAP attribute each
+// SCIM member is, in both directions. Read here for the mapping tables on
+// /admin/scim, and by scim.js for the conversions themselves. It registers no
+// route and requires only helpers.js and vc_claims.js, so requiring it here
+// neither moves a route nor makes a cycle — which is exactly why the conversions
+// live in a library rather than in scim.js, where a require from this file would
+// have dragged every /scim and /ldap route ahead of the console's own.
+const scimMap = require('./scim_map');
 // The groups claim: which directory groups reach a token, whether it is on, and
 // what it would say about one person. A LIBRARY like the line above — it
 // registers no route, so requiring it here cannot reorder the router
@@ -113,6 +121,22 @@ const applications = require('./applications');
 // The authorization server profiles — what each discovery document publishes.
 // A library that registers no route, so requiring it here moves nothing.
 const authorizationServers = require('./authorization_servers');
+// The two SPIFFE LIBRARIES, and only those two. `spiffe_ca.js` holds the trust
+// domain's authorities and `spiffe_registry.js` the registration entries and
+// agents; both register nothing, so requiring them here moves no route and
+// cannot close a cycle. `spiffe_id.js` comes with them for the server ID.
+//
+// **`spiffe_server.js` is deliberately NOT required here.** That module
+// registers the bundle endpoint and /spiffe, and server.js requires this file
+// FIRST — so a require from here would pull those routes into the express
+// router ahead of the console's own, and GET /sts-metadata is built by walking
+// that router. What this page needs from it is two facts about sockets, and
+// they arrive through a reader slot instead: the same inversion
+// setDirectoryReader(), setGroupReader() and setScimReader() already use, and
+// justified by rule 3e's test in exactly the same way.
+const spiffeCa = require('./spiffe_ca');
+const spiffeRegistry = require('./spiffe_registry');
+const spiffeIdLib = require('./spiffe_id');
 // For the DRIFT report: the document this service would publish, to compare a
 // profile's overrides against. oauth2.js is required before admin.js in
 // server.js (rule 5), so this is a plain require in the ordinary direction.
@@ -170,8 +194,12 @@ const NAV = [
   { path: '/admin/metrics', label: 'Metrics' },
   { path: '/admin/users', label: 'Users' },
   { path: '/admin/groups', label: 'Groups' },
+  { path: '/admin/scim', label: 'SCIM' },
   { path: '/admin/applications', label: 'Applications' },
   { path: '/admin/authorization-servers', label: 'Authorization servers' },
+  { path: '/admin/spiffe', label: 'SPIFFE' },
+  { path: '/admin/spiffe/entries', label: 'Registration entries' },
+  { path: '/admin/spiffe/agents', label: 'Agents' },
   { path: '/admin/tokens', label: 'Tokens' },
   { path: '/admin/audit', label: 'Audit log' },
   { path: '/admin/claims', label: 'Custom claims' },
@@ -203,7 +231,9 @@ const LIST_PARAMS = {
   '/admin/users': ['q', 'protocol', 'per', 'page'],
   '/admin/groups': ['q', 'per', 'page'],
   '/admin/applications': ['q', 'kind', 'per', 'page'],
-  '/admin/authorization-servers': ['per', 'page']
+  '/admin/authorization-servers': ['per', 'page'],
+  '/admin/spiffe/entries': ['q', 'origin', 'per', 'page'],
+  '/admin/spiffe/agents': ['q', 'per', 'page']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -2360,6 +2390,72 @@ function setGroupReader(fn) {
             "directory's groups.");
 }
 
+// The FOURTH slot, and the third of the ones that READ. Same direction and same
+// reason as the two above, and it passes rule 3e's test for the same two
+// grounds: requiring scim.js from here would pull every /scim route — and, since
+// that module requires ldap_server.js, every /ldap route too — into the express
+// router ahead of the console's own, and /sts-metadata is built by walking that
+// router.
+//
+// What it holds is scim.js's description(), which is the same object GET
+// /scim?format=json answers with. So /admin/scim shows what that page shows
+// rather than a second account of the same feature: the endpoint list, what SCIM
+// deliberately does not do, and the reachable negatives are written ONCE, in the
+// module that implements them, and this page renders them. A console page
+// carrying its own copy of "active: false deactivates nobody" would be the copy
+// that stops being true.
+// The SPIFFE listeners, through a slot for the reason given beside the requires
+// above: this file must not require spiffe_server.js. What it holds is that
+// module's `bindings()` and its bundle path — two facts about SOCKETS, which
+// neither this page nor /sts-metadata can see any other way, so a page without
+// this reports "nothing bound" and cannot tell that from a listener whose port
+// was taken.
+let spiffeReader = null;
+
+function setSpiffeReader(fn) {
+  spiffeReader = fn;
+  log.debug("A SPIFFE reader was installed; /admin/spiffe will now report " +
+            "which gRPC listeners bound.");
+}
+
+// Answered with empty listeners rather than null when the slot is unfilled, so
+// every caller renders the same "nothing bound" table instead of each having to
+// guard. The bundle path falls back to the configured value, which is what that
+// module reads too — one setting, two readers, no third opinion.
+function spiffeListeners() {
+  const read = spiffeReader ? spiffeReader() : null;
+  return read || { workload: [], api: [],
+                   bundlePath: config.value('spiffe.bundlePath') };
+}
+
+let scimReader = null;
+
+function setScimReader(fn) {
+  scimReader = fn;
+  log.debug("A SCIM reader was installed; /admin/scim will now describe the " +
+            "SCIM 2.0 endpoints.");
+}
+
+// And the one that WRITES, which is the third of these and the only one of the
+// three that changes anything. Same direction and same reason as the two above —
+// this file must not require ldap_server.js — and a third slot rather than a
+// member on one of theirs, for the reason stated there: a module that filled a
+// combined slot with only the readers would silently disable creation with
+// nothing reporting it.
+//
+// It holds createUser() and NOT a way to write an arbitrary entry. The console
+// is not a second definition of what a user is: what a name may be, and the
+// refusal of one that is already here, live in that function so that this form,
+// the management API and an `ldapadd` cannot come to disagree about the same
+// name.
+let directoryWriter = null;
+
+function setDirectoryWriter(fn) {
+  directoryWriter = fn;
+  log.debug("A directory writer was installed; /admin/users can now create a " +
+            "person in the directory.");
+}
+
 // The whole section, as HTML and as the object that goes into ?format=json. Both
 // come out of one call so that the page and the JSON cannot disagree about what
 // the directory holds, which is the same rule /ldap follows for its own two views.
@@ -2968,6 +3064,33 @@ function usersListPage(req) {
       '<button class="secondary">Filter</button>' +
       (wantedText || wantedProtocol ? ' <a href="/admin/users">clear</a>' : '') +
     '</div></form>' +
+
+    // The one control on this page. It writes to the DIRECTORY and not to the
+    // table below it, which the note says outright — see usersAction() for why
+    // that sentence is not optional. The `back` field carries the filter and
+    // page so that creating somebody does not throw the reader back to the top
+    // of an unfiltered list; the handler rebuilds it through the whitelist
+    // rather than echoing it.
+    '<form method="post" action="/admin/users">' +
+      '<input type="hidden" name="action" value="create">' +
+      '<input type="hidden" name="back" value="' + esc(queryWith(listView, {})) + '">' +
+      '<div class="formrow">' +
+        '<label for="new-username">Create a user</label>' +
+        '<input type="text" id="new-username" name="username" size="20" ' +
+               'placeholder="username" required>' +
+        '<button>Create</button>' +
+      '</div>' +
+      '<p class="note">Puts an entry in the embedded LDAP directory at ' +
+      '<code>uid=&lt;name&gt;,' + esc('ou=users,' + config.value('ldap.baseDn')) + '</code>, with the invented person ' +
+      'behind that name written onto it, so an issued credential and an ' +
+      '<code>ldapsearch</code> agree from the start. <strong>One entry per person:</strong> a ' +
+      'name that is already here is refused, whichever protocol brought them and whatever ' +
+      'attribute their entry is named by — the same refusal an <code>ldapadd</code> and ' +
+      '<code>POST /admin-api/users/create</code> get, because all three call one function. ' +
+      'The new user will not appear in the table below until they authenticate somewhere: that ' +
+      'is who this service has SEEN, and this is what the directory HOLDS. No password is set, ' +
+      'because none is ever checked.</p>' +
+    '</form>' +
     nav +
     '<table><tr><th>User</th><th>Kind</th><th>Authenticated</th><th>Protocols</th><th>Realms</th>' +
     '<th class="num">Sessions</th><th class="num">Tokens</th><th class="num">Valid</th>' +
@@ -3000,6 +3123,66 @@ function usersListPage(req) {
       users: shown
     }
   };
+}
+
+// ---------------------------------------------------------------------------
+// THE ONE THING THIS PAGE CAN CHANGE.
+//
+// Everything else on /admin/users is a report: who has authenticated, what they
+// were issued, what the directory holds about them. This creates a person in the
+// directory, and it is here rather than on /admin/groups or /ldap because this is
+// the page a reader is on when they discover that somebody is missing.
+//
+// IT DECIDES NOTHING. Every rule about what a username may be, and the refusal
+// of one that already exists, is in ldap_server.js's createUser() — reached
+// through the slot above. This function reads the form and phrases the answer,
+// which is the same split /admin/applications keeps with applications.js and the
+// reason POST /admin-api/users/create can call straight into this without a
+// second reading of any of it.
+//
+// WHAT IT DOES NOT DO is make the person appear in the list on this page. That
+// list is identities this service has SEEN authenticate; the entry is in the
+// DIRECTORY. The two are different questions — it is the same distinction
+// /admin/groups draws when it marks a member "never here" — and the message says
+// so outright, because an operator who created a user and could not find them in
+// the table above would reasonably conclude the button was broken.
+// ---------------------------------------------------------------------------
+function usersAction(body) {
+  log.debug("Entering usersAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+
+  if (action === 'create') {
+    if (!directoryWriter) {
+      log.debug("Leaving usersAction(). No directory is loaded.");
+      return { ok: false, errors: ['No LDAP directory is loaded in this process, so there is ' +
+                                   'nowhere to put a person. The rest of this page is ' +
+                                   'unaffected — it reports what this service has seen, which ' +
+                                   'does not come from the directory.'] };
+    }
+    const username = String(body.username || body.user || '').trim();
+    const result = directoryWriter(username, {
+      origin: 'console',
+      note: String(body.note || '').trim() ||
+            'created by hand on the admin console rather than by authenticating',
+      channel: 'console'
+    });
+    if (!result.ok) {
+      log.debug("Leaving usersAction(). create refused.");
+      return result;
+    }
+    log.debug("Leaving usersAction(). Created " + result.dn + ".");
+    return { ok: true, dn: result.dn, username: result.username, entry: result.entry,
+             message: result.dn + ' now exists in the directory, with the invented person ' +
+                      'behind that name written onto it — so a credential issued for ' +
+                      result.username + ' and an ldapsearch for that entry say the same ' +
+                      'thing. They will NOT appear in the table on this page until they ' +
+                      'authenticate somewhere: this list is who this service has seen, and ' +
+                      'the entry is what the directory holds. Nothing here checks a ' +
+                      'password, so there is none to set.' };
+  }
+
+  log.debug("Leaving usersAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". There is one: create.'] };
 }
 
 // One route, three answers, and the choice between them is here rather than in
@@ -3045,6 +3228,18 @@ app.get('/admin/users', function (req, res) {
   const view = usersView(req);
   respond(req, res, view.json, view.title, '/admin/users', view.inner, view.up);
   log.debug("Leaving the admin users page. " + view.title + ".");
+});
+
+app.post('/admin/users', function (req, res) {
+  log.debug("Entering the admin users action endpoint.");
+  const body = parseBody(req);
+  const result = usersAction(body);
+  // Back to the list carrying whatever filter and page the form came from, so
+  // that creating somebody does not cost the reader their place — the rule every
+  // form on this console follows.
+  const back = '/admin/users' + queryWith(listViewFromBack('/admin/users', body.back), {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin users action endpoint.");
 });
 
 // ---------------------------------------------------------------------------
@@ -6097,6 +6292,242 @@ app.post('/admin/config', function (req, res) {
   log.debug("Leaving the admin configuration action endpoint.");
 });
 
+// ---------------------------------------------------------------------------
+// /admin/scim — WHAT THE PROVISIONING SURFACE HAS DONE.
+//
+// The one page here that reports a protocol family rather than an artifact this
+// service issued, and it reports two different kinds of thing on purpose:
+//
+//   * the COUNTERS, from admin_stats.js. Which SCIM operation was performed how
+//     many times, on which resource type, and what was refused with which
+//     `scimType`. Every row of both vocabularies is drawn INCLUDING the zeroes,
+//     because "does this server do PATCH" is the question somebody comes here
+//     with and a table that only listed what had happened would answer it by
+//     omission.
+//   * the SURFACE, from scim.js through the reader slot — the endpoints, what it
+//     deliberately does not do, and the things you can make fail. Written once,
+//     in the module that implements them, and rendered here. See setScimReader().
+//
+// **IT HAS NO CONTROLS, AND THAT IS WHY IT NEEDS ONLY A GET ON /admin-api.**
+// Everything about SCIM that can be changed is a `config.js` row —
+// `scim.enabled` and the three limits — so /admin/config already has the form
+// and POST /admin-api/config/set already has the operation. A second form here
+// would be a second door to one setting, which is the mistake rule 5 exists for
+// and the same argument group_claims.js makes about `groups.claim`.
+//
+// **THE BULK COUNT DOES NOT TALLY WITH THE REST, ON PURPOSE.** One
+// POST /scim/v2/Bulk carrying five creates is one `bulk` row AND five `create`
+// rows, because each operation inside really is performed. Said on the page,
+// because a reader adding the column up will otherwise conclude the counting is
+// broken.
+// ---------------------------------------------------------------------------
+function scimJson(req) {
+  log.debug("Entering scimJson().");
+  const counters = stats.scimSnapshot();
+  const surface = scimReader ? scimReader(req) : null;
+  const out = {
+    // Distinguished from `enabled` deliberately: a process whose scim.js never
+    // loaded is a different thing from one where scim.enabled is false, and a
+    // page that reported both as "off" would send somebody to the wrong setting.
+    installed: !!surface,
+    enabled: surface ? surface.enabled : false,
+    baseUrl: surface ? surface.baseUrl : null,
+    specifications: surface ? surface.specifications : ['RFC 7642', 'RFC 7643', 'RFC 7644'],
+    store: surface ? surface.store : null,
+    identifiers: surface ? surface.identifiers : null,
+    endpoints: surface ? surface.endpoints : [],
+    doesNotDo: surface ? surface.doesNotDo : [],
+    reachableNegatives: surface ? surface.reachableNegatives : [],
+    mapping: { user: scimMap.USER_ATTRIBUTES.map(scimMappingRow),
+               group: scimMap.GROUP_ATTRIBUTES.map(scimMappingRow) },
+    counters: counters
+  };
+  log.debug("Leaving scimJson(). " + counters.total + " request(s) counted.");
+  return out;
+}
+
+// One row of the mapping, as the page and the API both want it. The `note` is
+// carried through because several of them are the whole reason the row is not
+// obvious — `groups` being read-only, `active` deactivating nobody, `manager`
+// being passed through rather than resolved.
+function scimMappingRow(row) {
+  return { scim: row.scim, ldap: row.ldap, kind: row.kind,
+           readOnly: !!row.readOnly, required: !!row.required,
+           extension: !!row.extension, schema: row.schema || '',
+           note: row.note || '' };
+}
+
+app.get('/admin/scim', function (req, res) {
+  log.debug("Entering the admin SCIM page.");
+  const json = scimJson(req);
+  const counters = json.counters;
+
+  const tiles = tile(counters.total, 'SCIM requests') +
+    tile(counters.ok, 'answered') +
+    tile(counters.failed, 'refused') +
+    tile(json.store ? json.store.userCount : '—', 'people in the directory') +
+    tile(json.store ? json.store.groupCount : '—', 'groups') +
+    tile(json.store ? json.store.entryCount + ' / ' + json.store.maxEntries : '—', 'entries / max');
+
+  const operationRows = counters.operations.map(function (row) {
+    return '<tr><td><code>' + esc(row.method) + '</code> ' + esc(row.label) + '</td>' +
+      '<td class="num">' + row.count + '</td>' +
+      '<td class="sub">' + esc(row.what) + '</td></tr>';
+  }).join('');
+
+  const typeRows = counters.resourceTypes.map(function (row) {
+    return '<tr><td><code>' + esc(row.resourceType) + '</code></td>' +
+      '<td class="num">' + row.count + '</td></tr>';
+  }).join('');
+
+  const statusRows = Object.keys(counters.byStatus).sort().map(function (code) {
+    return '<tr><td><code>' + esc(code) + '</code></td><td class="num">' +
+      counters.byStatus[code] + '</td></tr>';
+  }).join('') || '<tr><td colspan="2">Nothing has been answered yet.</td></tr>';
+
+  const scimTypeRows = Object.keys(counters.byScimType).sort().map(function (name) {
+    return '<tr><td><code>' + esc(name) + '</code></td><td class="num">' +
+      counters.byScimType[name] + '</td></tr>';
+  }).join('') || '<tr><td colspan="2">Nothing has been refused yet, which on a ' +
+                 'server this permissive usually means nothing has tried the ' +
+                 'error paths.</td></tr>';
+
+  const endpointRows = json.endpoints.map(function (row) {
+    return '<tr><td><code>' + esc(row.method) + '</code></td><td><code>' +
+      esc(row.path) + '</code></td><td class="sub">' + esc(row.what) + '</td></tr>';
+  }).join('');
+
+  const negativeRows = json.reachableNegatives.map(function (row) {
+    return '<tr><td>' + esc(row.what) + '</td><td>' + esc(row.answer) + '</td></tr>';
+  }).join('');
+
+  function mappingTable(rows) {
+    return '<table><tr><th>SCIM</th><th>LDAP attribute</th><th>How</th>' +
+      '<th>Defined by</th></tr>' +
+      rows.map(function (row) {
+        return '<tr><td><code>' + esc(row.scim) + '</code>' +
+          (row.required ? ' <span class="state-valid">required</span>' : '') +
+          (row.extension ? ' <span class="sub">(enterprise extension)</span>' : '') +
+          '</td>' +
+          '<td><code>' + esc(row.ldap) + '</code></td>' +
+          '<td>' + esc(row.kind) + (row.readOnly ? ', read-only' : '') +
+          (row.note ? '<div class="sub">' + esc(row.note) + '</div>' : '') + '</td>' +
+          '<td class="sub">' + esc(row.schema) + '</td></tr>';
+      }).join('') + '</table>';
+  }
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>SCIM is not loaded in this process.</strong> ' +
+        'The module registers no routes here, so there is nothing to report. ' +
+        'Everything else on this console is unaffected.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? '<div class="warn"><strong>SCIM is turned off</strong> ' +
+        '(<code>scim.enabled</code>). The routes are still registered and answer ' +
+        '<code>501</code> rather than <code>404</code>, because the feature ' +
+        'being off and the URL being wrong are different sentences to a client. ' +
+        'Turn it back on at <a href="/admin/config">Configuration</a>.</div>'
+      : '') +
+
+    '<p class="note">SCIM 2.0 — RFC 7642, 7643 and 7644 — at <code>' +
+    esc(json.baseUrl || '/scim/v2') + '</code>. It is the only protocol family ' +
+    'here whose purpose is to WRITE, and what it writes is the embedded LDAP ' +
+    'directory: there is no second store and no cache. A ' +
+    '<code>POST /scim/v2/Users</code> and an <code>ldapadd</code> create the ' +
+    'same entry, so somebody provisioned over SCIM appears on ' +
+    '<a href="/admin/users">Users</a>, gains whatever attributes ' +
+    '<a href="/admin/vc">Credential claims</a> selects, and lands in whatever ' +
+    'group a client puts them in on <a href="/admin/groups">Groups</a>.</p>' +
+
+    '<div class="warn"><strong>These endpoints create and delete accounts and ' +
+    'nothing on them checks a credential.</strong> The ServiceProviderConfig ' +
+    'says so with an empty <code>authenticationSchemes</code> rather than by ' +
+    'leaving the member out. <strong>And <code>active: false</code> ' +
+    'deactivates nobody</strong> — it is stored on the entry as ' +
+    '<code>scimActive</code> and read by nothing here: no bind is refused, no ' +
+    'token withheld, no session ended. Deprovisioning is the commonest thing a ' +
+    'SCIM client does, so that one is worth reading twice.</div>' +
+
+    tiles +
+
+    '<h2>Operations</h2>' +
+    '<p class="note">Every operation this server implements, including the ones ' +
+    'nothing has used yet — a table listing only what has happened would answer ' +
+    '&ldquo;does this support PATCH?&rdquo; by omission. <strong>The column does ' +
+    'not tally</strong>, on purpose: one <code>Bulk</code> carrying five creates ' +
+    'is one bulk AND five creates, because each of the five really is performed.</p>' +
+    '<table><tr><th>Operation</th><th class="num">Count</th><th>What it is</th></tr>' +
+    operationRows + '</table>' +
+
+    '<h2>By resource type</h2>' +
+    '<table><tr><th>Resource type</th><th class="num">Count</th></tr>' + typeRows +
+    '</table>' +
+
+    '<h2>What went back</h2>' +
+    '<p class="note">The HTTP status of every answer, and the <code>scimType</code> ' +
+    'of every refusal (RFC 7644 section 3.12). <code>(none)</code> is a refusal ' +
+    'that carried no such code — a 404 has none — and is counted rather than ' +
+    'dropped, so the two failure tables agree with each other.</p>' +
+    '<div class="tiles" style="align-items:flex-start">' +
+    '<div><table><tr><th>Status</th><th class="num">Count</th></tr>' + statusRows +
+    '</table></div>' +
+    '<div><table><tr><th>scimType</th><th class="num">Count</th></tr>' +
+    scimTypeRows + '</table></div></div>' +
+
+    (json.identifiers
+      ? '<h2>The <code>id</code> is the DN</h2>' +
+        '<p class="note">' + esc(json.identifiers.why) + '</p>' +
+        '<p class="note">For example: <code>' + esc(json.identifiers.example) +
+        '</code></p>'
+      : '') +
+
+    (endpointRows
+      ? '<h2>Endpoints</h2><table><tr><th>Method</th><th>Path</th><th>What</th>' +
+        '</tr>' + endpointRows + '</table>'
+      : '') +
+
+    (json.doesNotDo.length
+      ? '<h2>What it deliberately does not do</h2><ul>' +
+        json.doesNotDo.map(function (text) {
+          return '<li>' + esc(text) + '</li>';
+        }).join('') + '</ul>'
+      : '') +
+
+    (negativeRows
+      ? '<h2>Things you can make fail</h2>' +
+        '<p class="note">A permissive server is hard to write error handling ' +
+        'against, so these are here on purpose — the same device as the reserved ' +
+        'password <code>invalid</code> everywhere else in this service.</p>' +
+        '<table><tr><th>Do this</th><th>Get this</th></tr>' + negativeRows +
+        '</table>'
+      : '') +
+
+    '<h2>The User mapping</h2>' +
+    '<p class="note">Which LDAP attribute each SCIM member is. The attribute ' +
+    'spellings are the same catalogue <a href="/admin/vc">Credential claims</a> ' +
+    'and <a href="/admin/claims">Custom claims</a> read, checked against it at ' +
+    'startup rather than copied — four independently maintained lists of ' +
+    'spellings is how one of them comes to be quietly wrong.</p>' +
+    mappingTable(json.mapping.user) +
+
+    '<h2>The Group mapping</h2>' +
+    mappingTable(json.mapping.group) +
+
+    '<p class="note">Nothing on this page is a control, because everything about ' +
+    'SCIM that can be changed is a configuration row: <code>scim.enabled</code> ' +
+    'and the three limits, on <a href="/admin/config">Configuration</a>. A form ' +
+    'here would be a second door to one setting.</p>' +
+
+    '<p class="note"><a href="/scim">What this is, for a person</a> &middot; ' +
+    '<a href="/admin/scim?format=json">this page as JSON</a> &middot; ' +
+    '<a href="/admin-api/scim">the same over the management API</a> &middot; ' +
+    '<a href="/ldap">the directory it writes into</a></p>';
+
+  respond(req, res, json, 'SCIM 2.0', '/admin/scim', inner);
+  log.debug("Leaving the admin SCIM page.");
+});
+
 app.get('/admin/config', function (req, res) {
   log.debug("Entering the admin configuration page.");
   const snapshot = config.snapshot();
@@ -6153,10 +6584,1008 @@ app.get('/admin/config', function (req, res) {
   log.debug("Leaving the admin configuration page.");
 });
 
+// ---------------------------------------------------------------------------
+// /admin/spiffe, /admin/spiffe/entries, /admin/spiffe/agents — THE SPIFFE
+// SECTION.
+//
+// Three pages rather than one, and the split is by what the reader is doing
+// rather than by what the data is:
+//
+//   /admin/spiffe           the TRUST DOMAIN — its authorities, the bundle,
+//                           the four gRPC listeners, the federated bundles.
+//                           The forms here rotate an authority and set or
+//                           remove a federated bundle.
+//   /admin/spiffe/entries   the REGISTRATION ENTRIES: a list with a filter and
+//                           paging, a drill-down per entry, and the forms that
+//                           create, change and delete one.
+//   /admin/spiffe/agents    the ATTESTED AGENTS: the same shape, and the forms
+//                           ban, unban and delete.
+//
+// **The second and third are separate sections rather than drill-downs**, which
+// is why each has its own NAV row and its own LIST_PARAMS whitelist. A
+// drill-down's section crumb points at the list it came from, and an entries
+// list hanging under /admin/spiffe would make the crumb point at a page that
+// does not hold that list — the exact defect rule 7a describes.
+//
+// **THIS PAGE DECIDES NOTHING.** Every form posts to an action function that
+// calls into `spiffe_registry.js` or `spiffe_ca.js` — the same functions the
+// SPIRE Server API's `BatchCreateEntry`, `BanAgent` and
+// `BatchSetFederatedBundle` call, and the same store an `ldapmodify` under
+// `ou=spiffe` writes to. Three doors, one store, which is the one-store rule
+// this service already applies to revocation, to the applications registry and
+// to SCIM.
+//
+// **AND IT SAYS, ON EVERY PAGE, THAT NOTHING IS ATTESTED.** A console that
+// listed registration entries beside the tokens page without saying so would
+// let somebody conclude that a selector on an entry restricts who can get that
+// identity. Nothing here restricts anything: any caller that reaches the
+// Workload API socket is handed every identity in the trust domain.
+// ---------------------------------------------------------------------------
+
+// The warning that goes at the top of all three, written once. It is the SPIFFE
+// analogue of the "a group here grants nothing" line on /admin/groups, and it
+// matters more, because what comes out of these pages is a credential another
+// service will believe.
+const SPIFFE_POSTURE_NOTE =
+  '<div class="warn"><strong>Nothing here is attested and nobody is ' +
+  'authenticated.</strong> A real SPIFFE agent reads the peer credentials of ' +
+  'its socket, turns them into selectors, and hands a workload only the ' +
+  'identities those selectors match. This service hands every caller EVERY ' +
+  'identity in the trust domain, and its SPIRE Server API lets any caller ' +
+  'create a registration entry granting one. So the selectors below are ' +
+  'recorded, reported, and used for <code>GetAuthorizedEntries</code> and the ' +
+  '&ldquo;what would match&rdquo; view — and they restrict nothing. ' +
+  '<a href="/spiffe">GET /spiffe</a> has the full list of what is and is not ' +
+  'checked.</div>';
+
+function spiffeSelectorText(selector) {
+  return spiffeRegistry.selectorText(selector);
+}
+
+// ---------------------------------------------------------------------------
+// THE TRUST DOMAIN PAGE.
+// ---------------------------------------------------------------------------
+function spiffeJson(req) {
+  log.debug("Entering spiffeJson().");
+  const state = spiffeCa.state();
+  const bindings = spiffeListeners();
+  const json = {
+    enabled: state.enabled,
+    ready: state.ready,
+    error: state.error,
+    trustDomain: state.trustDomain,
+    trustDomainId: state.trustDomainId,
+    serverId: state.serverId,
+    bundle: {
+      path: bindings.bundlePath,
+      sequence: state.sequence,
+      refreshHint: state.refreshHint
+    },
+    authorities: { x509: state.x509Authorities, jwt: state.jwtAuthorities,
+                   maxRetained: spiffeCa.MAX_RETAINED_AUTHORITIES },
+    listeners: { workloadApi: bindings.workload, serverApi: bindings.api },
+    federated: state.federated,
+    counts: { entries: spiffeRegistry.entryCount(),
+              agents: spiffeRegistry.agentCount(),
+              maxEntries: spiffeRegistry.maxEntries(),
+              maxAgents: spiffeRegistry.maxAgents(),
+              maxFederatedBundles: config.value('spiffe.maxFederatedBundles') },
+    keyTypes: state.keyTypes,
+    // Which settings shape this, so that a reader who wants to change something
+    // knows where to go rather than hunting /admin/config. The same courtesy
+    // /admin/scim pays.
+    settings: ['spiffe.enabled', 'spiffe.trustDomain', 'spiffe.x509KeyType',
+               'spiffe.jwtKeyType', 'spiffe.caTtl', 'spiffe.svidTtl',
+               'spiffe.jwtSvidTtl', 'spiffe.refreshHint', 'spiffe.svidSubject',
+               'spiffe.autoCreateEntries', 'spiffe.requireSecurityHeader',
+               'spiffe.maxEntries', 'spiffe.maxAgents',
+               'spiffe.maxFederatedBundles', 'spiffe.bundlePath',
+               'spiffe.workloadSocketEnabled', 'spiffe.workloadSocket',
+               'spiffe.workloadPort', 'spiffe.serverPort',
+               'spiffe.serverSocketEnabled', 'spiffe.serverSocket',
+               'spiffe.grpcHost'].map(function (key) {
+      return { key: key, value: config.text(key) };
+    })
+  };
+  log.debug("Leaving spiffeJson(). ready=" + json.ready);
+  return json;
+}
+
+function spiffeListenerRows(bindings, what) {
+  if (!bindings.length) {
+    return '<tr><td colspan="3">Nothing bound for ' + esc(what) + '. Either ' +
+      'both transports are off in configuration, or the process has not ' +
+      'finished starting.</td></tr>';
+  }
+  return bindings.map(function (binding) {
+    return '<tr><td>' + esc(what) + '</td><td><code>' + esc(binding.address) +
+      '</code></td><td>' + (binding.listening ? 'listening'
+        : '<strong>did not bind</strong> &mdash; ' + esc(binding.error)) +
+      '</td></tr>';
+  }).join('');
+}
+
+function spiffePage(req) {
+  log.debug("Entering spiffePage().");
+  const json = spiffeJson(req);
+  const state = spiffeCa.state();
+  const x509Rows = state.x509Authorities.map(function (authority) {
+    return '<tr><td><code>' + esc(authority.id) + '</code></td><td>' +
+      (authority.active ? '<strong>active</strong>' : 'retired, still published') +
+      '</td><td>' + esc(authority.keyType) + '</td><td>' +
+      esc(authority.notAfter) + '</td><td><code>' + esc(authority.subject) +
+      '</code></td></tr>';
+  }).join('');
+  const jwtRows = state.jwtAuthorities.map(function (authority) {
+    return '<tr><td><code>' + esc(authority.id) + '</code></td><td>' +
+      (authority.active ? '<strong>active</strong>' : 'retired, still published') +
+      '</td><td>' + esc(authority.keyType) + ' / ' + esc(authority.alg) +
+      '</td><td>' + esc(new Date(authority.createdAt).toISOString()) +
+      '</td><td>&mdash;</td></tr>';
+  }).join('');
+  const federatedRows = state.federated.map(function (entry) {
+    return '<tr><td><code>' + esc(entry.trustDomainId) + '</code></td><td>' +
+      entry.x509Keys + ' x509, ' + entry.jwtKeys + ' jwt</td><td>' +
+      esc(entry.bundleEndpointProfile) + '<br><span class="note">' +
+      esc(entry.bundleEndpointUrl || '(no endpoint URL recorded)') +
+      '</span></td><td>' + esc(entry.sequence) + '</td><td>' +
+      '<form method="post" action="/admin/spiffe" class="inline">' +
+      '<input type="hidden" name="action" value="federation-remove">' +
+      '<input type="hidden" name="trustDomain" value="' + esc(entry.trustDomain) + '">' +
+      '<button class="danger">Remove</button></form> ' +
+      '<a href="/spiffe/federated/' + encodeURIComponent(entry.trustDomain) +
+      '">document</a></td></tr>';
+  }).join('') || '<tr><td colspan="5">None. This trust domain federates with ' +
+    'nobody.</td></tr>';
+
+  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+    (json.enabled ? '' : '<div class="warn">SPIFFE is turned OFF ' +
+      '(<code>spiffe.enabled</code>): the bundle endpoint answers 404 and every ' +
+      'gRPC call is refused with <code>Unavailable</code>. Turn it back on from ' +
+      '<a href="/admin/config">Configuration</a>; it needs no restart.</div>') +
+    (json.ready ? '' : '<div class="warn">' + (json.error
+      ? 'The issuing authority could not be built, so nothing here will issue ' +
+        'an SVID: ' + esc(json.error)
+      : 'The issuing authority is still being generated &mdash; an RSA-4096 key ' +
+        'takes a few seconds. Reload.') + '</div>') +
+
+    '<h2>The trust domain</h2>' +
+    '<p>This service is the issuing authority for <code>' +
+    esc(json.trustDomainId) + '</code>. Its own identity as a SPIFFE server is ' +
+    '<code>' + esc(json.serverId || '(not yet)') + '</code>, and every ' +
+    'registration entry hangs beneath that by default. The trust domain is ' +
+    'restart-only (<code>spiffe.trustDomain</code>): every authority ' +
+    'certificate names it.</p>' +
+    '<p>The bundle is published at <a href="' + esc(json.bundle.path) +
+    '"><code>' + esc(json.bundle.path) + '</code></a> &mdash; sequence <code>' +
+    esc(json.bundle.sequence) + '</code>, refresh hint ' +
+    esc(json.bundle.refreshHint) + ' seconds. The sequence changes whenever the ' +
+    'bundle does and never otherwise, which is what lets a consumer tell ' +
+    '&ldquo;I have the current bundle&rdquo; from &ldquo;I have a ' +
+    'bundle&rdquo;.</p>' +
+
+    '<h2>Authorities</h2>' +
+    '<p>Generated per start and held in memory, exactly like the STS signing ' +
+    'key and the TLS certificate &mdash; so a workload holding a bundle from ' +
+    'before a restart will fail to verify every SVID minted after it. ' +
+    'Rotating PREPENDS a new authority and keeps the old one published: an SVID ' +
+    'minted a minute ago has to go on verifying, which is what a bundle is for. ' +
+    'At most ' + esc(json.authorities.maxRetained) + ' are retained, and past ' +
+    'that the oldest is dropped &mdash; anything it signed stops verifying at ' +
+    'that moment.</p>' +
+    '<table><tr><th>Id</th><th>State</th><th>Key</th><th>Until</th>' +
+    '<th>Subject</th></tr>' + x509Rows + jwtRows + '</table>' +
+    '<form method="post" action="/admin/spiffe"><div class="formrow">' +
+    '<input type="hidden" name="action" value="rotate">' +
+    '<label for="which">Rotate</label>' +
+    '<select id="which" name="which">' +
+    '<option value="x509">the X.509 authority</option>' +
+    '<option value="jwt">the JWT authority</option>' +
+    '<option value="both">both</option></select>' +
+    '<button>Rotate</button>' +
+    '<span class="note">New SVIDs are signed with the new authority ' +
+    'immediately; existing ones keep verifying until they expire.</span>' +
+    '</div></form>' +
+
+    '<h2>The gRPC listeners</h2>' +
+    '<p>Neither <code>/sts-metadata</code> nor this page can see a socket, so ' +
+    'this table is the only place that reports whether each one actually ' +
+    'bound. All four are restart-only.</p>' +
+    '<table><tr><th>Surface</th><th>Address</th><th>State</th></tr>' +
+    spiffeListenerRows(json.listeners.workloadApi, 'Workload API') +
+    spiffeListenerRows(json.listeners.serverApi, 'SPIRE Server API') +
+    '</table>' +
+
+    '<h2>Federated trust domains</h2>' +
+    '<p><strong>A foreign bundle is given to this service and never fetched by ' +
+    'it.</strong> The federation specification has a bundle endpoint URL in the ' +
+    'relationship and a real implementation polls it; this one records the URL ' +
+    'and refuses to follow it, because fetching a URL somebody registered in ' +
+    'order to obtain a credential-verification key is a server-side request ' +
+    'forgery with a citation attached &mdash; the same refusal this service ' +
+    'gives WS-Federation\'s <code>wreqptr</code> and a client\'s ' +
+    '<code>jwks_uri</code>. Paste the bundle in below, or push it with ' +
+    '<code>BatchSetFederatedBundle</code>.</p>' +
+    '<table><tr><th>Trust domain</th><th>Keys</th><th>Profile / endpoint</th>' +
+    '<th>Sequence</th><th></th></tr>' + federatedRows + '</table>' +
+    '<form method="post" action="/admin/spiffe">' +
+    '<div class="formrow">' +
+    '<input type="hidden" name="action" value="federation-set">' +
+    '<label for="fed-td">Trust domain</label>' +
+    '<input id="fed-td" name="trustDomain" placeholder="other.example" size="24">' +
+    '<label for="fed-url">Bundle endpoint URL</label>' +
+    '<input id="fed-url" name="bundleEndpointUrl" placeholder="https://other.example/bundle" size="34">' +
+    '<label for="fed-profile">Profile</label>' +
+    '<select id="fed-profile" name="bundleEndpointProfile">' +
+    '<option value="https_web">https_web</option>' +
+    '<option value="https_spiffe">https_spiffe</option></select>' +
+    '</div><div class="formrow">' +
+    '<label for="fed-doc">Bundle document</label>' +
+    '<textarea id="fed-doc" name="document" rows="6" cols="80" ' +
+    'placeholder=\'{"keys":[{"kty":"EC","use":"x509-svid","x5c":["..."]}],"spiffe_sequence":1,"spiffe_refresh_hint":300}\'></textarea>' +
+    '<button>Set</button>' +
+    '<span class="note">A JWK Set. Every key needs <code>use</code> of ' +
+    '<code>x509-svid</code>, <code>jwt-svid</code> or <code>wit-svid</code>: a ' +
+    'consumer MUST IGNORE one without it, so a bundle of keys missing that ' +
+    'member verifies nothing and reports no error, which is why it is refused ' +
+    'here rather than stored.</span></div></form>' +
+
+    '<h2>Elsewhere</h2><ul>' +
+    '<li><a href="/admin/spiffe/entries">Registration entries</a> &mdash; ' +
+    esc(json.counts.entries) + ' of at most ' + esc(json.counts.maxEntries) +
+    '</li>' +
+    '<li><a href="/admin/spiffe/agents">Attested agents</a> &mdash; ' +
+    esc(json.counts.agents) + ' of at most ' + esc(json.counts.maxAgents) +
+    '</li>' +
+    '<li><a href="/spiffe">What this is, and what it does not check</a></li>' +
+    '<li><a href="/ldap/spiffe">The containers and their schema</a></li>' +
+    '<li><a href="/admin-api/spiffe">The same, over JSON</a></li>' +
+    '</ul>';
+  log.debug("Leaving spiffePage().");
+  return { json: json, inner: inner, title: 'SPIFFE' };
+}
+
+// ---------------------------------------------------------------------------
+// THE REGISTRATION ENTRIES.
+// ---------------------------------------------------------------------------
+function spiffeEntriesJson(req) {
+  log.debug("Entering spiffeEntriesJson().");
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const origin = String(req.query.origin || '').trim();
+  const all = spiffeRegistry.allEntries();
+  const rows = all.filter(function (entry) {
+    if (origin && entry.origin !== origin) return false;
+    if (!q) return true;
+    return (entry.spiffeId + ' ' + entry.parentId + ' ' + entry.id + ' ' +
+            entry.hint + ' ' +
+            entry.selectors.map(spiffeSelectorText).join(' ')).toLowerCase()
+      .indexOf(q) >= 0;
+  });
+  const pg = pagingOf(req.query, rows.length, { unit: 'entry' });
+  const json = {
+    total: all.length,
+    matched: rows.length,
+    filter: { q: q, origin: origin },
+    origins: all.map(function (entry) { return entry.origin; })
+      .filter(function (value, index, list) { return list.indexOf(value) === index; })
+      .sort(),
+    paging: { page: pg.page, pages: pg.pages, perPage: pg.perPage,
+              total: pg.total },
+    max: spiffeRegistry.maxEntries(),
+    container: 'ou=entries,ou=spiffe',
+    entries: rows.slice(pg.offset, pg.offset + pg.perPage)
+  };
+  log.debug("Leaving spiffeEntriesJson(). " + rows.length + " matched.");
+  return { json: json, paging: pg };
+}
+
+function spiffeEntriesListPage(req) {
+  log.debug("Entering spiffeEntriesListPage().");
+  const view = spiffeEntriesJson(req);
+  const json = view.json;
+  const listView = listViewOf('/admin/spiffe/entries', req.query);
+  const rows = json.entries.map(function (entry) {
+    return '<tr><td><a href="/admin/spiffe/entries' +
+      queryWith(listView, { entry: entry.id }) + '"><code>' +
+      esc(entry.spiffeId) + '</code></a>' +
+      (entry.expired ? ' <strong>(expired)</strong>' : '') +
+      '<br><span class="note"><code>' + esc(entry.id) + '</code></span></td>' +
+      '<td>' + esc(entry.selectors.map(spiffeSelectorText).join(', ') ||
+                   '(none — matches every workload)') + '</td>' +
+      '<td>' + esc(entry.origin) + '</td>' +
+      '<td>' + esc(entry.hint || '—') + '</td>' +
+      '<td>' + entry.svidsIssued + '</td>' +
+      '<td>rev ' + entry.revisionNumber + '</td></tr>';
+  }).join('') || '<tr><td colspan="6">No registration entry matches.</td></tr>';
+  const originOptions = ['<option value="">every origin</option>'].concat(
+    json.origins.map(function (name) {
+      return '<option value="' + esc(name) + '"' +
+        (json.filter.origin === name ? ' selected' : '') + '>' + esc(name) +
+        '</option>';
+    })).join('');
+  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+    '<p>' + esc(json.total) + ' registration entry/entries, of at most ' +
+    esc(json.max) + ' (<code>spiffe.maxEntries</code>). The store is the ' +
+    'embedded directory under <code>' + esc(json.container) + '</code>: ' +
+    'an <code>ldapmodify</code> there, a form here and the SPIRE Server API\'s ' +
+    '<code>BatchUpdateEntry</code> are three doors onto one entry, and nothing ' +
+    'caches it &mdash; so a change takes effect on the next SVID.</p>' +
+    '<form method="get" action="/admin/spiffe/entries"><div class="formrow">' +
+    '<label for="q">Search</label>' +
+    '<input id="q" name="q" value="' + esc(json.filter.q) + '" size="28" ' +
+    'placeholder="a SPIFFE ID, a selector, an entry id">' +
+    '<label for="origin">Origin</label>' +
+    '<select id="origin" name="origin">' + originOptions + '</select>' +
+    '<label for="per">Rows</label>' +
+    '<select id="per" name="per">' + perPageOptions(view.paging.perPage) +
+    '</select><button class="secondary">Filter</button>' +
+    '<span class="note">Origin is how the entry got here: <code>seed</code> ' +
+    'at startup, <code>console</code>, <code>api</code>, <code>grpc</code>, ' +
+    '<code>auto</code> (invented for a workload that matched nothing) or ' +
+    '<code>ldap</code>.</span></div></form>' +
+    '<table><tr><th>SPIFFE ID / entry id</th><th>Selectors</th><th>Origin</th>' +
+    '<th>Hint</th><th>SVIDs</th><th>Revision</th></tr>' + rows + '</table>' +
+    pageNav('/admin/spiffe/entries', filterOnly(listView), view.paging) +
+    spiffeCreateEntryForm() ;
+  log.debug("Leaving spiffeEntriesListPage().");
+  return { json: json, inner: inner };
+}
+
+function spiffeCreateEntryForm() {
+  return '<h2>Create a registration entry</h2>' +
+    '<p>The SPIFFE ID must be in this trust domain and outside the reserved ' +
+    '<code>/spire</code> path &mdash; those two refusals are the whole of what ' +
+    'is checked. The parent defaults to this server\'s own identity, which is ' +
+    'what SPIRE uses for an entry describing a workload rather than a node.</p>' +
+    '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
+    '<input type="hidden" name="action" value="create">' +
+    '<label for="e-id">SPIFFE ID</label>' +
+    '<input id="e-id" name="spiffeId" size="40" placeholder="spiffe://' +
+    esc(spiffeCa.trustDomain()) + '/ns/default/sa/web">' +
+    '<label for="e-parent">Parent</label>' +
+    '<input id="e-parent" name="parentId" size="34" placeholder="(this server)">' +
+    '</div><div class="formrow">' +
+    '<label for="e-sel">Selectors</label>' +
+    '<input id="e-sel" name="selectors" size="40" ' +
+    'placeholder="unix:uid:1000, k8s:ns:default">' +
+    '<label for="e-dns">DNS names</label>' +
+    '<input id="e-dns" name="dnsNames" size="26" placeholder="web.default.svc">' +
+    '</div><div class="formrow">' +
+    '<label for="e-x509ttl">X509-SVID TTL</label>' +
+    '<input id="e-x509ttl" name="x509SvidTtl" size="6" placeholder="3600">' +
+    '<label for="e-jwtttl">JWT-SVID TTL</label>' +
+    '<input id="e-jwtttl" name="jwtSvidTtl" size="6" placeholder="300">' +
+    '<label for="e-hint">Hint</label>' +
+    '<input id="e-hint" name="hint" size="12" placeholder="internal">' +
+    '<label for="e-fed">Federates with</label>' +
+    '<input id="e-fed" name="federatesWith" size="20" placeholder="other.example">' +
+    '<button>Create</button>' +
+    '<span class="note">Selectors, DNS names and trust domains are ' +
+    'comma-separated. A selector is <code>type:value</code>, split on the ' +
+    'FIRST colon only &mdash; so <code>docker:label:app:web</code> is type ' +
+    '<code>docker</code>.</span></div></form>';
+}
+
+function spiffeEntryDetailPage(req, id) {
+  log.debug("Entering spiffeEntryDetailPage(). id=" + id);
+  const entry = spiffeRegistry.entryById(id);
+  const listView = listViewOf('/admin/spiffe/entries', req.query);
+  const back = queryWith(listView, {});
+  if (!entry) {
+    log.debug("Leaving spiffeEntryDetailPage(). Not here.");
+    return { json: { error: 'No registration entry has the id ' + id },
+             inner: messagesOf(req) +
+               '<p>No registration entry has the id <code>' + esc(id) +
+               '</code>. It may have been deleted &mdash; from this page, ' +
+               'with <code>BatchDeleteEntry</code>, or with an ' +
+               '<code>ldapdelete</code> under <code>ou=entries,ou=spiffe</code>, ' +
+               'which are three doors onto one store.</p>' +
+               '<p><a href="/admin/spiffe/entries' + esc(back) +
+               '">Back to the entries</a>.</p>' };
+  }
+  const attributeRows = Object.keys(entry.attributes || {}).sort()
+    .map(function (name) {
+      const value = entry.attributes[name];
+      return '<tr><td><code>' + esc(name) + '</code></td><td>' +
+        esc(Array.isArray(value) ? value.join(' | ') : String(value)) +
+        '</td></tr>';
+    }).join('');
+  const json = { entry: entry, editable: spiffeRegistry.EDITABLE };
+  const carried = '<input type="hidden" name="back" value="' + esc(back) + '">' +
+                  '<input type="hidden" name="entry" value="' + esc(entry.id) + '">';
+  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+    '<h2><code>' + esc(entry.spiffeId) + '</code></h2>' +
+    '<p>Entry <code>' + esc(entry.id) + '</code>, revision ' +
+    esc(entry.revisionNumber) + ', created by <code>' + esc(entry.origin) +
+    '</code>. It lives at <code>' + esc(entry.dn) + '</code>' +
+    (entry.expired ? ' and <strong>has expired</strong> &mdash; it is kept and ' +
+      'reported rather than deleted, because an entry that vanished is ' +
+      'indistinguishable from one nobody created' : '') + '.</p>' +
+    '<table><tr><th>Field</th><th>Value</th></tr>' +
+    '<tr><td>Parent</td><td><code>' + esc(entry.parentId) + '</code></td></tr>' +
+    '<tr><td>Selectors</td><td>' +
+    esc(entry.selectors.map(spiffeSelectorText).join(', ') ||
+        '(none — this entry matches every workload)') + '</td></tr>' +
+    '<tr><td>DNS names</td><td>' + esc(entry.dnsNames.join(', ') || '—') +
+    '</td></tr>' +
+    '<tr><td>Federates with</td><td>' +
+    esc(entry.federatesWith.join(', ') || '—') + '</td></tr>' +
+    '<tr><td>X509-SVID TTL</td><td>' +
+    (entry.x509SvidTtl || ('default (' + esc(config.text('spiffe.svidTtl')) + ')')) +
+    '</td></tr>' +
+    '<tr><td>JWT-SVID TTL</td><td>' +
+    (entry.jwtSvidTtl || ('default (' + esc(config.text('spiffe.jwtSvidTtl')) + ')')) +
+    '</td></tr>' +
+    '<tr><td>Hint</td><td>' + esc(entry.hint || '—') + '</td></tr>' +
+    '<tr><td>admin / downstream / storeSvid</td><td>' +
+    (entry.admin ? 'admin' : '') + (entry.downstream ? ' downstream' : '') +
+    (entry.storeSvid ? ' storeSvid' : '') +
+    ((entry.admin || entry.downstream || entry.storeSvid) ? '' : '—') +
+    ' <span class="note">recorded and never read &mdash; nothing here decides ' +
+    'anything on one</span></td></tr>' +
+    '<tr><td>SVIDs issued</td><td>' + entry.svidsIssued +
+    (entry.lastSvidAt ? ', most recently ' + esc(entry.lastSvidAt) : '') +
+    '</td></tr></table>' +
+
+    '<h3>Change it</h3>' +
+    '<p>Only the DECLARED half is editable here &mdash; what the entry may DO. ' +
+    'The derived half (the revision number, the SVID counter, when it was ' +
+    'created) is what HAPPENED, and a form that could rewrite it would make ' +
+    'this page lie about the service\'s own behaviour. <code>ldapmodify</code> ' +
+    'reaches everything: refusing it here is the difference between offering ' +
+    'an operation and merely not preventing it.</p>' +
+    '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
+    '<input type="hidden" name="action" value="update">' + carried +
+    '<label for="u-field">Field</label>' +
+    '<select id="u-field" name="field">' +
+    ['spiffeId', 'parentId', 'selectors', 'dnsNames', 'federatesWith',
+     'x509SvidTtl', 'jwtSvidTtl', 'hint', 'expiresAt', 'admin', 'downstream',
+     'storeSvid'].map(function (name) {
+      return '<option value="' + esc(name) + '">' + esc(name) + '</option>';
+    }).join('') + '</select>' +
+    '<label for="u-value">Value</label>' +
+    '<input id="u-value" name="value" size="40">' +
+    '<button>Set</button>' +
+    '<span class="note">A list field takes comma-separated values and an ' +
+    'empty value clears it. A boolean takes true or false.</span>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
+    '<input type="hidden" name="action" value="delete">' + carried +
+    '<button class="danger">Delete this entry</button>' +
+    '<span class="note">Whatever holds an SVID minted from it keeps that SVID ' +
+    'until it expires. SPIFFE has no revocation &mdash; the answer is a short ' +
+    'lifetime, which is why the default is an hour.</span></div></form>' +
+
+    '<h3>The directory entry</h3>' +
+    '<p>Every attribute, operational ones included. This is the store rather ' +
+    'than a description of it.</p>' +
+    '<table><tr><th>Attribute</th><th>Value</th></tr>' + attributeRows +
+    '</table>';
+  log.debug("Leaving spiffeEntryDetailPage().");
+  return { json: json, inner: inner };
+}
+
+function spiffeEntriesView(req) {
+  log.debug("Entering spiffeEntriesView().");
+  const wanted = String(req.query.entry || '').trim();
+  if (wanted) {
+    const detail = spiffeEntryDetailPage(req, wanted);
+    log.debug("Leaving spiffeEntriesView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'Registration entry ' + wanted,
+             up: upTo('/admin/spiffe/entries', wanted,
+                      listViewOf('/admin/spiffe/entries', req.query)) };
+  }
+  const list = spiffeEntriesListPage(req);
+  log.debug("Leaving spiffeEntriesView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Registration entries' };
+}
+
+// ---------------------------------------------------------------------------
+// THE AGENTS.
+// ---------------------------------------------------------------------------
+function spiffeAgentsJson(req) {
+  log.debug("Entering spiffeAgentsJson().");
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const all = spiffeRegistry.allAgents();
+  const rows = all.filter(function (agent) {
+    if (!q) return true;
+    return (agent.id + ' ' + agent.attestationType + ' ' +
+            agent.selectors.map(spiffeSelectorText).join(' ')).toLowerCase()
+      .indexOf(q) >= 0;
+  });
+  const pg = pagingOf(req.query, rows.length, { unit: 'agent' });
+  const json = {
+    total: all.length,
+    matched: rows.length,
+    filter: { q: q },
+    max: spiffeRegistry.maxAgents(),
+    container: 'ou=agents,ou=spiffe',
+    paging: { page: pg.page, pages: pg.pages, perPage: pg.perPage,
+              total: pg.total },
+    agents: rows.slice(pg.offset, pg.offset + pg.perPage)
+  };
+  log.debug("Leaving spiffeAgentsJson(). " + rows.length + " matched.");
+  return { json: json, paging: pg };
+}
+
+function spiffeAgentsListPage(req) {
+  log.debug("Entering spiffeAgentsListPage().");
+  const view = spiffeAgentsJson(req);
+  const json = view.json;
+  const listView = listViewOf('/admin/spiffe/agents', req.query);
+  const rows = json.agents.map(function (agent) {
+    return '<tr><td><a href="/admin/spiffe/agents' +
+      queryWith(listView, { agent: agent.id }) + '"><code>' +
+      esc(agent.id) + '</code></a></td>' +
+      '<td>' + esc(agent.attestationType) + '</td>' +
+      '<td>' + (agent.banned ? '<strong>banned</strong>' : 'active') + '</td>' +
+      '<td>' + agent.attestations + '</td>' +
+      '<td>' + esc(agent.lastSeen || '—') + '</td></tr>';
+  }).join('') || '<tr><td colspan="5">No agent has attested here. An agent ' +
+    'appears when it calls <code>AttestAgent</code> on the SPIRE Server ' +
+    'API.</td></tr>';
+  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+    '<p>' + esc(json.total) + ' agent(s), of at most ' + esc(json.max) +
+    ' (<code>spiffe.maxAgents</code>). These entries are a RECORD rather than ' +
+    'configuration &mdash; everything on them was written by this service when ' +
+    'an agent attested &mdash; which is why nothing about an agent is editable ' +
+    'and only the ban is.</p>' +
+    '<div class="warn"><strong>Node attestation is never verified.</strong> ' +
+    'Whatever attestor an agent names and whatever payload it sends are ' +
+    'written down as claimed. That is why every agent carries a selector ' +
+    'valued <code>unverified:true</code>: an agent\'s selectors here are ' +
+    'claims, not attested facts.</div>' +
+    '<form method="get" action="/admin/spiffe/agents"><div class="formrow">' +
+    '<label for="q">Search</label>' +
+    '<input id="q" name="q" value="' + esc(json.filter.q) + '" size="30" ' +
+    'placeholder="an agent id, an attestor, a selector">' +
+    '<label for="per">Rows</label>' +
+    '<select id="per" name="per">' + perPageOptions(view.paging.perPage) +
+    '</select><button class="secondary">Filter</button></div></form>' +
+    '<table><tr><th>Agent</th><th>Attestor</th><th>State</th>' +
+    '<th>Attestations</th><th>Last seen</th></tr>' + rows + '</table>' +
+    pageNav('/admin/spiffe/agents', filterOnly(listView), view.paging);
+  log.debug("Leaving spiffeAgentsListPage().");
+  return { json: json, inner: inner };
+}
+
+function spiffeAgentDetailPage(req, id) {
+  log.debug("Entering spiffeAgentDetailPage(). id=" + id);
+  const agent = spiffeRegistry.agentById(id);
+  const listView = listViewOf('/admin/spiffe/agents', req.query);
+  const back = queryWith(listView, {});
+  if (!agent) {
+    log.debug("Leaving spiffeAgentDetailPage(). Not here.");
+    return { json: { error: 'No agent has attested here as ' + id },
+             inner: messagesOf(req) +
+               '<p>No agent has attested here as <code>' + esc(id) +
+               '</code>.</p><p><a href="/admin/spiffe/agents' + esc(back) +
+               '">Back to the agents</a>.</p>' };
+  }
+  const attributeRows = Object.keys(agent.attributes || {}).sort()
+    .map(function (name) {
+      const value = agent.attributes[name];
+      return '<tr><td><code>' + esc(name) + '</code></td><td>' +
+        esc(Array.isArray(value) ? value.join(' | ') : String(value)) +
+        '</td></tr>';
+    }).join('');
+  const carried = '<input type="hidden" name="back" value="' + esc(back) + '">' +
+                  '<input type="hidden" name="agent" value="' + esc(agent.id) + '">';
+  const inner = messagesOf(req) + SPIFFE_POSTURE_NOTE +
+    '<h2><code>' + esc(agent.id) + '</code></h2>' +
+    '<p>Attested with <code>' + esc(agent.attestationType) + '</code>, ' +
+    esc(agent.attestations) + ' time(s), first at ' + esc(agent.firstSeen) +
+    ' and most recently at ' + esc(agent.lastSeen) + '. It lives at <code>' +
+    esc(agent.dn) + '</code> &mdash; the RDN is a digest of the SPIFFE ID, ' +
+    'because a SPIFFE ID is too long for a readable one, so <strong>the cn is ' +
+    'not the identity here</strong>: <code>spiffeAgentId</code> is.</p>' +
+    '<table><tr><th>Field</th><th>Value</th></tr>' +
+    '<tr><td>State</td><td>' + (agent.banned
+      ? '<strong>banned</strong> — AttestAgent refuses it, which is one of ' +
+        'the few refusals in this service and is what keeps the button below ' +
+        'from being a lie'
+      : 'active') + '</td></tr>' +
+    '<tr><td>Can reattest</td><td>' + (agent.canReattest ? 'yes' : 'no') +
+    '</td></tr>' +
+    '<tr><td>Selectors</td><td>' +
+    esc(agent.selectors.map(spiffeSelectorText).join(', ') || '—') +
+    ' <span class="note">claimed, never verified</span></td></tr>' +
+    '<tr><td>SVID</td><td>' + esc(agent.svidHash || '—') +
+    (agent.expiresAt ? ', expires ' +
+      esc(new Date(agent.expiresAt * 1000).toISOString()) : '') +
+    '</td></tr></table>' +
+    '<form method="post" action="/admin/spiffe/agents"><div class="formrow">' +
+    '<input type="hidden" name="action" value="' +
+    (agent.banned ? 'unban' : 'ban') + '">' + carried +
+    '<button class="' + (agent.banned ? 'secondary' : 'danger') + '">' +
+    (agent.banned ? 'Unban' : 'Ban') + ' this agent</button>' +
+    '<span class="note">A banned agent is refused at <code>AttestAgent</code> ' +
+    'with <code>PermissionDenied</code>. Whatever SVID it already holds keeps ' +
+    'working until it expires &mdash; there is no revocation in SPIFFE.</span>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/spiffe/agents"><div class="formrow">' +
+    '<input type="hidden" name="action" value="delete">' + carried +
+    '<button class="danger">Delete this agent</button>' +
+    '<span class="note">It reappears the next time it attests, because ' +
+    'attestation is not checked &mdash; deleting is forgetting, not ' +
+    'revoking.</span></div></form>' +
+    '<h3>The directory entry</h3>' +
+    '<table><tr><th>Attribute</th><th>Value</th></tr>' + attributeRows +
+    '</table>';
+  log.debug("Leaving spiffeAgentDetailPage().");
+  return { json: { agent: agent }, inner: inner };
+}
+
+function spiffeAgentsView(req) {
+  log.debug("Entering spiffeAgentsView().");
+  const wanted = String(req.query.agent || '').trim();
+  if (wanted) {
+    const detail = spiffeAgentDetailPage(req, wanted);
+    log.debug("Leaving spiffeAgentsView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner, title: 'Agent ' + wanted,
+             up: upTo('/admin/spiffe/agents', wanted,
+                      listViewOf('/admin/spiffe/agents', req.query)) };
+  }
+  const list = spiffeAgentsListPage(req);
+  log.debug("Leaving spiffeAgentsView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Attested agents' };
+}
+
+// ---------------------------------------------------------------------------
+// THE ACTIONS.
+//
+// Three handlers, one per page, and each is what BOTH the console form and the
+// management API call — with `action` taken from the URL there instead of from
+// a hidden input here. That is rule 7's arrangement, and it is what makes an
+// API operation most of the cost of a console control rather than a second
+// implementation of it.
+//
+// Each returns `{ ok, errors, message }` and DECIDES NOTHING ITSELF: the work
+// is in `spiffe_registry.js` and `spiffe_ca.js`, which the SPIRE Server API
+// also calls.
+// ---------------------------------------------------------------------------
+function spiffeCommaList(value) {
+  return String(value == null ? '' : value).split(',')
+    .map(function (part) { return part.trim(); })
+    .filter(Boolean);
+}
+
+// The known actions, as a list, so that an unknown one can be answered by
+// NAMING the ones that exist. The parent project's tests/admin_api.js reads
+// exactly that reply to assert console/API parity — it asks each handler for an
+// action that does not exist and compares what comes back with the API's
+// operations — so this list is not decoration.
+const SPIFFE_ACTIONS = ['rotate', 'federation-set', 'federation-remove'];
+const SPIFFE_ENTRY_ACTIONS = ['create', 'update', 'delete'];
+const SPIFFE_AGENT_ACTIONS = ['ban', 'unban', 'delete'];
+
+function spiffeUnknownAction(action, known) {
+  return { ok: false, errors: ['Unknown action "' + String(action) + '". ' +
+    'The actions here are: ' + known.join(', ') + '.'] };
+}
+
+async function spiffeAction(body) {
+  log.debug("Entering spiffeAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  if (action === 'rotate') {
+    const which = String(body.which || 'x509');
+    const done = [];
+    try {
+      if (which === 'x509' || which === 'both') {
+        const authority = await spiffeCa.rotateX509Authority();
+        done.push('a new X.509 authority (' + authority.id + ')');
+      }
+      if (which === 'jwt' || which === 'both') {
+        const authority = await spiffeCa.rotateJwtAuthority();
+        done.push('a new JWT authority (kid ' + authority.id + ')');
+      }
+    } catch (e) {
+      log.debug("Leaving spiffeAction(). Rotation failed.");
+      return { ok: false, errors: ['The authority could not be rotated: ' +
+                                   e.message] };
+    }
+    if (!done.length) {
+      log.debug("Leaving spiffeAction(). Nothing named.");
+      return { ok: false, errors: ['Rotate what? `which` is x509, jwt or both.'] };
+    }
+    auditLog.audit({ action: 'spiffe.bundle.change', actor: '', protocol: 'SPIFFE',
+                  channel: 'internal', target: spiffeCa.trustDomainId(),
+                  summary: 'An authority was rotated from the console',
+                  detail: { which: which, sequence: spiffeCa.sequence() } });
+    log.debug("Leaving spiffeAction(). Rotated.");
+    return { ok: true, message: 'Rotated: ' + done.join(' and ') + '. The ' +
+      'previous authority is still published in the bundle, so SVIDs already ' +
+      'issued go on verifying; the bundle sequence is now ' +
+      spiffeCa.sequence() + '.' };
+  }
+
+  if (action === 'federation-set') {
+    const name = String(body.trustDomain || '').trim().toLowerCase();
+    if (!name) {
+      log.debug("Leaving spiffeAction(). No trust domain.");
+      return { ok: false, errors: ['Which trust domain? Send `trustDomain` ' +
+                                   'with its name — other.example, not ' +
+                                   'spiffe://other.example.'] };
+    }
+    const result = spiffeCa.setFederatedBundle(name, body.document, {
+      bundleEndpointUrl: String(body.bundleEndpointUrl || ''),
+      bundleEndpointProfile: String(body.bundleEndpointProfile || 'https_web'),
+      endpointSpiffeId: String(body.endpointSpiffeId || '')
+    });
+    if (!result.ok) {
+      log.debug("Leaving spiffeAction(). Refused.");
+      return { ok: false, errors: [result.reason] };
+    }
+    auditLog.audit({ action: 'spiffe.bundle.change', actor: '', protocol: 'SPIFFE',
+                  channel: 'internal', target: name,
+                  summary: 'A federated bundle for ' + name + ' was set from ' +
+                           'the console',
+                  detail: { created: result.created } });
+    log.debug("Leaving spiffeAction(). Federated bundle set.");
+    return { ok: true, message: 'The bundle for ' + name + ' was ' +
+      (result.created ? 'added' : 'replaced') + '. Any registration entry that ' +
+      'federates with it will now hand it to its workloads. The endpoint URL ' +
+      'is recorded and will not be fetched — see the note on this page.' };
+  }
+
+  if (action === 'federation-remove') {
+    const name = String(body.trustDomain || '').trim().toLowerCase();
+    const removed = spiffeCa.deleteFederatedBundle(name);
+    if (!removed) {
+      log.debug("Leaving spiffeAction(). Not held.");
+      return { ok: false, errors: ['This service holds no bundle for the ' +
+                                   'trust domain ' + name + '.'] };
+    }
+    auditLog.audit({ action: 'spiffe.bundle.change', actor: '', protocol: 'SPIFFE',
+                  channel: 'internal', target: name,
+                  summary: 'A federated bundle for ' + name + ' was removed ' +
+                           'from the console', detail: {} });
+    log.debug("Leaving spiffeAction(). Removed.");
+    return { ok: true, message: 'The bundle for ' + name + ' is gone. Any ' +
+      'entry that federates with it keeps the name and simply contributes no ' +
+      'bundle, which is the same state as a relationship configured before its ' +
+      'bundle arrives.' };
+  }
+
+  log.debug("Leaving spiffeAction(). Unknown action.");
+  return spiffeUnknownAction(action, SPIFFE_ACTIONS);
+}
+
+function spiffeEntriesAction(body) {
+  log.debug("Entering spiffeEntriesAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const trustDomain = spiffeCa.trustDomain();
+
+  if (action === 'create') {
+    const result = spiffeRegistry.createEntry({
+      spiffeId: String(body.spiffeId || '').trim(),
+      parentId: String(body.parentId || '').trim() ||
+                spiffeIdLib.serverId(trustDomain),
+      selectors: spiffeCommaList(body.selectors)
+        .map(spiffeRegistry.parseSelector).filter(Boolean),
+      dnsNames: spiffeCommaList(body.dnsNames),
+      federatesWith: spiffeCommaList(body.federatesWith),
+      x509SvidTtl: parseInt(String(body.x509SvidTtl || '0'), 10) || 0,
+      jwtSvidTtl: parseInt(String(body.jwtSvidTtl || '0'), 10) || 0,
+      hint: String(body.hint || '').trim()
+    }, 'console', trustDomain, '');
+    log.debug("Leaving spiffeEntriesAction(). create " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, id: result.id, entry: result.entry,
+             message: 'The entry is in the registry as ' + result.id +
+                      '. The next FetchX509SVID will include an SVID ' +
+                      'for ' + result.entry.spiffeId + ' — this service hands ' +
+                      'every caller every identity, so the selectors do not ' +
+                      'narrow that.' };
+  }
+
+  if (action === 'update') {
+    const id = String(body.entry || '').trim();
+    if (!id) {
+      log.debug("Leaving spiffeEntriesAction(). No entry named.");
+      return { ok: false, errors: ['Which entry? Send `entry` with its id.'] };
+    }
+    const field = String(body.field || '').trim();
+    if (spiffeRegistry.EDITABLE.indexOf(fieldToAttribute(field)) < 0) {
+      log.debug("Leaving spiffeEntriesAction(). Not editable.");
+      return { ok: false, errors: ['"' + field + '" is not a field this page ' +
+        'may change. The editable ones are what the entry may DO: ' +
+        'spiffeId, parentId, selectors, dnsNames, federatesWith, ' +
+        'x509SvidTtl, jwtSvidTtl, hint, expiresAt, admin, downstream, ' +
+        'storeSvid. The rest is what HAPPENED, and only ldapmodify reaches it.'] };
+    }
+    const raw = body.value === undefined ? '' : String(body.value);
+    const changes = {};
+    if (field === 'selectors') {
+      changes.selectors = spiffeCommaList(raw)
+        .map(spiffeRegistry.parseSelector).filter(Boolean);
+    } else if (field === 'dnsNames' || field === 'federatesWith') {
+      changes[field] = spiffeCommaList(raw);
+    } else if (field === 'x509SvidTtl' || field === 'jwtSvidTtl' ||
+               field === 'expiresAt') {
+      changes[field] = parseInt(raw, 10) || 0;
+    } else if (field === 'admin' || field === 'downstream' ||
+               field === 'storeSvid') {
+      changes[field] = /^(1|true|yes|on)$/i.test(raw.trim());
+    } else {
+      changes[field] = raw.trim();
+    }
+    const result = spiffeRegistry.updateEntry(id, changes, trustDomain, '');
+    log.debug("Leaving spiffeEntriesAction(). update " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, id: id, entry: result.entry,
+             message: field + ' is set. The entry is now at revision ' +
+                      result.entry.revisionNumber + ', and the change applies ' +
+                      'to the NEXT SVID issued from it — nothing caches this ' +
+                      'and nothing already issued changes.' };
+  }
+
+  if (action === 'delete') {
+    const id = String(body.entry || '').trim();
+    if (!id) {
+      log.debug("Leaving spiffeEntriesAction(). No entry named.");
+      return { ok: false, errors: ['Which entry? Send `entry` with its id.'] };
+    }
+    const result = spiffeRegistry.deleteEntry(id, '');
+    log.debug("Leaving spiffeEntriesAction(). delete " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, id: id,
+             message: 'The entry is gone. Anything holding an SVID minted from ' +
+                      'it keeps that SVID until it expires — SPIFFE has no ' +
+                      'revocation.' };
+  }
+
+  log.debug("Leaving spiffeEntriesAction(). Unknown action.");
+  return spiffeUnknownAction(action, SPIFFE_ENTRY_ACTIONS);
+}
+
+// The console names a field the way the record does and the EDITABLE table
+// names it the way the DIRECTORY does. One map, here, rather than two
+// vocabularies that drift: a form offering `dnsNames` while the table says
+// `spiffeDnsName` would refuse every edit the form offers.
+const SPIFFE_FIELD_ATTRIBUTES = {
+  spiffeId: 'spiffeId', parentId: 'spiffeParentId', selectors: 'spiffeSelector',
+  dnsNames: 'spiffeDnsName', federatesWith: 'spiffeFederatesWith',
+  x509SvidTtl: 'spiffeX509SvidTtl', jwtSvidTtl: 'spiffeJwtSvidTtl',
+  hint: 'spiffeHint', expiresAt: 'spiffeEntryExpiresAt', admin: 'spiffeAdmin',
+  downstream: 'spiffeDownstream', storeSvid: 'spiffeStoreSvid'
+};
+
+function fieldToAttribute(field) {
+  return SPIFFE_FIELD_ATTRIBUTES[String(field)] || '';
+}
+
+function spiffeAgentsAction(body) {
+  log.debug("Entering spiffeAgentsAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const id = String(body.agent || '').trim();
+  if (SPIFFE_AGENT_ACTIONS.indexOf(action) >= 0 && !id) {
+    log.debug("Leaving spiffeAgentsAction(). No agent named.");
+    return { ok: false, errors: ['Which agent? Send `agent` with its SPIFFE ' +
+                                 'ID, which is under /spire/agent/.'] };
+  }
+  if (action === 'ban' || action === 'unban') {
+    const result = spiffeRegistry.setAgentBanned(id, action === 'ban', '');
+    log.debug("Leaving spiffeAgentsAction(). " + action + " " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, id: id, agent: result.agent,
+             message: action === 'ban'
+               ? 'That agent is banned: AttestAgent now refuses it with ' +
+                 'PermissionDenied. Whatever SVID it already holds keeps ' +
+                 'working until it expires.'
+               : 'That agent may attest again.' };
+  }
+  if (action === 'delete') {
+    const result = spiffeRegistry.deleteAgent(id, '');
+    log.debug("Leaving spiffeAgentsAction(). delete " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, id: id,
+             message: 'That agent is forgotten. It reappears the moment it ' +
+                      'attests again, because attestation is not checked — ' +
+                      'deleting is forgetting, not revoking. Ban it instead if ' +
+                      'that is what you meant.' };
+  }
+  log.debug("Leaving spiffeAgentsAction(). Unknown action.");
+  return spiffeUnknownAction(action, SPIFFE_AGENT_ACTIONS);
+}
+
+// ---------------------------------------------------------------------------
+// THE ROUTES.
+// ---------------------------------------------------------------------------
+app.get('/admin/spiffe', function (req, res) {
+  log.debug("Entering the admin SPIFFE page.");
+  const view = spiffePage(req);
+  respond(req, res, view.json, view.title, '/admin/spiffe', view.inner);
+  log.debug("Leaving the admin SPIFFE page.");
+});
+
+// The one action handler here that is ASYNCHRONOUS, because rotating an
+// authority generates a key and key generation is async. `respondToAction`
+// takes the resolved result, so the await is here rather than inside it — every
+// other action in this console is synchronous and making that function async
+// would change the shape of all of them for one caller.
+app.post('/admin/spiffe', function (req, res) {
+  log.debug("Entering the admin SPIFFE action endpoint.");
+  const body = parseBody(req);
+  spiffeAction(body).then(function (result) {
+    respondToAction(req, res, '/admin/spiffe', result);
+    log.debug("Leaving the admin SPIFFE action endpoint.");
+  }).catch(function (err) {
+    // A throw out of the action itself. Answered rather than left to express's
+    // handler, which would replace the Content-Security-Policy header — see the
+    // frame-ancestors note in CLAUDE.md.
+    log.error('The SPIFFE console action threw: ' + err.message);
+    respondToAction(req, res, '/admin/spiffe',
+                    { ok: false, errors: [err.message] });
+    log.debug("Leaving the admin SPIFFE action endpoint. It threw.");
+  });
+});
+
+app.get('/admin/spiffe/entries', function (req, res) {
+  log.debug("Entering the admin SPIFFE entries page.");
+  const view = spiffeEntriesView(req);
+  respond(req, res, view.json, view.title, '/admin/spiffe/entries', view.inner,
+          view.up);
+  log.debug("Leaving the admin SPIFFE entries page. " + view.title + ".");
+});
+
+app.post('/admin/spiffe/entries', function (req, res) {
+  log.debug("Entering the admin SPIFFE entries action endpoint.");
+  const body = parseBody(req);
+  const result = spiffeEntriesAction(body);
+  // Back to the drill-down the form was posted from where there was one, and
+  // carrying the list state off the form's `back` field either way — so an edit
+  // does not silently cost the reader their place in the list. Rule 7a: a new
+  // form on this page needs `carryBack` in it, and nothing can check that it
+  // has one.
+  const listView = listViewFromBack('/admin/spiffe/entries', body.back);
+  const target = String(body.entry || '').trim() && result.ok !== false
+    ? '/admin/spiffe/entries' + queryWith(listView,
+        { entry: String(body.entry).trim() })
+    : '/admin/spiffe/entries' + queryWith(listView, {});
+  respondToAction(req, res, target, result);
+  log.debug("Leaving the admin SPIFFE entries action endpoint.");
+});
+
+app.get('/admin/spiffe/agents', function (req, res) {
+  log.debug("Entering the admin SPIFFE agents page.");
+  const view = spiffeAgentsView(req);
+  respond(req, res, view.json, view.title, '/admin/spiffe/agents', view.inner,
+          view.up);
+  log.debug("Leaving the admin SPIFFE agents page. " + view.title + ".");
+});
+
+app.post('/admin/spiffe/agents', function (req, res) {
+  log.debug("Entering the admin SPIFFE agents action endpoint.");
+  const body = parseBody(req);
+  const result = spiffeAgentsAction(body);
+  const listView = listViewFromBack('/admin/spiffe/agents', body.back);
+  const target = String(body.agent || '').trim() && result.ok !== false &&
+                 String(body.action || '') !== 'delete'
+    ? '/admin/spiffe/agents' + queryWith(listView,
+        { agent: String(body.agent).trim() })
+    : '/admin/spiffe/agents' + queryWith(listView, {});
+  respondToAction(req, res, target, result);
+  log.debug("Leaving the admin SPIFFE agents action endpoint.");
+});
+
+
 module.exports = {
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
+  // Filled by spiffe_server.js at its require time, for the reason beside the
+  // requires at the top: this file must not require that module.
+  setSpiffeReader: setSpiffeReader,
+  setScimReader: setScimReader,
   setGroupReader: setGroupReader,
+  setDirectoryWriter: setDirectoryWriter,
+  usersAction: usersAction,
   jtiFrom: jtiFrom,
   // The four action functions. admin_api.js calls exactly these — it decides
   // nothing about a revocation or a claim that this console does not — which is
@@ -6181,6 +7610,15 @@ module.exports = {
   groupsView: groupsView,
   applicationsView: applicationsView,
   applicationsAction: applicationsAction,
+  // The three SPIFFE views and their three action handlers. admin_api.js calls
+  // exactly these — rule 7 again: the API decides nothing the console does not,
+  // and an action added to one of these switches is most of adding it there.
+  spiffeView: spiffePage,
+  spiffeAction: spiffeAction,
+  spiffeEntriesView: spiffeEntriesView,
+  spiffeEntriesAction: spiffeEntriesAction,
+  spiffeAgentsView: spiffeAgentsView,
+  spiffeAgentsAction: spiffeAgentsAction,
   authorizationServersView: authorizationServersView,
   authorizationServersAction: asAction,
   claimsJson: claimsJson,
@@ -6192,6 +7630,7 @@ module.exports = {
   vcJson: vcJson,
   vcPreviewUser: vcPreviewUser,
   vpConfigJson: vpConfigJson,
+  scimJson: scimJson,
   configJson: configJson,
   // A body field that may appear more than once. Exported because the
   // management API takes the same two spellings of a list (`attribute` and

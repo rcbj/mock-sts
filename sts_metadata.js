@@ -73,6 +73,84 @@ const SPECS = [
               'GENERATED from the route table that registers the routes, so ' +
               'this row describes a serializer rather than a hand-written ' +
               'file.' },
+  // The five SPIFFE documents. They are not RFCs — SPIFFE is a CNCF project with
+  // its own numbered standards in one repository — so `where` says so rather
+  // than leaving a reader to look for an RFC number that does not exist.
+  { id: 'spiffe-id', name: 'SPIFFE-ID',
+    where: 'SPIFFE (CNCF)',
+    url: 'https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md',
+    coverage: 'full: the whole grammar, checked on the RAW TEXT rather than ' +
+              'through a URL parser — the trust domain lower-case and ' +
+              'restricted to letters, digits, dots, dashes and underscores; no ' +
+              'port, userinfo, query or fragment; no empty, relative or ' +
+              'percent-encoded path segment; the 2048- and 255-byte limits; ' +
+              'and the reserved /spire path. An upper-case trust domain is ' +
+              'REFUSED rather than normalised, because `new URL()` would ' +
+              'lower-case it silently and a client that sent the wrong form ' +
+              'would never learn it.' },
+  { id: 'spiffe-x509-svid', name: 'X509-SVID',
+    where: 'SPIFFE (CNCF)',
+    url: 'https://github.com/spiffe/spiffe/blob/main/standards/X509-SVID.md',
+    coverage: 'full for issuing: exactly one URI subjectAltName holding the ' +
+              'SPIFFE ID, CA:FALSE, keyUsage digitalSignature with no ' +
+              'keyCertSign, extKeyUsage serverAuth AND clientAuth (an SVID is ' +
+              'used at both ends of an mTLS connection), and EC P-256 by ' +
+              'default with RSA and Ed25519 available. NOT verified on the way ' +
+              'IN: nothing here validates a presented SVID, because nothing ' +
+              'here authenticates anybody.' },
+  { id: 'spiffe-jwt-svid', name: 'JWT-SVID',
+    where: 'SPIFFE (CNCF)',
+    url: 'https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md',
+    coverage: 'full in both directions, and this is the one SPIFFE surface ' +
+              'here that REFUSES: minting requires an audience, and ' +
+              'ValidateJWTSVID really checks — signature against the trust ' +
+              'domain\'s JWT authorities, exp with no leeway, the audience, ' +
+              'and that the sub belongs to the trust domain whose key ' +
+              'verified it. There is deliberately no `iss` claim: a JWT-SVID ' +
+              'is verified against the bundle of the trust domain in its ' +
+              '`sub`, and an issuer claim would teach a client to check the ' +
+              'wrong thing.' },
+  { id: 'spiffe-bundle', name: 'SPIFFE Trust Domain and Bundle',
+    where: 'SPIFFE (CNCF)',
+    url: 'https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Trust_Domain_and_Bundle.md',
+    coverage: 'full for the document: a JWK Set with `spiffe_sequence` and ' +
+              '`spiffe_refresh_hint`, every key carrying `use` of x509-svid or ' +
+              'jwt-svid, and x5c holding base64 DER. A submitted federated ' +
+              'bundle is CHECKED against those rules — one of the few ' +
+              'refusals here — because a consumer MUST IGNORE a JWK with no ' +
+              '`use`, so a bundle missing it verifies nothing and reports no ' +
+              'error. PARTIAL for federation: the bundle endpoint URL of a ' +
+              'relationship is recorded and NEVER FETCHED, so bundles are ' +
+              'pushed in rather than polled.' },
+  { id: 'spiffe-workload-api', name: 'SPIFFE Workload API and Workload Endpoint',
+    where: 'SPIFFE (CNCF)',
+    url: 'https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md',
+    coverage: 'partial, and the gap is the whole of workload attestation. Five ' +
+              'of the seven methods are implemented — FetchX509SVID, ' +
+              'FetchX509Bundles, FetchJWTSVID, FetchJWTBundles, ' +
+              'ValidateJWTSVID — over a Unix socket and over TCP, with the ' +
+              'streams held open and re-sent at half the SVID lifetime so a ' +
+              'client\'s rotation path runs. The mandatory ' +
+              '`workload.spiffe.io: true` header IS enforced. FetchWITSVID and ' +
+              'FetchWITBundles answer Unimplemented, because the Workload ' +
+              'Identity Token\'s format is not settled in a document this ' +
+              'service could implement against and inventing one would be ' +
+              'inventing a credential format. NOTHING ATTESTS THE CALLER: ' +
+              'every caller is handed every identity in the trust domain.' },
+  { id: 'spire-server-api', name: 'SPIRE Server API',
+    where: 'SPIRE (CNCF) — spire-api-sdk',
+    url: 'https://github.com/spiffe/spire-api-sdk',
+    coverage: 'partial: six services and 42 methods are served from the ' +
+              'vendored protos, of which 35 are implemented. The seven that ' +
+              'are not each answer with a reason — RenewAgent (nothing here ' +
+              'authenticates the caller, so there is no way to know which ' +
+              'agent to renew), AppendBundle and PublishJWTAuthority (they ' +
+              'would publish an authority this server holds no key for), ' +
+              'RefreshBundle (it would fetch a URL somebody registered), and ' +
+              'the three WIT methods. NO CALLER IS AUTHORIZED: a real server ' +
+              'checks every method against the caller\'s own SVID, and ' +
+              'anybody who can reach this port here can create a registration ' +
+              'entry granting any identity.' },
   { id: 'rfc4120', name: 'Kerberos v5 (RFC 4120)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4120',
@@ -127,6 +205,51 @@ const SPECS = [
     url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kkdcp/',
     coverage: 'mock: POST /KdcProxy accepts a KDC-PROXY-MESSAGE and relays it to the KDC in ' +
               'this process. Exists because a browser cannot open a raw socket to port 88.' },
+  // --- SCIM 2.0 ------------------------------------------------------------
+  //
+  // Three documents rather than one, and the split is worth knowing: 7642 is the
+  // requirements and use cases (no wire format at all), 7643 is the schema, and 7644 is
+  // the protocol. A client author who has read only one of them has usually read 7644
+  // and is looking for the attribute characteristics, which are in 7643.
+  { id: 'rfc7642', name: 'SCIM: Definitions, Overview, Concepts, and Requirements (RFC 7642)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7642',
+    coverage: 'mock: this is the requirements-and-use-cases document and defines no wire ' +
+              'format, so there is nothing in it to implement. It is listed because it is ' +
+              'what says what SCIM is FOR, and because the use case this service serves — ' +
+              'an identity provider pushing accounts into a service provider\'s directory — ' +
+              'is section 3.1 of it.' },
+  { id: 'rfc7643', name: 'SCIM: Core Schema (RFC 7643)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7643',
+    coverage: 'partial: the User and Group resources with their common attributes (id, ' +
+              'externalId, meta), and the enterprise User extension in part — ' +
+              'employeeNumber, department, organization, division and manager. The schema ' +
+              'definitions themselves are published at /scim/v2/Schemas with every ' +
+              'attribute\'s characteristics, and they come from the scimmy library rather ' +
+              'than being retyped here. NOT covered: the entire attribute set of the ' +
+              'enterprise extension (costCenter and manager.$ref are absent), and any ' +
+              'schema extension of this service\'s own. Every value that comes back is ' +
+              'read off an LDAP entry and none of it is verified by anything — where the ' +
+              'entry is silent, the value was INVENTED from the username by the same ' +
+              'deterministic persona a Verifiable Credential is filled from.' },
+  { id: 'rfc7644', name: 'SCIM: Protocol (RFC 7644)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc7644',
+    coverage: 'partial: create, read, list, replace, PATCH (section 3.5.2 in full, ' +
+              'value-filter paths included), delete, both shapes of .search, bulk, and ' +
+              'the three discovery endpoints — with filtering (3.4.2.2), sorting, ' +
+              'pagination, attribute projection and the section 3.12 error shape. NOT ' +
+              'covered, each on purpose and each said on /scim: NO AUTHENTICATION OF ANY ' +
+              'KIND, which the ServiceProviderConfig states with an empty ' +
+              'authenticationSchemes rather than by omission; no ETag or If-Match ' +
+              '(section 3.14), advertised as unsupported because a version built over a ' +
+              'one-second timestamp would be a concurrency control a client trusts and ' +
+              'that is wrong; no changePassword, there being no password here that is ' +
+              'checked; and /Me (section 3.11) answers 501, because it aliases the ' +
+              'authenticated subject and nothing here authenticates. active:false is ' +
+              'stored and DEACTIVATES NOBODY.' },
+
   { id: 'rfc4511', name: 'LDAP v3: the protocol (RFC 4511)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4511',
@@ -615,6 +738,22 @@ const ENDPOINTS = [
           'one it deliberately does not (referential integrity: deleting a user leaves its ' +
           'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
           'the machine-readable half of it. Add ?format=json.' },
+  { path: '/ldap/spiffe', group: 'LDAP', name: 'The SPIFFE registry, and its schema',
+    specs: ['rfc4511', 'rfc4519', 'spiffe-id'],
+    what: 'THE TWO SPIFFE CONTAINERS AS THE DIRECTORY HOLDS THEM. ' +
+          '`ou=entries,ou=spiffe` holds the registration entries — which SPIFFE ID a ' +
+          'workload gets, under which parent, matching which selectors — and ' +
+          '`ou=agents,ou=spiffe` holds what has attested. They are different KINDS of ' +
+          'thing, which is why they are two containers: an entry is CONFIGURATION that ' +
+          'decides what gets issued, and an agent is a RECORD of something that ' +
+          'happened, so nothing about an agent is editable from the console. THE ' +
+          'ENTRIES ARE THE REGISTRY rather than a copy of one: nothing caches them, so ' +
+          'an ldapmodify of spiffeX509SvidTtl changes the lifetime of the next SVID the ' +
+          'Workload API hands out. The page also publishes the SCHEMA — every object ' +
+          'class and attribute, with which are editable — because this directory is ' +
+          'schemaless and these ~30 attribute names are this service\'s own inventions: ' +
+          'no registered LDAP schema has a SPIFFE ID or a selector on it. Add ' +
+          '?format=json.' },
   { path: '/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591'],
     what: 'EVERY APPLICATION THIS SERVICE HAS BEEN ASKED ABOUT — an OAuth client, an OpenID ' +
@@ -638,6 +777,123 @@ const ENDPOINTS = [
           'who authenticates through ANY of the twelve protocol families here, through one ' +
           'hook on the funnel they all already pass. Not an LDAP operation. Add ' +
           '?format=json.' },
+
+  // --- SCIM ---
+  //
+  // The fifteenth family, and the only one whose purpose is to WRITE. Every row below
+  // provisions into the embedded LDAP directory above — the same entries, the same cap,
+  // no store of its own — so what SCIM created is reported by /ldap/directory,
+  // /admin/users and /admin/groups rather than by anything here.
+  //
+  // Unlike Kerberos, LDAP and TLS, this group has NO blind spot: SCIM is HTTP all the
+  // way down, so every one of its endpoints is a route on the plain listener and this
+  // walk can see all of them. That is why the routes are registered against the shared
+  // app one by one rather than behind a mounted express Router, which this walk skips.
+  { path: '/scim', group: 'SCIM', name: 'What the SCIM surface is',
+    specs: ['rfc7642', 'rfc7643', 'rfc7644', 'rfc4511', 'rfc4519'],
+    what: 'NOT a SCIM endpoint — a real server publishes none of this. What the ' +
+          'provisioning surface is, what it writes into (the embedded directory, entry ' +
+          'for entry), what a SCIM id is here (the entry\'s DN, and what that costs on a ' +
+          'rename), the four things it deliberately does not do, and the five things you ' +
+          'can do to make it fail. The first of those four is worth reading before ' +
+          'pointing anything at it: THESE ENDPOINTS CREATE AND DELETE ACCOUNTS AND ' +
+          'NOTHING ON THEM CHECKS A CREDENTIAL, which the ServiceProviderConfig states ' +
+          'with an EMPTY authenticationSchemes rather than by leaving the member out. ' +
+          'The second is that active:false DEACTIVATES NOBODY — it is stored as ' +
+          'scimActive and read by nothing here. Add ?format=json.' },
+  { path: '/scim/v2/ServiceProviderConfig', group: 'SCIM',
+    name: 'What this SCIM server supports',
+    specs: ['rfc7643', 'rfc7644'],
+    what: 'RFC 7643 section 5. Filtering, sorting, PATCH and bulk are supported; ETag and ' +
+          'changePassword are NOT, and are advertised as unsupported rather than ' +
+          'half-implemented — a version built over a one-second timestamp would be a ' +
+          'concurrency control a client trusts and that is wrong, and no password here is ' +
+          'checked so there is none to change. THE DOCUMENT IS THE SERVER: the same object ' +
+          'the endpoints read their limits from builds it, so it cannot advertise a page ' +
+          'size or a bulk limit that is not the one enforced.' },
+  { path: '/scim/v2/ResourceTypes', group: 'SCIM', name: 'The resource types',
+    specs: ['rfc7643'],
+    what: 'User and Group, with the schema and the endpoint of each (RFC 7643 section 6).' },
+  { path: '/scim/v2/ResourceTypes/:id', group: 'SCIM', name: 'One resource type',
+    specs: ['rfc7643'],
+    what: 'One of the two above, by name.' },
+  { path: '/scim/v2/Schemas', group: 'SCIM', name: 'The schemas',
+    specs: ['rfc7643'],
+    what: 'The core User and Group schemas with every attribute\'s characteristics — ' +
+          'required, multi-valued, mutability, returned, uniqueness, canonical values. ' +
+          'This is the half of SCIM that is genuinely hard to hand-roll and is why this ' +
+          'service took a dependency rather than writing it.' },
+  { path: '/scim/v2/Schemas/:id', group: 'SCIM', name: 'One schema',
+    specs: ['rfc7643'],
+    what: 'One schema by its URN.' },
+  { path: '/scim/v2/Users', group: 'SCIM', name: 'Users: list and create',
+    specs: ['rfc7644', 'rfc7643', 'rfc4511', 'rfc4519'],
+    effect: 'POST creates an entry under ou=users in the embedded directory',
+    what: 'GET is the list, with ?filter (section 3.4.2.2), ?sortBy, ?sortOrder, ' +
+          '?startIndex, ?count, ?attributes and ?excludedAttributes. POST creates — and ' +
+          'what it creates is an ORDINARY DIRECTORY ENTRY at uid=<userName>,ou=users, the ' +
+          'same DN a person who signed in would have got, so provisioning somebody and ' +
+          'authenticating as them produce one entry rather than two. userName is unique ' +
+          '(409 uniqueness); the userName "invalid" is refused on purpose (400 ' +
+          'invalidValue), the same reserved value every other protocol here refuses.' },
+  { path: '/scim/v2/Users/.search', group: 'SCIM', name: 'Users: search by POST',
+    specs: ['rfc7644'],
+    what: 'Section 3.4.3 — the same query as a POST body, for a filter too long to put in ' +
+          'a URL. The body must carry the SearchRequest schema URN and is refused with ' +
+          '400 invalidSyntax if it does not: a POST to .search carrying a resource is a ' +
+          'client that meant to create something, and answering it as an empty search ' +
+          'would be the most confusing possible reply.' },
+  { path: '/scim/v2/Users/:id', group: 'SCIM', name: 'One user: read, replace, modify, delete',
+    specs: ['rfc7644', 'rfc7643', 'rfc4511'],
+    effect: 'PUT and PATCH rewrite an entry under ou=users; DELETE removes it',
+    what: 'THE id IS THE ENTRY\'S DN, percent-encoded — RFC 7643 section 3.1 wants an ' +
+          'opaque server-assigned identifier and the DN already is one. PUT replaces ONLY ' +
+          'THE MAPPED ATTRIBUTES and leaves the rest of the entry alone: read strictly, a ' +
+          'SCIM PUT would delete schacDateOfBirth, authnMethod and every x509 attribute ' +
+          'the moment a client updated a phone number, and those are facts SCIM never knew ' +
+          'about and cannot restore. PATCH is section 3.5.2 in full, value-filter paths ' +
+          'included. DELETE leaves the DN behind in every group that lists it, because ' +
+          'this directory does no referential integrity on purpose.' },
+  { path: '/scim/v2/Groups', group: 'SCIM', name: 'Groups: list and create',
+    specs: ['rfc7644', 'rfc7643', 'rfc4519'],
+    effect: 'POST creates an entry under ou=groups',
+    what: 'The list is every group by BOTH of this directory\'s rules — under ou=groups, ' +
+          'or carrying a group objectClass wherever it sits — because SCIM here is a view ' +
+          'of that directory and a third opinion about what a group is would be the one ' +
+          'that eventually disagrees. A created group gets placement AND a groupOfNames ' +
+          'objectClass, so it stays a group if a client moves it.' },
+  { path: '/scim/v2/Groups/.search', group: 'SCIM', name: 'Groups: search by POST',
+    specs: ['rfc7644'],
+    what: 'Section 3.4.3, for groups.' },
+  { path: '/scim/v2/Groups/:id', group: 'SCIM', name: 'One group: read, replace, modify, delete',
+    specs: ['rfc7644', 'rfc7643', 'rfc4519'],
+    effect: 'PUT and PATCH rewrite a group entry; DELETE removes it',
+    what: 'READ resolves member, uniqueMember and memberUid alike and returns each ' +
+          'member as the DN — treating the three differently is how every posixGroup ' +
+          'membership silently disappears. WRITE puts new values in member, since a SCIM ' +
+          'member id is a DN, and clears the other two so that a client which removed ' +
+          'everybody does not find the group still populated. A member naming nothing is ' +
+          'ACCEPTED and logged: a dangling member is a state worth being able to produce.' },
+  { path: '/scim/v2/.search', group: 'SCIM', name: 'Search across both resource types',
+    specs: ['rfc7644'],
+    what: 'Section 3.4.3 at the root, which is the one thing the per-type .search cannot ' +
+          'do: one filter answered by Users AND Groups, merged into one ListResponse.' },
+  { path: '/scim/v2/Bulk', group: 'SCIM', name: 'Bulk',
+    specs: ['rfc7644'],
+    effect: 'applies up to the advertised number of creates, updates and deletes in one request',
+    what: 'Section 3.7. Each operation carries its own status, so a bulk in which one ' +
+          'operation failed is still a 200 — the failure is inside it. The payload limit ' +
+          'is checked against the number the ServiceProviderConfig ADVERTISES rather than ' +
+          'against the express body parser\'s service-wide one, because a client reads a ' +
+          'published limit as a promise.' },
+  { path: '/scim/v2/Me', group: 'SCIM', name: '/Me, which is a refusal',
+    specs: ['rfc7644'],
+    what: 'Section 3.11 defines /Me as an alias for the subject the request authenticated ' +
+          'as, and NOTHING HERE AUTHENTICATES — so there is never a subject to alias. ' +
+          'Answers 501 saying exactly that, on every method, which is a REACHABLE ' +
+          'NEGATIVE of the same kind as the reserved password "invalid": better than a ' +
+          '404, which would say the route is not there, and far better than a guess at ' +
+          'who is asking.' },
 
   // --- TLS ---
   //
@@ -730,6 +986,64 @@ const ENDPOINTS = [
   // because two of them CHANGE WHAT THE PROTOCOL ENDPOINTS DO — which is the single
   // most surprising thing about this service and the last thing that should be
   // discoverable only by reading server.js.
+  // --- SPIFFE ---
+  //
+  // The same blind spot the Kerberos, LDAP and TLS groups have, and it is wider
+  // here than anywhere else: TWO of the three server-side SPIFFE surfaces
+  // register no Express route at all. The Workload API and the SPIRE Server API
+  // are gRPC on their own sockets — a Unix socket and a TCP port each, four in
+  // all — so the walk that builds this page cannot see them, and everything
+  // this document says about them is said in the text of the row below. GET
+  // /spiffe reports whether each one actually bound, which is the only place
+  // that can.
+  { path: '/spiffe', group: 'SPIFFE', name: 'What the SPIFFE surfaces are',
+    specs: ['spiffe-id', 'spiffe-bundle', 'spiffe-x509-svid', 'spiffe-jwt-svid',
+            'spiffe-workload-api', 'spire-server-api'],
+    what: 'THE ONE PAGE THAT DESCRIBES ALL THREE SERVER-SIDE SPIFFE SURFACES, and the ' +
+          'only one that can report the two invisible ones. This service is the issuing ' +
+          'authority for one trust domain (spiffe.trustDomain, `example.org` by ' +
+          'default): the BUNDLE ENDPOINT below is plain HTTPS; the SPIFFE WORKLOAD API ' +
+          '(the gRPC service SpiffeWorkloadAPI, five of seven methods) is on a UNIX ' +
+          'SOCKET at spiffe.workloadSocket — `/tmp/spire-agent/public/api.sock`, which ' +
+          'is SPIRE\'s own path and what SPIFFE_ENDPOINT_SOCKET means to every real ' +
+          'client — and on TCP spiffe.workloadPort (8092); the SPIRE SERVER API (Entry, ' +
+          'Agent, Bundle, SVID, TrustDomain and Debug, 35 of 42 methods) is on TCP ' +
+          'spiffe.serverPort (8181, because SPIRE\'s own 8081 is this service\'s HTTP ' +
+          'port) and optionally on a socket of its own. RAW SOCKETS, all four: this page ' +
+          'is built by walking the Express router and cannot see one, so their state is ' +
+          'reported by GET /spiffe and on /admin/spiffe rather than here. MOST OF THAT ' +
+          'PAGE IS WHAT IS NOT CHECKED — no workload attestation (every caller is handed ' +
+          'every identity in the trust domain), no node attestation, no caller ' +
+          'authorization on the SPIRE Server API, and no revocation anywhere — because ' +
+          'what comes out of these surfaces is a credential another service will ' +
+          'believe. Add ?format=json.' },
+  { path: '/spiffe/bundle', group: 'SPIFFE', name: 'The trust bundle',
+    specs: ['spiffe-bundle'],
+    what: 'THE FEDERATION SURFACE, and the whole of it: one GET returning a JWK Set with ' +
+          'two extra members — `spiffe_sequence`, which changes when the bundle changes ' +
+          'and never otherwise, and `spiffe_refresh_hint`. Every key carries `use` of ' +
+          '`x509-svid` (with the certificate in `x5c`, base64 DER) or `jwt-svid`; a ' +
+          'consumer MUST IGNORE a key whose `use` it does not recognise, which is why a ' +
+          'bundle missing that member verifies nothing and reports no error. The path is ' +
+          'spiffe.bundlePath and is restart-only, because the require order is the route ' +
+          'order. Served no-store: the authorities are regenerated on every start, so a ' +
+          'cached copy outlives the keys it describes. NOTE THE SCHEME — this is http ' +
+          'unless global.https is set, and a real federation partner will refuse a ' +
+          'plain-http bundle endpoint, correctly: the bundle is the root of trust for a ' +
+          'whole trust domain.' },
+  { path: '/spiffe/federated/:trustDomain', group: 'SPIFFE',
+    name: 'A federated trust domain\'s bundle, as held',
+    specs: ['spiffe-bundle'],
+    what: 'What this service actually holds for a foreign trust domain, exactly as it ' +
+          'was given. Published so that "the bundle I pushed" and "the bundle you are ' +
+          'serving to workloads" can be compared, which is most of debugging a ' +
+          'federation. A FOREIGN BUNDLE IS ALWAYS GIVEN AND NEVER FETCHED: the ' +
+          'relationship\'s bundle endpoint URL is recorded, RefreshBundle on the SPIRE ' +
+          'Server API refuses to follow it, and the reason is the one this service gives ' +
+          'for wreqptr and jwks_uri — fetching a URL somebody registered, to obtain a ' +
+          'key that will verify credentials, is a server-side request forgery with a ' +
+          'citation attached. Push one in with POST /admin-api/spiffe/federation-set or ' +
+          'BatchSetFederatedBundle.' },
   { path: '/admin', group: 'Admin', name: 'Admin console',
     specs: [],
     what: 'NON-SPEC. What the console is, what it can change about this service, and what it ' +
@@ -755,7 +1069,11 @@ const ENDPOINTS = [
           'issued to them. One row is one local name across all protocols — alice, ' +
           'urn:sts-mock:user:alice and alice@REALM are one identity — and subjects that never ' +
           'authenticated at all (an exchanged foreign token, OnBehalfOf, S4U) are listed and ' +
-          'marked as such. Add ?format=json.' },
+          'marked as such. Add ?format=json. IT HAS ONE CONTROL, and it writes somewhere else: ' +
+          'POST creates a person in the embedded LDAP directory, refusing a username that is ' +
+          'already there. The new entry does not appear in this page\'s own table until they ' +
+          'authenticate — that list is who this service has SEEN, and the entry is what the ' +
+          'directory HOLDS.' },
   { path: '/admin/applications', group: 'Admin', name: 'Applications',
     // rfc7591 because the client registrations this page shows ARE the entries under
     // ou=applications, and rfc4519 because applicationProcess — the one registered
@@ -782,6 +1100,39 @@ const ENDPOINTS = [
           'same functions a protocol path and an LDAP modify call, so they are not a third ' +
           'store. Two attributes hold credentials in the clear, marked as such, for the reason ' +
           '/krb5/principals prints the Kerberos passwords. Add ?format=json.' },
+  { path: '/admin/spiffe', group: 'Admin', name: 'SPIFFE',
+    specs: ['spiffe-id', 'spiffe-bundle', 'spiffe-x509-svid', 'spiffe-jwt-svid'],
+    what: 'THE TRUST DOMAIN this service is the issuing authority for: its X.509 and ' +
+          'JWT authorities (the active one and the retired ones still published in the ' +
+          'bundle), where the bundle is and what its sequence is, every federated trust ' +
+          'domain, and WHETHER EACH OF THE FOUR gRPC LISTENERS ACTUALLY BOUND — which ' +
+          'nothing else can report, because this page cannot see a socket any more than ' +
+          'this metadata document can. Its two forms rotate an authority and set or ' +
+          'remove a federated bundle; a foreign bundle is PUSHED IN and never fetched, ' +
+          'which is the refusal this service also gives wreqptr and jwks_uri. It says on ' +
+          'every screen that nothing here is attested. Add ?format=json.' },
+  { path: '/admin/spiffe/entries', group: 'Admin', name: 'SPIFFE registration entries',
+    specs: ['spiffe-id', 'spire-server-api'],
+    what: 'Every registration entry, filtered and paged, with a drill-down per entry ' +
+          '(?entry=) that shows its whole directory entry and the forms that change and ' +
+          'delete it. WHAT MAY BE CHANGED IS DECLARED AND NOT DERIVED: what the entry ' +
+          'may DO is editable; the revision number and the SVID counter are what ' +
+          'HAPPENED and are refused, because a form that could rewrite them would make ' +
+          'the page lie about this service\'s own behaviour. ldapmodify still reaches ' +
+          'everything. THE SELECTORS RESTRICT NOTHING — they are recorded, reported and ' +
+          'used by GetAuthorizedEntries, and the Workload API hands every caller every ' +
+          'identity. Add ?format=json.' },
+  { path: '/admin/spiffe/agents', group: 'Admin', name: 'SPIFFE agents',
+    specs: ['spiffe-id', 'spire-server-api'],
+    what: 'Every agent that has called AttestAgent, filtered and paged, with a ' +
+          'drill-down per agent (?agent=). These entries are a RECORD rather than ' +
+          'configuration, so the only writes are ban, unban and delete. NODE ' +
+          'ATTESTATION IS NEVER VERIFIED: whatever attestor an agent names and whatever ' +
+          'payload it sends are written down as claimed, which is why every agent ' +
+          'carries a selector valued `unverified:true`. The BAN is enforced — one of ' +
+          'the few refusals in this service, and what keeps the button from being a lie ' +
+          '— while DELETE is forgetting rather than revoking: the agent reappears the ' +
+          'moment it attests again. Add ?format=json.' },
   { path: '/admin/authorization-servers', group: 'Admin', name: 'Authorization servers',
     specs: ['rfc8414', 'oidc-discovery', 'rfc9700'],
     what: 'NON-SPEC page over the two discovery documents. ONE PROCESS, SEVERAL AUTHORIZATION ' +
@@ -815,6 +1166,22 @@ const ENDPOINTS = [
           'back (nothing here maintains memberOf). A GROUP HERE GRANTS NOTHING: no token, ' +
           'assertion, ticket or PAC this service issues carries a group from this directory and no ' +
           'endpoint reads one. Add ?format=json.' },
+  { path: '/admin/scim', group: 'Admin', name: 'SCIM',
+    // rfc7643 and rfc7644 because the page reports that surface; rfc4511 and rfc4519
+    // because what it reports having done is entries in the embedded directory, and the
+    // mapping table names their attribute types.
+    specs: ['rfc7643', 'rfc7644', 'rfc4511', 'rfc4519'],
+    what: 'NON-SPEC page over the SCIM 2.0 endpoints. Which operation was performed how ' +
+          'many times, on which resource type, and what was refused with which scimType — ' +
+          'every operation and resource type listed INCLUDING the ones at zero, because ' +
+          '"does this server do PATCH" is otherwise answered by omission. Then the surface ' +
+          'itself, read from the module that implements it rather than described a second ' +
+          'time here: the endpoints, the four things SCIM here deliberately does not do, ' +
+          'the five things you can do to make it fail, and which LDAP attribute each SCIM ' +
+          'member is. IT HAS NO CONTROLS, which is the console parity rule holding rather ' +
+          'than a gap: everything about SCIM that can be changed is a configuration row. ' +
+          'The bulk count deliberately does not tally with the rest — one Bulk of five ' +
+          'creates is one bulk AND five creates. Add ?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -988,6 +1355,21 @@ const ENDPOINTS = [
           'tokens issued on them. A name never seen answers 200 with ' +
           'known:false rather than 404 — it is an answer about the identity, not ' +
           'about the route. Mirrors GET /admin/users.' },
+  { path: '/admin-api/users/:action', group: 'Management API',
+    name: 'User actions',
+    specs: ['rfc4511', 'rfc4519'],
+    effect: 'creates an entry under ou=users in the embedded LDAP directory',
+    what: 'NON-SPEC path over the embedded directory. One URL behind the pattern: create, ' +
+          'which puts a person there BEFORE they authenticate — otherwise an entry appears ' +
+          'only when somebody presents a credential somewhere in this service. The entry ' +
+          'carries the invented person behind that name, so an issued credential and an ' +
+          'ldapsearch agree from the start. ONE ENTRY PER PERSON: a username already here is ' +
+          'refused, whatever protocol brought them and whichever attribute their entry is ' +
+          'named by, and an ldapadd under ou=users gets the same refusal as ' +
+          'LDAP_ENTRY_ALREADY_EXISTS (68) — all three doors call one function. NO PASSWORD IS ' +
+          'SET, because none is ever checked. Creating the entry does not put the name in GET ' +
+          '/admin-api/users: that lists identities this service has SEEN authenticate, and ' +
+          'this writes what the directory HOLDS. Mirrors POST /admin/users.' },
   { path: '/admin-api/groups', group: 'Management API', name: 'Directory groups',
     specs: ['rfc4511', 'rfc4514', 'rfc4519'],
     what: 'NON-SPEC. Every group in the embedded LDAP directory; ?group=<dn> is ' +
@@ -1069,6 +1451,54 @@ const ENDPOINTS = [
           '`remove` and `reset` are not the same operation: reset undoes an override, remove ' +
           'publishes an ABSENCE, and a client that cannot find a member learns nothing rather ' +
           'than learning the capability is missing. Mirrors POST /admin/authorization-servers.' },
+  { path: '/admin-api/scim', group: 'Management API', name: 'SCIM',
+    specs: ['rfc7643', 'rfc7644', 'openapi'],
+    what: 'Everything /admin/scim shows, over JSON: the counters, the endpoint list, what ' +
+          'SCIM here will not do, the reachable negatives and the whole attribute ' +
+          'mapping. READ-ONLY, and the second of the two operations here with no POST ' +
+          'beside it — the other is the audit log. In both cases that is the parity rule ' +
+          'holding: the console page carries no control either, because everything about ' +
+          'SCIM that can be changed is a configuration row and POST /admin-api/config/set ' +
+          'is already the operation for it.' },
+  { path: '/admin-api/spiffe', group: 'Management API', name: 'The SPIFFE trust domain',
+    specs: ['openapi', 'spiffe-bundle'],
+    what: 'GET /admin/spiffe over JSON: the authorities, the bundle and its sequence, ' +
+          'the federated trust domains, and which of the four gRPC listeners bound. No ' +
+          'private key is in the reply — the authority CERTIFICATE is published, the way ' +
+          'GET /tls/server-certificate publishes that one.' },
+  { path: '/admin-api/spiffe/:action', group: 'Management API',
+    name: 'Rotate an authority, or set a federated bundle',
+    specs: ['openapi', 'spiffe-bundle'],
+    what: 'rotate, federation-set and federation-remove — the same three the console\'s ' +
+          'forms post, through the same action function, with the action taken from the ' +
+          'URL instead of a hidden input. Rotating PREPENDS an authority and keeps the ' +
+          'old one published, so SVIDs already issued go on verifying; it is also the ' +
+          'only way to add one, since AppendBundle on the SPIRE Server API is refused.' },
+  { path: '/admin-api/spiffe/entries', group: 'Management API',
+    name: 'The registration entries',
+    specs: ['openapi', 'spiffe-id'],
+    what: 'GET /admin/spiffe/entries over JSON, filtered and paged, with ?entry= for ' +
+          'one of them and its directory entry. The entries ARE the registry: they live ' +
+          'under ou=entries,ou=spiffe and nothing caches them, so an ldapmodify is ' +
+          'visible here on the next call.' },
+  { path: '/admin-api/spiffe/entries/:action', group: 'Management API',
+    name: 'Create, change or delete a registration entry',
+    specs: ['openapi', 'spiffe-id'],
+    what: 'create, update and delete, calling the same functions the console\'s forms ' +
+          'and the SPIRE Server API\'s BatchCreateEntry do — three doors onto one ' +
+          'store. Three refusals and no others: a SPIFFE ID that is not one, one in ' +
+          'another trust domain, and one under the reserved /spire path.' },
+  { path: '/admin-api/spiffe/agents', group: 'Management API', name: 'The attested agents',
+    specs: ['openapi', 'spire-server-api'],
+    what: 'GET /admin/spiffe/agents over JSON, filtered and paged, with ?agent= for one ' +
+          'of them. A RECORD rather than configuration — everything on these entries was ' +
+          'written by this service when an agent attested, and none of it was verified.' },
+  { path: '/admin-api/spiffe/agents/:action', group: 'Management API',
+    name: 'Ban, unban or forget an agent',
+    specs: ['openapi', 'spire-server-api'],
+    what: 'ban, unban and delete. The ban is ENFORCED at AttestAgent, which is what ' +
+          'keeps it from being a lie; delete is forgetting rather than revoking, since ' +
+          'the agent reappears the moment it attests again.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +

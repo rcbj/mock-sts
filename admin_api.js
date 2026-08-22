@@ -342,6 +342,67 @@ const ROUTES = [
       log.debug("Leaving the management API users endpoint.");
     } },
 
+  { method: 'POST', route: BASE + '/users/:action', tag: 'Users',
+    mirrors: 'POST /admin/users',
+    handler: function (req, res) {
+      log.debug("Entering the management API users action endpoint.");
+      const body = parseBody(req);
+      const result = admin.usersAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API users action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createUser',
+        summary: 'Put a person in the directory before they authenticate',
+        description: 'An entry under `ou=users` usually appears because ' +
+                     'somebody AUTHENTICATED — at either sign-in screen, on a ' +
+                     'password grant, with a `UsernameToken`, in a Kerberos ' +
+                     'AS-REQ. This is how to get one in ahead of that, which ' +
+                     'is what a client testing claims from the directory ' +
+                     'needs: the entry carries the invented person behind that ' +
+                     'name, so a credential issued for them and an ' +
+                     '`ldapsearch` for the entry say the same thing from the ' +
+                     'start.\n\n**One entry per person, and this is one of ' +
+                     'three doors onto that rule.** A username already here is ' +
+                     'refused with the DN that holds it — whatever protocol ' +
+                     'brought them, and whichever attribute their entry is ' +
+                     'named by, since a person whose entry was created by a ' +
+                     'client certificate is at `cn=<name>,ou=users` rather ' +
+                     'than `uid=<name>,ou=users`. An `ldapadd` under ' +
+                     '`ou=users` gets the same refusal as ' +
+                     'LDAP_ENTRY_ALREADY_EXISTS (68), because all three call ' +
+                     'one function.\n\n**No password is set** — none is ever ' +
+                     'checked here, in this protocol or any other. Creating ' +
+                     'the entry does not put the name in `GET ' +
+                     '/admin-api/users`: that lists identities this service ' +
+                     'has SEEN authenticate, and this writes what the ' +
+                     'directory HOLDS.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            username: { type: 'string',
+                        description: 'The name they will authenticate under — ' +
+                                     'the same string that appears in a ' +
+                                     'token\'s `sub` and on /admin/users. Not ' +
+                                     'a DN and not a `did:`, and it may not ' +
+                                     'carry a character RFC 4514 reserves in ' +
+                                     'a DN: those name entries that get here ' +
+                                     'by being presented rather than by being ' +
+                                     'created.' },
+            note: { type: 'string',
+                    description: 'Optional. What the entry\'s `description` ' +
+                                 'says about why it exists; the default says ' +
+                                 'it was created by hand rather than by ' +
+                                 'authenticating.' }
+          },
+          required: ['username'],
+          examples: [{ username: 'rcbj' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The entry as created, in `entry`, with its `dn`.' }
+    ] },
+
   { method: 'GET', path: BASE + '/groups', tag: 'Groups',
     operationId: 'getGroups',
     summary: 'Every group in the embedded LDAP directory, or one in full',
@@ -1641,6 +1702,36 @@ const ROUTES = [
   // form on it, because a clear button on an unprotected console would make an
   // audit log unable to answer the one question it exists for. There is nothing
   // to change, so there is nothing to document as changeable.
+  { method: 'GET', path: BASE + '/scim', tag: 'SCIM',
+    operationId: 'getScim',
+    summary: 'The SCIM 2.0 provisioning surface, and what it has been asked to do',
+    description: 'Counters and capabilities in one reply. The counters say ' +
+                 'which SCIM operation was performed how many times, on ' +
+                 'which resource type, and what was refused with which ' +
+                 '`scimType`; every operation and resource type is listed ' +
+                 'INCLUDING the ones at zero, because "does this server do ' +
+                 'PATCH" is otherwise answered by omission. The capabilities ' +
+                 'say what the endpoints are, what SCIM here deliberately ' +
+                 'does not do, and which LDAP attribute each SCIM member ' +
+                 'is.\n\nTHERE IS NO POST BESIDE THIS ONE and that is not a ' +
+                 'gap: everything about SCIM that can be changed is a ' +
+                 'configuration row — `scim.enabled` and the three limits — ' +
+                 'so POST /admin-api/config/set is already the operation for ' +
+                 'it. The console page has no form on it either, which is ' +
+                 'the parity rule holding rather than being broken.\n\nWHAT ' +
+                 'SCIM WROTE is not here: it went into the embedded ' +
+                 'directory, so a person provisioned over SCIM is on ' +
+                 '/admin-api/users and their groups are on /admin-api/groups. ' +
+                 'There is no second store to report.',
+    mirrors: 'GET /admin/scim',
+    responseDescription: 'The counters and the capabilities.',
+    responseSchema: { $ref: '#/components/schemas/Scim' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SCIM endpoint.");
+      sendJson(res, 200, admin.scimJson(req));
+      log.debug("Leaving the management API SCIM endpoint.");
+    } },
+
   { method: 'GET', path: BASE + '/audit', tag: 'Audit log',
     operationId: 'getAudit',
     summary: 'What happened here, in order, filtered and paged',
@@ -1707,7 +1798,459 @@ const ROUTES = [
       log.debug("Entering the management API audit endpoint.");
       sendJson(res, 200, admin.auditView(req.query).json);
       log.debug("Leaving the management API audit endpoint.");
-    } }
+    } },
+
+  // -------------------------------------------------------------------------
+  // SPIFFE. Three resources, mirroring the three console pages one for one, and
+  // each POST calls the SAME action function the console's form posts to — with
+  // `action` taken from the URL instead of from a hidden input. Rule 7.
+  //
+  // There is a fourth SPIFFE surface that is deliberately NOT here: the SPIRE
+  // Server API itself. It is gRPC, it already does all of this, and wrapping it
+  // in JSON would be a second implementation of forty-two methods that could
+  // then disagree with the first. What this API covers is the CONSOLE — the
+  // trust domain, its authorities, its federated bundles, the registration
+  // entries and the agents — which is the parity rule's actual subject.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/spiffe', tag: 'SPIFFE',
+    operationId: 'getSpiffe',
+    summary: 'The trust domain: its authorities, its bundle, its listeners',
+    description: 'What this service is as a SPIFFE issuing authority. The ' +
+                 'X.509 and JWT authorities (the ACTIVE one first, with the ' +
+                 'retired ones that are still published behind it), the bundle ' +
+                 'path and its sequence, every federated trust domain, and ' +
+                 'whether each of the four gRPC listeners actually bound — ' +
+                 'which nothing else can tell you, because neither this API ' +
+                 'nor GET /sts-metadata can see a socket.\n\n**Nothing here ' +
+                 'is attested.** Any caller that reaches the Workload API ' +
+                 'socket is handed every identity in the trust domain, and any ' +
+                 'caller that reaches the SPIRE Server API port can create a ' +
+                 'registration entry granting one. GET /spiffe carries the ' +
+                 'full list of what is and is not checked.\n\nNo private key ' +
+                 'is in this reply. The authority CERTIFICATE is published, as ' +
+                 'GET /tls/server-certificate publishes that one.',
+    mirrors: 'GET /admin/spiffe',
+    responseDescription: 'The trust domain, its authorities, its federated ' +
+                         'bundles and its listeners.',
+    responseSchema: { type: 'object',
+                      description: 'The SPIFFE trust domain as this service ' +
+                                   'holds it.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE endpoint.");
+      sendJson(res, 200, admin.spiffeView(req).json);
+      log.debug("Leaving the management API SPIFFE endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/spiffe/:action', tag: 'SPIFFE',
+    mirrors: 'POST /admin/spiffe',
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE action endpoint.");
+      const body = parseBody(req);
+      // The one action handler in this API that is ASYNCHRONOUS: rotating an
+      // authority generates a key pair, and key generation is async. Every
+      // other handler here is synchronous, so the await is local rather than a
+      // change to the shape of all of them.
+      admin.spiffeAction(withAction(req, body)).then(function (result) {
+        sendJson(res, result.ok ? 200 : 400, result);
+        log.debug("Leaving the management API SPIFFE action endpoint.");
+      }).catch(function (err) {
+        log.error('The SPIFFE management API action threw: ' + err.message);
+        sendJson(res, 500, { ok: false, errors: [err.message] });
+        log.debug("Leaving the management API SPIFFE action endpoint. It threw.");
+      });
+    },
+    actions: [
+      { action: 'rotate', operationId: 'rotateSpiffeAuthority',
+        summary: 'Rotate the X.509 authority, the JWT authority, or both',
+        description: 'A new authority is PREPENDED — everything is signed with ' +
+                     'it from that moment — and the old one stays in the ' +
+                     'published bundle, so SVIDs already in the field go on ' +
+                     'verifying. That is what a bundle is FOR, and dropping ' +
+                     'the old one is the difference between a rotation and an ' +
+                     'outage.\n\nThe bundle `spiffe_sequence` changes, which ' +
+                     'is how a consumer that polls the bundle endpoint knows ' +
+                     'to refetch. At most four authorities are retained; past ' +
+                     'that the oldest is dropped and anything it signed stops ' +
+                     'verifying at that moment.\n\nThis is also the ONLY way ' +
+                     'to add an authority to this trust domain. The SPIRE ' +
+                     'Server API\'s AppendBundle and PublishJWTAuthority are ' +
+                     'refused, because they would publish a signing key ' +
+                     'nothing here holds.',
+        requestBodyRequired: false,
+        requestBody: {
+          type: 'object',
+          properties: {
+            which: { type: 'string', enum: ['x509', 'jwt', 'both'],
+                     description: 'Which authority. Defaults to x509.' }
+          },
+          examples: [{ which: 'both' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was rotated, and the new bundle sequence.' },
+
+      { action: 'federation-set', operationId: 'setSpiffeFederatedBundle',
+        summary: 'Add or replace a foreign trust domain\'s bundle',
+        description: '**The bundle is PUSHED here and never PULLED by this ' +
+                     'service.** The SPIFFE federation specification puts a ' +
+                     'bundle endpoint URL in the relationship and a real ' +
+                     'implementation polls it; this one records the URL and ' +
+                     'refuses to follow it — the SPIRE Server API\'s ' +
+                     'RefreshBundle says so in terms — because fetching a URL ' +
+                     'somebody registered, in order to obtain a key that will ' +
+                     'then verify credentials, is a server-side request ' +
+                     'forgery with a citation attached. The same refusal this ' +
+                     'service gives WS-Federation\'s `wreqptr` and a ' +
+                     'client\'s `jwks_uri`.\n\nThe document is CHECKED, ' +
+                     'which is unusual for this service: every JWK needs a ' +
+                     '`use` of `x509-svid`, `jwt-svid` or `wit-svid`, because ' +
+                     'a consumer MUST IGNORE one without it — so a bundle of ' +
+                     'keys missing that member is stored happily and then ' +
+                     'verifies nothing, with no error anywhere pointing back ' +
+                     'here.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            trustDomain: { type: 'string',
+                           description: 'The trust domain NAME — ' +
+                                        '`other.example`, not ' +
+                                        '`spiffe://other.example`. This ' +
+                                        'service\'s own is refused: a trust ' +
+                                        'domain does not federate with ' +
+                                        'itself, and accepting it would give ' +
+                                        'it two bundles that could disagree.' },
+            document: { type: 'object',
+                        description: 'The bundle, as a JWK Set with ' +
+                                     '`spiffe_sequence` and ' +
+                                     '`spiffe_refresh_hint`. A JSON string is ' +
+                                     'accepted too, which is what the ' +
+                                     'console\'s textarea sends.' },
+            bundleEndpointUrl: { type: 'string',
+                                 description: 'Recorded and never fetched. It ' +
+                                              'is reported back so an operator ' +
+                                              'can see what the relationship ' +
+                                              'says.' },
+            bundleEndpointProfile: { type: 'string',
+                                     enum: ['https_web', 'https_spiffe'],
+                                     description: 'Which profile the partner ' +
+                                                  'expects. Recorded.' },
+            endpointSpiffeId: { type: 'string',
+                                description: 'For `https_spiffe`, the SPIFFE ' +
+                                             'ID the partner\'s endpoint ' +
+                                             'presents. Recorded.' }
+          },
+          required: ['trustDomain', 'document'],
+          examples: [{ trustDomain: 'other.example',
+                       bundleEndpointUrl: 'https://other.example/bundle',
+                       bundleEndpointProfile: 'https_web',
+                       document: { keys: [], spiffe_sequence: 1,
+                                   spiffe_refresh_hint: 300 } }],
+          additionalProperties: false
+        },
+        responseDescription: 'Whether it was added or replaced.' },
+
+      { action: 'federation-remove', operationId: 'removeSpiffeFederatedBundle',
+        summary: 'Forget a foreign trust domain\'s bundle',
+        description: 'Any registration entry that federates with it keeps the ' +
+                     'name and simply contributes no bundle to its workloads, ' +
+                     'which is the same state as a relationship configured ' +
+                     'before its bundle has arrived. The entries are left ' +
+                     'alone deliberately; the SPIRE Server API\'s ' +
+                     'BatchDeleteFederatedBundle is where the three modes ' +
+                     'RESTRICT, DELETE and DISSOCIATE live.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            trustDomain: { type: 'string', description: 'The trust domain name.' }
+          },
+          required: ['trustDomain'],
+          examples: [{ trustDomain: 'other.example' }],
+          additionalProperties: false
+        },
+        responseDescription: 'That it is gone.' }
+    ] },
+
+  { method: 'GET', path: BASE + '/spiffe/entries', tag: 'SPIFFE',
+    operationId: 'getSpiffeEntries',
+    summary: 'The registration entries, filtered and paged',
+    description: 'A registration entry says which SPIFFE ID a workload gets, ' +
+                 'under which parent, matching which selectors. It is the most ' +
+                 'important object in a SPIFFE deployment: the Workload API ' +
+                 'answers out of it.\n\n**The entries ARE the registry.** ' +
+                 'They live under `ou=entries,ou=spiffe` in the embedded LDAP ' +
+                 'directory and nothing caches them, so an `ldapmodify` is ' +
+                 'visible here on the next call and changes what the next SVID ' +
+                 'looks like.\n\n**The selectors restrict nothing here.** ' +
+                 'They are recorded, reported, and used by the SPIRE Server ' +
+                 'API\'s GetAuthorizedEntries — and the Workload API hands ' +
+                 'every caller every identity, because nothing in this service ' +
+                 'attests a workload.',
+    mirrors: 'GET /admin/spiffe/entries',
+    parameters: [
+      { name: 'entry', in: 'query', required: false, schema: { type: 'string' },
+        description: 'One entry, by its id — the 32 hex characters this ' +
+                     'registry minted, which is what the SPIRE Server API ' +
+                     'calls `id`. The reply then carries that entry with every ' +
+                     'attribute of its directory entry.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the SPIFFE ID, the parent, the entry id, ' +
+                     'the hint or any selector, case-insensitive.' },
+      { name: 'origin', in: 'query', required: false,
+        schema: { type: 'string',
+                  enum: ['seed', 'console', 'api', 'grpc', 'auto', 'ldap'] },
+        description: 'How the entry got here. `auto` is one this service ' +
+                     'INVENTED for a workload that matched nothing, which is ' +
+                     'the setting `spiffe.autoCreateEntries` — telling those ' +
+                     'from entries somebody meant is the whole reason this ' +
+                     'field exists.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The matching registration entries with the paging ' +
+                         'that found them, or one entry with its directory ' +
+                         'entry when `entry` was given.',
+    responseSchema: { type: 'object',
+                      description: 'Registration entries and their paging.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE entries endpoint.");
+      sendJson(res, 200, admin.spiffeEntriesView(req).json);
+      log.debug("Leaving the management API SPIFFE entries endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/spiffe/entries/:action', tag: 'SPIFFE',
+    mirrors: 'POST /admin/spiffe/entries',
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE entries action endpoint.");
+      const body = parseBody(req);
+      const result = admin.spiffeEntriesAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SPIFFE entries action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createSpiffeEntry',
+        summary: 'Register an identity',
+        description: 'Three refusals and no others: a SPIFFE ID that is not ' +
+                     'one, a SPIFFE ID in ANOTHER trust domain (this service ' +
+                     'is the issuing authority for exactly one, and cannot ' +
+                     'sign for somebody else\'s — that is what federation is ' +
+                     'for), and a SPIFFE ID under the reserved `/spire` path, ' +
+                     'which belongs to this server and the agents it ' +
+                     'attests.\n\nA DUPLICATE SPIFFE ID IS ALLOWED. Two ' +
+                     'entries granting one identity under different parents is ' +
+                     'a real configuration and SPIRE permits it.\n\nThis is ' +
+                     'the same function `BatchCreateEntry` on the SPIRE Server ' +
+                     'API calls, writing the same directory entry an ' +
+                     '`ldapadd` would.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            spiffeId: { type: 'string',
+                        description: 'The identity this entry grants.' },
+            parentId: { type: 'string',
+                        description: 'The agent or server it hangs beneath. ' +
+                                     'Defaults to this server\'s own SPIFFE ' +
+                                     'ID, which is what SPIRE uses for an ' +
+                                     'entry describing a workload rather than ' +
+                                     'a node.' },
+            selectors: { type: 'string',
+                         description: 'Comma-separated `type:value` pairs, ' +
+                                      'split on the FIRST colon only — so ' +
+                                      '`docker:label:app:web` is type ' +
+                                      '`docker` and value `label:app:web`. An ' +
+                                      'entry with NO selectors matches every ' +
+                                      'workload, which is how a catch-all is ' +
+                                      'written and is also the shape of one ' +
+                                      'somebody forgot to finish.' },
+            dnsNames: { type: 'string',
+                        description: 'Comma-separated DNS subjectAltNames, ' +
+                                     'added beside the SPIFFE ID. What makes ' +
+                                     'an SVID usable by TLS software that ' +
+                                     'checks a hostname and cannot read a ' +
+                                     'SPIFFE ID.' },
+            federatesWith: { type: 'string',
+                             description: 'Comma-separated trust domain names ' +
+                                          'whose bundles are handed to a ' +
+                                          'holder of this identity. A name ' +
+                                          'with no bundle here contributes ' +
+                                          'nothing rather than failing.' },
+            x509SvidTtl: { type: 'integer',
+                           description: 'Seconds. 0 means spiffe.svidTtl.' },
+            jwtSvidTtl: { type: 'integer',
+                          description: 'Seconds. 0 means spiffe.jwtSvidTtl.' },
+            hint: { type: 'string',
+                    description: 'Operator guidance when a workload gets more ' +
+                                 'than one SVID — `internal`, `external`. ' +
+                                 'Passed through verbatim; nothing here reads ' +
+                                 'it.' }
+          },
+          required: ['spiffeId'],
+          examples: [{ spiffeId: 'spiffe://example.org/ns/prod/sa/api',
+                       selectors: 'k8s:ns:prod, k8s:sa:api',
+                       dnsNames: 'api.prod.svc', hint: 'external',
+                       x509SvidTtl: 900 }],
+          additionalProperties: false
+        },
+        responseDescription: 'The entry as it now stands, with its new id.' },
+
+      { action: 'update', operationId: 'updateSpiffeEntry',
+        summary: 'Change one field of an entry',
+        description: '**What may be changed is DECLARED and not DERIVED.** The ' +
+                     'declared half is what the entry may DO — the SPIFFE ID, ' +
+                     'the parent, the selectors, the DNS names, the ' +
+                     'lifetimes, the hint, the flags — and it is what the ' +
+                     'Workload API reads. The derived half is what HAPPENED: ' +
+                     'the revision number, the SVID counter, when it was ' +
+                     'created. Those are refused with a list of what is not, ' +
+                     'because a call that could rewrite them would make this ' +
+                     'registry lie about the service\'s own behaviour in a ' +
+                     'way indistinguishable from the recording being ' +
+                     'broken.\n\n`ldapmodify` still reaches everything, ' +
+                     'which is deliberate: refusing it HERE is the difference ' +
+                     'between offering an operation and merely not preventing ' +
+                     'it.\n\nThe change applies to the NEXT SVID issued from ' +
+                     'this entry. Nothing already issued changes, and there is ' +
+                     'nothing to invalidate — SPIFFE has no revocation.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            entry: { type: 'string', description: 'The entry id.' },
+            field: { type: 'string',
+                     enum: ['spiffeId', 'parentId', 'selectors', 'dnsNames',
+                            'federatesWith', 'x509SvidTtl', 'jwtSvidTtl',
+                            'hint', 'expiresAt', 'admin', 'downstream',
+                            'storeSvid'],
+                     description: 'Which field. Anything else is refused ' +
+                                  'naming these.' },
+            value: { type: 'string',
+                     description: 'A list field takes comma-separated values ' +
+                                  'and an empty value CLEARS it; a boolean ' +
+                                  'takes true or false; a TTL takes seconds.' }
+          },
+          required: ['entry', 'field'],
+          examples: [{ entry: '0f5a…', field: 'hint', value: 'internal' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The entry as it now stands, at its new revision.' },
+
+      { action: 'delete', operationId: 'deleteSpiffeEntry',
+        summary: 'Remove an entry',
+        description: 'Anything holding an SVID minted from it keeps that SVID ' +
+                     'until it expires. SPIFFE has no revocation — the answer ' +
+                     'is a short lifetime and rotation, which is why the ' +
+                     'default X509-SVID lifetime here is an hour and the ' +
+                     'JWT-SVID one is five minutes.\n\nA seeded entry stays ' +
+                     'deleted until a restart: nothing here is persisted, but ' +
+                     'nothing re-creates it either, because an operator who ' +
+                     'deleted it meant to.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            entry: { type: 'string', description: 'The entry id.' }
+          },
+          required: ['entry'],
+          examples: [{ entry: '0f5a…' }],
+          additionalProperties: false
+        },
+        responseDescription: 'That it is gone.' }
+    ] },
+
+  { method: 'GET', path: BASE + '/spiffe/agents', tag: 'SPIFFE',
+    operationId: 'getSpiffeAgents',
+    summary: 'The agents that have attested here, filtered and paged',
+    description: 'An agent appears when it calls `AttestAgent` on the SPIRE ' +
+                 'Server API. These entries are a RECORD rather than ' +
+                 'configuration — everything on them was written by this ' +
+                 'service — which is why nothing about an agent is editable ' +
+                 'and the only write is the ban.\n\n**Node attestation is ' +
+                 'never verified.** Whatever attestor an agent names and ' +
+                 'whatever payload it sends are written down as claimed, which ' +
+                 'is why every agent carries a selector valued ' +
+                 '`unverified:true`: an agent\'s selectors here are claims, ' +
+                 'not attested facts.',
+    mirrors: 'GET /admin/spiffe/agents',
+    parameters: [
+      { name: 'agent', in: 'query', required: false, schema: { type: 'string' },
+        description: 'One agent, by its SPIFFE ID — always under ' +
+                     '`/spire/agent/`. The reply then carries its directory ' +
+                     'entry, where the cn is a DIGEST of the SPIFFE ID and ' +
+                     '`spiffeAgentId` is the identity.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the agent id, the attestation type or any ' +
+                     'selector, case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The matching agents with the paging that found them.',
+    responseSchema: { type: 'object',
+                      description: 'Attested agents and their paging.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE agents endpoint.");
+      sendJson(res, 200, admin.spiffeAgentsView(req).json);
+      log.debug("Leaving the management API SPIFFE agents endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/spiffe/agents/:action', tag: 'SPIFFE',
+    mirrors: 'POST /admin/spiffe/agents',
+    handler: function (req, res) {
+      log.debug("Entering the management API SPIFFE agents action endpoint.");
+      const body = parseBody(req);
+      const result = admin.spiffeAgentsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SPIFFE agents action endpoint.");
+    },
+    actions: [
+      { action: 'ban', operationId: 'banSpiffeAgent',
+        summary: 'Refuse this agent at AttestAgent',
+        description: 'ONE OF THE FEW REFUSALS IN THIS SERVICE, and it earns ' +
+                     'its place: a ban that did not refuse would make the ' +
+                     'button a lie. A banned agent gets `PermissionDenied` ' +
+                     'from `AttestAgent`.\n\nWhatever SVID it already holds ' +
+                     'keeps working until it expires. There is no revocation ' +
+                     'in SPIFFE, so a ban stops the NEXT identity rather than ' +
+                     'the current one.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            agent: { type: 'string', description: 'The agent\'s SPIFFE ID.' }
+          },
+          required: ['agent'],
+          examples: [{ agent: 'spiffe://example.org/spire/agent/k8s_psat/abc' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The agent as it now stands.' },
+
+      { action: 'unban', operationId: 'unbanSpiffeAgent',
+        summary: 'Let this agent attest again',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            agent: { type: 'string', description: 'The agent\'s SPIFFE ID.' }
+          },
+          required: ['agent'],
+          examples: [{ agent: 'spiffe://example.org/spire/agent/k8s_psat/abc' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The agent as it now stands.' },
+
+      { action: 'delete', operationId: 'deleteSpiffeAgent',
+        summary: 'Forget an agent',
+        description: '**Deleting is forgetting, not revoking.** It reappears ' +
+                     'the moment it attests again, because attestation is not ' +
+                     'checked here. Ban it if the intention was to stop it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            agent: { type: 'string', description: 'The agent\'s SPIFFE ID.' }
+          },
+          required: ['agent'],
+          examples: [{ agent: 'spiffe://example.org/spire/agent/k8s_psat/abc' }],
+          additionalProperties: false
+        },
+        responseDescription: 'That it is forgotten.' }
+    ] }
 ];
 
 // Every operation, flattened, for the index. The same walk buildSpec() does,

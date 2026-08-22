@@ -370,6 +370,32 @@ function recordTicket(kind, detail) {
   return record;
 }
 
+// A SPIFFE SVID, X.509 or JWT.
+//
+// A FOURTH artifact family rather than rows under `token`, and the distinction
+// is not cosmetic. A JWT-SVID is a JWS and would sit perfectly well among the
+// JWTs — but an X509-SVID is a certificate, the two are issued by the same act
+// against the same registration entry, and splitting them would put one half of
+// SPIFFE on the tokens page and the other half nowhere. More to the point:
+// **neither is revocable here**, where every kind under `token` is. `signJwt()`
+// is not the funnel for a JWT-SVID either, and cannot be — it signs with the
+// STS key, and a JWT-SVID is signed by the trust domain's JWT authority — so
+// this is the funnel, called from spiffe_workload.js and spiffe_api.js at the
+// moment each SVID is minted.
+function recordSvid(kind, detail) {
+  log.debug("Entering recordSvid(). kind=" + kind + ", subject=" + (detail.subject || '?'));
+  const record = recordArtifact('SVID (' + kind + ')', {
+    subject: detail.subject || '',
+    entryId: detail.entryId || '',
+    audience: (detail.audiences || []).join(' '),
+    serial: detail.serial || '',
+    hint: detail.hint || '',
+    expiresAt: detail.expiresAt || 0
+  });
+  log.debug("Leaving recordSvid(). " + artifacts.length + " artifact(s) held.");
+  return record;
+}
+
 // A verifiable credential, in whichever of the three formats was asked for.
 function recordCredential(format, detail) {
   log.debug("Entering recordCredential(). format=" + format);
@@ -380,6 +406,145 @@ function recordCredential(format, detail) {
   });
   log.debug("Leaving recordCredential(). " + artifacts.length + " artifact(s) held.");
   return record;
+}
+
+// ---------------------------------------------------------------------------
+// SCIM, WHICH IS COUNTED HERE AND NOT ON /admin/metrics.
+//
+// Every other family in this service is counted twice on purpose and in two
+// different senses: an endpoint CALL (app.js's log, by matched route) and an
+// ARTIFACT (a token, an assertion, a ticket). SCIM produces no artifact — a
+// provisioned person is an LDAP entry and the directory already reports those —
+// so what is worth counting is the SHAPE of what a provisioning client did:
+// which operation, on which resource type, and whether it was refused.
+//
+// **It is deliberately NOT folded into snapshot().** The /scim routes are
+// already in that reply, counted by path like every other endpoint, and a second
+// total beside them would be one act counted twice in one document — the same
+// mistake rule 3c warns about for audit rows. So this is its own reply, read by
+// /admin/scim and by GET /admin-api/scim, and /admin/metrics is untouched.
+//
+// **THE VOCABULARY IS A TABLE**, the way audit.js's CATEGORIES and ACTIONS are,
+// and for the same reason: the console's breakdown and the management API's
+// `operations` member are both built from it, so an operation cannot be
+// performed and go unreported, nor be reported and never occur. A new operation
+// is a row here and a `recordScim()` call, and nothing else.
+// ---------------------------------------------------------------------------
+const SCIM_OPERATIONS = [
+  { operation: 'create', label: 'Create', method: 'POST',
+    what: 'A resource was created (RFC 7644 section 3.3).' },
+  { operation: 'list', label: 'List', method: 'GET',
+    what: 'A collection was queried (section 3.4.2), with or without a filter.' },
+  { operation: 'read', label: 'Read', method: 'GET',
+    what: 'One resource was retrieved by id (section 3.4.1).' },
+  { operation: 'search', label: 'Search', method: 'POST',
+    what: 'A query sent as a POST to .search (section 3.4.3), which is what a ' +
+          'client uses when its filter is too long for a URL.' },
+  { operation: 'replace', label: 'Replace', method: 'PUT',
+    what: 'A whole resource was replaced (section 3.5.1).' },
+  { operation: 'modify', label: 'Modify', method: 'PATCH',
+    what: 'A PATCH was applied (section 3.5.2). The operation a provisioning ' +
+          'client uses most, and the one whose path grammar is hardest to get ' +
+          'right — which is why this service does not implement it itself.' },
+  { operation: 'delete', label: 'Delete', method: 'DELETE',
+    what: 'A resource was deleted (section 3.6).' },
+  { operation: 'bulk', label: 'Bulk', method: 'POST',
+    what: 'A BulkRequest was applied (section 3.7). The operations INSIDE it ' +
+          'are counted individually as well, so one bulk of five creates is ' +
+          'one bulk row and five create rows — which is the honest reading and ' +
+          'is said on the page, because a reader adding the column up will ' +
+          'otherwise find it does not tally.' },
+  { operation: 'discovery', label: 'Discovery', method: 'GET',
+    what: 'ServiceProviderConfig, ResourceTypes or Schemas (section 4). What a ' +
+          'client reads before it does anything else, and the one thing here ' +
+          'that touches no directory entry.' }
+];
+
+const SCIM_RESOURCE_TYPES = ['User', 'Group', 'Bulk', 'ServiceProviderConfig',
+                             'ResourceType', 'Schema', 'Self'];
+
+const scimCounts = {
+  total: 0,
+  ok: 0,
+  failed: 0,
+  firstAt: 0,
+  lastAt: 0,
+  byOperation: {},
+  byResourceType: {},
+  byStatus: {},
+  // Keyed by the `scimType` from RFC 7644 section 3.12, with '(none)' for a
+  // refusal that carried no such code — a 404 has none, and a table that
+  // silently dropped those would report far fewer failures than there were.
+  byScimType: {}
+};
+
+function bump(table, key) {
+  const name = String(key || '(none)');
+  table[name] = (table[name] || 0) + 1;
+}
+
+// One SCIM request, recorded where it is ANSWERED rather than where it arrives —
+// the same rule recordAuthentication() follows about a credential being
+// accepted. A request that never reached a handler is an endpoint call and is
+// counted as one by app.js; a request this module counts is one the SCIM
+// implementation had an opinion about.
+//
+// It cannot throw. It is called from inside request handlers whose failure mode
+// would otherwise be a provisioning client seeing a 500 because a counter was
+// unhappy, which is the same guarantee audit() gives and for the same reason.
+function recordScim(detail) {
+  try {
+    const info = detail || {};
+    const now = Date.now();
+    scimCounts.total++;
+    if (info.ok) {
+      scimCounts.ok++;
+    } else {
+      scimCounts.failed++;
+    }
+    if (!scimCounts.firstAt) {
+      scimCounts.firstAt = now;
+    }
+    scimCounts.lastAt = now;
+    bump(scimCounts.byOperation, info.operation);
+    bump(scimCounts.byResourceType, info.resourceType);
+    bump(scimCounts.byStatus, info.status);
+    if (!info.ok) {
+      bump(scimCounts.byScimType, info.scimType);
+    }
+  } catch (e) {
+    // Swallowed on purpose: a counter must never be able to fail a provisioning
+    // request. Logged rather than ignored, because a counter that stopped
+    // counting silently would make this page quietly wrong.
+    log.warn('scim: a request could not be counted: ' + e.message);
+  }
+}
+
+// The counters, with the two vocabularies beside them so that a caller can draw
+// every row — including the ones at zero, which are the interesting ones for
+// somebody asking "does this server support PATCH".
+function scimSnapshot() {
+  log.debug("Entering scimSnapshot().");
+  const operations = SCIM_OPERATIONS.map(function (row) {
+    return { operation: row.operation, label: row.label, method: row.method,
+             what: row.what, count: scimCounts.byOperation[row.operation] || 0 };
+  });
+  const resourceTypes = SCIM_RESOURCE_TYPES.map(function (name) {
+    return { resourceType: name, count: scimCounts.byResourceType[name] || 0 };
+  });
+  const out = {
+    total: scimCounts.total,
+    ok: scimCounts.ok,
+    failed: scimCounts.failed,
+    firstAt: scimCounts.firstAt,
+    lastAt: scimCounts.lastAt,
+    operations: operations,
+    resourceTypes: resourceTypes,
+    byStatus: Object.assign({}, scimCounts.byStatus),
+    byScimType: Object.assign({}, scimCounts.byScimType)
+  };
+  log.debug("Leaving scimSnapshot(). " + out.total + " request(s) counted.");
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -688,7 +853,24 @@ function recordAuthentication(detail) {
         // holds. It rides on the observer rather than on a second hook because
         // this is already the funnel, and a second call at the TLS listener would
         // be a second thing to keep right. Nothing here reads it.
-        certificate: info.certificate || null
+        certificate: info.certificate || null,
+        // WHOSE identity this one belongs to, where the caller knows and only
+        // where it does. It exists for one shape: a DECENTRALIZED IDENTIFIER,
+        // which names nobody by itself, arriving from the Credential Endpoint
+        // where the access token has already said who the credential is about.
+        // The directory folds such a DID onto that person's entry instead of
+        // creating a second one named by a digest of it.
+        //
+        // NORMALISED like `key` is, and through the same function: the caller
+        // has whatever the token carried — `alice` or `urn:sts-mock:user:alice`
+        // — and passing it through raw would link the DID to a person filed
+        // under a name nothing else here uses, which is the split this whole
+        // funnel exists to prevent.
+        //
+        // Empty for every other family, and that is not an omission to fill in
+        // later: a name-shaped identity IS the person, so a link from it to
+        // itself would say nothing.
+        linkedTo: info.linkedTo ? identityKeyOf(info.linkedTo) : ''
       });
     } catch (e) {
       log.error('the user observer threw and was ignored; the authentication ' +
@@ -1184,7 +1366,13 @@ const ISSUED_FAMILIES = [
           'WS-Federation sign-in' },
   { family: 'ticket', label: 'Kerberos tickets', kinds: ['Kerberos TGT', 'Kerberos service ticket'],
     what: 'issued by the KDC over raw TCP and UDP 88 and over MS-KKDCP, and used by ' +
-          'the Kerberos-protected service and by SPNEGO' }
+          'the Kerberos-protected service and by SPNEGO' },
+  { family: 'svid', label: 'SPIFFE SVIDs', kinds: ['SVID (X.509)', 'SVID (JWT)'],
+    what: 'issued over the SPIFFE Workload API and by the SPIRE Server API\'s ' +
+          'SVID service. NONE OF THEM IS REVOCABLE from /admin/tokens, unlike ' +
+          'every kind above it: SPIFFE has no revocation — the answer is a ' +
+          'short lifetime and rotation — so a button there would be a lie of ' +
+          'exactly the kind this console avoids' }
 ];
 
 // kind -> family, for the artifacts. One map built from the structure above rather
@@ -1570,6 +1758,11 @@ module.exports = {
   recordAssertion: recordAssertion,
   recordTicket: recordTicket,
   recordCredential: recordCredential,
+  recordSvid: recordSvid,
+  SCIM_OPERATIONS: SCIM_OPERATIONS,
+  SCIM_RESOURCE_TYPES: SCIM_RESOURCE_TYPES,
+  recordScim: recordScim,
+  scimSnapshot: scimSnapshot,
   revoke: revoke,
   restore: restore,
   revokeWhere: revokeWhere,

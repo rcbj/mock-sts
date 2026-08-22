@@ -1,7 +1,7 @@
 # Mock STS
 
-A deliberately permissive **mock identity service** that speaks fourteen protocol
-families — three of which, Kerberos, LDAP and TLS, are not HTTP over its own
+A deliberately permissive **mock identity service** that speaks sixteen protocol
+families — four of which, Kerberos, LDAP, TLS and SPIFFE, are not HTTP over its own
 listener at all — for exercising clients. It
 authenticates nobody, checks no passwords and validates no access tokens (UserInfo
 excepted, deliberately, and there is a section on why below): it exists so that a
@@ -48,13 +48,20 @@ are — most of it is the record of something having gone wrong once.
 | **OpenID4VP 1.0** | a Verifier with DCQL that **actually verifies** what it is sent, check by check |
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 | **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
-| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false, and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
+| **SPIFFE, and the SPIRE Server API** | a **SPIFFE issuing authority** for one trust domain, in all three of its server-side shapes. The **bundle endpoint** is plain HTTPS at `/spiffe/bundle` — a JWK Set with `spiffe_sequence` and `spiffe_refresh_hint`, every key carrying the `use` a consumer must have to consider it at all. The **Workload API** is the gRPC service `SpiffeWorkloadAPI` on a **Unix socket** (SPIRE's own `/tmp/spire-agent/public/api.sock`, which is what `SPIFFE_ENDPOINT_SOCKET` means to every real client) and on TCP: X509-SVIDs with their private keys and the trust bundle, JWT-SVIDs for an audience, both bundle streams, and a `ValidateJWTSVID` that really verifies. The streams are held open and re-sent at half the SVID lifetime, so a client's **rotation** path runs without anybody waiting an hour. The **SPIRE Server API** is six gRPC services and 42 methods from the vendored `spire-api-sdk` protos — Entry, Agent, Bundle, SVID, TrustDomain, Debug — of which 35 are implemented and the other seven each answer with a reason. **Nothing is attested**: every caller gets every identity in the trust domain, which is this service's posture everywhere and matters most here. `GET /spiffe` is most of that sentence at length |
+| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false — plus one of its own, that an add under `ou=users` whose username is already there is `LDAP_ENTRY_ALREADY_EXISTS` (68), because one person is one entry however they got in — and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
+| **SCIM 2.0 (RFC 7642, 7643, 7644)** | a provisioning endpoint at `/scim/v2`, and **the only family here whose purpose is to write**: create, read, list, replace, PATCH (section 3.5.2 in full, `emails[type eq "work"].value` paths included), delete, both shapes of `.search`, bulk, filtering, sorting, pagination, attribute projection, and the three discovery documents. **What it provisions into is the LDAP directory above — the same entries, no second store and no cache** — so a `POST /scim/v2/Users` and an `ldapadd` create the same entry, and somebody provisioned over SCIM turns up on `/admin/users`, in an `ldapsearch`, in whatever group a client puts them in, and in the attributes their next access token carries. The SCIM `id` **is** the entry's DN, because that already is the opaque server-assigned identifier RFC 7643 asks for. It authenticates nobody — the ServiceProviderConfig says so with an *empty* `authenticationSchemes` rather than by omission — and `active: false` **deactivates nobody**: it is stored as `scimActive` and read by nothing, which is worth reading twice, because deprovisioning is the commonest thing a SCIM client is built to do |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
 router, so it cannot go stale, and fifty specifications with how far each one
 goes. See *The index of itself* below, including the one blind spot that design has:
 a protocol that registers no route, which is exactly what Kerberos, LDAP and the two
-HTTPS listeners are.
+HTTPS listeners are. SCIM is deliberately **not** one of them — it is HTTP all the way
+down, and its routes are registered against the shared app one by one rather than
+behind a mounted Express `Router`, which that walk would skip. That is most of why the
+`scimmy-routers` package is not used; the rest of the reason is that its constructor
+requires an authentication scheme, and what this service would have installed is a
+handler that accepts everything, dressed as a check.
 
 **WS-Federation used to be the gap here, and this note used to say so.** Until
 `wsfed.js` existed, the pieces a passive-requestor profile needs — the assertion
@@ -231,7 +238,7 @@ And LDAP's, which is the other protocol here that is not HTTP:
 | `LDAP_PORT` | the directory's TCP port (default `389`). It is privileged, so the container binds it as root and a host run usually cannot — that is what this is for. If the parent project's api is opening this directory, its `ldapAllowedPorts` has to allow whatever this becomes; the same coupling `KRB5_KDC_PORT` has, and for the same reason |
 | `LDAPS_PORT` | the same directory over TLS (default `636`, the IANA-assigned one). Privileged for the reason 389 is, and bound by a **second server object** rather than by an option on the first — ldapjs decides between a `net.Server` and a `tls.Server` at construction — so the two fail independently and are reported independently. There is no StartTLS to turn on instead: it is an extended operation, ldapjs implements none, and this repository does not patch that submodule |
 | `LDAP_BASE_DN` | the naming context (default `dc=example,dc=com`). `ou=users` and `ou=groups` are derived from it rather than configured, because two variables that could disagree with it would put entries in a tree nobody is searching |
-| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client. A verified **TLS client certificate** does, and it is the one identity that is a DN rather than a name — see the TLS section for where its entry goes |
+| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client. A verified **TLS client certificate** does, and it is the one identity that is a DN rather than a name — see the TLS section for where its entry goes. **One entry per person whatever brought them**: every family here normalises to one key, a certificate saying `CN=rcbj` folds onto the entry `rcbj` already has, and an `ldapadd`, the console form and `POST /admin-api/users/create` all refuse a username that is taken |
 | `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
 | `LDAP_SIZE_LIMIT` | the largest result this server will return from one search (default `500`), on top of whatever the client asks for. A search of a directory this small will never reach it — but a client that has never seen `LDAP_SIZE_LIMIT_EXCEEDED` has never handled a paged result either |
 
@@ -1979,7 +1986,9 @@ and the reason an application accumulates kinds instead of being filed twice.
 
 **A user's page also shows that user's LDAP object, and the dependency that puts it there runs the opposite way from the call.** Every person who authenticates anywhere here already grows an entry at `uid=<name>,ou=users,<base>` (see the directory's own section below), so by the time somebody has a page in this console they usually have a directory object too — and the two are the same authentication seen from two sides, which is the reason for showing them together rather than making a reader find the object again on `/ldap/directory`. What is shown is the entry itself and not a copy: its DN, where it came from (`seed` or `authentication`), its two generalized-time stamps kept in the directory's own punctuation rather than converted to the ISO 8601 the rest of the console uses, and **every attribute with every value, the operational ones included** — a search returns `createTimestamp` and `modifyTimestamp` only when they are asked for by name (RFC 4511 section 4.5.1.8, which `toSearchEntry()` honours), but this is not a search, and a dump that silently dropped two of an entry's attributes would be the one thing a dump must not do. `?format=json` carries the same object under `ldap`.
 
-Where there is no entry the section says **which** of the five reasons it is, because four of them are facts about the user rather than about the directory and "not found" alone would send a reader looking for a bug: auto-creation is switched off, the identity is a *client* and not a person, it has never authenticated here at all (it is known only as the subject of something that was issued), everything it has ever done here is an *LDAP bind* — which presents a DN and not a user name — or the entry was there and has since been `delete`d or `modifyDN`'d through the protocol. It also lists any **other** entry whose `uid` names the same person, since this directory has no schema and does not require a uid to be unique, and it says so loudly when the directory's listener is down: the entry can be in this process's store while no client can connect to read it, and only one of those two facts is visible from an HTTP page. The dependency is the thing to be careful with. `admin.js` does **not** require `ldap_server.js` — `server.js` requires the console first (rule 6: the directory needs `admin_stats`' identity normalisation, and the console reads `oauth2`'s sessions), so a require from the console would drag the directory's routes into the router *ahead* of its own, and `/sts-metadata` is built by walking that router. So the direction is inverted the same way the user observer is: `admin.js` offers `setDirectoryReader()`, `ldap_server.js` fills it at its own require time with a function that takes the identity key the console files a person under — the same normalised local name the entry's DN was built from, so the two cannot drift — and a build of this service without the directory renders the section as "no directory is loaded", which is a different answer from an entry that is not there.
+Where there is no entry the section says **which** of the five reasons it is, because four of them are facts about the user rather than about the directory and "not found" alone would send a reader looking for a bug: auto-creation is switched off, the identity is a *client* and not a person, it has never authenticated here at all (it is known only as the subject of something that was issued), everything it has ever done here is an *LDAP bind* — which presents a DN and not a user name — or the entry was there and has since been `delete`d or `modifyDN`'d through the protocol. It also lists any **other** entry whose `uid` names the same person — which is now a report about entries *outside* `ou=users`, since inside it one person is one entry and every door enforces that — and it says so loudly when the directory's listener is down: the entry can be in this process's store while no client can connect to read it, and only one of those two facts is visible from an HTTP page. The dependency is the thing to be careful with. `admin.js` does **not** require `ldap_server.js` — `server.js` requires the console first (rule 6: the directory needs `admin_stats`' identity normalisation, and the console reads `oauth2`'s sessions), so a require from the console would drag the directory's routes into the router *ahead* of its own, and `/sts-metadata` is built by walking that router. So the direction is inverted the same way the user observer is: `admin.js` offers `setDirectoryReader()`, `ldap_server.js` fills it at its own require time with a function that takes the identity key the console files a person under — the same normalised local name the entry's DN was built from, so the two cannot drift — and a build of this service without the directory renders the section as "no directory is loaded", which is a different answer from an entry that is not there.
+
+**The page has exactly one control, and it writes somewhere else.** A form on the list creates a person in the embedded LDAP directory — `POST /admin/users` with `action=create`, and `POST /admin-api/users/create` beside it. Until it existed `ou=users` could only be filled by authenticating or by an `ldapadd`, while `ou=applications` could be filled from three directions; a client that wanted claims read out of the directory had to sign somebody in first to make the entry it was about to read. The entry is created with the invented person behind that name already written onto it, so an issued credential and an `ldapsearch` for that entry agree from the first request. **A username that is already there is refused**, naming the entry that holds it — the same refusal an `ldapadd` gets as `LDAP_ENTRY_ALREADY_EXISTS` (68), because both call one function in `ldap_server.js` and the console is not a second definition of what a user is. Two things the message says outright rather than leaving to be discovered: **no password is set**, because none is ever checked here, and **the new person does not appear in the table above** until they authenticate somewhere — that list is who this service has *seen*, and the entry is what the directory *holds*. It is the same distinction `/admin/groups` draws when it marks a member *never here*.
 
 **`/admin/groups`** is the one page in this console that reports the *directory* rather than what this service has issued. It lists every group with what it is made of, and `?group=<dn>` drills into one: every attribute the entry holds, operational ones included, and every member resolved to the entry it names. Both views come out of `groupsFor()` in `ldap_server.js` through a third inverted hook — `admin.js` offers `setGroupReader()` and the directory fills it, for the same route-order reason `setDirectoryReader()` exists — and the console renders what it is handed without deciding anything, which matters most for the first decision below.
 
@@ -2044,7 +2053,7 @@ Filtering is by category, action, outcome, actor and free text, and the vocabula
 
 Paging is `?page=` and `?per=` as everywhere else, but **the thing to walk this list by is `seq`**. That number is monotonic and never reused, including across a drop, so "everything after 4,102" is exact where page 2 taken a second after page 1 can repeat a row that shifted onto it — the log is still being written while you read it. `?format=json` carries `oldestSeq` and `newestSeq` for that, and a gap between the last sequence number a caller saw and `oldestSeq` is precisely how many events it missed while the cap discarded them.
 
-Two things it deliberately does not have. **No client address**: this service is reached over a compose bridge, through a published port or from the same machine, so what it would record is the bridge — a fact about docker rather than about whoever made the call, and a column that was right on a laptop and quietly wrong everywhere else is worse than no column. What a row *does* say is the channel — `http`, `ldap`, `ldaps`, or `internal` for the things this service did on its own, such as the directory entry it seeds for somebody who authenticated elsewhere — which is the part that is actually knowable and is what somebody who has just turned LDAPS on wants to check. And **no clear button**, here or on the API: an erase control on an unprotected surface would make an audit log unable to answer the one question it exists for. Restarting the service is how you get an empty one, which is also what happens anyway — this is in memory and dies with the process, like the counters, the sessions and the signing key. There is no compliance story here to serve: this service checks no password anywhere, so an audit log of it is a debugging aid and not a record of anything.
+Two things it deliberately does not have. **No client address**: this service is reached over a compose bridge, through a published port or from the same machine, so what it would record is the bridge — a fact about docker rather than about whoever made the call, and a column that was right on a laptop and quietly wrong everywhere else is worse than no column. What a row *does* say is the channel — `http`, `ldap`, `ldaps`, `grpc` for the two SPIFFE gRPC surfaces, or `internal` for the things this service did on its own, such as the directory entry it seeds for somebody who authenticated elsewhere — which is the part that is actually knowable and is what somebody who has just turned LDAPS on wants to check. And **no clear button**, here or on the API: an erase control on an unprotected surface would make an audit log unable to answer the one question it exists for. Restarting the service is how you get an empty one, which is also what happens anyway — this is in memory and dies with the process, like the counters, the sessions and the signing key. There is no compliance story here to serve: this service checks no password anywhere, so an audit log of it is a debugging aid and not a record of anything.
 
 Two settings on `/admin/config` change it and both take effect immediately, because `audit.js` reads them per event rather than capturing them at require time. `audit.maxEvents` (5,000) is the cap, and what was dropped is counted and shown, so a truncated log says it was truncated instead of implying the cap is all there ever was — lowering it from 5,000 to 100 discards the excess on the very next event rather than one row per event for the next 4,900. `audit.protocolCalls` (on) is whether ordinary protocol endpoint calls get a row at all; it is far and away the noisiest category, since every JWKS poll and metadata fetch is one, and turning it off is how somebody watching the directory or the console gets a readable page. It never touches the other five categories, and `/admin/metrics` counts every call either way.
 
@@ -2096,19 +2105,20 @@ Three things the console deliberately does **not** do. It does not invalidate a 
 
 ### The management API
 
-`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. 54 operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
+`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. 55 operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
 
 **It exists because a form is the right shape for a person and the wrong one for anything else.** Every page here has answered `?format=json` since it was written, so reading was never the problem; *changing* something was. A caller that wanted to revoke a token from a script, or narrow the issuer's claim set from a CI job before running a wallet against it, was left either parsing a 303 redirect for the message in its query string or knowing which hidden input a particular form carried. Both are ways of driving a browser without one.
 
-**The rule the API is written under is about the future rather than about the code**: a control added to `/admin` gets an operation on `/admin-api` in the same commit. `GET /admin-api/audit` is what that rule produced for the audit page, and it is the one resource here with **no POST beside it** — not an operation nobody got round to, but the consequence of the page it mirrors having no form on it. An erase control on an unprotected audit log would make it unable to answer the one question it exists for, so there is nothing to change and therefore nothing to document as changeable. `GET /admin-api/applications` **has** a POST beside it — six actions — and the thing worth knowing about them is that they are not a third store: each calls the same function in `applications.js` that a protocol path or an `ldapmodify` reaches, against the same `ou=applications` entries. An API that covers eight of nine controls is worse than one that covers none, because the ninth is discovered by somebody who has already written the code that assumed it was there. Two things make keeping that rule cheap, and the third thing is why there is a test for it in the parent project.
+**The rule the API is written under is about the future rather than about the code**: a control added to `/admin` gets an operation on `/admin-api` in the same commit. `GET /admin-api/audit` is what that rule produced for the audit page, and it is the one resource here with **no POST beside it** — not an operation nobody got round to, but the consequence of the page it mirrors having no form on it. An erase control on an unprotected audit log would make it unable to answer the one question it exists for, so there is nothing to change and therefore nothing to document as changeable. `GET /admin-api/users` grew one the day `/admin/users` grew its first form — a single
+action, `create` — and `GET /admin-api/applications` **has** a POST beside it — six actions — and the thing worth knowing about them is that they are not a third store: each calls the same function in `applications.js` that a protocol path or an `ldapmodify` reaches, against the same `ou=applications` entries. An API that covers eight of nine controls is worse than one that covers none, because the ninth is discovered by somebody who has already written the code that assumed it was there. Two things make keeping that rule cheap, and the third thing is why there is a test for it in the parent project.
 
-The first is that **this API decides nothing**. Every POST calls the same action function the console's form posts to — `tokenAction`, `claimsAction`, `vcAction`, `vpConfigAction` — with the action taken from the URL instead of from a hidden field, and every GET calls the same JSON view the page's `?format=json` answers. Those views became functions in `admin.js` for this reason (`consoleJson`, `metricsJson`, `tokensView`, `auditView`, `usersView`, `groupsView`, `claimsJson`, `vcJson`, `vpConfigJson`); they had been built inline in the route handlers, which was fine while there was one caller and is exactly the shape that produces two objects that agree today and not next month. So `admin_api.js` holds no opinion about what a revocation means that `admin.js` does not, and the way to see that is not to read the code: revoke a token through the API and RFC 7662 introspection calls it inactive, because there is one set of revoked jtis in this service and it is the same one `/oauth2/revoke` writes to.
+The first is that **this API decides nothing**. Every POST calls the same action function the console's form posts to — `tokenAction`, `usersAction`, `claimsAction`, `vcAction`, `vpConfigAction` — with the action taken from the URL instead of from a hidden field, and every GET calls the same JSON view the page's `?format=json` answers. Those views became functions in `admin.js` for this reason (`consoleJson`, `metricsJson`, `tokensView`, `auditView`, `usersView`, `groupsView`, `claimsJson`, `vcJson`, `vpConfigJson`); they had been built inline in the route handlers, which was fine while there was one caller and is exactly the shape that produces two objects that agree today and not next month. So `admin_api.js` holds no opinion about what a revocation means that `admin.js` does not, and the way to see that is not to read the code: revoke a token through the API and RFC 7662 introspection calls it inactive, because there is one set of revoked jtis in this service and it is the same one `/oauth2/revoke` writes to.
 
 The second is that **the OpenAPI document is generated from the table that registers the routes**. `admin_api.js` holds one row per resource — the handler, the parameters, the request bodies with their examples, the prose — and `admin_api_spec.js` turns that into the document. An operation therefore cannot exist and be undocumented, nor be documented and not exist. A specification file kept beside the code it describes is wrong within a month, and the way it goes wrong is silent: somebody adds an action to the console, adds it to the API, and does not touch the YAML.
 
 The third is the direction neither of those can check. **Nothing in this service can see a form appear on a page**, so a new console control with no operation here would go unnoticed by everything above. That is asserted from outside, by the parent project's `tests/admin_api.js`, and it reads the facts off this service rather than off a list in the test: the console's own page list comes back in `GET /admin-api/status`, and each action handler, asked to perform an action that does not exist, replies with the names of the ones that do — "Unknown action "x". The four are: add, remove, clear, replace." Add an action to a switch and that sentence grows; the test then fails until there is an operation for it. The same test checks every property the document describes against a live reply, which has already caught two names that were wrong and unnoticeable: an `expiresAt` that is really `expiresAtMs`, and a group drill-down documented with its members at the top level when they are inside `group`.
 
-**Four POST routes serve twenty-four URLs**, and the shape is deliberate. Express registers `/admin-api/tokens/:action` once; the document lists `/admin-api/tokens/revoke`, `/restore`, `/revoke-kind`, `/revoke-subject`, `/revoke-user` and `/revoke-all` as the six operations they are, each with its own body schema and its own example. One pattern keeps `GET /sts-metadata` to one row per resource showing the parameter — the router is what that page reads, and twenty-four rows of near-identical prose there would bury the rest of the service — while the document describes URLs a caller can actually use. An action nobody has heard of is not a 404: it reaches the console's own handler and comes back as its refusal, naming the ones that exist, which is both the friendliest error and the sentence the parity check reads.
+**Eight POST routes serve thirty-nine URLs**, and the shape is deliberate. Express registers `/admin-api/tokens/:action` once; the document lists `/admin-api/tokens/revoke`, `/restore`, `/revoke-kind`, `/revoke-subject`, `/revoke-user` and `/revoke-all` as the six operations they are, each with its own body schema and its own example. One pattern keeps `GET /sts-metadata` to one row per resource showing the parameter — the router is what that page reads, and twenty-four rows of near-identical prose there would bury the rest of the service — while the document describes URLs a caller can actually use. An action nobody has heard of is not a 404: it reaches the console's own handler and comes back as its refusal, naming the ones that exist, which is both the friendliest error and the sentence the parity check reads.
 
 **The explorer at `/admin-api/docs` is the only page in this service with a script on it**, and that is the one thing this feature costs. `app.js` sets `script-src 'none'` service-wide, which is what makes the whole family of reflected-content problems moot here rather than merely unlikely, so the explorer relaxes that header on its own two routes and in exactly two clauses: `script-src 'self'`, and an added `connect-src 'self'` so the page can call the API it documents. `default-src 'none'` and everything else stay as they are, and the console next door is still `script-src 'none'` — which the test asserts, because a middleware change that widened the exception would show up there first. The script is a **separate resource rather than an inline block for precisely that reason**: `'self'` is enough for a file, an inline block would have needed `'unsafe-inline'`, and `'unsafe-inline'` is the clause that would make the relaxation matter.
 
@@ -2521,10 +2531,52 @@ would grow the directory without bound. **An OAuth client** does not either: a c
 not a person and `ou=users` is for people, a distinction the admin console already makes
 with its `isClient` flag, which is what this reads.
 
+**One entry per person, however many ways they get in.** `rcbj` at the login screen,
+`urn:sts-mock:user:rcbj` in a token, `rcbj@STS.MOCK` in a Kerberos AS-REQ and `rcbj` on a
+WS-Security `UsernameToken` have always been one entry: `identityOf()` strips the prefix
+and the realm before the observer sees any of them, so every name-shaped family here —
+OAuth 2.0, OpenID Connect, both SAML profiles, WS-Federation, WS-Trust, Kerberos, SPNEGO
+— lands on `uid=rcbj,ou=users` and simply adds a line to its `description`.
+
+What did **not** fold was the one identity that is a DN rather than a name. A client
+certificate saying `CN=rcbj` became `cn=rcbj,ou=users`, which is a second object for a
+person who already had one — and the reverse order produced the same pair, since a
+password sign-in after a handshake would build `uid=rcbj` beside it. `existingUserEntry()`
+is the whole of the fix: before a plan names an entry it asks whether this person already
+has one, matching on the two things that can carry a username under `ou=users` — the
+entry's own **naming RDN value**, whatever attribute type names it, and any **`uid`** it
+carries. Case-insensitively, because the store already keys DNs lower-cased. Scoped to
+entries directly under `ou=users`, because this directory is schemaless and placement is
+the only rule that cannot be lied to.
+
+**The same function answers at every other door**, which is what makes it a rule rather
+than a habit. An `ldapadd` under `ou=users` whose username is already here is
+`LDAP_ENTRY_ALREADY_EXISTS` (68) naming the entry that holds it — so `uid=rcbj` and
+`cn=rcbj` cannot both exist, and neither can `sn=someone` carrying `uid: rcbj`. The
+console's create form on `/admin/users` and `POST /admin-api/users/create` get the same
+refusal, because all three call one function. Without that, the fold could be undone from
+the other side in a single operation, with nothing having gone wrong that a reader could
+point at.
+
+**A DID is the one identity that generally cannot fold**, and that is a fact about DIDs
+rather than a gap. `did:jwk:eyJrdHkiOi…` names nobody by itself — that is why its entry is
+named by a digest of it. But at the Credential Endpoint this service *does* know: it
+decides who a credential is about from the access token and derives the holder's DID from
+the key the wallet proved possession of, in one call, so it passes the username through as
+`linkedTo` and the identifier goes onto that person's entry as a `didSubject` value beside
+their name. `didSubject` is multi-valued, so a wallet holding several keys for one person
+puts several DIDs on one entry rather than one each on several. When that DID is later
+presented to the Verifier — with nothing saying whose it is — the entry that already
+records it is found by `didSubject` and nothing new is created. A DID this service has no
+link for still gets its own digest-named entry, because inventing a person to attach it to
+would be worse than a digest for a name.
+
 **And one identity is not a name at all: a verified TLS client certificate.** Its
 subject is already a DN, so the entry is not `uid=<name>` and is placed by
 `certificatePlan()` instead — at the subject itself where that lies under this
-directory's base, and otherwise under `ou=users` named by the CN, with the subject's
+directory's base, and otherwise under `ou=users` named by the CN — or, where that CN is somebody
+this directory already holds, **on their existing entry**, with the whole subject, the
+issuer, the serial and the validity written onto it — with the subject's
 other RDNs kept as attributes and the certificate's own facts written on as `x509*`
 attributes that are this service's names rather than schema. The TLS section above
 carries the reasoning, including what the placement costs and why `userCertificate` is
@@ -2657,6 +2709,453 @@ Which leads to the second defect: **`messageId` defaults to 1**, so `send()`'s
 symptom is an uncaught exception in this log and a search that returns *zero entries and
 then ends successfully*, which reads as an empty directory. `toSearchEntry()` builds the
 instance with `res.messageId` and sidesteps both.
+
+### SCIM 2.0 — the one family here whose purpose is to write
+
+Every other protocol in this service answers a question about somebody who is already
+there: issue this person a token, tell me who signed in, seal this ticket. SCIM (RFC
+7642 for the *why*, 7643 for the schema, 7644 for the protocol) is how an identity
+provider puts them there in the first place, and `/scim/v2` is a provisioning endpoint
+that does it.
+
+**What it provisions into is the LDAP directory in the section above** — the same
+entries, the same cap, no second store and no cache:
+
+```
+POST /scim/v2/Users {"userName": "dave"}
+    -> uid=dave,ou=users,dc=example,dc=com          the entry, not a copy of one
+    -> ldapsearch -b ou=users '(uid=dave)'          finds it
+    -> GET /admin/users?user=dave                   shows it
+    -> /admin/vc's selection sweeps it              so a credential has something to assert
+    -> an access token for dave                     carries its attributes
+```
+
+That is the whole design, and a SCIM server with a `Map` of its own beside the directory
+would have been half the code and taught a provisioning client nothing. The interesting
+property of a SCIM endpoint is that what it writes is what everything else then reads.
+`scim_map.js` owns which LDAP attribute each SCIM member is; `ldap_server.js` owns where
+the containers are, what counts as a person and what counts as a group; `scim.js` is the
+boundary, which is why it is short.
+
+**It is the fifteenth protocol family and NOT the fifteenth authentication family**, and
+where this document says fourteen it still means fourteen. `recordAuthentication()` is
+the funnel every family passes through the moment a credential is accepted, and SCIM
+accepts none: nobody signs in to provision somebody else. So a person created here gets a
+directory entry with `origin: scim` and no row on `/admin/users` until they actually turn
+up and authenticate — which is the honest distinction, and the same one this service draws
+everywhere else between an identity being *recorded* and an identity having *authenticated*.
+
+#### The `id` is the DN
+
+RFC 7643 section 3.1 asks for an opaque, server-assigned, unique identifier the client
+must not parse. The DN already is one — it is the key the entry is stored under — so that
+is what a SCIM `id` is here, percent-encoded in a path segment:
+
+```
+GET /scim/v2/Users/uid%3Ddave%2Cou%3Dusers%2Cdc%3Dexample%2Cdc%3Dcom
+```
+
+Every other candidate is a *second definition of one fact*. A `uid` is not unique in this
+tree (nothing stops `uid=alice,ou=users` and `cn=alice,ou=people` existing side by side);
+a synthesised id would have to be stored on the entry and would go stale on a rename,
+which is the failure `applicationEntry()`'s fallback exists to route around; a digest
+would be unreadable in the one place a reader most wants to read one. The cost is stated
+rather than hidden: **an LDAP rename gives the same person a new SCIM id**, which really
+is a deviation from "stable for the lifetime of the resource" — and it is the honest
+behaviour for a directory-backed server, because after a rename it *is* a different key.
+
+#### A create goes through the directory's own door
+
+SCIM is the **fourth** way a person can be put in `ou=users` — after an `ldapadd`, the
+console's form and `POST /admin-api/users/create` — and the last two already share
+`createUser()` in `ldap_server.js` so that "creating a user" cannot come to mean two
+things. `scim.js` calls the same function. What it keeps for itself is only the
+translation: `createUser()` returns errors for a person to read on a web page, and a
+SCIM client needs a status and a `scimType`.
+
+It was written the other way first, and all three of the home-made rules turned out to
+be weaker than the one they were standing in for:
+
+* **The DN.** It built `uid=<userName>,ou=users` directly, skipping `namePlan()`'s
+  *fold* — the rule that lands a new name on the entry that is already this person's
+  under a different naming attribute, a client certificate's `cn=rcbj,ou=users` say.
+  Bypassing it creates a second object for one person, which is precisely what the fold
+  exists to prevent.
+* **Uniqueness.** It scanned for a matching `uid` *attribute*. `existingUserEntry()`
+  matches the RDN value too, so somebody whose only entry a certificate had named by
+  `cn` was invisible to the scan and SCIM would create them again — the "one entry per
+  person at every door" rule broken at the newest door.
+* **The name.** Both refused RFC 4514's reserved characters and the two lists had
+  already drifted by one (`#` anywhere, versus only leading). There is now one regex,
+  `nameUsableInDn()`, exported and read by all three doors; a group create has no
+  `createUser()` to defer to, so the check is shared even though the door is not.
+
+One consequence worth knowing: `createUser()` writes its own `user.create` audit row —
+and now takes a `protocol`, so the row says SCIM rather than LDAP — which is why
+`scim.js` records only updates and deletes. Two rows would be one act counted twice at
+the same layer.
+
+#### A PUT replaces the window, not the entry
+
+Read strictly, RFC 7644 section 3.5.1 says a PUT replaces the resource — and against an
+LDAP entry that would mean a provisioning client deleting `schacDateOfBirth`,
+`authnMethod`, `mfaAuthenticated` and every `x509*` attribute the moment it updated
+somebody's phone number. Those are facts SCIM never knew about, cannot send back, and
+cannot restore.
+
+So SCIM sees a **window** onto the entry: `fromScimUser()` is handed the attributes the
+entry already has, removes every attribute the mapping covers, and writes the ones the
+resource carried. Everything outside the window comes through untouched. A client that
+means to remove a mapped value still can, by omitting it, which is what PUT semantics are
+actually for.
+
+Three attributes are deliberately dropped on the way through and not written back:
+`entryDN`, `createTimestamp` and `modifyTimestamp`. None of them is really *on* the entry
+— the DN is synthesised from where the entry is stored (RFC 5020) and the timestamps
+belong to the entry rather than to whoever wrote it — and carrying them through wrote
+them, which produced exactly the stored-copy-of-the-DN the synthesis exists to prevent.
+An audit row naming `entryDN` among the attributes a SCIM PUT had just written is what
+showed it.
+
+#### What it deliberately does not do
+
+* **It authenticates nobody.** No bearer token, no basic credential, no client
+  certificate check on any of these endpoints — and the ServiceProviderConfig says so with
+  an **empty `authenticationSchemes`** rather than by leaving the member out. A real SCIM
+  endpoint is the most dangerous URL an identity provider exposes, so a mock that shipped
+  a token check nobody verified would be worse than one that says plainly it has none.
+* **`active: false` deactivates nobody.** It is stored on the entry as `scimActive` and
+  read by nothing here: no bind is refused, no token withheld, no session ended. This is
+  the same distinction this service draws about a group — carrying a fact is not acting on
+  one — and it matters more here than anywhere else, because deprovisioning is the single
+  most common thing a SCIM client is built to do and a mock that pretended to disable an
+  account would let somebody ship a path that has never worked.
+* **No ETag and no `changePassword`**, both advertised as unsupported rather than
+  half-implemented. A version built over a `modifyTimestamp` with one-second resolution
+  would be a concurrency control a client *trusts* and that is wrong, which is worse than
+  none; and no password here is checked, so there is none to change. Responses go out
+  through `res.end()` rather than `res.send()` for the first of those — Express computes a
+  weak ETag for every `send()` body, and a document saying there is no version control on
+  responses carrying a version is the drift that building the document out of the config
+  object was meant to prevent.
+* **A member that names nothing is accepted.** This directory does no referential
+  integrity — deleting a user leaves their DN in every group that listed them — so
+  refusing a dangling member here would make that state impossible to reproduce and would
+  be this service enforcing in one direction what it explicitly does not enforce in the
+  other. It is logged, so it is visible rather than silent, and `/admin/groups` reports it.
+
+#### Things you can make fail
+
+A permissive server is hard to write error handling against, so these exist on purpose —
+the same device as the reserved password `invalid` everywhere else here:
+
+| Do this | Get this |
+|---|---|
+| create a user with `userName` `invalid` | `400 invalidValue` |
+| create a second user with a `userName` somebody already has | `409 uniqueness` |
+| ask for an id that names nothing | `404` |
+| send a filter this server cannot evaluate | `400 invalidFilter` — refused rather than answered with an empty list, because "no results" and "I could not read your filter" are different answers and a client can only act on the second |
+| any method on `/Me` | `501` — section 3.11 aliases the authenticated subject and nothing here authenticates, so there is never one to alias. Better than a 404, which would say the route is not there, and far better than a guess at who is asking |
+| POST to `.search` without the SearchRequest schema URN | `400 invalidSyntax` |
+
+#### Why there is a dependency, and one defect it is routed around
+
+`scimmy` is the second npm dependency this service has taken on for a protocol, and the
+reasoning is the same one that refused `swagger-ui-dist` and came out the other way: 735 KB
+unpacked, **no runtime dependencies**, MIT, and it brings the three things that are
+genuinely hard about SCIM and boring to get right — the RFC 7643 schema definitions with
+their attribute characteristics and the coercion that enforces them, the section 3.4.2.2
+filter grammar, and the section 3.5.2 PATCH path grammar. That last one is where every
+hand-rolled SCIM server is subtly wrong: `emails[type eq "work"].value` is a *path*, and
+treating it as a property name is the defect that makes a provisioning client's updates
+land somewhere else. Writing those by hand would have been most of two thousand lines for
+a mock and would have been wrong in exactly the places a client is trying to test.
+
+Two things it does *not* do are worth knowing, because both look like they are handled:
+
+**`Resource#read()` does not apply the filter it parsed.** It parses it, hands the
+resource instance to the egress handler, and wraps whatever comes back. A handler that
+ignores `.filter` returns everybody for every query — which looks like a working server
+right up until somebody filters. The sort and the pagination *are* applied, by
+`ListResponse`.
+
+**`Filter#match()` throws on a nested attribute the resource does not have.** It handles
+one by diving in — `new Filter([expressions]).match([actual])` — without checking that
+`actual` is there, so the recursive call reaches `Object.entries(undefined)`. A filter
+naming any sub-attribute (`emails.value co "@example.com"`, `name.familyName sw "Sm"`)
+blows up on the first person who has no email, which in a directory is the ordinary case
+and not an edge one; the exception surfaces as `400 invalidValue: Cannot convert undefined
+or null to object`, which points at nothing. `toScimUser()` routes around it by **padding**
+every multi-valued and complex member so the value is always at least an empty array or
+object, and `prune()` takes the padding back off before the resource goes on the wire. The
+two steps are separate on purpose — the padding is for the matcher and the pruning is for
+the wire — and it is the same shape of workaround `toSearchEntry()` uses for ldapjs's
+`SearchResponse.send()`, documented in both places because it is two lines that look like
+a stylistic choice.
+
+#### The console page
+
+`/admin/scim` reports two different kinds of thing. The **counters**, from
+`admin_stats.js`: which operation was performed how many times, on which resource type,
+and what was refused with which `scimType` — with every operation and resource type drawn
+*including the ones at zero*, because "does this server do PATCH" is the question somebody
+arrives with and a table listing only what has happened answers it by omission. And the
+**surface**, read from `scim.js` through a reader slot: the endpoints, what SCIM here
+deliberately does not do, and the reachable negatives, written once in the module that
+implements them rather than described a second time on a page that would eventually stop
+being true.
+
+**The bulk count deliberately does not tally with the rest**, and the page says so: one
+`POST /scim/v2/Bulk` carrying five creates is one `bulk` row *and* five `create` rows,
+because each of the five really is performed. A reader adding the column up would
+otherwise conclude the counting is broken.
+
+**It has no controls, and that is the console parity rule holding rather than a gap.**
+Everything about SCIM that can be changed is a `config.js` row — `scim.enabled` and three
+limits — so `/admin/config` already has the form and `POST /admin-api/config/set` already
+has the operation. A second form here would be a second door to one setting.
+`GET /admin-api/scim` is therefore read-only, which it shares with `/admin-api/audit`, and
+in both cases for the same reason.
+
+One thing those settings do that is worth copying: `applyCapabilities()` is called both at
+require time *and* at the top of the ServiceProviderConfig handler. Without the second
+call, `scim.maxResults` would be enforced live — `queryParams()` reads it per request,
+which is the rule for a runtime setting — while the published document went on advertising
+the number the process started with. That is a captured `const` in disguise, and the exact
+silent disagreement `config.js`'s header warns about.
+
+### SPIFFE — three server-side surfaces, and no attestation at all
+
+This service is a **SPIFFE issuing authority** for one trust domain
+(`spiffe.trustDomain`, `example.org` by default). SPIFFE's server side is three
+separate things, and they are worth separating because they have almost nothing
+in common with each other:
+
+| | |
+|---|---|
+| **The bundle endpoint** | plain HTTPS. One GET returning a JWK Set. This is the whole of the federation protocol's server half |
+| **The Workload API** | gRPC, on a Unix socket and on TCP. What a *workload* talks to, to be given an identity |
+| **The SPIRE Server API** | gRPC. What an *operator* and an *agent* talk to: registration entries, attestation, bundles, minting |
+
+`GET /spiffe` describes all three and reports whether each of the four sockets
+actually bound — which nothing else can do, because `/sts-metadata` is built by
+walking the Express router and a gRPC listener registers no route.
+
+#### Nothing here attests anything, and that is the sentence to read twice
+
+In a real deployment the agent inspects the peer of its Unix socket — pid, uid,
+gid, executable path, container, Kubernetes pod — turns that into **selectors**,
+and hands the workload only the identities whose registration entries those
+selectors match. That is workload attestation, and it is the whole of how a
+Workload API decides who is asking.
+
+This service does none of it. **Every caller is handed every identity in the
+trust domain**, and any caller that can reach the SPIRE Server API port can
+create a registration entry granting a new one. That is the same statement as
+"every LDAP bind succeeds" one directory over, and it is what makes the service
+useful for exercising a client rather than dangerous to run on a laptop — but it
+matters more here than anywhere else in this repository, because what comes out
+is a credential another service will believe. It is said on `GET /spiffe`, on
+every page of `/admin/spiffe`, in the management API's descriptions, and beside
+`spiffe.grpcHost` in `config.js`.
+
+Three things follow, and each is deliberate:
+
+* **Selector matching is implemented and is not what decides an answer.**
+  `spiffe_registry.selectorsMatch()` computes exactly what SPIRE would — the
+  entry's selectors must be a **subset** of the workload's, not equal to them and
+  not merely intersecting — and `GetAuthorizedEntries` and the console use it.
+  The Workload API does not, because there is nothing to match against.
+* **`spiffe.autoCreateEntries` off is the interesting setting.** With it off, a
+  caller matching no entry is answered with an **empty SVID list**, which is
+  exactly what a real agent does for an unregistered workload and is the only way
+  to exercise a client's "I have no identity" path. That path is one most client
+  libraries have and almost nobody runs.
+* **Node attestation is taken on trust.** Whatever attestor an agent names and
+  whatever payload it sends are written down as claimed, which is why every agent
+  entry carries a selector valued `unverified:true`: an agent's selectors here
+  are claims, not attested facts.
+
+#### What it does refuse, which is a short list and not an empty one
+
+A mock that said yes to everything would be useless to the only people who call
+some of these methods:
+
+* **A Workload API call with no `workload.spiffe.io: true` metadata header.** The
+  Workload Endpoint specification requires it and requires a server to refuse
+  without it. It is not a security check — anybody can send a header — it exists
+  so a caller cannot reach the endpoint *by accident*. It is enforced here
+  because **a client that omits it has a bug and this is the only thing that will
+  ever tell them**: every real implementation will refuse them, and a mock that
+  accepted it would let somebody ship code that works against this and nothing
+  else. `spiffe.requireSecurityHeader` turns it off.
+* **`FetchJWTSVID` and `MintJWTSVID` with no audience.** A JWT-SVID is a bearer
+  credential; the audience is what stops one issued for service A being replayed
+  against service B, which is why the specification puts it in the request rather
+  than in configuration.
+* **`ValidateJWTSVID` on anything that does not really verify** — signature
+  against the trust domain's JWT authorities, `exp` with no leeway, the audience,
+  and that the `sub` belongs to the trust domain whose key verified it. The point
+  of the call is to be told no, so this is the one method in the family that
+  behaves like a real one. It is the same exception `/oauth2/userinfo` is among
+  the token-reading endpoints.
+* **A registration entry** whose SPIFFE ID is invalid, belongs to another trust
+  domain, or sits under the reserved `/spire` path.
+* **`AttestAgent` for a banned agent**, and a join token presented twice. A ban
+  that did not refuse would make the button on `/admin/spiffe/agents` a lie.
+* **A federated bundle whose JWKs have no `use` member.** A consumer *MUST
+  IGNORE* a JWK whose `use` is missing or unknown — so a bundle full of them is
+  stored happily and then verifies nothing, with no error anywhere pointing back
+  at the bundle. Refusing it is the only way that failure ever gets diagnosed.
+
+#### The SPIFFE ID grammar is stricter than a URL parser
+
+`spiffe_id.js` checks the **raw text** and never uses `new URL()`, and that is
+not fastidiousness. Four things a URL parser gets wrong here, each of which
+produces an identifier that looks right in a log:
+
+* **A trust domain is lower-case.** `spiffe://Example.org/x` is not a valid
+  SPIFFE ID, and it is not another spelling of `spiffe://example.org/x` either —
+  they are different identifiers. `new URL()` lower-cases the host for you, which
+  *hides* the defect: the client that sent the wrong form gets an SVID naming the
+  right one and never learns.
+* **The path is not a URL path.** No percent-encoding, no empty segment (so no
+  trailing slash and no `//`), no `.` or `..`. A URL parser accepts all of those
+  and normalises three of them away.
+* **No port, no userinfo, no query, no fragment.** Each is a way of writing an
+  identifier that a naive `startsWith()` treats as belonging to a trust domain it
+  does not — which is an authorization bug in anything that federates. Membership
+  here is a comparison of the *parsed* trust domain, never a prefix test.
+* **`/spire` is reserved** for the server and the agents it attests, so a
+  registration entry there is refused: it would be an identifier this service
+  also mints on its own account.
+
+#### One process, two PKIs
+
+The SPIFFE authority is **not** the certificate that 8443, 9443, LDAPS 636 and
+(under `global.https`) the main port share. That one is a leaf with `CA:FALSE`
+and `extKeyUsage serverAuth`; it cannot sign anything. More to the point, a
+trust domain's CA and a host's TLS identity are two unrelated trust decisions,
+and a service whose SPIFFE root was also its web certificate would teach exactly
+the wrong lesson. So there are two, generated per start, both in memory.
+
+The X.509 half is **EC P-256 by default**, which is what SPIRE issues and what
+the X509-SVID specification recommends. That is why `x509.js`, `key_material.js`,
+`jose_jwe.js` and `crypto_bytes.js` are vendored here from the OAuth2/OIDC
+Debugger — byte-identical, the way `bbs2023.js` already is: `node-forge`, which
+`helpers.js` and `tls_server.js` use, **cannot sign with an EC key at all**. What
+comes with those files is the parent project's `tests/pki_x509.js`, which drives
+~240 certificates — every key algorithm against every signature algorithm, every
+extension, a four-deep chain — and checks each one with **OpenSSL** rather than by
+reading back what the same code just wrote. Four real defects were found that
+way, and all four produced certificates that parsed perfectly and were refused
+elsewhere with a message about a signature.
+
+**Rotation prepends and never replaces.** A new authority becomes the one
+everything is signed with; the old one stays published in the bundle, because an
+SVID minted a minute ago has to go on verifying. Dropping it is the difference
+between a rotation and an outage. Four are retained, and past that the oldest is
+dropped — which does invalidate whatever it signed, and the page says so.
+
+#### The registry is the directory
+
+Registration entries live under `ou=entries,ou=spiffe` and attested agents under
+`ou=agents,ou=spiffe`, in the embedded LDAP directory, exactly as the application
+registry lives under `ou=applications`. **Nothing caches them**, so an
+`ldapmodify` of `spiffeX509SvidTtl` changes the lifetime of the *next* SVID the
+Workload API hands out. Three doors, one store: `ldapmodify`, the forms on
+`/admin/spiffe/entries`, and the SPIRE Server API's `BatchCreateEntry` /
+`BatchUpdateEntry` / `BatchDeleteEntry` — all of which call the same functions.
+
+Two containers rather than one, because they hold different *kinds* of thing: an
+entry is **configuration** deciding what will be issued, and an agent is a
+**record** of something that happened. That is why what may be changed is
+declared rather than derived — the SPIFFE ID, the parent, the selectors, the
+lifetimes and the flags are editable, and the revision number and the SVID
+counter are not. A form that could rewrite a counter would make the page lie
+about this service's own behaviour, indistinguishably from the recording being
+broken. `ldapmodify` still reaches everything: refusing it *there* is the
+difference between offering an operation and merely not preventing it.
+
+`GET /ldap/spiffe` publishes the whole schema, because this directory is
+schemaless and roughly thirty of these attribute names are this service's own
+inventions — no registered LDAP schema has a SPIFFE ID or a selector on it.
+
+#### Three entries are seeded, and the streams stay open
+
+A fresh start seeds three registration entries — `/workload`,
+`/ns/default/sa/web` (with DNS names and a `hint`) and `/ns/default/sa/db` (with
+a different hint) — for the same reason the directory seeds three people: a
+Workload API that answers an empty list teaches a client author nothing, and the
+first thing they will do is assume they have misconfigured something. The two
+hints exist so that "more than one SVID came back" is a path a client can
+actually be driven down. Delete them and they stay deleted until a restart.
+
+`FetchX509SVID` and the two bundle streams are **held open** and re-sent at half
+the SVID lifetime. A Workload API that writes once and ends the stream looks
+completely correct on the first fetch and puts `go-spiffe` into a reconnect loop
+— and a client's rotation handling is the part most worth exercising, which
+otherwise nobody would see without waiting an hour.
+
+#### A foreign bundle is pushed in and never fetched
+
+The federation specification puts a bundle endpoint URL in the relationship and a
+real implementation polls it. This one **records the URL and refuses to follow
+it** — `RefreshBundle` on the SPIRE Server API says so in terms, naming the URL
+it is not fetching. Fetching a URL that somebody registered, in order to obtain a
+key that will then verify credentials, is a server-side request forgery with a
+specification citation attached; on a service that authenticates nobody and
+accepts any registration, it is a blind HTTP client anybody can point anywhere.
+It is the same refusal this service gives WS-Federation's `wreqptr` and a
+client's `jwks_uri`, and holding the position in two files and not in a third
+would be no position at all.
+
+Push one in instead: `POST /admin-api/spiffe/federation-set`, the form on
+`/admin/spiffe`, or `BatchSetFederatedBundle`.
+
+#### The seven methods that are not implemented, each with a reason
+
+A table saying 42 of 42 would be the most misleading thing in this repository, so
+`GET /spiffe` publishes every method with an `implemented` flag and the reason
+where it is false:
+
+| Method | Why not |
+|---|---|
+| `Agent.RenewAgent` | A real server knows which agent is calling from the SVID on the mTLS connection. Nothing here authenticates the caller, so answering would mean renewing whichever agent the *caller named* — a way for anybody to obtain any agent's identity. Call `AttestAgent` again; it is not refused |
+| `Bundle.AppendBundle`, `Bundle.PublishJWTAuthority` | They would add an authority to *this* trust domain's bundle — a key permitted to sign identities in it — that this server holds no private key for. Every workload would trust an authority that can issue nothing. Rotate instead |
+| `TrustDomain.RefreshBundle` | It would fetch a URL somebody registered. See above |
+| `FetchWITSVID`, `FetchWITBundles`, `SVID.MintWITSVID`, `SVID.BatchNewWITSVID`, `Bundle.PublishWITAuthority` | WIT — the Workload Identity Token — is in the current `workloadapi.proto` and `wit-svid` is a `use` the bundle specification names, but the **token's own format is not settled** in a document this service could implement against. Minting something JWS-shaped and calling it a WIT-SVID would be inventing a credential format: code written against the invention would work here and interoperate with nothing. The same reasoning that makes WS-Federation's `wauth` a refusal rather than a fabricated second factor |
+
+#### Why `@grpc/grpc-js` is a dependency in a package that is deliberately short
+
+The argument this repository makes against `swagger-ui-dist` is a real argument
+and it was made again here, in the other direction. This service already
+hand-rolls ASN.1, NDR and a Kerberos PAC, and a hand-rolled protobuf codec with a
+gRPC server over node's built-in `http2` was a genuine option — around 900 lines
+and no dependency.
+
+It was not taken, and the reason is what the service is *for*. A mock exists to
+be talked to by **real clients**: `go-spiffe`, `spiffe-helper`, a SPIRE agent,
+the `spire-server` CLI. An interoperability bug in a hand-rolled HTTP/2 framer
+does not announce itself as a framing bug — it appears as a client that hangs, or
+reports a truncated message, and the client author debugging it has no way to
+tell whether the fault is theirs or ours. That is precisely the failure this
+service exists to spare somebody. The explorer script traded a familiar look for
+11.7 MB; this trades ~30 packages for the wire being right.
+
+Two things that cost real time and are recorded so they cost it once:
+
+* **`keepCase: true` does not reach the well-known types.** It tells the loader
+  not to camel-case the fields of the files it *parses*, which is why the
+  handlers say `spiffe_id` and `x509_svid_key`. `google/protobuf/struct.proto` is
+  not one of those files — protobufjs carries the well-known types as pre-built
+  descriptors whose names are already camelCase. So a `Struct` built with
+  `string_value` serialises to **nothing**: no throw, no warning, a response with
+  the right field names and every value empty. It has to be `stringValue`.
+* **protobufjs wraps exactly one well-known type, `Any`.** A plain JavaScript
+  object assigned to a `Struct` field is not converted for you; it becomes a
+  Struct with no fields. `ValidateJWTSVID` answered 200 with the right
+  `spiffe_id` and an empty `claims` until a real client asked for the claims.
 
 ### TLS and mutual TLS — the other side of a handshake
 

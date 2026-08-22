@@ -149,6 +149,19 @@ var config = {
     sizeLimit: 500
   },
 
+  // --- SCIM --------------------------------------------------------------
+  //
+  // SCIM 2.0 provisions into the directory above — the same entries, the same
+  // cap — so `ldap.maxEntries` is what a POST /scim/v2/Users runs out of and
+  // there is nothing here about storage. Nothing on these endpoints checks a
+  // credential.
+  scim: {
+    enabled: true,
+    maxResults: 200,
+    bulkMaxOperations: 100,
+    bulkMaxPayloadSize: 1048576
+  },
+
   // --- The group claim ---------------------------------------------------
   //
   // A groups claim in every access token, ID Token and SAML assertion, for
@@ -167,7 +180,60 @@ var config = {
   audit: {
     maxEvents: 5000,
     protocolCalls: true
-  }
+  },
+
+  // --- SPIFFE / SPIRE ------------------------------------------------------
+  //
+  // The bundle endpoint, the Workload API and the SPIRE Server API. Four of
+  // these are bound sockets and three are material derived at startup (the
+  // trust domain and the two key types), which is why config.js marks them
+  // restart-only.
+  spiffe: {
+    // Whether the three SPIFFE surfaces answer.
+    enabled: true,
+    // The trust domain this service issues for.
+    trustDomain: 'example.org',
+    // The X.509 authority's key. What SPIRE issues by default.
+    x509KeyType: 'ec-p256',
+    // The JWT authority's key, which decides the alg of every JWT-SVID.
+    jwtKeyType: 'ec-p256',
+    // How long the X.509 authority's own certificate is valid, in seconds.
+    caTtl: 86400,
+    // The default X509-SVID lifetime, in seconds.
+    svidTtl: 3600,
+    // The default JWT-SVID lifetime, in seconds. Shorter because it is a bearer credential.
+    jwtSvidTtl: 300,
+    // spiffe_refresh_hint in the published bundle, in seconds.
+    refreshHint: 300,
+    // The X.501 subject on every SVID. SPIRE's own value; the identity is the URI SAN.
+    svidSubject: 'C=US,O=SPIRE',
+    // Invent a registration entry for a workload that matches none. Off is how a client's "I have no identity" path is exercised.
+    autoCreateEntries: true,
+    // Refuse a Workload API call with no workload.spiffe.io: true header, as every conforming implementation does.
+    requireSecurityHeader: true,
+    // How many registration entries may live under ou=spiffe.
+    maxEntries: 500,
+    // How many attested agents are held.
+    maxAgents: 200,
+    // How many foreign trust domains' bundles are held.
+    maxFederatedBundles: 32,
+    // Where the trust bundle is published.
+    bundlePath: '/spiffe/bundle',
+    // Serve the Workload API on a Unix socket. What SPIFFE_ENDPOINT_SOCKET means to every real client.
+    workloadSocketEnabled: true,
+    // Where that socket lives. SPIRE's own default path.
+    workloadSocket: '/tmp/spire-agent/public/api.sock',
+    // The Workload API over TCP. 0 turns it off.
+    workloadPort: 8092,
+    // The SPIRE Server API over gRPC. SPIRE's own default is 8081, which this service's HTTP port already has.
+    serverPort: 8181,
+    // Also serve the SPIRE Server API on a Unix socket.
+    serverSocketEnabled: false,
+    // Where that socket lives when it is on.
+    serverSocket: '/tmp/spire-server/private/api.sock',
+    // The address both TCP gRPC listeners bind.
+    grpcHost: '0.0.0.0'
+  },
 };
 
 module.exports = config;

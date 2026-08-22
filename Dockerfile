@@ -81,6 +81,14 @@ COPY *.js ./
 # these live in the client's tree and bbs2023.js looks there first; here they are a
 # sibling directory, which is that function's second candidate.
 COPY contexts ./contexts
+# The vendored `.proto` files, read AT REQUIRE TIME by spiffe_grpc.js — the same
+# mandatory relationship the contexts above have, and with the same consequence:
+# that module loads them at module scope, so a missing one is not a degraded
+# SPIFFE feature, it is a container that never listens. They are the SPIFFE
+# project's own workloadapi.proto and the spire-api-sdk's, verbatim; the wire
+# matching what a real client expects is the entire reason @grpc/grpc-js is a
+# dependency here, so a local edit to one of these would give that up silently.
+COPY protos ./protos
 # The service selects its configuration (log level) with CONFIG_FILE, the same
 # way api and client do. The compose files override this per stack.
 COPY env ./env
@@ -111,4 +119,17 @@ EXPOSE 389
 EXPOSE 636
 EXPOSE 8443
 EXPOSE 9443
+# The two SPIFFE gRPC listeners over TCP: 8092 is the Workload API and 8181 the
+# SPIRE Server API. 8181 rather than SPIRE's own 8081 because that is this
+# service's HTTP port, so a client configured for a real spire-server has one
+# thing to change and it is named on GET /spiffe.
+#
+# THE WORKLOAD API'S UNIX SOCKET IS NOT A PORT and cannot be EXPOSEd: it is at
+# spiffe.workloadSocket (`/tmp/spire-agent/public/api.sock`, SPIRE's own path)
+# INSIDE the container, and it is what SPIFFE_ENDPOINT_SOCKET means to every real
+# client. To reach it from the host or from another container, mount the
+# directory as a volume — publishing 8092 is the alternative, and it needs the
+# client pointed at `tcp://host:8092` explicitly.
+EXPOSE 8092
+EXPOSE 8181
 CMD [ "node", "server.js" ]

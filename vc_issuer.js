@@ -627,7 +627,30 @@ async function buildLdpVc(subjectClaims, holderJwk, credentialIssuer, issuerDid)
 }
 
 // Mint whichever format the requested configuration names.
-async function buildCredentialFor(configId, subjectClaims, holderJwk, credentialIssuer, issuerDid) {
+// WHO THE ACCESS TOKEN SAYS THE CREDENTIAL IS ABOUT, as one function because it
+// is now asked twice and the two answers must be the same string.
+//
+// subjectClaimsFrom() asks it to pick the person a credential describes; the
+// credential endpoint asks it so that buildCredentialFor() can tell the
+// directory whose the holder DID is. Written out at both sites, a change to
+// either — the day this reads `sub` before `preferred_username`, say — would
+// link a DID to a person nothing else here is filed under, and the symptom
+// would be a second directory entry rather than an error.
+function holderNameFrom(accessToken) {
+  let t = {};
+  try {
+    const parts = String(accessToken || '').split('.');
+    if (parts.length === 3) t = jsonFromB64u(parts[1]) || {};
+  } catch (e) {
+    // An opaque token, exactly as subjectClaimsFrom() treats one: the mock
+    // default is the answer, not an error.
+    t = {};
+  }
+  return t.preferred_username || t.sub || 'mock-holder';
+}
+
+async function buildCredentialFor(configId, subjectClaims, holderJwk, credentialIssuer, issuerDid,
+                                  holderName) {
   log.debug("Entering buildCredentialFor(). configId=" + configId);
   const format = vciFormatOf(configId);
   let built;
@@ -670,6 +693,14 @@ async function buildCredentialFor(configId, subjectClaims, holderJwk, credential
   if (/^did:[a-z0-9]+:/i.test(subject)) {
     stats.recordAuthentication({
       presented: subject,
+      // WHOSE DID IT IS, which this function knows and nothing downstream can
+      // work out. The DIRECTORY uses it to put this identifier on that person's
+      // entry rather than on a second one named by a digest — see didPlan() in
+      // ldap_server.js, where the reversal of the paragraph above is argued.
+      // The two records stay two: /admin/users still shows the DID as its own
+      // identity, because a holder key and the person a credential is about are
+      // genuinely different things to have seen.
+      linkedTo: holderName,
       protocol: 'OpenID4VCI',
       method: 'credential subject (' + format + ', bound to the holder key the ' +
               'wallet proved possession of)',
@@ -706,7 +737,7 @@ function subjectClaimsFrom(accessToken, configId) {
     // An opaque token — the mock defaults it is.
     log.debug("The access token is not a readable JWT; using the default claims.");
   }
-  const user = t.preferred_username || t.sub || 'mock-holder';
+  const user = holderNameFrom(accessToken);
   // ---------------------------------------------------------------------------
   // AND THAT PERSON IS RECORDED, which is the one funnel this subsystem was
   // missing.
@@ -1310,6 +1341,10 @@ app.post('/oid4vci/credential', async function (req, res) {
     const transactionId = randomId(16);
     deferredTransactions.set(transactionId, {
       claims: subjectClaimsFrom(accessToken, requestedConfigId),
+      // Read HERE and kept, because the deferred endpoint is reached with a
+      // transaction_id and not with the access token that named this person —
+      // so it is the last moment anything knows whose credential this is.
+      holderName: holderNameFrom(accessToken),
       holderJwk: holderJwk,
       holderJwks: holderJwks,
       // The format was chosen in the request that was deferred, not in the one
@@ -1339,7 +1374,7 @@ app.post('/oid4vci/credential', async function (req, res) {
   const issuerId = vciMetadata(req).credential_issuer;
   const issued = await Promise.all(holderJwks.map(function (jwk) {
     return buildCredentialFor(requestedConfigId, claims, jwk, issuerId,
-      issuerDidFor(requestedConfigId, req));
+      issuerDidFor(requestedConfigId, req), holderNameFrom(accessToken));
   }));
   const response = {
     credentials: issued.map(function (b) { return { credential: b.credential }; }),
@@ -1399,7 +1434,7 @@ app.post('/oid4vci/deferred_credential', async function (req, res) {
   const deferredConfigId = record.configId || VCI_CONFIG_ID;
   const issued = await Promise.all(holderKeys.map(function (jwk) {
     return buildCredentialFor(deferredConfigId, record.claims, jwk, issuerId,
-      issuerDidFor(deferredConfigId, req));
+      issuerDidFor(deferredConfigId, req), record.holderName);
   }));
   const response = {
     credentials: issued.map(function (b) { return { credential: b.credential }; }),
