@@ -476,7 +476,19 @@ const OWN_NAMES = [
   // factor": the nearest things in the wild are Active Directory's msDS-*
   // attributes, which are Microsoft's own names for something else entirely, and
   // pretending to be one of those would be worse than obviously not being one.
-  'authnMethod', 'mfaAuthenticated', 'mfaLastAuthTime'
+  'authnMethod', 'mfaAuthenticated', 'mfaLastAuthTime',
+
+  // The HOBA client public keys registered at /.well-known/hoba/register, one
+  // value per key as `<kid> <base64 DER>`. Another invention for the same
+  // reason as the two above: RFC 7486 postdates the LDAP schema documents and
+  // registered no attribute type, and the nearest standard thing —
+  // `userPKCS12`, or `userCertificate` again — is a different object entirely.
+  // It is a CREDENTIAL, which the two lists above are not: anyone who can read
+  // this directory can see which key authenticates somebody, though not sign
+  // with it. That is the same honest position the Kerberos passwords and
+  // `oauthClientSecret` are in, and it is on GET /scim rather than left to be
+  // found.
+  'hobaPublicKey'
 ];
 
 // The table itself, built from the two lists. `learnName()` is the ONE way in,

@@ -1879,8 +1879,10 @@ app.get('/admin/tokens', function (req, res) {
 // funnels rather than from a recording site per feature:
 //
 //   authentication   admin_stats.recordAuthentication(), the single point all
-//                    fourteen protocol families already pass through when a
-//                    credential is ACCEPTED
+//                    fifteen protocol families already pass through when a
+//                    credential is ACCEPTED — SCIM being the fifteenth, for
+//                    the three of its schemes that present a credential per
+//                    request
 //   session          authn.js's startSession / endSession, which is where both
 //                    OAuth 2.0 / OIDC and WS-Federation sign in and out
 //   directory        the seven LDAP handlers in ldap_server.js, plus the
@@ -6310,7 +6312,9 @@ app.post('/admin/config', function (req, res) {
 //
 // **IT HAS NO CONTROLS, AND THAT IS WHY IT NEEDS ONLY A GET ON /admin-api.**
 // Everything about SCIM that can be changed is a `config.js` row —
-// `scim.enabled` and the three limits — so /admin/config already has the form
+// `scim.enabled`, the three limits, and the thirteen authentication settings
+// (which scheme is offered, the two scope names, the realm, the shared Digest
+// password, the two lifetimes) — so /admin/config already has the form
 // and POST /admin-api/config/set already has the operation. A second form here
 // would be a second door to one setting, which is the mistake rule 5 exists for
 // and the same argument group_claims.js makes about `groups.claim`.
@@ -6335,6 +6339,11 @@ function scimJson(req) {
     specifications: surface ? surface.specifications : ['RFC 7642', 'RFC 7643', 'RFC 7644'],
     store: surface ? surface.store : null,
     identifiers: surface ? surface.identifiers : null,
+    // The six schemes, whether each is on, and the access control policy —
+    // from scim_auth.js's table by way of scim.js's description(). Null when
+    // SCIM is not loaded, which is a different thing from every scheme being
+    // off and is why it is not defaulted to an empty list.
+    authentication: surface ? surface.authentication : null,
     endpoints: surface ? surface.endpoints : [],
     doesNotDo: surface ? surface.doesNotDo : [],
     reachableNegatives: surface ? surface.reachableNegatives : [],
@@ -6343,6 +6352,79 @@ function scimJson(req) {
     counters: counters
   };
   log.debug("Leaving scimJson(). " + counters.total + " request(s) counted.");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// THE AUTHENTICATION SECTION OF /admin/scim.
+//
+// Two tables and a list, and the division between them is the one this page
+// already draws everywhere else: the SCHEMES come from scim.js's description()
+// — which is scim_auth.js's table, the same one that builds the
+// WWW-Authenticate challenge and the ServiceProviderConfig — while the COUNTS
+// come from admin_stats.js. So a scheme that is offered cannot be missing from
+// this page and a count cannot be attributed to a scheme that does not exist.
+//
+// Every scheme is drawn INCLUDING the ones at zero and the ones turned off,
+// for the reason the operations table below draws its zeroes: "can I use Digest
+// against this server" is the question somebody arrives with, and a table that
+// listed only what had been used would answer it by omission.
+//
+// There are no CONTROLS here, which is what keeps rule 7 satisfied with only a
+// GET on /admin-api/scim: every one of these is a config.js row, so
+// /admin/config already has the form and POST /admin-api/config/set already has
+// the operation. A second form here would be a second door to one setting.
+// ---------------------------------------------------------------------------
+function authenticationSection(auth, counters) {
+  log.debug("Entering authenticationSection().");
+  const counts = (counters && counters.byAuthScheme) || {};
+  const rows = auth.schemes.map(function (row) {
+    return '<tr><td>' + esc(row.name) +
+      (row.primary ? ' <span class="sub">(primary)</span>' : '') +
+      '<div class="sub">' + esc(row.description) + '</div></td>' +
+      '<td><code>' + esc(row.type) + '</code>' +
+      (row.canonical ? '' : '<div class="sub">no canonical value in RFC 7643 ' +
+        'section 5 — published beside the four that have one</div>') + '</td>' +
+      '<td>' + (row.enabled
+        ? '<span class="state-valid">offered</span>'
+        : '<span class="state-none">off</span>') +
+      '<div class="sub"><code>' + esc(row.setting) + '</code></div></td>' +
+      '<td>' + (row.scoped ? 'what its scopes say' : 'everything') + '</td>' +
+      '<td class="num">' + (counts[row.id] || 0) + '</td></tr>';
+  }).join('');
+  const extra = ['anonymous', 'refused'].map(function (name) {
+    return '<tr><td>' + esc(name === 'anonymous'
+      ? 'Nothing (an open discovery call, or authentication turned off)'
+      : 'Refused before any handler ran') + '</td><td></td><td></td><td></td>' +
+      '<td class="num">' + (counts[name] || 0) + '</td></tr>';
+  }).join('');
+  const policy = auth.policy.map(function (text) {
+    return '<li>' + esc(text) + '</li>';
+  }).join('');
+  const out = '<h2>Authentication</h2>' +
+    '<p class="note">RFC 7644 section 2 defines no credential of its own — it ' +
+    'delegates to TLS and RFC 7235 and NAMES six schemes, and all six are ' +
+    'here. Its one SHALL is that the schemes be indicated in ' +
+    '<code>WWW-Authenticate</code>, which every 401 from these endpoints ' +
+    'carries; its one MUST is that an authenticated client be mappable to an ' +
+    'access control policy, which is the list below. Realm <code>' +
+    esc(auth.realm) + '</code>. Discovery is ' +
+    (auth.discoveryOpen
+      ? 'OPEN, because a client has to be able to read which schemes exist ' +
+        'before it can use one'
+      : 'closed as well (<code>scim.authDiscovery</code>)') + '. Every switch ' +
+    'here is on <a href="/admin/config">Configuration</a>.</p>' +
+    '<table><tr><th>Scheme</th><th>type</th><th>State</th><th>May do</th>' +
+    '<th class="num">Requests</th></tr>' + rows + extra + '</table>' +
+    '<p class="note">The two OAuth scopes are <code>' + esc(auth.scopes.read) +
+    '</code> and <code>' + esc(auth.scopes.write) + '</code> — the first scope ' +
+    'requirement anywhere in this service — and they are published in ' +
+    '<code>scopes_supported</code> in both discovery documents. Digest offers ' +
+    esc(auth.digestAlgorithms.join(', ')) + '; HOBA keys are registered at ' +
+    '<code>' + esc(auth.hobaRegistration) + '</code> and land on the person\'s ' +
+    'own directory entry, so <a href="/admin/users">Users</a> shows them.</p>' +
+    '<h3>The access control policy</h3><ul class="note">' + policy + '</ul>';
+  log.debug("Leaving authenticationSection(). " + auth.schemes.length + " scheme(s).");
   return out;
 }
 
@@ -6440,16 +6522,23 @@ app.get('/admin/scim', function (req, res) {
     '<a href="/admin/vc">Credential claims</a> selects, and lands in whatever ' +
     'group a client puts them in on <a href="/admin/groups">Groups</a>.</p>' +
 
-    '<div class="warn"><strong>These endpoints create and delete accounts and ' +
-    'nothing on them checks a credential.</strong> The ServiceProviderConfig ' +
-    'says so with an empty <code>authenticationSchemes</code> rather than by ' +
-    'leaving the member out. <strong>And <code>active: false</code> ' +
-    'deactivates nobody</strong> — it is stored on the entry as ' +
-    '<code>scimActive</code> and read by nothing here: no bind is refused, no ' +
-    'token withheld, no session ended. Deprovisioning is the commonest thing a ' +
-    'SCIM client does, so that one is worth reading twice.</div>' +
+    '<div class="warn"><strong>These endpoints create and delete accounts, and ' +
+    'they are the one surface in this service that requires a credential' +
+    (json.authentication && !json.authentication.required
+      ? ' — except that <code>scim.authRequired</code> is currently OFF, so ' +
+        'right now they do not'
+      : '') + '.</strong> Almost nothing is checked about it: every scheme ' +
+    'below is permissive, so this is a turnstile rather than a lock. What it ' +
+    'buys is that a client\'s 401, 403 and challenge-response paths can be ' +
+    'exercised at all. <strong>And <code>active: false</code> deactivates ' +
+    'nobody</strong> — it is stored on the entry as <code>scimActive</code> ' +
+    'and read by nothing here: no bind is refused, no token withheld, no ' +
+    'session ended. Deprovisioning is the commonest thing a SCIM client does, ' +
+    'so that one is worth reading twice.</div>' +
 
     tiles +
+
+    (json.authentication ? authenticationSection(json.authentication, counters) : '') +
 
     '<h2>Operations</h2>' +
     '<p class="note">Every operation this server implements, including the ones ' +

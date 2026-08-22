@@ -1492,6 +1492,12 @@ module.exports = {
   close: close,
   // Exported for tests, which check these without opening a socket.
   splitPemCertificates: splitPemCertificates,
+  // The RFC 4514 form of a subject, exported because scim_auth.js needs the
+  // identity of a client certificate presented at the SCIM endpoints and it has
+  // to be the SAME string this module records and the directory files a
+  // certificate under. Two spellings of one DN is two people on /admin/users,
+  // and the difference between them is a comma and a space.
+  dnRfc4514: dnRfc4514,
   addAnchors: addAnchors,
   clearAnchors: clearAnchors,
   serverCertificatePem: function () { return SERVER_CERTIFICATE.certPem; },

@@ -50,7 +50,7 @@ are — most of it is the record of something having gone wrong once.
 | **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
 | **SPIFFE, and the SPIRE Server API** | a **SPIFFE issuing authority** for one trust domain, in all three of its server-side shapes. The **bundle endpoint** is plain HTTPS at `/spiffe/bundle` — a JWK Set with `spiffe_sequence` and `spiffe_refresh_hint`, every key carrying the `use` a consumer must have to consider it at all. The **Workload API** is the gRPC service `SpiffeWorkloadAPI` on a **Unix socket** (SPIRE's own `/tmp/spire-agent/public/api.sock`, which is what `SPIFFE_ENDPOINT_SOCKET` means to every real client) and on TCP: X509-SVIDs with their private keys and the trust bundle, JWT-SVIDs for an audience, both bundle streams, and a `ValidateJWTSVID` that really verifies. The streams are held open and re-sent at half the SVID lifetime, so a client's **rotation** path runs without anybody waiting an hour. The **SPIRE Server API** is six gRPC services and 42 methods from the vendored `spire-api-sdk` protos — Entry, Agent, Bundle, SVID, TrustDomain, Debug — of which 35 are implemented and the other seven each answer with a reason. **Nothing is attested**: every caller gets every identity in the trust domain, which is this service's posture everywhere and matters most here. `GET /spiffe` is most of that sentence at length |
 | **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false — plus one of its own, that an add under `ou=users` whose username is already there is `LDAP_ENTRY_ALREADY_EXISTS` (68), because one person is one entry however they got in — and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
-| **SCIM 2.0 (RFC 7642, 7643, 7644)** | a provisioning endpoint at `/scim/v2`, and **the only family here whose purpose is to write**: create, read, list, replace, PATCH (section 3.5.2 in full, `emails[type eq "work"].value` paths included), delete, both shapes of `.search`, bulk, filtering, sorting, pagination, attribute projection, and the three discovery documents. **What it provisions into is the LDAP directory above — the same entries, no second store and no cache** — so a `POST /scim/v2/Users` and an `ldapadd` create the same entry, and somebody provisioned over SCIM turns up on `/admin/users`, in an `ldapsearch`, in whatever group a client puts them in, and in the attributes their next access token carries. The SCIM `id` **is** the entry's DN, because that already is the opaque server-assigned identifier RFC 7643 asks for. It authenticates nobody — the ServiceProviderConfig says so with an *empty* `authenticationSchemes` rather than by omission — and `active: false` **deactivates nobody**: it is stored as `scimActive` and read by nothing, which is worth reading twice, because deprovisioning is the commonest thing a SCIM client is built to do |
+| **SCIM 2.0 (RFC 7642, 7643, 7644)** | a provisioning endpoint at `/scim/v2`, and **the only family here whose purpose is to write**: create, read, list, replace, PATCH (section 3.5.2 in full, `emails[type eq "work"].value` paths included), delete, both shapes of `.search`, bulk, filtering, sorting, pagination, attribute projection, and the three discovery documents. **What it provisions into is the LDAP directory above — the same entries, no second store and no cache** — so a `POST /scim/v2/Users` and an `ldapadd` create the same entry, and somebody provisioned over SCIM turns up on `/admin/users`, in an `ldapsearch`, in whatever group a client puts them in, and in the attributes their next access token carries. The SCIM `id` **is** the entry's DN, because that already is the opaque server-assigned identifier RFC 7643 asks for. **It is the one family here that requires a credential** — all six schemes RFC 7644 section 2 names are offered (OAuth 2.0 bearer and DPoP tokens with `scim:read` / `scim:write`, HTTP Basic, HTTP Digest, HOBA, the session cookie and a TLS client certificate), and every one of them is permissive, so it is a turnstile rather than a lock. `active: false` **deactivates nobody**: it is stored as `scimActive` and read by nothing, which is worth reading twice, because deprovisioning is the commonest thing a SCIM client is built to do |
 
 `GET /sts-metadata` is the authoritative list — every endpoint read from the running
 router, so it cannot go stale, and fifty specifications with how far each one
@@ -2037,9 +2037,9 @@ Three further details of that page are worth knowing before changing it. It keep
 
 **`/admin/audit`** is the one page here that reports *history* rather than *state*, and that distinction is the whole reason it exists. Every other page answers a question about now: how many calls, which tokens are still valid, who is in `cn=developers`. None of them can answer *when*, or *by whom*, or *in what order*. `/admin/metrics` will tell you the directory holds eleven entries; only this page can tell you that a twelfth was created at 14:02 and deleted at 14:03 by somebody bound as `uid=carol`, over LDAPS — and that in the same minute a token was revoked from the console. Those are three rows here and three numbers that each went up by one over there.
 
-Six categories, and the shape of them is the point rather than the count. **Authentication** is a credential having been *accepted* in any of the fourteen protocol families. **Session** is a browser sign-on session created or ended — shared between OAuth 2.0 / OIDC and WS-Federation, so a `wsignout1.0` and an `/oauth2/logout` produce the same row. **Directory** is every LDAP operation over 389 and 636 alike. **Admin** and **API** are the console and `/admin-api`. **Protocol** is every other endpoint.
+Six categories, and the shape of them is the point rather than the count. **Authentication** is a credential having been *accepted* in any of the fifteen protocol families. **Session** is a browser sign-on session created or ended — shared between OAuth 2.0 / OIDC and WS-Federation, so a `wsignout1.0` and an `/oauth2/logout` produce the same row. **Directory** is every LDAP operation over 389 and 636 alike. **Admin** and **API** are the console and `/admin-api`. **Protocol** is every other endpoint.
 
-Each of those arrives through a funnel this service already had, which is the property worth keeping. `admin_stats.recordAuthentication()` is the single point all fourteen families pass through the moment a credential is accepted, so one line there is one line and not fourteen; `app.js`'s call log is the single place every answered request passes through, so one call there covers the console, the API and every protocol endpoint rather than a recording site in each of forty route handlers, thirty-seven of which would never have been added. Only the directory needed a site per operation, because ldapjs dispatches straight into the handler and what a row has to say genuinely differs — a modify names its changed attributes, a search names how many entries came back. What is *not* repeated across those seven is the rule that decides whether an add is a user, a group or something else: that is **placement**, since this directory is schemaless and believing the `objectClass` a client sent would file a `groupOfNames` added under `ou=users` as a group, and it lives in one function that `/admin/groups` agrees with by construction.
+Each of those arrives through a funnel this service already had, which is the property worth keeping. `admin_stats.recordAuthentication()` is the single point all fifteen families pass through the moment a credential is accepted, so one line there is one line and not fifteen; `app.js`'s call log is the single place every answered request passes through, so one call there covers the console, the API and every protocol endpoint rather than a recording site in each of forty route handlers, thirty-seven of which would never have been added. Only the directory needed a site per operation, because ldapjs dispatches straight into the handler and what a row has to say genuinely differs — a modify names its changed attributes, a search names how many entries came back. What is *not* repeated across those seven is the rule that decides whether an add is a user, a group or something else: that is **placement**, since this directory is schemaless and believing the `objectClass` a client sent would file a `groupOfNames` added under `ou=users` as a group, and it lives in one function that `/admin/groups` agrees with by construction.
 
 **No credential is ever recorded, and that constrains what the rows can say.** Not a password, not a bearer token, not an assertion, and no request or response body at all. A modify names the attributes it changed and never their values, because a modify is where a `userPassword` gets set; a compare says whether it matched and not what was tried, because comparing against `userPassword` is precisely how a client checks a password without binding; a refused bind carries the DN and not the password, not even its length. An `authorization code` or an `id_token_hint` in a query string is replaced with `(redacted)` — a query string is otherwise kept, because on this service it is page numbers, filters and client ids. The one field read out of an admin request body is `action`, by name and capped in length, and that narrowness is deliberate: those bodies carry pasted JWTs, since the tokens page revokes by pasted token.
 
@@ -2737,12 +2737,21 @@ property of a SCIM endpoint is that what it writes is what everything else then 
 the containers are, what counts as a person and what counts as a group; `scim.js` is the
 boundary, which is why it is short.
 
-**It is the fifteenth protocol family and NOT the fifteenth authentication family**, and
-where this document says fourteen it still means fourteen. `recordAuthentication()` is
-the funnel every family passes through the moment a credential is accepted, and SCIM
-accepts none: nobody signs in to provision somebody else. So a person created here gets a
-directory entry with `origin: scim` and no row on `/admin/users` until they actually turn
-up and authenticate — which is the honest distinction, and the same one this service draws
+**It is the fifteenth protocol family, and it became the fifteenth *authentication*
+family when these endpoints started requiring a credential** — which is a change from
+what this document used to say, and the change is narrower than it looks. Three of the
+schemes at `/scim/v2` present a credential on every request (Basic, Digest, HOBA), and
+accepting one of those is an authentication like any other, so it reaches
+`recordAuthentication()` and its caller appears on `/admin/users` under protocol `SCIM`.
+The other three do not, because each *continues* an authentication already recorded:
+an access token was accepted when it was issued, a session cookie when its session began,
+and a client certificate once per connection rather than once per request.
+
+What has **not** changed is the distinction that mattered here first: **being provisioned
+is not authenticating**. The person a SCIM client creates has signed in to nothing. So a
+person created here gets a directory entry with `origin: scim` and no row on
+`/admin/users` until they actually turn up and authenticate — which is the honest
+distinction, and the same one this service draws
 everywhere else between an identity being *recorded* and an identity having *authenticated*.
 
 #### The `id` is the DN
@@ -2817,13 +2826,145 @@ them, which produced exactly the stored-copy-of-the-DN the synthesis exists to p
 An audit row naming `entryDN` among the attributes a SCIM PUT had just written is what
 showed it.
 
+#### Authentication — the one surface here that asks
+
+Every other endpoint in this service answers anybody. These do not, and the reason is
+what they are: `/scim/v2` creates and **deletes** accounts in a directory that fifteen
+other things then read. A provisioning endpoint that asks nobody's name is the one place
+in a permissive mock where *permissive* stops being a teaching device and becomes a shape
+somebody copies into a real deployment.
+
+**RFC 7644 section 2 is shorter than people expect.** It defines no SCIM credential at
+all: "The SCIM protocol is based upon HTTP and does not itself define a SCIM-specific
+scheme for authentication and authorization. SCIM depends on the use of Transport Layer
+Security (TLS) and/or standard HTTP authentication and authorization schemes as per
+[RFC7235]." What it does is *name* six ways — TLS client authentication, HOBA, bearer
+tokens, proof-of-possession tokens, cookies, and HTTP Basic, which it discourages in
+those words — and state two normative sentences. **All six are implemented here**, and
+both sentences are honoured:
+
+* a provider **SHALL** indicate its supported schemes in `WWW-Authenticate`. Every 401
+  from these endpoints carries one header per offered scheme.
+* a provider **MUST** be able to map the authenticated client to an access control policy.
+  This service has one, and it is two lines long, which is the honest length for a mock.
+
+| Scheme | `type` in the ServiceProviderConfig | What it costs a caller |
+|---|---|---|
+| **OAuth 2.0 Bearer token** (RFC 6750) | `oauthbearertoken`, `primary` | An access token from this service's own token endpoint, from **any** grant, carrying `scim:read` or `scim:write`. Verified as `/oauth2/userinfo` verifies: this service's signature, not revoked, right audience |
+| **DPoP / proof-of-possession** (RFC 9449) | `oauth2` | The same token, bound to a key and presented with a proof. An RFC 8705 certificate-bound token is honoured on the same path |
+| **HTTP Basic** (RFC 7617) | `httpbasic` | Any username, any password except the reserved `invalid` |
+| **HTTP Digest** (RFC 7616) | `httpdigest` | Any username, and **the password really is checked** — see below |
+| **HOBA** (RFC 7486) | `hoba` | A signature over the server's challenge, verified against a key anybody may register |
+| **Session cookie** | `httpcookie` | The browser sign-on session `/authn/login` already creates |
+| **TLS client certificate** | `tlsclientauth` | A certificate that verified against an anchor POSTed to `/tls/trust` |
+
+**The access control policy.** An OAuth credential may do what its scopes say: `scim:read`
+to read and `scim:write` to write, and **neither implies the other** — a read-only
+provisioning credential is a thing a client has to handle, and a server that treated one
+scope as both could not produce one. **Every other scheme may do both**, because none of
+them carries a scope. That is worth reading twice, because it has a consequence: a caller
+who cannot get a scope can simply use Basic instead. Which is why every scheme has a
+switch of its own — a deployment exercising a client's scope handling turns the other
+five off, and then the only way in is the one being tested.
+
+**These are the first OAuth scopes anywhere in this service that are read for anything.**
+They are published in `scopes_supported` in both discovery documents, and this
+authorization server grants what it is asked, from any grant, to any `client_id`. So what
+the requirement exercises is the *client's* handling of a scope, not this service's
+willingness to withhold one.
+
+**Two schemes really verify something, and both for the same reason.** HTTP Digest hashes
+the password into the response, so a server that accepted any response would not be
+performing the exchange at all — and the half of a client that this exercises *is* the
+part that computes that hash. So Digest does what Kerberos does, for the same reason and
+with the same shape: any username authenticates and every one of them shares one password
+(`scim.digestPassword`, `password!` by default — the value `KRB5_USER_PASSWORD` already
+defaults to, so there is one fact to remember rather than two). HOBA is the same argument
+about a signature: it is genuinely verified, RSA with SHA-256 over RFC 7486 section 5's
+length-prefixed blob, and what is permissive is the *registration* — anybody may register
+any key for any name at `/.well-known/hoba/register`, which is unauthenticated for the
+reason `POST /tls/trust` is: it is how a caller **gets** a credential. The key lands on
+that person's own directory entry as `hobaPublicKey`, so an `ldapsearch` and
+`/admin/users` show it.
+
+Between them those two make five negatives reachable that no permissive server can
+produce: a wrong password, a stale nonce (`stale=true`, which a conforming client retries
+silently and a hand-written one usually does not), a replayed nonce count (refused
+*without* `stale`, because the credential was valid and has been seen before — a
+different sentence deserving a different answer), a signature that does not verify, and a
+replayed HOBA triple.
+
+**The discovery endpoints are open.** `/ServiceProviderConfig`, `/ResourceTypes` and
+`/Schemas` answer without a credential unless `scim.authDiscovery` says otherwise, which
+is the bootstrapping argument `POST /tls/trust` already makes: the ServiceProviderConfig
+is where a client *reads* which schemes exist, so demanding a credential to fetch it means
+a client must already know the answer to the question it is asking. RFC 7644 section 4
+says nothing either way, so both are conforming and the other one is a setting away.
+
+**The ServiceProviderConfig publishes all seven rows and three of them have no canonical
+`type`.** RFC 7644 section 2 names six schemes; RFC 7643 section 5 gives
+`authenticationSchemes.type` five canonical values — `oauth`, `oauth2`,
+`oauthbearertoken`, `httpbasic`, `httpdigest` — and the two lists do not cover each other:
+there is no canonical value for a client certificate, a cookie or HOBA. `scimmy` enforces
+the canonical five, which is a correct reading of that document, so the four it can
+validate go through its config object and the other three are appended to the serialised
+document with an honest type of their own. Both halves are built from one table, so the
+document cannot advertise a scheme that is turned off nor omit one that is on. A
+ServiceProviderConfig listing four of the seven ways in would be the most misleading
+document this service publishes, and it is the first thing a SCIM client reads.
+
+**`/Me` is an alias now, and its 501 is still reachable.** It answered 501 on every method
+for one reason — "nothing here authenticates, so there is never a subject to alias" — and
+that sentence stopped being true the moment these endpoints started requiring a
+credential. Leaving it would have been the most easily-noticed lie on this surface: a
+client reads the ServiceProviderConfig, authenticates, and is told there is nobody to be.
+So `GET`, `PUT`, `PATCH` and `DELETE` resolve the caller to a directory entry and delegate
+to the **same** User handlers `/Users/{id}` uses — no second read path and no second write
+path. The 501 is still right in two cases and is kept for both: an **anonymous** caller
+has no subject to alias, and `POST` would create a subject that by definition already
+exists. A credential naming somebody with no entry — a `client_credentials` token, a
+client certificate — gets `404` instead, which is the alias resolving to nothing rather
+than the alias being unavailable.
+
+**A caller that authenticates here is recorded, and three of the schemes do not do it.**
+Basic, Digest and HOBA present a credential on every request, so accepting one reaches
+`recordAuthentication()` — the same funnel every other family passes — and the caller
+turns up on `/admin/users` under protocol `SCIM` with a directory entry of their own. A
+bearer token, a session cookie and a client certificate do not, because each continues an
+authentication that was already recorded where it was accepted: the token when it was
+issued, the cookie when its session began, the certificate once per *connection* (which
+is a decision `tls_server.js` made on purpose, and counting it per request here would
+undo it from the other end).
+
+**And it is still a turnstile rather than a lock**, which is the whole design. Anybody can
+get a token with either scope. Any password but one passes Basic. Any username passes
+Digest. Anybody can register a HOBA key. Nothing here decides that a caller *should* be
+allowed to delete an account — it decides that they said who they were first. Do not put
+this port on a public address on the strength of it.
+
+Every switch is a `config.js` row and therefore already on `/admin/config` and
+`POST /admin-api/config/set`: `scim.authRequired` (on by default; turning it **off**
+restores the unauthenticated behaviour these endpoints used to have, which stays reachable
+on purpose), `scim.authDiscovery`, `scim.authRealm`, `scim.scopeRead`, `scim.scopeWrite`,
+one flag per scheme, `scim.digestPassword`, `scim.digestNonceSeconds` and
+`scim.hobaMaxAgeSeconds`. **A credential that is presented and fails is refused whether or
+not one was required** — otherwise a client testing its expired-token path would get a 200
+because the endpoint would also have accepted nobody.
+
 #### What it deliberately does not do
 
-* **It authenticates nobody.** No bearer token, no basic credential, no client
-  certificate check on any of these endpoints — and the ServiceProviderConfig says so with
-  an **empty `authenticationSchemes`** rather than by leaving the member out. A real SCIM
-  endpoint is the most dangerous URL an identity provider exposes, so a mock that shipped
-  a token check nobody verified would be worse than one that says plainly it has none.
+* **It authenticates, and it checks almost nothing.** This is the one surface in the
+  service that refuses a caller who presents nothing, and the reason is the sentence that
+  used to stand here instead: a SCIM endpoint is the most dangerous URL an identity
+  provider exposes, because it creates and *deletes* accounts. All six schemes RFC 7644
+  section 2 names are offered and a credential is required by default — see
+  *Authentication* above. What is *not* checked is almost everything about it: anybody can
+  get an access token with either scope from this service's own token endpoint with any
+  grant, any username with any password but `invalid` passes Basic, any username passes
+  Digest with the one shared password, and anybody can register a HOBA key for any name.
+  It is a turnstile rather than a lock. What it buys is that a client's 401, 403,
+  challenge-response and scope-handling paths can be exercised at all, none of which an
+  open endpoint can produce.
 * **`active: false` deactivates nobody.** It is stored on the entry as `scimActive` and
   read by nothing here: no bind is refused, no token withheld, no session ended. This is
   the same distinction this service draws about a group — carrying a fact is not acting on
@@ -2855,7 +2996,13 @@ the same device as the reserved password `invalid` everywhere else here:
 | create a second user with a `userName` somebody already has | `409 uniqueness` |
 | ask for an id that names nothing | `404` |
 | send a filter this server cannot evaluate | `400 invalidFilter` — refused rather than answered with an empty list, because "no results" and "I could not read your filter" are different answers and a client can only act on the second |
-| any method on `/Me` | `501` — section 3.11 aliases the authenticated subject and nothing here authenticates, so there is never one to alias. Better than a 404, which would say the route is not there, and far better than a guess at who is asking |
+| ask for anything with no credential | `401`, with one `WWW-Authenticate` header per offered scheme — RFC 7644 section 2 makes that header a *SHALL*. The three discovery endpoints are exempt unless `scim.authDiscovery` is on |
+| use an access token with the wrong scope for the operation | `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="scim:write"`. Neither scope implies the other |
+| present a token this service did not issue, or one that was revoked | `401`. These endpoints verify the signature, unlike the OID4VCI credential endpoints which accept a foreign token: a scope on a token nobody verified is a permission its holder wrote for themselves |
+| Basic with the password `invalid` | `401` — the same reserved value every other family here refuses |
+| Digest with a wrong password, a stale nonce, or a repeated `nc` | `401` three ways. The password really is checked here; a stale nonce carries `stale=true`, which a conforming client retries silently; a replayed nonce count does **not**, because it was a valid credential and has been seen before |
+| a HOBA signature that does not verify, or a reused (kid, challenge, nonce) | `401`. The signature is really verified, and the challenge may be *reused* until its max-age — so what counts as a replay is the triple |
+| `GET /Me` with no credential, or any `POST /Me` | `501` — the alias is unavailable rather than the resource missing. A credential naming somebody with no entry here gets `404` instead |
 | POST to `.search` without the SearchRequest schema URN | `400 invalidSyntax` |
 
 #### Why there is a dependency, and one defect it is routed around

@@ -109,9 +109,16 @@ function protocolCallsRecorded() {
 // ---------------------------------------------------------------------------
 const CATEGORIES = [
   { category: 'authentication', label: 'Authentication',
-    what: 'A credential was ACCEPTED, in any of the fourteen protocol ' +
+    what: 'A credential was ACCEPTED, in any of the fifteen protocol ' +
           'families here. Recorded at the single funnel every one of them ' +
-          'already passes through, so this is one place and not fourteen.' },
+          'already passes through, so this is one place and not fifteen. SCIM ' +
+          'is the fifteenth and joined late: three of the schemes its ' +
+          'endpoints accept — Basic, Digest and HOBA — present a credential on ' +
+          'every request, and accepting one is an authentication. Its other ' +
+          'three do not appear here, because each continues an authentication ' +
+          'recorded elsewhere: an access token was accepted when it was ' +
+          'issued, a session cookie when its session began, and a client ' +
+          'certificate once per CONNECTION rather than once per request.' },
   { category: 'session', label: 'Sessions',
     what: 'A browser sign-on session was created or ended. Shared between ' +
           'OAuth 2.0 / OIDC and WS-Federation, so a WS-Federation sign-out ' +
@@ -147,7 +154,7 @@ const CATEGORIES = [
           'registration entry created, changed or deleted, an agent attesting, ' +
           'and the trust bundle being fetched or federated. An SVID row is NOT ' +
           'an authentication row — nothing authenticates to be issued one here ' +
-          '— which is why these are not counted among the fourteen families.' }
+          '— which is why these are not counted among the fifteen families.' }
 ];
 
 const ACTIONS = [

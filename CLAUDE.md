@@ -25,6 +25,14 @@ FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
 *clients*: it authenticates nobody, checks no password, validates no access token
 and **attests no workload**.
 
+**One surface is the exception to that sentence and it is worth knowing before
+reading further**: the SCIM endpoints REQUIRE a credential, in any of the six
+schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read` or
+`scim:write`. They create and DELETE accounts, which is why. It changes none of
+the rest: anybody can get a token with either scope, any password but one passes
+Basic, anybody can register a HOBA key — a turnstile rather than a lock. See
+rule 6a-ii and `scim_auth.js`.
+
 **There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
 Response. That is now the gap beside WS-Trust and WS-Federation, and it is deliberate;
 see README.md rather than inferring from the absence that it was overlooked. It is also
@@ -65,7 +73,8 @@ messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
 `mtls.js`, `client_auth.js`, `oauth2_bcp.js`, `applications.js`,
 `authorization_servers.js`,
 `admin_stats.js`, `audit.js`, `vc_claims.js`, `vc_verifier_config.js`,
-`claim_attributes.js`, `group_claims.js`, `scim_map.js`, `spiffe_id.js`,
+`claim_attributes.js`, `group_claims.js`, `scim_map.js`, `scim_auth.js`,
+`spiffe_id.js`,
 `spiffe_ca.js`, `spiffe_registry.js`, `spiffe_grpc.js`, `spiffe_workload.js`,
 `spiffe_api.js`, the four VENDORED PKI modules those rest on (`x509.js`,
 `key_material.js`, `jose_jwe.js`, `crypto_bytes.js` — byte-identical copies of the
@@ -300,7 +309,7 @@ the one place a reader goes when a handshake is failing.
    had.** `app.js`'s call log covers three of the six categories (the console,
    the management API and every protocol endpoint) because it is the single
    place every answered request passes through; `recordAuthentication()` covers
-   the fourteen protocol families for the same reason it covers the directory's
+   the fifteen protocol families for the same reason it covers the directory's
    user observer; `authn.js`'s `startSession`/`endSession` covers both
    protocols' sign-in and sign-out. Only `ldap_server.js` has a site per
    operation, because ldapjs dispatches straight into the handler and what a row
@@ -1120,7 +1129,7 @@ the one place a reader goes when a handshake is failing.
    `ou=users` for anybody who authenticates through any of the families here, and
    `admin_stats.recordAuthentication()` is already the single funnel all of them
    pass at the moment a credential is ACCEPTED — so one observer there is one place
-   and not fourteen. **A verified TLS client certificate is one of them and is the
+   and not fifteen. **A verified TLS client certificate is one of them and is the
    odd one: its identity is not a name but a DN**, so its entry is named from the
    subject's CN (or the leaf RDN where there is none), every other RDN of the
    subject becomes an attribute, and the issuer, serial, validity and fingerprint go
@@ -1168,7 +1177,7 @@ the one place a reader goes when a handshake is failing.
    return value is ignored and a throw from it is caught — a directory must never
    be able to fail an authentication. Do not "simplify" that into a require in the
    other direction, and do not seed the entry at each authentication site instead:
-   fourteen call sites means a fifteenth that is not.
+   fifteen call sites means a sixteenth that is not.
 
    **A container it does NOT sweep, and that is the point of it.**
    `ou=applications` is `applications.js`'s store (rule 3g) and this module is
@@ -1368,16 +1377,108 @@ WS-Trust 1.0 through 1.4 instead of four.
    HTTP call row `app.js` writes, which is a different layer and is meant to be
    there.
 
-   **IT IS THE FIFTEENTH PROTOCOL FAMILY AND NOT THE FIFTEENTH AUTHENTICATION
-   ONE**, which is why every "fourteen" in this file and in README.md still says
-   fourteen. `recordAuthentication()` is the funnel every family passes at the
-   moment a credential is ACCEPTED and SCIM accepts none — nobody signs in to
-   provision somebody else. So a person created here has a directory entry with
-   `origin: scim` and no row on `/admin/users` until they turn up and
-   authenticate, which is the same distinction this service draws everywhere else
-   between an identity being RECORDED and one having AUTHENTICATED. Do not add a
-   `recordAuthentication()` call to make the two pages agree: they are answering
-   different questions and one of the answers would become false.
+   **IT IS THE FIFTEENTH PROTOCOL FAMILY, AND IT BECAME THE FIFTEENTH
+   AUTHENTICATION ONE WHEN THESE ENDPOINTS STARTED REQUIRING A CREDENTIAL** —
+   which is why "fourteen" now says fifteen throughout this file and README.md.
+   The change is narrower than it sounds and both halves have to be kept
+   straight. Three of the schemes `scim_auth.js` offers present a credential on
+   EVERY REQUEST (Basic, Digest, HOBA), so accepting one is an authentication
+   like a WS-Trust UsernameToken and reaches `recordAuthentication()`; the other
+   three do NOT, because each continues an authentication already recorded where
+   it was accepted — a token when it was issued, a cookie when its session
+   began, a certificate once per CONNECTION, which is a decision
+   `tls_server.js` made deliberately and which counting per request here would
+   undo from the other end.
+
+   **WHAT DID NOT CHANGE IS THAT BEING PROVISIONED IS NOT AUTHENTICATING.** The
+   person a SCIM client CREATES has signed in to nothing, so they still have a
+   directory entry with `origin: scim` and no row on `/admin/users` until they
+   turn up and authenticate. That is the distinction this service draws
+   everywhere else between an identity being RECORDED and one having
+   AUTHENTICATED, and it survives intact; do not add a `recordAuthentication()`
+   call for the provisioned person to make the two pages agree.
+
+6a-ii. **`scim_auth.js` IS WHO IS ASKING AT `/scim/v2`, AND IT IS THE ONLY
+   AUTHENTICATION THIS SERVICE ENFORCES ANYWHERE.** A library like `scim_map.js`
+   — it registers nothing and NEVER TOUCHES `res`: it decides and `scim.js`
+   answers in SCIM's own error shape, the same split `oauth2_bcp.js` has with
+   `oauth2.js`. It requires `helpers.js`, `config.js`, `dpop.js`, `mtls.js`,
+   `admin_stats.js`, `audit.js` by way of those, `authn.js`, `tls_server.js` and
+   `ldap_server.js`; the last three register routes, and requiring them is safe
+   for rule 3e's reason applied rather than assumed — `scim.js` is the only
+   thing that requires this file and it already sits after all three in
+   `server.js`, so there is no cycle and no route moves. Eight things:
+
+   **THE TABLE IS THE MODULE.** `SCHEMES` is the single source for the
+   WWW-Authenticate challenge, for `authenticationSchemes` in the
+   ServiceProviderConfig, for `GET /scim`, and for `/admin/scim`'s per-scheme
+   counters. A scheme turned off vanishes from the challenge and from the
+   published document TOGETHER, which is the property that matters: a client
+   reads a published scheme as a promise and a challenge as an instruction.
+   **Do not add a scheme RFC 7644 section 2 does not name** — the temptation is
+   an API key in a header, which is what most real integrations use, is in no
+   specification, and would interoperate with nothing.
+
+   **RFC 7644 SECTION 2 HAS EXACTLY TWO NORMATIVE SENTENCES** and both are
+   implemented rather than approximated: a provider SHALL indicate its schemes
+   in `WWW-Authenticate` (every 401 carries one header per offered scheme), and
+   a provider MUST be able to map an authenticated client to an access control
+   policy (two OAuth scopes, with every other scheme granting both). The section
+   NAMES six schemes and all six are here. It defines no credential of its own.
+
+   **THE BEARER CHECK IS `dpop.presentedAccessToken()` THROUGH A CAPTURING
+   RESPONSE.** That function is the single check `/oauth2/userinfo` and the
+   three credential endpoints share and it carries the DPoP proof and nonce
+   handshake, the RFC 8705 certificate binding, the RFC 9700 query-string
+   refusal and the audience check — so a fifth implementation was out of the
+   question. What it will not do is speak SCIM: it ANSWERS, with an OAuth-shaped
+   body. So it is handed a response object that records, and what it would have
+   said is translated. THE HEADERS IT SET ARE KEPT VERBATIM, which is the part
+   that matters — `DPoP-Nonce` and `use_dpop_nonce` are how a wallet learns to
+   retry.
+
+   **ONLY THE OAUTH SCHEMES CARRY SCOPES, AND THAT HAS A CONSEQUENCE WORTH
+   STATING.** A caller who cannot get a scope can use Basic instead. Which is
+   why every scheme has a switch of its own: a deployment exercising a client's
+   scope handling turns the other five off. `scim:read` and `scim:write` do NOT
+   imply one another, deliberately, so that a read-only provisioning credential
+   is something this service can produce.
+
+   **TWO SCHEMES REALLY VERIFY SOMETHING AND IT IS THE KERBEROS ARGUMENT BOTH
+   TIMES.** Digest hashes the password into the response, so a server accepting
+   anything would not be performing the exchange and the client's own digest
+   code would go unexercised — hence any username, one shared password
+   (`scim.digestPassword`). HOBA's signature is genuinely verified for the same
+   reason; what is permissive there is the REGISTRATION, which is
+   unauthenticated for the reason `POST /tls/trust` is — it is how a caller GETS
+   a credential. Between them they make five negatives reachable that no
+   permissive server can produce, including the one worth knowing: a replayed
+   nonce count is refused WITHOUT `stale=true`, because `stale` means "your
+   credential was fine, try again" and a replay is the opposite claim.
+
+   **WHICH SCHEMES REACH THE AUTHENTICATION FUNNEL IS `recorded` ON THE ROW**,
+   and the rule is the one this service applies everywhere: recorded at the
+   moment a credential is ACCEPTED, never again while that act continues. See
+   rule 6a above for the three and three.
+
+   **THE DISCOVERY ENDPOINTS ARE OPEN BY DEFAULT** (`scim.authDiscovery`), which
+   is `POST /tls/trust`'s bootstrapping argument: the ServiceProviderConfig is
+   where a client READS which schemes exist, so demanding a credential to fetch
+   it means a client must already know the answer to the question it is asking.
+
+   **A CREDENTIAL THAT WAS PRESENTED AND FAILED IS ALWAYS A REFUSAL**, even with
+   `scim.authRequired` off. A client testing its expired-token path must not get
+   a 200 because the endpoint would also have accepted nobody.
+
+   **THE ServiceProviderConfig PUBLISHES THREE SCHEMES scimmy CANNOT
+   VALIDATE.** RFC 7643 section 5's five canonical `type` values do not cover
+   RFC 7644 section 2's six schemes — there is none for a client certificate, a
+   cookie or HOBA — and scimmy enforces the five, correctly. So the four
+   canonical rows go through `SCIMMY.Config` and the other three are appended to
+   the SERIALISED document by `scim.js`, from the same table. Note also that
+   `authenticationSchemes` is the one scimmy property that is CUMULATIVE:
+   `applyCapabilities()` resets it before setting it, or the array would grow by
+   four every time somebody read the document.
 
    **THE ROUTES ARE REGISTERED ONE BY ONE AND NOT BEHIND `scimmy-routers`.** That
    package exists and would have done it in a line. It mounts an express
@@ -1947,12 +2048,19 @@ Worth knowing before "fixing" one of them:
   only way to exercise a wallet's "I cannot satisfy this request" path, and one page
   setting both would make it impossible to produce. Asking for NO claim is a setting
   too — DCQL reads an absent `claims` member as the whole credential.
-* **SCIM writes into the directory and authenticates nobody doing it.** The
-  `/scim/v2` endpoints create, replace, patch and DELETE accounts, and there is no
-  bearer token, basic credential or client certificate check on any of them — the
-  ServiceProviderConfig states that with an EMPTY `authenticationSchemes` rather
-  than by leaving the member out, which is the honest form of the same statement
-  every other surface here makes. **`active: false` DEACTIVATES NOBODY**: it is
+* **SCIM WRITES INTO THE DIRECTORY AND IS THE ONE SURFACE HERE THAT ASKS WHO IS
+  DOING IT.** The `/scim/v2` endpoints create, replace, patch and DELETE
+  accounts, so they are the exception to everything above: a credential is
+  REQUIRED (`scim.authRequired`), all six schemes RFC 7644 section 2 names are
+  offered, and the OAuth ones must carry `scim:read` or `scim:write` — the first
+  scope requirement anywhere in this service. **It is still a turnstile rather
+  than a lock**, which is a different sentence and the one that matters: anybody
+  can get a token with either scope from any grant, any password but `invalid`
+  passes Basic, any username passes Digest with the one shared password, and
+  anybody can register a HOBA key for any name. What it buys is that a client's
+  401, 403, challenge-response and scope handling can be exercised at all — none
+  of which an open endpoint can produce. See rule 6a-ii and `scim_auth.js`.
+  **`active: false` DEACTIVATES NOBODY**: it is
   stored as `scimActive` and read by nothing, so no bind is refused, no token
   withheld and no session ended. That is the same carrying-is-not-acting
   distinction this service draws about a group, and it matters more here than
@@ -1961,13 +2069,15 @@ Worth knowing before "fixing" one of them:
   somebody ship a path that has never worked. There is no ETag and no
   `changePassword`, both ADVERTISED as unsupported rather than half-implemented
   (a version over a one-second timestamp is a concurrency control a client
-  trusts and that is wrong; and no password here is checked). `/Me` answers 501,
-  because section 3.11 aliases the authenticated subject and there is never one.
-  A member naming nothing is ACCEPTED, because refusing it would make the
+  trusts and that is wrong; and no password here is checked outside Digest).
+  `/Me` is an ALIAS now that there can be an authenticated subject, delegating
+  to the same User handlers, and its 501 is kept for the two cases where it is
+  still right — an anonymous caller, and POST. A member naming nothing is
+  ACCEPTED, because refusing it would make the
   dangling-member state `/admin/groups` exists to report impossible to produce.
 * **The audit log at `/admin/audit` is HISTORY where the rest of the console is
   STATE**, and it is the one page here that can answer *when* and *by whom*.
-  Six categories — a credential accepted in any of the fourteen families, a
+  Six categories — a credential accepted in any of the fifteen families, a
   sign-on session created or ended, every LDAP operation over 389 and 636 alike,
   every console page and form, every management API call, every other endpoint
   call — recorded at the five funnels rule 3c names. **No credential is ever in

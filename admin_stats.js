@@ -50,9 +50,9 @@ const { log, setJwtRecorder, userFor } = require('./helpers');
 //
 // It is called from ONE place in here, recordAuthentication() below, and that
 // is the point: that function is already the single funnel every one of the
-// fourteen protocol families passes through at the moment a credential is
+// fifteen protocol families passes through at the moment a credential is
 // accepted, so the audit log gets its authentication events from one line
-// rather than from fourteen call sites, the fifteenth of which would be the one
+// rather than from fifteen call sites, the sixteenth of which would be the one
 // nobody adds. It is also the only place in this service that has already
 // normalised the identity, which is what lets an audit row and a /admin/users
 // row name the same person.
@@ -475,7 +475,17 @@ const scimCounts = {
   // Keyed by the `scimType` from RFC 7644 section 3.12, with '(none)' for a
   // refusal that carried no such code — a 404 has none, and a table that
   // silently dropped those would report far fewer failures than there were.
-  byScimType: {}
+  byScimType: {},
+  // WHICH AUTHENTICATION SCHEME GOT IN. Keyed by scim_auth.js's scheme ids,
+  // plus `anonymous` for a request nothing authenticated (a discovery call, or
+  // any call while scim.authRequired is off) and `refused` for one that never
+  // got past the gate. The VOCABULARY is not here, deliberately: it belongs to
+  // scim_auth.js, this module cannot require that one (it requires this), and
+  // the console draws the full list of schemes from the surface description it
+  // already reads. So this is a plain tally and the zeroes are supplied by the
+  // page — which is the same division /admin/scim already has between the
+  // counters and the surface.
+  byAuthScheme: {}
 };
 
 function bump(table, key) {
@@ -509,6 +519,7 @@ function recordScim(detail) {
     bump(scimCounts.byOperation, info.operation);
     bump(scimCounts.byResourceType, info.resourceType);
     bump(scimCounts.byStatus, info.status);
+    bump(scimCounts.byAuthScheme, info.authScheme);
     if (!info.ok) {
       bump(scimCounts.byScimType, info.scimType);
     }
@@ -541,7 +552,8 @@ function scimSnapshot() {
     operations: operations,
     resourceTypes: resourceTypes,
     byStatus: Object.assign({}, scimCounts.byStatus),
-    byScimType: Object.assign({}, scimCounts.byScimType)
+    byScimType: Object.assign({}, scimCounts.byScimType),
+    byAuthScheme: Object.assign({}, scimCounts.byAuthScheme)
   };
   log.debug("Leaving scimSnapshot(). " + out.total + " request(s) counted.");
   return out;
