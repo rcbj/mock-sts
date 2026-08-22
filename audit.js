@@ -109,16 +109,21 @@ function protocolCallsRecorded() {
 // ---------------------------------------------------------------------------
 const CATEGORIES = [
   { category: 'authentication', label: 'Authentication',
-    what: 'A credential was ACCEPTED, in any of the fifteen protocol ' +
+    what: 'A credential was ACCEPTED, in any of the sixteen protocol ' +
           'families here. Recorded at the single funnel every one of them ' +
-          'already passes through, so this is one place and not fifteen. SCIM ' +
-          'is the fifteenth and joined late: three of the schemes its ' +
+          'already passes through, so this is one place and not sixteen. SCIM ' +
+          'joined late and SPIFFE later still. SCIM: three of the schemes its ' +
           'endpoints accept — Basic, Digest and HOBA — present a credential on ' +
           'every request, and accepting one is an authentication. Its other ' +
           'three do not appear here, because each continues an authentication ' +
           'recorded elsewhere: an access token was accepted when it was ' +
           'issued, a session cookie when its session began, and a client ' +
-          'certificate once per CONNECTION rather than once per request.' },
+          'certificate once per CONNECTION rather than once per request. ' +
+          'SPIFFE is the sixteenth and reaches this in three ways: an ' +
+          'X509-SVID presented over mutual TLS at the SPIRE Server API (once ' +
+          'per connection, for the reason a client certificate is), an agent ' +
+          'attesting, and a JWT-SVID verified at ValidateJWTSVID. Being ' +
+          'ISSUED an SVID is not one of them.' },
   { category: 'session', label: 'Sessions',
     what: 'A browser sign-on session was created or ended. Shared between ' +
           'OAuth 2.0 / OIDC and WS-Federation, so a WS-Federation sign-out ' +
@@ -153,8 +158,13 @@ const CATEGORIES = [
     what: 'The three server-side SPIFFE surfaces: an SVID minted, a ' +
           'registration entry created, changed or deleted, an agent attesting, ' +
           'and the trust bundle being fetched or federated. An SVID row is NOT ' +
-          'an authentication row — nothing authenticates to be issued one here ' +
-          '— which is why these are not counted among the fifteen families.' }
+          'an authentication row — being ISSUED a credential is not presenting ' +
+          'one — so an issuance is here and never in `authentication`. What ' +
+          'IS in both is a credential PRESENTED to one of these surfaces and ' +
+          'accepted: an X509-SVID over mutual TLS, an agent attesting, a ' +
+          'JWT-SVID validated. Those write an authentication row as well, at ' +
+          'the funnel, the way one act writes rows at several layers ' +
+          'everywhere else here.' }
 ];
 
 const ACTIONS = [
@@ -262,7 +272,18 @@ const ACTIONS = [
   { action: 'spiffe.bundle.read', category: 'spiffe',
     label: 'The trust bundle was fetched' },
   { action: 'spiffe.bundle.change', category: 'spiffe',
-    label: 'An authority was rotated, or a federated bundle was set or removed' }
+    label: 'An authority was rotated, or a federated bundle was set or removed' },
+  // The one SPIFFE row that records a REFUSAL rather than something happening.
+  // It is here rather than folded into `protocol.call` because the question it
+  // answers is different: "why could my agent not list entries" is asked of the
+  // caller and the method together, and a row saying only that a call was made
+  // and failed sends somebody to the client's logs for an answer this service
+  // has. The identity refused IS recorded — a SPIFFE ID is a name and not a
+  // secret — and the certificate it arrived on is not, which is the
+  // no-credential rule at the top of this file holding where it would be
+  // easiest to break.
+  { action: 'spiffe.call.refuse', category: 'spiffe',
+    label: 'A SPIRE Server API call was refused for who was calling' }
 ];
 
 const CATEGORY_OF_ACTION = {};
@@ -423,10 +444,10 @@ function record(event) {
     actorForm: trimmed(info.actorForm || '', MAX_DETAIL_LENGTH),
     // What it was done to: a DN, a path, a session id, a jti.
     target: trimmed(info.target || '', MAX_DETAIL_LENGTH),
-    // Which family, where one applies. Free text on purpose: the fourteen
+    // Which family, where one applies. Free text on purpose: the sixteen
     // families here already spell themselves differently in the places this is
     // read from, and forcing them into an enum would mean a lookup table that
-    // silently drops the fifteenth.
+    // silently drops the seventeenth.
     protocol: trimmed(info.protocol || '', 60),
     // Where it came from: 'http', 'ldap', 'ldaps', 'internal'. Not the client's
     // IP address — see the note on the console page. A mock behind a compose

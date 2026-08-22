@@ -22,16 +22,26 @@ the main port too, on the same certificate), and **SPIFFE** (an issuing authorit
 for one trust domain, in all three of its server-side shapes: the bundle endpoint
 over plain HTTPS, and the **Workload API** and **SPIRE Server API** over gRPC on
 FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
-*clients*: it authenticates nobody, checks no password, validates no access token
-and **attests no workload**.
+*clients*: it checks no password, validates no access token and **attests no
+workload**.
 
-**One surface is the exception to that sentence and it is worth knowing before
-reading further**: the SCIM endpoints REQUIRE a credential, in any of the six
-schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read` or
-`scim:write`. They create and DELETE accounts, which is why. It changes none of
-the rest: anybody can get a token with either scope, any password but one passes
-Basic, anybody can register a HOBA key — a turnstile rather than a lock. See
-rule 6a-ii and `scim_auth.js`.
+**TWO surfaces are the exception to that sentence and both are worth knowing
+before reading further.** The SCIM endpoints REQUIRE a credential, in any of the
+six schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read`
+or `scim:write`; they create and DELETE accounts, which is why. And the **SPIRE
+Server API** requires an **X509-SVID over mutual TLS** on its TCP port and
+authorizes every method against SPIRE's own per-method table — because what
+comes out of that surface is a credential another service will believe. Both are
+a turnstile rather than a lock: anybody can get a token with either SCIM scope,
+any password but one passes Basic, anybody can register a HOBA key, and anybody
+can ask the local socket to mint an SVID. Neither changes anything else, and
+each can be turned off (`scim.authRequired`, `spiffe.authRequired`). See rules
+6a-ii and 3k, `scim_auth.js` and `spiffe_auth.js`.
+
+**The Workload API is the opposite case and the distinction matters**: it
+authenticates nobody because its specification says it MUST NOT — a workload has
+no root of trust until that call gives it one. What it lacks there is
+ATTESTATION, not authentication.
 
 **There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
 Response. That is now the gap beside WS-Trust and WS-Federation, and it is deliberate;
@@ -76,7 +86,7 @@ messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
 `claim_attributes.js`, `group_claims.js`, `scim_map.js`, `scim_auth.js`,
 `spiffe_id.js`,
 `spiffe_ca.js`, `spiffe_registry.js`, `spiffe_grpc.js`, `spiffe_workload.js`,
-`spiffe_api.js`, the four VENDORED PKI modules those rest on (`x509.js`,
+`spiffe_api.js`, `spiffe_auth.js`, the four VENDORED PKI modules those rest on (`x509.js`,
 `key_material.js`, `jose_jwe.js`, `crypto_bytes.js` — byte-identical copies of the
 parent project's, the way `bbs2023.js` and `krb5_spnego.js` are; DO NOT EDIT THEM
 HERE), and
@@ -309,7 +319,7 @@ the one place a reader goes when a handshake is failing.
    had.** `app.js`'s call log covers three of the six categories (the console,
    the management API and every protocol endpoint) because it is the single
    place every answered request passes through; `recordAuthentication()` covers
-   the fifteen protocol families for the same reason it covers the directory's
+   the sixteen protocol families for the same reason it covers the directory's
    user observer; `authn.js`'s `startSession`/`endSession` covers both
    protocols' sign-in and sign-out. Only `ldap_server.js` has a site per
    operation, because ldapjs dispatches straight into the handler and what a row
@@ -799,23 +809,83 @@ the one place a reader goes when a handshake is failing.
    `spiffe_id.js` (the ID grammar), `spiffe_ca.js` (the authorities, minting,
    the bundle), `spiffe_registry.js` (entries and agents, directory-backed),
    `spiffe_grpc.js` (loading the protos, binding, the wrappers),
-   `spiffe_workload.js` and `spiffe_api.js` (the handlers) are all LIBRARIES —
-   they register nothing — and only `spiffe_server.js` registers routes and
-   starts listeners. Seven things are load-bearing:
+   `spiffe_workload.js`, `spiffe_api.js` (the handlers) and `spiffe_auth.js`
+   (who is calling) are all LIBRARIES — they register nothing — and only
+   `spiffe_server.js` registers routes and starts listeners. Nine things are
+   load-bearing:
 
-   **NOTHING ATTESTS THE CALLER, AND THAT IS THE DESIGN.** A real agent reads
-   the peer credentials of its Unix socket, turns them into selectors, and hands
-   a workload only the identities those match. This service hands EVERY caller
-   EVERY identity in the trust domain, and the SPIRE Server API lets any caller
-   create an entry granting a new one. That is the same statement as "every LDAP
-   bind succeeds", and it is stated on `GET /spiffe`, on all three console
-   pages, in the management API's descriptions and beside `spiffe.grpcHost` —
-   because what comes out here is a credential another service will believe.
-   **Selector matching is implemented and is NOT what decides the answer**:
-   `selectorsMatch()` computes exactly what SPIRE would (the entry's selectors a
-   SUBSET of the workload's — not equal, not intersecting) and is used by
-   `GetAuthorizedEntries` and the console. Do not wire it into the Workload API
-   to "fix" this; there is nothing to match against.
+   **THE TWO SURFACES ARE AUTHENTICATED DIFFERENTLY BECAUSE THEIR
+   SPECIFICATIONS SAY OPPOSITE THINGS, and reading that as an inconsistency is
+   the mistake to avoid.** The SPIFFE Workload Endpoint specification says the
+   endpoint "MUST NOT require any direct authentication of its clients" and that
+   "Transport Layer Security MUST NOT be required" — bootstrapping: a workload
+   has no secret and no root of trust until this call gives it one. A real SPIRE
+   *server*, by contrast, binds a TCP port whose callers present an X509-SVID
+   over mutual TLS and authorizes every method against what the caller IS. So:
+   `spiffe.authRequired` reaches the SPIRE Server API and DELIBERATELY NOT the
+   Workload API. Do not "fix" the asymmetry.
+
+   **NOTHING ATTESTS A WORKLOAD OR A NODE, WHICH IS A DIFFERENT CLAIM FROM
+   "NOBODY IS AUTHENTICATED" AND THE TWO MUST STAY APART.** A real agent reads
+   the peer credentials of its Unix socket — `SO_PEERCRED`, giving pid and from
+   that uid, gid, executable, container, pod — and turns them into selectors.
+   **Node has no portable way to read them**: `net.Socket` exposes no such call
+   and `/proc/net/unix` does not record the peer. So `spiffe_auth.js` identifies
+   a Workload API caller by the TRANSPORT it arrived on, the ENDPOINT it reached
+   and its PEER ADDRESS, and by nothing else. Two consequences:
+
+   * **Selector matching now DECIDES the answer** (`spiffe.attestWorkloads`,
+     on by default). `selectorsMatch()` computes exactly what SPIRE would — the
+     entry's selectors a SUBSET of the workload's, not equal, not intersecting —
+     and the Workload API uses it, which it did not before. An INVENTED entry
+     carries the caller's STABLE selectors (transport and endpoint, never
+     `peer:` — its port is ephemeral and a fresh entry would be invented per
+     connection until the registry hit its cap).
+   * **The selectors are spelt `transport:`, `endpoint:` and `peer:`** and never
+     `unix:` or `k8s:`. Writing `unix:uid:1000` for a uid nothing read would be
+     inventing an attested fact, which is the `wauth` argument again. An
+     ASSERTED selector — `spiffe.acceptAssertedSelectors`, OFF by default, sent
+     in an `x-sts-mock-workload-selector` header — is passed through VERBATIM,
+     because it is the caller's own claim rather than this service's invention,
+     and it exists so that a client's "these matched and those did not" path can
+     be exercised at all.
+
+   **THE SPIRE SERVER API'S AUTHORIZATION TABLE IS SPIRE'S OWN, COPIED ROW FOR
+   ROW.** `POLICY` in `spiffe_auth.js` is `pkg/server/authpolicy/policy_data.json`
+   restricted to the forty-two methods here, and it is copied rather than
+   reasoned out: a table derived from what each method "obviously" needs
+   disagrees with SPIRE in two or three places and the client author who meets
+   the disagreement cannot tell which end is wrong. Where a row looks surprising
+   — `Debug.GetInfo` is LOCAL-ONLY, so an admin SVID over TCP is refused it —
+   that is SPIRE's answer and the surprise is the point. A method with NO ROW is
+   REFUSED and logged as a defect here; the other default fails silently
+   forever. **It decides and never answers**: `spiffe_auth.js` returns a
+   `{ status, message }` descriptor and `spiffe_grpc.js` maps it, the same split
+   `oauth2_bcp.js` has with `oauth2.js`. **The check is in the wrapper**, so
+   there is no authorization code in any of the forty-two handlers and there
+   must not be.
+
+   **THE `admin` AND `downstream` FLAGS ON AN ENTRY ARE NOW READ.** They were
+   recorded, reported, and consulted by nothing, and this file said so. They are
+   read on every call and never cached, so an `ldapmodify` of `spiffeAdmin`
+   changes what that identity may do on the NEXT one. `spiffe.adminIds` is the
+   other way in and is SPIRE's own `admin_ids`: it needs no entry.
+
+   **`Agent.RenewAgent` STOPPED BEING UNIMPLEMENTED because of it**, and the
+   refusal it replaced is the argument to keep in view: "nothing here
+   authenticates the caller, so answering would mean renewing whichever agent
+   the caller named". Something does now, so the method renews the agent on the
+   CONNECTION and never one named in the request — and with `spiffe.authRequired`
+   off it answers `Unimplemented` with that same sentence.
+
+   **AN ACCEPTED CREDENTIAL IS AN IDENTITY**, through the funnel every other
+   family uses. Three acceptances reach it: an X509-SVID over mutual TLS (ONCE
+   PER CONNECTION — the credential was accepted at the handshake, which is
+   `tls_server.js`'s decision made again), an agent attesting, and a JWT-SVID
+   verified at `ValidateJWTSVID`. Being ISSUED an SVID is not one of them.
+   `ldap_server.js`'s `spiffePlan()` is the fourth placement plan (rule 6) and
+   `entryBySpiffeSubject()` is what makes the same identity arriving three ways
+   ONE entry.
 
    **`spiffe.autoCreateEntries` OFF IS THE INTERESTING SETTING**, and it is the
    one thing here that must not be quietly removed: with it off, a caller
@@ -862,13 +932,15 @@ the one place a reader goes when a handshake is failing.
    IGNORE one without it, so an unchecked bundle verifies nothing and reports no
    error.
 
-   **SEVEN OF THE 42 SPIRE METHODS ARE UNIMPLEMENTED AND EACH PUBLISHES A
+   **SIX OF THE 42 SPIRE METHODS ARE UNIMPLEMENTED AND EACH PUBLISHES A
    REASON**, in `NOT_IMPLEMENTED` and on `GET /spiffe`. A table saying 42 of 42
    would be the most misleading thing in this repository — the same rule
-   `oauth2_bcp.js` follows by publishing its `enforced: 'no'` rows. **Do not
-   implement a WIT method by inventing the token format**: that is the
-   `wauth`-is-a-refusal argument, and code written against the invention would
-   work here and interoperate with nothing.
+   `oauth2_bcp.js` follows by publishing its `enforced: 'no'` rows. It was SEVEN
+   until `RenewAgent` became answerable; the note above that table records what
+   its reason was and why it no longer holds. **Do not implement a WIT method by
+   inventing the token format**: that is the `wauth`-is-a-refusal argument, and
+   code written against the invention would work here and interoperate with
+   nothing.
 
    **TWO gRPC TRAPS, BOTH ALREADY PAID FOR.** `keepCase: true` does not reach
    protobufjs's built-in well-known types, so a `google.protobuf.Struct` is built
@@ -1129,16 +1201,17 @@ the one place a reader goes when a handshake is failing.
    `ou=users` for anybody who authenticates through any of the families here, and
    `admin_stats.recordAuthentication()` is already the single funnel all of them
    pass at the moment a credential is ACCEPTED — so one observer there is one place
-   and not fifteen. **A verified TLS client certificate is one of them and is the
+   and not sixteen. **A verified TLS client certificate is one of them and is the
    odd one: its identity is not a name but a DN**, so its entry is named from the
    subject's CN (or the leaf RDN where there is none), every other RDN of the
    subject becomes an attribute, and the issuer, serial, validity and fingerprint go
    on beside them as `x509*` attributes that are this service's own names and not
    schema. `certificatePlan()` carries the placement rules and what they cost.
 
-   **A DECENTRALIZED IDENTIFIER is the THIRD shape and there is one plan per
-   shape** — `certificatePlan()`, `didPlan()`, `namePlan()`, chosen in
-   `autoCreateUser()` and decided in each. A DID is neither a DN nor a name but
+   **A DECENTRALIZED IDENTIFIER is the THIRD shape and A SPIFFE IDENTITY IS THE
+   FOURTH; there is one plan per shape** — `certificatePlan()`, `didPlan()`,
+   `spiffePlan()`, `namePlan()`, chosen in `autoCreateUser()` and decided in
+   each. A DID is neither a DN nor a name but
    one long opaque string, so its entry is named by a DIGEST of it —
    `uid=did-<12 hex>,ou=users` — with the identifier whole on the entry as
    `didSubject` and its method as `didMethod`. Written out, a `did:jwk` is a DN
@@ -1151,6 +1224,26 @@ the one place a reader goes when a handshake is failing.
    invents the person FROM it — seed the persona from the digest instead and the
    startup sweep describes a different person from the one the authentication
    path already wrote.
+
+   **A SPIFFE IDENTITY IS FILED THE SAME WAY AND FOR THE SAME REASONS, and the
+   one place it differs from a DID is why it does not fold.** `spiffePlan()`
+   names the entry `uid=spiffe-<12 hex>,ou=users`, puts the identifier whole on
+   it as `spiffeSubject` (multi-valued) with `spiffeTrustDomain` and
+   `spiffePath` beside it, and `locateEntry()` finds it by
+   `entryBySpiffeSubject()` — never by rebuilding the digest, so the naming rule
+   can change without orphaning anything. That lookup is the whole of "reuse the
+   identity if it is already here": the same workload arriving as an X509-SVID
+   at the SPIRE Server API, as an attesting agent and as a JWT-SVID at
+   `ValidateJWTSVID` lands on ONE entry with one description per route.
+   **It deliberately does NOT consult `existingUserEntry()`**, which is the
+   opposite of what `namePlan()` does: the last segment of a SPIFFE path is
+   exactly the kind of short common word (`db`, `web`, `api`) that collides with
+   a person somebody signed in as, and a workload called `db` is not the DBA.
+   And a workload is filed with the PEOPLE rather than under `ou=applications`,
+   which is a decision: that container holds what this service was ASKED ABOUT —
+   an application is the audience of a token — and a SPIFFE identity is the
+   SUBJECT of one, like the TLS client certificate for a machine that already
+   lands in `ou=users`.
 
    **The three DIDs come from the Decentralized Identity endpoints, and each
    reaches the funnel at the point its own credential is accepted.**
@@ -1177,7 +1270,7 @@ the one place a reader goes when a handshake is failing.
    return value is ignored and a throw from it is caught — a directory must never
    be able to fail an authentication. Do not "simplify" that into a require in the
    other direction, and do not seed the entry at each authentication site instead:
-   fifteen call sites means a sixteenth that is not.
+   sixteen call sites means a seventeenth that is not.
 
    **A container it does NOT sweep, and that is the point of it.**
    `ou=applications` is `applications.js`'s store (rule 3g) and this module is
@@ -1379,7 +1472,9 @@ WS-Trust 1.0 through 1.4 instead of four.
 
    **IT IS THE FIFTEENTH PROTOCOL FAMILY, AND IT BECAME THE FIFTEENTH
    AUTHENTICATION ONE WHEN THESE ENDPOINTS STARTED REQUIRING A CREDENTIAL** —
-   which is why "fourteen" now says fifteen throughout this file and README.md.
+   which is why "fourteen" became fifteen throughout this file and README.md —
+   and then sixteen, when the SPIRE Server API started requiring an X509-SVID
+   (rule 3k). Both counts mean "families reaching `recordAuthentication()`".
    The change is narrower than it sounds and both halves have to be kept
    straight. Three of the schemes `scim_auth.js` offers present a credential on
    EVERY REQUEST (Basic, Digest, HOBA), so accepting one is an authentication
@@ -1511,8 +1606,15 @@ WS-Trust 1.0 through 1.4 instead of four.
    to the client as a missing user. `handle()` logs the original whole, which is
    the only thing that makes such a defect findable.
 
-6a. **`spiffe_server.js` must stay after `ldap_server.js`, and it INVERTS one
-   dependency the way `ldap_server.js` inverts five.** The plain half first: the
+6a. **`spiffe_server.js` must stay after `ldap_server.js` AND after
+   `tls_server.js`, and it INVERTS one dependency the way `ldap_server.js`
+   inverts five.** The `tls_server.js` half is the newer of the two and is a
+   plain require rather than an inversion, arrived at by rule 3e's test applied
+   both ways round: `spiffe_auth.js` needs `dnRfc4514()` — the ONE spelling of a
+   certificate subject, which `scim_auth.js` requires for the same reason, since
+   two spellings of one DN is two people on `/admin/users` — and that module
+   knows nothing about SPIFFE, so there is no cycle, and its `/tls*` routes are
+   already registered by the time this is read, so no route moves. The plain half first: the
    SPIFFE registry's store is the directory under `ou=spiffe`, and that module
    fills `spiffe_registry.js`'s `setDirectory()` slot at ITS require time — so
    requiring this any earlier leaves the registry with no store at the moment
@@ -1898,7 +2000,20 @@ wrong again: a `google.protobuf.Struct` whose members serialise to nothing
 when it should stay open, an X509-SVID whose private key does not match its
 certificate, `keepCase` spellings, the `MATCH_SUBSET`/`SUPERSET`/`ANY` selector
 behaviours, an output mask that is ignored, paging that returns a `next_page_token`
-forever, and every one of the refusals above. Drive it with `@grpc/grpc-js` as a
+forever, and every one of the refusals above. **The authentication half now has
+its own list and it is mostly negatives**: an anonymous caller refused
+`UNAUTHENTICATED` and an insufficient one refused `PERMISSION_DENIED` (they are
+different instructions and collapsing them is easy); `AttestAgent` and
+`GetBundle` reachable with no credential at all, because an agent has none yet;
+`Debug.GetInfo` refused to an admin SVID over TCP and allowed on the socket; an
+agent allowed `GetAuthorizedEntries` and refused `ListEntries`; a certificate
+with no URI SAN, with two, signed by nothing here, outside its validity window,
+or naming a trust domain the signing authority does not own; a join token never
+minted, expired, replayed, or minted for another agent; `RenewAgent` renewing
+the agent on the CONNECTION and never one named in the request; and the same run
+with `spiffe.authRequired` off, which must behave exactly as the service did
+before any of it existed. Also that one identity presented three ways is ONE
+directory entry. Drive it with `@grpc/grpc-js` as a
 CLIENT — which is what `tests/sts_dpop.js` does by writing its own DPoP client
 rather than importing the wallet's, and for the same reason: if both ends came
 from one implementation, a shared misunderstanding passes and interoperates with
@@ -2077,7 +2192,7 @@ Worth knowing before "fixing" one of them:
   dangling-member state `/admin/groups` exists to report impossible to produce.
 * **The audit log at `/admin/audit` is HISTORY where the rest of the console is
   STATE**, and it is the one page here that can answer *when* and *by whom*.
-  Six categories — a credential accepted in any of the fifteen families, a
+  Six categories — a credential accepted in any of the sixteen families, a
   sign-on session created or ended, every LDAP operation over 389 and 636 alike,
   every console page and form, every management API call, every other endpoint
   call — recorded at the five funnels rule 3c names. **No credential is ever in
@@ -2099,18 +2214,28 @@ Worth knowing before "fixing" one of them:
   the two sentences are kept apart everywhere they appear. It is defensible as
   ON by default only because the claim is OMITTED ENTIRELY for somebody in no
   group — see rule 3d-ii.
-* **NOTHING IN SPIFFE IS ATTESTED, WHICH IS THE SAME SENTENCE AS "EVERY BIND
-  SUCCEEDS" AND MATTERS MORE.** A real Workload API decides who is asking by
-  attesting the peer of its socket; this one hands EVERY caller EVERY identity in
-  the trust domain, and the SPIRE Server API lets any caller register a new one.
-  Node attestation is taken on trust too — which is why every agent entry carries
-  a selector valued `unverified:true`. What IS refused is short and deliberate:
-  a Workload API call with no `workload.spiffe.io: true` header (every conforming
-  implementation refuses it, and a client that omits it has a bug nothing else
-  will report), a JWT-SVID with no audience, a `ValidateJWTSVID` that does not
-  really verify, an entry in another trust domain or under `/spire`, a banned
-  agent, a join token presented twice, and a federated bundle whose JWKs have no
-  `use`. See rule 3k and `GET /spiffe`.
+* **NOTHING IN SPIFFE IS ATTESTED, AND THAT IS NOW A NARROWER SENTENCE THAN IT
+  WAS.** No workload and no node: a Workload API caller is identified by its
+  transport, the endpoint it reached and its peer address — node cannot read a
+  Unix socket's peer credentials — so any caller that reaches the socket still
+  gets an identity, and an agent's attestation payload is written down as
+  claimed, which is why every agent entry carries a selector valued
+  `unverified:true`. **What changed is the OTHER half**: the SPIRE Server API's
+  TCP port is MUTUAL TLS, its callers present an X509-SVID verified against the
+  trust bundle, and every method is authorized against SPIRE's own table. Those
+  are two different claims and merging them back into one gets both wrong.
+  Selector matching also DECIDES which entries answer a Workload API caller
+  now (`spiffe.attestWorkloads`), which is narrowing without attesting.
+  What IS refused: a Workload API call with no `workload.spiffe.io: true` header
+  (every conforming implementation refuses it, and a client that omits it has a
+  bug nothing else will report), a JWT-SVID with no audience, a
+  `ValidateJWTSVID` that does not really verify, an entry in another trust
+  domain or under `/spire`, a banned agent, a join token this server did not
+  mint or that has expired or been spent or was minted for another agent, an
+  X509-SVID that no authority here signed or that is outside its validity
+  window, every method the caller's entity is not allowed, and a federated
+  bundle whose JWKs have no `use`. `spiffe.authRequired` off restores the whole
+  of the old posture. See rule 3k, `spiffe_auth.js` and `GET /spiffe`.
 * **The admin console at `/admin` is not protected and holds nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every

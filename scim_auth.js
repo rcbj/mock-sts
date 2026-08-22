@@ -118,9 +118,10 @@
 //
 //   * Basic, Digest and HOBA are RECORDED. Each presents a credential on every
 //     request, and accepting it is an act of authentication exactly as a
-//     WS-Trust UsernameToken is. So SCIM is now the fifteenth family to reach
-//     that funnel, its callers appear on /admin/users, and the directory seeds
-//     an entry for them like any other.
+//     WS-Trust UsernameToken is. So SCIM became the fifteenth family to reach
+//     that funnel — SPIFFE is the sixteenth and arrived after it — its callers
+//     appear on /admin/users, and the directory seeds an entry for them like
+//     any other.
 //   * A BEARER OR DPoP token is NOT recorded. The credential behind it was
 //     accepted when the token was issued — at the authorization endpoint, or at
 //     the token endpoint for a grant with no user — and recording it again here

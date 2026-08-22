@@ -14,38 +14,58 @@
 // `spiffe_registry.js` and `spiffe_grpc.js`, none of which requires it back.
 //
 // ---------------------------------------------------------------------------
-// THE CENTRAL FACT ABOUT THIS FILE: NOTHING HERE ATTESTS THE CALLER
+// THE CENTRAL FACT ABOUT THIS FILE: NO CREDENTIAL IS ASKED FOR HERE, AND THAT
+// IS THE SPECIFICATION RATHER THAN THIS SERVICE'S PERMISSIVENESS
 //
-// In a real deployment the agent looks at the peer of the Unix socket — its
-// pid, and from that its uid, gid, executable path, container, Kubernetes pod —
-// turns that into SELECTORS, and answers with the SVIDs of the registration
-// entries whose selectors are a subset of those. That is workload attestation,
-// and it is the whole of how a Workload API decides who is asking.
+// The SPIFFE Workload Endpoint specification says the endpoint "MUST NOT
+// require any direct authentication of its clients" and that "Transport Layer
+// Security MUST NOT be required". A workload has no secret and no root of trust
+// until this call gives it one, so there is nothing it could present. A mock
+// that demanded a credential here would refuse every conforming client, which
+// is why `spiffe.authRequired` — the mutual TLS the SPIRE Server API grew —
+// deliberately does not reach this surface.
 //
-// This service does none of it. Node has no portable way to read a Unix
-// socket's peer credentials, and more to the point THIS SERVICE AUTHENTICATES
-// NOBODY — the LDAP directory accepts every bind, the KDC gives anyone a TGT,
-// and no password is checked anywhere. So the Workload API here answers with
-// **every registration entry that is not expired**, and a caller matching
-// nothing gets one invented for it when `spiffe.autoCreateEntries` is on.
+// What a real endpoint does instead is ASCERTAIN the caller out of band: the
+// agent asks the kernel about the peer of its Unix socket — pid, and from that
+// uid, gid, executable path, container, Kubernetes pod — turns it into
+// SELECTORS, and answers with the SVIDs of the registration entries whose
+// selectors are a subset of those.
 //
-// Three consequences, all of them deliberate and all of them stated on
-// `GET /spiffe` rather than left to be discovered:
+// **This service attests what node can see, which is less, and says so.** Node
+// has no portable way to read `SO_PEERCRED`, so there is no uid here, no pid,
+// no container and no pod. What there is: the transport a call arrived on, the
+// endpoint it reached, its peer address, and — only with
+// `spiffe.acceptAssertedSelectors` on — whatever the caller SAID about itself.
+// `spiffe_auth.workloadSelectors()` builds that list and its header explains
+// why the types are spelt `transport:`, `endpoint:` and `peer:` rather than
+// `unix:`: writing `unix:uid:1000` for a uid nothing read would be inventing an
+// attested fact.
 //
-//   * **Any caller can obtain any identity in this trust domain.** That is the
-//     same statement as "any bind succeeds" one directory over, and it is what
-//     makes the service useful for exercising a client rather than dangerous to
-//     run on a laptop. It also means the socket's filesystem permissions are
-//     the only thing standing between a process and every SVID here.
+// Four consequences, all deliberate and all stated on `GET /spiffe` rather than
+// left to be discovered:
 //
-//   * **Selector matching is implemented and is not what decides this
-//     answer.** `spiffe_registry.selectorsMatch()` computes exactly what SPIRE
-//     would, and the SPIRE Server API's `GetAuthorizedEntries` and the
-//     console's "what would match" view use it. It is not used HERE because
-//     there is nothing to match against.
+//   * **Selector matching now decides the answer**, through the same
+//     `spiffe_registry.selectorsMatch()` that `GetAuthorizedEntries` and the
+//     console's "what would match" view use. It used to be implemented and
+//     unused here, because there was nothing to match against. There is now.
+//     `spiffe.attestWorkloads` off restores the old answer — every entry to
+//     every caller.
 //
-//   * **`spiffe.autoCreateEntries` off is the interesting setting.** With it
-//     off, a caller matching no entry is answered with an EMPTY SVID list —
+//   * **Any caller that can reach the socket can still obtain an identity.**
+//     Nothing proves who it is; matching narrows WHICH entries answer, and
+//     `spiffe.autoCreateEntries` still invents one for a caller that matches
+//     none. So the socket's filesystem permissions are still the only thing
+//     standing between a process and an SVID here, which is the same statement
+//     as "any bind succeeds" one directory over.
+//
+//   * **An INVENTED entry carries the caller's stable selectors** — its
+//     transport and endpoint, and not its peer, whose port is ephemeral. That
+//     is what stops a fresh entry being invented per connection until the
+//     registry hits its cap, and it means the second caller of the same shape
+//     MATCHES the first one's entry instead of inventing another.
+//
+//   * **`spiffe.autoCreateEntries` off is still the interesting setting.** With
+//     it off, a caller matching no entry is answered with an EMPTY SVID list —
 //     which is what a real agent does for an unregistered workload, and is the
 //     only way to exercise a client's "I have no identity" path. That path is
 //     the one most client libraries have and almost nobody runs.
@@ -74,6 +94,7 @@ const spiffeId = require('./spiffe_id');
 const ca = require('./spiffe_ca');
 const registry = require('./spiffe_registry');
 const rpc = require('./spiffe_grpc');
+const auth = require('./spiffe_auth');
 
 function trustDomain() { return ca.trustDomain(); }
 
@@ -85,11 +106,25 @@ function trustDomain() { return ca.trustDomain(); }
 // identities and a FetchJWTSVID that returned one would be a mock that
 // contradicts itself.
 // ---------------------------------------------------------------------------
-function entitledEntries() {
+function entitledEntries(caller) {
   log.debug('Entering entitledEntries().');
-  const rows = registry.allEntries().filter(function (entry) {
+  const live = registry.allEntries().filter(function (entry) {
     return !entry.expired;
   });
+  // The caller's selectors, where there is a caller. `caller` is absent when
+  // the console asks this question — it is looking at the registry rather than
+  // standing on a socket — and an absent caller means no narrowing, which is
+  // the honest answer to "what is in here" as opposed to "what would I get".
+  const selectors = (caller && caller.selectors) || null;
+  const narrow = !!(selectors && auth.attestWorkloads());
+  const rows = narrow ? live.filter(function (entry) {
+    return registry.selectorsMatch(entry.selectors, selectors);
+  }) : live;
+  if (narrow) {
+    log.debug('entitledEntries(): ' + rows.length + ' of ' + live.length +
+              ' entry/entries match [' +
+              selectors.map(registry.selectorText).join(' ') + '].');
+  }
   if (rows.length) {
     log.debug('Leaving entitledEntries(). ' + rows.length + ' entry/entries.');
     return rows;
@@ -99,20 +134,32 @@ function entitledEntries() {
     // unregistered workload, and a client that has never seen it has never run
     // its own "I have no identity" path.
     log.info('spiffe: a workload asked for an SVID, no registration entry ' +
-             'exists, and spiffe.autoCreateEntries is off — so it is being ' +
+             (narrow ? 'matched its selectors' : 'exists') +
+             ', and spiffe.autoCreateEntries is off — so it is being ' +
              'answered with an empty SVID list, which is what a real agent ' +
              'does for an unregistered workload.');
     log.debug('Leaving entitledEntries(). None, and none will be invented.');
     return [];
   }
-  // Nothing registered and we are permitted to invent. ONE entry, named for
-  // what it is, so that a person looking at /admin/spiffe/entries can see that
-  // this service made it up rather than wondering who configured it.
+  // Nothing matched and we are permitted to invent. ONE entry, named for what
+  // it is, so that a person looking at /admin/spiffe/entries can see that this
+  // service made it up rather than wondering who configured it.
+  //
+  // **IT CARRIES THE CALLER'S STABLE SELECTORS AND NOT ALL OF THEM.** The peer
+  // is left off because its port is ephemeral: an entry selecting on
+  // `peer:127.0.0.1` would match the next connection from that host, but one
+  // selecting on the whole `127.0.0.1:53422` could never match anything again,
+  // and a fresh entry would be invented per connection until the registry hit
+  // `spiffe.maxEntries`. With the transport and the endpoint on it, the second
+  // caller of the same shape matches this entry rather than inventing another.
+  const inventedSelectors = (selectors || []).filter(function (selector) {
+    return selector.type !== 'peer';
+  });
   const id = spiffeId.make(trustDomain(), '/workload');
   const created = registry.createEntry({
     spiffeId: id,
     parentId: spiffeId.serverId(trustDomain()),
-    selectors: [],
+    selectors: inventedSelectors,
     description: 'Invented for a workload that matched no registration entry ' +
                  '(spiffe.autoCreateEntries).'
   }, 'auto', trustDomain(), '');
@@ -163,9 +210,9 @@ async function federatedBundlesFor(entries) {
 // fields is a string a client will decode as DER and reject as malformed, and
 // the error names neither field.
 // ---------------------------------------------------------------------------
-async function buildX509Response() {
+async function buildX509Response(caller) {
   log.debug('Entering buildX509Response().');
-  const entries = entitledEntries();
+  const entries = entitledEntries(caller);
   const bundleDer = await ca.x509BundleDer();
   const svids = [];
   for (let i = 0; i < entries.length; i++) {
@@ -196,7 +243,13 @@ async function buildX509Response() {
     // ITS PRIVATE KEY, which makes this the sharpest case in the service of
     // audit.js's no-credential rule.
     detail: { count: svids.length,
-              ids: svids.map(function (s) { return s.spiffe_id; }).join(' ') }
+              ids: svids.map(function (s) { return s.spiffe_id; }).join(' '),
+              // WHICH SELECTORS DECIDED IT. Without this a row saying "two
+              // SVIDs were issued" cannot be told from one saying "and here
+              // is why those two" — and the second is the question somebody
+              // reading this page after a client got nothing is asking.
+              selectors: (((caller || {}).selectors) || [])
+                .map(registry.selectorText).join(' ') }
   });
   log.debug('Leaving buildX509Response(). ' + svids.length + ' SVID(s).');
   return {
@@ -247,8 +300,16 @@ function pushOnRotation(push, buildResponse, label) {
 const fetchX509Svid = rpc.serverStream('workload', 'FetchX509SVID',
   async function (call, push) {
     await ca.ready();
-    pushOnRotation(push, buildX509Response, 'FetchX509SVID');
-    return await buildX509Response();
+    // The caller is captured ONCE and closed over, rather than read again
+    // inside the timer. The stream outlives the call that opened it and the
+    // rotation timer runs against a `call` whose metadata may be long gone —
+    // and an SVID re-sent for a different set of selectors from the one the
+    // client was first answered with would be a rotation that silently changed
+    // the workload's identity.
+    const caller = call.spiffeCaller;
+    pushOnRotation(push, function () { return buildX509Response(caller); },
+                   'FetchX509SVID');
+    return await buildX509Response(caller);
   });
 
 // ---------------------------------------------------------------------------
@@ -308,7 +369,7 @@ const fetchJwtSvid = rpc.unary('workload', 'FetchJWTSVID', async function (call)
                               'Workload API refuses this call without one.');
   }
   const wanted = String(request.spiffe_id || '').trim();
-  let entries = entitledEntries();
+  let entries = entitledEntries(call.spiffeCaller);
   if (wanted) {
     const parsed = spiffeId.parse(wanted);
     if (!parsed.ok) {
@@ -335,7 +396,9 @@ const fetchJwtSvid = rpc.unary('workload', 'FetchJWTSVID', async function (call)
     summary: svids.length + ' JWT-SVID(s) were issued over the Workload API',
     // The audiences are recorded and the TOKENS are not. A JWT-SVID is a bearer
     // credential; a row holding one would be a credential on a web page.
-    detail: { count: svids.length, audience: audiences.join(' ') }
+    detail: { count: svids.length, audience: audiences.join(' '),
+              selectors: (((call.spiffeCaller || {}).selectors) || [])
+                .map(registry.selectorText).join(' ') }
   });
   return { svids: svids };
 });
@@ -409,6 +472,30 @@ const validateJwtSvid = rpc.unary('workload', 'ValidateJWTSVID', async function 
   if (!result.ok) {
     throw rpc.invalidArgument(result.reason);
   }
+  // ---------------------------------------------------------------------
+  // A VERIFIED JWT-SVID IS A CREDENTIAL THAT WAS PRESENTED AND ACCEPTED, so
+  // its subject reaches the authentication funnel and gets — or REUSES — a
+  // directory entry, like every other accepted credential in this service.
+  //
+  // BELOW the refusal, deliberately: a JWT-SVID that failed its signature, its
+  // audience or its clock records nothing, which is the rule
+  // `/oid4vp/response` already follows about a presentation that did not
+  // verify. And the identity recorded is the token's OWN subject rather than
+  // the caller's — this method says "is this credential good", and the holder
+  // of it is not necessarily the thing it names.
+  //
+  // No `once` key, so a token validated twice records twice. That is correct
+  // here where it would be wrong for a connection: each call is a fresh
+  // presentation of a bearer credential, and collapsing them would hide a
+  // replay rather than tidy a duplicate.
+  // ---------------------------------------------------------------------
+  auth.recordIdentity({
+    presented: result.spiffeId,
+    protocol: 'SPIFFE',
+    method: 'JWT-SVID (validated)',
+    note: 'a JWT-SVID naming this identity was presented at ValidateJWTSVID ' +
+          'and verified against this trust domain\'s JWT authorities'
+  });
   return { spiffe_id: result.spiffeId, claims: structFrom(result.claims) };
 });
 
@@ -566,6 +653,8 @@ module.exports = {
   WIT_MESSAGE: WIT_MESSAGE,
   // Exported for the console's "what would this workload get" view, which asks
   // the same question the Workload API answers and must not compute it a second
-  // way.
+  // way. Called with NO caller there, which means no selector narrowing — the
+  // console is looking at the registry rather than standing on a socket, and
+  // "what is in here" is a different question from "what would I get".
   entitledEntries: entitledEntries
 };

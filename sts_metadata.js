@@ -135,22 +135,39 @@ const SPECS = [
               'FetchWITBundles answer Unimplemented, because the Workload ' +
               'Identity Token\'s format is not settled in a document this ' +
               'service could implement against and inventing one would be ' +
-              'inventing a credential format. NOTHING ATTESTS THE CALLER: ' +
-              'every caller is handed every identity in the trust domain.' },
+              'inventing a credential format. NO CREDENTIAL IS ASKED FOR ' +
+              'AND THERE MUST NOT BE ONE — the Workload Endpoint ' +
+              'specification says the endpoint MUST NOT require direct ' +
+              'authentication of its clients and that TLS MUST NOT be ' +
+              'required — so what is missing is ATTESTATION rather than ' +
+              'authentication. A caller is identified only by the transport ' +
+              'it arrived on, the endpoint it reached and its peer address, ' +
+              'because node cannot read a Unix socket\'s peer credentials; ' +
+              'those selectors DO decide which registration entries answer ' +
+              '(spiffe.attestWorkloads), and they prove nothing about who is ' +
+              'calling, so any caller that reaches the socket still gets an ' +
+              'identity. The selectors are spelt `transport:`, `endpoint:` ' +
+              'and `peer:` rather than `unix:` so that they cannot be ' +
+              'mistaken for an attestor\'s.' },
   { id: 'spire-server-api', name: 'SPIRE Server API',
     where: 'SPIRE (CNCF) — spire-api-sdk',
     url: 'https://github.com/spiffe/spire-api-sdk',
     coverage: 'partial: six services and 42 methods are served from the ' +
-              'vendored protos, of which 35 are implemented. The seven that ' +
-              'are not each answer with a reason — RenewAgent (nothing here ' +
-              'authenticates the caller, so there is no way to know which ' +
-              'agent to renew), AppendBundle and PublishJWTAuthority (they ' +
-              'would publish an authority this server holds no key for), ' +
-              'RefreshBundle (it would fetch a URL somebody registered), and ' +
-              'the three WIT methods. NO CALLER IS AUTHORIZED: a real server ' +
-              'checks every method against the caller\'s own SVID, and ' +
-              'anybody who can reach this port here can create a registration ' +
-              'entry granting any identity.' },
+              'vendored protos, of which 36 are implemented. The six that ' +
+              'are not each answer with a reason — AppendBundle and ' +
+              'PublishJWTAuthority (they would publish an authority this ' +
+              'server holds no key for), RefreshBundle (it would fetch a URL ' +
+              'somebody registered), and the three WIT methods. THE CALLER IS ' +
+              'AUTHENTICATED AND AUTHORIZED: the TCP port is mutual TLS, the ' +
+              'caller\'s SPIFFE ID is taken from its X509-SVID\'s URI SAN ' +
+              'and verified against the trust bundle, and every method is ' +
+              'checked against SPIRE\'s own policy_data.json — local, agent, ' +
+              'admin, downstream — with the Unix socket trusted as `local` ' +
+              'the way a real spire-server trusts its private one. RenewAgent ' +
+              'stopped being unimplemented because of it: it renews the agent ' +
+              'on the connection. spiffe.authRequired off restores the old ' +
+              'posture, where the port is plain and anybody who reaches it ' +
+              'can create a registration entry granting any identity.' },
   { id: 'rfc4120', name: 'Kerberos v5 (RFC 4120)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4120',
@@ -1085,16 +1102,19 @@ const ENDPOINTS = [
           'SOCKET at spiffe.workloadSocket — `/tmp/spire-agent/public/api.sock`, which ' +
           'is SPIRE\'s own path and what SPIFFE_ENDPOINT_SOCKET means to every real ' +
           'client — and on TCP spiffe.workloadPort (8092); the SPIRE SERVER API (Entry, ' +
-          'Agent, Bundle, SVID, TrustDomain and Debug, 35 of 42 methods) is on TCP ' +
+          'Agent, Bundle, SVID, TrustDomain and Debug, 36 of 42 methods) is on TCP ' +
           'spiffe.serverPort (8181, because SPIRE\'s own 8081 is this service\'s HTTP ' +
           'port) and optionally on a socket of its own. RAW SOCKETS, all four: this page ' +
           'is built by walking the Express router and cannot see one, so their state is ' +
           'reported by GET /spiffe and on /admin/spiffe rather than here. MOST OF THAT ' +
-          'PAGE IS WHAT IS NOT CHECKED — no workload attestation (every caller is handed ' +
-          'every identity in the trust domain), no node attestation, no caller ' +
-          'authorization on the SPIRE Server API, and no revocation anywhere — because ' +
-          'what comes out of these surfaces is a credential another service will ' +
-          'believe. Add ?format=json.' },
+          'PAGE IS WHAT IS AND IS NOT CHECKED — no workload attestation and no node ' +
+          'attestation (a Workload API caller is identified by its transport, endpoint ' +
+          'and peer address and nothing else, because node cannot read a socket\'s peer ' +
+          'credentials), no revocation anywhere, and, on the other side, the WHOLE ' +
+          'per-method authorization table for the SPIRE Server API, whose TCP port is ' +
+          'MUTUAL TLS with an X509-SVID (spiffe.authRequired) — because what comes out of ' +
+          'these surfaces is a credential another service will believe. Add ' +
+          '?format=json.' },
   { path: '/spiffe/bundle', group: 'SPIFFE', name: 'The trust bundle',
     specs: ['spiffe-bundle'],
     what: 'THE FEDERATION SURFACE, and the whole of it: one GET returning a JWK Set with ' +
@@ -1188,7 +1208,10 @@ const ENDPOINTS = [
           'this metadata document can. Its two forms rotate an authority and set or ' +
           'remove a federated bundle; a foreign bundle is PUSHED IN and never fetched, ' +
           'which is the refusal this service also gives wreqptr and jwks_uri. It says on ' +
-          'every screen that nothing here is attested. Add ?format=json.' },
+          'every screen that nothing here is ATTESTED, and reports separately whether the ' +
+          'SPIRE Server API is AUTHENTICATING its callers — the two are different claims ' +
+          'and the second is a setting. The reply carries the per-method authorization ' +
+          'table. Add ?format=json.' },
   { path: '/admin/spiffe/entries', group: 'Admin', name: 'SPIFFE registration entries',
     specs: ['spiffe-id', 'spire-server-api'],
     what: 'Every registration entry, filtered and paged, with a drill-down per entry ' +
@@ -1292,7 +1315,7 @@ const ENDPOINTS = [
           'rather than as counters — which is the difference from /admin/metrics: that page can ' +
           'say the directory holds eleven entries, and only this one can say a twelfth was created ' +
           'at 14:02 and deleted at 14:03 by somebody bound as uid=carol, over LDAPS. Six ' +
-          'categories: a credential ACCEPTED in any of the fifteen families here; a sign-on ' +
+          'categories: a credential ACCEPTED in any of the sixteen families here; a sign-on ' +
           'session created or ended; every LDAP operation over 389 and 636 alike (an entry ' +
           'created, deleted, updated, renamed, searched, compared, bound to), with a user, a group ' +
           'and an entry told apart by PLACEMENT because this directory is schemaless; every ' +

@@ -30,7 +30,7 @@
 // A claim name is this service's own invention until something backs it. An
 // attribute type is a name a directory already knows, and this service HAS a
 // directory — ldap_server.js seeds an entry for everybody who authenticates
-// through any of the fourteen families. So the page offers what a person's entry
+// through any of the sixteen families. So the page offers what a person's entry
 // can hold, each row saying which claim it becomes, and the value in the
 // credential is the value in the directory. Two things fall out of that which
 // were the point of doing it this way:
