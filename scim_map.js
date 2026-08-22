@@ -322,8 +322,12 @@ function firstOf(attributes, name) {
 
 // Put a value at a dotted path, creating the objects on the way. Written out
 // rather than reached for from a dependency because the whole of it is this.
+//
+// A LIST of segments is accepted as well as a dotted string, for the one path
+// here that cannot be spelt as one: an extension attribute's member name holds
+// the schema URN, and that has dots of its own. See egressPath().
 function setPath(target, path, value) {
-  const parts = String(path).split('.');
+  const parts = Array.isArray(path) ? path : String(path).split('.');
   let node = target;
   for (let i = 0; i < parts.length - 1; i++) {
     if (node[parts[i]] === undefined) {
@@ -335,7 +339,7 @@ function setPath(target, path, value) {
 }
 
 function getPath(source, path) {
-  const parts = String(path).split('.');
+  const parts = Array.isArray(path) ? path : String(path).split('.');
   let node = source;
   for (let i = 0; i < parts.length; i++) {
     if (node === null || node === undefined || typeof node !== 'object') {
@@ -344,6 +348,64 @@ function getPath(source, path) {
     node = node[parts[i]];
   }
   return node;
+}
+
+// The two halves of an extension row's path, separated at the LAST colon — the
+// attribute half never contains one. RFC 7643 section 3.3 spells such a path as
+// the schema URN, a colon, and then an ordinary (possibly dotted) attribute:
+// `urn:...:extension:enterprise:2.0:User:manager.value`.
+function extensionParts(scimPath) {
+  const path = String(scimPath);
+  const colon = path.lastIndexOf(':');
+  return { urn: path.slice(0, colon), path: path.slice(colon + 1) };
+}
+
+// ---------------------------------------------------------------------------
+// WHERE AN EXTENSION ROW'S VALUE SITS ON THE WAY OUT, AND WHY IT IS NOT WHERE
+// IT SITS ON THE WAY IN.
+//
+// RFC 7643 section 3.3 lets a resource carry an extension attribute in either
+// of two shapes: a member named by the schema URN holding an object, or a
+// top-level member whose name is the URN, a colon and the attribute. scimmy
+// hands the ingress handler the FIRST — its coercion normalises to it — and
+// accepts either on the way out, so the two look interchangeable and are not.
+// What decides it is the FILTER MATCHER: `SCIMMY.Types.Filter` parses
+// `urn:...:User:manager.value eq "x"` into the key `urn:...:User:manager`
+// carrying a nested `value`, which is the SECOND shape. A resource carrying
+// only the object form therefore matches no filter naming an enterprise
+// attribute — and a filter naming a sub-attribute of one throws, which is the
+// same scimmy defect applyFilter() in scim.js documents.
+//
+// So egress writes the namespaced form and ingress reads the object form, each
+// being the one the side of scimmy it faces actually looks at.
+//
+// Both come back as a LIST of segments rather than a dotted string, because the
+// first segment cannot be spelt in one: the URN has dots of its own
+// (`...:enterprise:2.0:User`), so splitting the whole path on '.' — which is
+// what this file used to do — buries the value under a member named
+// `...:enterprise:2` that no client asks for and scimmy's coercion drops. That
+// is why the enterprise attributes went out of a POST and came back as nothing.
+//
+// Neither is entered and left out loud, and nor is extensionParts() above: they
+// sit with setPath(), getPath() and valuesOf() — called once per attribute per
+// resource, so a pair of log lines in them is a list of a thousand rows for one
+// page of users, and the converters that call them already log the conversion.
+// ---------------------------------------------------------------------------
+function egressPath(row) {
+  if (!row.extension) {
+    return String(row.scim).split('.');
+  }
+  const parts = extensionParts(row.scim);
+  const steps = String(parts.path).split('.');
+  return [parts.urn + ':' + steps[0]].concat(steps.slice(1));
+}
+
+function ingressPath(row) {
+  if (!row.extension) {
+    return String(row.scim).split('.');
+  }
+  const parts = extensionParts(row.scim);
+  return [parts.urn].concat(String(parts.path).split('.'));
 }
 
 // The LDAP boolean strings. RFC 4517 section 3.3.3 spells them in capitals and
@@ -448,6 +510,26 @@ function toScimUser(entry, context) {
     }
   };
 
+  // The extension members this mapping writes into, padded like the members
+  // above and for the same reason: `manager.value` is a sub-attribute, so a
+  // filter naming it dives into a value that has to be there. Built from the
+  // catalogue rather than written out, so an extension row cannot be added
+  // without its padding, and every parent on the way is created because the
+  // matcher walks the whole path and not just the leaf.
+  USER_ATTRIBUTES.forEach(function (row) {
+    if (!row.extension) {
+      return;
+    }
+    const steps = egressPath(row);
+    let node = resource;
+    for (let i = 0; i < steps.length - 1; i++) {
+      if (node[steps[i]] === undefined) {
+        node[steps[i]] = {};
+      }
+      node = node[steps[i]];
+    }
+  });
+
   const address = {};
   USER_ATTRIBUTES.forEach(function (row) {
     if (row.kind === 'derived') {
@@ -457,12 +539,16 @@ function toScimUser(entry, context) {
     if (!values.length) {
       return;
     }
+    // An extension row is written as its namespaced member rather than at a
+    // dotted path off the resource. See egressPath().
+    const path = egressPath(row);
     if (row.kind === 'single') {
-      setPath(resource, row.scim, row.toScim ? row.toScim(values[0]) : String(values[0]));
+      setPath(resource, path,
+              row.toScim ? row.toScim(values[0]) : String(values[0]));
       return;
     }
     if (row.kind === 'bool') {
-      setPath(resource, row.scim, boolFromLdap(values[0]));
+      setPath(resource, path, boolFromLdap(values[0]));
       return;
     }
     if (row.kind === 'complex') {
@@ -551,7 +637,10 @@ function fromScimUser(resource, existing) {
       return;
     }
     if (row.kind === 'single' || row.kind === 'bool') {
-      const value = getPath(resource, row.scim);
+      // Read an extension row out of the object at its schema URN, which is
+      // the shape scimmy's coercion hands this handler and NOT the one the
+      // egress side writes. See egressPath().
+      const value = getPath(resource, ingressPath(row));
       if (value === undefined || value === null || String(value) === '') {
         return;
       }
