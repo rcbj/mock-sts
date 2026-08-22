@@ -52,8 +52,8 @@
 // should be told about rather than one this mock should hide by inventing a
 // schema of its own. GET /ldap says so on the page.
 //
-// Three protocol behaviours ARE enforced, because each is a real rule whose
-// absence would teach a client something false:
+// Four behaviours ARE enforced. Three of them are protocol rules whose absence
+// would teach a client something false, and the fourth is this service's own:
 //
 //   * an add whose PARENT does not exist is LDAP_NO_SUCH_OBJECT (32). A
 //     directory is a tree, and a client that has never seen this refusal will
@@ -63,6 +63,14 @@
 //   * a modify naming an attribute that is not there is
 //     LDAP_NO_SUCH_ATTRIBUTE (16) for `delete` and `replace`-with-values-absent,
 //     and succeeds for `add`.
+//   * ONE ENTRY PER PERSON: an add under `ou=users` whose username is already
+//     here is LDAP_ENTRY_ALREADY_EXISTS (68), naming the entry that holds it.
+//     This one is not a protocol rule — LDAP has no notion of a username, and a
+//     real directory gets this from a uniqueness constraint in its schema, which
+//     is exactly the subsystem this mock does not have. It is enforced because
+//     every OTHER door onto this container now folds onto one entry per person
+//     (see existingUserEntry()), and a directory that let an `ldapadd` undo that
+//     in one operation would be keeping the rule nowhere.
 //
 // And one that is NOT enforced, stated here rather than discovered: deleting a
 // user does not remove it from the groups that list it as a `member`. Referential
@@ -103,6 +111,19 @@
 // certificatePlan() for where it goes instead and what that costs. It arrives
 // through the same observer as everything else, with the certificate's own facts
 // riding along beside the identity.
+//
+// ONE ENTRY PER PERSON, HOWEVER MANY WAYS THEY GET IN. `rcbj` signing in at the
+// login screen, `urn:sts-mock:user:rcbj` in a token, `rcbj@STS.MOCK` in a
+// Kerberos AS-REQ and `rcbj` on a WS-Security UsernameToken have always been one
+// entry — identityOf() in admin_stats.js normalises all four to one key before
+// this hook ever sees them. What did NOT fold was the identity that is a DN
+// rather than a name, and now does: a certificate saying `CN=rcbj` lands on the
+// entry rcbj already has, and a password sign-in after a handshake lands on the
+// one the certificate made. existingUserEntry() is the whole of it, and the same
+// function answers at the other two doors — an `ldapadd` under `ou=users` and
+// createUser(), which the console and the management API share. A DID is the one
+// identity that names nobody by itself and so cannot generally fold; where this
+// service KNOWS whose it is, it does. See didPlan().
 // ---------------------------------------------------------------------------
 
 // For one thing only: the short, stable uid a DID-named entry is placed at.
@@ -119,6 +140,14 @@ const stats = require('./admin_stats');
 // an inverted slot filled at the bottom of this file for the four functions
 // that read and write the container.
 const applications = require('./applications');
+// The SPIFFE registry's schema and both conversions. The same division
+// applications.js draws: THAT module owns what a registration entry IS, THIS
+// one owns where the containers are, how an entry is created and what the cap
+// is. Its setDirectory() slot is filled below at require time, for the reason
+// every slot in this file exists — a require reaching this module from there
+// would drag every /ldap route to the front of the express router.
+const spiffeRegistry = require('./spiffe_registry');
+const scimMap = require('./scim_map');
 // The audit log. A plain require and it cannot become anything else: audit.js
 // requires helpers.js and config.js only, so it can be reached from the deepest
 // module here without dragging a graph behind it.
@@ -210,6 +239,17 @@ const GROUPS_DN = 'ou=groups,' + BASE_DN;
 // The third container, and the one whose entries are a REGISTRY rather than a
 // description of one. See the applications section further down.
 const APPLICATIONS_DN = 'ou=applications,' + BASE_DN;
+// The fourth and fifth, and they are `spiffe_registry.js`'s store the way
+// ou=applications is `applications.js`'s. TWO containers rather than one,
+// because they hold different KINDS of thing: an entry under ou=entries is
+// CONFIGURATION deciding what will be issued, and an entry under ou=agents is a
+// RECORD of something that happened. The same split ou=applications draws
+// internally between what an application may do and what it has done — made
+// structural here, because a registration entry and an attested agent share no
+// attributes at all.
+const SPIFFE_DN = 'ou=spiffe,' + BASE_DN;
+const SPIFFE_ENTRIES_DN = 'ou=entries,' + SPIFFE_DN;
+const SPIFFE_AGENTS_DN = 'ou=agents,' + SPIFFE_DN;
 
 // Only an explicit "0" or "false" turns the auto-creation off, so a missing or
 // misspelled variable leaves it ON — the safe direction here, because the
@@ -386,7 +426,7 @@ const STANDARD_NAMES = [
   // RFC 5020 and RFC 4530 — the two operational attributes that name an entry
   // rather than describe it. `entryDN` is load-bearing beyond the display: it is
   // what matchable() calls the DN when a filter matches on it, and what
-  // applicationObject() publishes the DN as, so those two and this table have to
+  // entryObject() publishes the DN as, so those two and this table have to
   // agree or an ldapsearch filter and a console page name one fact two things.
   'entryDN', 'entryUUID',
 
@@ -501,6 +541,18 @@ Object.keys(vcClaims.CANONICAL_NAMES).forEach(function (lower) {
 // check stays quiet — which is the point of having it rather than assuming.
 applications.SCHEMA.attributes.forEach(function (row) {
   learnName(row.name, 'the applications schema');
+});
+
+// And the SCIM mapping's two inventions, `scimActive` and `scimExternalId`, for
+// the same reason and from the same kind of source. They are a FIFTH list, which
+// is one more than the comment above learnName() named — and the check is what
+// makes a fifth affordable: the two names are this service's own, nothing else
+// spells them, and if that ever stops being true the warning says which table to
+// look in. scim_map.js is a library that registers nothing and requires only
+// helpers.js and vc_claims.js, so requiring it here moves no route and closes no
+// cycle.
+scimMap.OWN_NAMES.forEach(function (spelling) {
+  learnName(spelling, 'the SCIM mapping');
 });
 
 // A DN as a comparison key. Case-folded, and the whitespace around each comma
@@ -776,6 +828,31 @@ function seed() {
       'the protocol endpoints do. applications.js holds the schema; GET ' +
       '/ldap/applications publishes it.'
   }, { origin: 'seed' });
+  putEntry(SPIFFE_DN, {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'spiffe',
+    description: 'The SPIFFE trust domain this service is the issuing ' +
+      'authority for. Two containers beneath: entries (registration entries, ' +
+      'which decide what gets issued) and agents (what has attested). ' +
+      'spiffe_registry.js holds the schema; GET /ldap/spiffe publishes it.'
+  }, { origin: 'seed' });
+  putEntry(SPIFFE_ENTRIES_DN, {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'entries',
+    description: 'SPIFFE registration entries. THIS CONTAINER IS THE ' +
+      'REGISTRY — an ldapmodify of spiffeX509SvidTtl here changes the ' +
+      'lifetime of the next SVID the Workload API hands out, because nothing ' +
+      'caches these.'
+  }, { origin: 'seed' });
+  putEntry(SPIFFE_AGENTS_DN, {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'agents',
+    description: 'SPIFFE agents that have attested here. A RECORD rather ' +
+      'than configuration: everything on these entries was written by this ' +
+      'service, and nothing about an agent is editable from the console. ' +
+      'Node attestation is never verified — whatever an agent claimed is ' +
+      'what is written down.'
+  }, { origin: 'seed' });
   putEntry('cn=admin,' + BASE_DN, {
     objectClass: ['top', 'person', 'organizationalRole'],
     cn: 'admin',
@@ -920,6 +997,115 @@ function commonNameOf(dn) {
 }
 
 // ---------------------------------------------------------------------------
+// ONE ENTRY PER PERSON, WHATEVER PROTOCOL BROUGHT THEM — and the two functions
+// below are the whole of how that is kept true.
+//
+// It was already true for most of this service and by accident rather than by
+// design: identityOf() in admin_stats.js strips the `urn:sts-mock:user:` prefix
+// and the Kerberos realm, so `rcbj`, `urn:sts-mock:user:rcbj` and
+// `rcbj@STS.MOCK` reach autoCreateUser() as one key and namePlan() builds one
+// DN from it. Every name-shaped family — OAuth 2.0, OpenID Connect,
+// WS-Federation, WS-Trust, both SAML profiles, Kerberos, SPNEGO, an LDAP bind —
+// therefore landed on `uid=rcbj,ou=users` already.
+//
+// What did NOT fold was the one identity that is a DN rather than a name. A
+// client certificate `CN=rcbj,O=Example` becomes `cn=rcbj,ou=users`
+// (certificatePlan()'s second rule), which is a SECOND object for a person who
+// already had one — and the reverse order produces the same pair, since a
+// password sign-in after a handshake would build `uid=rcbj` beside the
+// `cn=rcbj` the certificate made. Two entries for one person is the failure
+// this service already refuses everywhere else it can: /admin/users keys on the
+// normalised name for exactly this reason, and a directory disagreeing with it
+// makes both pages wrong about how many people are here.
+//
+// So a plan that is about to name an entry asks first whether this person
+// already has one, and folds onto it where they do. The lookup is by the two
+// things that can carry a username on an entry under ou=users:
+//
+//   * the `uid` attribute, which is what namePlan() writes and what every
+//     name-shaped identity here is filed under;
+//   * the entry's own NAMING RDN VALUE, which is what a certificate's entry is
+//     called (`cn=rcbj`) and what an entry added by an LDAP client is called
+//     whatever attribute type it used.
+//
+// Case-insensitively, because the store already keys DNs lower-cased — `uid=RCBJ`
+// and `uid=rcbj` were one entry before this function existed, and a lookup that
+// was stricter than the store would report "no such person" about an entry the
+// very next putEntry() would collide with.
+//
+// SCOPED TO ENTRIES DIRECTLY UNDER ou=users, and that is the same placement rule
+// /admin/groups reports by and the one the add handler enforces. This directory
+// is schemaless: a client can put a `person` objectClass on a group, so believing
+// the class would fold a person onto a group. Placement is the rule that cannot
+// be lied to.
+// ---------------------------------------------------------------------------
+function usernameOfEntry(stored) {
+  const rdn = splitRdns(stored.dn)[0] || '';
+  const pairs = rdnPairs(rdn);
+  return pairs.length ? unescapeDnValue(pairs[0].value) : '';
+}
+
+// THE ENTRY THAT ALREADY RECORDS THIS DECENTRALIZED IDENTIFIER, wherever it is
+// and whatever it is named.
+//
+// It is found by what the entry RECORDED and never by rebuilding the digest,
+// which is the rule locateEntry() already stated for itself and which now
+// matters twice over: since a linked DID goes onto its owner's entry
+// (didPlan()), the digest is not where it lives at all. A wallet that was issued
+// a credential as `erin` and later presents it to the Verifier arrives with the
+// DID alone and no link — and without this lookup that presentation would create
+// the very second entry the link exists to avoid, for a person whose entry
+// already names that identifier.
+function entryByDidSubject(did) {
+  const wanted = String(did == null ? '' : did).trim();
+  if (!wanted) {
+    return null;
+  }
+  let found = null;
+  entries.forEach(function (entry) {
+    if (found) {
+      return;
+    }
+    if ((entry.attributes.didsubject || []).indexOf(wanted) >= 0) {
+      found = entry;
+    }
+  });
+  return found;
+}
+
+function existingUserEntry(name) {
+  const wanted = String(name == null ? '' : name).trim().toLowerCase();
+  if (!wanted) {
+    return null;
+  }
+  // The common case first and without a scan: this is called on every
+  // authentication, and the overwhelming majority of them are a returning person
+  // whose entry is exactly where namePlan() put it.
+  const direct = getEntry('uid=' + name + ',' + USERS_DN);
+  if (direct) {
+    return direct;
+  }
+  const parent = normalizeDn(USERS_DN);
+  let found = null;
+  entries.forEach(function (entry) {
+    if (found) {
+      return;
+    }
+    if (normalizeDn(parentDn(entry.dn)) !== parent) {
+      return;
+    }
+    const names = (entry.attributes.uid || []).concat([usernameOfEntry(entry)]);
+    const hit = names.filter(function (value) {
+      return String(value).trim().toLowerCase() === wanted;
+    });
+    if (hit.length) {
+      found = entry;
+    }
+  });
+  return found;
+}
+
+// ---------------------------------------------------------------------------
 // WHERE A CLIENT CERTIFICATE'S ENTRY GOES, which is the one placement decision
 // in this module with no obviously right answer.
 //
@@ -997,8 +1183,27 @@ function certificatePlan(info) {
         : null);
 
   let dn;
+  const already = naming ? existingUserEntry(naming.value) : null;
   if (subject && isUnder(subject, BASE_DN) && getEntry(parentDn(subject))) {
     dn = subject;
+  } else if (already) {
+    // THE PERSON THIS CERTIFICATE NAMES IS ALREADY HERE, so this is not a new
+    // entry — it is a second credential for one that exists. `CN=rcbj` and the
+    // `rcbj` who signed in at the password screen are one person as far as this
+    // service is concerned (it authenticates nobody, so a name is a name), and
+    // filing them apart would put two objects in the directory for one row on
+    // /admin/users.
+    //
+    // Nothing is lost by folding: `merge` below carries the whole subject, the
+    // issuer, the serial and the validity onto the entry, so what the
+    // certificate said is recorded on the person it said it about. What it
+    // COSTS is the same collapse the header already accepts one paragraph up,
+    // reaching one step further — two `CN=rcbj` from different CAs were already
+    // one entry, and now they are the same entry as the login name. The full
+    // subjects are all listed in `x509subject`, so it stays visible rather than
+    // silent, and the console still files them as separate identities because
+    // it keys on the whole DN.
+    dn = already.dn;
   } else if (naming) {
     dn = naming.attribute + '=' + naming.rdnValue + ',' + USERS_DN;
   } else {
@@ -1082,9 +1287,20 @@ function certificatePlan(info) {
 function namePlan(name) {
   log.debug('Entering namePlan(). name=' + name);
   const persona = vcClaims.personaFor(name);
-  log.debug('Leaving namePlan().');
+  // THE OTHER HALF OF THE FOLD certificatePlan() does, and it is needed because
+  // the two credentials can arrive in either order. Where a client certificate
+  // came first this person's entry is called `cn=rcbj,ou=users`, and building
+  // `uid=rcbj,ou=users` beside it would be the second object the fold exists to
+  // prevent — so the name lands on the entry that is already theirs.
+  //
+  // `uid` is MERGED onto it in that case: the entry was named by whatever
+  // attribute the other credential used, and the username is a fact about this
+  // person that nothing on it recorded. It also makes the next lookup the cheap
+  // one — existingUserEntry() finds a uid without a scan.
+  const already = existingUserEntry(name);
+  log.debug('Leaving namePlan().' + (already ? ' Folding onto ' + already.dn + '.' : ''));
   return {
-    dn: 'uid=' + name + ',' + USERS_DN,
+    dn: already ? already.dn : 'uid=' + name + ',' + USERS_DN,
     attributes: {
       objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
       uid: name,
@@ -1094,7 +1310,7 @@ function namePlan(name) {
       displayName: persona.display + ' (mock)',
       mail: persona.email
     },
-    merge: {}
+    merge: already ? { uid: name } : {}
   };
 }
 
@@ -1152,13 +1368,73 @@ function didPlan(info) {
   const note = 'named by a decentralized identifier presented through ' +
     String(info.protocol || 'an unstated protocol') +
     (info.method ? ' (' + info.method + ')' : '');
-  log.debug('Leaving didPlan(). uid=' + uid + ' for ' + did.slice(0, 48));
+  // ---------------------------------------------------------------------
+  // WHERE THIS SERVICE KNOWS WHOSE DID IT IS, THE ENTRY IS THEIRS.
+  //
+  // A DID names nobody by itself — that is the whole of why the entry below is
+  // named by a digest — so most of the time there is nothing to fold onto and
+  // the digest-named entry is the honest answer. But at the Credential
+  // Endpoint there IS a link, and it is exact: vc_issuer.js decides who a
+  // credential is about from the access token and derives the holder's did:jwk
+  // from the key the wallet proved possession of, in one call, so it passes the
+  // username through as `linkedTo`. A DID arriving with one is this person's
+  // second identifier and not a second person.
+  //
+  // What this reverses is an argument written at that call site and worth
+  // stating rather than deleting: one wallet can hold several holder keys for
+  // one person, and filing them all under the access token's name was said to
+  // lose the ability to tell them apart. It does not — `didSubject` is
+  // multi-valued and every DID is listed on the entry, so all of them are
+  // visible on one object instead of one each on several. One person is one
+  // entry here, which is the rule that wins.
+  //
+  // A DID presented with no link — the OID4VP Verifier is shown one, or
+  // /did/generate mints one — still gets its own entry. There is nothing to
+  // attach it to, and inventing a person to attach it to would be worse than a
+  // digest for a name. If it was linked EARLIER, locateEntry() finds the entry
+  // by `didSubject` before this plan is ever consulted, so no duplicate
+  // appears.
+  // ---------------------------------------------------------------------
+  const linked = String(info.linkedTo || '').trim();
+  if (linked) {
+    const plan = namePlan(linked);
+    const facts = { didSubject: did, didMethod: method };
+    // On BOTH, because autoCreateUser() reads `attributes` when it creates the
+    // entry and `merge` when it finds one — this person may or may not have
+    // authenticated by name before their wallet asked for a credential.
+    plan.attributes = Object.assign({}, plan.attributes, facts);
+    plan.merge = Object.assign({}, plan.merge, facts);
+    plan.note = note;
+    // The invented person is seeded from the USERNAME and not from the DID.
+    // Without this the entry would be filled by two different personas — the
+    // one the sign-in path invented for `rcbj` and the one a digest invents —
+    // which disagree on every attribute the credential asserts.
+    plan.personaKey = linked;
+    log.debug('Leaving didPlan(). Linked to ' + linked + ' at ' + plan.dn + '.');
+    return plan;
+  }
+  // NOT LINKED, so this identifier names its own entry — unless one already
+  // records it. That happens on the ordinary path through the Decentralized
+  // Identity endpoints: the DID was linked to a person when their credential was
+  // ISSUED, and the wallet then presents it to the Verifier with nothing saying
+  // whose it is. Rebuilding the digest there would file one identifier in two
+  // places.
+  const recorded = entryByDidSubject(did);
+  const dn = recorded ? recorded.dn
+                      : 'uid=' + escapeDnValue(uid) + ',' + USERS_DN;
+  log.debug('Leaving didPlan(). ' + (recorded ? 'Already recorded at ' + dn + '.'
+                                              : 'uid=' + uid + ' for ' + did.slice(0, 48)));
   // Nothing to merge onto an entry that already exists. Unlike a certificate,
   // which is reissued with a new serial and a new validity for the same person,
   // a DID presented a second time is byte-for-byte the DID that named this entry
   // in the first place.
   return {
-    dn: 'uid=' + escapeDnValue(uid) + ',' + USERS_DN,
+    dn: dn,
+    // The persona on an entry that already exists is not rewritten — plan
+    // attributes are read only when one is CREATED — but the key it was seeded
+    // from must still be that entry's own, or the fill below would invent a
+    // second person for it. personaKeyOf() answers that from the entry itself.
+    personaKey: recorded ? personaKeyOf(recorded) : did,
     attributes: {
       objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
       uid: uid,
@@ -1313,6 +1589,12 @@ function autoCreateUser(detail) {
     ? certificatePlan(info)
     : (DID_SHAPED.test(name) ? didPlan(info) : namePlan(name));
   const dn = plan.dn;
+  // Whose invented person fills what this entry lacks. It is the identity by
+  // default and the plan's own where it has one: a DID that arrived with a
+  // username attached is that person's second identifier, so the persona has to
+  // be seeded from the username or the entry gets attributes invented for two
+  // different people (see didPlan()'s linked branch).
+  const personaName = plan.personaKey || name;
   const existing = getEntry(dn);
   // What the entry's description says about why it exists. A plan may state its
   // own — didPlan() does, because "authenticated through W3C DID Core" would be
@@ -1337,7 +1619,7 @@ function autoCreateUser(detail) {
     // /admin/vc gets the whole directory populated then (that page runs the same
     // sweep), and this is what covers the person who authenticates for the first
     // time after that but whose entry was created before it.
-    if (applyVcAttributes(existing, name)) {
+    if (applyVcAttributes(existing, personaName)) {
       changed = true;
     }
     // And how they authenticated this time, where the protocol says. This is
@@ -1373,7 +1655,7 @@ function autoCreateUser(detail) {
   // It runs after putEntry() rather than being folded into the attributes above
   // because it fills only what is ABSENT, and the plan's own attributes — uid,
   // cn, sn, the certificate's RDNs — are the ones that must win.
-  applyVcAttributes(created, name);
+  applyVcAttributes(created, personaName);
   // Before the audit row below, so that the attributes it lists are the ones the
   // entry actually has. On a PASSWORDLESS WebAuthn sign-in this is what says the
   // single factor was a key rather than a password, on an entry that exists
@@ -1409,6 +1691,147 @@ function autoCreateUser(detail) {
   });
   log.debug('Leaving autoCreateUser(). The entry was created.');
   return created;
+}
+
+// The characters RFC 4514 section 2.4 reserves inside a DN. Written once,
+// because THREE doors now need the same answer: createUser() below (the
+// console's and the management API's), and scim.js's create of a User and of a
+// Group. A name carrying one of these would build a DN that means something
+// other than what was typed, and this service files people and groups BY NAME
+// everywhere — /admin/users, /admin/groups, the persona, the SCIM id, which IS
+// the DN. An `ldapadd` can still create such an entry with the escaping written
+// out by the client, which is the line applications.js already draws between
+// what a door offers and what it merely does not prevent.
+//
+// Three copies of this regex would be three doors that eventually disagree
+// about whether `a+b` is a name, and the one that said yes would be the one
+// that produced the unreachable entry.
+const DN_RESERVED = /[,=+<>#;"\\]/;
+
+function nameUsableInDn(name) {
+  return !DN_RESERVED.test(String(name == null ? '' : name));
+}
+
+// ---------------------------------------------------------------------------
+// A PERSON CREATED ON PURPOSE, rather than because they authenticated.
+//
+// autoCreateUser() above is the automatic door: somebody presented a credential
+// somewhere in this service and an entry appeared. This is the deliberate one,
+// and it exists because the console and the management API had NO way to put a
+// person in this directory at all — `ou=applications` could be filled by hand
+// from three directions (LDAP, a form, an API call) and `ou=users` could only
+// be filled by authenticating or by an `ldapadd`.
+//
+// THE SAME FUNCTION SERVES BOTH SURFACES, which is the rule `applications.js`
+// already keeps: /admin/users's form and POST /admin-api/users/create call this,
+// so a form post and an API call are one act arriving by two routes and cannot
+// drift into two readings of what creating a user means.
+//
+// Three things about it:
+//
+//   * IT REFUSES A NAME THAT IS TAKEN, which is the whole point of the ask it
+//     was written for. The lookup is existingUserEntry(), the same one the add
+//     handler and both plans use, so "already exists" means the same thing at
+//     every door — including a person whose only entry is the one a client
+//     certificate created under a different naming attribute.
+//   * IT IS NOT GOVERNED BY `ldap.autocreateUsers`. That setting says whether
+//     authenticating somewhere else should silently seed a directory entry;
+//     this is somebody asking for one outright, and refusing it because the
+//     automatic door is shut would be answering a question nobody asked.
+//   * THE NAME IS CHECKED FOR DN SYNTAX rather than escaped. A username
+//     containing a comma or an equals sign would build a DN that means
+//     something else entirely, and this service files people by name
+//     everywhere — /admin/users, the persona, the groups page — so the honest
+//     answer is that such a thing is not a username here. An `ldapadd` can
+//     still create it, with the escaping spelled out by the client, which is
+//     the same line applications.js draws between what it offers and what it
+//     merely does not prevent.
+// ---------------------------------------------------------------------------
+function createUser(name, options) {
+  log.debug('Entering createUser(). name=' + name);
+  const opts = options || {};
+  const wanted = String(name == null ? '' : name).trim();
+  if (!wanted) {
+    log.debug('Leaving createUser(). No name.');
+    return { ok: false, errors: ['Which user? Send `username` with the name ' +
+                                 'they will authenticate under — the same ' +
+                                 'string that would appear in a token\'s `sub` ' +
+                                 'and on /admin/users.'] };
+  }
+  if (DN_SHAPED.test(wanted)) {
+    log.debug('Leaving createUser(). That is a DN.');
+    return { ok: false, errors: ['"' + wanted + '" is a DN and not a username. ' +
+                                 'An entry named by a distinguished name gets ' +
+                                 'here by presenting a client certificate, ' +
+                                 'where the DN is the identity; there is ' +
+                                 'nothing to create one from by hand.'] };
+  }
+  if (DID_SHAPED.test(wanted)) {
+    log.debug('Leaving createUser(). That is a DID.');
+    return { ok: false, errors: ['"' + wanted.slice(0, 48) + '" is a ' +
+                                 'decentralized identifier and not a username. ' +
+                                 'A DID reaches this directory by being ' +
+                                 'presented, and where this service knows whose ' +
+                                 'it is the identifier goes onto that person\'s ' +
+                                 'entry as didSubject.'] };
+  }
+  if (!nameUsableInDn(wanted)) {
+    log.debug('Leaving createUser(). The name carries DN syntax.');
+    return { ok: false, errors: ['"' + wanted + '" cannot be a username here: ' +
+                                 'it carries a character RFC 4514 reserves in a ' +
+                                 'DN (one of , = + < > # ; " \\), so the entry ' +
+                                 'would be named something other than what was ' +
+                                 'typed. An ldapadd can still create such an ' +
+                                 'entry, with the escaping written out.'] };
+  }
+  const clash = existingUserEntry(wanted);
+  if (clash) {
+    log.debug('Leaving createUser(). That username is taken.');
+    return { ok: false,
+             errors: ['There is already a user called "' + wanted + '" here, at ' +
+                      clash.dn + '. One entry per person is the rule this ' +
+                      'directory keeps at every door — whatever protocol ' +
+                      'authenticated them, and whichever attribute their entry ' +
+                      'happens to be named by.'],
+             existing: { dn: clash.dn, origin: clash.origin || '' } };
+  }
+  if (entries.size >= maxEntries()) {
+    log.debug('Leaving createUser(). The directory is full.');
+    return { ok: false, errors: ['This directory holds its maximum of ' +
+                                 maxEntries() + ' entries.'] };
+  }
+  const plan = namePlan(wanted);
+  const note = String(opts.note || '').trim() ||
+    'created by hand rather than by authenticating';
+  const created = putEntry(plan.dn, Object.assign({}, plan.attributes,
+                                                  { description: [note] }),
+                           { origin: opts.origin || 'console' });
+  // The same fill autoCreateUser() does, and for the same reason: the entry an
+  // LDAP client reads and the credential a wallet is handed have to say the
+  // same thing about this person from the moment the entry exists.
+  applyVcAttributes(created, wanted);
+  log.info('ldap: created ' + created.dn + ' because somebody asked for it.');
+  audit.recordDirectory({
+    action: 'user.create',
+    actor: String(opts.actor || ''),
+    target: created.dn,
+    // Passed through rather than fixed at '' (which recordDirectory reads as
+    // LDAP), because this function now serves a THIRD door: a SCIM create says
+    // SCIM here, and a row that called it LDAP would be the audit log's one
+    // job — saying what happened and through what — done wrong.
+    protocol: String(opts.protocol || ''),
+    channel: opts.channel || 'internal',
+    summary: 'created ' + created.dn + ' on request; ' + note,
+    detail: { reason: note,
+              attributes: Object.keys(created.attributes).join(', '),
+              entriesNow: entries.size,
+              note: 'created by hand through the console or the management ' +
+                    'API, not by an LDAP client and not by an authentication' }
+  });
+  log.debug('Leaving createUser(). ' + created.dn + ' was created.');
+  return { ok: true, dn: created.dn, username: wanted,
+           entry: { dn: created.dn, origin: created.origin || '',
+                    attributes: created.attributes } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,9 +1910,17 @@ function personaKeyOf(stored) {
   // (see didPlan()), so seeding from it would invent a SECOND person for
   // somebody the authentication path had already invented one for — and the two
   // would disagree on every attribute the sweep filled in.
+  //
+  // ONLY WHERE IT NAMED THE ENTRY, which is the qualification the fold added.
+  // A DID now also lands on the entry of the person it was issued to (see
+  // didPlan()'s linked branch), and there the uid IS the identity — the
+  // username somebody typed — so preferring the DID would do the very thing
+  // this paragraph exists to prevent, in the other direction. The test is
+  // exact rather than a guess: the entry is DID-named when its uid is the
+  // digest didPlan() would have built from that DID.
   const did = (stored.attributes.didsubject || [])[0];
-  if (did) return String(did);
   const uid = (stored.attributes.uid || [])[0];
+  if (did && (!uid || String(uid) === didUid(String(did)))) return String(did);
   if (uid) return String(uid);
   const cn = (stored.attributes.cn || [])[0];
   if (cn) return String(cn);
@@ -1647,15 +2078,7 @@ function locateEntry(key) {
   // certificate's is, and didPlan() is consulted only to say where an entry
   // WOULD go when there is none.
   if (DID_SHAPED.test(key)) {
-    let found = null;
-    entries.forEach(function (entry) {
-      if (found) {
-        return;
-      }
-      if ((entry.attributes.didsubject || []).indexOf(key) >= 0) {
-        found = entry;
-      }
-    });
+    const found = entryByDidSubject(key);
     if (found) {
       log.debug('Leaving locateEntry(). Found by didSubject: ' + found.dn);
       return { dn: found.dn, stored: found };
@@ -1664,9 +2087,20 @@ function locateEntry(key) {
     log.debug('Leaving locateEntry(). Nothing yet; it would go at ' + plan.dn);
     return { dn: plan.dn, stored: null };
   }
+  // A NAME, and it is asked of the store rather than answered by rebuilding the
+  // DN. `uid=<name>,ou=users` is where namePlan() puts one and is still the
+  // answer for almost everybody — but a person whose entry was created by a
+  // client certificate is at `cn=<name>,ou=users`, and rebuilding the name would
+  // report "nothing here" about an entry this directory holds and every
+  // authentication now folds onto.
+  const already = existingUserEntry(key);
+  if (already) {
+    log.debug('Leaving locateEntry(). A name, found at ' + already.dn + '.');
+    return { dn: already.dn, stored: already };
+  }
   const dn = 'uid=' + key + ',' + USERS_DN;
-  log.debug('Leaving locateEntry(). A name, so ' + dn);
-  return { dn: dn, stored: getEntry(dn) };
+  log.debug('Leaving locateEntry(). A name, so ' + dn + ' (nothing there yet).');
+  return { dn: dn, stored: null };
 }
 
 function objectFor(name) {
@@ -2183,6 +2617,27 @@ if (typeof admin.setGroupReader === 'function') {
            'unaffected.');
 }
 
+// The console's THIRD slot, and the only one of the three that WRITES. It is
+// deliberately not counted in with the cross-module numbering below, because
+// what makes it different is not where it sits in the require order but what it
+// does: the other two answer questions about the directory, and this one puts a
+// person in it.
+//
+// It carries createUser() and not putEntry(): the console must not be a second
+// definition of what creating a user means, any more than /admin/applications is
+// a third door onto the registry. The refusal that matters — a username that is
+// already here — is inside that function, so the form, the management API and an
+// `ldapadd` all get the same answer about the same name.
+//
+// Guarded like the other two, and for the same reason.
+if (typeof admin.setDirectoryWriter === 'function') {
+  admin.setDirectoryWriter(createUser);
+} else {
+  log.warn('ldap: the admin console offers no setDirectoryWriter(), so ' +
+           '/admin/users cannot create a person. The directory itself is ' +
+           'unaffected, and an ldapadd still reaches it.');
+}
+
 // The fourth, and the only one that goes to a module this file also requires
 // outright. That is not a contradiction: vc_claims.js is required above for the
 // catalogue and the invented people, and it calls back into these two functions
@@ -2490,6 +2945,57 @@ server.add('', function (req, res, next) {
   if (getEntry(dn)) {
     log.debug('Leaving the LDAP add handler. It is already there.');
     return next(new ldap.EntryAlreadyExistsError(dn));
+  }
+  // ---------------------------------------------------------------------
+  // AND ONE ENTRY PER PERSON, WHICH IS A DIFFERENT REFUSAL FROM THE ONE
+  // ABOVE.
+  //
+  // That one is about the DN and every directory makes it. This is about the
+  // USERNAME, and without it the fold the authentication path now does could
+  // be undone from the other side in one operation: `uid=rcbj,ou=users`
+  // exists, an add of `cn=rcbj,ou=users` succeeds, and this directory holds
+  // two objects for one person again — with nothing having gone wrong that a
+  // reader could point at.
+  //
+  // WHAT COUNTS AS A USERNAME is the two things existingUserEntry() looks at,
+  // asked of the entry being added: the value of its naming RDN, whatever
+  // attribute type names it, and any `uid` it carries. So `uid=rcbj,ou=users`,
+  // `cn=rcbj,ou=users` and `sn=someone,ou=users` with `uid: rcbj` on it are
+  // all refused once any one of them is here.
+  //
+  // SCOPED TO ou=users for the reason every other rule in this module is
+  // scoped that way: placement is what decides that an entry is a person,
+  // because a schemaless directory cannot believe an objectClass. An add of
+  // `cn=rcbj,ou=people` is not a user by that rule and is not refused — this
+  // enforces one entry per person in the container people live in, which is
+  // the container everything else here reads.
+  //
+  // LDAP_ENTRY_ALREADY_EXISTS (68) rather than a constraint violation, and it
+  // names the DN that already holds the name: a client that gets 68 back
+  // looks for the entry it collided with, which is exactly what the message
+  // hands it.
+  // ---------------------------------------------------------------------
+  if (normalizeDn(parentDn(dn)) === normalizeDn(USERS_DN)) {
+    const proposed = [usernameOfEntry({ dn: dn })].concat(
+      req.attributes.filter(function (attr) {
+        return String(attr.type).toLowerCase() === 'uid';
+      }).reduce(function (all, attr) {
+        return all.concat(attr.values);
+      }, []));
+    let clash = null;
+    proposed.forEach(function (candidate) {
+      if (clash) {
+        return;
+      }
+      clash = existingUserEntry(candidate);
+    });
+    if (clash) {
+      log.info('ldap: refusing to add ' + dn + '; ' + clash.dn + ' already ' +
+               'names that user. One entry per person, whatever protocol or ' +
+               'operation brought them.');
+      log.debug('Leaving the LDAP add handler. That username is taken.');
+      return next(new ldap.EntryAlreadyExistsError(clash.dn));
+    }
   }
   const parent = parentDn(dn);
   if (parent && !getEntry(parent)) {
@@ -3092,7 +3598,14 @@ function description(req) {
       'a delete of an entry with children is LDAP_NOT_ALLOWED_ON_NONLEAF (66)',
       'a modify delete of an attribute that is not present is ' +
         'LDAP_NO_SUCH_ATTRIBUTE (16)',
-      'deleting the last value of an attribute deletes the attribute'
+      'deleting the last value of an attribute deletes the attribute',
+      'an add under ou=users whose username is already here is ' +
+        'LDAP_ENTRY_ALREADY_EXISTS (68), naming the entry that holds it. ' +
+        'ONE ENTRY PER PERSON: the username is the entry\'s naming RDN value ' +
+        'and any uid it carries, so uid=rcbj and cn=rcbj are the same person ' +
+        'and only one of them can be here. It is the same refusal the console ' +
+        'and POST /admin-api/users/create give, and the same rule every ' +
+        'protocol here folds onto when it authenticates somebody'
     ],
     limits: {
       maxEntries: maxEntries(),
@@ -3351,8 +3864,16 @@ function applicationEntry(identifier) {
 //     where the published schema says `oauthClientId` reads as a bug in the
 //     page. canonicalName() now knows the applications schema's names too —
 //     see the merge beside CANONICAL_NAMES.
+//
+// IT IS NOT ONLY AN APPLICATION'S SHAPE ANY MORE. `scim.js` reads people and
+// groups through the same function, because "the entry, whole, canonically
+// spelled, with the DN synthesised on it" is one question and the container it
+// is asked about does not change the answer. That is why it is called
+// entryObject() rather than applicationObject(): a second copy differing only in
+// the container it was written for is the two-lists mistake this file already
+// warns about three times.
 // ---------------------------------------------------------------------------
-function applicationObject(stored) {
+function entryObject(stored) {
   const attributes = {};
   Object.keys(stored.attributes).sort().forEach(function (attribute) {
     attributes[canonicalName(attribute)] = stored.attributes[attribute].slice(0);
@@ -3373,7 +3894,7 @@ function applicationObject(stored) {
 
 function readApplication(identifier) {
   const stored = applicationEntry(identifier);
-  return stored ? applicationObject(stored) : null;
+  return stored ? entryObject(stored) : null;
 }
 
 function applicationCount() {
@@ -3392,7 +3913,7 @@ function allApplications() {
   entries.forEach(function (stored) {
     if (isUnder(stored.dn, APPLICATIONS_DN) &&
         normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
-      rows.push(applicationObject(stored));
+      rows.push(entryObject(stored));
     }
   });
   log.debug('Leaving allApplications(). ' + rows.length + ' application(s).');
@@ -3502,6 +4023,443 @@ applications.setDirectory({
 });
 
 // ---------------------------------------------------------------------------
+// THE SPIFFE CONTAINERS AS A STORE.
+//
+// The applications container's arrangement, made again for the two containers
+// above — and it is a deliberate copy rather than a coincidence: this file owns
+// WHERE an entry lives, how it is created and what the cap is, and
+// `spiffe_registry.js` owns what an entry IS. Neither knows the other's half,
+// which is what lets `ldapmodify`, the console and both gRPC surfaces be three
+// doors onto one store rather than three stores.
+//
+// **The dependency is NOT inverted, and that is worth the sentence rule 3e
+// asks for.** This file requires `spiffe_registry.js` directly and fills its
+// slot; that module does not require this one. Neither of the two things that
+// force a slot in the other direction applies here — there is no cycle (that
+// module knows nothing about this one) and no route moves, because its slot is
+// filled at THIS module's require time, by which point every /ldap route is
+// already registered.
+//
+// **An entry is named by its ID, and an agent by a DIGEST of its SPIFFE ID.**
+// A registration entry id is 32 hex characters, which is a perfectly good RDN.
+// An agent's identity is a SPIFFE ID — long, and holding characters a DN would
+// have to escape — so its entry is `cn=agent-<12 hex>` with the identifier
+// whole on the entry as `spiffeAgentId`, which is `didPlan()`'s device and has
+// the same consequence: ON THESE ENTRIES THE cn IS NOT THE IDENTITY.
+// ---------------------------------------------------------------------------
+function spiffeEntryDn(id) {
+  return 'cn=' + escapeDnValue(String(id)) + ',' + SPIFFE_ENTRIES_DN;
+}
+
+function spiffeAgentDn(id) {
+  return 'cn=' + escapeDnValue(spiffeRegistry.agentCnFor(id)) + ',' +
+         SPIFFE_AGENTS_DN;
+}
+
+// Find one by its own identifier rather than by its DN, because somebody may
+// have renamed the entry — the same walk `applicationEntry()` does, affordable
+// for the same reason (a few hundred entries in one process) and correct for
+// the same reason (the identifier is on the entry; the DN is where it happens
+// to live).
+function spiffeStored(containerDn, attributeName, identifier) {
+  log.debug('Entering spiffeStored(). identifier=' + identifier);
+  const wanted = String(identifier);
+  const key = String(attributeName).toLowerCase();
+  let found = null;
+  entries.forEach(function (stored) {
+    if (found || !isUnder(stored.dn, containerDn)) {
+      return;
+    }
+    if (normalizeDn(stored.dn) === normalizeDn(containerDn)) {
+      return;
+    }
+    if ((stored.attributes[key] || [])[0] === wanted) {
+      found = stored;
+    }
+  });
+  log.debug('Leaving spiffeStored(). ' + (found ? 'Found.' : 'Not here.'));
+  return found;
+}
+
+function spiffeChildren(containerDn) {
+  const rows = [];
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, containerDn) &&
+        normalizeDn(stored.dn) !== normalizeDn(containerDn)) {
+      rows.push(entryObject(stored));
+    }
+  });
+  return rows;
+}
+
+function spiffeChildCount(containerDn) {
+  let n = 0;
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, containerDn) &&
+        normalizeDn(stored.dn) !== normalizeDn(containerDn)) {
+      n++;
+    }
+  });
+  return n;
+}
+
+// REPLACES rather than merges, exactly as writeApplication() does and for the
+// identical reason: the record being written was read from this entry a moment
+// ago, so merging would make it impossible ever to REMOVE a value — a DNS name
+// deleted with ldapmodify would come back on the next write. The operational
+// attributes are preserved, because createTimestamp belongs to the entry rather
+// than to the record.
+function spiffeWrite(containerDn, attributeName, identifier, attributes, originLabel) {
+  log.debug('Entering spiffeWrite(). identifier=' + identifier);
+  const existing = spiffeStored(containerDn, attributeName, identifier);
+  const dn = existing ? existing.dn
+    : (containerDn === SPIFFE_ENTRIES_DN ? spiffeEntryDn(identifier)
+                                         : spiffeAgentDn(identifier));
+  if (!existing && entries.size >= maxEntries()) {
+    // Warned rather than thrown, as a full directory always is here: whatever
+    // the caller was doing succeeded, and a registry that could fail an SVID
+    // request would be the tail wagging the dog.
+    log.warn('ldap: not creating ' + dn + '; the directory holds its maximum ' +
+             'of ' + maxEntries() + ' entries.');
+    log.debug('Leaving spiffeWrite(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, attributes,
+                          { origin: existing ? existing.origin : originLabel });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  spiffeAuditDirectory(existing ? 'entry.update' : 'entry.create', dn,
+                       attributes, !existing);
+  log.debug('Leaving spiffeWrite(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+function spiffeDelete(containerDn, attributeName, identifier) {
+  log.debug('Entering spiffeDelete(). identifier=' + identifier);
+  const stored = spiffeStored(containerDn, attributeName, identifier);
+  if (!stored) {
+    log.debug('Leaving spiffeDelete(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  spiffeAuditDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving spiffeDelete(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// The DIRECTORY's own row, which is a different fact from spiffe_registry.js's
+// `spiffe.entry.create`: that one says a registration entry was created, this
+// one says an entry in the tree changed. Both are recorded for the reason the
+// applications container gives — /admin/audit's directory filter would
+// otherwise show every entry this service writes except these.
+//
+// NO VALUES ARE NAMED, only attribute names, like every other LDAP row here.
+function spiffeAuditDirectory(action, dn, attributes, created) {
+  audit.audit({
+    action: action,
+    actor: '',
+    protocol: 'LDAP',
+    channel: 'internal',
+    target: dn,
+    summary: 'The SPIFFE entry ' + dn + ' was ' +
+             (action === 'entry.delete' ? 'deleted' : (created ? 'created' : 'updated')),
+    detail: { attributes: Object.keys(attributes || {}).sort().join(', ') }
+  });
+}
+
+spiffeRegistry.setDirectory({
+  readEntry: function (id) {
+    const stored = spiffeStored(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id);
+    return stored ? entryObject(stored) : null;
+  },
+  writeEntry: function (id, attributes) {
+    return spiffeWrite(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id, attributes,
+                       'spiffe-entry');
+  },
+  deleteEntry: function (id) {
+    return spiffeDelete(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id);
+  },
+  allEntries: function () { return spiffeChildren(SPIFFE_ENTRIES_DN); },
+  countEntries: function () { return spiffeChildCount(SPIFFE_ENTRIES_DN); },
+  readAgent: function (id) {
+    const stored = spiffeStored(SPIFFE_AGENTS_DN, 'spiffeAgentId', id);
+    return stored ? entryObject(stored) : null;
+  },
+  writeAgent: function (id, attributes) {
+    return spiffeWrite(SPIFFE_AGENTS_DN, 'spiffeAgentId', id, attributes,
+                       'spiffe-agent');
+  },
+  deleteAgent: function (id) {
+    return spiffeDelete(SPIFFE_AGENTS_DN, 'spiffeAgentId', id);
+  },
+  allAgents: function () { return spiffeChildren(SPIFFE_AGENTS_DN); },
+  countAgents: function () { return spiffeChildCount(SPIFFE_AGENTS_DN); },
+  // Where the containers are, for the pages that report it. Here rather than in
+  // that module because that module deliberately does not know.
+  entriesContainerDn: function () { return SPIFFE_ENTRIES_DN; },
+  agentsContainerDn: function () { return SPIFFE_AGENTS_DN; },
+  containerDn: function () { return SPIFFE_DN; }
+});
+
+// ---------------------------------------------------------------------------
+// THE PEOPLE AND THE GROUPS AS A STORE, WHICH IS WHAT `scim.js` PROVISIONS INTO.
+//
+// The same division the applications container above draws, made again for the
+// two containers that were already here: `scim_map.js` owns the SCHEMA (which
+// LDAP attribute each SCIM member is, in both directions) and this file owns the
+// DIRECTORY (where the containers are, what counts as a person or a group, how
+// an entry is created, what the cap is, and what an audit row says). Neither
+// knows the other's half.
+//
+// **THE DEPENDENCY IS NOT INVERTED HERE, and that is worth a sentence because
+// five other things in this file are.** `scim.js` requires this module directly
+// and `server.js` requires it AFTER this one, so neither of the two things that
+// force a slot applies: there is no cycle (this module knows nothing about SCIM)
+// and no route moves (the /ldap routes are already registered by the time the
+// /scim ones are). Rule 3e says a slot is what you reach for when a require
+// would close a cycle or move a route, and to check a new proposal both ways
+// round before adding one. This proposal fails that test both ways round, so it
+// is a plain require.
+//
+// **THERE IS NO SECOND STORE AND NO CACHE**, exactly as the registry has none.
+// A SCIM POST and an `ldapadd` write the same entry, a SCIM PATCH and an
+// `ldapmodify` change it the same way, and a person provisioned over SCIM is
+// visible on /admin/users, gets a directory entry swept for credential claims,
+// and lands in whatever group a client puts them in. That is the whole point of
+// building SCIM onto this directory rather than beside it — a provisioning
+// client and an LDAP client pointed at this service are shown one truth.
+//
+// **A PERSON IS AN ENTRY UNDER ou=users AND A GROUP IS WHATEVER groupRuleFor()
+// SAYS ONE IS.** Both rules are already written down in this file and neither is
+// re-decided here: `populateVcAttributes()` uses the first and `groupsFor()`
+// uses the second, and a third opinion in a SCIM module would be the second
+// definition that eventually disagrees. The consequence is one a SCIM client
+// will meet: a group a client `ldapadd`ed under ou=people with a groupOfNames
+// objectClass IS a SCIM Group and is returned by GET /Groups, because it is one
+// by this directory's rules and SCIM is a view of this directory.
+// ---------------------------------------------------------------------------
+
+// Is this entry a person? Under ou=users, the container itself excepted — the
+// same test populateVcAttributes() applies, and for the same reason: this
+// directory is schemaless, so what an entry IS cannot be read off an
+// objectClass, and placement is the only rule that cannot be argued with.
+function isPersonEntry(stored) {
+  return isUnder(stored.dn, USERS_DN) &&
+         normalizeDn(stored.dn) !== normalizeDn(USERS_DN);
+}
+
+function personCount() {
+  let n = 0;
+  entries.forEach(function (stored) {
+    if (isPersonEntry(stored)) n++;
+  });
+  return n;
+}
+
+// Every person, as entry objects. Sorted by normalised DN so that the order a
+// SCIM list response comes back in is stable across calls — scimmy sorts and
+// pages on top of this, and a list whose underlying order changed between two
+// pages would drop and repeat people with nothing looking wrong.
+function allPersons() {
+  log.debug('Entering allPersons().');
+  const rows = [];
+  entries.forEach(function (stored) {
+    if (isPersonEntry(stored)) {
+      rows.push(stored);
+    }
+  });
+  rows.sort(function (a, b) {
+    return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
+  });
+  const out = rows.map(entryObject);
+  log.debug('Leaving allPersons(). ' + out.length + ' person(s).');
+  return out;
+}
+
+// One person BY DN, which is what a SCIM id is. Null for a DN that names
+// nothing AND for one that names something outside ou=users: a SCIM client
+// asking for a User must not be handed an application entry because it guessed
+// the right DN, and answering 404 for it is the same answer any other directory
+// would give for a resource that is not of the type asked for.
+function readPerson(dn) {
+  log.debug('Entering readPerson(). dn=' + dn);
+  const stored = getEntry(dn);
+  if (!stored || !isPersonEntry(stored)) {
+    log.debug('Leaving readPerson(). ' + (stored ? 'Not under ' + USERS_DN + '.' : 'Nothing there.'));
+    return null;
+  }
+  log.debug('Leaving readPerson(). Found ' + stored.dn + '.');
+  return entryObject(stored);
+}
+
+// WHERE A NEW PERSON GOES IS NOT DECIDED HERE, and there used to be a
+// personDnFor() on this line that decided it.
+//
+// It built `uid=<userName>,ou=users` directly, which is right until it is not:
+// namePlan() FOLDS a new name onto an entry that is already this person's under
+// a different naming attribute (a client certificate's `cn=rcbj,ou=users`, say),
+// and a second rule that always built a `uid=` DN would have created
+// `uid=rcbj` beside it — two objects for one person, which is the exact thing
+// that fold exists to prevent. createUser() applies namePlan(), refuses a taken
+// name through existingUserEntry() and refuses DN syntax through
+// nameUsableInDn(), so scim.js calls THAT and takes the DN it returns. One
+// definition of what creating a person means, at all three doors.
+
+// Create or replace a person's entry. The caller has already merged whatever it
+// means to keep (see scim_map.js's window rule), so this REPLACES, exactly as
+// writeApplication() does and for the same reason: a merge here would make it
+// impossible for a SCIM client ever to remove a value.
+//
+// Returns a result object rather than a boolean, because a SCIM client is owed a
+// reason. `full` is the one refusal this can produce, and it is a refusal rather
+// than a warning — unlike writeApplication(), where the application's own
+// request had already succeeded and only the record was at stake, here the
+// request IS the write.
+function writePerson(dn, attributes) {
+  log.debug('Entering writePerson(). dn=' + dn);
+  const existing = getEntry(dn);
+  if (existing && !isPersonEntry(existing)) {
+    log.debug('Leaving writePerson(). ' + dn + ' is not under ' + USERS_DN + '.');
+    return { ok: false, reason: 'notAPerson', dn: dn };
+  }
+  if (!existing && entries.size >= maxEntries()) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
+             maxEntries() + ' entries (ldap.maxEntries).');
+    log.debug('Leaving writePerson(). The directory is full.');
+    return { ok: false, reason: 'full', dn: dn };
+  }
+  // The parent has to exist, which is the same structural rule the LDAP add
+  // handler enforces. It always does here — seed() creates ou=users — but a
+  // client can delete it, and an entry under a container that is gone is
+  // unreachable by every search this service answers.
+  if (!getEntry(parentDn(dn))) {
+    log.debug('Leaving writePerson(). There is no ' + parentDn(dn) + '.');
+    return { ok: false, reason: 'noParent', dn: dn, parent: parentDn(dn) };
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, attributes, { origin: existing ? existing.origin : 'scim' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  log.debug('Leaving writePerson(). The entry was ' + (existing ? 'updated.' : 'created.'));
+  return { ok: true, created: !existing, dn: stored.dn, entry: entryObject(stored) };
+}
+
+// Delete a person's entry. It leaves that DN behind in every group that lists
+// it, which is deliberate and is the same non-feature `GET /ldap` documents:
+// referential integrity is a directory feature and not a protocol rule, and a
+// dangling member is exactly what /admin/groups exists to report. A SCIM client
+// that means to remove somebody from their groups has to say so.
+function deletePerson(dn) {
+  log.debug('Entering deletePerson(). dn=' + dn);
+  const stored = getEntry(dn);
+  if (!stored || !isPersonEntry(stored)) {
+    log.debug('Leaving deletePerson(). It was not a person here.');
+    return { ok: false, reason: 'notFound', dn: dn };
+  }
+  if (hasChildren(stored.dn)) {
+    log.debug('Leaving deletePerson(). It has children.');
+    return { ok: false, reason: 'notLeaf', dn: stored.dn };
+  }
+  entries.delete(normalizeDn(stored.dn));
+  log.debug('Leaving deletePerson(). ' + entries.size + ' entry/entries left.');
+  return { ok: true, dn: stored.dn, dangling: membershipsNaming(stored.dn) };
+}
+
+// Every group, as entry objects, by BOTH of groupRuleFor()'s rules. The rule
+// each one matched comes back on it, because a SCIM client that finds a Group
+// outside ou=groups deserves to be able to see why this service thinks it is
+// one.
+function allGroupEntries() {
+  log.debug('Entering allGroupEntries().');
+  const rows = [];
+  entries.forEach(function (stored) {
+    if (groupRuleFor(stored)) {
+      rows.push(stored);
+    }
+  });
+  rows.sort(function (a, b) {
+    return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
+  });
+  const out = rows.map(function (stored) {
+    const object = entryObject(stored);
+    object.rule = groupRuleFor(stored);
+    object.members = membersOf(stored);
+    return object;
+  });
+  log.debug('Leaving allGroupEntries(). ' + out.length + ' group(s).');
+  return out;
+}
+
+function readGroupEntry(dn) {
+  log.debug('Entering readGroupEntry(). dn=' + dn);
+  const stored = getEntry(dn);
+  if (!stored || !groupRuleFor(stored)) {
+    log.debug('Leaving readGroupEntry(). ' +
+              (stored ? 'It is an entry and not a group.' : 'Nothing there.'));
+    return null;
+  }
+  const object = entryObject(stored);
+  object.rule = groupRuleFor(stored);
+  object.members = membersOf(stored);
+  log.debug('Leaving readGroupEntry(). ' + object.members.length + ' member value(s).');
+  return object;
+}
+
+// Where a new group goes: `cn=<displayName>,ou=groups`. Placement AND an
+// objectClass — scim_map.js adds groupOfNames — so a group created over SCIM is
+// one by both rules rather than by where it happens to sit, and stays one if a
+// client moves it.
+function groupDnFor(displayName) {
+  return 'cn=' + escapeDnValue(String(displayName)) + ',' + GROUPS_DN;
+}
+
+function writeGroupEntry(dn, attributes) {
+  log.debug('Entering writeGroupEntry(). dn=' + dn);
+  const existing = getEntry(dn);
+  if (existing && !groupRuleFor(existing)) {
+    log.debug('Leaving writeGroupEntry(). ' + dn + ' is an entry and not a group.');
+    return { ok: false, reason: 'notAGroup', dn: dn };
+  }
+  if (!existing && entries.size >= maxEntries()) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
+             maxEntries() + ' entries (ldap.maxEntries).');
+    log.debug('Leaving writeGroupEntry(). The directory is full.');
+    return { ok: false, reason: 'full', dn: dn };
+  }
+  if (!getEntry(parentDn(dn))) {
+    log.debug('Leaving writeGroupEntry(). There is no ' + parentDn(dn) + '.');
+    return { ok: false, reason: 'noParent', dn: dn, parent: parentDn(dn) };
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, attributes, { origin: existing ? existing.origin : 'scim' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  log.debug('Leaving writeGroupEntry(). The entry was ' + (existing ? 'updated.' : 'created.'));
+  return { ok: true, created: !existing, dn: stored.dn, entry: readGroupEntry(stored.dn) };
+}
+
+function deleteGroupEntry(dn) {
+  log.debug('Entering deleteGroupEntry(). dn=' + dn);
+  const stored = getEntry(dn);
+  if (!stored || !groupRuleFor(stored)) {
+    log.debug('Leaving deleteGroupEntry(). It was not a group here.');
+    return { ok: false, reason: 'notFound', dn: dn };
+  }
+  if (hasChildren(stored.dn)) {
+    log.debug('Leaving deleteGroupEntry(). It has children.');
+    return { ok: false, reason: 'notLeaf', dn: stored.dn };
+  }
+  entries.delete(normalizeDn(stored.dn));
+  log.debug('Leaving deleteGroupEntry(). ' + entries.size + ' entry/entries left.');
+  return { ok: true, dn: stored.dn };
+}
+
+// ---------------------------------------------------------------------------
 // GET /ldap/applications — the registry, and the schema that defines it.
 //
 // Two things on one page because they answer one question. The TABLE is what
@@ -3515,6 +4473,108 @@ applications.setDirectory({
 // through applications.js, which reads these very entries. The page cannot
 // disagree with the directory because it has nothing to disagree with.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /ldap/spiffe — the SPIFFE containers, and their schema.
+//
+// The same page `/ldap/applications` is, for the same reason: this directory is
+// SCHEMALESS, so a container whose entries carry thirty invented attribute
+// names needs somewhere to publish what they mean, or a client reading one back
+// is guessing. It sits here rather than in `spiffe_registry.js` because it is a
+// view of the CONTAINERS — where they are, how full they are — which is this
+// file's half of the division.
+// ---------------------------------------------------------------------------
+app.get('/ldap/spiffe', function (req, res) {
+  log.debug('Entering GET /ldap/spiffe.');
+  const entries_ = spiffeRegistry.allEntries();
+  const agents = spiffeRegistry.allAgents();
+  const payload = {
+    baseDn: BASE_DN,
+    container: SPIFFE_DN,
+    entriesContainer: SPIFFE_ENTRIES_DN,
+    agentsContainer: SPIFFE_AGENTS_DN,
+    entries: entries_.length,
+    agents: agents.length,
+    maxEntries: spiffeRegistry.maxEntries(),
+    maxAgents: spiffeRegistry.maxAgents(),
+    sourceOfTruth: 'These entries ARE the SPIFFE registry. An ldapmodify under ' +
+      'ou=entries changes what the next SVID looks like — spiffeX509SvidTtl ' +
+      'changes its lifetime, spiffeDnsName changes its subjectAltName, and ' +
+      'spiffeId changes whose identity it is — because nothing caches them. ' +
+      'The two containers hold different KINDS of thing: entries are ' +
+      'CONFIGURATION and agents are a RECORD, which is why nothing about an ' +
+      'agent is editable from the console.',
+    editable: spiffeRegistry.EDITABLE,
+    schema: spiffeRegistry.SCHEMA,
+    registrationEntries: entries_,
+    attestedAgents: agents
+  };
+  if (String(req.query.format || '').toLowerCase() === 'json') {
+    log.debug('Leaving GET /ldap/spiffe. JSON.');
+    return res.status(200).json(payload);
+  }
+  const classRows = spiffeRegistry.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.where) + (one.standard ? '' : ' <strong>(invented here)</strong>') +
+      '</td><td>' + xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = spiffeRegistry.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code></td><td>' +
+      xmlEscape(row.kind) + '</td><td>' +
+      (row.editable ? 'yes' : 'no') + '</td><td>' + xmlEscape(row.from) +
+      '</td><td>' + xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+  const entryRows = entries_.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.spiffeId) + '</code><br>' +
+      '<span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td><td>' +
+      xmlEscape(row.selectors.map(spiffeRegistry.selectorText).join(', ') ||
+                '(none — matches every workload)') +
+      '</td><td>' + xmlEscape(row.origin) + '</td><td>' + row.svidsIssued +
+      '</td></tr>';
+  }).join('');
+  const agentRows = agents.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.id) + '</code><br>' +
+      '<span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td><td>' +
+      xmlEscape(row.attestationType) + '</td><td>' +
+      (row.banned ? '<strong>banned</strong>' : 'active') + '</td><td>' +
+      row.attestations + '</td></tr>';
+  }).join('');
+  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<title>The SPIFFE registry in the directory</title><style>' +
+    'body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem;line-height:1.5}' +
+    'table{border-collapse:collapse;margin:1rem 0;width:100%}' +
+    'th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left;vertical-align:top}' +
+    'th{background:#f4f4f4}code{background:#f4f4f4;padding:.1rem .3rem}' +
+    '.sub{color:#666;font-size:.9em}' +
+    '</style></head><body><h1>The SPIFFE registry, in the directory</h1>' +
+    '<p>' + xmlEscape(payload.sourceOfTruth) + '</p>' +
+    '<p>Registration entries live under <code>' + xmlEscape(SPIFFE_ENTRIES_DN) +
+    '</code> (' + entries_.length + ' of at most ' + spiffeRegistry.maxEntries() +
+    ') and attested agents under <code>' + xmlEscape(SPIFFE_AGENTS_DN) +
+    '</code> (' + agents.length + ' of at most ' + spiffeRegistry.maxAgents() +
+    '). <a href="/spiffe">What SPIFFE is here</a> &middot; ' +
+    '<a href="/admin/spiffe">the console</a>.</p>' +
+    '<h2>Registration entries</h2><table>' +
+    '<tr><th>SPIFFE ID / DN</th><th>Selectors</th><th>Origin</th><th>SVIDs</th></tr>' +
+    (entryRows || '<tr><td colspan="4">None.</td></tr>') + '</table>' +
+    '<h2>Attested agents</h2><table>' +
+    '<tr><th>Agent / DN</th><th>Attestor</th><th>State</th><th>Attestations</th></tr>' +
+    (agentRows || '<tr><td colspan="4">None. Nothing has attested here.</td></tr>') +
+    '</table>' +
+    '<h2>Object classes</h2><table><tr><th>Class</th><th>Where from</th>' +
+    '<th>What</th></tr>' + classRows + '</table>' +
+    '<h2>Attributes</h2>' +
+    '<p>Declared is what an entry may DO and is editable from the console; ' +
+    'derived is what HAPPENED and is not. <code>ldapmodify</code> reaches ' +
+    'everything either way — refusing it in the console is the difference ' +
+    'between offering an operation and merely not preventing it.</p>' +
+    '<table><tr><th>Attribute</th><th>Values</th><th>Editable</th>' +
+    '<th>Written by</th><th>What</th></tr>' + attrRows + '</table>' +
+    '<p class="sub">Add <code>?format=json</code> for the machine-readable ' +
+    'form, which includes every entry in full.</p></body></html>');
+  log.debug('Leaving GET /ldap/spiffe. HTML.');
+});
+
 app.get('/ldap/applications', function (req, res) {
   log.debug('Entering GET /ldap/applications.');
   const rows = applications.list();
@@ -3732,9 +4792,43 @@ module.exports = {
   maxSearchResults: maxSearchResults,
   entries: entries,
   autoCreateUser: autoCreateUser,
+  createUser: createUser,
+  existingUserEntry: existingUserEntry,
   objectFor: objectFor,
   groupsFor: groupsFor,
   groupsOfUser: groupsOfUser,
   APPLICATIONS_DN: APPLICATIONS_DN,
-  maxApplications: maxApplications
+  SPIFFE_DN: SPIFFE_DN,
+  SPIFFE_ENTRIES_DN: SPIFFE_ENTRIES_DN,
+  SPIFFE_AGENTS_DN: SPIFFE_AGENTS_DN,
+  maxApplications: maxApplications,
+  // The people and group containers as a store, for scim.js. A plain export
+  // rather than a slot somebody fills, because that module is required AFTER
+  // this one and knows about it: neither of the two things that force an
+  // inversion applies. See the section above them for the whole argument.
+  isPersonEntry: isPersonEntry,
+  personCount: personCount,
+  allPersons: allPersons,
+  readPerson: readPerson,
+  writePerson: writePerson,
+  deletePerson: deletePerson,
+  groupDnFor: groupDnFor,
+  // The DN-syntax rule, shared with createUser() above so that the three doors
+  // that create something named cannot disagree about what a name may be.
+  nameUsableInDn: nameUsableInDn,
+  // DN COMPARISON, exported for the same reason: scim.js has to ask whether two
+  // DNs name the same entry, and a second implementation over there would
+  // eventually disagree with this one about `cn=alice, ou=users` — which is a
+  // difference only visible as a uniqueness check that stops firing.
+  normalizeDn: normalizeDn,
+  allGroupEntries: allGroupEntries,
+  readGroupEntry: readGroupEntry,
+  writeGroupEntry: writeGroupEntry,
+  deleteGroupEntry: deleteGroupEntry,
+  // The sweep, so that somebody provisioned over SCIM gets the same credential
+  // claim attributes an authenticated person does. Exported rather than called
+  // from inside writePerson(), because a batch of fifty creates should sweep
+  // once and the caller is what knows the batch is over.
+  populateVcAttributes: populateVcAttributes,
+  entryCount: function () { return entries.size; }
 };

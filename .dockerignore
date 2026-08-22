@@ -1,8 +1,8 @@
 # What is NOT sent to the daemon as build context.
 #
-# Nothing here changes what ends up in the image: the Dockerfile copies four
-# things — package*.json, *.js, contexts and env — and no rule below touches any
-# of them. What it changes is what is UPLOADED before the first instruction runs.
+# Nothing here changes what ends up in the image: the Dockerfile copies five
+# things — package*.json, *.js, contexts, protos and env — and no rule below
+# touches any of them. What it changes is what is UPLOADED before the first instruction runs.
 #
 # node_modules is the whole reason this file exists. It is tens of megabytes, it
 # is re-sent on every build, and it is usually PRESENT: `npm ci` here is the

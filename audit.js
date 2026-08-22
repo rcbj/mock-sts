@@ -133,7 +133,21 @@ const CATEGORIES = [
           'TO. One act commonly writes both.' },
   { category: 'protocol', label: 'Protocol endpoints',
     what: 'Every other HTTP endpoint: the token endpoint, the KDC proxy, the ' +
-          'credential endpoint, the metadata documents, all of it.' }
+          'credential endpoint, the metadata documents, all of it.' },
+  // SPIFFE is its own category rather than rows under `application` or
+  // `authentication`, and the reason is that a SPIFFE row answers a question
+  // neither of those does. An SVID is not an authentication — nothing
+  // authenticated to get one — and a registration entry is not an application
+  // sighting, it is CONFIGURATION deciding what will be issued later. The two
+  // gRPC surfaces also arrive on a channel nothing else here uses, so folding
+  // them into `protocol` would put them in a filter that means "HTTP endpoint"
+  // everywhere else.
+  { category: 'spiffe', label: 'SPIFFE',
+    what: 'The three server-side SPIFFE surfaces: an SVID minted, a ' +
+          'registration entry created, changed or deleted, an agent attesting, ' +
+          'and the trust bundle being fetched or federated. An SVID row is NOT ' +
+          'an authentication row — nothing authenticates to be issued one here ' +
+          '— which is why these are not counted among the fourteen families.' }
 ];
 
 const ACTIONS = [
@@ -205,7 +219,43 @@ const ACTIONS = [
   { action: 'api.change', category: 'api', label: 'A management API write' },
 
   { action: 'protocol.call', category: 'protocol',
-    label: 'A protocol endpoint was called' }
+    label: 'A protocol endpoint was called' },
+
+  // SPIFFE. Nine actions, and the split between them is the same one the
+  // application rows draw: what was CONFIGURED, what HAPPENED, and what was
+  // ISSUED. `spiffe.svid.issue` is by far the noisiest — a workload refetches
+  // its SVID as often as it likes — which is why it is one action rather than
+  // one per SVID format: a reader filtering for it wants "identities were
+  // handed out", not a breakdown.
+  //
+  // NO SVID IS EVER RECORDED IN A ROW, only the SPIFFE ID it named. A JWT-SVID
+  // is a bearer credential and an X509-SVID is delivered WITH ITS PRIVATE KEY,
+  // so this is the sharpest case in the service of the no-credential rule at
+  // the top of this file.
+  { action: 'spiffe.svid.issue', category: 'spiffe',
+    label: 'An SVID was issued' },
+  { action: 'spiffe.svid.validate', category: 'spiffe',
+    label: 'A JWT-SVID was validated' },
+  { action: 'spiffe.entry.create', category: 'spiffe',
+    label: 'A registration entry was created' },
+  { action: 'spiffe.entry.update', category: 'spiffe',
+    label: 'A registration entry was changed' },
+  { action: 'spiffe.entry.delete', category: 'spiffe',
+    label: 'A registration entry was deleted' },
+  { action: 'spiffe.agent.create', category: 'spiffe',
+    label: 'An agent attested for the first time' },
+  { action: 'spiffe.agent.attest', category: 'spiffe',
+    label: 'An agent attested again' },
+  { action: 'spiffe.agent.ban', category: 'spiffe',
+    label: 'An agent was banned' },
+  { action: 'spiffe.agent.unban', category: 'spiffe',
+    label: 'An agent was unbanned' },
+  { action: 'spiffe.agent.delete', category: 'spiffe',
+    label: 'An agent was deleted' },
+  { action: 'spiffe.bundle.read', category: 'spiffe',
+    label: 'The trust bundle was fetched' },
+  { action: 'spiffe.bundle.change', category: 'spiffe',
+    label: 'An authority was rotated, or a federated bundle was set or removed' }
 ];
 
 const CATEGORY_OF_ACTION = {};

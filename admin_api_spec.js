@@ -1088,6 +1088,127 @@ const SCHEMAS = {
         'one.', {})
     }),
 
+  Scim: openObject(
+    'The SCIM 2.0 provisioning surface: what it has been asked to do, what it ' +
+    'will and will not do, and which LDAP attribute each SCIM member is. It ' +
+    'writes into the SAME directory /admin-api/users and /admin-api/groups ' +
+    'report, with no store of its own — so a POST to /scim/v2/Users and an ' +
+    'ldapadd create the same entry.',
+    {
+      installed: {
+        type: 'boolean',
+        description: 'Whether the SCIM module is loaded in this process at ' +
+                     'all. A DIFFERENT question from `enabled`: a process ' +
+                     'that never required scim.js has no /scim routes, where ' +
+                     'one with scim.enabled false has routes that answer 501. ' +
+                     'Reporting both as "off" would send a caller to the ' +
+                     'wrong setting.'
+      },
+      enabled: {
+        type: 'boolean',
+        description: 'The `scim.enabled` setting. When false, every endpoint ' +
+                     'under /scim/v2 answers 501 — the routes stay registered, ' +
+                     'because "turned off" and "wrong URL" are different ' +
+                     'answers to a client.'
+      },
+      baseUrl: {
+        type: 'string',
+        description: 'Where the endpoints are, as the request reached this ' +
+                     'service — so a document fetched through a proxy or a ' +
+                     'published port names an address the caller can use.'
+      },
+      specifications: { type: 'array', items: { type: 'string' } },
+      store: openObject(
+        'The directory it provisions into, and how full it is. The cap is ' +
+        '`ldap.maxEntries`: SCIM has no cap of its own because it has no ' +
+        'store of its own.', {}),
+      identifiers: openObject(
+        'What a SCIM `id` is here — the entry\'s DN — and why. Includes the ' +
+        'cost, which is that an LDAP rename gives the same person a new id.',
+        {}),
+      endpoints: {
+        type: 'array',
+        description: 'Every SCIM endpoint with what it does.',
+        items: openObject('One endpoint.', {})
+      },
+      doesNotDo: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'The four sentences worth reading before pointing a ' +
+                     'provisioning client at this. It authenticates nobody; ' +
+                     '`active: false` deactivates nobody; there is no ETag ' +
+                     'and no changePassword; a member naming nothing is ' +
+                     'accepted.'
+      },
+      reachableNegatives: {
+        type: 'array',
+        description: 'What to do to get each error out of it. A permissive ' +
+                     'server is hard to write error handling against, so ' +
+                     'these exist on purpose — the same device as the ' +
+                     'reserved password `invalid` elsewhere in this service.',
+        items: openObject('One way to make it fail.', {})
+      },
+      mapping: openObject(
+        'Which LDAP attribute each SCIM member is, for both resource types. ' +
+        'The attribute spellings are the same catalogue the credential and ' +
+        'token claim pages read, checked against it at startup rather than ' +
+        'copied.',
+        {
+          user: {
+            type: 'array',
+            items: openObject('One User member.', {
+              scim: { type: 'string' },
+              ldap: { type: 'string' },
+              kind: { type: 'string' },
+              readOnly: { type: 'boolean' },
+              required: { type: 'boolean' },
+              extension: { type: 'boolean' },
+              schema: { type: 'string' },
+              note: { type: 'string' }
+            })
+          },
+          group: {
+            type: 'array',
+            items: openObject('One Group member.', {})
+          }
+        }),
+      counters: openObject(
+        'What has been asked of it. Every operation and every resource type ' +
+        'is listed INCLUDING the ones at zero, because "does this support ' +
+        'PATCH" is answered by omission otherwise. The bulk count ' +
+        'deliberately does not tally with the rest: one Bulk carrying five ' +
+        'creates is one bulk AND five creates, because each is performed.',
+        {
+          total: { type: 'integer' },
+          ok: { type: 'integer' },
+          failed: { type: 'integer' },
+          firstAt: { type: 'integer' },
+          lastAt: { type: 'integer' },
+          operations: {
+            type: 'array',
+            items: openObject('One operation, with its count.', {
+              operation: { type: 'string' },
+              label: { type: 'string' },
+              method: { type: 'string' },
+              what: { type: 'string' },
+              count: { type: 'integer' }
+            })
+          },
+          resourceTypes: {
+            type: 'array',
+            items: openObject('One resource type, with its count.', {
+              resourceType: { type: 'string' },
+              count: { type: 'integer' }
+            })
+          },
+          byStatus: openObject('HTTP status code to count.', {}),
+          byScimType: openObject(
+            'RFC 7644 section 3.12 `scimType` to count. `(none)` is a ' +
+            'refusal that carried no such code — a 404 has none — counted ' +
+            'rather than dropped so that the failure tables agree.', {})
+        })
+    }),
+
   AuditEvent: openObject(
     'One thing that happened, with the facts of it and no credential of any ' +
     'kind. Written out rather than left open because a caller filtering or ' +
@@ -1372,6 +1493,13 @@ const TAG_DESCRIPTIONS = {
           'endpoint reads one.',
   Tokens: 'What has been issued, and the revocation of the three kinds that ' +
           'can be revoked.',
+  SCIM: 'The SCIM 2.0 provisioning endpoints under /scim/v2 — what they have ' +
+        'been asked to do, and what they will and will not do. READ-ONLY ' +
+        'here, and that is the parity rule holding rather than a gap: the ' +
+        'console page has no form on it either, because everything about ' +
+        'SCIM that can be changed is a configuration row. What SCIM WROTE is ' +
+        'under Users and Groups, since it provisions into the same directory ' +
+        'and has no store of its own.',
   'Audit log': 'What happened here, in order — history rather than state, ' +
                'and read-only. It carries no credential of any kind and has ' +
                'no clear operation: an erase control on an unprotected ' +

@@ -863,6 +863,57 @@ const SETTINGS = [
     description: 'The server-side size limit for a search, which is what ' +
                  'produces LDAP_SIZE_LIMIT_EXCEEDED.' },
 
+  // --- SCIM ----------------------------------------------------------------
+  //
+  // SCIM 2.0 provisions into the SAME directory the four settings above
+  // describe: there is no separate store and no cap of its own, so
+  // `ldap.maxEntries` is what a POST /scim/v2/Users runs out of. That is why
+  // there are only four rows here rather than the eight a second store would
+  // have needed.
+  //
+  // All four are RUNTIME, and the two limits are runtime only because
+  // `applyCapabilities()` in scim.js is called again at the top of the
+  // ServiceProviderConfig handler. Without that they would be captured at
+  // require time and the published document would go on advertising the number
+  // this process started with while a different one was enforced — a `const` in
+  // disguise, and exactly the silent disagreement this file's header warns
+  // about.
+  { key: 'scim.enabled', group: 'SCIM', label: 'SCIM enabled',
+    env: 'SCIM_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the SCIM 2.0 endpoints under /scim/v2 create, ' +
+                 'read, replace, patch and delete entries in the embedded ' +
+                 'directory. On by default, like every other protocol family ' +
+                 'here. Turning it off leaves the routes REGISTERED and makes ' +
+                 'them answer 501 rather than 404 — the feature is off, the ' +
+                 'URL is not wrong, and those are different sentences to a ' +
+                 'client. Nothing on these endpoints checks a credential; do ' +
+                 'not put this port on a public address.' },
+
+  { key: 'scim.maxResults', group: 'SCIM', label: 'Maximum results per page',
+    env: 'SCIM_MAX_RESULTS', type: 'int', dflt: 200, runtime: true,
+    description: 'The largest page a list or a search will return, published ' +
+                 'as filter.maxResults in the ServiceProviderConfig and used ' +
+                 'as the page size when a client asks for none. A ?count ' +
+                 'larger than this is clamped rather than refused, which RFC ' +
+                 '7644 section 3.4.2.4 permits — the ListResponse says what ' +
+                 'actually happened in itemsPerPage.' },
+
+  { key: 'scim.bulkMaxOperations', group: 'SCIM', label: 'Bulk operation limit',
+    env: 'SCIM_BULK_MAX_OPERATIONS', type: 'int', dflt: 100, runtime: true,
+    description: 'How many operations one POST /scim/v2/Bulk may carry, ' +
+                 'published as bulk.maxOperations. A request carrying more is ' +
+                 'refused with 413 and the payloadTooLarge scimType, which is ' +
+                 'a reachable negative worth having.' },
+
+  { key: 'scim.bulkMaxPayloadSize', group: 'SCIM', label: 'Bulk payload limit',
+    env: 'SCIM_BULK_MAX_PAYLOAD_SIZE', type: 'int', dflt: 1048576, runtime: true,
+    description: 'The largest BulkRequest body in bytes, published as ' +
+                 'bulk.maxPayloadSize and CHECKED against that number rather ' +
+                 'than against the express body parser\'s service-wide 5 MB. A ' +
+                 'client reads a published limit as a promise, so a request ' +
+                 'refused at a different size than the document names would be ' +
+                 'the drift this arrangement exists to prevent.' },
+
   // --- The group claim -----------------------------------------------------
   //
   // The one feature in this service that reads the directory's GROUPS back out
@@ -956,7 +1007,252 @@ const SETTINGS = [
                  'so turning it off is how somebody watching the directory or ' +
                  'the console gets a readable page. It never affects the ' +
                  'other five categories, and /admin/metrics counts every call ' +
-                 'either way.' }
+                 'either way.' },
+
+  // --- SPIFFE / SPIRE ------------------------------------------------------
+  //
+  // The three server-side surfaces of SPIFFE: the bundle endpoint (plain
+  // HTTPS), the Workload API (gRPC, on a Unix socket and/or TCP) and the SPIRE
+  // Server API (gRPC, likewise). What is restart-only here and why is the
+  // ordinary split the header of this file describes: a BOUND SOCKET (all four
+  // listeners) and MATERIAL DERIVED AT STARTUP (the trust domain, which every
+  // authority's certificate names, and the two key types those authorities are
+  // generated with). Everything else is read where it is used.
+  { key: 'spiffe.enabled', group: 'SPIFFE', label: 'Enable SPIFFE',
+    env: 'STS_SPIFFE_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether the three SPIFFE surfaces answer. Off, the routes ' +
+                 'are still registered and the gRPC listeners still bound — ' +
+                 'so /sts-metadata still describes them and /spiffe still ' +
+                 'says what this is — but the bundle endpoint answers 404 and ' +
+                 'every gRPC call is refused with Unavailable. Read per ' +
+                 'request, so it can be turned off without a restart; the ' +
+                 'sockets are a separate question and are restart-only below.' },
+
+  { key: 'spiffe.trustDomain', group: 'SPIFFE', label: 'Trust domain',
+    env: 'STS_SPIFFE_TRUST_DOMAIN', type: 'string', dflt: 'example.org',
+    runtime: false,
+    restartReason: 'the X.509 and JWT authorities are generated at startup ' +
+                   'and every certificate they hold names this trust domain',
+    description: 'The trust domain this service is the issuing authority for: ' +
+                 'the authority part of every SPIFFE ID it mints, so ' +
+                 'spiffe://example.org/… by default. LOWER-CASE, and only ' +
+                 'letters, digits, dots, dashes and underscores — an ' +
+                 'upper-case trust domain is not a valid SPIFFE ID and is not ' +
+                 'another spelling of the lower-case one either. Restart-only ' +
+                 'because changing it now would leave a CA whose certificates ' +
+                 'name the old one, which is the silent disagreement this ' +
+                 'file exists to prevent.' },
+
+  { key: 'spiffe.x509KeyType', group: 'SPIFFE', label: 'X.509 authority key',
+    env: 'STS_SPIFFE_X509_KEY_TYPE', type: 'enum',
+    enumValues: ['ec-p256', 'ec-p384', 'ec-p521', 'rsa-2048', 'rsa-4096',
+                 'ed25519'],
+    dflt: 'ec-p256', runtime: false,
+    restartReason: 'the X.509 authority is generated with this key type at ' +
+                   'startup',
+    description: 'The key the trust domain\'s X.509 authority is generated ' +
+                 'with, and therefore the key type of every X509-SVID it ' +
+                 'signs. EC P-256 by default because that is what SPIRE ' +
+                 'issues and what the X509-SVID specification recommends. RSA ' +
+                 '4096 takes several seconds to generate at startup, which is ' +
+                 'worth knowing before wondering why the bundle endpoint is ' +
+                 'not answering yet.' },
+
+  { key: 'spiffe.jwtKeyType', group: 'SPIFFE', label: 'JWT authority key',
+    env: 'STS_SPIFFE_JWT_KEY_TYPE', type: 'enum',
+    enumValues: ['ec-p256', 'ec-p384', 'ec-p521', 'rsa-2048', 'rsa-4096'],
+    dflt: 'ec-p256', runtime: false,
+    restartReason: 'the JWT authority is generated with this key type at startup',
+    description: 'The key the trust domain\'s JWT authority is generated ' +
+                 'with, which decides the `alg` of every JWT-SVID: ES256, ' +
+                 'ES384, ES512 or RS256. Ed25519 is DELIBERATELY ABSENT here ' +
+                 'and present for X.509 — jsonwebtoken, this service\'s JWS ' +
+                 'implementation, does not sign EdDSA, so offering it would ' +
+                 'be a setting that fails at the first FetchJWTSVID rather ' +
+                 'than at startup.' },
+
+  { key: 'spiffe.caTtl', group: 'SPIFFE', label: 'Authority lifetime (seconds)',
+    env: 'STS_SPIFFE_CA_TTL', type: 'int', dflt: 86400, runtime: false,
+    restartReason: 'the authority certificate is issued for this long at startup',
+    description: 'How long the X.509 authority\'s own certificate is valid. ' +
+                 'An SVID is never issued past it — a leaf outliving its ' +
+                 'issuer works until it suddenly does not, and nothing in ' +
+                 'that failure names the CA — so a short authority lifetime ' +
+                 'silently shortens every SVID with it.' },
+
+  { key: 'spiffe.svidTtl', group: 'SPIFFE', label: 'X509-SVID lifetime (seconds)',
+    env: 'STS_SPIFFE_SVID_TTL', type: 'int', dflt: 3600, runtime: true,
+    description: 'The default lifetime of an X509-SVID. A registration entry ' +
+                 'may name its own and that wins; this is what an entry with ' +
+                 'no `x509SvidTtl` gets. SPIRE\'s default is an hour and so ' +
+                 'is this: rotation is the interesting behaviour to exercise ' +
+                 'in a client, and a long-lived SVID never rotates.' },
+
+  { key: 'spiffe.jwtSvidTtl', group: 'SPIFFE', label: 'JWT-SVID lifetime (seconds)',
+    env: 'STS_SPIFFE_JWT_SVID_TTL', type: 'int', dflt: 300, runtime: true,
+    description: 'The default lifetime of a JWT-SVID. Much shorter than the ' +
+                 'X.509 one on purpose and in both SPIRE and here: a JWT-SVID ' +
+                 'is a bearer credential — whoever holds it can present it — ' +
+                 'where an X509-SVID is bound to a private key.' },
+
+  { key: 'spiffe.refreshHint', group: 'SPIFFE', label: 'Bundle refresh hint (seconds)',
+    env: 'STS_SPIFFE_REFRESH_HINT', type: 'int', dflt: 300, runtime: true,
+    description: 'The `spiffe_refresh_hint` published in the bundle: how often ' +
+                 'a consumer should come back for it. It matters more against ' +
+                 'this service than against a real one, because the whole ' +
+                 'bundle is regenerated on every restart — a consumer that ' +
+                 'never refreshes will fail to verify every SVID minted after ' +
+                 'one, with nothing in the failure naming the bundle.' },
+
+  { key: 'spiffe.svidSubject', group: 'SPIFFE', label: 'SVID subject DN',
+    env: 'STS_SPIFFE_SVID_SUBJECT', type: 'string', dflt: 'C=US,O=SPIRE',
+    runtime: true,
+    description: 'The X.501 subject written into every X509-SVID. The SPIFFE ' +
+                 'ID is in a URI subjectAltName and IS the identity; this is ' +
+                 'decoration, and it is SPIRE\'s own value by default so that ' +
+                 'an SVID from here looks like one from there. It cannot be ' +
+                 'empty: an empty subject is refused by the certificate ' +
+                 'builder and is rendered as a blank line by every tool a ' +
+                 'person might inspect one with.' },
+
+  { key: 'spiffe.autoCreateEntries', group: 'SPIFFE',
+    label: 'Invent a registration entry on first sight',
+    env: 'STS_SPIFFE_AUTOCREATE_ENTRIES', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'THIS IS THE SETTING THAT MAKES THIS A MOCK. On, a workload ' +
+                 'that asks the Workload API for an SVID and matches no ' +
+                 'registration entry gets one created for it and is issued an ' +
+                 'SVID anyway — no attestation, no selectors, nothing checked ' +
+                 '— which is the same permissive posture every other family ' +
+                 'here has. Off, an unregistered workload is answered with an ' +
+                 'empty SVID list, which is what a real SPIRE agent does and ' +
+                 'is the ONLY way to exercise a client\'s "I have no ' +
+                 'identity" path. Both answers are worth having; neither is ' +
+                 'the safe one.' },
+
+  { key: 'spiffe.requireSecurityHeader', group: 'SPIFFE',
+    label: 'Require the workload.spiffe.io header',
+    env: 'STS_SPIFFE_REQUIRE_SECURITY_HEADER', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'The Workload Endpoint specification says a client MUST send ' +
+                 '`workload.spiffe.io: true` on every call and a server MUST ' +
+                 'refuse one without it. It is a conformance check rather than ' +
+                 'a security one — it exists so that a caller cannot reach ' +
+                 'the endpoint by accident — and it is ON here even though ' +
+                 'nothing else in this service refuses anything, because a ' +
+                 'client that omits it has a bug this is the only thing that ' +
+                 'will ever tell them about. Off is for the case where you ' +
+                 'are deliberately testing something else.' },
+
+  { key: 'spiffe.maxEntries', group: 'SPIFFE', label: 'Maximum registration entries',
+    env: 'STS_SPIFFE_MAX_ENTRIES', type: 'int', dflt: 500, runtime: true,
+    description: 'How many entries may live under ou=spiffe. Past it a new ' +
+                 'one is REFUSED and the SVID request that would have created ' +
+                 'it is answered without one — the registry is a directory ' +
+                 'container and a container has a size, the same cap ' +
+                 'ou=applications has.' },
+
+  { key: 'spiffe.maxAgents', group: 'SPIFFE', label: 'Maximum attested agents',
+    env: 'STS_SPIFFE_MAX_AGENTS', type: 'int', dflt: 200, runtime: true,
+    description: 'How many attested agents are held. The agent id comes off ' +
+                 'whatever the caller sent, so any caller can invent one; ' +
+                 'past the cap the oldest is dropped rather than the newest ' +
+                 'refused, because an agent that cannot attest is an agent ' +
+                 'that cannot do anything at all.' },
+
+  { key: 'spiffe.maxFederatedBundles', group: 'SPIFFE',
+    label: 'Maximum federated bundles',
+    env: 'STS_SPIFFE_MAX_FEDERATED_BUNDLES', type: 'int', dflt: 32,
+    runtime: true,
+    description: 'How many foreign trust domains\' bundles are held. They are ' +
+                 'PASTED IN and never fetched — see /spiffe — so this bounds ' +
+                 'what an operator or the SPIRE Server API can add, not what ' +
+                 'any polling loop could accumulate.' },
+
+  { key: 'spiffe.bundlePath', group: 'SPIFFE', label: 'Bundle endpoint path',
+    env: 'STS_SPIFFE_BUNDLE_PATH', type: 'string', dflt: '/spiffe/bundle',
+    runtime: false,
+    restartReason: 'the route is registered at require time, and the require ' +
+                   'order is the route order',
+    description: 'Where the trust bundle is published. A real federation ' +
+                 'partner is configured with this URL and polls it. It is ' +
+                 'restart-only for the reason every path here is: requiring a ' +
+                 'module registers its endpoints, so the path is fixed by the ' +
+                 'time anything could change it.' },
+
+  { key: 'spiffe.workloadSocketEnabled', group: 'SPIFFE',
+    label: 'Workload API on a Unix socket',
+    env: 'STS_SPIFFE_WORKLOAD_SOCKET_ENABLED', type: 'bool', dflt: true,
+    runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'Whether the Workload API is served on a Unix domain socket. ' +
+                 'ON by default because that is what SPIFFE_ENDPOINT_SOCKET ' +
+                 'means to every real client — go-spiffe, spiffe-helper, the ' +
+                 'SPIRE agent — so without it nothing connects unconfigured. ' +
+                 'It is the ONE thing this service puts on a filesystem: a ' +
+                 'socket is a rendezvous point rather than state, nothing is ' +
+                 'persisted through it, and it is unlinked when the listener ' +
+                 'closes.' },
+
+  { key: 'spiffe.workloadSocket', group: 'SPIFFE', label: 'Workload API socket path',
+    env: 'STS_SPIFFE_WORKLOAD_SOCKET', type: 'string',
+    dflt: '/tmp/spire-agent/public/api.sock', runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'Where that socket lives. SPIRE\'s own default path, so a ' +
+                 'client that was pointed at a SPIRE agent needs no change. ' +
+                 'The directory is created if it is missing and the socket is ' +
+                 'removed on a clean shutdown; a stale one left by a killed ' +
+                 'process is unlinked before binding, which is the ordinary ' +
+                 'thing every Unix socket server does and the ordinary way ' +
+                 'two copies of this service fight over one path.' },
+
+  { key: 'spiffe.workloadPort', group: 'SPIFFE', label: 'Workload API TCP port',
+    env: 'STS_SPIFFE_WORKLOAD_PORT', type: 'port', dflt: 8092, runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'The Workload API over TCP, which the Workload Endpoint ' +
+                 'specification permits (tcp://host:port) and which is how ' +
+                 'this is reached from another container or from a host that ' +
+                 'cannot share the socket. 0 turns it off and leaves the Unix ' +
+                 'socket alone.' },
+
+  { key: 'spiffe.serverPort', group: 'SPIFFE', label: 'SPIRE Server API TCP port',
+    env: 'STS_SPIFFE_SERVER_PORT', type: 'port', dflt: 8181, runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'The SPIRE Server API — Entry, Agent, Bundle, SVID, ' +
+                 'TrustDomain and Debug — over gRPC. SPIRE\'s own default is ' +
+                 '8081, which is this service\'s HTTP port, so the default ' +
+                 'here is 8181 and a client configured for a real SPIRE ' +
+                 'server has one thing to change. 0 turns it off.' },
+
+  { key: 'spiffe.serverSocketEnabled', group: 'SPIFFE',
+    label: 'SPIRE Server API on a Unix socket',
+    env: 'STS_SPIFFE_SERVER_SOCKET_ENABLED', type: 'bool', dflt: false,
+    runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'Whether the SPIRE Server API is also served on a Unix ' +
+                 'socket, which is where a real spire-server keeps its ' +
+                 'administrative API. OFF by default — unlike the Workload ' +
+                 'API\'s, which is on — because `spire-server entry create` ' +
+                 'and friends are the only things that reach for it, where ' +
+                 'the Workload API socket is what every workload reaches for.' },
+
+  { key: 'spiffe.serverSocket', group: 'SPIFFE', label: 'SPIRE Server API socket path',
+    env: 'STS_SPIFFE_SERVER_SOCKET', type: 'string',
+    dflt: '/tmp/spire-server/private/api.sock', runtime: false,
+    restartReason: 'the listener is bound when the process starts',
+    description: 'Where that socket lives when it is on. SPIRE\'s own default ' +
+                 'path, for the same reason the Workload API\'s is.' },
+
+  { key: 'spiffe.grpcHost', group: 'SPIFFE', label: 'gRPC bind address',
+    env: 'STS_SPIFFE_GRPC_HOST', type: 'string', dflt: '0.0.0.0',
+    runtime: false,
+    restartReason: 'the listeners are bound when the process starts',
+    description: 'The address both TCP gRPC listeners bind. 0.0.0.0 is every ' +
+                 'interface, which is what a container needs; 127.0.0.1 ' +
+                 'confines them to the machine this runs on. Worth a thought ' +
+                 'here rather than elsewhere: the SPIRE Server API can create ' +
+                 'registration entries, and nothing in this service ' +
+                 'authenticates anybody.' }
 ];
 
 // Indexed once. A linear scan per read would be invisible on a mock and the

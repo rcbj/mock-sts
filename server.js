@@ -32,7 +32,7 @@
 //                EVERY setting this service has — env/docker-tests.js is what
 //                the containerized test stack uses.
 //
-// The forty-five settings themselves are not listed here any more, because a
+// The sixty-five settings themselves are not listed here any more, because a
 // list in a comment is a list that goes stale: `config.js` is the table, and it
 // carries each setting's name, its environment variable, its default, what it
 // does, and whether changing it while the service runs does anything.
@@ -191,6 +191,44 @@ const tlsServer = require('./tls_server');
 // so requiring it first is what makes the route order in this file the real one
 // rather than a fiction node quietly corrects.
 const ldapServer = require('./ldap_server');
+// SCIM 2.0 (RFC 7642, 7643, 7644) — the fifteenth family, and the one whose
+// whole purpose is to WRITE. It provisions into the directory above, entry for
+// entry, with no store of its own: a POST /scim/v2/Users and an ldapadd write
+// the same entry, so a person provisioned over SCIM appears on /admin/users,
+// carries the credential-claim attributes /admin/vc selects, and lands in
+// whatever group a client puts them in.
+//
+// It must come AFTER ./ldap_server, and that is a dependency rather than a
+// preference: it requires that module for the twelve functions that make
+// ou=users and ou=groups a store, and requiring it any earlier would pull every
+// /ldap route into the express router at that point. It is NOT one of that
+// file's five inverted hooks — there is no cycle and no route moves, which is
+// rule 3e's test, and this proposal fails it both ways round, so it is a plain
+// require.
+//
+// Unlike the four modules above it, it starts nothing: it is HTTP all the way
+// down, so requiring it is the whole of its installation.
+require('./scim');
+// SPIFFE — the sixteenth family, and the third module here whose own listeners
+// are started from listen() below rather than at require time.
+//
+// Three server-side surfaces: the BUNDLE ENDPOINT (plain HTTPS, registered by
+// requiring this), the WORKLOAD API and the SPIRE SERVER API (both gRPC, on a
+// Unix socket and a TCP port each). The gRPC listeners are invisible to
+// /sts-metadata for the same reason the KDC's, the directory's and the TLS
+// endpoint's sockets are, so they are described by hand there.
+//
+// It must come AFTER ./ldap_server, and it is a dependency rather than a
+// preference: the SPIFFE registry's store is the directory under ou=spiffe, and
+// that module fills spiffe_registry.js's setDirectory() slot at ITS require
+// time. Requiring this any earlier would leave the registry with no store at
+// the moment the seed entries are written.
+//
+// The 8443/9443/636/8081 certificate is NOT shared with this. A SPIFFE trust
+// domain is its own PKI — the CA here signs identities in one trust domain and
+// the TLS certificate identifies a host — and one process holding two of them
+// is correct rather than wasteful. See spiffe_ca.js.
+const spiffeServer = require('./spiffe_server');
 require('./sts_metadata');
 
 // ---------------------------------------------------------------------------
@@ -317,6 +355,33 @@ function announce() {
   // sockets are. GET /tls describes them and hands out the server certificate;
   // GET /sts-metadata cannot see a socket, so they are described by hand there
   // beside the KDC's and the directory's.
+  // The two gRPC listeners, started here for the reason the other four sockets
+  // are. GET /spiffe describes all three surfaces and reports whether each
+  // socket bound; GET /sts-metadata cannot see one, so they are described by
+  // hand there beside the KDC's, the directory's and the TLS endpoint's.
+  const spiffeListeners = spiffeServer.listen();
+  spiffeListeners.whenReady.then(function (ready) {
+    const up = ready.workload.concat(ready.api)
+      .filter(function (b) { return b.listening; });
+    const down = ready.workload.concat(ready.api)
+      .filter(function (b) { return !b.listening; });
+    log.info('spiffe: the trust domain ' + config.value('spiffe.trustDomain') +
+             ' is served by ' + up.length + ' gRPC listener(s)' +
+             (up.length ? ' — ' + up.map(function (b) { return b.address; })
+               .join(', ') : '') +
+             (down.length ? ', and ' + down.length + ' did NOT bind (' +
+               down.map(function (b) { return b.address + ': ' + b.error; })
+               .join('; ') + '), which leaves the rest of this service ' +
+               'untouched' : '') +
+             '. The trust bundle is at ' + spiffeServer.BUNDLE_PATH +
+             ' and GET /spiffe says what is and is not checked — which is ' +
+             'most of that page, because NOTHING HERE IS ATTESTED: any ' +
+             'caller that reaches the Workload API gets any identity in the ' +
+             'trust domain.');
+  }).catch(function (err) {
+    // Reported rather than thrown, exactly as the other three are.
+    log.error('spiffe: the SPIFFE listeners could not start: ' + err.message);
+  });
   const tlsListeners = tlsServer.listen();
   tlsListeners.whenReady.then(function (ready) {
     log.info('tls: an HTTPS endpoint that reports the connection back to ' +
