@@ -1,0 +1,40 @@
+# Jekyll configuration for the mock-sts documentation site.
+#
+# GitHub's own Pages workflow builds this directory — see
+# ../.github/workflows/pages.yml, which runs actions/jekyll-build-pages against
+# `source: ./docs`. Nothing here is installed by `npm install`: this repository's
+# package.json has no documentation dependency and is not going to grow one, so
+# the site is built entirely by the action and the markdown stays readable in the
+# repository whether or not anybody ever visits the site.
+#
+# `minima` is the theme GitHub Pages ships. Choosing anything else means either
+# vendoring a theme or adding a Gemfile, and this project's whole reason for
+# preferring Jekyll over MkDocs was not adding a second toolchain.
+title: mock-sts
+description: >-
+  A permissive mock identity service that speaks sixteen protocol families.
+  It exists to exercise CLIENTS: it checks no password, validates no access
+  token and attests no workload.
+theme: minima
+show_excerpts: false
+
+# The site lives under the repository name on github.io, so every internal link
+# has to be written with `relative_url` or as a plain relative path. The pages
+# here use plain relative paths (`configuration.md`), which work both on the
+# rendered site and when the markdown is read in the repository — the second of
+# those is the case that matters most, because that is where a maintainer reads
+# it.
+baseurl: "/mock-sts"
+
+# What Jekyll must not try to render. There is nothing else in this directory,
+# but a future `images/` or a downloaded artefact should not be processed.
+exclude:
+  - CLAUDE.md
+
+header_pages:
+  - getting-started.md
+  - configuration.md
+  - endpoints.md
+  - what-is-not-checked.md
+  - layout.md
+  - parent-project-migration.md
