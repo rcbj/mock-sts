@@ -44,6 +44,26 @@ is POSTed — and they match on **local name with the namespace ignored** becaus
 trust namespace alone has four versions in use. That is what lets one parser answer
 WS-Trust 1.0 through 1.4 instead of four.
 
+**`dnRfc4514()` IS THE NEWEST OF THEM AND IT MOVED HERE RATHER THAN BEING WRITTEN
+TWICE.** It renders a certificate subject the way LDAP and RFC 4514 write one —
+leaf first, no spaces after the commas, values escaped — which is a DIFFERENT
+string from the most-significant-first form node and `openssl x509 -subject`
+print, and it is the form this service files an identity under. It was in
+`tls/tls_server.js`, which still re-exports it, because `scim_auth.js` and
+`spiffe_auth.js` require that module for it and have done since before it moved.
+What forced the move is `spiffe_ca.js`: the directory now records the
+certificate every X509-SVID mint produces, using the same six `x509*` attributes
+a verified TLS client certificate writes, so the two paths must render a DN
+identically — **two spellings of one DN is two people on `/admin/users`** — and
+that module CANNOT require `tls_server.js`. Rule 3e's test says why:
+`admin-ui/admin.js` requires `spiffe_ca.js`, and `server.js` requires `admin.js`
+at 18 and `tls_server.js` at 20, so the require would pull every `/tls*` route
+into the router ahead of the console's and `GET /sts-metadata` walks that router.
+A leaf here moves no route and closes no cycle. **It takes BOTH shapes of DN node
+produces** — the object from `getPeerCertificate()` and the newline-separated
+string from `crypto.X509Certificate` — which is the whole reason it is one
+function and not two that agree today.
+
 
 ---
 
@@ -148,6 +168,21 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    require in the other direction, and do not count tokens at their call sites
    instead — `signJwt()` is the single funnel, and five counted call sites means a
    sixth that is not.
+
+   **ITS ONE OBSERVER SLOT NOW CARRIES THREE KINDS OF EVENT, AND THAT IS NOT A
+   SIXTH HOOK.** `setUserObserver()` is still one slot filled by one module at
+   its require time; what changed is that `ldap_server.js` is offered an `event`
+   of `authentication`, `issuance` or `credential-status` through it.
+   `recordAuthentication()` sends the first, `recordSvid('X.509', …)` sends the
+   second when an X509-SVID is minted, and `recordCredentialStatus()` — which
+   `spiffe_registry.js` calls by a plain require — sends the third. Keeping them
+   on one slot rather than adding two more is what rule 3e asks for: a slot is
+   the price you pay when a require would close a cycle or move a route, and one
+   cycle does not become three. **AN ABSENT `event` MEANS AN AUTHENTICATION**,
+   so an older `ldap_server.js` behaves exactly as it did, and only that event
+   is counted on `/admin/users` or written to the audit log as one — an issuance
+   that inflated the authentication count would make this page's central number
+   mean two things at once.
 
 3c. **`audit.js` is a library too, it sits BESIDE `admin_stats.js` rather than
    under it, and one dependency into it is inverted.** `admin_stats.js` answers

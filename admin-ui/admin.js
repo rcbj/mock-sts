@@ -41,20 +41,39 @@
 // nothing about this module — so it is not a cycle.
 //
 // ---------------------------------------------------------------------------
-// THIS CONSOLE IS NOT PROTECTED, and that is a decision rather than an oversight.
+// THIS CONSOLE IS PROTECTED NOW, AND THE OLD PARAGRAPH IS KEPT BELOW BECAUSE
+// MOST OF IT IS STILL TRUE.
 //
-// Every page here says so. This service checks no password anywhere — the username
-// typed at the login screen simply becomes the identity in every token — and a
-// console with a credential on it would be the only authenticated surface in a
-// service whose whole premise is that it authenticates nobody. It would also be the
-// only one a test had to hold a secret for.
+// `admin.authRequired` is ON by default. Every page and every form under /admin
+// needs a browser sign-on session from `../authn/authn.js` and one of two roles
+// — Admin Read and Admin Write — held as two ordinary groups in the embedded
+// directory. The gate is one `app.use('/admin', ...)` further down this file and
+// the roles are `./admin_rbac.js`; both have headers of their own.
 //
-// What follows from that is worth stating plainly rather than leaving implied:
-// anyone who can reach this port can revoke every token this service has issued and
-// add a claim to every token it issues next. That is fine for a mock on a laptop or
-// on a compose network and is not fine on a public address, which is the same thing
-// that was already true of /oauth2/token — it will mint a token for any username
-// asked of it. Do not put this service on a public address.
+// **IT IS A TURNSTILE AND NOT A LOCK, and that distinction is the same one SCIM's
+// authentication carries.** This service still checks no password anywhere — the
+// username typed at the sign-in screen simply becomes the identity — so what the
+// gate proves is that somebody TYPED a name that holds a role. What it buys is
+// what a mock is for: a client, or a person, can now be driven through 302 to a
+// sign-in screen, 401 with no session, 403 with the wrong role and a role model
+// that can be granted and revoked, none of which was reachable here before.
+//
+// **AND `/admin-api` IS NOT GATED**, deliberately: it is how a test drives this
+// console, it is the way back in when nobody holds a role, and gating it would
+// have broken the parent project's `tests/admin_api.js`. So the sentence below
+// is still true of this PORT even though it is no longer true of this PAGE —
+// which is why it stays rather than being deleted:
+//
+//   anyone who can reach this port can revoke every token this service has
+//   issued and add a claim to every token it issues next. That is fine for a
+//   mock on a laptop or on a compose network and is not fine on a public
+//   address, which is the same thing that was already true of /oauth2/token —
+//   it will mint a token for any username asked of it. Do not put this service
+//   on a public address.
+//
+// Every page says which of the three states it is in (see gateBanner()), because
+// "protected" and "protected, but nobody holds a role so anybody who signs in is
+// an administrator" are very different things to be reading a console under.
 // ---------------------------------------------------------------------------
 
 const app = require('../common/app');
@@ -66,7 +85,23 @@ const stats = require('../common/admin_stats');
 // here: the console reports them and never ends one, because /oauth2/logout and
 // wsignout1.0 already do that and doing it from a third place would mean three
 // ways of getting the cleanup wrong.
-const { sessions } = require('../authn/authn');
+//
+// THREE MORE THINGS COME FROM THAT MODULE NOW, and they are the whole of how
+// this console is protected: `sessionOf()` reads the cookie, `beginAuthentication()`
+// stashes the page somebody asked for and hands back the URL of the sign-in
+// screen, and `LOGIN_PATH` is where they are sent. Nothing about signing in is
+// implemented here — see the guard below — because a console with a login screen
+// of its own would be a second authentication service, and this service has
+// exactly one on purpose.
+const { sessions, sessionOf, beginAuthentication, LOGIN_PATH } =
+  require('../authn/authn');
+// WHO MAY USE THIS CONSOLE. A library (rule 3): it registers no route, so
+// requiring it here moves nothing in the router, and it requires only config.js,
+// helpers.js and audit.js — none of which requires it back. The two roles it
+// decides from are two ORDINARY GROUPS in the embedded directory, which it
+// reaches through a slot ldap_server.js fills; see its header for why that is a
+// directory group rather than a store of this console's own.
+const rbac = require('./admin_rbac');
 // The credential claim set: which LDAP attributes an issued Verifiable Credential
 // carries, and the invented values behind them. A library like admin_stats.js —
 // it registers no route — so requiring it here neither adds to the express router
@@ -195,25 +230,95 @@ const MAX_WHO = 12;
 // exception. Every control on these pages is therefore a plain form POST, and
 // every list is sorted server-side.
 // ---------------------------------------------------------------------------
-const NAV = [
-  { path: '/admin', label: 'Console' },
-  { path: '/admin/metrics', label: 'Metrics' },
-  { path: '/admin/users', label: 'Users' },
-  { path: '/admin/groups', label: 'Groups' },
-  { path: '/admin/scim', label: 'SCIM' },
-  { path: '/admin/applications', label: 'Applications' },
-  { path: '/admin/authorization-servers', label: 'Authorization servers' },
-  { path: '/admin/spiffe', label: 'SPIFFE' },
-  { path: '/admin/spiffe/entries', label: 'Registration entries' },
-  { path: '/admin/spiffe/agents', label: 'Agents' },
-  { path: '/admin/tokens', label: 'Tokens' },
-  { path: '/admin/audit', label: 'Audit log' },
-  { path: '/admin/claims', label: 'Custom claims' },
-  { path: '/admin/vc', label: 'Credential claims' },
-  { path: '/admin/vc-verifier-config', label: 'Verifier request' },
-  { path: '/admin/config', label: 'Configuration' },
-  { path: '/sts-metadata', label: 'Service metadata' }
+// ---------------------------------------------------------------------------
+// THE NAVIGATION, WHICH IS NOW A LIST DOWN THE LEFT RATHER THAN A ROW ACROSS
+// THE TOP, AND IS GROUPED.
+//
+// Seventeen tabs on one line wrapped to three rows on a laptop and to five on
+// anything narrower, and a reader looking for `Verifier request` had to read all
+// seventeen labels to find out it was not `Credential claims`. What the row could
+// not express is that these pages are not seventeen peers: some are about
+// PROTOCOLS this service speaks, some are about what is in its DIRECTORY, one is
+// history, and the rest are about the service itself.
+//
+// So SECTIONS is the structure and `NAV` below is derived from it. Two rules
+// about that and both are load-bearing:
+//
+//   * **`NAV` is DERIVED and never written by hand.** `upTo()` and `trailBar()`
+//     look a path up in it to label a breadcrumb, so a page in SECTIONS that was
+//     not in NAV would leave a drill-down whose trail names a path instead of a
+//     section. Deriving it makes that impossible rather than merely unlikely.
+//   * **The section a page is in is NOT a crumb.** A section has no page of its
+//     own, so a crumb for it could not be a link, and a trail with a dead crumb
+//     in the middle of it teaches a reader not to trust the ones beside it — the
+//     rule the LAST crumb already follows for the same reason. The section is
+//     visible where it is useful, which is the sidebar: the heading above the
+//     page you are on is the answer to "what else is near this".
+//
+// WHERE THE PAGES THE ASK DID NOT NAME WENT. Four sections were asked for by
+// name — Protocols (SCIM, SPIFFE, Verifier request, Credential claims, Custom
+// claims), Directory (Users, Groups, Applications), Monitoring (Audit log) and
+// Server configuration (Service metadata) — and seven pages were not mentioned.
+// They are placed by the same question rather than left dangling: SPIFFE's
+// registration entries and agents are SPIFFE, and authorization servers are
+// OAuth, so all three are protocol pages; the console index, the metrics and the
+// issued-token list describe the SERVICE'S OWN state rather than any one
+// protocol, so they are an Overview at the top; and the configuration page and
+// the admin roles below it are what this service is set up with, so they sit
+// with the service metadata.
+const SECTIONS = [
+  { title: 'Overview',
+    what: 'What this service has done, across all of it.',
+    items: [
+      { path: '/admin', label: 'Console' },
+      { path: '/admin/metrics', label: 'Metrics' },
+      { path: '/admin/tokens', label: 'Tokens' }
+    ] },
+  { title: 'Protocols',
+    what: 'One page per family, each configuring or reporting what that ' +
+          'protocol does here.',
+    items: [
+      { path: '/admin/authorization-servers', label: 'Authorization servers' },
+      { path: '/admin/claims', label: 'Custom claims' },
+      { path: '/admin/vc', label: 'Credential claims' },
+      { path: '/admin/vc-verifier-config', label: 'Verifier request' },
+      { path: '/admin/scim', label: 'SCIM' },
+      { path: '/admin/spiffe', label: 'SPIFFE' },
+      { path: '/admin/spiffe/entries', label: 'Registration entries' },
+      { path: '/admin/spiffe/agents', label: 'Agents' }
+    ] },
+  { title: 'Directory',
+    what: 'The embedded LDAP directory, and the identities this service has ' +
+          'seen. The two are different questions and these pages keep them ' +
+          'apart.',
+    items: [
+      { path: '/admin/users', label: 'Users' },
+      { path: '/admin/groups', label: 'Groups' },
+      { path: '/admin/applications', label: 'Applications' }
+    ] },
+  { title: 'Monitoring',
+    what: 'History rather than state: what happened, in order.',
+    items: [
+      { path: '/admin/audit', label: 'Audit log' }
+    ] },
+  { title: 'Server configuration',
+    what: 'What this service is set up with, and who may change it.',
+    items: [
+      { path: '/admin/config', label: 'Configuration' },
+      { path: '/admin/rbac', label: 'Admin roles' },
+      { path: '/sts-metadata', label: 'Service metadata' }
+    ] }
 ];
+
+// Every page in every section, flattened, with the section it belongs to on each
+// row. Derived rather than typed for the reason above; the `section` member is
+// what lets the sidebar bold the right heading without a second lookup.
+const NAV = [];
+SECTIONS.forEach(function (section) {
+  section.items.forEach(function (item) {
+    NAV.push({ path: item.path, label: item.label, section: section.title });
+  });
+});
 
 function esc(v) { return xmlEscape(v == null ? '' : String(v)); }
 
@@ -239,7 +344,8 @@ const LIST_PARAMS = {
   '/admin/applications': ['q', 'kind', 'per', 'page'],
   '/admin/authorization-servers': ['per', 'page'],
   '/admin/spiffe/entries': ['q', 'origin', 'per', 'page'],
-  '/admin/spiffe/agents': ['q', 'per', 'page']
+  '/admin/spiffe/agents': ['q', 'per', 'page'],
+  '/admin/rbac': ['q', 'role', 'per', 'page']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -332,17 +438,35 @@ function upTo(path, leaf, listView) {
 // the foot of a long page. On a drill-down the tab is a LINK: still bold, because
 // the reader is inside that section, and underlined so that "the section you are
 // in" cannot be read as "not clickable".
+//
+// It is one `<nav>` holding one `<ul>` per section with a heading above it. The
+// heading is plain text and NOT a link, for the reason the section is not a
+// crumb: there is no page behind it. The section containing the page being drawn
+// is marked, so a reader who arrived on a deep link can see where they are
+// without reading every label.
 function navBar(active, up) {
-  return '<nav>' + NAV.map(function (item) {
-    if (item.path === active) {
-      if (up) {
-        return '<a class="here" href="' + esc(up.href) + '" title="Back to ' +
-               esc(up.label) + '">' + esc(item.label) + '</a>';
-      }
-      return '<span class="here">' + esc(item.label) + '</span>';
-    }
-    return '<a href="' + esc(item.path) + '">' + esc(item.label) + '</a>';
-  }).join('') + '</nav>';
+  log.debug("Entering navBar(). active=" + active);
+  const html = '<nav aria-label="Admin console sections">' +
+    SECTIONS.map(function (section) {
+      const inThisSection = section.items.filter(function (item) {
+        return item.path === active;
+      }).length > 0;
+      const links = section.items.map(function (item) {
+        if (item.path === active) {
+          if (up) {
+            return '<li><a class="here" href="' + esc(up.href) + '" title="Back to ' +
+                   esc(up.label) + '">' + esc(item.label) + '</a></li>';
+          }
+          return '<li><span class="here">' + esc(item.label) + '</span></li>';
+        }
+        return '<li><a href="' + esc(item.path) + '">' + esc(item.label) + '</a></li>';
+      }).join('');
+      return '<div class="navsec' + (inThisSection ? ' open' : '') + '">' +
+        '<p class="navhead" title="' + esc(section.what) + '">' +
+        esc(section.title) + '</p><ul>' + links + '</ul></div>';
+    }).join('') + '</nav>';
+  log.debug("Leaving navBar(). " + SECTIONS.length + " section(s).");
+  return html;
 }
 
 // How long a leaf crumb may be before it is cut. A group's leaf is a DN and a
@@ -414,37 +538,149 @@ function trailBar(active, up, title) {
   return html;
 }
 
-// The banner every page carries. It is repeated on all of them rather than shown
-// once on the index, because the pages are linkable and the one somebody arrives at
-// directly is exactly the one that needs to say this.
+// ---------------------------------------------------------------------------
+// THE BANNER EVERY PAGE CARRIES, AND IT NOW HAS THREE THINGS TO SAY RATHER THAN
+// ONE.
+//
+// It is repeated on all of them rather than shown once on the index, because the
+// pages are linkable and the one somebody arrives at directly is exactly the one
+// that needs to say this. What it says depends on the state of the gate, and the
+// three states are genuinely different warnings rather than one warning with a
+// detail changed:
+//
+//   * THE GATE IS OFF (`admin.authRequired`). The old banner, unchanged and
+//     still true: nothing here checks anything. It stays because that state is
+//     deliberately reachable — every refusal in this service is switchable — and
+//     because a console that used to say this and now says nothing would leave
+//     somebody who turned the setting off believing they were still protected.
+//   * THE GATE IS ON AND NOBODY HOLDS A ROLE. The most dangerous state and the
+//     one nothing else would report: a person has signed in, sees a working
+//     console, and it is working because the roster is EMPTY rather than because
+//     they were allowed. Said loudly, with what to do about it, because the
+//     moment somebody grants the first role the door shuts behind whoever is not
+//     in it — including, quite possibly, them.
+//   * THE GATE IS ON AND THE ROSTER IS ENFORCED. Not a warning at all: who is
+//     signed in and what they hold. It is still on every page, because "am I
+//     read-only here" is the question behind every button a reader does not find.
+//
+// It takes what `respond()` worked out rather than asking again, so the banner
+// and the guard that let the request through cannot come to disagree about who
+// somebody is.
+// ---------------------------------------------------------------------------
 const OPEN_BANNER =
-  '<div class="warn"><strong>This console is not protected.</strong> Nothing here checks a ' +
-  'credential, because nothing in this service does — the username typed at the sign-in screen ' +
-  'is the identity in every token it issues. Anyone who can reach this port can revoke every ' +
-  'token and change what the next one contains. That is fine on a laptop or a compose network ' +
-  'and is not fine on a public address.</div>';
+  '<div class="warn"><strong>This console is not protected.</strong> ' +
+  '<code>admin.authRequired</code> is OFF, so nothing here checks a credential — and nothing ' +
+  'else in this service does either: the username typed at the sign-in screen is the identity ' +
+  'in every token it issues. Anyone who can reach this port can revoke every token and change ' +
+  'what the next one contains. That is fine on a laptop or a compose network and is not fine on ' +
+  'a public address. Turn it on from <a href="/admin/config">Configuration</a>, and say who may ' +
+  'get in on <a href="/admin/rbac">Admin roles</a>.</div>';
 
-function page(title, active, inner, up) {
+function gateBanner(gate) {
+  log.debug("Entering gateBanner().");
+  const info = gate || {};
+  if (!info.enforced) {
+    log.debug("Leaving gateBanner(). The gate is off.");
+    return OPEN_BANNER;
+  }
+  const who = '<code>' + esc(info.username || '(nobody)') + '</code>';
+  if (info.open) {
+    log.debug("Leaving gateBanner(). The roster is empty.");
+    return '<div class="warn"><strong>Signed in as ' + who + ', and holding both roles ' +
+      'because NOBODY HOLDS EITHER.</strong> <code>admin.authRequired</code> is on, so this ' +
+      'console asked you to sign in — but neither <code>' + esc(info.readGroup) + '</code> nor ' +
+      '<code>' + esc(info.writeGroup) + '</code> has a single member, and while that is true ' +
+      'anyone who signs in has the whole console. This service has no password to bootstrap an ' +
+      'administrator with, which is why the empty roster opens rather than closes ' +
+      '(<code>admin.openWhenEmpty</code>). <strong>Grant somebody a role on ' +
+      '<a href="/admin/rbac">Admin roles</a></strong> and the roster is enforced from that ' +
+      'moment — including against you, so grant yourself one first.</div>';
+  }
+  if (info.closed) {
+    // Rendered for completeness rather than because a reader will meet it: a
+    // request in this state is refused before a page is drawn. It is reachable
+    // on the refusal page itself, which IS drawn.
+    log.debug("Leaving gateBanner(). The roster is empty and closed.");
+    return '<div class="err"><strong>Nobody can use this console.</strong> ' +
+      '<code>admin.authRequired</code> is on, <code>admin.openWhenEmpty</code> is off, and no ' +
+      'role has a member. <code>POST /admin-api/rbac/grant</code> is the way back in — the ' +
+      'management API is not gated.</div>';
+  }
+  const held = (info.roles || []).map(function (id) {
+    const role = rbac.roleFor(id);
+    return '<strong>' + esc(role ? role.label : id) + '</strong>';
+  }).join(' and ');
+  log.debug("Leaving gateBanner(). Enforced; " + (info.roles || []).length + " role(s).");
+  return '<div class="ok">Signed in as ' + who + ', holding ' +
+    (held || '<strong>no console role</strong>') + '. ' +
+    (info.write
+      ? 'Every control on these pages is yours.'
+      : 'This is a READ-ONLY view: the forms are drawn so that you can see what ' +
+        'they do, and posting one is refused. ' + esc(info.writeGroup) + ' is the role that ' +
+        'changes that.') +
+    ' <a href="/admin/rbac">Who holds what</a>. Ending this session is ' +
+    '<a href="/oauth2/logout">/oauth2/logout</a>\'s job and not this console\'s — it is one ' +
+    'sign-on session shared with WS-Federation, and a third way to end one is a third way to ' +
+    'get the cleanup wrong.</div>';
+}
+
+function page(title, active, inner, up, gate) {
   log.debug("Entering page(). title=" + title + ", up=" + (up ? up.href : "none"));
   const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>' + esc(title) + ' — mock STS admin</title><style>' +
     'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
     'padding:2rem 1rem;color:#222;line-height:1.45}' +
+    // THE TWO COLUMNS. Flex rather than grid because the behaviour wanted at a
+    // narrow width is "the sidebar stops being a column and becomes a block
+    // above the page", which is what `flex-wrap` does for nothing — and this
+    // console runs no script, so a layout that needed one would not be an
+    // option anyway. The sidebar's `flex` is `0 0 auto` with a fixed basis so
+    // that a long label wraps inside it instead of widening it and squeezing
+    // the tables, which is the failure mode of letting it size to content.
+    '.shell{display:flex;flex-wrap:wrap;align-items:flex-start;gap:18px;' +
+    'max-width:92rem;margin:0 auto}' +
+    '.side{flex:0 0 13.5rem;position:sticky;top:1rem}' +
+    // `min-width:0` on a flex child is what stops a wide table inside the card
+    // from pushing the whole layout past the viewport: without it the card's
+    // minimum width is its content's, and one long DN widens the page rather
+    // than scrolling inside its own cell.
+    '.main{flex:1 1 32rem;min-width:0}' +
+    '.brand{font-size:.82em;font-weight:700;color:#12107c;margin:0 0 2px;letter-spacing:.02em}' +
+    '.brandsub{font-size:.72em;color:#666;margin:0 0 14px}' +
     '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:24px 28px;' +
-    'max-width:76rem;margin:0 auto;box-shadow:0 6px 24px rgba(0,0,0,.08)}' +
+    'box-shadow:0 6px 24px rgba(0,0,0,.08)}' +
     'h1{font-size:1.35em;margin:0 0 4px;color:#12107c}' +
     'h2{font-size:1.05em;margin:1.8em 0 .5em;color:#12107c;border-bottom:1px solid #eee;padding-bottom:.2em}' +
     'h3{font-size:.92em;margin:1.2em 0 .4em}' +
     'p.sub{color:#666;font-size:.85em;margin:0 0 14px}' +
-    'nav{margin:0 0 16px;padding-bottom:10px;border-bottom:1px solid #eee;font-size:.85em}' +
-    'nav a,nav .here{display:inline-block;margin-right:.9em;text-decoration:none}' +
-    'nav a{color:#12107c}nav .here{font-weight:700;color:#222}' +
-    // The active tab on a DRILL-DOWN. It keeps the weight `.here` gives it, because
-    // the reader is still inside that section, and takes back the link colour and an
-    // underline, because it is a link again and a bold black tab reads as text
-    // nobody can click — which is exactly what it was.
-    'nav a.here{color:#12107c;text-decoration:underline}' +
+    // THE SIDEBAR. A list per section with a heading over it, in the same card
+    // material as the page so the two read as one surface rather than as a
+    // frame around a document.
+    'nav{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:14px 14px 8px;' +
+    'font-size:.85em;box-shadow:0 6px 24px rgba(0,0,0,.06)}' +
+    '.navsec{margin:0 0 12px}' +
+    '.navsec:last-child{margin-bottom:4px}' +
+    // The section heading. Not a link and it must not look like one — there is
+    // no page behind a section, which is the same reason it is not a crumb.
+    '.navhead{margin:0 0 4px;font-size:.7em;text-transform:uppercase;letter-spacing:.06em;' +
+    'color:#8a8a99;font-weight:700}' +
+    // The section the current page is in. A rule down its left rather than a
+    // background, so that the mark reads as "you are in here" and not as a
+    // second selected item beside the selected one.
+    '.navsec.open{border-left:3px solid #12107c;margin-left:-14px;padding-left:11px}' +
+    '.navsec.open .navhead{color:#12107c}' +
+    'nav ul{list-style:none;margin:0;padding:0}' +
+    'nav li{margin:0;font-size:1em}' +
+    'nav a,nav .here{display:block;padding:3px 6px;border-radius:5px;text-decoration:none;' +
+    'line-height:1.3}' +
+    'nav a{color:#12107c}nav a:hover{background:#f0f0f7}' +
+    'nav .here{font-weight:700;color:#222;background:#eceaf6}' +
+    // The active item on a DRILL-DOWN. It keeps the weight and the fill `.here`
+    // gives it, because the reader is still inside that section, and takes back
+    // the link colour and an underline, because it is a link again and a bold
+    // black label reads as text nobody can click — which is exactly what it was.
+    'nav a.here{color:#12107c;text-decoration:underline;background:#eceaf6}' +
     '.crumb{font-size:.82em;margin:0 0 14px;color:#666}' +
     '.crumb a{text-decoration:none;font-weight:600}' +
     '.crumb a:hover{text-decoration:underline}' +
@@ -494,21 +730,39 @@ function page(title, active, inner, up) {
     '.pagenav .here{background:#12107c;border-color:#12107c;color:#fff;font-weight:700}' +
     '.pagenav .off{color:#aaa;background:#f7f7fa}' +
     '.pagenav .where{border:0;background:none;color:#666;padding-left:.4em}' +
-    '</style></head><body><div class="card">' +
+    // The narrow case. One breakpoint and no more: below it the sidebar stops
+    // being sticky and sits above the page as an ordinary block, which is what
+    // flex-wrap has already done to it by then — the rule only undoes the
+    // stickiness, which on a full-width block would pin the whole nav to the
+    // top of the viewport and take the screen with it.
+    '@media (max-width:56rem){.side{position:static;flex:1 1 100%}' +
+    '.navsec{display:inline-block;vertical-align:top;min-width:11rem;margin-right:1.2em}' +
+    '.navsec.open{margin-left:0;padding-left:0;border-left:0;border-top:3px solid #12107c;' +
+    'padding-top:6px}}' +
+    '</style></head><body><div class="shell">' +
+    '<aside class="side">' +
+    '<p class="brand">Mock STS admin</p>' +
+    '<p class="brandsub">' + esc(config.value('wstrust.issuer')) + '</p>' +
+    navBar(active, up) +
+    '</aside><div class="main"><div class="card">' +
     '<h1>' + esc(title) + '</h1>' +
     '<p class="sub">Mock STS admin console — issuer <code>' +
       esc(config.value('wstrust.issuer')) + '</code></p>' +
-    navBar(active, up) + trailBar(active, up, title) + OPEN_BANNER + inner +
+    trailBar(active, up, title) + gateBanner(gate) + inner +
     '<div class="meta">' +
     '<div>Everything on these pages is held in memory and dies with the process, like the signing ' +
     'key this service regenerates on every start. There is nothing to persist and a statistics file ' +
     'that outlived the key that signed the tokens it described would be worse than none.</div>' +
     '<div>Every page here also answers <code>?format=json</code>, and every form also accepts a ' +
     'JSON body, so a test can drive this console without a browser.</div>' +
-    // Two closing divs, not one: the .meta block and then the .card the whole page
-    // is inside. Getting this wrong leaves a document that renders and does not
-    // parse, which is the kind of thing only a parser notices.
-    '</div></div></body></html>\n';
+    // FOUR closing divs now, not two: the .meta block, the .card it is inside,
+    // the .main column that holds the card and the .shell that holds the two
+    // columns. Getting this wrong leaves a document that renders and does not
+    // parse, which is the kind of thing only a parser notices — and with a flex
+    // layout it is worse than that, because one missing tag nests the next
+    // page's sidebar inside the last one's card and the failure looks like a CSS
+    // bug.
+    '</div></div></div></div></body></html>\n';
   log.debug("Leaving page(). " + html.length + " bytes.");
   return html;
 }
@@ -527,7 +781,7 @@ function respond(req, res, json, title, active, html, up) {
     log.debug("Leaving respond(). Answered JSON.");
     return;
   }
-  res.status(200).type('text/html').send(page(title, active, html, up));
+  res.status(200).type('text/html').send(page(title, active, html, up, gateStateFor(req)));
   log.debug("Leaving respond(). Answered HTML.");
 }
 
@@ -556,6 +810,229 @@ function respondToAction(req, res, target, result) {
      .redirect(303, target + joiner + key + '=' + encodeURIComponent(String(message).slice(0, 500)));
   log.debug("Leaving respondToAction(). Redirected to " + target + ".");
 }
+
+// ---------------------------------------------------------------------------
+// THE GATE. WHO GETS INTO THIS CONSOLE AT ALL.
+//
+// It is ONE `app.use('/admin', ...)` registered here, above every route in this
+// file, and that placement is the whole of how it works: express applies
+// middleware only to routes added AFTER it (rule 1), so a route added below this
+// line is guarded and a route added above it would not be. There are none above
+// it, and a new console page must go below — which it will, since every route in
+// this file is below.
+//
+// FOUR THINGS ABOUT IT ARE DELIBERATE.
+//
+// **It authenticates NOTHING itself.** `authn.js` owns the session and the
+// sign-in screen; this asks `sessionOf()` who is here and, when nobody is, sends
+// the browser to `beginAuthentication()`'s URL with the page they wanted stashed
+// on the pending record. A login screen of this console's own would be a second
+// authentication service, and the one consequence of sharing the first is the
+// good one: sign in at `/authn/login` with a security key and this console knows
+// it, because it is the same session WS-Federation and the authorization
+// endpoint read.
+//
+// **A BROWSER IS REDIRECTED AND A PROGRAM IS REFUSED, and telling them apart is
+// not a nicety.** Every page here answers `?format=json` and every form accepts
+// a JSON body, precisely so a test can drive this console without a browser —
+// and a 302 to an HTML login screen is not an answer such a caller can read. It
+// would arrive as a 200 full of markup where JSON was expected, which is the
+// shape of failure that costs an afternoon. So: `?format=json`, a JSON
+// content-type or an `Accept` that asks for JSON gets 401 or 403 with a body
+// saying which, and everything else gets the screen.
+//
+// **IT GUARDS `/admin` AND NOT `/admin-api`.** Express matches a `use` path on
+// segment boundaries, so `/admin-api` does not match `/admin` — that is not an
+// accident being relied on, it is the arrangement: the management API stays open
+// (`mgmt-api/CLAUDE.md` rule 7 covers what that costs) and is therefore the way
+// back in for somebody who has locked themselves out of the console, which is a
+// state `admin.openWhenEmpty: false` makes reachable. It is also why turning
+// this on does not break the parent project's `tests/admin_api.js`.
+//
+// **A REFUSAL IS A PAGE AND NOT A BARE STATUS.** 403 with an empty body is the
+// single least useful thing this could answer: the reader is signed in, the
+// console plainly exists, and nothing tells them that a directory group is what
+// they are missing. The refusal names the role, names the group, and says which
+// four doors can grant it.
+// ---------------------------------------------------------------------------
+
+// Everything the banner and the guard both need, worked out ONCE per request.
+//
+// Both were written separately at first and disagreed within the hour: the guard
+// let somebody through on the empty-roster rule and the banner, asking again,
+// found a roster that a concurrent grant had just filled — so the page said
+// "signed in, holding no role" above a console it had just allowed. One function,
+// one answer.
+function gateStateFor(req) {
+  log.debug("Entering gateStateFor().");
+  const enforced = !!config.value('admin.authRequired');
+  const session = sessionOf(req);
+  const username = session ? session.user.username : '';
+  const held = rbac.rolesOf(username);
+  const state = {
+    enforced: enforced,
+    available: rbac.available(),
+    session: session,
+    username: username,
+    readGroup: config.value('admin.readGroup'),
+    writeGroup: config.value('admin.writeGroup'),
+    // With the gate OFF everybody may do everything, which is what this console
+    // did before any of this existed. Said as `true` here rather than checked
+    // separately at each call site, so a caller cannot ask "may they write" and
+    // get an answer that ignores the setting.
+    read: enforced ? held.read : true,
+    write: enforced ? held.write : true,
+    roles: enforced ? held.roles : rbac.ROLE_IDS.slice(0),
+    open: enforced && held.open,
+    closed: enforced && held.empty && !held.open && !held.roles.length,
+    empty: held.empty
+  };
+  log.debug("Leaving gateStateFor(). enforced=" + enforced + ", read=" + state.read +
+            ", write=" + state.write + ".");
+  return state;
+}
+
+// Does this caller want JSON rather than a page? See the header for why the
+// question matters more than it looks.
+//
+// `?format=json` is first because it is the one this console documents on every
+// page. The content-type is what a form-less POST carries. `Accept` is last and
+// is checked for JSON BEFORE html deliberately: a browser sends
+// `text/html,...,*/*` and would match a naive "does it mention json" test on the
+// wildcard alone, so the html half is what decides when both are present.
+function wantsJson(req) {
+  if (String((req.query || {}).format || '') === 'json') {
+    return true;
+  }
+  if (/json/i.test(String(req.headers['content-type'] || ''))) {
+    return true;
+  }
+  const accept = String(req.headers.accept || '');
+  return /json/i.test(accept) && !/text\/html/i.test(accept);
+}
+
+// A refusal, in whichever of the two shapes the caller can read. The HTML one
+// goes through page() like everything else, so it carries the nav and the
+// banner: a reader who is refused one page can still see the ones they are
+// allowed, which is the difference between a permission and a wall.
+function refuse(req, res, status, code, title, message, detail) {
+  log.debug("Entering refuse(). status=" + status + ", code=" + code);
+  res.set('Cache-Control', 'no-store');
+  if (wantsJson(req)) {
+    res.status(status).type('application/json').send(JSON.stringify({
+      error: code,
+      error_description: message,
+      // Named rather than left to be inferred from the status, because the two
+      // refusals are genuinely different instructions — one says "sign in", the
+      // other says "you are signed in and it is not enough" — and a client that
+      // retried the second the way it retries the first would loop.
+      needed: detail.needed || '',
+      group: detail.group || '',
+      signIn: detail.signIn || '',
+      roles: detail.roles || []
+    }, null, 2));
+    log.debug("Leaving refuse(). Answered JSON.");
+    return;
+  }
+  const inner = '<div class="err"><strong>' + esc(title) + '</strong> ' + esc(message) + '</div>' +
+    (detail.html || '');
+  res.status(status).type('text/html')
+     .send(page(title, '', inner, null, gateStateFor(req)));
+  log.debug("Leaving refuse(). Answered HTML.");
+}
+
+app.use('/admin', function (req, res, next) {
+  log.debug("Entering the admin console gate. " + req.method + " " + req.originalUrl);
+  if (!config.value('admin.authRequired')) {
+    log.debug("Leaving the admin console gate. admin.authRequired is off; everything is allowed.");
+    next();
+    return;
+  }
+
+  const state = gateStateFor(req);
+
+  if (!state.session) {
+    if (wantsJson(req)) {
+      refuse(req, res, 401, 'login_required',
+             'Sign in first.',
+             'This console needs a browser sign-on session from ' + LOGIN_PATH +
+             ', and this request carries none. The session is a cookie, so a ' +
+             'program driving this console has to sign in at that screen and keep ' +
+             'it — or turn admin.authRequired off, or use /admin-api, which is not gated.',
+             { needed: 'session', signIn: LOGIN_PATH });
+      log.debug("Leaving the admin console gate. Refused 401 to a JSON caller.");
+      return;
+    }
+    // GET and HEAD only. A POST with no session is NOT redirected: the browser
+    // would repeat it as a GET after signing in — a 303 turns the method into
+    // GET by definition — and the form's fields would be gone, so "revoke
+    // everything" would come back as a page view of the tokens list with the
+    // click silently discarded. Better to say what happened and let them post it
+    // again.
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const where = beginAuthentication({
+        returnTo: String(req.originalUrl || '/admin'),
+        protocol: 'Admin console',
+        details: [
+          { label: 'Signing in to', value: 'the mock STS admin console' },
+          { label: 'Page you asked for', value: String(req.originalUrl || '/admin') },
+          // Said on the screen rather than only here, because the person about
+          // to type a username is exactly the one who needs to know that the
+          // username decides whether the console lets them in.
+          { label: 'What decides access',
+            value: 'membership of ' + config.value('admin.readGroup') + ' or ' +
+                   config.value('admin.writeGroup') + ' in the directory' }
+        ]
+      });
+      res.set('Cache-Control', 'no-store').redirect(302, where);
+      log.debug("Leaving the admin console gate. Sent to the sign-in screen.");
+      return;
+    }
+    refuse(req, res, 401, 'login_required', 'Sign in first.',
+           'This form needs a browser sign-on session and this request carries none — ' +
+           'the session it was posted with has probably expired.',
+           { needed: 'session', signIn: LOGIN_PATH,
+             html: '<p class="note"><a href="' + esc(LOGIN_PATH) + '">Sign in</a>, then post ' +
+                   'the form again. It is not resubmitted for you: a redirect after a POST ' +
+                   'becomes a GET and the fields would be lost, so a control you did not ' +
+                   'press twice would not fire twice.</p>' });
+    log.debug("Leaving the admin console gate. Refused 401 to a form POST.");
+    return;
+  }
+
+  // WRITE for anything that is not a read. Every control on this console is a
+  // POST — there is no script here, so nothing uses any other method — and the
+  // test is written as "not GET and not HEAD" rather than "is POST" so that a
+  // method added later is refused by default rather than allowed by omission.
+  const needsWrite = req.method !== 'GET' && req.method !== 'HEAD';
+  if (needsWrite ? state.write : state.read) {
+    log.debug("Leaving the admin console gate. Allowed: " + state.username + " holds " +
+              (state.roles.join(', ') || '(the empty roster)') + ".");
+    next();
+    return;
+  }
+
+  const group = needsWrite ? state.writeGroup : state.readGroup;
+  const role = rbac.roleFor(needsWrite ? 'write' : 'read');
+  refuse(req, res, 403, 'insufficient_role',
+         'You are signed in and that is not enough.',
+         'Signed in as ' + state.username + ', holding ' +
+         (state.roles.length ? state.roles.join(' and ') : 'no console role') + '. ' +
+         (needsWrite ? 'Posting a form on this console' : 'Reading this console') +
+         ' needs ' + role.label + ', which is membership of cn=' + group + '.',
+         { needed: needsWrite ? 'write' : 'read', group: group,
+           roles: state.roles,
+           html: '<p class="note">The role is an ordinary group in the embedded LDAP ' +
+                 'directory, and there are four doors onto it: the <a href="/admin/rbac">Admin ' +
+                 'roles</a> screen (which you also need a role to use), ' +
+                 '<code>POST /admin-api/rbac/grant</code> (the management API is NOT gated, ' +
+                 'so this is the one that works from here), an <code>ldapmodify</code> on 389 ' +
+                 'or 636, and a SCIM PATCH of the group.</p>' +
+                 '<p class="note">Nothing else about this service is affected. Every protocol ' +
+                 'endpoint is exactly as open as it was — these two groups grant this console ' +
+                 'and nothing else.</p>' });
+  log.debug("Leaving the admin console gate. Refused 403 to " + state.username + ".");
+});
 
 // The message a redirect brought back, if any. Escaped where it is rendered; capped
 // where it is read, so a hand-written URL cannot make the page arbitrarily long.
@@ -1131,7 +1608,9 @@ app.get('/admin', function (req, res) {
     'the one page here that reports the directory rather than what this service has issued, and ' +
     'the one thing to know about it is that <strong>a group here grants nothing</strong>: no ' +
     'endpoint reads one and nothing decides anything on one. A token can CARRY one &mdash; see ' +
-    '<code>groups.claim</code> &mdash; which is a different sentence.' +
+    '<code>groups.claim</code> &mdash; which is a different sentence. The two named on ' +
+    '<a href="/admin/rbac">Admin roles</a> are the exception and grant exactly one thing: this ' +
+    'console.' +
     '</li>' +
     '<li><a href="/admin/tokens">Tokens</a> — everything issued, in one table: every JWT, every ' +
     'SAML assertion (WS-Trust\'s and WS-Federation\'s alike) and every Kerberos ticket, newest ' +
@@ -3056,6 +3535,23 @@ function usersListPage(req) {
     'accepted AP-REQ, and the subject of an exchanged token. A request that was REFUSED records ' +
     'nothing, so this is a list of identities that got somewhere rather than of names that were ' +
     'tried. Click a name for its sessions and everything issued to it.</p>' +
+    // WHERE AN ISSUED SPIFFE IDENTITY LANDS ON THIS TABLE, said here because
+    // the row it produces is easy to misread. It has an artifact and NO
+    // authentication, so it falls in the "seen only as a subject" tile above —
+    // which is exactly right and is what that tile has always been for.
+    // Counting an issuance as a sign-in would be the wrong answer twice over:
+    // receiving a credential is not presenting one, and an agent holding
+    // FetchX509SVID open re-mints every half-lifetime, so one workload left
+    // running overnight would read as several hundred authentications.
+    '<p class="note"><strong>An identity this trust domain has only ISSUED a ' +
+    'certificate to is here with <em>never</em> in the Authenticated column' +
+    '</strong> &mdash; it counts under &ldquo;seen only as a subject&rdquo;. ' +
+    'Being issued a credential is not presenting one, and an agent re-mints ' +
+    'every half-hour, so counting issuances would turn one workload into ' +
+    'hundreds of sign-ins. It also gets a directory entry under ' +
+    '<code>ou=users</code> carrying the certificate it currently holds &mdash; ' +
+    'see <a href="/ldap/directory">the directory</a> and ' +
+    '<a href="/admin/spiffe">SPIFFE</a>.</p>' +
     '<div class="warn"><strong>One row is one local name, across every protocol.</strong> The same ' +
     'person arrives here as <code>alice</code> at the login screen, ' +
     '<code>urn:sts-mock:user:alice</code> in every token and <code>alice@STS.MOCK</code> as a ' +
@@ -3372,11 +3868,27 @@ function usersPageCell(userKey, known) {
 // claims, and this is the same line this service already draws between an
 // identity being recorded and an identity being authenticated.
 const GROUPS_CAVEAT =
-  '<p class="note"><strong>A group here grants nothing.</strong> No endpoint in this service ' +
-  'checks one, and nothing decides anything on one. Adding somebody to ' +
+  '<p class="note"><strong>A group here grants nothing, with exactly two exceptions and they ' +
+  'are named below.</strong> No <em>endpoint</em> in this service checks a group, and nothing ' +
+  'in any protocol decides anything on one. Adding somebody to ' +
   '<code>cn=directory-admins</code> changes what a directory client sees, and what a token ' +
   '<em>says</em>, and changes nothing at all about what that token can DO &mdash; on a service ' +
   'that authenticates nobody, it could hardly be otherwise.</p>' +
+  // THE EXCEPTION, said HERE and not only on the page that owns it. A reader
+  // meeting this caveat on the groups page and then finding cn=admin-write in
+  // the table above it would be entitled to conclude that one of the two was
+  // lying. The general claim is still the one that matters — it is true of every
+  // group but these two, and true of these two everywhere except one console —
+  // so it is qualified rather than dropped.
+  '<p class="note"><strong>The two exceptions are <code>' +
+  esc(config.value('admin.readGroup')) + '</code> and <code>' +
+  esc(config.value('admin.writeGroup')) + '</code>, which decide who may use THIS CONSOLE</strong> ' +
+  '&mdash; see <a href="/admin/rbac">Admin roles</a>, where they are granted and taken away. ' +
+  'They are ordinary groups and appear in the table above like any other, deliberately: the ' +
+  'alternative was a membership store of the console\'s own that an <code>ldapmodify</code> ' +
+  'could not see. Even those two grant nothing outside <code>/admin</code> &mdash; no token, ' +
+  'assertion, ticket, PAC or credential is changed by being in one, and every protocol endpoint ' +
+  'answers a member exactly as it answers anybody else.</p>' +
   '<p class="note"><strong>A token can now carry one.</strong> With ' +
   '<code>groups.claim</code> on &mdash; it is on by default &mdash; every OAuth 2.0 access ' +
   'token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries ' +
@@ -4766,6 +5278,405 @@ app.get('/admin/groups', function (req, res) {
   const view = groupsView(req);
   respond(req, res, view.json, view.title, '/admin/groups', view.inner, view.up);
   log.debug("Leaving the admin groups page. " + view.title + ".");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/rbac, POST /admin/rbac — WHO MAY USE THIS CONSOLE.
+//
+// The page behind the gate above, and the second page here (after /admin/groups)
+// whose content comes from the directory rather than from this service's own
+// memory. It renders and decides nothing: `admin_rbac.js` holds the two roles,
+// the empty-roster rule and both writes, and this draws them — the same division
+// /admin/groups keeps with `ldap_server.js`, and for the same reason. A second
+// opinion here about who is an administrator is the one bug in this feature that
+// would be genuinely dangerous.
+//
+// **ONE TABLE OF GRANTS RATHER THAN ONE TABLE PER ROLE**, which is a rendering
+// decision with a reason. Two tables would each need their own filter, their own
+// page parameter and their own per-page control — three sets of controls for a
+// list that is usually four rows long — and a reader's question is "who has
+// access", not "who is in cn=admin-read". So a row is one GRANT: a person and a
+// role. Somebody holding both roles is two rows, which is honest — they were
+// granted twice and can be revoked once.
+//
+// **THE GRANT FORM IS TWO FORMS AND THAT IS DELIBERATE.** One picks from a list
+// of people this service knows about, which is what somebody wants nine times in
+// ten and is the only one that can be used without knowing how names are spelt
+// here. The other takes a typed name, because the interesting case for a mock is
+// granting a role to somebody who has NEVER been here — then watching them
+// arrive already holding it. A single control doing both would have to be a text
+// box with a datalist, and the list would then look like a set of options while
+// silently accepting anything, which is a control that lies about what it takes.
+// ---------------------------------------------------------------------------
+
+// The caveat, on the page rather than only in a comment. It is the exact
+// counterpart of GROUPS_CAVEAT and it says the opposite thing about two named
+// groups, which is why it is worded to leave the general claim standing.
+const RBAC_CAVEAT =
+  '<p class="note"><strong>These two groups are the only groups in this service that grant ' +
+  'anything, and what they grant is this console.</strong> Every other group here still grants ' +
+  'nothing at all — see <a href="/admin/groups">Groups</a>, which says so — and even these two ' +
+  'grant nothing outside <code>/admin</code>: no token\'s scopes change, no assertion gains an ' +
+  'attribute, no Kerberos PAC is affected, and a member of ' +
+  '<code>admin-write</code> gets exactly the same answer from <code>/oauth2/token</code> as ' +
+  'anybody else. They are also ordinary directory entries, so <code>ldapmodify</code>, a SCIM ' +
+  'PATCH, this page and <code>POST /admin-api/rbac/grant</code> are four doors onto one ' +
+  'membership — which is the point rather than a leak: a role no test can grant is a role no ' +
+  'test can exercise.</p>';
+
+// A membership value that names an entry which is not there. It is a normal
+// state here rather than a fault — see the grant form's note — so it is marked
+// and explained rather than hidden or repaired.
+function rbacMemberCell(row, knownKeys) {
+  const name = esc(row.username || row.value);
+  if (row.userKey && knownKeys[row.userKey]) {
+    return '<a href="' + esc('/admin/users?user=' + encodeURIComponent(row.userKey)) + '">' +
+           name + '</a>';
+  }
+  if (row.present) {
+    // In the directory, but this service has never seen them authenticate. The
+    // same distinction /admin/groups draws on its member rows, and drawn the
+    // same way so the two pages cannot be read as disagreeing.
+    return name + ' <span class="state-none" title="This person has an entry in the ' +
+           'directory, but nothing here has authenticated as them yet, so there is no ' +
+           'page about them on Users.">never here</span>';
+  }
+  return name + ' <span class="state-expired" title="Nothing is at this DN. The role still ' +
+         'counts — it resolves the moment somebody authenticates under this name or the entry ' +
+         'is created — but until then no directory client can see who it names.">dangling</span>';
+}
+
+// The mark on a row whose membership is on the PERSON'S entry rather than in the
+// group. It really grants the role — `groupsOfUser()` reads both directions, so
+// admin_rbac.js merges these in — which is why it is on this list at all; and it
+// cannot be taken away from here, so the row says that too rather than offering
+// a button that would report success and change nothing.
+function rbacClaimedMark(row) {
+  if (row.kind !== 'claimed') {
+    return '';
+  }
+  return ' <span class="state-expired" title="Their own entry&#39;s memberOf names this group ' +
+         'and the group does not list them back. Nothing here maintains memberOf — a client ' +
+         'wrote it — and it grants the role all the same, so it is on this list. The Revoke ' +
+         'button cannot remove it: the value is on the person, and this console writes only ' +
+         'to groups.">via their own memberOf</span>';
+}
+
+function rbacListPage(req) {
+  log.debug("Entering rbacListPage().");
+  const info = rbac.describe();
+  const state = gateStateFor(req);
+
+  // One row per grant, flattened out of the two rosters. Sorted by name and then
+  // by role so that somebody holding both is two adjacent rows rather than two
+  // rows a page apart.
+  const grants = [];
+  info.roles.forEach(function (role) {
+    role.members.forEach(function (member) {
+      grants.push({
+        username: member.username, role: role.role, roleLabel: role.label,
+        cn: role.cn, dn: role.dn, value: member.value, attribute: member.attribute,
+        holds: member.holds, memberDn: member.dn, present: member.present,
+        kind: member.kind, userKey: member.userKey
+      });
+    });
+  });
+  grants.sort(function (a, b) {
+    const an = String(a.username).toLowerCase();
+    const bn = String(b.username).toLowerCase();
+    if (an !== bn) {
+      return an < bn ? -1 : 1;
+    }
+    return a.role < b.role ? -1 : 1;
+  });
+
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const wantedRole = String(req.query.role || '').trim().toLowerCase();
+  const filtered = grants.filter(function (row) {
+    if (wantedRole && row.role !== wantedRole) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    return String(row.username).toLowerCase().indexOf(needle) >= 0 ||
+           String(row.value).toLowerCase().indexOf(needle) >= 0;
+  });
+
+  const paging = pagingOf(req.query, filtered.length, { noun: 'grants' });
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const filterParams = { q: wantedText || '', role: wantedRole || '',
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/rbac', filterParams, paging);
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listViewOf('/admin/rbac', req.query), {})) + '">';
+
+  const knownKeys = knownUserKeys();
+  const rows = shown.map(function (row) {
+    return '<tr><td>' + rbacMemberCell(row, knownKeys) + rbacClaimedMark(row) + '</td>' +
+      '<td>' + esc(row.roleLabel) + '</td>' +
+      '<td><a href="' + esc('/admin/groups?group=' + encodeURIComponent(row.dn)) + '"><code>' +
+        esc(row.dn) + '</code></a></td>' +
+      '<td><code>' + esc(row.attribute) + '</code>: <code>' + esc(row.value) + '</code></td>' +
+      '<td>' +
+        (row.kind === 'claimed'
+          ? '<span class="state-expired" title="The membership is on their own entry as ' +
+            'memberOf, so there is nothing in the group to remove. An ldapmodify or a SCIM ' +
+            'PATCH of the PERSON takes it away.">not from here</span>'
+          : state.write
+          ? '<form class="inline" method="post" action="/admin/rbac">' +
+            '<input type="hidden" name="action" value="revoke">' +
+            '<input type="hidden" name="username" value="' + esc(row.username) + '">' +
+            '<input type="hidden" name="role" value="' + esc(row.role) + '">' + carryBack +
+            '<button class="danger">Revoke</button></form>'
+          : '<span class="state-none">read-only</span>') +
+      '</td></tr>';
+  }).join('');
+
+  // WHO CAN BE PICKED. `stats.userRows()` is who has authenticated and the
+  // directory is who has an entry; admin_rbac.js unions them, because a select
+  // built from either alone would silently omit half the people somebody wants
+  // to grant a role to.
+  const candidates = rbac.candidates(Object.keys(knownKeys));
+  const options = candidates.map(function (row) {
+    const where = row.inDirectory && row.seen ? 'directory, and has signed in'
+      : (row.inDirectory ? 'in the directory' : 'has signed in');
+    return '<option value="' + esc(row.username) + '">' + esc(row.username) +
+           ' — ' + esc(where) + '</option>';
+  }).join('');
+  const roleOptions = rbac.ROLES.map(function (role) {
+    return '<option value="' + esc(role.id) + '">' + esc(role.label) + '</option>';
+  }).join('');
+
+  const tiles = '<div class="tiles">' +
+    info.roles.map(function (role) {
+      return tile(role.memberCount, role.label);
+    }).join('') +
+    tile(candidates.length, 'People who could hold one') +
+    '</div>';
+
+  const status = info.closedToEveryone
+    ? '<div class="err"><strong>Nobody can use this console.</strong> The gate is on, no role ' +
+      'has a member, and <code>admin.openWhenEmpty</code> is off. Anything you are reading here ' +
+      'you are reading through <code>/admin-api</code> or with the gate off.</div>'
+    : (info.openToAnyone
+        ? '<div class="warn"><strong>No role has a member, so anybody who signs in has the ' +
+          'whole console.</strong> The first grant made on this page ends that — for everybody, ' +
+          'including whoever makes it. <strong>Grant yourself a role before you grant anybody ' +
+          'else one</strong>, or the next page you click will be a 403.</div>'
+        : (info.enforced
+            ? '<div class="ok">The roster is enforced. ' + info.grantCount + ' grant(s) across ' +
+              'two roles; everybody else is refused at every page of this console.</div>'
+            : '<div class="warn"><strong>None of this is in force.</strong> ' +
+              '<code>admin.authRequired</code> is OFF, so the console is open to anybody who ' +
+              'can reach this port and these roles decide nothing. They are still real ' +
+              'directory groups and can be granted now — turn the setting on from ' +
+              '<a href="/admin/config">Configuration</a> when the roster looks right.</div>'));
+
+  const noDirectory = info.available ? '' :
+    '<div class="err">No LDAP directory is loaded in this process, so there is nowhere to hold ' +
+    'these roles and nothing on this page can be granted. That is a build of this service ' +
+    'without <code>ldap_server.js</code> rather than a failure — but with ' +
+    '<code>admin.authRequired</code> on it leaves this console reachable only while ' +
+    '<code>admin.openWhenEmpty</code> is on.</div>';
+
+  const forms = state.write && info.available
+    ? '<h2>Grant a role</h2>' +
+      '<form method="post" action="/admin/rbac"><div class="formrow">' +
+      '<input type="hidden" name="action" value="grant">' + carryBack +
+      '<label for="username">Person</label>' +
+      '<select id="username" name="username">' +
+        (options || '<option value="">nobody yet</option>') + '</select>' +
+      '<label for="role">Role</label>' +
+      '<select id="role" name="role">' + roleOptions + '</select>' +
+      '<button type="submit">Grant</button>' +
+      '</div></form>' +
+      '<p class="note">The list is everybody with an entry in the directory and everybody this ' +
+      'service has seen authenticate — two different sets, which is why both are offered and ' +
+      'why each row says which it came from.</p>' +
+      '<h3>Grant to a name that is not listed</h3>' +
+      '<form method="post" action="/admin/rbac"><div class="formrow">' +
+      '<input type="hidden" name="action" value="grant">' + carryBack +
+      '<label for="typed">Name</label>' +
+      '<input type="text" id="typed" name="username" size="24" placeholder="the name they ' +
+      'will sign in as">' +
+      '<label for="typedrole">Role</label>' +
+      '<select id="typedrole" name="role">' + roleOptions + '</select>' +
+      '<button type="submit" class="secondary">Grant</button>' +
+      '</div></form>' +
+      '<p class="note">The membership will DANGLE until that person exists — it names a DN this ' +
+      'directory does not hold yet — and the role counts from the moment they first sign in. ' +
+      'That is the interesting case for a mock and is why this form is here: nothing about a ' +
+      'grant requires the person to have been seen. A name carrying a character RFC 4514 ' +
+      'reserves in a DN is refused, the same refusal creating a person gets.</p>'
+    : (info.available && info.enforced && !state.write
+        ? '<p class="note">Granting and revoking need <strong>Admin Write</strong>. The table ' +
+          'above is what you can see with <strong>Admin Read</strong>.</p>'
+        : '');
+
+  const inner = messagesOf(req) + noDirectory + status + tiles +
+    '<form method="get" action="/admin/rbac"><div class="formrow">' +
+    '<label for="q">Person</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(wantedText) + '" size="22" ' +
+    'placeholder="part of a name">' +
+    '<label for="rolefilter">Role</label>' +
+    '<select id="rolefilter" name="role"><option value="">both</option>' +
+    rbac.ROLES.map(function (role) {
+      return '<option value="' + esc(role.id) + '"' +
+             (wantedRole === role.id ? ' selected' : '') + '>' + esc(role.label) + '</option>';
+    }).join('') + '</select>' +
+    '<label for="per">Per page</label>' +
+    '<select id="per" name="per">' + perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText || wantedRole ? ' <a href="/admin/rbac">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    '<table><tr><th>Person</th><th>Role</th><th>Group</th><th>Membership value</th>' +
+    '<th>Take it away</th></tr>' +
+    (rows || '<tr><td colspan="5">' +
+      (wantedText || wantedRole
+        ? 'No grant matches. The filter above may be hiding some.'
+        : 'Nobody holds either role.' +
+          (info.openToAnyone ? ' Which is why anybody who signs in can read this page.' : '')) +
+      '</td></tr>') +
+    '</table>' + nav +
+    (info.roles.some(function (r) { return r.claimedCount; })
+      ? '<p class="note"><strong>Some of those grants are on the PERSON rather than in the ' +
+        'group.</strong> An entry whose own <code>memberOf</code> names a role group holds ' +
+        'the role — the directory is asked in both directions — and nothing here maintains ' +
+        '<code>memberOf</code>, so a client wrote it. They are listed because a page ' +
+        'answering &ldquo;who has access&rdquo; that omitted them would be showing a console ' +
+        'somebody could use and a list they were not on. They cannot be revoked from here: ' +
+        'the value is on their entry, and this console writes only to groups. One edge worth ' +
+        'knowing — a <code>memberOf</code> naming a role group that has <em>never been ' +
+        'created</em> grants nothing, and starts granting the moment the first ordinary ' +
+        'grant creates it.</p>'
+      : '') + forms +
+    '<h2>What the two roles are</h2>' +
+    '<table><tr><th>Role</th><th>Group</th><th>What it allows</th><th class="num">Members</th></tr>' +
+    info.roles.map(function (role) {
+      return '<tr><td><strong>' + esc(role.label) + '</strong></td>' +
+        '<td><code>' + esc(role.dn || ('cn=' + role.cn)) + '</code>' +
+        (role.exists ? '' : ' <span class="state-none" title="The group is created by the ' +
+          'first grant rather than at startup, so &quot;no group&quot; and &quot;no ' +
+          'members&quot; are the same state here.">not created yet</span>') + '</td>' +
+        '<td>' + esc(role.what) + '</td>' +
+        '<td class="num">' + role.memberCount +
+        (role.claimedCount
+          ? ' <span class="state-expired" title="Of which ' + role.claimedCount +
+            ' are claimed by the person&#39;s own memberOf rather than listed by the ' +
+            'group.">(' + role.claimedCount + ')</span>'
+          : '') + '</td></tr>';
+    }).join('') + '</table>' +
+    '<p class="note"><strong>Write implies read.</strong> A member of <code>' +
+    esc(info.roles[1] ? info.roles[1].cn : '') + '</code> does not also need <code>' +
+    esc(info.roles[0] ? info.roles[0].cn : '') + '</code>: a role that could post a form to a ' +
+    'page it was not allowed to look at would be a trap rather than a permission.</p>' +
+    '<h2>How the gate is set</h2>' +
+    '<table><tr><th>Setting</th><th>Now</th><th>What it does</th></tr>' +
+    '<tr><td><code>admin.authRequired</code></td><td>' +
+      (info.enforced ? '<span class="state-valid">on</span>' : '<span class="state-revoked">off</span>') +
+      '</td><td>Whether any of this is in force. Off, the console is completely open — which ' +
+      'is what it was before this existed and stays deliberately reachable.</td></tr>' +
+    '<tr><td><code>admin.openWhenEmpty</code></td><td>' +
+      (info.openWhenEmpty ? '<span class="state-expired">on</span>' : 'off') +
+      '</td><td>What happens while NO role has a member: on, anybody who signs in holds both; ' +
+      'off, nobody gets in at all. On by default because this service has no password to ' +
+      'bootstrap an administrator with and the roster dies with the process.</td></tr>' +
+    '<tr><td><code>admin.readGroup</code> / <code>admin.writeGroup</code></td><td><code>' +
+      esc(info.roles[0] ? info.roles[0].cn : '') + '</code> / <code>' +
+      esc(info.roles[1] ? info.roles[1].cn : '') + '</code></td>' +
+      '<td>Which groups these roles are. Renaming one does not move anybody: the members stay ' +
+      'in the old group, which stops granting anything the moment the name changes.</td></tr>' +
+    '</table>' +
+    '<p class="note">All four are on <a href="/admin/config">Configuration</a> and every one of ' +
+    'them takes effect on the next request. <code>/admin-api</code> is NOT gated by any of ' +
+    'them, which is on purpose: it is the way back in when the roster is empty and ' +
+    '<code>admin.openWhenEmpty</code> is off, and it is why turning this on does not break a ' +
+    'test suite driving the management API.</p>' +
+    RBAC_CAVEAT;
+
+  log.debug("Leaving rbacListPage(). " + shown.length + " row(s) drawn of " +
+            grants.length + " grant(s).");
+  return {
+    inner: inner,
+    json: {
+      enforced: info.enforced, openWhenEmpty: info.openWhenEmpty,
+      openToAnyone: info.openToAnyone, closedToEveryone: info.closedToEveryone,
+      available: info.available, groupsDn: info.groupsDn, usersDn: info.usersDn,
+      grantCount: info.grantCount, matched: filtered.length, shown: shown.length,
+      filter: { q: wantedText || null, role: wantedRole || null },
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      // WHO IS ASKING, which is on the reply rather than only in the banner
+      // because a caller driving this over JSON has no banner and the answer to
+      // "why did that 403" is here.
+      you: { username: state.username, roles: state.roles,
+             read: state.read, write: state.write, viaEmptyRoster: state.open },
+      roles: info.roles,
+      grants: shown,
+      candidates: candidates
+    }
+  };
+}
+
+function rbacView(req) {
+  log.debug("Entering rbacView().");
+  const list = rbacListPage(req);
+  log.debug("Leaving rbacView().");
+  return { json: list.json, inner: list.inner, title: 'Admin roles' };
+}
+
+// Both writes, and neither decides anything: admin_rbac.js holds the rules and
+// this reads two fields off a body. `actor` is threaded through so the
+// `admin.role.change` audit row can say WHO made the grant — the one question an
+// audit log of permissions changes exists to answer, and the one nothing else on
+// the row could reconstruct.
+function rbacAction(body, context) {
+  log.debug("Entering rbacAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const username = String(body.username || body.user || '').trim();
+  const role = String(body.role || '').trim();
+  const ctx = { via: (context || {}).via || 'console',
+                actor: (context || {}).actor || '' };
+
+  if (action === 'grant') {
+    const result = rbac.grant(username, role, ctx);
+    log.debug("Leaving rbacAction(). grant " + (result.ok ? "ok." : "refused."));
+    return result;
+  }
+  if (action === 'revoke') {
+    const result = rbac.revoke(username, role, ctx);
+    log.debug("Leaving rbacAction(). revoke " + (result.ok ? "ok." : "refused."));
+    return result;
+  }
+
+  log.debug("Leaving rbacAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". There are two: grant and ' +
+                               'revoke.'] };
+}
+
+app.get('/admin/rbac', function (req, res) {
+  log.debug("Entering the admin roles page.");
+  const view = rbacView(req);
+  respond(req, res, view.json, view.title, '/admin/rbac', view.inner, view.up);
+  log.debug("Leaving the admin roles page.");
+});
+
+app.post('/admin/rbac', function (req, res) {
+  log.debug("Entering the admin roles action endpoint.");
+  const body = parseBody(req);
+  // The actor is the person whose session got them through the gate above, and
+  // it is read here rather than inside admin_rbac.js because that module has no
+  // request — the management API calls the same function with an actor of its
+  // own, and a module that reached for a cookie would only work from one of
+  // them.
+  const state = gateStateFor(req);
+  const result = rbacAction(body, { via: 'console', actor: state.username });
+  const back = '/admin/rbac' + queryWith(listViewFromBack('/admin/rbac', body.back), {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin roles action endpoint.");
 });
 
 // ---------------------------------------------------------------------------
@@ -7381,6 +8292,16 @@ function spiffeAgentDetailPage(req, id) {
         'the few refusals in this service and is what keeps the button below ' +
         'from being a lie'
       : 'active') + '</td></tr>' +
+    '<tr><td>Its directory entry</td><td>' +
+    'Every identity this trust domain issues an X509-SVID to has one under ' +
+    '<code>ou=users</code>, carrying the current certificate as the same six ' +
+    '<code>x509*</code> attributes a verified TLS client certificate writes. ' +
+    'Banning or deleting this agent marks that entry ' +
+    '<code>spiffeCredentialStatus: revoked</code> and never removes it; ' +
+    'unbanning marks it active again. <span class="note">That is not a ' +
+    'certificate status. SPIFFE has no revocation, nothing reads the flag ' +
+    'back, and whatever SVID this agent holds keeps working until it ' +
+    'expires.</span></td></tr>' +
     '<tr><td>Can reattest</td><td>' + (agent.canReattest ? 'yes' : 'no') +
     '</td></tr>' +
     '<tr><td>Selectors</td><td>' +
@@ -7816,6 +8737,16 @@ module.exports = {
   spiffeAgentsAction: spiffeAgentsAction,
   authorizationServersView: authorizationServersView,
   authorizationServersAction: asAction,
+  // The roles page and its two writes. Rule 7 again — and this one is the page
+  // most in need of the API half rather than least: the management API is not
+  // gated, so `POST /admin-api/rbac/grant` is the only door onto the roster that
+  // still works when nobody holds a role and `admin.openWhenEmpty` is off.
+  rbacView: rbacView,
+  rbacAction: rbacAction,
+  // The gate's answer for one request, so admin_api.js's own /rbac view can say
+  // WHO IS ASKING without a second reading of the cookie that could disagree
+  // with this one.
+  gateStateFor: gateStateFor,
   claimsJson: claimsJson,
   // Which person the claims page shows attribute values for. Exported for the
   // same reason vcPreviewUser is: GET /admin-api/claims takes the same `user`

@@ -68,7 +68,11 @@ the six of forty-two SPIRE methods that are unimplemented and why each one is.
 `GET /ldap` says the directory is schemaless. A mock that quietly pretended
 would teach you something false about every real server you will ever meet.
 
-**The admin console at `/admin` is not protected.** It can revoke tokens, add
+**The admin console at `/admin` asks for a sign-in and a role** — `admin.authRequired`,
+on by default — and the roles are two ordinary groups in the embedded directory.
+It is a turnstile and not a lock: no password is checked at that screen either,
+and `/admin-api` is not gated at all, so anybody who can reach this port can
+grant themselves both roles through it. The console can revoke tokens, add
 claims to every future token and assertion, and create people in the directory.
 Do not put this on a public address.
 
@@ -77,5 +81,5 @@ Do not put this on a public address.
 - [Getting started](getting-started.md) — running it, the ports, the container
 - [Configuration](configuration.md) — every setting, and which can change at runtime
 - [Endpoints](endpoints.md) — how to find out, rather than a list that goes stale
-- [What is not checked](what-is-not-checked.md) — the permissive posture, and the two exceptions
+- [What is not checked](what-is-not-checked.md) — the permissive posture, and the three exceptions
 - [Repository layout](layout.md) — where the code is, for contributors

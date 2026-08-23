@@ -31,7 +31,7 @@ files did not change; the paths did.
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
-| `admin-ui/` | The console at `/admin`. |
+| `admin-ui/` | The console at `/admin`, and the two roles that decide who may use it. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
 | `env/` | The appconfig files. `CONFIG_FILE` selects one. |
@@ -71,17 +71,31 @@ FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
 *clients*: it checks no password, validates no access token and **attests no
 workload**.
 
-**TWO surfaces are the exception to that sentence and both are worth knowing
-before reading further.** The SCIM endpoints REQUIRE a credential, in any of the
+**THREE surfaces are the exception to that sentence and all of them are worth
+knowing before reading further.** The SCIM endpoints REQUIRE a credential, in any
+of the
 six schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read`
-or `scim:write`; they create and DELETE accounts, which is why. And the **SPIRE
+or `scim:write`; they create and DELETE accounts, which is why. The **SPIRE
 Server API** requires an **X509-SVID over mutual TLS** on its TCP port and
 authorizes every method against SPIRE's own per-method table — because what
-comes out of that surface is a credential another service will believe. Both are
+comes out of that surface is a credential another service will believe. And the
+**ADMIN CONSOLE** at `/admin` requires a browser sign-on session from
+`/authn/login` and one of two roles — **Admin Read** and **Admin Write**, held as
+two ordinary groups in the embedded directory — because it is the one surface
+here that can change what every protocol endpoint does. All three are
 a turnstile rather than a lock: anybody can get a token with either SCIM scope,
-any password but one passes Basic, anybody can register a HOBA key, and anybody
-can ask the local socket to mint an SVID. Neither changes anything else, and
-each can be turned off (`scim.authRequired`, `spiffe.authRequired`). See `scim/CLAUDE.md` and `spiffe/CLAUDE.md`.
+any password but one passes Basic, anybody can register a HOBA key, anybody
+can ask the local socket to mint an SVID, and **no password is checked at the
+console's sign-in screen either** — what the gate proves is that somebody typed a
+name that holds a role. None of them changes anything else, and
+each can be turned off (`scim.authRequired`, `spiffe.authRequired`,
+`admin.authRequired`). See `scim/CLAUDE.md`, `spiffe/CLAUDE.md` and
+`admin-ui/CLAUDE.md`.
+
+**`/admin-api` is NOT gated and that is deliberate** — it is what a test drives,
+and it is the way back in when nobody holds a role. Which means anybody who can
+reach this port can grant themselves both roles through it; see
+`mgmt-api/CLAUDE.md`, where that is argued rather than assumed.
 
 **The Workload API is the opposite case and the distinction matters**: it
 authenticates nobody because its specification says it MUST NOT — a workload has
@@ -161,6 +175,15 @@ what each module is for is that directory's `CLAUDE.md`.
    resolver is the one to check a new proposal against: it was added only after
    showing it failed that test BOTH ways round.
 
+   **`setUserObserver()` NOW CARRIES THREE KINDS OF EVENT AND IS STILL ONE
+   SLOT**, which is the same rule read the other way: `ldap_server.js` is
+   offered an `event` of `authentication`, `issuance` (an X509-SVID was minted
+   for a SPIFFE identity) or `credential-status` (the SPIFFE registry ended or
+   restored an identity's ability to obtain one). Two more slots would have been
+   two more indirections for one cycle. **An absent `event` means an
+   authentication**, so an older copy of either module behaves as it did. See
+   `common/CLAUDE.md` and `spiffe/CLAUDE.md`.
+
 
 ---
 
@@ -217,6 +240,7 @@ in every file, including the ones in the source comments. This is the index.
 | 6a (SCIM), 6a-ii | `scim.js`, `scim_auth.js` | `scim/CLAUDE.md` |
 | 6a (SPIFFE) | `spiffe_server.js` | `spiffe/CLAUDE.md` |
 | 7, 7a | The console/API parity rule, the breadcrumb trail | `mgmt-api/CLAUDE.md`, `admin-ui/CLAUDE.md` |
+| 8, 8a, 8b | The console's gate, its two roles, and the claim they qualify | `admin-ui/CLAUDE.md` |
 
 Two rules share the number `6a` and always did — one for SCIM and one for
 SPIFFE. They are now in different files, which is the first thing that has ever
@@ -410,7 +434,19 @@ minted, expired, replayed, or minted for another agent; `RenewAgent` renewing
 the agent on the CONNECTION and never one named in the request; and the same run
 with `spiffe.authRequired` off, which must behave exactly as the service did
 before any of it existed. Also that one identity presented three ways is ONE
-directory entry. Drive it with `@grpc/grpc-js` as a
+directory entry — **and now that one identity ISSUED a certificate fifty times
+is still one entry**, with `x509serialNumber` equal to the last SVID and
+`x509svidsIssued` equal to fifty, which is the assertion that catches the
+append-versus-assign rule being "simplified" into agreement with
+`certificatePlan()`. Beside it: that an issuance adds NOTHING to
+`/admin/users`'s authentication count (an agent holding `FetchX509SVID` open
+would otherwise read as hundreds of sign-ins overnight); that the `x509subject`
+an SVID writes is byte-for-byte the string a client certificate with that
+subject would write, because two spellings of one DN is two people; that
+deleting ONE of two registration entries naming an identity leaves it active and
+deleting the second marks it revoked; that a ban and an unban round-trip while
+`spiffeRevokedAt` survives the unban; and that nothing anywhere is ever deleted
+from `ou=users`. Drive it with `@grpc/grpc-js` as a
 CLIENT — which is what `tests/sts_dpop.js` does by writing its own DPoP client
 rather than importing the wallet's, and for the same reason: if both ends came
 from one implementation, a shared misunderstanding passes and interoperates with
@@ -446,19 +482,32 @@ argument in two places is an argument that will disagree with itself.
 | Turn a verified presentation into a sign-on | `oid4vc/CLAUDE.md` |
 | Deactivate anybody on SCIM `active: false` | `scim/CLAUDE.md` |
 | Attest a workload or a node | `spiffe/CLAUDE.md` |
-| Let a group grant anything, though a token now carries one | `admin-ui/CLAUDE.md`, `common/CLAUDE.md` |
-| Protect the admin console, or persist anything at all | `admin-ui/CLAUDE.md` |
+| Revoke a SPIFFE credential — the directory now records who may still be ISSUED one, which is a different claim | `spiffe/CLAUDE.md`, `ldap/CLAUDE.md` |
+| Let a group grant anything — bar the TWO that grant the admin console and nothing else | `admin-ui/CLAUDE.md`, `common/CLAUDE.md` |
+| Persist anything at all | `admin-ui/CLAUDE.md` |
 | Fake WS-Federation's `wauth`, or dereference `wreqptr` | `ws-federation/CLAUDE.md` |
 | Publish a SAML 2.0 Web SSO profile | `saml/CLAUDE.md` |
 
-Two exceptions to the whole of that list, and both are worth knowing before
+THREE exceptions to the whole of that list, and each is worth knowing before
 reading further. **The SCIM endpoints REQUIRE a credential** — in any of the six
 schemes RFC 7644 section 2 names, with the OAuth ones needing `scim:read` or
-`scim:write` — because they create and DELETE accounts. And **the SPIRE Server
+`scim:write` — because they create and DELETE accounts. **The SPIRE Server
 API requires an X509-SVID over mutual TLS** and authorizes every method against
 SPIRE's own per-method table, because what comes out of that surface is a
-credential another service will believe. Both are a turnstile rather than a lock,
-and each can be turned off (`scim.authRequired`, `spiffe.authRequired`).
+credential another service will believe. And **the ADMIN CONSOLE at `/admin`
+requires a sign-on session and one of two roles**, because it is the one surface
+that can change what every protocol endpoint does. All three are a turnstile
+rather than a lock, and each can be turned off (`scim.authRequired`,
+`spiffe.authRequired`, `admin.authRequired`).
+
+The console's is the newest and the one with the most surprising edges, all of
+which are argued in `admin-ui/CLAUDE.md`: the two roles are ORDINARY DIRECTORY
+GROUPS rather than a store of the console's own, so four doors write one
+membership; **`/admin-api` is deliberately NOT gated**, which is what a test
+drives and what somebody locked out reaches for — and also means anybody who can
+reach this port can grant themselves both roles; and while NEITHER role group has
+a member, anybody who signs in holds both, because this service has no password
+anywhere to bootstrap an administrator with.
 
 **The Workload API is the opposite case and the distinction matters**: it
 authenticates nobody because its specification says it MUST NOT — a workload has

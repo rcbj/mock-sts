@@ -71,11 +71,18 @@
 // `value` is undefined, and the symptom would arrive somewhere else entirely as
 // "value is not a function".
 //
-// NOT PROTECTED, and it publishes the Kerberos passwords. That is deliberate
-// and it is not new: `GET /krb5/principals` already prints them, for the reason
-// written there — a debugger whose accounts are unusable without reading the
-// source is worse than one that says what they are. Nothing in this service
-// checks a credential. Do not put this port on a public address.
+// IT PUBLISHES THE KERBEROS PASSWORDS, and that is deliberate and not new:
+// `GET /krb5/principals` already prints them, for the reason written there — a
+// debugger whose accounts are unusable without reading the source is worse than
+// one that says what they are.
+//
+// Where they are published now needs one distinction. `/admin/config` is behind
+// the console gate (`admin.authRequired`, on by default), but `GET
+// /admin-api/config` is NOT, because nothing under `/admin-api` is — so the
+// settings, passwords included, are still readable by anybody who can reach
+// this port. The gate is a turnstile for exercising a client and not a lock,
+// and no password anywhere in this service is checked. Do not put this port on
+// a public address.
 // ---------------------------------------------------------------------------
 
 // CONFIG_FILE is made ABSOLUTE before it is read. This module lives in a
@@ -512,6 +519,80 @@ const SETTINGS = [
                  'allow it; turning it OFF makes this server deliberately ' +
                  'non-compliant, which is how a native-app client is shown ' +
                  'what happens when it meets a server that got this wrong.' },
+
+  // --- The admin console ---------------------------------------------------
+  //
+  // FOUR SETTINGS AND THEY ARE ONE FEATURE. The console at /admin used to be
+  // open, and every document here said so at length. It now asks for a session
+  // from the authentication service and for one of two roles held in the
+  // embedded directory.
+  //
+  // The roles ARE two ordinary groups under ou=groups — cn=admin-read and
+  // cn=admin-write by default — rather than a store of this console's own, for
+  // the one-store reason every other part of this service follows: an
+  // `ldapmodify`, a SCIM PATCH, the /admin/rbac screen and the management API
+  // all write membership, and two stores would each look right alone and never
+  // see each other. It is also why these two are the FIRST groups in this
+  // service that grant anything, and why the sentence "a group here grants
+  // nothing" is now qualified everywhere it appears rather than deleted: it is
+  // still true of every OTHER group, and of these two everywhere except this
+  // console.
+  { key: 'admin.authRequired', group: 'Admin console',
+    label: 'Require a sign-in for /admin',
+    env: 'ADMIN_AUTH_REQUIRED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, every /admin page and every /admin form needs a ' +
+                 'browser sign-on session from the authentication service at ' +
+                 '/authn/login, and the person signed in needs a console ' +
+                 'role: admin.readGroup to READ a page, admin.writeGroup to ' +
+                 'POST a form. A browser with no session is sent to the ' +
+                 'sign-in screen and returned to the page it asked for; a ' +
+                 'caller asking for ?format=json, or posting JSON, is refused ' +
+                 '401 or 403 rather than redirected, because a redirect to an ' +
+                 'HTML login screen is not an answer a program can read. ' +
+                 'Turning it OFF restores the behaviour this console had ' +
+                 'before any of this existed — completely open — which stays ' +
+                 'reachable on purpose, for the reason every refusal here is ' +
+                 'switchable: a client is exercised by both answers. It does ' +
+                 'NOT gate /admin-api, which is open either way and is ' +
+                 'deliberately the way back in for somebody who has locked ' +
+                 'themselves out; see admin.openWhenEmpty.' },
+
+  { key: 'admin.readGroup', group: 'Admin console', label: 'Admin Read role',
+    env: 'ADMIN_READ_GROUP', type: 'string', dflt: 'admin-read', runtime: true,
+    description: 'The cn of the directory group whose members may READ the ' +
+                 'console — every page, and every ?format=json view of one. ' +
+                 'It is an ordinary group under ou=groups, so an ldapmodify, ' +
+                 'a SCIM PATCH and the /admin/rbac screen are three doors ' +
+                 'onto the same membership. The group need not exist: while ' +
+                 'NEITHER role group has a member, admin.openWhenEmpty ' +
+                 'decides what happens.' },
+
+  { key: 'admin.writeGroup', group: 'Admin console', label: 'Admin Write role',
+    env: 'ADMIN_WRITE_GROUP', type: 'string', dflt: 'admin-write',
+    runtime: true,
+    description: 'The cn of the directory group whose members may POST a ' +
+                 'console form — revoke a token, add a claim, change a ' +
+                 'setting, grant a role. WRITE IMPLIES READ: a member of this ' +
+                 'group does not also need the read group, because a role ' +
+                 'that could change a page it could not see would be a trap ' +
+                 'rather than a permission.' },
+
+  { key: 'admin.openWhenEmpty', group: 'Admin console',
+    label: 'Open while no role has a member',
+    env: 'ADMIN_OPEN_WHEN_EMPTY', type: 'bool', dflt: true, runtime: true,
+    description: 'What happens while NEITHER role group has a single member: ' +
+                 'ON, anybody who signs in holds both roles and the console ' +
+                 'says so in a banner on every page; OFF, nobody can get in ' +
+                 'at all. ON by default because the roster lives in memory ' +
+                 'and dies with the process, so a service that started with ' +
+                 'admin.authRequired on and this off would have a console no ' +
+                 'browser could ever reach — there is no bootstrap admin and ' +
+                 'no password anywhere in this service to be one. The moment ' +
+                 'the FIRST grant is made the roster is enforced, so turning ' +
+                 'this off is a thing to do after granting yourself a role ' +
+                 'and not before. If it is off and you are locked out, ' +
+                 '/admin-api is not gated: POST /admin-api/rbac/grant, or ' +
+                 'POST /admin-api/config/set with admin.authRequired=false.' },
 
   // --- Applications --------------------------------------------------------
   { key: 'applications.max', group: 'Applications',

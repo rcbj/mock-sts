@@ -82,6 +82,48 @@ ldapjs implements none, and this repository does not patch that submodule.
    SUBJECT of one, like the TLS client certificate for a machine that already
    lands in `ou=users`.
 
+   **AN ISSUED CERTIFICATE IS A FOURTH WAY ONTO THAT ENTRY, AND IT IS NOT AN
+   AUTHENTICATION.** The three above are acceptances; this one is the trust
+   domain MINTING an X509-SVID. `admin_stats.js` offers all four through the ONE
+   observer slot, discriminated by `event` — `authentication`, `issuance` or
+   `credential-status` — and `observeIdentity()` here is the dispatcher.
+   **An absent `event` means an authentication**, deliberately, so that an older
+   `admin_stats.js` behaves exactly as it did. An issuance goes through
+   `autoCreateUser()` like everything else (one creation path, or the fold
+   `createUser()`'s header protects is undone from a fifth door) and then
+   `applySpiffeCertificate()` writes the certificate. A `credential-status`
+   NEVER creates an entry: a revocation for something this directory has no
+   record of issuing to is nothing to write down.
+
+   **`applySpiffeCertificate()` WRITES THE SAME SIX `x509*` ATTRIBUTES
+   `certificatePlan()` DOES, AND ASSIGNS WHERE THAT ONE APPENDS.** The same six
+   on purpose — a certificate is a certificate however it arrived, and a second
+   set spelt `svid*` would mean a filter written for one path silently misses
+   the other. `spiffe_ca.js` reads the strings back off the certificate it has
+   just issued with node's own parser and renders both DNs through the one
+   `dnRfc4514()`, which is why that function now lives in `common/helpers.js`.
+   The append-versus-assign difference had to happen: a renewed client
+   certificate is rare and seeing both serials is the point, where an SVID is
+   minted afresh at half its lifetime for as long as the workload runs, so
+   appending would add six values an hour for ever — `applyVcAttributes()`'s
+   second rule met in a new place. `x509svidsIssued`, `x509firstIssued` and
+   `x509lastIssued` are what is left of the history; the individual serials are
+   on `/admin/metrics`, where every SVID is an artifact row. A ROTATION NEEDS NO
+   CODE TO LAND ON THE SAME OBJECT: `entryBySpiffeSubject()` keys on the SPIFFE
+   ID and on nothing about the certificate.
+
+   **`spiffeCredentialStatus` IS NOT A CERTIFICATE STATUS AND NOTHING READS IT
+   BACK.** SPIFFE has no revocation; `applySpiffeCredentialStatus()` carries the
+   whole argument and `GET /spiffe` states it as a thing this service
+   deliberately does not do. The attribute records the three things in
+   `spiffe_registry.js` that end an identity's ability to obtain a NEW
+   credential — its LAST registration entry deleted, its agent banned, its agent
+   deleted — each reversible and each reversal written the same way, so the flag
+   is the current state. `spiffeRevokedAt` is never cleared, which is
+   `mfaLastAuthTime`'s rule and for the same reason. **THE ENTRY IS NEVER
+   REMOVED**: an identity this trust domain used to issue certificates to is
+   exactly what a directory is for.
+
    **The three DIDs come from the Decentralized Identity endpoints, and each
    reaches the funnel at the point its own credential is accepted.**
    `subjectClaimsFrom()` in `vc_issuer.js` records the person an access token
@@ -233,14 +275,46 @@ ldapjs implements none, and this repository does not patch that submodule.
    "checked, and it was one factor"; and TWO FACTORS MEANS TWO, so a
    passwordless `["hwk"]` is FALSE.
 
-   **A GROUP HERE GRANTS NOTHING**, and both pages say so where a reader will see
-   it. No endpoint reads a group and nothing decides anything on one. The same is
+   **A GROUP HERE GRANTS NOTHING, WITH EXACTLY TWO EXCEPTIONS**, and both pages
+   say so where a reader will see it. The exceptions are `cn=admin-read` and
+   `cn=admin-write` (`admin.readGroup`, `admin.writeGroup`), which decide who may
+   use the ADMIN CONSOLE — the SIXTH slot below is what carries this module's
+   group functions to `admin-ui/admin_rbac.js` so that they can. Even those two
+   grant nothing outside `/admin`: no token, assertion, ticket, PAC or credential
+   is changed by being in one, and every protocol endpoint answers a member
+   exactly as it answers anybody else. The general sentence is what matters and
+   is why it is qualified rather than dropped everywhere it appears. No endpoint reads a group and nothing decides anything on one. The same is
    true of those three authentication-factor attributes, and of them it is true
    twice over — nothing reads them back and no token carries them either. On a
    service that authenticates nobody it could hardly be otherwise — but a console
    that listed groups beside the tokens page without saying it would let somebody
    conclude that adding a user to `cn=directory-admins` changed what their token
    could do.
+
+   **A SIXTH HOOK IS THE FIRST THAT HANDS OVER A WRITER.** `admin_rbac.js`
+   decides who may use `/admin`, out of two ordinary groups in this directory,
+   and this module fills its `setDirectory()` slot at require time with
+   `groupsOfUser`, `readGroupEntry`, `writeGroupEntry`, `groupDnFor`,
+   `normalizeDn`, `existingUserEntry`, `usernameOfEntry`, `nameUsableInDn`,
+   `allPersons` and the two container DNs. Same route-order reason as the five
+   above: a require of THIS module from there would pull every `/ldap` route
+   ahead of every `/admin` one.
+
+   What crosses is this module's own FUNCTIONS and not a copy of its rules, the
+   same division the five keep — which is the whole point of the arrangement: a
+   role granted on `/admin/rbac`, one granted by `POST /admin-api/rbac/grant`,
+   one granted with an `ldapmodify` and one granted by a SCIM PATCH all end in
+   `writeGroupEntry()` and leave the IDENTICAL entry. A membership store of the
+   console's own would have been a second answer to "is alice an admin" that no
+   directory client could see. `writeGroupEntry()` grew an `origin` argument for
+   it, defaulting to `scim` so the call site that predates the parameter says
+   what it always meant.
+
+   It is ONE object where the console's own slots are five separate functions,
+   and the concern stated over there — a filler installing only half of it would
+   silently disable the other half — is answered rather than ignored:
+   `setDirectory()` checks every member and refuses a partial object with an
+   error naming what was missing.
 
    **A TOKEN DOES CARRY A GROUP NOW, WHICH IS A DIFFERENT SENTENCE** — see rule
    3d-ii and `groups.claim`, which is ON by default. `groupsOfUser()` here is

@@ -466,6 +466,98 @@ function userFor(username) {
   return user;
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE SPELLING OF A CERTIFICATE SUBJECT.
+//
+// Here rather than in `tls/tls_server.js`, where it was written, because FOUR
+// callers now need the same string and two of them cannot reach that module.
+// `scim_auth.js` and `spiffe_auth.js` require it directly and always could;
+// `spiffe_ca.js` cannot, and the reason is rule 3e's test rather than a
+// preference — `admin-ui/admin.js` requires `spiffe_ca.js`, and `server.js`
+// requires `admin.js` at 18 and `tls_server.js` at 20, so a require from that
+// module would pull every `/tls*` route into the express router ahead of the
+// console's and `GET /sts-metadata` walks that router. A leaf in `helpers.js`
+// moves no route and closes no cycle, which is what a shared spelling has to be.
+//
+// WHY THIS FORM AT ALL, and why it is not what a report shows. Node hands a
+// subject back most-significant-first (`C=US, O=Example, CN=alice`) and
+// `openssl x509 -subject` prints it that way too. A DN as LDAP and every RFC
+// 4514 document writes it is the REVERSE — leaf first, `CN=alice,O=Example,C=US`
+// — with no spaces after the commas, and THAT is the form this service files an
+// identity under and the directory builds an entry from. One form used for both
+// would be wrong in whichever direction it was wrong: a report that disagreed
+// with openssl, or a DN nothing in LDAP would accept.
+//
+// TWO SPELLINGS OF ONE DN IS TWO PEOPLE ON /admin/users, which is the whole
+// reason this is one function. A verified TLS client certificate, a client
+// certificate at the SCIM endpoints, an X509-SVID at the SPIRE Server API and
+// an X509-SVID this service has just MINTED all produce a subject, and any two
+// of them that render it differently put two objects in the directory for one
+// identity.
+//
+// IT TAKES BOTH SHAPES NODE PRODUCES, because node has two and this service
+// meets both. `tls.TLSSocket#getPeerCertificate()` gives an OBJECT keyed by
+// attribute type, with repeated types collapsed into an array (`OU=A,OU=B`
+// arrives as `OU: ['A','B']`, and those are separate RDNs rather than one
+// multi-valued RDN, so each becomes its own component here).
+// `crypto.X509Certificate#subject` gives a STRING with one `type=value` per
+// LINE, in the same most-significant-first order — which is what
+// `spiffe_ca.js` has, because it reads back the certificate it just issued
+// rather than one that arrived on a socket. Anything else is returned as it
+// stands.
+//
+// Values are ESCAPED. A comma inside `O=Example\, Ltd` that went through
+// unescaped would turn one RDN into two and name an object that does not exist.
+// ---------------------------------------------------------------------------
+function escapeRdnValue(value) {
+  const text = String(value == null ? '' : value);
+  // RFC 4514 section 2.4: these are escaped anywhere, '#' only leading, and a
+  // space only when it leads or trails.
+  let out = text.replace(/([\\,+"<>;=])/g, '\\$1');
+  if (out.indexOf('#') === 0) out = '\\' + out;
+  out = out.replace(/^ /, '\\ ').replace(/ $/, '\\ ');
+  return out;
+}
+
+function dnRfc4514(dn) {
+  if (!dn) {
+    return '';
+  }
+  // crypto.X509Certificate's shape: one `type=value` per line. Split rather
+  // than parsed, because node has already done the parsing — a value that
+  // itself contains a newline is not representable in that output and so
+  // cannot arrive here.
+  if (typeof dn === 'string') {
+    if (dn.indexOf('\n') < 0) {
+      // A single-component subject, or something already in one line. Returned
+      // as it stands rather than guessed at: a caller that already holds an
+      // RFC 4514 string must get it back unchanged.
+      return dn.trim();
+    }
+    return dn.split('\n').map(function (line) {
+      const text = String(line).trim();
+      const eq = text.indexOf('=');
+      if (eq < 0) {
+        return '';
+      }
+      return text.slice(0, eq) + '=' + escapeRdnValue(text.slice(eq + 1));
+    }).filter(function (part) {
+      return part !== '';
+    }).reverse().join(',');
+  }
+  if (typeof dn !== 'object') {
+    return String(dn);
+  }
+  const parts = [];
+  Object.keys(dn).forEach(function (key) {
+    const value = dn[key];
+    (Array.isArray(value) ? value : [value]).forEach(function (one) {
+      parts.push(key + '=' + escapeRdnValue(one));
+    });
+  });
+  return parts.reverse().join(',');
+}
+
 module.exports = {
   log: log,
   logArtifact: logArtifact,
@@ -495,5 +587,7 @@ module.exports = {
   signJwt: signJwt,
   setJwtRecorder: setJwtRecorder,
   userFor: userFor,
-  hasScope: hasScope
+  hasScope: hasScope,
+  escapeRdnValue: escapeRdnValue,
+  dnRfc4514: dnRfc4514
 };

@@ -934,8 +934,25 @@ function state() {
           'identifier on it as `spiffeSubject`, and REUSED when the same ' +
           'identity arrives again by another route. Three acceptances do ' +
           'that: an X509-SVID over mutual TLS (once per connection), an agent ' +
-          'attesting, and a JWT-SVID verified at ValidateJWTSVID. Being ' +
-          'ISSUED an SVID is not one of them.',
+          'attesting, and a JWT-SVID verified at ValidateJWTSVID. AN ISSUANCE ' +
+          'IS A FOURTH WAY IN and is not one of those three: every identity ' +
+          'this trust domain mints an X509-SVID for gets the same entry, ' +
+          'carrying the certificate as the same six `x509*` attributes a ' +
+          'verified TLS client certificate writes — ASSIGNED rather than ' +
+          'appended, because an SVID is minted afresh every half-lifetime, ' +
+          'with `x509svidsIssued` and two timestamps beside them. It is not ' +
+          'counted as an authentication, because being issued a credential is ' +
+          'not presenting one.',
+    credentialStatusNote: 'The entry also records whether the identity may ' +
+          'still be issued a credential HERE — `spiffeCredentialStatus`, with ' +
+          'a reason beside it. THAT IS NOT A CERTIFICATE STATUS AND NOTHING ' +
+          'READS IT BACK: SPIFFE has no revocation, and an SVID already issued ' +
+          'verifies against the bundle until it expires whatever the directory ' +
+          'says. What it records is the three things that end an identity\'s ' +
+          'ability to get a NEW one — its last registration entry deleted, its ' +
+          'agent banned, its agent deleted — each of which is reversible and ' +
+          'recorded the same way when it is reversed. The entry is never ' +
+          'removed.',
     enforced: authRequired(),
     trustLocalSocket: trustLocalSocket(),
     adminIds: adminIds(),

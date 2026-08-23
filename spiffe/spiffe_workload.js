@@ -225,7 +225,13 @@ async function buildX509Response(caller) {
     registry.noteSvidIssued(entry.id);
     stats.recordSvid('X.509', {
       subject: entry.spiffeId, entryId: entry.id, serial: svid.serialHex,
-      hint: entry.hint, expiresAt: svid.expiresAt
+      hint: entry.hint, expiresAt: svid.expiresAt,
+      // The six facts about the certificate, for the directory entry this
+      // identity gets. Passed at every X509-SVID mint rather than read back
+      // there, because only the minting authority has the certificate — see
+      // noteCertificateIssued() in admin_stats.js and certificateFacts() in
+      // spiffe_ca.js.
+      certificate: svid.certificate
     });
     svids.push({
       spiffe_id: entry.spiffeId,

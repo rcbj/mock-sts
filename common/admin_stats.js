@@ -392,8 +392,164 @@ function recordSvid(kind, detail) {
     hint: detail.hint || '',
     expiresAt: detail.expiresAt || 0
   });
+  // -----------------------------------------------------------------------
+  // AND THE DIRECTORY, FOR AN X509-SVID. See noteCertificateIssued() below for
+  // why an ISSUANCE reaches the observer at all, given that being issued a
+  // credential is not authenticating with one.
+  // -----------------------------------------------------------------------
+  if (kind === 'X.509' && detail.certificate) {
+    noteCertificateIssued(detail.subject, detail.certificate, detail);
+  }
   log.debug("Leaving recordSvid(). " + artifacts.length + " artifact(s) held.");
   return record;
+}
+
+// ---------------------------------------------------------------------------
+// AN ISSUED CERTIFICATE IS AN IDENTITY IN THE DIRECTORY, WHICH IS A DIFFERENT
+// CLAIM FROM "IT AUTHENTICATED" AND THE TWO MUST NOT MERGE.
+//
+// Until now the directory grew an entry for a SPIFFE identity at exactly three
+// points, all of them an acceptance: an X509-SVID over mutual TLS at the SPIRE
+// Server API, an agent attesting, and a JWT-SVID verified at ValidateJWTSVID.
+// Being ISSUED an SVID was deliberately not one of them, and the argument was
+// sound as far as it went — a workload that collects a certificate has proved
+// nothing, and /admin/users answers "who has authenticated here".
+//
+// What it left out is that this trust domain's whole output is CERTIFICATES,
+// and a directory that could not say which identities hold one — nor what the
+// current one is, nor whether the identity has since been shut off — could not
+// answer the question somebody points an LDAP client at a SPIFFE mock to ask.
+// So an issuance now reaches the observer too, and it is told which of the two
+// it is:
+//
+//   * `event: 'authentication'` — a credential was ACCEPTED. Counted on this
+//     page, an audit row, the whole existing path, unchanged.
+//   * `event: 'issuance'` — a certificate was MINTED for this identity. It
+//     creates or updates the directory entry and writes the certificate onto
+//     it, and it does NOTHING ELSE: no `authentications` count, no audit
+//     `authentication` row, and no protocol row. An issuance that inflated the
+//     authentication count would make /admin/users's central number mean two
+//     things at once, and an agent holding a stream open re-mints every
+//     half-lifetime — so a workload left running overnight would read as having
+//     authenticated four hundred times. What the identity DOES get on that page
+//     is the row `recordArtifact()` above already gives it: an SVID with no
+//     authentication behind it, which the page counts under "seen only as a
+//     subject" and which is the honest answer.
+//
+// THE FUNNEL IS recordSvid() ABOVE, which the five X509-SVID mints already
+// call, and that is the same argument recordAuthentication() makes for itself:
+// one place rather than five, and a sixth mint added later that forgets to call
+// it is a mint with no artifact row either — so the omission shows on
+// /admin/metrics rather than being silent in the directory alone.
+//
+// WHAT IS NOT COVERED, and each is a decision rather than a gap:
+//
+//   * A JWT-SVID. It is not a certificate; it has no subject, issuer, serial or
+//     validity in the sense these attributes hold, and the identity behind one
+//     reaches the directory anyway when it is VALIDATED at ValidateJWTSVID,
+//     which is an acceptance.
+//   * The SPIRE Server API's OWN server SVID, minted in spiffe_grpc.js to bind
+//     the mutual-TLS port. It never reaches this function because that call
+//     site records no artifact either, and it must not: filing this service's
+//     own listener among the people is the mistake didPlan() already refuses
+//     for `/did/generate?method=web`.
+//   * A downstream CA from NewDownstreamX509CA. It is an intermediate belonging
+//     to whoever asked for it, not an identity in this trust domain, and
+//     spiffe_ca.js deliberately does not add it to this service's authorities
+//     either.
+// ---------------------------------------------------------------------------
+function noteCertificateIssued(subject, certificate, detail) {
+  log.debug("Entering noteCertificateIssued(). subject=" + (subject || '?'));
+  const identity = identityOf(subject);
+  if (!identity.key || !userObserver) {
+    log.debug("Leaving noteCertificateIssued(). " +
+              (identity.key ? "There is no directory." : "There is no identity."));
+    return;
+  }
+  const info = detail || {};
+  try {
+    userObserver({
+      event: 'issuance',
+      key: identity.key, name: identity.name, realm: identity.realm,
+      presented: identity.form,
+      protocol: 'SPIFFE',
+      method: 'X509-SVID issued',
+      isClient: false, sub: '',
+      amr: [], acr: '',
+      // NOT `certificate`, which the observer already reads as "the identity IS
+      // this DN" and routes to certificatePlan(). Every SVID this trust domain
+      // mints carries the SAME subject — `spiffe.svidSubject`, `C=US,O=SPIRE` —
+      // so that route would fold every workload in the domain onto one entry
+      // named for `O=SPIRE`. The identity here is the SPIFFE ID; the
+      // certificate is a FACT ABOUT it, which is what the different key says.
+      issuedCertificate: certificate,
+      entryId: info.entryId || '',
+      hint: info.hint || '',
+      linkedTo: ''
+    });
+  } catch (e) {
+    // The same rule the observer call in recordAuthentication() follows, and
+    // here it matters more: this runs inside a gRPC handler that has already
+    // minted a certificate the caller is owed, and a throw would turn a
+    // successful issuance into an Unknown status.
+    log.error('the user observer threw on an issuance and was ignored; the ' +
+              'SVID itself is unaffected: ' + e.message);
+  }
+  log.debug("Leaving noteCertificateIssued().");
+}
+
+// ---------------------------------------------------------------------------
+// AND THE OTHER END OF IT: AN IDENTITY WHOSE CREDENTIALS HAVE BEEN SHUT OFF.
+//
+// SPIFFE HAS NO REVOCATION and this does not invent one — `GET /spiffe` says so
+// outright and the Workload API's `crl` field stays empty because empty is the
+// conforming value. What this records is the three things in the registry that
+// DO end an identity's ability to hold a credential here, which is the honest
+// nearest thing: a registration entry deleted, an agent banned, an agent
+// deleted. `spiffe_registry.js` is what calls it, at the point each of those
+// happens, and the directory writes a status onto the entry rather than
+// removing it — the record of an identity that USED to be issued certificates
+// is the whole reason somebody would look.
+//
+// It goes through the observer for the reason everything else here does: this
+// file cannot require ldap_server.js (that module requires this one, and a
+// cycle in node hands back exports that are undefined), and a second slot for
+// three calls would cost a reader an indirection that rule 3e says to spend
+// only where a require would close a cycle or move a route. This one is the
+// SAME slot with a third `event`.
+// ---------------------------------------------------------------------------
+function recordCredentialStatus(subject, status, detail) {
+  log.debug("Entering recordCredentialStatus(). subject=" + (subject || '?') +
+            ", status=" + status);
+  const identity = identityOf(subject);
+  if (!identity.key || !userObserver) {
+    log.debug("Leaving recordCredentialStatus(). " +
+              (identity.key ? "There is no directory." : "There is no identity."));
+    return;
+  }
+  const info = detail || {};
+  try {
+    userObserver({
+      event: 'credential-status',
+      key: identity.key, name: identity.name, realm: identity.realm,
+      presented: identity.form,
+      protocol: 'SPIFFE',
+      method: String(status),
+      credentialStatus: String(status),
+      // Why, in the words the page prints. It is written as a sentence rather
+      // than as a code because it is the only thing on the entry that explains
+      // a status a reader did not expect, and "entry-deleted" would need a
+      // table nobody has.
+      credentialStatusReason: String(info.reason || ''),
+      isClient: false, sub: '', amr: [], acr: '', linkedTo: ''
+    });
+  } catch (e) {
+    // As above: a ban or a delete has already happened and must not be undone
+    // by a directory that could not write it down.
+    log.error('the user observer threw on a credential status change and was ' +
+              'ignored; the change itself stands: ' + e.message);
+  }
+  log.debug("Leaving recordCredentialStatus().");
 }
 
 // A verifiable credential, in whichever of the three formats was asked for.
@@ -845,6 +1001,12 @@ function recordAuthentication(detail) {
   if (userObserver) {
     try {
       userObserver({
+        // WHICH OF THE THREE THINGS HAPPENED. The observer used to be offered
+        // one kind of event and needed no discriminator; it is now offered
+        // three (see noteCertificateIssued() above), and an absent `event` has
+        // to keep meaning this one — an older copy of ldap_server.js that does
+        // not read the field must go on behaving exactly as it did.
+        event: 'authentication',
         key: identity.key, name: identity.name, realm: identity.realm,
         presented: identity.form, protocol: protocol, method: method,
         isClient: record.isClient, sub: info.sub || '',
@@ -1771,6 +1933,7 @@ module.exports = {
   recordTicket: recordTicket,
   recordCredential: recordCredential,
   recordSvid: recordSvid,
+  recordCredentialStatus: recordCredentialStatus,
   SCIM_OPERATIONS: SCIM_OPERATIONS,
   SCIM_RESOURCE_TYPES: SCIM_RESOURCE_TYPES,
   recordScim: recordScim,

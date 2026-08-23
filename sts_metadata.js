@@ -845,8 +845,13 @@ const ENDPOINTS = [
           'LDAP, or created because somebody authenticated. That last column is the point: ' +
           'LDAP_AUTOCREATE_USERS (ON by default) grows an entry under ou=users for anybody ' +
           'who authenticates through ANY of the twelve protocol families here, through one ' +
-          'hook on the funnel they all already pass. Not an LDAP operation. Add ' +
-          '?format=json.' },
+          'hook on the funnel they all already pass. THAT HOOK NOW CARRIES THREE KINDS OF ' +
+          'EVENT: an authentication, an ISSUANCE (every identity this trust domain mints ' +
+          'an X509-SVID for gets the same entry, carrying the certificate as the same six ' +
+          'x509* attributes a verified TLS client certificate writes — assigned rather ' +
+          'than appended, because an SVID rotates every half-lifetime), and a CREDENTIAL ' +
+          'STATUS, which is not a revocation and is explained on GET /spiffe. Not an ' +
+          'LDAP operation. Add ?format=json.' },
 
   // --- SCIM ---
   //
@@ -1113,7 +1118,11 @@ const ENDPOINTS = [
           'PAGE IS WHAT IS AND IS NOT CHECKED — no workload attestation and no node ' +
           'attestation (a Workload API caller is identified by its transport, endpoint ' +
           'and peer address and nothing else, because node cannot read a socket\'s peer ' +
-          'credentials), no revocation anywhere, and, on the other side, the WHOLE ' +
+          'credentials), no revocation anywhere — the directory does record a ' +
+          '`spiffeCredentialStatus` on an identity whose last registration entry was ' +
+          'deleted or whose agent was banned or deleted, and that is not one: nothing ' +
+          'reads it back and no certificate is refused because of it — and, on the ' +
+          'other side, the WHOLE ' +
           'per-method authorization table for the SPIRE Server API, whose TCP port is ' +
           'MUTUAL TLS with an X509-SVID (spiffe.authRequired) — because what comes out of ' +
           'these surfaces is a credential another service will believe. Add ' +
@@ -1151,7 +1160,13 @@ const ENDPOINTS = [
           'deliberately cannot (it does not revoke assertions, tickets or credentials, because ' +
           'nothing consults this service about those; it does not end a sign-on session, because ' +
           'wsignout1.0 has cleanup to fan out and a third way to end one is a third way to get it ' +
-          'wrong). NOT PROTECTED — nothing in this service checks a credential.' },
+          'wrong). PROTECTED, and it is the only HTML surface here that is: with ' +
+          'admin.authRequired on (the default) every page needs a sign-on session from ' +
+          '/authn/login and one of two roles held as directory groups — see /admin/rbac. That ' +
+          'is a turnstile and not a lock, exactly as SCIM\'s is: no password is checked ' +
+          'anywhere in this service, so the username typed at that screen is the whole of the ' +
+          'claim, and /admin-api is NOT gated at all. Turning the setting off restores the ' +
+          'completely open console this used to be.' },
   { path: '/admin/metrics', group: 'Admin', name: 'Metrics',
     specs: [],
     what: 'NON-SPEC. Every endpoint call by matched route and status class, every token by typ ' +
@@ -1267,9 +1282,33 @@ const ENDPOINTS = [
           'does not enforce referential integrity, so deleting a user leaves its DN in every ' +
           'group), a member that is itself a GROUP (nesting is shown and never expanded — nothing ' +
           'here walks it), and an entry whose own memberOf claims a group that does not list it ' +
-          'back (nothing here maintains memberOf). A GROUP HERE GRANTS NOTHING: no token, ' +
-          'assertion, ticket or PAC this service issues carries a group from this directory and no ' +
-          'endpoint reads one. Add ?format=json.' },
+          'back (nothing here maintains memberOf). A GROUP HERE GRANTS NOTHING, WITH TWO NAMED ' +
+          'EXCEPTIONS: no token, assertion, ticket or PAC this service issues carries a group ' +
+          'from this directory as an authorization and no endpoint reads one — except that ' +
+          'admin.readGroup and admin.writeGroup (cn=admin-read, cn=admin-write) decide who may ' +
+          'use /admin, and they are ordinary entries listed here like any other. Even those two ' +
+          'grant nothing outside that console. See /admin/rbac. Add ?format=json.' },
+  { path: '/admin/rbac', group: 'Admin', name: 'Admin roles',
+    // rfc4511/rfc4514/rfc4519 because the two roles ARE two ordinary groups in the
+    // embedded directory — the same member/groupOfNames machinery /admin/groups
+    // reports — and NOT because any of those specifications says anything about
+    // authorizing a web console. Nothing does: this is a role model of this
+    // service's own.
+    specs: ['rfc4511', 'rfc4514', 'rfc4519'],
+    effect: 'decides who may read and who may change this console',
+    what: 'NON-SPEC. WHO MAY USE /admin. Two roles — Admin Read and Admin Write, and WRITE ' +
+          'IMPLIES READ — held as two ORDINARY GROUPS in the embedded LDAP directory ' +
+          '(admin.readGroup, admin.writeGroup; cn=admin-read and cn=admin-write by default), ' +
+          'so this page, POST /admin-api/rbac/grant, an ldapmodify on 389 or 636 and a SCIM ' +
+          'PATCH are FOUR DOORS onto one membership rather than four stores. Grants and ' +
+          'revokes here, filtered and paged. THESE TWO GROUPS ARE THE ONLY GROUPS IN THIS ' +
+          'SERVICE THAT GRANT ANYTHING, and what they grant is this console and nothing else — ' +
+          'no token, assertion, ticket, PAC or credential is changed by holding one, and no ' +
+          'protocol endpoint reads them. While NEITHER group has a member, anybody who signs ' +
+          'in holds both roles and every page says so: this service has no password anywhere ' +
+          'to bootstrap an administrator with, so an empty roster OPENS (admin.openWhenEmpty, ' +
+          'which can be turned off — and /admin-api, which is NOT gated, is then the only way ' +
+          'back in). None of it is in force while admin.authRequired is off. Add ?format=json.' },
   { path: '/admin/scim', group: 'Admin', name: 'SCIM',
     // rfc7643 and rfc7644 because the page reports that surface; rfc4511 and rfc4519
     // because what it reports having done is entries in the embedded directory, and the
@@ -1481,6 +1520,25 @@ const ENDPOINTS = [
           'directory:false and a group that is not there with found:false, ' +
           'because both are answers rather than errors. A GROUP HERE GRANTS ' +
           'NOTHING. Mirrors GET /admin/groups.' },
+  { path: '/admin-api/rbac', group: 'Management API', name: 'Admin console roles',
+    specs: ['rfc4511', 'rfc4514', 'rfc4519'],
+    what: 'NON-SPEC. The two console roles with every grant, the four settings behind the ' +
+          'gate, and who the CALLER is. The roles are two ordinary directory groups, so this ' +
+          'and an ldapsearch answer about the same entries. Mirrors GET /admin/rbac.' },
+  { path: '/admin-api/rbac/:action', group: 'Management API', name: 'Admin role actions',
+    specs: ['rfc4511', 'rfc4514', 'rfc4519'],
+    effect: 'grants or revokes access to the admin console',
+    what: 'NON-SPEC. Two URLs behind one pattern: grant and revoke. THIS RESOURCE IS NOT ' +
+          'GATED BY admin.authRequired and neither is anything else under /admin-api, which ' +
+          'is deliberate and has a consequence worth stating: with the console protected and ' +
+          'this open, anybody who can reach this port can grant themselves both roles. It is ' +
+          'the same decision the whole service rests on — /oauth2/token will mint a token for ' +
+          'any username asked of it — and it is what makes this the way back in when the ' +
+          'roster is empty and admin.openWhenEmpty is off, a state from which no browser can ' +
+          'reach the console at all. Granting a role somebody already holds, or revoking one ' +
+          'they do not, answers 200 with changed:false. A person who does not exist CAN be ' +
+          'granted a role: the membership dangles until they first sign in. Mirrors ' +
+          'POST /admin/rbac.' },
   { path: '/admin-api/tokens', group: 'Management API',
     name: 'Issued tokens, assertions and tickets',
     specs: ['rfc7009', 'rfc7662', 'oidc', 'saml2', 'saml11', 'rfc4120'],

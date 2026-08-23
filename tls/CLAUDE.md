@@ -62,3 +62,25 @@ the one place a reader goes when a handshake is failing.
   is the subject in **RFC 4514 form** (leaf first, values escaped), which is a
   different string from the display DN shown beside it and is the one the directory
   builds from.
+
+* **`dnRfc4514()` NOW LIVES IN `common/helpers.js` and is re-exported from here.**
+  It was written in this module and the export stays, because `scim_auth.js` and
+  `spiffe_auth.js` require this module for it. What forced the move is a FOURTH
+  producer of that string: the SPIFFE authority records the certificate behind
+  every X509-SVID it mints onto the holder's directory entry, using **the same six
+  `x509*` attributes this path writes**, and `spiffe_ca.js` cannot require this
+  module — `admin.js` requires that one and is required first, so the require
+  would move every `/tls*` route ahead of the console's and `GET /sts-metadata`
+  walks that router. Two spellings of one DN is two people on `/admin/users`,
+  which is the sentence the export comment here has always carried; there are now
+  four callers of it rather than two. `common/CLAUDE.md` has the argument,
+  including the second shape of DN the function learnt for that caller.
+
+* **The SPIFFE path ASSIGNS those six where this one APPENDS, and the difference
+  is not a disagreement.** A renewed client certificate is a new serial for the
+  same person and is rare, so appending is what makes both visible. An X509-SVID
+  is minted afresh at half its lifetime for as long as the workload runs, so
+  appending there would add six values an hour for ever. See
+  `applySpiffeCertificate()` in `ldap/ldap_server.js`, which says so beside
+  `certificatePlan()` for exactly this reason: the two functions look alike
+  enough to be "fixed" into agreement by somebody reading only one.

@@ -307,7 +307,13 @@ function description(req) {
       'are empty because that is the conforming value, not because they are ' +
       'unimplemented. An SVID presented to the SPIRE Server API is checked ' +
       'against its validity window and the trust bundle and against no ' +
-      'revocation list, because there is none to check.'
+      'revocation list, because there is none to check. The directory does ' +
+      'record a `spiffeCredentialStatus` on an identity whose last ' +
+      'registration entry was deleted or whose agent was banned or deleted, ' +
+      'and THAT IS NOT A REVOCATION EITHER: nothing reads it back, no ' +
+      'certificate is refused because of it, and it says only that no FURTHER ' +
+      'SVID can be issued here. Read it as a note on the directory entry, ' +
+      'never as a check this service makes.'
     ].concat(auth.authRequired() ? [] : [
       'AND, RIGHT NOW, NOTHING ON THE SPIRE SERVER API EITHER. ' +
       'spiffe.authRequired is OFF, so that port is plain gRPC, no caller is ' +
@@ -537,6 +543,7 @@ function page(document) {
     '<p>' + esc(document.authentication.what) + '</p>' +
     '<p class="note">' + esc(document.authentication.bootstrapping) + '</p>' +
     '<p class="note">' + esc(document.authentication.identityNote) + '</p>' +
+    '<p class="note">' + esc(document.authentication.credentialStatusNote || '') + '</p>' +
     (document.authentication.adminIds.length
       ? '<p>Administrators by configuration (<code>spiffe.adminIds</code>): ' +
         document.authentication.adminIds.map(function (id) {

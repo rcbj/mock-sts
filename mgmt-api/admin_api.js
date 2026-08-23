@@ -37,13 +37,35 @@
 //     and the action names each of its four handlers accepts.
 //
 // ---------------------------------------------------------------------------
-// NOT PROTECTED, deliberately, exactly as the console is not. This service
-// checks no password anywhere; a credential on this API would be the only
-// authenticated surface in a service whose premise is that it authenticates
-// nobody, and the only one a test would have to hold a secret for. Anyone who
-// can reach this port can revoke every token issued here and change what the
-// next one contains. Do not put this service on a public address — which was
-// already true of /oauth2/token, and is why there is nothing new to weigh here.
+// NOT PROTECTED, deliberately — AND THE CONSOLE NOW IS, so this paragraph is no
+// longer "exactly as the console is not" and the difference has to be argued
+// rather than assumed.
+//
+// `admin.authRequired` gates every page and form under /admin: a sign-on session
+// and one of two roles. It does NOT gate anything here, and that is three
+// decisions rather than an omission:
+//
+//   * **A test drives this API.** The parent project's tests/admin_api.js walks
+//     every operation over HTTP with no browser and no cookie jar. A credential
+//     on this surface would be the only one a test had to hold a secret for, in
+//     a service whose premise is that it authenticates nobody.
+//   * **It is the way back in.** With `admin.openWhenEmpty` off and no role
+//     granted, NO browser can reach the console at all — the screen that grants
+//     the first role is behind the gate the role opens. `POST
+//     /admin-api/rbac/grant` is the only door out of that state, and one that
+//     needed a role would not be a door.
+//   * **The honest consequence, stated rather than buried:** anybody who can
+//     reach this port can grant themselves both roles here and then use the
+//     console. The gate is a turnstile for exercising a client's 302/401/403
+//     paths, not a lock — this service still checks no password anywhere and
+//     /oauth2/token will still mint a token for any username asked of it. Do
+//     not put this service on a public address.
+//
+// If that ever needs to change it is a SEPARATE setting and a separate argument
+// (`admin.apiAuthRequired` was considered and not built), not a quiet extension
+// of admin.authRequired to this path — a test suite that started failing because
+// a console setting reached an API it never named would be the worst possible
+// way to find out.
 //
 // ---------------------------------------------------------------------------
 // Route order: this module must come AFTER admin.js, and that is a plain
@@ -64,6 +86,11 @@
 const app = require('../common/app');
 const { log, parseBody, baseUrlOf } = require('../common/helpers');
 const admin = require('../admin-ui/admin');
+// The two console roles, for the `enum` on the role parameter and on both
+// request bodies. A library that registers nothing, so requiring it here moves
+// no route; taking the ids from it rather than writing them twice is what stops
+// the OpenAPI document offering a role this service does not have.
+const rbac = require('../admin-ui/admin_rbac');
 const spec = require('./admin_api_spec');
 const docs = require('./admin_api_docs');
 const VERSION = require('../package.json').version;
@@ -448,6 +475,152 @@ const ROUTES = [
       sendJson(res, 200, admin.groupsView(req).json);
       log.debug("Leaving the management API groups endpoint.");
     } },
+
+  // --- The console's own roles ---------------------------------------------
+  //
+  // TWO OPERATIONS, AND THIS RESOURCE MATTERS MORE THAN THE OTHERS RATHER THAN
+  // LESS. Rule 7 says a console control gets an operation in the same change;
+  // here the API half is not merely parity, it is the ONLY door onto the roster
+  // that still works when nobody holds a role and `admin.openWhenEmpty` is off.
+  // The console cannot let you fix that — you cannot reach it — so this can, and
+  // `/admin-api` is deliberately not gated by `admin.authRequired`.
+  //
+  // Which is worth saying plainly rather than leaving to be discovered: WITH THE
+  // CONSOLE PROTECTED AND THIS API OPEN, ANYBODY WHO CAN REACH THIS PORT CAN
+  // GRANT THEMSELVES BOTH ROLES. That is not an oversight in the gate, it is the
+  // same decision the whole service is built on — this is a mock whose value is
+  // exercising clients, the management API is how a test drives it, and a port
+  // that mints a token for any username asked of it is not made safe by a
+  // password on one of its web pages. The gate exists so a client can be driven
+  // through 302 / 401 / 403 and a role model, not to make this service safe to
+  // expose. Do not put this port on a public address.
+  { method: 'GET', path: BASE + '/rbac', tag: 'Admin roles',
+    operationId: 'getAdminRoles',
+    summary: 'Who may use the admin console, and how the gate is set',
+    description: 'The two roles — **Admin Read** and **Admin Write** — with ' +
+                 'every grant, the settings behind the gate, and who the ' +
+                 'CALLER is (`you`).\n\nThe roles are two ORDINARY GROUPS in ' +
+                 'the embedded LDAP directory (`admin.readGroup`, ' +
+                 '`admin.writeGroup`), not a store of the console\'s own. So ' +
+                 'this resource, `/admin/rbac`, an `ldapmodify` on 389 or ' +
+                 '636 and a SCIM PATCH of the group are four doors onto one ' +
+                 'membership, and a grant made through any of them is ' +
+                 'visible through all of them.\n\n**WRITE IMPLIES READ.** A ' +
+                 'member of the write group does not also need the read ' +
+                 'group.\n\n**While NEITHER group has a member**, ' +
+                 '`openToAnyone` is true and anybody who signs in holds both ' +
+                 'roles — there is no password anywhere in this service to ' +
+                 'bootstrap an administrator with, so an empty roster opens ' +
+                 'rather than closes. `admin.openWhenEmpty` turns that off, ' +
+                 'and `closedToEveryone` reports the state it produces: a ' +
+                 'console no browser can reach, which is what this resource ' +
+                 'is the way out of.\n\nNONE OF IT IS IN FORCE while ' +
+                 '`admin.authRequired` is off (`enforced: false`). The ' +
+                 'grants are still real and can be made in advance.',
+    mirrors: 'GET /admin/rbac',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the person\'s name or of the raw ' +
+                     'membership value, case-insensitive.' },
+      { name: 'role', in: 'query', required: false,
+        schema: { type: 'string', enum: rbac.ROLE_IDS },
+        description: 'Only grants of this role.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The roster, the settings, and who is asking.',
+    handler: function (req, res) {
+      log.debug("Entering the management API admin roles endpoint.");
+      sendJson(res, 200, admin.rbacView(req).json);
+      log.debug("Leaving the management API admin roles endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/rbac/:action', tag: 'Admin roles',
+    mirrors: 'POST /admin/rbac',
+    handler: function (req, res) {
+      log.debug("Entering the management API admin roles action endpoint.");
+      const body = parseBody(req);
+      // `via: 'api'` and the caller's own name, for the audit row. The console
+      // passes its signed-in user here; this API has no session to read, so the
+      // actor is empty unless the caller carried one — which is honest rather
+      // than convenient, and is exactly what the audit row should say about an
+      // unauthenticated management API call.
+      const result = admin.rbacAction(withAction(req, body),
+                                      { via: 'api', actor: '' });
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API admin roles action endpoint.");
+    },
+    actions: [
+      { action: 'grant', operationId: 'grantAdminRole',
+        summary: 'Give somebody a console role',
+        description: 'Adds them to the role\'s group as a `member`, creating ' +
+                     'the group if this is the first grant — which is why ' +
+                     '"the group does not exist" and "the group has no ' +
+                     'members" are the same state everywhere in this ' +
+                     'feature.\n\n**The person need not exist.** A name ' +
+                     'nothing here has seen, and that has no directory ' +
+                     'entry, is granted anyway: the membership names the DN ' +
+                     'they WILL be at (`uid=<name>,ou=users`) and dangles ' +
+                     'until they first sign in or somebody creates them, and ' +
+                     'the role counts from that moment. That is the ' +
+                     'interesting case for a mock and is deliberately ' +
+                     'reachable. What IS refused is a name carrying a ' +
+                     'character RFC 4514 reserves in a DN — the same refusal ' +
+                     '`POST /admin-api/users/create` gives, for the same ' +
+                     'reason.\n\nGranting a role somebody already holds ' +
+                     'answers 200 with `changed: false` rather than 400, so ' +
+                     'a script that grants on every run does not fail on its ' +
+                     'second one.\n\n**THE FIRST GRANT ON A SERVICE CLOSES ' +
+                     'THE DOOR BEHIND IT.** While the roster is empty ' +
+                     'anybody who signs in holds both roles; the moment one ' +
+                     'grant exists, everybody not in one of the two groups ' +
+                     'is refused at every page of the console. Grant ' +
+                     'yourself first.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            username: { type: 'string',
+                        description: 'The name they sign in as — the same ' +
+                                     'string that appears in a token\'s ' +
+                                     '`sub` and on /admin/users.' },
+            role: { type: 'string', enum: rbac.ROLE_IDS,
+                    description: '`write` includes `read`.' }
+          },
+          required: ['username', 'role'],
+          examples: [{ username: 'rcbj', role: 'write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was granted, and where the membership was ' +
+                             'written. `changed: false` means they already ' +
+                             'held it.' },
+
+      { action: 'revoke', operationId: 'revokeAdminRole',
+        summary: 'Take a console role away',
+        description: 'Removes them from the role\'s group — from EVERY ' +
+                     'membership attribute that named them (`member`, ' +
+                     '`uniqueMember`, `memberUid`) rather than from the ' +
+                     'first one found, because a person listed twice by two ' +
+                     'clients would otherwise still hold the role after a ' +
+                     'revoke that reported success.\n\nRevoking a role ' +
+                     'somebody does not hold answers 200 with `changed: ' +
+                     'false`, and so does revoking from a group that does ' +
+                     'not exist.\n\n**Taking away the LAST grant empties the ' +
+                     'roster**, which re-opens the console to anybody who ' +
+                     'signs in (or closes it to everybody, if ' +
+                     '`admin.openWhenEmpty` is off). The reply says which.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            username: { type: 'string', description: 'Who to take it from.' },
+            role: { type: 'string', enum: rbac.ROLE_IDS }
+          },
+          required: ['username', 'role'],
+          examples: [{ username: 'rcbj', role: 'read' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was removed, and whether the roster is ' +
+                             'now empty.' }
+    ] },
 
   { method: 'GET', path: BASE + '/tokens', tag: 'Tokens',
     operationId: 'getIssued',
@@ -2149,7 +2322,15 @@ const ROUTES = [
                      'until it expires. SPIFFE has no revocation — the answer ' +
                      'is a short lifetime and rotation, which is why the ' +
                      'default X509-SVID lifetime here is an hour and the ' +
-                     'JWT-SVID one is five minutes.\n\nA seeded entry stays ' +
+                     'JWT-SVID one is five minutes.\n\nIf this was the LAST ' +
+                     'entry naming that SPIFFE ID, the identity\'s directory ' +
+                     'entry under `ou=users` is marked ' +
+                     '`spiffeCredentialStatus: revoked` with the reason on it. ' +
+                     'The entry is NOT deleted, and that flag is not a ' +
+                     'certificate status: nothing reads it back and no SVID is ' +
+                     'refused because of it. Deleting one of several entries ' +
+                     'that name the same identity changes nothing there.' +
+                     '\n\nA seeded entry stays ' +
                      'deleted until a restart: nothing here is persisted, but ' +
                      'nothing re-creates it either, because an operator who ' +
                      'deleted it meant to.',
@@ -2217,7 +2398,12 @@ const ROUTES = [
                      'from `AttestAgent`.\n\nWhatever SVID it already holds ' +
                      'keeps working until it expires. There is no revocation ' +
                      'in SPIFFE, so a ban stops the NEXT identity rather than ' +
-                     'the current one.',
+                     'the current one.\n\nThe agent\'s own entry under ' +
+                     '`ou=users` — the one every identity this trust domain ' +
+                     'issues a certificate to gets — is marked ' +
+                     '`spiffeCredentialStatus: revoked`, and unbanning marks it ' +
+                     'active again. It is never deleted, and nothing reads that ' +
+                     'flag back.',
         requestBodyRequired: true,
         requestBody: {
           type: 'object',
@@ -2305,7 +2491,9 @@ log.info('The management API is at ' + BASE + ': ' +
          operationSummaries().length + ' operations over the same functions ' +
          'the /admin console calls. Its OpenAPI document is at ' + BASE +
          '/openapi.json and an explorer that calls it is at ' + BASE +
-         '/docs. It is NOT protected, exactly as the console is not.');
+         '/docs. It is NOT protected — and the console now IS ' +
+         '(admin.authRequired), so this is the surface to reach for when ' +
+         'nobody holds a console role: POST ' + BASE + '/rbac/grant.');
 
 module.exports = {
   BASE: BASE,
