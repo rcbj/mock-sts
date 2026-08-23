@@ -28,6 +28,39 @@ are — most of it is the record of something having gone wrong once.
 > **Not for production.** No credential is ever verified. Any username typed at the
 > login screen becomes the identity in every token it issues.
 
+## Where the code is
+
+Since 2026-08-23 the modules live in directories by protocol family rather than in
+the package root. **The files did not change; the paths did.**
+
+| Directory | |
+|---|---|
+| `common/` | config, helpers, the express app, the counters, the audit log, the application registry, the claim catalogues |
+| `common/vendored/` | byte-identical copies of the parent project's PKI and JSON-LD modules, plus the `contexts/` they read. **Do not edit them here.** |
+| `oauth-oidc/` | the authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles |
+| `authn/` | the sign-in screen and the WebAuthn relying party. Owns the session |
+| `saml/` | the two assertion builders |
+| `ws-trust/` · `ws-federation/` | the two WS-\* profiles |
+| `kerberos/` | the KDC, the acceptor, SPNEGO, and the codec |
+| `ldap/` · `scim/` · `tls/` · `spiffe/` · `oid4vc/` | one family each |
+| `admin-ui/` · `mgmt-api/` | the console and the management API |
+| `docs/` | the user-facing documentation, published as a GitHub Pages site |
+
+At the package root there are exactly two modules: **`server.js`**, the shell that
+requires the others and listens, and **`sts_metadata.js`**, which reads the router
+to list what everything else registered and is therefore required last.
+
+Every directory carries a `CLAUDE.md` with the reasoning for the modules in it —
+that is where the engineering notes below have been distributed to. `CLAUDE.md` at
+the root keeps only what is cross-cutting: the require order, the library and hook
+rules, the two CSP rules, the code style and the state of the tests.
+
+**One consequence for the parent project**, which reaches in here by flat path in
+its `tests/Dockerfile` and `tests/module_paths.js`: those paths are now wrong.
+Nothing over there was changed, because its `sts/` gitlink is pinned before any of
+this; what the pin bump needs is written down in
+[`docs/parent-project-migration.md`](docs/parent-project-migration.md).
+
 ## What it speaks
 
 | | |
@@ -334,7 +367,8 @@ JWKS.
 
 ### The JSON-LD contexts are not optional
 
-`bbs2023.js` reads the three files in `contexts/` **at require time**, at module
+`bbs2023.js` reads the three files in `common/vendored/contexts/` **at require
+time**, at module
 scope — so a missing one is not a degraded feature, the service does not start at
 all. They are vendored rather than fetched because a signature is computed over
 canonicalized statements: a one-byte difference in a context fails every signature
@@ -3633,7 +3667,10 @@ Extracted from the OAuth2/OIDC Debugger. Two things were adapted rather than cop
   are now relative to this repo's root;
 * the **JSON-LD contexts**, which live in the parent project's client tree. `bbs2023.js`
   already resolves two layouts and a sibling `contexts/` directory is its second
-  candidate, so no code changed.
+  candidate, so no code changed — and that is also why, when the 2026-08-23
+  reorganisation moved `bbs2023.js` into `common/vendored/`, the contexts moved with
+  it rather than staying at the root: keeping them a SIBLING is what let a vendored
+  file stay byte-identical.
 
 **The tests did not come with it.** They live in the parent project's `tests/`
 directory, and four of them need only this service — `sts_metadata.js` (the drift

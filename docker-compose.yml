@@ -24,9 +24,12 @@ services:
     build:
       # Repo root, and the default ./Dockerfile. The parent passes
       # `dockerfile: sts/Dockerfile` with a root context because its COPY paths
-      # are repo-root-relative there; in this repo the Dockerfile's paths
-      # (`COPY *.js`, `COPY contexts`, `COPY env`) are relative to this directory,
-      # which is what let the file be copied across unchanged.
+      # are repo-root-relative there; in this repo the Dockerfile copies the
+      # whole context (`COPY . ./`, with .dockerignore deciding what is in it),
+      # which is relative to this directory. That single COPY replaced the old
+      # per-thing list on 2026-08-23, when the modules moved into subdirectories
+      # and a per-DIRECTORY list acquired the same forget-one-silently failure
+      # the old `COPY *.js` wildcard existed to avoid.
       context: .
     # A published port rather than the parent's `network_mode: "host"`. Host
     # networking is what that stack needs and is Linux-only; publishing works on
@@ -72,9 +75,9 @@ services:
     # the parent project's verbatim: `node -e` rather than the curl the image also
     # has, because it depends on nothing but the runtime the service already needs
     # and it fails on a non-200 instead of merely on a closed port. It matters
-    # more than it looks: this service is eleven modules and server.js only
-    # requires them, so a module missing from the image is not a lost feature but
-    # a MODULE_NOT_FOUND before anything listens.
+    # more than it looks: this service is a shell — server.js only requires the
+    # other modules and listens — so a module missing from the image is not a
+    # lost feature but a MODULE_NOT_FOUND before anything listens.
     #
     # IT PICKS ITS OWN SCHEME, and that is not defensiveness. STS_HTTPS — and
     # STS_OAUTH2_RFC9700, which is its default — turn 8081 into an HTTPS

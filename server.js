@@ -86,10 +86,18 @@
 // route is missing.
 // ---------------------------------------------------------------------------
 
+// FIRST, and before any module that reads the appconfig file. Every module now
+// lives in a subdirectory, so a relative CONFIG_FILE — `./env/local.js`, which
+// is what the documented invocation and the Dockerfile's ENV both say — no
+// longer resolves against the package root from where those modules sit. This
+// makes it absolute once, in place, so all fourteen direct readers agree. See
+// common/config_file.js.
+require('./common/config_file').resolveConfigFile();
+
 const https = require('https');
-const app = require('./app');
-const { log, PORT, HOST } = require('./helpers');
-const config = require('./config');
+const app = require('./common/app');
+const { log, PORT, HOST } = require('./common/helpers');
+const config = require('./common/config');
 
 // Which LDAP attributes the four claim sets carry. A LIBRARY — it registers no
 // route, so this line adds nothing to /sts-metadata and its position in the route
@@ -99,7 +107,7 @@ const config = require('./config');
 // attributes. admin.js requires it too, which would be enough today by accident;
 // this line is what makes it true on purpose, and what keeps it true for a
 // process that loads the protocol modules without the console.
-require('./claim_attributes');
+require('./common/claim_attributes');
 
 // The groups claim: for anybody who is a member of a group in the embedded
 // directory, a claim naming those groups in every access token, ID Token and
@@ -109,40 +117,40 @@ require('./claim_attributes');
 // looking wrong. It must come before the modules that issue; the directory it
 // reads arrives later, through its own slot, and until then it simply reports
 // that no directory is loaded.
-require('./group_claims');
+require('./common/group_claims');
 
-require('./wstrust');
+require('./ws-trust/wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
 // person to, and the session store it fills. FIRST of the modules that use it,
 // because require order is route order on the /sts-metadata page and the thing
 // that authenticates should be listed before the protocols that lean on it.
-require('./authn');
-require('./oauth2');
+require('./authn/authn');
+require('./oauth-oidc/oauth2');
 // WS-Federation's passive requestor profile. It must come AFTER authn.js and the
 // order is a dependency and not a preference: it signs users in to the session
 // that service owns (startSession/sessionOf), so that single sign-on works across
 // the two protocols. The dependency is one-way — authn.js knows nothing about
 // this module — which is what keeps it out of the cycles the split exists to
 // avoid.
-require('./wsfed');
-require('./vc_offers');
-require('./vc_did');
-require('./vc_issuer');
-require('./vc_verifier');
+require('./ws-federation/wsfed');
+require('./oid4vc/vc_offers');
+require('./oid4vc/vc_did');
+require('./oid4vc/vc_issuer');
+require('./oid4vc/vc_verifier');
 // The Kerberos KDC. Requiring it registers /KdcProxy and /krb5/principals like
 // every other module here — but NOT the raw TCP/UDP listeners on port 88, which
 // are started by krb5.listen() below. Binding a privileged port can fail, and a
 // require that throws takes the whole service down; a route cannot.
-const krb5 = require('./krb5_kdc');
+const krb5 = require('./kerberos/krb5_kdc');
 // The Kerberos-protected service. Like the KDC it registers its HTTP view at
 // require time and starts its socket from listen(), for the same reason.
-const krb5Service = require('./krb5_service');
+const krb5Service = require('./kerberos/krb5_service');
 // The same acceptor over HTTP: SPNEGO. It must come AFTER krb5_service.js and
 // the order is a dependency rather than a preference — it calls that module's
 // accept() for every Kerberos check and adds none of its own. Unlike the two
 // above it starts nothing: it is HTTP all the way down, so requiring it is the
 // whole of its installation.
-require('./spnego');
+require('./kerberos/spnego');
 // The admin console. It must come AFTER oauth2.js and, like wsfed.js, the order is a
 // dependency rather than a preference: its metrics page reports the browser sign-on
 // sessions oauth2.js owns, read through the `sessions` map that module exports. The
@@ -150,7 +158,7 @@ require('./spnego');
 // cycle. What holds the STATE it renders is admin_stats.js, which registers no route
 // and is required by app.js, so the counting is already running by the time this
 // line is reached.
-require('./admin');
+require('./admin-ui/admin');
 // The management API: everything that console shows and everything it can
 // change, at /admin-api, over JSON. It must come AFTER admin.js and the order is
 // a dependency rather than a preference — it requires that module for the four
@@ -160,7 +168,7 @@ require('./admin');
 // admin_api_spec.js), so an operation cannot be undocumented; the explorer that
 // calls it is at /admin-api/docs and is the ONE page in this service with a
 // script on it, served under a policy that relaxes exactly that clause.
-require('./admin_api');
+require('./mgmt-api/admin_api');
 // The TLS / mutual-TLS endpoint. Third in the family of modules whose real
 // surface is a SOCKET rather than a route: it registers its plain-HTTP views
 // (/tls, /tls/server-certificate, /tls/trust) at require time and starts two
@@ -172,7 +180,7 @@ require('./admin_api');
 // this module's server certificate on 636, so it requires this file — and node
 // would load it here whatever this line said. Saying it explicitly is what
 // keeps "the order in this file is the route order" true.
-const tlsServer = require('./tls_server');
+const tlsServer = require('./tls/tls_server');
 // The embedded LDAPv3 directory (RFC 4511), built on the node-ldapjs submodule.
 // Like the two Kerberos modules it registers its HTTP views at require time
 // (/ldap, /ldap/directory) and starts its TCP listener from listen() below, for
@@ -190,7 +198,7 @@ const tlsServer = require('./tls_server');
 // LDAPS listener on 636 serves the certificate and key that module generates,
 // so requiring it first is what makes the route order in this file the real one
 // rather than a fiction node quietly corrects.
-const ldapServer = require('./ldap_server');
+const ldapServer = require('./ldap/ldap_server');
 // SCIM 2.0 (RFC 7642, 7643, 7644) — the fifteenth family, and the one whose
 // whole purpose is to WRITE. It provisions into the directory above, entry for
 // entry, with no store of its own: a POST /scim/v2/Users and an ldapadd write
@@ -208,7 +216,7 @@ const ldapServer = require('./ldap_server');
 //
 // Unlike the four modules above it, it starts nothing: it is HTTP all the way
 // down, so requiring it is the whole of its installation.
-require('./scim');
+require('./scim/scim');
 // SPIFFE — the sixteenth family, and the third module here whose own listeners
 // are started from listen() below rather than at require time.
 //
@@ -228,7 +236,7 @@ require('./scim');
 // domain is its own PKI — the CA here signs identities in one trust domain and
 // the TLS certificate identifies a host — and one process holding two of them
 // is correct rather than wasteful. See spiffe_ca.js.
-const spiffeServer = require('./spiffe_server');
+const spiffeServer = require('./spiffe/spiffe_server');
 require('./sts_metadata');
 
 // ---------------------------------------------------------------------------
