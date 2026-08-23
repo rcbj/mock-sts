@@ -233,7 +233,7 @@ into the LDAP directory, entry for entry, with **no store of its own**.
    `learnName()` like every other name; they are a FIFTH source into that table,
    which is affordable only because the check exists.
 
-   **FOUR DECISIONS IN IT ARE LOAD-BEARING and each is easy to undo.** The SCIM
+   **FIVE DECISIONS IN IT ARE LOAD-BEARING and each is easy to undo.** The SCIM
    `id` IS THE ENTRY'S DN — RFC 7643 section 3.1 asks for an opaque
    server-assigned identifier and the DN already is one, where a `uid` is not
    unique in this tree and a synthesised id would be a stored second definition
@@ -248,7 +248,19 @@ into the LDAP directory, entry for entry, with **no store of its own**.
    copy of the DN the synthesis exists to prevent. And A TYPE ON A MULTI-VALUED
    MEMBER IS SCIM'S IDEA: `telephoneNumber` and `mobile` are two attribute types
    and one SCIM member, so the type says which one a value came from and which
-   one it goes to, and `primary` is emitted and never stored.
+   one it goes to, and `primary` is emitted and never stored. FINALLY THE
+   MAPPING IS TOTAL: `userName` is RFC 7643's one required User attribute and
+   scimmy enforces it on the way OUT, so the entry a client certificate seeds —
+   named `cn=<CN>,ou=users`, with no `uid` on it at all — made `GET /Users`
+   answer 400 `Required attribute 'userName' is missing` for the WHOLE
+   directory until somebody deleted it — a message naming an attribute and no
+   entry, on a request that had nothing wrong with it. `toScimUser()` falls
+   back to the RDN VALUE — `usernameOfEntry()`, exported from
+   `ldap_server.js` and passed in by `scim.js` for the reason
+   `normalizeDn()` is, so that the name SCIM reports is the one a create would
+   collide with — and then to the DN, exactly as `toScimGroup()` already did for
+   `displayName`. One unmappable entry must never be able to hide every other
+   person, which is what a mapping that can throw halfway through a list does.
 
 
 ---

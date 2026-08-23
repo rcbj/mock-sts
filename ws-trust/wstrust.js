@@ -90,7 +90,7 @@ function buildJwt(subject, audience, lifetimeMin) {
   if (audience) opts.audience = audience;
   const claims = { sub: subject, name: subject };
   logArtifact('WS-Trust JWT', 'before signing', { header: { alg: opts.algorithm }, payload: claims, options: opts });
-  const signed = jwt.sign(claims, STS.privateKeyPem, opts);
+  const signed = jwt.sign(claims, STS.privateKey, opts);
   logArtifact('WS-Trust JWT', 'after signing', signed);
   log.debug("Leaving buildJwt().");
   return signed;

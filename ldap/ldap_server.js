@@ -321,6 +321,38 @@ let boundTlsPort = LDAPS_PORT;
 const entries = new Map();
 
 // ---------------------------------------------------------------------------
+// A COUNTER THAT SAYS "SOMETHING IN HERE CHANGED", and the one rule that comes
+// with it.
+//
+// It exists for groupIndexNow() below, which answers "which groups is this
+// person in" from a reverse index instead of by walking every entry in the
+// tree. The index is only correct while nothing has been written, so every
+// write says so here.
+//
+// **A NEW WRITER MUST CALL touchDirectory().** That is not a style preference:
+// a write that does not bump this leaves the index describing the directory as
+// it was, and the symptom is a `groups` claim that is one ldapmodify out of
+// date in a token that is otherwise perfect — which reads as a claim-mapping
+// bug and would be looked for anywhere but here. The call sites today are
+// putEntry(), addValues(), the vc-attribute sweep, the LDAP delete, modify and
+// modifyDN handlers, and the four typed deletes (applications, SPIFFE, people,
+// groups). Every one of them either replaces an entry in this Map or mutates a
+// stored entry's attributes in place, and those are the only two things that
+// can make the index wrong.
+//
+// The rebuild ALSO fires when `entries.size` disagrees with the size the index
+// was built at. That is a net rather than a design: it catches an add or a
+// delete that forgot to call this, and it cannot catch an in-place attribute
+// change, which is why the rule above is the rule and this is a second line of
+// defence.
+// ---------------------------------------------------------------------------
+let directoryVersion = 0;
+
+function touchDirectory() {
+  directoryVersion++;
+}
+
+// ---------------------------------------------------------------------------
 // TWO LISTS OF SPELLINGS, AND THE SPLIT IS WHO DEFINED THE NAME.
 //
 // `STANDARD_NAMES` are attribute types somebody else defined and published; the
@@ -702,6 +734,7 @@ function putEntry(dn, attributes, options) {
   stored.attributes.modifytimestamp = [now];
   if (opts.origin) stored.origin = String(opts.origin);
   entries.set(normalizeDn(dn), stored);
+  touchDirectory();
   log.debug('Leaving putEntry(). The directory now holds ' + entries.size +
             ' entry/entries.');
   return stored;
@@ -990,6 +1023,7 @@ function addValues(stored, name, values) {
     return false;
   }
   stored.attributes[key] = have.concat(added);
+  touchDirectory();
   return true;
 }
 
@@ -2069,6 +2103,7 @@ function applyVcAttributes(stored, key) {
       return;
     }
     stored.attributes[attribute] = [generated[attribute]];
+    touchDirectory();
     added.push(canonicalName(attribute));
   });
   if (!added.length) {
@@ -2730,6 +2765,125 @@ function groupsFor(dn) {
 // naming something that is not a group here is dropped: it would otherwise
 // invent a group out of a string somebody typed.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE MEMBERSHIP, INVERTED — and why this is the one thing here with an index.
+//
+// groupsOfUser() below is called ONCE PER TOKEN, for every access token, ID
+// Token and both SAML assertions (see group_claims.js). It used to answer by
+// walking every entry in the tree and, for each one that turned out to be a
+// group, normalising every value of its three membership attributes. That is
+// O(entries x members) per issuance against a store this service will let grow
+// to `ldap.maxEntries`, which is 2,000 by default — and it showed: normalizeDn()
+// was the third-heaviest application function in a CPU profile of the token
+// endpoint under load, above anything in oauth2.js.
+//
+// The walk is now done ONCE per change and kept, which turns the per-token cost
+// into two Map lookups and a sort of the handful of groups the person is
+// actually in.
+//
+// **THE PROPERTY THAT MATTERS IS PRESERVED: an ldapadd changes the very next
+// token.** That is the whole reason group_claims.js reads the membership per
+// token and caches nothing, and it is the thing somebody came to a mock
+// directory to watch. This is not a time-based cache and there is no staleness
+// window — `directoryVersion` is bumped by every writer (see touchDirectory()
+// beside the store), and a bumped version rebuilds on the next read, before it
+// answers. What was rejected was a cache with a TTL, which would have bought
+// the same speed and broken exactly that.
+//
+// Two maps, because the membership is asserted from two ends and this service
+// deliberately does not reconcile them (see claimedMembersOf()):
+//
+//   byMember  a normalised member DN -> the groups whose OWN member attributes
+//             name it, each with the attribute names that did the naming.
+//   byDn      a normalised group DN -> enough of the group to build a row.
+//             This is what answers the other direction: a person's `memberOf`
+//             is looked up here, and a value naming an entry that is not a
+//             group finds nothing and is skipped — which is what the old walk
+//             did by returning early on an empty rule.
+// ---------------------------------------------------------------------------
+let groupIndex = null;
+
+let groupIndexVersion = -1;
+
+let groupIndexSize = -1;
+
+let groupIndexBuilds = 0;
+
+const NO_GROUPS = new Map();
+
+function buildGroupIndex() {
+  log.debug('Entering buildGroupIndex().');
+  const byMember = new Map();
+  const byDn = new Map();
+  entries.forEach(function (entry) {
+    const rule = groupRuleFor(entry);
+    if (!rule) {
+      return;
+    }
+    const groupKey = normalizeDn(entry.dn);
+    byDn.set(groupKey, {
+      dn: entry.dn,
+      // The same two sources groupsFor() uses and in the same order, so the cn
+      // in a token is the cn on the page. An entry under ou=groups with no cn
+      // still has a name — its RDN — and a group with no name in a claim would
+      // be an empty string in a list.
+      cn: (entry.attributes.cn || [])[0] || commonNameOf(entry.dn),
+      rule: rule
+    });
+    // MEMBER_ATTRIBUTES is walked in ITS order, once per group, which is what
+    // keeps each `via` list in the order the old code produced: member,
+    // uniqueMember, memberUid. A caller comparing two runs would otherwise see
+    // the same membership described in a different order for no reason.
+    MEMBER_ATTRIBUTES.forEach(function (attribute) {
+      (entry.attributes[attribute.name] || []).forEach(function (value) {
+        const raw = String(value == null ? '' : value);
+        // memberUid holds a bare name where member and uniqueMember hold a DN.
+        // Resolving it to the DN it MEANS here, at build time, is what lets the
+        // lookup be a single Map.get — and it is exactly the resolution the old
+        // walk did per value per token.
+        const dn = attribute.holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
+        const memberKey = normalizeDn(dn);
+        let groups = byMember.get(memberKey);
+        if (!groups) {
+          groups = new Map();
+          byMember.set(memberKey, groups);
+        }
+        let via = groups.get(groupKey);
+        if (!via) {
+          via = [];
+          groups.set(groupKey, via);
+        }
+        const name = canonicalName(attribute.name);
+        // A group that names the same person twice through one attribute is a
+        // directory a client wrote by hand, and it is not an error here — but
+        // the attribute should appear once in `via`, as it did when the old
+        // walk used some() rather than counting.
+        if (via.indexOf(name) === -1) {
+          via.push(name);
+        }
+      });
+    });
+  });
+  groupIndexBuilds++;
+  log.debug('Leaving buildGroupIndex(). ' + byDn.size + ' group(s) and ' +
+            byMember.size + ' member name(s), built ' + groupIndexBuilds +
+            ' time(s) so far.');
+  return { byMember: byMember, byDn: byDn };
+}
+
+// The index, rebuilt if anything has been written since it was made. See the
+// block above for why the size is checked as well as the version.
+function groupIndexNow() {
+  if (groupIndex && groupIndexVersion === directoryVersion &&
+      groupIndexSize === entries.size) {
+    return groupIndex;
+  }
+  groupIndex = buildGroupIndex();
+  groupIndexVersion = directoryVersion;
+  groupIndexSize = entries.size;
+  return groupIndex;
+}
+
 function groupsOfUser(key) {
   log.debug('Entering groupsOfUser(). key=' + key);
   const wanted = String(key == null ? '' : key).trim();
@@ -2750,47 +2904,55 @@ function groupsOfUser(key) {
   out.entryFound = !!located.stored;
   const personDn = normalizeDn(located.dn);
 
-  // The person's own claim, normalised once rather than per group.
-  const claimed = {};
-  if (located.stored) {
-    (located.stored.attributes.memberof || []).forEach(function (value) {
-      claimed[normalizeDn(value)] = true;
-    });
-  }
+  const index = groupIndexNow();
+  // Keyed on the normalised group DN so that the two directions below meet on
+  // the same row: a group that both lists the person AND is named by their own
+  // memberOf is one group with both facts on it, which is what the old walk
+  // produced by computing `via` and `viaMemberOf` on a single pass.
+  const hits = new Map();
 
-  entries.forEach(function (entry) {
-    const rule = groupRuleFor(entry);
-    if (!rule) {
-      return;
-    }
-    const via = [];
-    MEMBER_ATTRIBUTES.forEach(function (attribute) {
-      const listed = (entry.attributes[attribute.name] || []).some(function (value) {
-        const raw = String(value == null ? '' : value);
-        const dn = attribute.holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
-        return normalizeDn(dn) === personDn;
-      });
-      if (listed) {
-        via.push(canonicalName(attribute.name));
-      }
-    });
-    const viaMemberOf = !!claimed[normalizeDn(entry.dn)];
-    if (!via.length && !viaMemberOf) {
-      return;
-    }
-    out.groups.push({
-      dn: entry.dn,
-      // The same two sources groupsFor() uses and in the same order, so the cn
-      // in a token is the cn on the page. An entry under ou=groups with no cn
-      // still has a name — its RDN — and a group with no name in a claim would
-      // be an empty string in a list.
-      cn: (entry.attributes.cn || [])[0] || commonNameOf(entry.dn),
-      rule: rule,
-      via: via,
-      viaMemberOf: viaMemberOf
+  (index.byMember.get(personDn) || NO_GROUPS).forEach(function (via, groupKey) {
+    const group = index.byDn.get(groupKey);
+    hits.set(groupKey, {
+      dn: group.dn,
+      cn: group.cn,
+      rule: group.rule,
+      // COPIED, not handed out: this array lives in the index and a caller that
+      // sorted or spliced it would be editing the directory's own answer for
+      // every token after it.
+      via: via.slice(0),
+      viaMemberOf: false
     });
   });
 
+  // The other end of the disagreement: what the PERSON's entry claims. A value
+  // naming something that is not a group finds nothing in byDn and is skipped,
+  // which is what the old walk's empty rule did.
+  if (located.stored) {
+    (located.stored.attributes.memberof || []).forEach(function (value) {
+      const groupKey = normalizeDn(value);
+      const group = index.byDn.get(groupKey);
+      if (!group) {
+        return;
+      }
+      const already = hits.get(groupKey);
+      if (already) {
+        already.viaMemberOf = true;
+        return;
+      }
+      hits.set(groupKey, {
+        dn: group.dn,
+        cn: group.cn,
+        rule: group.rule,
+        via: [],
+        viaMemberOf: true
+      });
+    });
+  }
+
+  hits.forEach(function (row) {
+    out.groups.push(row);
+  });
   out.groups.sort(function (a, b) {
     return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
   });
@@ -3268,6 +3430,7 @@ server.del('', function (req, res, next) {
     return next(new ldap.NotAllowedOnNonLeafError(dn));
   }
   entries.delete(normalizeDn(dn));
+  touchDirectory();
   // Note what is NOT done here: the DN is left in any group that lists it as a
   // member. See the header — referential integrity is a directory feature and
   // not a protocol rule, and hiding the dangling member would hide the thing a
@@ -3371,6 +3534,7 @@ server.modify('', function (req, res, next) {
   working.createtimestamp = stored.attributes.createtimestamp;
   working.modifytimestamp = [generalizedTime()];
   stored.attributes = working;
+  touchDirectory();
   stored.modifiedAt = working.modifytimestamp[0];
   log.info('ldap: modified ' + dn + '.');
   // Recorded AFTER the working copy has replaced the stored one, and that is
@@ -3447,6 +3611,7 @@ server.modifyDN('', function (req, res, next) {
   }
   stored.attributes.modifytimestamp = [generalizedTime()];
   entries.set(normalizeDn(target), stored);
+  touchDirectory();
   // The kind is taken from the NEW DN, because that is what the entry is now —
   // and a rename can move an entry between containers, which is exactly the
   // case where the two DNs would disagree. Both are on the row, so a rename out
@@ -4189,6 +4354,7 @@ function deleteApplicationEntry(identifier) {
     return false;
   }
   entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
   auditDirectory('entry.delete', stored.dn, stored.attributes, false);
   log.debug('Leaving deleteApplicationEntry(). ' + entries.size + ' entry/entries left.');
   return true;
@@ -4356,6 +4522,7 @@ function spiffeDelete(containerDn, attributeName, identifier) {
     return false;
   }
   entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
   spiffeAuditDirectory('entry.delete', stored.dn, stored.attributes, false);
   log.debug('Leaving spiffeDelete(). ' + entries.size + ' entry/entries left.');
   return true;
@@ -4576,6 +4743,7 @@ function deletePerson(dn) {
     return { ok: false, reason: 'notLeaf', dn: stored.dn };
   }
   entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
   log.debug('Leaving deletePerson(). ' + entries.size + ' entry/entries left.');
   return { ok: true, dn: stored.dn, dangling: membershipsNaming(stored.dn) };
 }
@@ -4666,6 +4834,7 @@ function deleteGroupEntry(dn) {
     return { ok: false, reason: 'notLeaf', dn: stored.dn };
   }
   entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
   log.debug('Leaving deleteGroupEntry(). ' + entries.size + ' entry/entries left.');
   return { ok: true, dn: stored.dn };
 }
@@ -5032,6 +5201,15 @@ module.exports = {
   // eventually disagree with this one about `cn=alice, ou=users` — which is a
   // difference only visible as a uniqueness check that stops firing.
   normalizeDn: normalizeDn,
+  // WHAT A PERSON IS CALLED WHEN THEIR ENTRY HAS NO `uid`, and exported for the
+  // third time for that same reason. Not every person entry has one:
+  // certificatePlan() names a client certificate's entry `cn=<CN>,ou=users` and
+  // writes no `uid` at all, and an `ldapadd` may create whatever it likes. This
+  // is the rule existingUserEntry() matches a typed name against — the RDN
+  // value, unescaped — so scim.js reporting a `userName` any other way would
+  // mean SCIM naming somebody one thing while a create of that same name
+  // collided with them under another.
+  usernameOfEntry: usernameOfEntry,
   allGroupEntries: allGroupEntries,
   readGroupEntry: readGroupEntry,
   writeGroupEntry: writeGroupEntry,

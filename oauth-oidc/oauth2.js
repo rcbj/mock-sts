@@ -425,17 +425,68 @@ function profileFromPath(raw) {
   return id;
 }
 
+// ---------------------------------------------------------------------------
+// THE SIGNED COPY OF A DISCOVERY DOCUMENT, AND WHY IT IS CACHED.
+//
+// Discovery is the single most-fetched endpoint on this service — every client
+// reads it before it does anything else — and signing this document was costing
+// an RSA signature on EVERY fetch, which made /.well-known/oauth-authorization-
+// server the slowest read-only endpoint here by a factor of five.
+//
+// It is also the one artifact on this service where re-signing per request buys
+// nothing. RFC 8414 section 2.1 describes signed_metadata as something the
+// issuer PUBLISHES: there is no nonce in it, no jti, and nothing bound to the
+// caller, so two clients fetching a second apart are entitled to byte-identical
+// documents and a real deployment would serve a pre-signed one. Everything that
+// can vary — the base URL the request arrived on, which authorization-server
+// profile it selected, any setting changed at runtime through /admin/config —
+// varies the METADATA, and the metadata is the cache key. A document that
+// differs by one member is a different key and is signed afresh, so runtime
+// settability is untouched.
+//
+// **The entry is held for a minute and the token lives for an hour**, and that
+// gap is the point rather than a rounding: a caller must never be handed a
+// signature that is about to expire, so the TTL is a small slice of the
+// lifetime and the worst case is a token with 59 minutes left instead of 60.
+//
+// It is capped for the reason every registry in this service is: the key
+// includes the base URL, which comes off the Host header, so a caller that
+// varies it could otherwise grow this map without limit.
+// ---------------------------------------------------------------------------
+const SIGNED_METADATA_TTL_MS = 60 * 1000;
+
+const MAX_SIGNED_METADATA = 64;
+
+const signedMetadataCache = new Map();   // the claims, serialised -> { signed, until }
+
 // RFC 8414 section 2.1: signed_metadata is a JWT whose claims are the metadata
 // members, signed by the issuer, and carrying iss and sub. Genuinely signed
 // with the STS key so it can be verified (public key at /sts/cert, JWKS below).
 function signedMetadata(meta) {
   log.debug("Entering signedMetadata().");
   const claims = Object.assign({}, meta, { sub: meta.issuer });
+  const key = JSON.stringify(claims);
+  const now = Date.now();
+  const held = signedMetadataCache.get(key);
+  if (held && held.until > now) {
+    // Logged, because a reader of this log comparing two fetches has to be able
+    // to tell a document that was signed again from one that was not — they are
+    // byte-identical and nothing else would say which happened.
+    log.debug("Leaving signedMetadata(). It was already signed " +
+              Math.round((now - held.at) / 1000) + "s ago and is reused.");
+    return held.signed;
+  }
   logArtifact('RFC 8414 signed_metadata', 'before signing', claims);
   try {
-    const signed = jwt.sign(claims, STS.privateKeyPem,
+    const signed = jwt.sign(claims, STS.privateKey,
       { algorithm: 'RS256', issuer: meta.issuer, expiresIn: 3600, keyid: STS.kid });
     logArtifact('RFC 8414 signed_metadata', 'after signing', signed);
+    if (signedMetadataCache.size >= MAX_SIGNED_METADATA) {
+      // Map iterates in insertion order, so the first key is the oldest.
+      signedMetadataCache.delete(signedMetadataCache.keys().next().value);
+    }
+    signedMetadataCache.set(key, { signed: signed, at: now,
+                                   until: now + SIGNED_METADATA_TTL_MS });
     log.debug("Leaving signedMetadata().");
     return signed;
   } catch (e) {

@@ -55,7 +55,7 @@
 // that already owns them.
 //
 // ---------------------------------------------------------------------------
-// FOUR DECISIONS ARE LOAD-BEARING, and each is easy to undo by accident.
+// FIVE DECISIONS ARE LOAD-BEARING, and each is easy to undo by accident.
 //
 // **THE SCIM `id` IS THE ENTRY'S DN.** RFC 7643 section 3.1 wants an opaque,
 // server-assigned, unique identifier that the client must not parse, and the DN
@@ -106,6 +106,17 @@
 // common thing a SCIM client is built to do. A mock that silently pretended to
 // disable an account would teach a provisioning client that its deprovisioning
 // path works.
+//
+// **EVERY PERSON UNDER `ou=users` MAPS, INCLUDING THE ONES WITH NO `uid`.**
+// `userName` is RFC 7643's one required User attribute and scimmy enforces it
+// on the way OUT, while a client certificate's entry is named `cn=<CN>` and
+// carries no `uid` at all — so one such entry used to make `GET /Users` a 400
+// for the WHOLE directory. `toScimUser()` therefore falls back to the RDN
+// value (the directory's own `usernameOfEntry()`, passed in) and then to the
+// DN, exactly as `toScimGroup()` does for `displayName`. The rule is that this
+// mapping is TOTAL: it is handed whatever is in the tree and it must produce a
+// resource, because the alternative is one entry making every other person
+// unreadable. The whole argument is at the code.
 // ---------------------------------------------------------------------------
 
 const { log } = require('../common/helpers');
@@ -562,6 +573,40 @@ function toScimUser(entry, context) {
       resource[row.scim].push({ value: String(value), type: row.type });
     });
   });
+
+  // ONE MEMBER IS NOT OPTIONAL, AND AN ENTRY THAT COULD NOT SUPPLY IT USED TO
+  // TAKE THE WHOLE LIST DOWN WITH IT.
+  //
+  // `userName` is the only REQUIRED attribute in RFC 7643's User schema, and
+  // scimmy enforces it on the way OUT as well as on the way in: a resource
+  // without one throws `Required attribute 'userName' is missing` out of its
+  // coercion. The egress handler maps every person in `ou=users` in one pass,
+  // so ONE entry that produced no `userName` answered a plain `GET /Users`
+  // with a 400 naming an attribute and naming no entry — every other person in
+  // the directory unreadable over SCIM because of one of them, and the message
+  // pointing at the client's request, which had nothing wrong with it.
+  //
+  // An entry with no `uid` is ordinary here rather than corrupt, which is why
+  // this is a mapping decision and not a repair. `certificatePlan()` names a
+  // client certificate's entry `cn=<CN>,ou=users` and deliberately writes no
+  // `uid` — the certificate is the identity, and `namePlan()`'s fold is what
+  // later adds one if that person also signs in by name — so a single mutual
+  // TLS connection to 9443 was enough to break every SCIM list until somebody
+  // deleted the entry. An `ldapadd` can produce the same thing at will: this
+  // directory enforces no schema, on purpose.
+  //
+  // The fallback is the RDN VALUE, and it is the DIRECTORY'S rule rather than
+  // a second one invented here: `usernameOfEntry()` is what
+  // `existingUserEntry()` matches a typed name against, so the `userName` SCIM
+  // reports is the name a create of that person would collide with. `entry.dn`
+  // is the last resort — exactly as `toScimGroup()` falls back to it for
+  // `displayName`, and for the same reason: whatever is under `ou=users`, this
+  // function has to produce a resource rather than an exception.
+  if (!String(resource.userName || '').trim()) {
+    resource.userName = String(ctx.rdnName || '').trim() || entry.dn;
+    log.debug("toScimUser(). The entry carries no uid, so its userName is " +
+              "the RDN value: " + resource.userName);
+  }
 
   // `primary` marks the FIRST value of each multi-valued member and is not
   // stored anywhere — see the header. Set after the loop rather than inside it

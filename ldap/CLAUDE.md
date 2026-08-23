@@ -252,6 +252,37 @@ ldapjs implements none, and this repository does not patch that submodule.
 
 ---
 
+## A WRITE MUST CALL `touchDirectory()`
+
+`groupsOfUser()` is called ONCE PER TOKEN — every access token, every ID Token
+and both SAML assertions, through `group_claims.js`. It used to answer by
+walking every entry in the tree and normalising every value of every membership
+attribute on each group it found, which is O(entries x members) per issuance
+against a store `ldap.maxEntries` lets reach 2,000. At that size it cost 2.7ms
+per token and `normalizeDn()` was the third-heaviest application function in a
+CPU profile of the token endpoint. It is now a reverse index and costs 0.0016ms.
+
+**The index is only correct while nothing has been written, so every writer
+bumps `directoryVersion` by calling `touchDirectory()`.** A write that does not
+leaves the index describing the directory as it was, and the symptom is a
+`groups` claim one `ldapmodify` out of date inside a token that is otherwise
+perfect — which reads as a claim-mapping bug and would be looked for anywhere
+but here. The call sites are `putEntry()`, `addValues()`, the vc-attribute
+sweep, the LDAP delete, modify and modifyDN handlers, and the four typed
+deletes. Those are the only two things that can make the index wrong: replacing
+an entry in the Map, or mutating a stored entry's attributes in place.
+
+A rebuild ALSO fires when `entries.size` disagrees with the size the index was
+built at. That is a net and not a design — it catches an add or a delete that
+forgot to call `touchDirectory()`, and it cannot catch an in-place attribute
+change, which is why the rule above is the rule.
+
+**What was NOT done is a cache with a TTL.** The membership is read per token
+and never cached precisely so that an `ldapadd` changes the very next token,
+which is the thing somebody came to a mock directory to watch. This is not a
+time-based cache and has no staleness window: a bumped version rebuilds on the
+next read, before it answers.
+
 ## The library is NOT patched
 
 Everything in `ldap_server.js` is handlers
