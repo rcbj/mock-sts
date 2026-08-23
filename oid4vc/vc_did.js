@@ -192,7 +192,7 @@ async function domainLinkageCredential(req) {
     credentialSubject: { id: did, origin: origin }
   };
   logArtifact('Domain Linkage Credential', 'before signing', vc);
-  const token = jwt.sign({ iss: did, sub: did, nbf: now, exp: exp, vc: vc }, STS.privateKeyPem, {
+  const token = jwt.sign({ iss: did, sub: did, nbf: now, exp: exp, vc: vc }, STS.privateKey, {
     algorithm: 'RS256',
     noTimestamp: true,
     header: { alg: 'RS256', kid: did + '#' + STS.kid, typ: undefined }
@@ -268,7 +268,12 @@ function generatedDidJwk() {
 // An SD-JWT VC naming `issuerDid` as its iss and signed with the key that DID
 // publishes. Minimal on purpose — one Disclosure and a cnf — because what is being
 // tested is the SIGNATURE against a resolved document, not the credential's shape.
-function credentialSignedBy(issuerDid, privateKeyPem, alg, kid) {
+// `privateKey` is whatever jsonwebtoken will sign with: the ONE caller that
+// names the STS key passes the parsed KeyObject that helpers.js holds, and the
+// one that generates a throwaway did:jwk key passes that key's PEM, because it
+// has never been parsed and is used exactly once. Both are valid here and the
+// parameter is named for the pair rather than for either.
+function credentialSignedBy(issuerDid, privateKey, alg, kid) {
   log.debug("Entering credentialSignedBy(). alg=" + alg);
   const now = Math.floor(Date.now() / 1000);
   const salt = crypto.randomBytes(16).toString('base64url');
@@ -286,7 +291,7 @@ function credentialSignedBy(issuerDid, privateKeyPem, alg, kid) {
   const header = { alg: alg, typ: 'dc+sd-jwt' };
   if (kid) header.kid = kid;
   logArtifact('generated SD-JWT VC', 'before signing', { header: header, payload: payload });
-  const signed = jwt.sign(payload, privateKeyPem, { algorithm: alg, header: header });
+  const signed = jwt.sign(payload, privateKey, { algorithm: alg, header: header });
   logArtifact('generated SD-JWT VC', 'after signing', signed);
   log.debug("Leaving credentialSignedBy().");
   return signed + '~' + disclosure + '~';
@@ -356,7 +361,7 @@ app.get('/did/generate', async function (req, res) {
       didConfigurationUrl: baseUrlOf(req) + '/.well-known/did-configuration.json',
       origin: baseUrlOf(req),
       verificationMethod: did + '#' + STS.kid,
-      credential: credentialSignedBy(did, STS.privateKeyPem, 'RS256', STS.kid)
+      credential: credentialSignedBy(did, STS.privateKey, 'RS256', STS.kid)
     };
   }
   logArtifact('generated DID', 'as returned', { method: body.method, did: body.did });

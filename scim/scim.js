@@ -626,7 +626,16 @@ function groupsOf(dn) {
 function userResourceFor(entry, req) {
   return scimMap.toScimUser(entry, {
     groups: groupsOf(entry.dn),
-    location: locationPrefix(req, 'Users')
+    location: locationPrefix(req, 'Users'),
+    // WHAT THIS PERSON IS CALLED WHEN THEIR ENTRY HAS NO `uid` — which is an
+    // ordinary entry here and not a broken one, since a client certificate's
+    // is named `cn=<CN>,ou=users` and carries none. Read through the
+    // directory's own function rather than parsed out of the DN here, for the
+    // reason normalizeDn() is exported: a second reading of a DN in this
+    // module would eventually disagree with the one existingUserEntry()
+    // matches a name against. What is DONE with it is scim_map.js's decision
+    // and the whole of it is in toScimUser().
+    rdnName: directory.usernameOfEntry(entry)
   });
 }
 

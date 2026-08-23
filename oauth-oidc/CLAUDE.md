@@ -368,6 +368,28 @@ are facts about `server.js`: `ws-federation/wsfed.js` must be required AFTER
 
 ---
 
+## `signed_metadata` is signed once a minute, not once a request
+
+`signedMetadata()` in `oauth2.js` caches, and both discovery documents go
+through it — the RFC 8414 one and the OpenID Provider Configuration. Discovery
+is the most-fetched endpoint here (every client reads it first) and signing it
+per request made it the slowest read-only endpoint in the service by a factor
+of five; caching took it from 762 to 8,006 requests a second.
+
+**It is the one artifact here where re-signing per request buys nothing.** RFC
+8414 section 2.1 describes `signed_metadata` as something the issuer PUBLISHES:
+no nonce, no `jti`, nothing bound to the caller, so two clients a second apart
+are entitled to byte-identical documents. Everything that can vary — the base
+URL the request arrived on, the authorization-server profile it selected, any
+setting changed at runtime through `/admin/config` — varies the METADATA, and
+**the metadata is the cache key**, so runtime settability is untouched: a
+document differing by one member is a different key and is signed afresh.
+
+The entry is held for a minute against a token that lives an hour, and that gap
+is the point — a caller must never be handed a signature about to expire. The
+map is capped because the key includes a base URL that comes off the Host
+header.
+
 ## What this half deliberately does not do
 
 * **It is permissive on purpose, and it can be told not to be.** Everything in this

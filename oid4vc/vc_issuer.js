@@ -240,7 +240,7 @@ function sendVciMetadata(req, res) {
   const claims = Object.assign({}, meta, { sub: meta.credential_issuer });
   logArtifact('OID4VCI signed_metadata', 'before signing', claims);
   try {
-    meta.signed_metadata = jwt.sign(claims, STS.privateKeyPem,
+    meta.signed_metadata = jwt.sign(claims, STS.privateKey,
       { algorithm: 'RS256', issuer: meta.credential_issuer, expiresIn: 3600, keyid: STS.kid });
     logArtifact('OID4VCI signed_metadata', 'after signing', meta.signed_metadata);
   } catch (e) {
@@ -436,7 +436,7 @@ function buildSdJwtVc(subjectClaims, holderJwk, credentialIssuer, issuerDid) {
 
   // iat is added by the signer (jsonwebtoken drops a payload iat when it is
   // told not to timestamp, so it is left to do it).
-  const issuerJwt = jwt.sign(payload, STS.privateKeyPem, {
+  const issuerJwt = jwt.sign(payload, STS.privateKey, {
     algorithm: 'RS256',
     header: { alg: 'RS256', typ: 'dc+sd-jwt', kid: STS.kid }
   });
@@ -506,7 +506,7 @@ function buildJwtVcJson(subjectClaims, holderJwk, credentialIssuer, issuerDid) {
   logArtifact('jwt_vc_json credential', 'before signing',
               { header: { alg: 'RS256', typ: 'JWT', kid: STS.kid }, payload: payload });
 
-  const token = jwt.sign(payload, STS.privateKeyPem, {
+  const token = jwt.sign(payload, STS.privateKey, {
     algorithm: 'RS256',
     header: { alg: 'RS256', typ: 'JWT', kid: STS.kid }
   });
