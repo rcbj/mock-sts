@@ -109,13 +109,33 @@ people in a group are the three the directory seeds, so a caller who never
 touched `ou=groups` gets exactly the tokens it got before the feature existed.
 
 Nothing reads the claim back. No endpoint checks it and nothing decides anything
-on it: carrying a group is not granting one.
+on it: carrying a group is not granting one. Two groups are the exception and are
+not an exception to *that* sentence — `admin.readGroup` and `admin.writeGroup`
+below are read from the directory by `/admin`, never from this claim, so a token
+carrying `admin-write` still does nothing a token without it cannot.
 
-### `scim.authRequired` and `spiffe.authRequired`
+### `scim.authRequired`, `spiffe.authRequired` and `admin.authRequired`
 
-The two places this service enforces authentication at all. Both on by default,
-both can be turned off, and each is explained under
+The three places this service enforces authentication at all. All on by default,
+all three can be turned off, and each is explained under
 [what is not checked](what-is-not-checked.md).
+
+### `admin.readGroup`, `admin.writeGroup` and `admin.openWhenEmpty`
+
+The console's two roles are two ordinary groups in the embedded directory —
+`cn=admin-read` and `cn=admin-write` by default — so `/admin/rbac`, `POST
+/admin-api/rbac/grant`, an `ldapmodify` and a SCIM `PATCH` all write the same
+membership. **Write implies read.**
+
+`admin.openWhenEmpty` is on and decides what happens while *neither* group has a
+member: anybody who signs in holds both roles, and every page says so. It is on
+because there is no password anywhere in this service to bootstrap an
+administrator with and the roster dies with the process — off, and a service
+started with an empty roster has a console no browser can reach. `/admin-api` is
+not gated by any of these, which is the way back out of that.
+
+Renaming a role group does not move anybody: the members stay in the old group,
+which stops granting anything the moment the name changes.
 
 ### `oauth2.breakIdTokenNonce`
 

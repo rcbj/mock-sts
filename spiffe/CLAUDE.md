@@ -89,10 +89,62 @@ that up silently.
    family uses. Three acceptances reach it: an X509-SVID over mutual TLS (ONCE
    PER CONNECTION — the credential was accepted at the handshake, which is
    `tls_server.js`'s decision made again), an agent attesting, and a JWT-SVID
-   verified at `ValidateJWTSVID`. Being ISSUED an SVID is not one of them.
-   `ldap_server.js`'s `spiffePlan()` is the fourth placement plan (rule 6) and
-   `entryBySpiffeSubject()` is what makes the same identity arriving three ways
-   ONE entry.
+   verified at `ValidateJWTSVID`. `ldap_server.js`'s `spiffePlan()` is the
+   fourth placement plan (rule 6) and `entryBySpiffeSubject()` is what makes the
+   same identity arriving three ways ONE entry.
+
+   **AND SO IS AN ISSUED CERTIFICATE, WHICH IS A FOURTH WAY IN AND NOT A FOURTH
+   ACCEPTANCE.** This file used to say "being ISSUED an SVID is not one of
+   them", and the sentence was right about what it denied and wrong about what
+   it implied: receiving a credential is still not presenting one, but a trust
+   domain whose whole output is certificates needs a directory that can say
+   which identities hold one. So an X509-SVID mint reaches the directory too,
+   and the two events are kept APART rather than merged — `admin_stats.js`'s
+   one observer slot now carries an `event` of `authentication`, `issuance` or
+   `credential-status`, and only the first is COUNTED as an authentication or
+   written to the audit log as one. An issuance that inflated that count would
+   be visible immediately: an agent holding `FetchX509SVID` open re-mints every
+   half-lifetime, so one workload left running overnight would read as several
+   hundred sign-ins. The identity is still ON `/admin/users` — the SVID is an
+   artifact, so it lands in the "seen only as a subject" tile with `never` in
+   the authenticated column, which is what that tile has always been for.
+
+   **THE FUNNEL IS `stats.recordSvid('X.509', …)`**, which the five X509-SVID
+   mints already called, and the sixth fact each now passes is
+   `svid.certificate` — `spiffe_ca.js`'s `certificateFacts()`, read back off
+   the certificate `issueLeaf()` has just built with `crypto.X509Certificate`.
+   Reading it back rather than assembling it from the inputs is the load-bearing
+   part: the directory writes THE SAME SIX `x509*` ATTRIBUTES a verified TLS
+   client certificate writes, and node prints four of the six identically on
+   both paths while the two DNs go through the ONE `dnRfc4514()` — which is why
+   that function moved into `common/helpers.js`. `spiffe.svidSubject` is the
+   string `C=US,O=SPIRE`, which is not the RFC 4514 form of itself; writing it
+   straight onto an entry would have been a second spelling of one DN, which is
+   two people on `/admin/users`.
+
+   **ASSIGNED, NOT APPENDED, AND THAT IS THE ONE RULE THAT DIFFERS FROM THE TLS
+   PATH.** `certificatePlan()` appends its facts because a renewed client
+   certificate is rare and seeing both is the point. An SVID is minted afresh at
+   half its lifetime for as long as the workload runs, so appending would grow
+   the entry by six values an hour for ever. `x509svidsIssued`, `x509firstIssued`
+   and `x509lastIssued` are what is left of the history. A ROTATION IS THE SAME
+   OBJECT with no code to make it so: `entryBySpiffeSubject()` keys on the
+   SPIFFE ID and on nothing about the certificate.
+
+   **`spiffeCredentialStatus` IS NOT A REVOCATION AND MUST NEVER BE DESCRIBED AS
+   ONE.** SPIFFE has none — the answer is a short lifetime and rotation, the
+   `crl` field stays empty because empty is the conforming value, and nothing
+   here reads this attribute back or refuses a certificate on it. What it
+   records is the three things in `spiffe_registry.js` that end an identity's
+   ability to obtain a NEW credential: its LAST registration entry deleted (the
+   qualifier is checked, because several entries may name one SPIFFE ID and
+   deleting one of them ends nothing), its agent banned, its agent deleted. Each
+   is reversible and the reverse is written the same way, so the flag is the
+   current state rather than a tombstone, and `spiffeRevokedAt` is never cleared
+   — `mfaLastAuthTime`'s rule. **THE ENTRY IS NEVER REMOVED.** That module
+   reaches `admin_stats.js` by a PLAIN REQUIRE, arrived at by rule 3e's test
+   both ways round: no cycle, no route moves, and its own `setDirectory()` slot
+   is the SPIFFE containers' store rather than `ou=users`.
 
    **`spiffe.autoCreateEntries` OFF IS THE INTERESTING SETTING**, and it is the
    one thing here that must not be quietly removed: with it off, a caller
@@ -219,7 +271,13 @@ that up silently.
   trust bundle, and every method is authorized against SPIRE's own table. Those
   are two different claims and merging them back into one gets both wrong.
   Selector matching also DECIDES which entries answer a Workload API caller
-  now (`spiffe.attestWorkloads`), which is narrowing without attesting.
+  now (`spiffe.attestWorkloads`), which is narrowing without attesting. **AND
+  THE DIRECTORY NOW RECORDS WHAT WAS ISSUED, WHICH IS A THIRD DIFFERENT CLAIM.**
+  An entry under `ou=users` carrying `x509serialNumber` says this authority
+  minted that certificate for that identity — which it knows, because it minted
+  it — and says nothing whatever about whether the workload holding it is the
+  one it was meant for. Nothing was attested. `spiffeCredentialStatus` beside it
+  is not a revocation either; see rule 3k.
   What IS refused: a Workload API call with no `workload.spiffe.io: true` header
   (every conforming implementation refuses it, and a client that omits it has a
   bug nothing else will report), a JWT-SVID with no audience, a

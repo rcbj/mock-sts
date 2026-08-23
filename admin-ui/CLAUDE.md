@@ -1,11 +1,15 @@
 # admin-ui/
 
-The admin console at `/admin`. One file, and it is the largest in the repository
-because every page's HTML and every page's JSON view are built in the same
-function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives.
+The admin console at `/admin`. Two files now:
 
-**It is not protected and holds nothing on disk.** It is also the one surface that
-can CHANGE what the protocol endpoints do.
+| File | What it is |
+|---|---|
+| `admin.js` | Every page, every form, the shell they are drawn in, and the GATE in front of all of them. The largest file in the repository, because every page's HTML and every page's JSON view are built in the same function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives. |
+| `admin_rbac.js` | **Who may use it.** Two roles, held as two ordinary groups in the embedded directory. A library (rule 3): it registers nothing. |
+
+**It IS protected now, and it holds nothing on disk.** It is also the one surface
+that can CHANGE what the protocol endpoints do, which is why it is the one that
+grew a gate.
 
 5. **`admin.js` must stay after `oauth2.js` too, for the same reason**: it reads that
    `sessions` map so the metrics page can report real sign-on sessions. And the same
@@ -36,6 +40,15 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    naming the old one. **The last crumb is never a link**: a crumb that reloads
    the page you are on teaches a reader not to trust the ones beside it.
 
+   **THE NAV IS A GROUPED LIST DOWN THE LEFT NOW AND THE TRAIL DID NOT CHANGE.**
+   `SECTIONS` is the structure and `NAV` is DERIVED from it — never written by
+   hand, because a page present in one and missing from the other leaves a
+   drill-down whose trail names a path instead of a section. **The section a page
+   is in is deliberately NOT a crumb**: a section has no page of its own, so its
+   crumb could not be a link, and a dead crumb in the MIDDLE of a trail is the
+   same mistake the last crumb rule exists to prevent. The section is visible
+   where it is useful, which is the sidebar heading above the page you are on.
+
    **WHAT MAKES IT A BREADCRUMB RATHER THAN A LINK TO THE SECTION IS
    `listViewOf()`.** A drill-down link carries the list's filter and page, and the
    section crumb spends it, so back lands where the reader was. `LIST_PARAMS` is a
@@ -63,6 +76,20 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
 
 ---
 
+## The layout: two columns, one card, and no script
+
+`page()` draws `.shell` holding `.side` (the sidebar) and `.main` (the card). It
+is flex rather than grid because what is wanted at a narrow width is "the sidebar
+stops being a column and becomes a block above the page", which `flex-wrap` does
+for nothing — and this console runs NO SCRIPT, so a layout needing one was never
+an option. Two rules in that CSS are load-bearing rather than cosmetic:
+`min-width:0` on `.main`, without which one long DN widens the whole page instead
+of scrolling inside its cell; and the sidebar's fixed `flex-basis`, without which
+a long label widens the column and squeezes every table. `page()` now closes FOUR
+divs rather than two — `.meta`, `.card`, `.main`, `.shell` — and one missing tag
+nests the next page's sidebar inside the last one's card, which looks like a CSS
+bug rather than a markup one.
+
 ## Four reader slots and two writer slots point INTO this module
 
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,
@@ -87,7 +114,8 @@ owns the store, and reimplementing any of it here is how the console and an
 
 ## The console, the audit log, and what a group does not grant
 
-* **The admin console at `/admin` is not protected and holds nothing on disk.** It is
+* **The admin console at `/admin` is protected now (see the section below) and holds
+  nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
   future access token, ID Token and SAML assertion. Custom claims are **additive**:
@@ -161,3 +189,106 @@ owns the store, and reimplementing any of it here is how the console and an
   the two sentences are kept apart everywhere they appear. It is defensible as
   ON by default only because the claim is OMITTED ENTIRELY for somebody in no
   group — see rule 3d-ii.
+
+
+---
+
+## 8. THE GATE, AND WHY THE OLD SENTENCE IS QUALIFIED RATHER THAN DELETED
+
+`admin.authRequired` is ON by default. Every page and every form under `/admin`
+needs a browser sign-on session from `../authn/authn.js` and one of two roles.
+The rest of the numbered rules are unchanged by it; this is the eighth because
+nothing it says was true before.
+
+**It is ONE `app.use('/admin', ...)` in `admin.js`, above every route in that
+file.** Express applies middleware only to routes added after it (rule 1), so
+that placement is the whole mechanism — a console page added below the guard is
+guarded and one added above it would not be. There are none above it, and there
+is nowhere else in the file a route could go.
+
+**It authenticates nothing itself.** `authn.js` owns the session and the sign-in
+screen; the guard asks `sessionOf()` who is here and hands
+`beginAuthentication()` the page they wanted. A login screen of this console's
+own would be a second authentication service. The good consequence of sharing the
+first is that signing in with a security key at `/authn/login` is visible here,
+because it is the same session WS-Federation and the authorization endpoint read.
+
+**A BROWSER IS REDIRECTED AND A PROGRAM IS REFUSED.** Every page here answers
+`?format=json` and every form takes a JSON body precisely so a test can drive
+this console without a browser — and a 302 to an HTML login screen is not an
+answer such a caller can read; it arrives as a 200 full of markup where JSON was
+expected. So `?format=json`, a JSON content-type or a JSON-only `Accept` gets 401
+or 403 with a body, and everything else gets the screen. **A POST with no session
+is never redirected either**: a 303 turns the method into GET by definition, so
+the form's fields would be gone and "revoke everything" would come back as a page
+view with the click silently discarded.
+
+**IT GUARDS `/admin` AND NOT `/admin-api`.** Express matches a `use` path on
+segment boundaries, so `/admin-api` does not match — and that is the arrangement
+rather than an accident being relied on. `../mgmt-api/CLAUDE.md` carries the
+argument and the honest consequence: anybody who can reach this port can grant
+themselves both roles through the API. The gate exists so a client can be driven
+through 302/401/403 and a role model, not to make this service safe to expose.
+
+**THREE STATES, AND EVERY PAGE SAYS WHICH.** `gateBanner()` — off (the old
+open-console warning, unchanged and still true of the port), on with an EMPTY
+ROSTER (anybody who signs in holds both roles, said loudly), and on and enforced
+(who you are and what you hold). They are different enough that one banner with a
+detail changed would have been the wrong shape. `gateStateFor()` computes it and
+the guard's decision from ONE call, because the two were written separately at
+first and disagreed within the hour.
+
+## 8a. THE ROLES ARE DIRECTORY GROUPS, AND THAT IS THE DECISION MOST LIKELY TO BE UNDONE
+
+`cn=admin-read` and `cn=admin-write` under `ou=groups`, both renameable. NOT a
+store of `admin_rbac.js`'s own, and the reason is the one-store rule this service
+follows everywhere it has been tempted otherwise: a second membership store would
+be a second answer to "is alice an admin" that an `ldapmodify`, a SCIM PATCH and
+`/admin/groups` could not see, drifting silently because nothing compares two
+stores that were never meant to disagree. So there are **four doors onto one
+membership** — `/admin/rbac`, `POST /admin-api/rbac/…`, an `ldapmodify` on 389 or
+636, and a SCIM PATCH — which is the point rather than a leak: a role no test can
+grant is a role no test can exercise.
+
+`ldap_server.js` fills `admin_rbac.js`'s `setDirectory()` slot at its own require
+time, for the route-order reason the five slots below have (rule 3e). **That slot
+takes ONE OBJECT where the five here take separate functions**, and the concern
+stated there — a filler installing half of it would silently disable the other
+half — is answered rather than ignored: it checks every member it needs and
+refuses a partial object with an error naming what was missing.
+
+**WRITE IMPLIES READ**, expressed as `implies` on the role table rather than as an
+`if`, so a page asking "may this person read" gets the same answer wherever it
+asks from. A role that could post a form to a page it could not see would be a
+trap rather than a permission.
+
+**THE EMPTY ROSTER OPENS.** While NEITHER group has a member, anybody who signs
+in holds both roles. This service has no password anywhere and the roster dies
+with the process, so there is no bootstrap administrator and no way to make one
+out of band: a service started with the gate on and an empty roster would
+otherwise have a console no browser could ever reach. `admin.openWhenEmpty` turns
+it off for somebody who wants the locked case, and `/admin-api` is the way back
+out of it. **"No members" and "no group at all" are deliberately the same state** —
+the group is created by the first grant, and treating the empty group a revoke
+leaves behind as *closed* would mean the console locking itself the moment
+somebody tidied up.
+
+**A grant to somebody who does not exist is allowed and dangles.** That is the
+interesting case for a mock — grant the role, then watch them arrive already
+holding it — and it is why the roster counts membership VALUES rather than
+resolvable members.
+
+## 8b. "A GROUP HERE GRANTS NOTHING" IS NOW QUALIFIED IN EIGHT PLACES
+
+It was asserted in `README.md`, three `CLAUDE.md` files, `sts_metadata.js`,
+`group_claims.js`, `ldap_server.js`, `docs/` and on `/admin/groups` itself. Every
+one of them was QUALIFIED and none deleted, because the general claim is still
+the one that matters: it is true of every group but these two, and true of these
+two everywhere except this console. Deleting it would leave a reader believing
+that adding somebody to `cn=developers` changed what their token could do.
+
+The exact shape of the qualification is worth keeping if any of it is reworded:
+these two groups grant **this console and nothing else** — no token's scopes
+change, no assertion gains an attribute, no Kerberos PAC is affected, no protocol
+endpoint reads them, and `groups.claim` carries `admin-write` into an access token
+exactly as it carries any other group, where still nothing reads it.

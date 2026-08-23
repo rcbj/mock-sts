@@ -201,6 +201,11 @@ const vcClaims = require('../oid4vc/vc_claims');
 // require this one: it is read from admin_stats.js's resolver, which every
 // issuance site reaches long before the directory's routes should exist.
 const groupClaims = require('../common/group_claims');
+// The admin console's two roles, which are two groups in THIS directory. Required
+// outright rather than through a slot in the other direction because it registers
+// no route (rule 3), so nothing about the require order changes by naming it here;
+// the slot below is what carries this module's functions the other way.
+const adminRbac = require('../admin-ui/admin_rbac');
 
 // The port. 389 is the assigned one and this process is root in the container,
 // so it binds it directly; a host run is not root, which is why the variable
@@ -492,6 +497,16 @@ const OWN_NAMES = [
   'x509subject', 'x509issuer', 'x509serialNumber', 'x509notBefore',
   'x509notAfter', 'x509fingerprint256',
 
+  // THE SAME SIX ARE NOW ALSO WRITTEN BY THE SPIFFE ISSUING AUTHORITY, onto the
+  // entry of every identity it mints an X509-SVID for — the same names on
+  // purpose, because a certificate is a certificate however it arrived and a
+  // second set spelt `svid*` would mean a filter written for one path silently
+  // misses the other. The three below go with them and exist only on that path:
+  // an SVID is minted afresh every half-lifetime, so the six above are ASSIGNED
+  // rather than appended there and these are what is left to say how many times
+  // and since when. See applySpiffeCertificate().
+  'x509svidsIssued', 'x509firstIssued', 'x509lastIssued',
+
   // On the entries a DECENTRALIZED IDENTIFIER seeds, and load-bearing rather
   // than decorative: the entry is NAMED by a hash of the DID (didPlan() says
   // why), so `didSubject` is the only place the identifier itself survives and
@@ -513,6 +528,22 @@ const OWN_NAMES = [
   // identity that authenticated here". Merging the two spellings would file a
   // registration entry and its holder under one name.
   'spiffeSubject', 'spiffePath', 'spiffeTrustDomain',
+
+  // WHETHER THIS IDENTITY MAY STILL BE ISSUED A CREDENTIAL HERE, and this is
+  // the one group in this list whose name could be read as a claim the service
+  // does not make. **SPIFFE HAS NO REVOCATION** — `GET /spiffe` says so, and
+  // the Workload API's `crl` field is empty because empty is the conforming
+  // value, not because it is unimplemented. `spiffeCredentialStatus` is NOT a
+  // certificate status and nothing verifying an SVID consults it: it records
+  // the three things in the registry that end an identity's ability to get a
+  // NEW one — its registration entry deleted, its agent banned, its agent
+  // deleted — and the certificates already in the world go on verifying until
+  // they expire, exactly as SPIFFE intends. The reason is a sentence rather
+  // than a code because it is the only thing that explains a status a reader
+  // did not expect. `spiffeRevokedAt` is never cleared, which is
+  // `mfaLastAuthTime`'s rule: it is the history the current-state flag beside
+  // it deliberately does not keep.
+  'spiffeCredentialStatus', 'spiffeCredentialStatusReason', 'spiffeRevokedAt',
 
   // On any entry whose person authenticated somewhere that STATES how they did
   // it — which today is the sign-in screen and nothing else, because amr is an
@@ -1606,9 +1637,19 @@ function spiffePlan(info) {
   // through X" — is not quite what happened: a workload presented a credential
   // this service or another part of this trust domain issued, and no human was
   // anywhere near it.
-  const note = 'named by a SPIFFE identity presented through ' +
-    String(info.protocol || 'an unstated protocol') +
-    (info.method ? ' (' + info.method + ')' : '');
+  //
+  // AND A SECOND SENTENCE FOR THE SECOND WAY IN. An ISSUANCE is not a
+  // presentation and must not describe itself as one: the entry exists because
+  // this trust domain minted a certificate naming this identity, which is a
+  // weaker statement than "it authenticated" and is the honest one. Both
+  // sentences can end up on one entry — `description` accumulates — and that is
+  // the point, because "issued to, and has since presented one" is a different
+  // history from either alone.
+  const note = info.event === 'issuance'
+    ? 'was issued an X509-SVID by this trust domain'
+    : 'named by a SPIFFE identity presented through ' +
+      String(info.protocol || 'an unstated protocol') +
+      (info.method ? ' (' + info.method + ')' : '');
   // An entry that already records this identity, wherever it is. This is what
   // makes the three acceptance points — an X509-SVID over mutual TLS, an agent
   // attesting, a JWT-SVID validated — land on ONE entry.
@@ -1639,11 +1680,17 @@ function spiffePlan(info) {
     },
     // Nothing to merge onto an entry that already exists: a SPIFFE ID
     // presented a second time is byte-for-byte the one that named this entry.
-    // The certificate it arrived on differs — a new serial, a new validity —
-    // and is deliberately NOT recorded here: an SVID is minted afresh every
-    // hour, and an entry that accumulated one value per rotation would be an
-    // entry that grows for as long as the workload runs. That is
-    // applyVcAttributes()'s second rule, met in a new place.
+    //
+    // **THE CERTIFICATE IS NOT MERGED EITHER, AND THAT IS NO LONGER THE SAME
+    // AS NOT BEING RECORDED.** `merge` is APPENDED by autoCreateUser(), which
+    // is right for a client certificate — a renewal is a new serial for the
+    // same person and rare — and would be ruinous here: an SVID is minted
+    // afresh at half its lifetime for as long as the workload runs, so six
+    // values an hour would accumulate for ever, which is applyVcAttributes()'s
+    // second rule met in a new place. So the certificate goes on the entry
+    // through applySpiffeCertificate() instead, which ASSIGNS the same six
+    // `x509*` attributes the TLS path writes and keeps a count and two
+    // timestamps beside them. Read that function before adding anything here.
     merge: {},
     note: note
   };
@@ -1695,7 +1742,8 @@ function spiffePlan(info) {
 //     well because it is what a relying party actually reads, and the two are
 //     set together by the one caller that sets either.
 //
-// A GROUP GRANTS NOTHING here and neither does this: no endpoint reads these
+// A GROUP GRANTS NOTHING here — bar the two that decide who may use /admin, see
+// `admin-ui/admin_rbac.js` — and neither does this: no endpoint reads these
 // attributes, no token carries them, and nothing decides anything on them. They
 // are a record of what happened, on the page an LDAP client can see it from.
 // ---------------------------------------------------------------------------
@@ -1743,6 +1791,339 @@ function applyAuthenticationFactors(stored, info) {
            (amr.length ? amr.join(', ') : acr) + '; mfaAuthenticated is ' + flag + '.');
   log.debug('Leaving applyAuthenticationFactors(). The entry was updated.');
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE CERTIFICATE A SPIFFE IDENTITY CURRENTLY HOLDS, WRITTEN ONTO ITS ENTRY.
+//
+// This is the SPIFFE half of what `certificatePlan()` does for a verified TLS
+// client certificate, and it writes THE SAME SIX ATTRIBUTES — `x509subject`,
+// `x509issuer`, `x509serialNumber`, `x509notBefore`, `x509notAfter`,
+// `x509fingerprint256` — in the same strings. The strings being identical is a
+// requirement rather than a nicety: `spiffe_ca.js` reads them back off the
+// certificate it has just issued with node's own parser and renders both DNs
+// through the one `dnRfc4514()` in `helpers.js`, so an `ldapsearch` filter
+// written against a client certificate's entry matches an SVID holder's too.
+// Two spellings of one DN is two people on /admin/users, and the same is true
+// one column over of a serial number with colons in it.
+//
+// **THE ONE RULE THAT DIFFERS FROM THE TLS PATH IS APPEND VERSUS ASSIGN, AND IT
+// HAD TO.** `certificatePlan()` APPENDS its facts, deliberately: a renewed
+// client certificate is a new serial for the same person, renewals are rare,
+// and seeing both is the point. An X509-SVID is minted afresh at half its
+// lifetime for as long as the workload runs — the default puts that at half an
+// hour — so appending would grow this entry by six values an hour, for ever,
+// and the entry that grows without bound is precisely the trap
+// `applyVcAttributes()`'s second rule and `applyAuthenticationFactors()`'s
+// `mfaAuthenticated` are both written about. `spiffePlan()` used to state this
+// as a reason to record NOTHING; the answer it was missing is that the six are
+// the CURRENT certificate and belong assigned.
+//
+// What assignment loses is the history, so three attributes of this path's own
+// carry the part of it worth keeping — how many have been issued, when the
+// first was, and when the last was. A reader who wants the individual serials
+// has them on /admin/metrics, where every SVID is an artifact row.
+//
+// **A ROTATION IS THE SAME OBJECT AND NEEDS NO CODE HERE TO MAKE IT SO.** The
+// entry is found by `entryBySpiffeSubject()`, which keys on the SPIFFE ID and
+// not on anything about the certificate, so the fiftieth SVID for
+// `spiffe://…/sa/db` lands on the entry the first one created. That is the same
+// property that already made an X509-SVID at the SPIRE Server API, an attesting
+// agent and a validated JWT-SVID one entry.
+//
+// **AN ISSUANCE MAKES AN IDENTITY ACTIVE AGAIN.** If the entry says `revoked` —
+// its registration entry was deleted, or its agent was banned — and a
+// certificate has just been minted for it anyway, the status is wrong and this
+// is the point at which the service knows it. That happens for real: unbanning
+// an agent and re-registering an identity both restore issuance, and
+// `spiffe.authRequired` off makes the whole registry advisory.
+// ---------------------------------------------------------------------------
+function applySpiffeCertificate(stored, certificate) {
+  log.debug('Entering applySpiffeCertificate(). dn=' + (stored && stored.dn));
+  if (!stored || !certificate) {
+    log.debug('Leaving applySpiffeCertificate(). There is nothing to write.');
+    return false;
+  }
+  // The same six names certificatePlan() writes, in the same order, so the two
+  // functions can be read side by side. An empty value is skipped rather than
+  // written blank: certificateFacts() returns '' for anything node could not
+  // read, and an attribute present and empty reads as a fact rather than as an
+  // absence.
+  const facts = {
+    x509subject: certificate.subject || '',
+    x509issuer: certificate.issuer || '',
+    x509serialnumber: certificate.serialNumber || '',
+    x509notbefore: certificate.validFrom || '',
+    x509notafter: certificate.validTo || '',
+    x509fingerprint256: certificate.fingerprint256 || ''
+  };
+  let changed = false;
+  Object.keys(facts).forEach(function (name) {
+    if (!facts[name]) {
+      return;
+    }
+    // ASSIGNED, not appended. See the header — this is the one place this
+    // module writes these six that way, and the comment is here as well as
+    // there because the two functions look alike enough to be "fixed" into
+    // agreement by somebody reading only one.
+    if ((stored.attributes[name] || [])[0] !== facts[name] ||
+        (stored.attributes[name] || []).length !== 1) {
+      stored.attributes[name] = [facts[name]];
+      changed = true;
+    }
+  });
+  const now = generalizedTime();
+  const issued = Number((stored.attributes.x509svidsissued || [])[0] || 0) + 1;
+  stored.attributes.x509svidsissued = [String(issued)];
+  if (!(stored.attributes.x509firstissued || []).length) {
+    // Written once and never again — the counterpart of x509lastIssued, and the
+    // pair is what makes "47 SVIDs since 09:00" readable without keeping 47
+    // values.
+    stored.attributes.x509firstissued = [now];
+  }
+  stored.attributes.x509lastissued = [now];
+  changed = true;
+  // See the header: a certificate has just been minted for this identity, so
+  // whatever the registry last said about it, it is being issued credentials.
+  if ((stored.attributes.spiffecredentialstatus || [])[0] === 'revoked') {
+    applySpiffeCredentialStatus(stored, 'active',
+      'an X509-SVID was issued for this identity after it was marked revoked, ' +
+      'so it is being issued credentials again');
+  }
+  stored.attributes.modifytimestamp = [now];
+  touchDirectory();
+  log.info('ldap: ' + stored.dn + ' holds X509-SVID serial ' +
+           (certificate.serialNumber || '(unreadable)') + '; ' + issued +
+           ' issued to this identity so far.');
+  log.debug('Leaving applySpiffeCertificate(). The entry was updated.');
+  return changed;
+}
+
+// ---------------------------------------------------------------------------
+// AND WHETHER IT MAY STILL BE ISSUED ONE, WHICH IS NOT A CERTIFICATE STATUS.
+//
+// **NOTHING HERE REVOKES A CERTIFICATE AND NOTHING READS THIS BACK.** SPIFFE
+// has no revocation: there is no CRL, no OCSP and no serial list, the answer is
+// a short lifetime and rotation, and `GET /spiffe` states that as one of the
+// things this service deliberately does not do. An SVID already in a workload's
+// hands goes on verifying against the bundle until it expires whatever this
+// attribute says, and that is correct behaviour rather than a gap — a mock that
+// quietly refused a certificate on a revocation list SPIFFE does not have would
+// teach a client something false about every SPIRE server it will ever meet.
+//
+// What this DOES record is the three things in the registry that end an
+// identity's ability to obtain a NEW credential here, which is the honest
+// nearest thing and is what somebody asking "is this workload still live"
+// wants:
+//
+//   * its LAST registration entry was deleted — the qualifier matters, and
+//     `spiffe_registry.js` checks it, because several entries may name one
+//     SPIFFE ID and deleting one of them ends nothing;
+//   * its AGENT was banned, which is the one refusal that module makes;
+//   * its AGENT was deleted.
+//
+// Each is reversible and the reverse is recorded the same way, so the flag is
+// the CURRENT state rather than a tombstone. **THE ENTRY IS NEVER REMOVED.** An
+// identity this trust domain used to issue certificates to is exactly what a
+// directory is for, and deleting the object would answer "was there ever a
+// workload called db?" with silence.
+//
+// Three attributes, following `applyAuthenticationFactors()`'s split for the
+// same reason — merging them loses one of the three:
+//
+//   spiffeCredentialStatus        `active` or `revoked`, ASSIGNED. The current
+//                                 state, so it flips back.
+//   spiffeCredentialStatusReason  why it is in THAT state, ASSIGNED with it.
+//                                 The two are written together by the one
+//                                 function that writes either, or a reason
+//                                 would outlive the status it explains.
+//   spiffeRevokedAt               when it was LAST revoked, and never cleared.
+//                                 That is the history the flag above does not
+//                                 keep, and it is `mfaLastAuthTime`'s rule.
+// ---------------------------------------------------------------------------
+function applySpiffeCredentialStatus(stored, status, reason) {
+  log.debug('Entering applySpiffeCredentialStatus(). dn=' +
+            (stored && stored.dn) + ', status=' + status);
+  if (!stored) {
+    log.debug('Leaving applySpiffeCredentialStatus(). There is no entry.');
+    return false;
+  }
+  const wanted = String(status || '').trim().toLowerCase();
+  if (wanted !== 'active' && wanted !== 'revoked') {
+    // Refused rather than written through. This attribute has exactly two
+    // values and a third would be a value every reader of the page has to
+    // guess at — the same reason `mfaAuthenticated` is TRUE or FALSE and not
+    // whatever a caller passed.
+    log.warn('ldap: "' + status + '" is not a SPIFFE credential status; only ' +
+             '`active` and `revoked` are written, so nothing was.');
+    log.debug('Leaving applySpiffeCredentialStatus(). Not a status.');
+    return false;
+  }
+  const text = String(reason || '').trim();
+  let changed = false;
+  if ((stored.attributes.spiffecredentialstatus || [])[0] !== wanted) {
+    stored.attributes.spiffecredentialstatus = [wanted];
+    changed = true;
+  }
+  if (text && (stored.attributes.spiffecredentialstatusreason || [])[0] !== text) {
+    stored.attributes.spiffecredentialstatusreason = [text];
+    changed = true;
+  }
+  if (wanted === 'revoked') {
+    // Never cleared on the way back to `active`. See the header.
+    stored.attributes.spifferevokedat = [generalizedTime()];
+    changed = true;
+  }
+  if (!changed) {
+    log.debug('Leaving applySpiffeCredentialStatus(). It already said this.');
+    return false;
+  }
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  touchDirectory();
+  log.info('ldap: ' + stored.dn + ' is now ' + wanted +
+           ' as far as being issued a SPIFFE credential goes' +
+           (text ? ' (' + text + ')' : '') + '. No certificate was revoked; ' +
+           'SPIFFE has no revocation.');
+  log.debug('Leaving applySpiffeCredentialStatus(). The entry was updated.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE OBSERVER ITSELF, WHICH IS NOW A DISPATCHER OVER THREE EVENTS.
+//
+// `admin_stats.js` offers ONE slot to this directory (see the header, and rule
+// 3e for why it is a slot and not a require), and it is now offered three kinds
+// of thing through it rather than one. The discriminator is `detail.event`, and
+// **AN ABSENT `event` MEANS AN AUTHENTICATION** — deliberately, so that a copy
+// of `admin_stats.js` without the field, or any caller that reaches this
+// function directly, behaves exactly as it did before the other two existed.
+//
+//   authentication      a credential was ACCEPTED, anywhere in this service.
+//                       The original path, unchanged, and the only one of the
+//                       three that creates an entry for an identity of any
+//                       shape.
+//   issuance            this trust domain MINTED an X509-SVID naming a SPIFFE
+//                       identity. It creates the entry the same way, through
+//                       the same plan, and then writes the certificate onto it.
+//                       Being issued a credential is not authenticating with
+//                       one, which is why it is a separate event and not a
+//                       fifteenth protocol.
+//   credential-status   the registry ended — or restored — an identity's
+//                       ability to obtain one. It NEVER creates an entry: a
+//                       revocation for something this directory has no record
+//                       of issuing to is nothing to write down, and creating an
+//                       entry in order to mark it dead would put a workload in
+//                       the directory that was never here.
+//
+// A kind this copy does not know is IGNORED rather than treated as an
+// authentication. The other direction — a newer `admin_stats.js` inventing a
+// fourth event and this file silently seeding a user entry for it — is the
+// failure that would be hard to find.
+// ---------------------------------------------------------------------------
+function observeIdentity(detail) {
+  const info = detail || {};
+  const event = String(info.event || 'authentication');
+  log.debug('Entering observeIdentity(). event=' + event +
+            ', key=' + (info.key || '?'));
+  if (event === 'authentication') {
+    const record = autoCreateUser(info);
+    log.debug('Leaving observeIdentity(). An authentication.');
+    return record;
+  }
+  if (event === 'issuance') {
+    const record = recordSpiffeIssuance(info);
+    log.debug('Leaving observeIdentity(). An issuance.');
+    return record;
+  }
+  if (event === 'credential-status') {
+    const record = recordSpiffeCredentialStatus(info);
+    log.debug('Leaving observeIdentity(). A credential status change.');
+    return record;
+  }
+  log.warn('ldap: the identity funnel offered a "' + event + '" event, which ' +
+           'this directory does not know about, so nothing was written. That ' +
+           'is a version skew between admin_stats.js and this module rather ' +
+           'than anything a caller did.');
+  log.debug('Leaving observeIdentity(). Unknown event.');
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// AN X509-SVID WAS MINTED FOR A SPIFFE IDENTITY.
+//
+// The entry is created exactly as an acceptance would create it — same plan,
+// same cap, same credential-claim sweep, same audit row — because it is the
+// same identity and a second creation path would be the fifth door
+// `createUser()`'s header warns about. What is added afterwards is the
+// certificate, through `applySpiffeCertificate()`.
+//
+// **IT IS GUARDED ON THE SHAPE OF THE IDENTITY, and the guard is not
+// defensive.** Only `spiffe_ca.js` mints these, so only a SPIFFE ID can reach
+// here today — but the six `x509*` attributes this writes ASSIGNED are the same
+// six `certificatePlan()` writes APPENDED, and if some later caller sent a
+// DN-shaped identity through this event the two rules would meet on one entry
+// and the appended history would start being overwritten by the assigned one.
+// That is a data loss nothing would report, so the shape is checked here rather
+// than assumed.
+// ---------------------------------------------------------------------------
+function recordSpiffeIssuance(detail) {
+  log.debug('Entering recordSpiffeIssuance(). key=' + (detail && detail.key));
+  const info = detail || {};
+  const id = String(info.key || '').trim();
+  if (!id || !SPIFFE_SHAPED.test(id)) {
+    log.warn('ldap: an issuance was reported for "' + id + '", which is not a ' +
+             'SPIFFE identity. Nothing was written — see the header for why ' +
+             'this is refused rather than filed under certificatePlan().');
+    log.debug('Leaving recordSpiffeIssuance(). Not a SPIFFE identity.');
+    return null;
+  }
+  // autoCreateUser() rather than a creation of its own: it holds the cap, the
+  // fold, the persona sweep and the audit row, and `spiffePlan()` reads
+  // `info.event` to describe the entry as issued-to rather than presented-by.
+  const stored = autoCreateUser(info);
+  if (!stored) {
+    // Three ways to get here and none is an error: ldap.autocreateUsers is off,
+    // the directory is at its cap, or there was no identity. Each already
+    // logged its own reason, and the SVID itself is unaffected either way.
+    log.debug('Leaving recordSpiffeIssuance(). There is no entry to write to.');
+    return null;
+  }
+  applySpiffeCertificate(stored, info.issuedCertificate);
+  log.debug('Leaving recordSpiffeIssuance(). ' + stored.dn + ' records the ' +
+            'certificate.');
+  return stored;
+}
+
+// ---------------------------------------------------------------------------
+// AND THE REGISTRY ENDED, OR RESTORED, AN IDENTITY'S ABILITY TO GET ONE.
+//
+// It creates NOTHING. See `observeIdentity()`: an entry that is not here was
+// never issued a certificate by this service, and inventing one in order to
+// mark it revoked would put a workload in the directory on the strength of its
+// registration entry being deleted. The lookup is `entryBySpiffeSubject()`, the
+// same one every other SPIFFE path uses, so a status lands on the entry a
+// rotation would have landed on.
+// ---------------------------------------------------------------------------
+function recordSpiffeCredentialStatus(detail) {
+  log.debug('Entering recordSpiffeCredentialStatus(). key=' +
+            (detail && detail.key));
+  const info = detail || {};
+  const id = String(info.key || '').trim();
+  if (!id || !SPIFFE_SHAPED.test(id)) {
+    log.debug('Leaving recordSpiffeCredentialStatus(). Not a SPIFFE identity.');
+    return null;
+  }
+  const stored = entryBySpiffeSubject(id);
+  if (!stored) {
+    log.debug('Leaving recordSpiffeCredentialStatus(). This directory has no ' +
+              'entry for that identity, so there is nothing to mark.');
+    return null;
+  }
+  applySpiffeCredentialStatus(stored, info.credentialStatus,
+                              info.credentialStatusReason);
+  log.debug('Leaving recordSpiffeCredentialStatus(). ' + stored.dn +
+            ' was updated.');
+  return stored;
 }
 
 // ---------------------------------------------------------------------------
@@ -2961,8 +3342,10 @@ function groupsOfUser(key) {
   return out;
 }
 
-// The inverted hook. See the header for why the direction is this way round.
-stats.setUserObserver(autoCreateUser);
+// The inverted hook. See the header for why the direction is this way round,
+// and observeIdentity() for why what is installed is a dispatcher now rather
+// than autoCreateUser() itself: the one slot carries three kinds of event.
+stats.setUserObserver(observeIdentity);
 
 // The second inverted hook, and the one that reads rather than writes. See
 // objectFor() above for why the console does not simply require this module.
@@ -3047,6 +3430,65 @@ if (typeof groupClaims.setDirectory === 'function') {
   log.warn('ldap: group_claims.js offers no setDirectory(), so no token or ' +
            'assertion will carry a groups claim. The directory itself is ' +
            'unaffected.');
+}
+
+// The SIXTH, and it is the first one that hands over a WRITER as well as
+// readers — which is the whole of what makes the admin console's two roles work
+// the way every other membership in this service works.
+//
+// `admin_rbac.js` decides who may use `/admin`, and it decides it out of two
+// ORDINARY GROUPS in this directory: `cn=admin-read` and `cn=admin-write` under
+// `ou=groups` by default. It is a slot rather than a require in the other
+// direction for exactly the reason the console's own five are (rule 3e): a
+// require of this module from there would pull every `/ldap` route into the
+// express router ahead of every `/admin` route, and `GET /sts-metadata` is
+// built by walking that router.
+//
+// WHAT CROSSES IS THIS MODULE'S OWN FUNCTIONS AND NOT A COPY OF ITS RULES, the
+// same division the five above keep. `groupsOfUser()` answers whether somebody
+// is in a group — by the three-shaped lookup, and in BOTH directions, so an
+// administrator added by writing `memberOf` on their entry really holds the
+// role — and `readGroupEntry`/`writeGroupEntry` are the same two functions SCIM
+// writes a Group with. That is the point: a role granted on `/admin/rbac`, one
+// granted by `POST /admin-api/rbac/grant`, one granted with an `ldapmodify` on
+// 389 or 636 and one granted by a SCIM PATCH all leave the IDENTICAL entry,
+// because all four end here. A membership store of the console's own would have
+// been a second answer to "is alice an admin" that no directory client could
+// see.
+//
+// It is ONE object where the console takes five separate slots, and the concern
+// stated over there — a filler that installed only half of it would silently
+// disable the other half — is answered rather than ignored: `setDirectory()`
+// checks every member it needs and refuses a partial object with an error line
+// naming what was missing. Guarded like the five above, so an older
+// `admin_rbac.js` costs a warning rather than a service that will not start.
+if (typeof adminRbac.setDirectory === 'function') {
+  adminRbac.setDirectory({
+    groupsOfUser: groupsOfUser,
+    readGroupEntry: readGroupEntry,
+    writeGroupEntry: writeGroupEntry,
+    groupDnFor: groupDnFor,
+    normalizeDn: normalizeDn,
+    existingUserEntry: existingUserEntry,
+    usernameOfEntry: usernameOfEntry,
+    nameUsableInDn: nameUsableInDn,
+    allPersons: allPersons,
+    // THE OTHER DIRECTION OF MEMBERSHIP. `readGroupEntry()` answers what the
+    // GROUP lists; this answers who CLAIMS the group through their own
+    // `memberOf` while the group does not list them back. `groupsOfUser()`
+    // already honours both directions, so somebody added that way really holds
+    // the role — and without this the roster page would have shown a console
+    // they could use and a list they were not on, which is the one thing a
+    // permissions page must never do.
+    claimedMembersOf: claimedMembersOf,
+    usersDn: USERS_DN,
+    groupsDn: GROUPS_DN
+  });
+} else {
+  log.warn('ldap: admin_rbac.js offers no setDirectory(), so the admin ' +
+           'console cannot read or grant its two roles. With ' +
+           'admin.authRequired on that leaves /admin reachable only while ' +
+           'admin.openWhenEmpty is on. The directory itself is unaffected.');
 }
 
 // And once, now. The seeded people were written before any of this existed and
@@ -3968,7 +4410,9 @@ function description(req) {
       'no pwd beside it and mfaAuthenticated FALSE, because one factor is one ' +
       'factor however phishing-resistant it is. Nothing here READS them: no ' +
       'token carries them and no endpoint decides anything on them, exactly as ' +
-      'a group here grants nothing.',
+      'a group here grants nothing — bar the two groups that decide who may ' +
+      'use the admin console, which is the one exception anywhere in this ' +
+      'directory and is confined to that console.',
     enforcedRules: [
       'an add whose parent does not exist is LDAP_NO_SUCH_OBJECT (32)',
       'a delete of an entry with children is LDAP_NOT_ALLOWED_ON_NONLEAF (66)',
@@ -4796,8 +5240,15 @@ function groupDnFor(displayName) {
   return 'cn=' + escapeDnValue(String(displayName)) + ',' + GROUPS_DN;
 }
 
-function writeGroupEntry(dn, attributes) {
-  log.debug('Entering writeGroupEntry(). dn=' + dn);
+// `origin` says WHICH DOOR wrote it, and it is a parameter rather than the
+// constant it used to be because there are now three: SCIM (the caller this
+// function was written for), the admin console's RBAC screen, and the
+// management API behind it. It shows in the `Came from` column on
+// /admin/groups, which is the one place a reader can tell a group somebody
+// PATCHed over SCIM from one the console created. It defaults to `scim`, so the
+// call site that predates the parameter says exactly what it always meant.
+function writeGroupEntry(dn, attributes, origin) {
+  log.debug('Entering writeGroupEntry(). dn=' + dn + ', origin=' + (origin || 'scim'));
   const existing = getEntry(dn);
   if (existing && !groupRuleFor(existing)) {
     log.debug('Leaving writeGroupEntry(). ' + dn + ' is an entry and not a group.');
@@ -4814,7 +5265,8 @@ function writeGroupEntry(dn, attributes) {
     return { ok: false, reason: 'noParent', dn: dn, parent: parentDn(dn) };
   }
   const created = existing ? existing.createdAt : generalizedTime();
-  const stored = putEntry(dn, attributes, { origin: existing ? existing.origin : 'scim' });
+  const stored = putEntry(dn, attributes,
+                          { origin: existing ? existing.origin : (origin || 'scim') });
   stored.createdAt = created;
   stored.attributes.createtimestamp = [created];
   stored.attributes.modifytimestamp = [generalizedTime()];

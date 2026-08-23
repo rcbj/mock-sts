@@ -232,6 +232,27 @@ const ACTIONS = [
   { action: 'claims.change', category: 'admin',
     label: 'A token or assertion claim set was changed' },
 
+  // THE SUBSTANCE OF A ROLE CHANGE, and it is here for the reason
+  // `claims.change` is: the `admin.change` row above says somebody posted a
+  // form to /admin/rbac at that moment, and this says WHO NOW HOLDS WHAT. They
+  // answer different questions and the second is the one asked afterwards —
+  // "when did alice get write access to this console, and who gave it to her"
+  // is not answerable from an HTTP row.
+  //
+  // It is written by the four doors onto the roster and not only by the
+  // console: the RBAC screen, POST /admin-api/rbac, and — because the roles ARE
+  // two ordinary directory groups — an ldapmodify or a SCIM PATCH, which also
+  // write a `group.update` row of their own through the directory funnel. One
+  // act, two rows, at two layers: the same shape as everything else here, and
+  // the page above says so.
+  //
+  // NO CREDENTIAL IS IN THE ROW, which on this action is nearly free: a role
+  // grant has no secret in it at all. The name granted IS recorded, because a
+  // username is a name and not a secret and an audit row that would not say who
+  // was made an administrator would be worth nothing.
+  { action: 'admin.role.change', category: 'admin',
+    label: 'An admin console role was granted or taken away' },
+
   { action: 'api.read', category: 'api', label: 'A management API read' },
   { action: 'api.change', category: 'api', label: 'A management API write' },
 

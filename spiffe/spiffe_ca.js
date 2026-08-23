@@ -75,7 +75,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const pkijs = require('pkijs');
 const asn1js = require('asn1js');
-const { log, b64u, nowSec } = require('../common/helpers');
+const { log, b64u, nowSec, dnRfc4514 } = require('../common/helpers');
 const config = require('../common/config');
 const spiffeId = require('./spiffe_id');
 const keys = require('../common/vendored/key_material');
@@ -443,7 +443,11 @@ async function mintX509Svid(id, options) {
     notBefore: issued.notBefore,
     notAfter: issued.notAfter,
     expiresAt: Math.floor(new Date(issued.notAfter).getTime() / 1000),
-    hint: opts.hint || ''
+    hint: opts.hint || '',
+    // The six facts the directory files this identity's entry by. See
+    // certificateFacts(); null if the certificate could not be read back,
+    // which is bookkeeping lost and not an SVID lost.
+    certificate: issued.certificate
   };
 }
 
@@ -493,7 +497,11 @@ async function signCsr(csrDer, id, options) {
     notBefore: issued.notBefore,
     notAfter: issued.notAfter,
     expiresAt: Math.floor(new Date(issued.notAfter).getTime() / 1000),
-    hint: opts.hint || ''
+    hint: opts.hint || '',
+    // The six facts the directory files this identity's entry by. See
+    // certificateFacts(); null if the certificate could not be read back,
+    // which is bookkeeping lost and not an SVID lost.
+    certificate: issued.certificate
   };
 }
 
@@ -550,11 +558,73 @@ async function issueLeaf(id, publicPem, options) {
       authorityKeyIdentifier: { present: true }
     }
   });
+  const der = Buffer.from(issued.der);
   log.debug('Leaving issueLeaf(). serial=' + issued.serialHex);
-  return { pem: issued.pem, der: Buffer.from(issued.der),
+  return { pem: issued.pem, der: der,
            serialHex: issued.serialHex,
            notBefore: notBefore.toISOString(),
-           notAfter: notAfter.toISOString() };
+           notAfter: notAfter.toISOString(),
+           certificate: certificateFacts(der) };
+}
+
+// ---------------------------------------------------------------------------
+// THE SIX FACTS ABOUT AN ISSUED CERTIFICATE, IN THE SPELLING THE TLS LISTENERS
+// ALREADY PRODUCE.
+//
+// The directory grows an entry for the holder of every X509-SVID this authority
+// mints (see `spiffePlan()` and `applySpiffeCertificate()` in
+// `ldap/ldap_server.js`), and what goes ON that entry is the same `x509*`
+// attribute set a verified TLS client certificate writes. That is a decision
+// with one hard requirement: **the strings have to be IDENTICAL in form**, or
+// `/admin/users` and an `ldapsearch` show one identity two ways and a filter
+// written against a client certificate's entry silently misses an SVID's.
+//
+// So the facts are READ BACK OFF THE CERTIFICATE THIS FUNCTION JUST ISSUED
+// rather than assembled from the inputs that produced it, and they are read
+// with `crypto.X509Certificate` — which is node's own parser, the same one
+// behind `tls.TLSSocket#getPeerCertificate()`. Four of the six then need no
+// conversion at all, because node prints them the same way on both paths:
+// `serialNumber` is uppercase hex with no separators, `validFrom` and
+// `validTo` are `Mon DD HH:MM:SS YYYY GMT`, and `fingerprint256` is
+// colon-separated uppercase hex. The two DNs come back as one `type=value` per
+// LINE rather than as an object, which is the second shape `dnRfc4514()` learnt
+// in order to serve this caller — one function, so the two paths cannot drift.
+//
+// Assembling them instead would have been cheaper and wrong in a way nothing
+// would report: `spiffe.svidSubject` is the string `C=US,O=SPIRE`, which is
+// most-significant-first and is NOT the RFC 4514 form of itself, and the CA's
+// own subject is held on the authority as whatever `dnToString()` rendered.
+// Either one written straight onto an entry would be a second spelling.
+//
+// A FAILURE HERE IS NOT A FAILURE TO ISSUE. The certificate exists and the
+// caller is entitled to it; the facts are bookkeeping, and bookkeeping must
+// never be able to fail the thing it is keeping books on — the rule
+// `recordClientCertificate()` follows on the other path and the observer in
+// `ldap_server.js` follows at the end of it.
+// ---------------------------------------------------------------------------
+function certificateFacts(der) {
+  log.debug('Entering certificateFacts().');
+  try {
+    const parsed = new crypto.X509Certificate(der);
+    log.debug('Leaving certificateFacts(). serial=' + parsed.serialNumber);
+    return {
+      subject: dnRfc4514(parsed.subject),
+      issuer: dnRfc4514(parsed.issuer),
+      serialNumber: parsed.serialNumber || '',
+      validFrom: parsed.validFrom || '',
+      validTo: parsed.validTo || '',
+      fingerprint256: parsed.fingerprint256 || ''
+    };
+  } catch (e) {
+    // A certificate this service built a moment ago that node cannot read is a
+    // defect here rather than bad input, so it is logged at error — but it is
+    // still swallowed, for the reason in the header: the SVID is minted and the
+    // caller is owed it.
+    log.error('spiffe: the certificate just issued could not be read back for ' +
+              'the directory, and the SVID is unaffected: ' + e.message);
+    log.debug('Leaving certificateFacts(). Unreadable.');
+    return null;
+  }
 }
 
 // An intermediate CA, for `NewDownstreamX509CA`. It is signed by the root and

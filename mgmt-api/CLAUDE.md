@@ -91,3 +91,38 @@ is ~250 lines, has no dependency, and does the same three things — read the
 document, fill a form, show the response — plus the equivalent `curl` line, which
 is what an operator of a mock actually copies.
 
+---
+
+## `/admin-api` IS NOT GATED AND THE CONSOLE NOW IS
+
+`admin.authRequired` (on by default) puts a sign-on session and one of two roles
+in front of every page and form under `/admin`. It puts nothing in front of
+anything here, and express does not do it by accident: `app.use('/admin', ...)`
+matches on segment boundaries, so `/admin-api` never matched it.
+
+Three reasons, and the third is the one to read before "fixing" this:
+
+* **A test drives this API.** The parent project's `tests/admin_api.js` walks
+  every operation over HTTP with no browser and no cookie jar. A credential here
+  would be the only one a test had to hold a secret for, in a service whose
+  premise is that it authenticates nobody.
+* **It is the way back in.** With `admin.openWhenEmpty` off and no role granted,
+  NO browser can reach the console — the screen that grants the first role is
+  behind the gate that role opens. `POST /admin-api/rbac/grant` is the only door
+  out of that state, and a door that needed a role would not be one.
+* **The consequence, stated rather than buried: anybody who can reach this port
+  can grant themselves both roles here and then use the console.** The gate
+  exists so a client can be driven through 302, 401, 403 and a role model — not
+  to make this service safe to expose. No password is checked anywhere here and
+  `/oauth2/token` will still mint a token for any username asked of it.
+
+If that ever needs to change it is a SEPARATE setting and a separate argument
+(`admin.apiAuthRequired` was considered and not built), never a quiet extension
+of `admin.authRequired` to this path: a suite that started failing because a
+console setting reached an API it never named would be the worst way to find out.
+
+**Rule 7 held for this feature and is worth noting because it is the case where
+it pays most.** `/admin/rbac` arrived with `GET /admin-api/rbac` and `POST
+/admin-api/rbac/:action` in the same change, and here the API half is not merely
+parity — it is the only door onto the roster that works when the console cannot
+be reached at all.

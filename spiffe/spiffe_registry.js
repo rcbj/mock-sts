@@ -84,6 +84,32 @@ const { log } = require('../common/helpers');
 const config = require('../common/config');
 const audit = require('../common/audit');
 const spiffeId = require('./spiffe_id');
+// ---------------------------------------------------------------------------
+// WHY THIS FILE KNOWS ABOUT THE PEOPLE CONTAINER AT ALL.
+//
+// It does not, and that is the point of reaching it through here.
+// `ldap_server.js` grows an entry under `ou=users` for every identity this
+// trust domain issues an X509-SVID to, and the three things below are the only
+// three in this service that end — or restore — an identity's ability to obtain
+// one. Somebody reading that entry has to be able to see it; nothing else can
+// tell them.
+//
+// `admin_stats.js` is the funnel, exactly as it is for an authentication and an
+// issuance, and this is a PLAIN REQUIRE in the ordinary direction rather than a
+// slot. Rule 3e's test, applied both ways round: that module registers no route
+// and does not require this one, so requiring it closes no cycle and moves no
+// route. The `setDirectory()` slot this file already has would have been the
+// other candidate and is the wrong one — it is the SPIFFE containers' store,
+// and `ou=users` is not in them.
+//
+// **THIS IS NOT REVOCATION AND MUST NOT BE DESCRIBED AS ANY.** SPIFFE has none;
+// see `applySpiffeCredentialStatus()` in `ldap_server.js`, which is where the
+// whole argument is written down, and `GET /spiffe`, which states it as a thing
+// this service deliberately does not do. Nothing here refuses a certificate,
+// nothing publishes a serial, and an SVID already issued goes on verifying
+// until it expires.
+// ---------------------------------------------------------------------------
+const stats = require('../common/admin_stats');
 
 function maxEntries() { return config.value('spiffe.maxEntries'); }
 function maxAgents() { return config.value('spiffe.maxAgents'); }
@@ -632,6 +658,16 @@ function createEntry(record, origin, trustDomain, actor) {
   }
   auditEntry('spiffe.entry.create', id, full, actor,
              'A SPIFFE registration entry for ' + full.spiffeId + ' was created');
+  // The other direction, and it is needed because both of these are reversible:
+  // an identity whose entries were all deleted and which is then registered
+  // again can be issued SVIDs again, and a directory entry still saying
+  // `revoked` would be the stalest thing on the page. It writes NOTHING where
+  // this directory has no entry for the identity — which is the ordinary case
+  // for a brand-new registration, since nothing has been issued to it yet.
+  stats.recordCredentialStatus(full.spiffeId, 'active', {
+    reason: 'a SPIFFE registration entry naming this identity (' + id +
+            ') exists, so an SVID can be issued for it'
+  });
   log.debug('Leaving createEntry(). id=' + id);
   return { ok: true, errors: [], id: id, entry: entryById(id) };
 }
@@ -680,6 +716,25 @@ function deleteEntry(id, actor) {
   directory.deleteEntry(id);
   auditEntry('spiffe.entry.delete', id, existing, actor,
              'The SPIFFE registration entry for ' + existing.spiffeId + ' was deleted');
+  // AND THE HOLDER'S OWN ENTRY, IF THIS WAS THE LAST WAY IT COULD BE ISSUED
+  // ONE. The qualifier is the whole of the check and getting it wrong would be
+  // silent: SEVERAL registration entries may name one SPIFFE ID — different
+  // parents, different selectors, that is an ordinary SPIRE arrangement — and
+  // marking the identity revoked because one of them went would say a workload
+  // is dead while it is still collecting an SVID every half hour.
+  const remaining = entriesForSpiffeId(existing.spiffeId).length;
+  if (!remaining) {
+    stats.recordCredentialStatus(existing.spiffeId, 'revoked', {
+      reason: 'the last SPIFFE registration entry naming this identity (' + id +
+              ') was deleted, so no further SVID can be issued for it here. ' +
+              'Nothing was revoked — SPIFFE has no revocation — and any SVID ' +
+              'already issued verifies until it expires.'
+    });
+  } else {
+    log.debug('deleteEntry(): ' + remaining + ' other registration entry/' +
+              'entries still name ' + existing.spiffeId + ', so its directory ' +
+              'entry is left active.');
+  }
   log.debug('Leaving deleteEntry(). Removed.');
   return { ok: true, errors: [], id: id };
 }
@@ -825,6 +880,13 @@ function recordAttestation(id, detail) {
     detail: { attestationType: String(info.attestationType || 'unknown'),
               selectors: selectors.length }
   });
+  // It attested, so it is not banned and it is not unknown — the two things
+  // that would have made it `revoked`. Written on EVERY attestation rather than
+  // only on the first, and cheaply: the directory does nothing when the entry
+  // already says this, which is how applySpiffeCredentialStatus() ends.
+  stats.recordCredentialStatus(id, 'active', {
+    reason: 'this agent attested successfully, so it may be issued an SVID'
+  });
   log.debug('Leaving recordAttestation(). ' + (existing ? 'Updated.' : 'Created.'));
   return { banned: false, agent: agentById(id), created: !existing };
 }
@@ -849,6 +911,18 @@ function setAgentBanned(id, banned, actor) {
     summary: 'The SPIFFE agent ' + id + ' was ' + (banned ? 'banned' : 'unbanned'),
     detail: {}
   });
+  // A ban is the ONE refusal this module makes, so it is the one place where
+  // "this identity can no longer get a credential here" is exactly true rather
+  // than nearly: a banned agent is refused at AttestAgent and at RenewAgent.
+  // An agent's id IS its SPIFFE ID, so there is nothing to look up.
+  stats.recordCredentialStatus(id, banned ? 'revoked' : 'active', {
+    reason: banned
+      ? 'this agent is banned on this server, so AttestAgent and RenewAgent ' +
+        'refuse it and no further SVID can be issued for it. Nothing was ' +
+        'revoked — SPIFFE has no revocation — and any SVID already issued ' +
+        'verifies until it expires.'
+      : 'this agent was unbanned, so it may attest and renew again'
+  });
   log.debug('Leaving setAgentBanned().');
   return { ok: true, errors: [], id: id, agent: agentById(id) };
 }
@@ -869,6 +943,17 @@ function deleteAgent(id, actor) {
     action: 'spiffe.agent.delete', actor: actor || '', protocol: 'SPIFFE',
     channel: 'internal', target: id,
     summary: 'The SPIFFE agent ' + id + ' was deleted', detail: {}
+  });
+  // Weaker than a ban and recorded the same way, because the OUTCOME for the
+  // holder is the same until it comes back: RenewAgent refuses an agent this
+  // server has no record of, naming AttestAgent as the way back. A
+  // re-attestation restores it, which is why recordAttestation() writes the
+  // other value.
+  stats.recordCredentialStatus(id, 'revoked', {
+    reason: 'this agent was deleted from the server, so RenewAgent refuses it ' +
+            'and it must call AttestAgent again before it can be issued ' +
+            'another SVID. Nothing was revoked — SPIFFE has no revocation — ' +
+            'and any SVID already issued verifies until it expires.'
   });
   log.debug('Leaving deleteAgent(). Removed.');
   return { ok: true, errors: [], id: id };

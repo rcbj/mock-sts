@@ -691,7 +691,10 @@ const agentHandlers = {
     }
     stats.recordSvid('X.509', {
       subject: agentId, entryId: '', serial: svid.serialHex,
-      expiresAt: svid.expiresAt
+      expiresAt: svid.expiresAt,
+      // See buildX509Response() in spiffe_workload.js: the directory files this
+      // agent's identity by the certificate it was just given.
+      certificate: svid.certificate
     });
     // ---------------------------------------------------------------------
     // THE ATTESTED AGENT IS AN IDENTITY, AND IT REACHES THE FUNNEL HERE.
@@ -807,7 +810,7 @@ const agentHandlers = {
     });
     stats.recordSvid('X.509', {
       subject: caller.spiffeId, entryId: '', serial: svid.serialHex,
-      expiresAt: svid.expiresAt
+      expiresAt: svid.expiresAt, certificate: svid.certificate
     });
     audit.audit({
       action: 'spiffe.agent.attest', actor: caller.spiffeId,
@@ -1247,7 +1250,8 @@ const svidHandlers = {
     const svid = await ca.signCsr(Buffer.from(request.csr), wanted,
                                   { ttl: Number(request.ttl || 0) });
     stats.recordSvid('X.509', { subject: wanted, serial: svid.serialHex,
-                                expiresAt: svid.expiresAt });
+                                expiresAt: svid.expiresAt,
+                                certificate: svid.certificate });
     auditSvid('An X509-SVID was minted for ' + wanted, wanted);
     return { svid: { cert_chain: [svid.certificateDer],
                      id: spiffeId.toProto(wanted),
@@ -1315,7 +1319,8 @@ const svidHandlers = {
         registry.noteSvidIssued(entry.id);
         stats.recordSvid('X.509', { subject: entry.spiffeId, entryId: entry.id,
                                     serial: svid.serialHex, hint: entry.hint,
-                                    expiresAt: svid.expiresAt });
+                                    expiresAt: svid.expiresAt,
+                                    certificate: svid.certificate });
         results.push({ status: okStatus(),
                        svid: { cert_chain: [svid.certificateDer],
                                id: spiffeId.toProto(entry.spiffeId),

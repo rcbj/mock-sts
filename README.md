@@ -2039,7 +2039,9 @@ Where there is no entry the section says **which** of the five reasons it is, be
 
 **A member links to `/admin/users` only for somebody this service has actually seen authenticate**, and is marked *never here* otherwise. The two lists answer different questions and it is worth being deliberate about the difference: the directory holds an entry for whoever somebody wrote one for — including `alice`, `bob` and `carol`, who are seeded at startup — while the users page holds whoever has presented a credential to this process. A link drawn unconditionally would usually land on "nothing here has authenticated as alice", which reads as a broken link rather than as the answer it is.
 
-**A group here grants nothing**, and both pages say so where a reader will see it rather than leaving it to be discovered. No endpoint in this service checks a group and nothing decides anything on one. On a service that authenticates nobody it could hardly be otherwise — but a console that listed groups a click away from the tokens page without saying it would let somebody conclude that adding a user to `cn=directory-admins` had changed what their token could do.
+**A group here grants nothing, with exactly two exceptions**, and both pages say so where a reader will see it rather than leaving it to be discovered. No *endpoint* in this service checks a group and nothing in any protocol decides anything on one. On a service that authenticates nobody it could hardly be otherwise — but a console that listed groups a click away from the tokens page without saying it would let somebody conclude that adding a user to `cn=directory-admins` had changed what their token could do.
+
+**The two exceptions are `cn=admin-read` and `cn=admin-write`, and what they grant is the admin console.** They are the roles behind `admin.authRequired` — see *Who may use the console* below — and they are ordinary group entries appearing on `/admin/groups` like any other, deliberately: the alternative was a membership store the console kept for itself, which an `ldapmodify` could not see and which would drift from the directory with nothing comparing the two. Even those two grant nothing outside `/admin`: no token's scopes change, no assertion gains an attribute, no Kerberos PAC is affected, and a member of `admin-write` gets exactly the same answer from `/oauth2/token` as anybody else. `groups.claim` carries `admin-write` into an access token exactly as it carries `developers`, where still nothing reads it.
 
 **A token can carry one, which is a different sentence and the two must not be merged.** That half of the paragraph used to read "no access token, ID Token, SAML assertion, WS-Federation token or Kerberos PAC carries a group from this directory", and `groups.claim` is what made it false. With that setting on — it is **on by default** — every OAuth 2.0 access token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries a claim naming the groups its subject is in, read out of these entries at the moment the token is minted. It is the same distinction this service already draws between an identity being **recorded** and an identity being **authenticated**, and it is drawn here for the same reason: carrying a fact is not acting on it. No Kerberos PAC carries a group either way.
 
@@ -2136,13 +2138,27 @@ Values may contain `${username}`-style placeholders, because a claim that can on
 
 Everything the console holds is **in memory and dies with the process**, like the signing key. There is nothing here worth persisting, and a statistics file that outlived the key that signed the tokens it described would be actively misleading. The registries are **bounded** — the most recent 5,000 tokens and 5,000 other artifacts, 500 call paths, and 2,000 identities keeping their 50 most recent authentications each (capped per user rather than in total, because a test loop signing one name in a thousand times is the normal case here) — and what was dropped is counted and shown, because a silent truncation turns "12 tokens issued" into a number that quietly means something else. The revoked-jti set is deliberately *not* capped and is kept separately from the token records, so a token whose record has aged out stays revoked.
 
-**The console is not protected, and every page says so.** This service checks no password anywhere; a console with a credential on it would be the only authenticated surface in a service whose premise is that it authenticates nobody, and the only thing a test had to hold a secret for. What follows is worth stating rather than implying: anyone who can reach this port can revoke every token this service has issued and add a claim to every token it issues next — which is the same thing that was already true of `/oauth2/token`, since it will mint a token for any username asked of it. Do not put this service on a public address.
+#### Who may use the console
+
+**The console is protected now, and every page says which of three states it is in.** With `admin.authRequired` on — it is **on by default** — every page and every form under `/admin` needs a browser sign-on session from `/authn/login` and one of two roles: **Admin Read**, which may look at every page and change nothing, and **Admin Write**, which may post every form. **Write implies read**, because a role that could change a page it was not allowed to see would be a trap rather than a permission.
+
+**It is a turnstile and not a lock, exactly as SCIM's authentication is.** This service still checks no password anywhere, so what the gate proves is that somebody *typed* a name that holds a role. What it buys is what a mock is for: a client, or a person, can now be driven through a 302 to a sign-in screen, a 401 with no session, a 403 with the wrong role, and a role model that can be granted and revoked — none of which was reachable here before. Turning the setting off restores the completely open console this used to be, which stays deliberately reachable for the reason every refusal here is switchable.
+
+**The two roles are two ordinary groups in the embedded LDAP directory** (`admin.readGroup`, `admin.writeGroup`; `cn=admin-read` and `cn=admin-write` by default), not a store of the console's own. So there are **four doors onto one membership** — the `/admin/rbac` screen, `POST /admin-api/rbac/grant`, an `ldapmodify` on 389 or 636, and a SCIM `PATCH` of the group — and a grant made through any of them is visible through all of them. That is the point rather than a side effect: a role no test can grant is a role no test can exercise.
+
+**While *neither* group has a member, anybody who signs in holds both roles**, and every page says so in a banner that cannot be missed. There is no password anywhere in this service to bootstrap an administrator with, and the roster lives in memory and dies with the process — so a service started with the gate on and an empty roster would otherwise have a console no browser could ever reach. The first grant made ends that for everybody, including whoever makes it, which is why the screen says to grant yourself one first. `admin.openWhenEmpty` turns the behaviour off for anybody who wants the locked case.
+
+**`/admin-api` is not gated by any of this**, deliberately. It is what a test drives, and it is the way back out of the locked case — with `admin.openWhenEmpty` off and no role granted, the screen that grants the first role is behind the gate that role opens, so `POST /admin-api/rbac/grant` is the only door. The honest consequence, stated rather than buried: **anyone who can reach this port can grant themselves both roles through the API and then use the console.** That is the same thing that was already true of `/oauth2/token`, since it will mint a token for any username asked of it. The gate exists to make a client's 302/401/403 paths runnable, not to make this service safe to expose. Do not put this service on a public address.
+
+#### The pages, and how they are grouped
+
+**The navigation is a grouped list down the left rather than a row of tabs across the top.** Seventeen tabs on one line wrapped to three rows on a laptop, and a reader looking for *Verifier request* had to read all seventeen labels to find out it was not *Credential claims*. The five sections are **Overview** (the console index, metrics, issued tokens), **Protocols** (authorization servers, custom claims, credential claims, the verifier request, SCIM, and SPIFFE with its registration entries and agents), **Directory** (users, groups, applications), **Monitoring** (the audit log) and **Server configuration** (configuration, admin roles, the service metadata). The breadcrumb trail is unchanged and deliberately does **not** gain a crumb for the section: a section has no page of its own, so its crumb could not be a link, and a dead crumb in the middle of a trail is the same mistake the last-crumb rule exists to prevent.
 
 Three things the console deliberately does **not** do. It does not invalidate a SAML assertion, a Kerberos ticket or a credential: none of those has a revocation mechanism a relying party consults — an assertion is valid because its signature verifies and its `Conditions` hold, and nothing about this service is asked — so a button claiming to revoke one would change a number here and nothing at all out there. It does not end a sign-on session, because `/oauth2/logout` and `wsignout1.0` already do and the second has cleanup to fan out to every relying party the session signed into; a third way to end one would be a third way to get that wrong. And it adds no claims to refresh tokens: a refresh token is presented back to this server and to nothing else, so a claim in one reaches no relying party and would only make the two halves of a grant disagree.
 
 ### The management API
 
-`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. 55 operations, none of them protected, all of them changing the same state the console changes — because they call the same functions it does.
+`GET /admin-api` is the console above with the HTML taken off: every page's `?format=json` view and every one of its forms, at a path a script can use, with an OpenAPI 3.1 document at `/admin-api/openapi.json` and an explorer that calls it at `/admin-api/docs`. None of them protected — **including now that the console itself is**, which is argued above and is what makes this the way back in when nobody holds a console role — and all of them changing the same state the console changes, because they call the same functions it does.
 
 **It exists because a form is the right shape for a person and the wrong one for anything else.** Every page here has answered `?format=json` since it was written, so reading was never the problem; *changing* something was. A caller that wanted to revoke a token from a script, or narrow the issuer's claim set from a CI job before running a wallet against it, was left either parsing a 303 redirect for the message in its query string or knowing which hidden input a particular form carried. Both are ways of driving a browser without one.
 
@@ -2669,6 +2685,20 @@ rather than `ou=applications`, which is a decision rather than an oversight —
 that container holds what this service was *asked about*, where an application is
 the audience of a token, and a SPIFFE identity is the **subject** of one, like the
 TLS client certificate for a machine that already lands here.
+
+**There is a fourth way onto that entry and it is not an acceptance: this trust
+domain *issuing* the identity a certificate.** Every X509-SVID minted here writes
+the certificate onto the holder's entry, using the **same six `x509*`
+attributes** a verified TLS client certificate writes and in the same strings —
+`spiffe_ca.js` reads them back off the certificate it has just issued with node's
+own parser, and both DNs go through the one `dnRfc4514()`, which is why that
+function now lives in `common/helpers.js` rather than in `tls_server.js`. Two
+spellings of one DN would be two people on `/admin/users`. The one rule that
+differs is that these six are **assigned** rather than appended, because an SVID
+is minted afresh every half-lifetime and appending would grow the entry for as
+long as the workload runs; `x509svidsIssued`, `x509firstIssued` and
+`x509lastIssued` are what is left of the history. The SPIFFE section has the whole
+of it, including why `spiffeCredentialStatus` is **not** a revocation.
 
 **None of the three DID cases is a sign-on**, and each says so on its own record. A presentation
 that verifies still starts no session and issues no token — the Verifier's own section
@@ -3276,7 +3306,10 @@ seeds an entry for it. Three acceptances do that:
 
 Being **issued** an SVID is not one of them: receiving a credential is not
 presenting one, so the Workload API's own callers do not appear as
-authentications.
+authentications — they appear on `/admin/users` with *never* in that column,
+counted under "seen only as a subject", because the SVID itself is an artifact.
+**It does get them a directory entry, which is a different statement again and
+the next section is about it.**
 
 The entry is the fourth shape this directory files (see *An LDAP object for
 every user who authenticates*): `uid=spiffe-<12 hex>,ou=users`, named by a digest
@@ -3288,6 +3321,79 @@ entry rather than three. It deliberately does *not* fold onto a person of a
 similar name: the last segment of a SPIFFE path is exactly the kind of short
 common word (`db`, `web`, `api`) that collides with a username, and a workload
 called `db` is not the DBA.
+
+#### And every certificate this trust domain issues gets one too
+
+That is the fourth way onto the same entry, and it is deliberately **not** a
+fourth acceptance. A trust domain whose whole output is certificates ought to be
+able to answer "which identities hold one, what is the current one, and can this
+one still get another" from an `ldapsearch` — and until now it could not, because
+the directory only heard about an identity that had *presented* something.
+
+So an X509-SVID mint reaches the directory as well. `stats.recordSvid('X.509', …)`
+is the funnel — the five mint sites already called it, so a sixth that forgets is
+a mint with no artifact row on `/admin/metrics` either — and what it carries is
+the certificate read back off itself with node's own parser at the moment
+`spiffe_ca.js` issues it.
+
+**It writes the same six `x509*` attributes a verified TLS client certificate
+writes**, in the same strings:
+
+| Attribute | On a SPIFFE identity's entry |
+|---|---|
+| `x509subject` | the SVID's subject, RFC 4514 — `O=SPIRE,C=US` by default, which is `spiffe.svidSubject` and is the same for every SVID in the domain |
+| `x509issuer` | this trust domain's X.509 authority |
+| `x509serialNumber` | the **current** SVID's serial |
+| `x509notBefore` / `x509notAfter` | its validity window |
+| `x509fingerprint256` | its SHA-256 fingerprint |
+| `x509svidsIssued` | how many have been minted for this identity |
+| `x509firstIssued` / `x509lastIssued` | when the first and the most recent were |
+
+Three things about that are worth knowing before reading the code:
+
+* **A rotation lands on the same object and nothing had to be written to make it
+  so.** The entry is found by `spiffeSubject`, which keys on the SPIFFE ID and on
+  nothing about the certificate, so the fiftieth SVID for `spiffe://…/sa/db`
+  updates the entry the first one created.
+* **The six are ASSIGNED here where the TLS path APPENDS them**, and that is the
+  one rule that differs. A renewed client certificate is rare and seeing both
+  serials is the point; an SVID is minted afresh at half its lifetime for as long
+  as the workload runs, so appending would add six values an hour for ever. The
+  three counters are what is left of the history, and the individual serials are
+  all on `/admin/metrics`.
+* **The identity is the SPIFFE ID and not the subject DN.** Filing an SVID the
+  way a client certificate is filed — by its subject — would fold every workload
+  in the trust domain onto one entry called `O=SPIRE`, because that is the subject
+  they all share. The certificate is a *fact about* the identity here, not the
+  identity.
+
+#### `spiffeCredentialStatus` is not a revocation
+
+**SPIFFE has no revocation.** There is no CRL, no OCSP and no serial list here;
+the answer is a short lifetime and rotation, the `crl` field in the Workload API's
+responses is empty because empty is the *conforming* value, and an SVID already in
+a workload's hands verifies against the bundle until it expires. Nothing reads
+this attribute back and no certificate is ever refused because of it.
+
+What it records is the three things in the registry that end an identity's ability
+to obtain a **new** credential here, on the entry of the identity they happened to:
+
+| What happened | Status written |
+|---|---|
+| its **last** registration entry was deleted — the qualifier is checked, because several entries may name one SPIFFE ID and deleting one of them ends nothing | `revoked`, with the entry id in the reason |
+| its **agent was banned**, which is the one refusal the registry makes: `AttestAgent` and `RenewAgent` both refuse it | `revoked` |
+| its **agent was deleted**, so `RenewAgent` refuses it until it attests again | `revoked` |
+| a registration entry naming it was created, its agent was unbanned, its agent attested, or an SVID was minted for it anyway | `active` |
+
+`spiffeCredentialStatusReason` is a sentence rather than a code, because it is the
+only thing that explains a status a reader did not expect. `spiffeRevokedAt` is
+when it was **last** revoked and is never cleared — the history the current-state
+flag deliberately does not keep, which is `mfaLastAuthTime`'s rule met again.
+
+**The entry is never removed.** An identity this trust domain used to issue
+certificates to is exactly what somebody points an LDAP client at a SPIFFE mock to
+find, and deleting the object would answer "was there ever a workload called `db`?"
+with silence.
 
 #### What it does refuse, which is a short list and not an empty one
 

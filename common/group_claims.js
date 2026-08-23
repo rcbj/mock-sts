@@ -19,6 +19,14 @@
 // `cn=directory-admins` still does not let them do one thing they could not do
 // before. /admin/groups says so and goes on saying so.
 //
+// TWO GROUPS ARE NOW AN EXCEPTION AND NOT TO THIS SENTENCE. `admin.readGroup`
+// and `admin.writeGroup` — `cn=admin-read` and `cn=admin-write` by default —
+// decide who may use the ADMIN CONSOLE, and nothing about that reaches here:
+// they are put in this claim exactly like any other group a person is in, and
+// no endpoint reads the claim to find them. A client that saw `admin-write` in
+// an access token and concluded the token could do something would be making
+// precisely the mistake the paragraph above is about. See `admin-ui/admin_rbac.js`.
+//
 // What stopped being true is the OTHER half of that sentence, which used to run
 // "...and no token carries a group from this directory". One now can. The two
 // are different claims and merging them is the mistake to avoid — it is the
@@ -368,7 +376,11 @@ function state() {
     // read by people who never open the console.
     grants: 'A group here grants nothing. No endpoint in this service reads ' +
             'this claim and nothing decides anything on it; the token merely ' +
-            'carries it.',
+            'carries it. The two admin-console roles are the one exception ' +
+            'and are not an exception to THIS sentence: they are read from ' +
+            'the directory by /admin and never from this claim, so a token ' +
+            'carrying admin-write can still do nothing a token without it ' +
+            'cannot.',
     precedence: 'A typed claim and a directory attribute of the same name both ' +
                 'win over the groups claim.',
     settings: ['groups.claim', 'groups.claimName', 'groups.claimValue',

@@ -656,7 +656,34 @@ async function serverApiCredentials() {
   log.debug('Entering serverApiCredentials().');
   await ca.ready();
   const identity = spiffeId.serverId(ca.trustDomain());
-  const svid = await ca.mintX509Svid(identity, {});
+  // ---------------------------------------------------------------------
+  // THE SERVER'S OWN CERTIFICATE GETS THE AUTHORITY'S LIFETIME, NOT AN
+  // SVID'S, AND THE DIFFERENCE IS A SERVICE THAT STOPS ANSWERING AFTER AN
+  // HOUR.
+  //
+  // This is not a workload SVID. It is a LISTENER'S certificate, minted
+  // ONCE at `listen()` and handed to `grpc.ServerCredentials.createSsl()`,
+  // which holds it for the life of the process — there is no way to swap it
+  // afterwards without rebinding the socket. So with `spiffe.svidTtl` (an
+  // hour by default) it expires while the listener is still up, and from
+  // that moment every mutual-TLS client is refused with `certificate has
+  // expired`.
+  //
+  // That failure names the CLIENT'S trust store rather than this server's
+  // clock: a caller sees only that the certificate it was handed will not
+  // verify, and the obvious first move is to re-fetch the bundle — which is
+  // perfectly good and changes nothing. A fresh container hides it
+  // completely, so it appears as a SPIRE Server API that works right after a
+  // restart and not otherwise.
+  //
+  // `spiffe.caTtl` is the right bound because it is the true one: nothing
+  // this authority signs can outlive it, and `issueLeaf()` clamps to the
+  // authority's own notAfter anyway. What is left is that the listener's
+  // certificate now lasts exactly as long as the trust domain it speaks
+  // for.
+  // ---------------------------------------------------------------------
+  const svid = await ca.mintX509Svid(identity,
+    { ttl: config.value('spiffe.caTtl') });
   const roots = await ca.x509BundleDer();
   const credentials = grpc.ServerCredentials.createSsl(
     // The roots are handed over as PEM: node's `ca` option takes PEM or DER,

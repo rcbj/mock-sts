@@ -114,7 +114,8 @@ const tls = require('tls');
 const crypto = require('crypto');
 const forge = require('node-forge');
 const app = require('../common/app');
-const { log, xmlEscape, parseBody, baseUrlOf } = require('../common/helpers');
+const helpers = require('../common/helpers');
+const { log, xmlEscape, parseBody, baseUrlOf } = helpers;
 // The single funnel every authentication in this service passes through at the
 // moment a credential is ACCEPTED. A verified client certificate is one, and
 // going through here rather than writing to the console and the directory
@@ -398,41 +399,20 @@ function dnToString(dn) {
 //
 // dnToString() above renders what a reader's own tool prints: node hands the
 // subject back most-significant-first (`C=US, O=Example, CN=alice`) and openssl
-// x509 -subject shows it that way too. A DN as LDAP and every RFC 4514 document
-// writes it is the REVERSE — leaf first, `CN=alice,O=Example,C=US` — with no
-// spaces after the commas, and that is the form this service files the identity
-// under and the directory builds an entry from. Producing one form and using it
-// for both would be wrong in whichever direction it was wrong: a report that
-// disagreed with openssl, or a DN nothing in LDAP would accept.
+// x509 -subject shows it that way too. A DN as LDAP writes it is the REVERSE,
+// leaf first and with no spaces after the commas, and that is the form this
+// service files the identity under and the directory builds an entry from.
 //
-// Two details that are easy to lose. Node collapses repeated attribute types
-// into an ARRAY (`OU=A,OU=B` arrives as `OU: ['A','B']`), and those are separate
-// RDNs rather than one multi-valued RDN, so each becomes its own component here
-// — dnToString() joins them with '+', which is the right punctuation for the
-// display form and the wrong one for this. And values are escaped: a comma
-// inside `O=Example\, Ltd` that went through unescaped would turn one RDN into
-// two and name an object that does not exist.
-function escapeRdnValue(value) {
-  const text = String(value == null ? '' : value);
-  // RFC 4514 section 2.4: these are escaped anywhere, '#' only leading, and a
-  // space only when it leads or trails.
-  let out = text.replace(/([\\,+"<>;=])/g, '\\$1');
-  if (out.indexOf('#') === 0) out = '\\' + out;
-  out = out.replace(/^ /, '\\ ').replace(/ $/, '\\ ');
-  return out;
-}
-
-function dnRfc4514(dn) {
-  if (!dn || typeof dn !== 'object') return String(dn || '');
-  const parts = [];
-  Object.keys(dn).forEach(function (key) {
-    const value = dn[key];
-    (Array.isArray(value) ? value : [value]).forEach(function (one) {
-      parts.push(key + '=' + escapeRdnValue(one));
-    });
-  });
-  return parts.reverse().join(',');
-}
+// **THE FUNCTION ITSELF NOW LIVES IN `common/helpers.js`** and is re-exported
+// from here unchanged, because the string has FOUR producers rather than two
+// and two spellings of one DN is two people on /admin/users. `scim_auth.js`
+// and `spiffe_auth.js` require this module for it and still may; `spiffe_ca.js`
+// cannot — `admin.js` requires that module and is required BEFORE this one, so
+// the require would move every `/tls*` route ahead of the console's — and it
+// needs the same spelling for a certificate it has just MINTED. The header in
+// `helpers.js` carries the whole argument, including the second shape of DN it
+// learnt in order to serve that caller.
+const dnRfc4514 = helpers.dnRfc4514;
 
 // The address in a certificate, if it carries one: the emailAddress RDN, or the
 // first rfc822Name in the subjectAltName. Read rather than invented, because the
@@ -1492,11 +1472,12 @@ module.exports = {
   close: close,
   // Exported for tests, which check these without opening a socket.
   splitPemCertificates: splitPemCertificates,
-  // The RFC 4514 form of a subject, exported because scim_auth.js needs the
-  // identity of a client certificate presented at the SCIM endpoints and it has
-  // to be the SAME string this module records and the directory files a
-  // certificate under. Two spellings of one DN is two people on /admin/users,
-  // and the difference between them is a comma and a space.
+  // The RFC 4514 form of a subject. It now LIVES in common/helpers.js and is
+  // re-exported here so that scim_auth.js and spiffe_auth.js — which require
+  // this module for it and have done since before it moved — go on getting the
+  // same string this module records and the directory files a certificate
+  // under. Two spellings of one DN is two people on /admin/users, and the
+  // difference between them is a comma and a space.
   dnRfc4514: dnRfc4514,
   addAnchors: addAnchors,
   clearAnchors: clearAnchors,

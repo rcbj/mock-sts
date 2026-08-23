@@ -57,6 +57,22 @@ var config = {
     revokeRefreshOnLogout: true
   },
 
+  // --- The admin console -------------------------------------------------
+  // The console at /admin now asks for a sign-on session and one of two roles,
+  // and the roles are two ORDINARY GROUPS in the embedded directory — so an
+  // ldapmodify, a SCIM PATCH, /admin/rbac and the management API are four doors
+  // onto one membership. Write implies read. While NEITHER group has a member,
+  // openWhenEmpty decides whether anybody who signs in holds both roles (on) or
+  // nobody gets in at all (off); it is on because the roster dies with the
+  // process and nothing here has a password to bootstrap with. /admin-api is
+  // NOT gated either way, which is the way back in.
+  admin: {
+    authRequired: true,
+    readGroup: "admin-read",
+    writeGroup: "admin-write",
+    openWhenEmpty: true
+  },
+
   // --- Applications ------------------------------------------------------
   // The registry of every OAuth client, relying party, service provider and
   // Kerberos service this instance has been asked about. It IS the

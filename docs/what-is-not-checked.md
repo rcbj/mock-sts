@@ -28,8 +28,7 @@ service can be told to be strict, it can.
 | Verify anything in an issued credential's values | They come off the directory entry, and what the entry lacks is *invented* from the username |
 | Deactivate anybody on SCIM `active: false` | Stored as `scimActive` and read by nothing |
 | Attest a workload or a node | See SPIFFE, below |
-| Let a group grant anything | A token now *carries* one; no endpoint reads it |
-| Protect the admin console | `/admin` can revoke tokens and create people |
+| Let a group grant anything, bar two | A token now *carries* one; no endpoint reads it. `cn=admin-read` and `cn=admin-write` are the exception and grant the admin console, nothing else |
 
 **Recorded is not the same claim as authenticated, and the two are kept apart
 everywhere.** A verified TLS client certificate, a verified presentation and an
@@ -74,7 +73,7 @@ either, so several refusals are kept deliberately reachable:
   handed you in order to verify a credential is a server-side request forgery
   with a specification citation attached.
 
-## The two surfaces that DO require a credential
+## The three surfaces that DO require a credential
 
 ### SCIM, at `/scim/v2`
 
@@ -120,6 +119,39 @@ service's invention.
 What comes out of that surface is a credential another service will believe,
 which is why. `spiffe.authRequired` turns it off and restores the whole of the
 old posture.
+
+### The admin console, at `/admin`
+
+`admin.authRequired` is **on by default**. Every page and every form under
+`/admin` needs a browser sign-on session from `/authn/login` and one of two
+roles: **Admin Read** (look at everything, change nothing) and **Admin Write**
+(post every form). Write implies read.
+
+It is the one surface that can change what every *other* surface does — it
+revokes tokens through the same set `/oauth2/revoke` writes to, and it adds
+claims to every token, ID Token and assertion issued from then on — which is why.
+
+**It is a turnstile rather than a lock, and here that is sharper than it is for
+SCIM: no password is checked at the sign-in screen either.** What the gate proves
+is that somebody *typed* a name that holds a role. What it buys is a client, or a
+person, being driven through a 302 to a sign-in screen, a 401 with no session, a
+403 with the wrong role, and a role model that can be granted and revoked.
+
+**The roles are two ordinary groups in the embedded directory** — `cn=admin-read`
+and `cn=admin-write` by default (`admin.readGroup`, `admin.writeGroup`) — so
+`/admin/rbac`, `POST /admin-api/rbac/grant`, an `ldapmodify` and a SCIM `PATCH`
+are four doors onto one membership. A role no test can grant would be a role no
+test can exercise.
+
+**While neither group has a member, anybody who signs in holds both roles**, and
+every page says so. There is no password anywhere here to bootstrap an
+administrator with and the roster dies with the process, so an empty roster opens
+rather than closes; `admin.openWhenEmpty` turns that off.
+
+**`/admin-api` is not gated at all.** It is what a test drives and it is the way
+back in when nobody holds a role — and it means anybody who can reach this port
+can grant themselves both roles through it. Do not put this service on a public
+address.
 
 ## The Workload API is the opposite case
 
