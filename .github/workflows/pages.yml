@@ -1,0 +1,111 @@
+# Builds docs/ as a Jekyll site and deploys it to GitHub Pages.
+#
+# WHY THIS SHAPE. The parent project (rcbj/oauth2-oidc-debugger) has no Pages
+# workflow to copy: its site is static content pushed to S3 + CloudFront from a
+# container, which needs AWS credentials this repository does not have and does
+# not want. The only gh-pages job anywhere in that tree is inside the node-ldapjs
+# submodule, and it pushes a built directory into a DIFFERENT repository with a
+# personal access token — the pre-Pages-v2 pattern, and not one to copy in 2026:
+# it needs a secret, and the secret grants write access to another repo.
+#
+# So this is GitHub's own arrangement instead. configure-pages, then
+# jekyll-build-pages, then deploy-pages. It needs no secret at all — the
+# id-token/pages permissions below are what authorise the deployment — and no
+# dependency in package.json, which matters here: this repository's dependencies
+# are deliberately short, its image is built in containers that may have no
+# network beyond the registry, and a documentation toolchain has no business
+# being installed by `npm install` for a service that does not render markdown at
+# runtime.
+#
+# MkDocs was the alternative and was weighed rather than skipped. It has better
+# navigation and search out of the box, and it would add a Python toolchain to a
+# repository that currently has only Node, plus a theme version that is a moving
+# part. `minima` is the theme GitHub Pages ships; the markdown stays readable in
+# the repository, which is where a maintainer actually reads it.
+#
+# BEFORE THE FIRST RUN, somebody has to set Settings → Pages → Source to
+# "GitHub Actions" once. Until that is done this job fails at the deploy step
+# with a message about Pages not being enabled — which names the API and not the
+# setting, so it is worth knowing in advance.
+name: Deploy docs to GitHub Pages
+
+on:
+  # Only when the documentation or this workflow changes. The container build
+  # (build-container.yml) runs on every push to main and this does not need to:
+  # a source change cannot alter the site, because nothing here is generated
+  # from the source. If that ever stops being true — a page built from
+  # sts_metadata.js, say — this filter is the first thing to remove.
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# The three permissions the official flow needs, and no more. `contents: read`
+# rather than write: nothing here pushes a branch, which is the whole difference
+# from the gh-pages pattern this replaced.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a queued one is NOT cancelled: a half-finished
+# Pages deployment is a site serving a mixture of two builds. cancel-in-progress
+# is right for a test suite and wrong for this.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules. node-ldapjs is 30 MB of a library this site does not
+      # mention, and the build-container job is where its absence would matter.
+      # Fetching it here would only make this job slower and its failures
+      # confusing.
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      # `source: ./docs` — the site is that directory and nothing above it, so
+      # README.md, the CLAUDE.md files and the source tree are not published. The
+      # baseurl comes from configure-pages above rather than from docs/_config.yml,
+      # which is why that file's own `baseurl` is a fallback for a local
+      # `jekyll serve` and not the authority.
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
+      # A guard rather than trust in the step above. jekyll-build-pages succeeds
+      # on an empty source directory, and the symptom of that is a deployed site
+      # that is simply blank — which reads as a Pages problem rather than a build
+      # one. index.html is what docs/index.md must have become.
+      - name: Check the site is not empty
+        run: |
+          if [ ! -f _site/index.html ]; then
+            echo "_site/index.html is missing — docs/index.md did not render." >&2
+            ls -la _site || true
+            exit 1
+          fi
+          echo "Built $(find _site -name '*.html' | wc -l) page(s)."
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
