@@ -1,8 +1,12 @@
 # What is NOT sent to the daemon as build context.
 #
-# Nothing here changes what ends up in the image: the Dockerfile copies five
-# things — package*.json, *.js, contexts, protos and env — and no rule below
-# touches any of them. What it changes is what is UPLOADED before the first instruction runs.
+# This file now DECIDES what ends up in the image, which it did not before. The
+# Dockerfile used to copy five named things (package*.json, *.js, contexts,
+# protos, env) and no rule here touched any of them; since the 2026-08-23
+# reorganisation put every module in a subdirectory it copies the context whole,
+# so that adding a protocol directory cannot be forgotten. Every exclusion below
+# is therefore a decision about the image as well as about upload time — read the
+# Dockerfile's COPY comment before adding one.
 #
 # node_modules is the whole reason this file exists. It is tens of megabytes, it
 # is re-sent on every build, and it is usually PRESENT: `npm ci` here is the
@@ -24,3 +28,21 @@
 # private.
 *.pem
 *.log
+
+# The documentation and the CI definitions. Neither is read at runtime: docs/ is
+# the source of the GitHub Pages site, .github/ is the workflows that build it
+# and the container, and the CLAUDE.md files are guidance for whoever (or
+# whatever) edits this repository. They are excluded because the Dockerfile now
+# copies the context whole — before that they were left out by not being named.
+docs
+.github
+CLAUDE.md
+**/CLAUDE.md
+README.md
+COVERAGE.md
+SECURITY.md
+LICENSE.md
+clean.sh
+docker-compose.yml
+Dockerfile
+.dockerignore

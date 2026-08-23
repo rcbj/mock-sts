@@ -36,13 +36,13 @@
 // no list at all in a tool people use to learn those specs.
 // ---------------------------------------------------------------------------
 
-const app = require('./app');
-const { log, xmlEscape, baseUrlOf, PORT } = require('./helpers');
-const config = require('./config');
+const app = require('./common/app');
+const { log, xmlEscape, baseUrlOf, PORT } = require('./common/helpers');
+const config = require('./common/config');
 // The named authorization servers this process has served. They cannot be read
 // off the router — one route serves all of them — so they are listed by hand,
 // the same way the Kerberos and LDAP listeners are.
-const authorizationServers = require('./authorization_servers');
+const authorizationServers = require('./oauth-oidc/authorization_servers');
 
 // ---------------------------------------------------------------------------
 // The specifications this service implements, and how far.

@@ -3,6 +3,52 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in
 this repository.
 
+**It is the thin one.** Almost every fact about a module lives in the `CLAUDE.md`
+of the directory that module is in, and this file keeps only what is genuinely
+cross-cutting: the require order, the rules about libraries and hooks, the two
+CSP rules, the endpoint-drift rule, the code style, the submodule warnings, and
+the state of the tests. **There is one copy of each fact.** If something here
+looks like a summary of a directory file, it is a bug — say so rather than
+reconciling the two.
+
+## Where things are
+
+The 2026-08-23 reorganisation moved every module out of the package root. The
+files did not change; the paths did.
+
+| Directory | What is in it |
+|---|---|
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `admin_stats.js`, `audit.js`, `applications.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
+| `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
+| `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles. |
+| `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. |
+| `saml/` | The two assertion builders. No Web SSO profile. |
+| `ws-trust/` | WS-Trust 1.0–1.4. |
+| `ws-federation/` | WS-Federation 1.2, the passive requestor profile, and the mock relying party. |
+| `kerberos/` | The KDC, the acceptor, SPNEGO, and the seven codec modules they rest on. |
+| `ldap/` | The embedded directory. Also the STORE for people, groups, applications and the SPIFFE registry. |
+| `scim/` | `/scim/v2`, its authentication, and its attribute mapping. |
+| `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
+| `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
+| `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
+| `admin-ui/` | The console at `/admin`. |
+| `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
+| `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
+| `env/` | The appconfig files. `CONFIG_FILE` selects one. |
+
+At the package root there are exactly two modules, and both earn it:
+**`server.js`**, the shell that requires the others and listens, and
+**`sts_metadata.js`**, which reads the router to list what everything else
+registered and is therefore required last.
+
+**Read the directory's own `CLAUDE.md` before changing anything in it.** They are
+not summaries — the reasoning that used to be in this file is in them, verbatim,
+and most of it is the record of something having gone wrong once.
+
+`README.md` is the substantive document and is still at the root. `docs/` is the
+user-facing half — how to USE this service — and is published as a GitHub Pages
+site; this file and the directory files are the maintainer-facing half.
+
 ## Overview
 
 A mock identity service that speaks sixteen protocol families — Kerberos v5 (a KDC on
@@ -35,8 +81,7 @@ comes out of that surface is a credential another service will believe. Both are
 a turnstile rather than a lock: anybody can get a token with either SCIM scope,
 any password but one passes Basic, anybody can register a HOBA key, and anybody
 can ask the local socket to mint an SVID. Neither changes anything else, and
-each can be turned off (`scim.authRequired`, `spiffe.authRequired`). See rules
-6a-ii and 3k, `scim_auth.js` and `spiffe_auth.js`.
+each can be turned off (`scim.authRequired`, `spiffe.authRequired`). See `scim/CLAUDE.md` and `spiffe/CLAUDE.md`.
 
 **The Workload API is the opposite case and the distinction matters**: it
 authenticates nobody because its specification says it MUST NOT — a workload has
@@ -48,13 +93,10 @@ Response. That is now the gap beside WS-Trust and WS-Federation, and it is delib
 see README.md rather than inferring from the absence that it was overlooked. It is also
 why the federation metadata publishes no IDPSSODescriptor.
 
-`README.md` is the substantive document — it explains why each piece is the way it
-is, and most of those explanations are the record of something having gone wrong
-once. Read it before changing anything. What follows is only what is not in there.
-
 Extracted from the [OAuth2/OIDC Debugger](https://idptools.com). The tests that cover
 this service still live in that project (see *Tests* below), which is the single most
 important thing to know about this repo's current state.
+
 
 ## Running it
 
@@ -67,179 +109,32 @@ CONFIG_FILE=./env/local.js node server.js      # 8081; STS_PORT overrides
 At the default `debug` every endpoint call and every artifact before and after
 signing is logged — that is the point of a mock, so do not quieten it by default.
 
-## Architecture, and the four rules that hold it together
 
-`server.js` is a shell: it requires the modules and listens. The modules are
-`config.js` (every setting this service has, and the only module `helpers.js`
-depends on), `helpers.js` (log, keys, cross-protocol helpers), `app.js` (the
-express app and every middleware), `authn.js` (the authentication service), `saml2.js`, `saml11.js`,
-`wstrust.js`, `oauth2.js`, `wsfed.js`,
-`webauthn.js`, `vc_configs.js`, `vc_offers.js`, `vc_did.js`, `vc_issuer.js`,
-`vc_verifier.js`, `ldap_server.js`, `scim.js`, `tls_server.js`,
-`spiffe_server.js`, `krb5_kdc.js`,
-`krb5_service.js`, `spnego.js` and the `krb5_*` files they rest on (ASN.1, crypto,
-messages, principals, NDR, PAC, GSS, SPNEGO), `admin.js`, `admin_api.js`,
-`sts_metadata.js`, and the libraries that register nothing: `dpop.js`,
-`mtls.js`, `client_auth.js`, `oauth2_bcp.js`, `applications.js`,
-`authorization_servers.js`,
-`admin_stats.js`, `audit.js`, `vc_claims.js`, `vc_verifier_config.js`,
-`claim_attributes.js`, `group_claims.js`, `scim_map.js`, `scim_auth.js`,
-`spiffe_id.js`,
-`spiffe_ca.js`, `spiffe_registry.js`, `spiffe_grpc.js`, `spiffe_workload.js`,
-`spiffe_api.js`, `spiffe_auth.js`, the four VENDORED PKI modules those rest on (`x509.js`,
-`key_material.js`, `jose_jwe.js`, `crypto_bytes.js` — byte-identical copies of the
-parent project's, the way `bbs2023.js` and `krb5_spnego.js` are; DO NOT EDIT THEM
-HERE), and
-`admin_api_spec.js` and `admin_api_docs.js` beside the management API. One file in the tree is not a
-node module at all — `admin_api_explorer.js` is BROWSER code, read off disk by
-`admin_api_docs.js` and served verbatim; its own header says so at length.
+The invocation above did not change when the modules moved, and that took one new
+file to keep true: `common/config_file.js` makes `CONFIG_FILE` absolute before
+anything reads it, because a relative path resolves against the directory of the
+module doing the requiring and fourteen modules read it directly. See
+`common/CLAUDE.md`.
 
-**`authn.js` is the authentication service, and it is not part of any protocol.**
-The sign-in screen used to be rendered inside `GET /oauth2/authorize`: no session
-meant a 200 with the login form in the body, at the authorization endpoint's own
-URL. It is now its own endpoint and its own module, and the protocol endpoints
-send people to it:
+## Architecture, and the rules that hold it together
 
-```
-GET /oauth2/authorize (no session)
-    -> 302 /authn/login?authn=<id>          the request is stashed with a
-                                            return URL built from its own query
-    -> the screen; POST /authn/login        the session cookie is established
-    -> 302 back to /oauth2/authorize?<the original query, minus prompt>
-    -> the session is there this time, so the response goes out per spec
-```
-
-Four things about that are load-bearing:
-
-* **The service knows nothing about OAuth.** It never reads `client_id` or
-  `redirect_uri`. What the screen shows about the request it interrupted arrives
-  as `details` rows the CALLER wrote, because only the caller knows what its own
-  parameters mean — the `issuer_state` note, for one, which says whether the
-  request came from a Credential Offer this issuer actually made.
-* **A refusal comes back rather than being answered there.** Cancel returns to
-  the caller with `authn_error=access_denied`, and the caller turns that into
-  its own protocol's refusal. `redirectBack()` in `oauth2.js` knows about
-  `response_mode`, and in `form_post` the answer is not a redirect at all but a
-  self-submitting form — protocol knowledge stays in the protocol module. The
-  authorization endpoint checks for that parameter BEFORE it checks the session,
-  or a refusal would be answered by sending the person straight back to the
-  screen they just declined.
-* **`returnTo` is checked to be a path on this service.** It is built by the
-  caller and never read off the query string, and it is checked anyway: an
-  authentication service that will redirect a browser to an arbitrary URL after
-  signing somebody in is a credential phishing tool with a login screen in front
-  of it.
-* **It owns the SESSION**, and `wsfed.js` and `admin.js` take it from here.
-  `oauth2.js`'s old note said the session lived there "because this module owns
-  the login flow the session comes out of" — which is exactly the sentence that
-  moved it, now that the login flow has. `oauth2.js` reads the session and never
-  writes one. The WebAuthn second factor moved with it for the same reason: it
-  is the other half of one act of authentication, and it shares the pending
-  record.
-* **WEBAUTHN IS TWO ROLES ON ONE SCREEN and the ceremony cannot tell them
-  apart.** `use_webauthn` is the second factor after a password (session
-  `amr ["pwd","hwk"]`, `acr "mfa"`); `webauthn_only` is the PRIMARY credential
-  with no password read at all (`amr ["hwk"]`, `acr "1"` — ONE factor, since
-  the ceremony asks for user verification as `preferred` rather than
-  `required`). Four things there are load-bearing. The choice is made at the
-  password screen and CARRIED on the pending record, because the ceremony's own
-  POST is the browser's result and nothing in it says what somebody chose a
-  screen ago. `webauthn_only` WINS where a hand-made POST sets both, since the
-  boxes cannot be made exclusive on a screen that runs no script. A caller that
-  demanded a second factor (`forceMfa`, from `acr_values`) is refused the
-  passwordless path SERVER-SIDE — `disabled` is a property of a browser and not
-  of a request. And `methodPhraseFor()` exists because there are three outcomes
-  now: the two-way conditional it replaced asked whether `hwk` was present and
-  called a passwordless sign-in a password one. Anything downstream that reads
-  `hwk` to mean "two factors" is wrong for the same reason — `wsfed.js`'s
-  `authnMethodsFor()` was, and now tests for `hwk` AND `pwd`.
-
-WS-Federation still has a sign-in screen of its own, deliberately: section
-13.2.1 lets the sign-in request arrive as a cross-site form POST, which
-`SameSite=Lax` keeps a session cookie off, and routing that through a redirect
-chain would lose the request. It lands in the SAME session, which is what makes
-single sign-on between the two protocols work. Pointing it at this service is the
-obvious next move and is not done yet.
-
-**`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
-dependency rather than a preference: it calls that module's `accept()` for every
-Kerberos check and adds none of its own. It is also the one Kerberos module that
-starts NOTHING — it is HTTP all the way down, so requiring it is the whole of its
-installation. Note the naming: `krb5_spnego.js` beside it is the VENDORED RFC 4178
-codec (a byte-identical copy of the parent project's `common/krb5/krb5_spnego.js`,
-kept honest by `tests/krb5_codec_sync.js` there), and `spnego.js` is this repo's own.
-Do not merge the two — one of them is somebody else's file.
-
-The two Kerberos modules, `ldap_server.js` AND `tls_server.js` are the exception to
-rule 1 below in one direction only: requiring them registers their HTTP views
-(`/KdcProxy`, `/krb5/principals`, `/ldap`, `/tls`) like everything else, but their
-**own listeners are started from `listen()` in `server.js`, not at require time** —
-binding a port can fail, and a `require` that throws takes the whole service down
-where a route cannot. A failure to bind is RECORDED rather than thrown, and both
-`ldap_server.js` and `tls_server.js` publish it (`listening` / `listenError` on
-`GET /ldap` and `GET /tls`), because the HTTP view answers 200 either way and there
-is otherwise no way to tell a running listener from one whose port was already taken
-— by the host's own slapd, or by a second copy of this service.
-
-`ldap_server.js` starts **two** of those listeners — plain 389 and LDAPS 636 — and
-they are published SEPARATELY (`listening`/`listenError`, and a `tls` object with its
-own `listening`/`error`) because they bind independently and "389 is up and 636 is
-not" is the ordinary outcome of a host run, which is not root. One flag could only
-report one of them, and the direction it would get wrong is the expensive one: a page
-saying no client can connect while LDAPS is answering. Note what LDAPS is NOT: it is
-not an option on the plain server. ldapjs decides between a `net.Server` and a
-`tls.Server` at CONSTRUCTION, so there is a second server object, handlers are
-registered per instance, and the `server` most of that file registers against is a
-FAN-OUT over the eight operations plus unbind rather than a server — see the comment
-above it before adding an operation. `listen`, `close` and `address` are deliberately
-not fanned out. There is no StartTLS to add instead: it is an extended operation,
-ldapjs implements none, and this repository does not patch that submodule.
-
-`tls_server.js` is the newest of the four and the one whose sockets are easiest to
-forget are sockets — and there are now TWO MORE TLS sockets in this process that are
-not its own, both on `serverCertificate()`'s certificate and key rather than a second
-pair: the directory's LDAPS listener on 636, and — when `global.https` is set, which
-`oauth2.rfc9700` does by default — THE MAIN PORT ITSELF, bound as HTTPS from
-`listen()` in `server.js`. So one anchor covers 8443, 9443, 636 and 8081, and a
-caller trusts this service once per start rather than four times. The LDAPS half is
-what makes `ldap_server.js` require this module, and therefore what fixes their order
-in `server.js` (rule 6); the main-port half needs no require order at all, because
-`server.js` already has this module in hand by the time it listens. The private key
-crosses a module boundary and no network one: it is generated per start, held in
-memory, and `GET /tls/server-certificate` publishes the certificate alone.
-
-**One thing that arrangement costs, and it is stated on the page rather than left to
-be met as a handshake failure**: with the main port TLS there is no plain listener in
-this process, so `POST /tls/trust` and `GET /tls/server-certificate` — which exist to
-be reachable BEFORE anything is trusted — have to be called the first time with
-verification off.
-
-Its own sockets: they speak **HTTP**, so they look as though they belong on the
-plain listener — but they are HTTPS on 8443 and 9443, and `GET /sts-metadata` walks
-the plain listener's router, which cannot see them. Its four rows there are the
-plain-HTTP views only, and the listeners are described in their text. Its truststore
-for CLIENT certificates is empty at startup and is filled at runtime through
-`POST /tls/trust`, because the CA it verifies is generated in somebody's browser
-minutes before the connection; that endpoint is on the MAIN port on purpose, since
-that is normally the one reachable before anything is trusted. `global.https` —
-which `oauth2.rfc9700` turns on — takes that property away by making the main port
-TLS as well, so the first fetch of the certificate and the first POST of an anchor
-then have to be made with verification off. Every sentence in that module which
-names the port goes through `mainPortPhrase()` for exactly that reason; seven of
-them used to say "the plain HTTP port" outright, which would be quietly wrong in
-the one place a reader goes when a handshake is failing.
+`server.js` is a shell: it requires the modules and listens. Nothing else lives at
+the root except `sts_metadata.js`. What each directory holds is the table above;
+what each module is for is that directory's `CLAUDE.md`.
 
 1. **Requiring a module registers its endpoints.** Each calls `app.get(...)` at its
    top level against the shared app from `app.js`, rather than exporting a
    `register()`. So **the require order in `server.js` is the route order**, and the
    middleware has to live in `app.js`, because express applies middleware only to
    routes added after it.
+
 2. **`vc_configs.js` and `vc_offers.js` exist to break require cycles, not to group
    code.** The credential configurations are read by both the issuer and the
    authorization server; the Credential Offer's pre-authorized codes are minted by
    the offer pages and redeemed at the token endpoint. A cycle in node does not fail
    loudly — it hands back a half-initialised module whose exports are `undefined`,
    and the symptom arrives later as something that is not a function.
+
 3. **`dpop.js` is a library, not a protocol module.** It registers nothing, so its
    position in the require order does not matter, and it requires only `helpers.js`
    (plus npm leaves) so it cannot join a cycle. Keep it that way. It is also why
@@ -247,284 +142,6 @@ the one place a reader goes when a handshake is failing.
    share — lives there rather than in `vc_issuer.js` where it was written: the
    fourth caller is in `oauth2.js`, which vc_issuer.js cannot be required from
    without building a cycle or moving OID4VCI ahead of OAuth2 in the route order.
-3a. **`vc_claims.js` is a library like `dpop.js` too, and it is read from three
-   different points of the require order.** It holds which claims an issued
-   Verifiable Credential carries — a catalogue of LDAP ATTRIBUTE TYPES, not of claim
-   names, because a claim's value is the value on that person's directory entry —
-   plus the invented, DETERMINISTIC persona that fills what an entry lacks.
-   `vc_issuer.js` (early), `admin.js` (late) and `ldap_server.js` (last) all read it,
-   so it must stay a library: it registers no route and requires only `helpers.js`
-   and `admin_stats.js` (for `identityKeyOf()`, so that `alice`,
-   `urn:sts-mock:user:alice` and `alice@REALM` are one invented person and one
-   entry). The DIRECTORY half is inverted the usual way — `setDirectory()` is filled
-   by `ldap_server.js` at ITS require time, because that module cannot be required
-   from a module `vc_issuer.js` reads without dragging every `/ldap` route to the
-   front of the router. Two things there are load-bearing and easy to undo: the
-   ISSUER METADATA is built from the same selection the credential is (an issuer
-   advertising five claims and minting fourteen teaches every wallet author that the
-   metadata is not worth reading), and `ldp_vc` carries only the terms the vendored
-   JSON-LD context defines — `bbs2023.js` canonicalizes with `safe: true`, so an
-   undefined term does not go missing, it THROWS inside a cryptosuite at issuance
-   time. `buildLdpVc()` filters against the context it actually loaded rather than
-   trusting the hand-kept list.
-3a-ii. **`vc_verifier_config.js` is the same kind of library, and it holds the
-   OTHER end of that catalogue.** `vc_claims.js` says what an issued credential
-   CARRIES; this says what the mock Verifier — the bar door at `/oid4vp/verifier` —
-   ASKS FOR, and which of the three credential formats it asks in. Both ends read
-   it (`vc_verifier.js` early, `admin.js` late), so it registers no route and
-   requires only `helpers.js`, `vc_claims.js` and `vc_configs.js`, none of which
-   registers anything either. Four things in it are load-bearing:
-   its catalogue is `vc_claims.js`'s rows GROUPED BY CLAIM rather than listed as
-   attribute types, because `buildSdJwtVc()` makes one Disclosure per top-level
-   claim and `address` is therefore one unit of disclosure however many attributes
-   feed it; the DCQL query is built HERE and `vpDcqlQuery()` in `vc_verifier.js` is
-   now only the caller that logs it, so the console's preview and the real request
-   cannot drift; the ldp_vc paths use the VENDORED CONTEXT'S TERM and not the OIDC
-   claim name (`birthDate`, and four flat terms where the others have `address`),
-   which was silently wrong while the Verifier could only ask for the two claims
-   whose spellings coincide; and `formatById()` reads a SPACE AS A PLUS, because
-   `dc+sd-jwt` is a format id containing the one character a query string spells a
-   space with — `?format=dc+sd-jwt` arrives as `dc sd-jwt`, which cost nothing
-   while an unrecognised format fell back to a constant and costs the bar door's
-   own button the moment that fallback is configuration.
-   The claims a request asks for are FROZEN onto the transaction in
-   `buildVpRequest()` and every check reads them from there: the list is editable
-   while a presentation is in flight, and judging what came back against a list
-   changed after the question was asked refuses a wallet for answering correctly.
-3b. **`admin_stats.js` is a library like `dpop.js`, and one dependency into it is
-   INVERTED.** It registers nothing and requires only `helpers.js`, which it needs to
-   stay that way more than `dpop.js` does: it is called from `app.js`'s call log,
-   `helpers.js`'s `signJwt()`, both assertion builders, the KDC and the credential
-   issuer. Because `helpers.js` cannot require it back (that is the cycle rule 2
-   exists for), `helpers.js` offers a slot — `setJwtRecorder()` — and `admin_stats.js`
-   installs itself in it at require time. **`app.js` is what requires
-   `admin_stats.js`**, which is a real dependency (the call log is there) and also
-   what makes the ordering safe: every protocol module requires `app.js`, so the
-   recorder is installed before any route exists. Do not "simplify" that into a
-   require in the other direction, and do not count tokens at their call sites
-   instead — `signJwt()` is the single funnel, and five counted call sites means a
-   sixth that is not.
-3c. **`audit.js` is a library too, it sits BESIDE `admin_stats.js` rather than
-   under it, and one dependency into it is inverted.** `admin_stats.js` answers
-   "how much"; this answers "what, when, and to whom", as a list of discrete
-   events. It requires `helpers.js` and `config.js` and NOTHING ELSE in this
-   repository, and that has to stay true: it is called from `app.js`'s call log,
-   from `admin_stats.js`'s `recordAuthentication()`, from `authn.js`'s session
-   store and from every LDAP handler, which between them are most of the
-   service. In particular it must not require `admin_stats.js`, because that
-   module requires THIS one — so the identity normalisation an audit row wants
-   is passed IN by the one caller that has already done it.
-
-   **Five recording points, and four of them are funnels this service already
-   had.** `app.js`'s call log covers three of the six categories (the console,
-   the management API and every protocol endpoint) because it is the single
-   place every answered request passes through; `recordAuthentication()` covers
-   the sixteen protocol families for the same reason it covers the directory's
-   user observer; `authn.js`'s `startSession`/`endSession` covers both
-   protocols' sign-in and sign-out. Only `ldap_server.js` has a site per
-   operation, because ldapjs dispatches straight into the handler and what a row
-   says genuinely differs per operation. Do not add a recording site beside a
-   funnel — that is how a category comes to be counted twice for one act.
-
-   **The one inverted dependency is the ACTOR.** An HTTP row wants the
-   signed-in user's name and only `authn.js` can supply it, but `authn.js`
-   requires `app.js` and `app.js` requires this — so `audit.js` offers
-   `setActorResolver()` and `authn.js` fills it at require time, the same shape
-   `setJwtRecorder()` and `setUserObserver()` have. The resolver it installs is
-   deliberately NOT `sessionOf()`: that function deletes an expired session as
-   it finds it, and an observer that quietly ended sessions while reporting on
-   them would be changing the thing it describes.
-
-   **Three properties are load-bearing and each is easy to undo.** `audit()`
-   CANNOT THROW — it is wrapped, and a caller must never guard it, because an
-   audit log that could fail a bind is a worse bug than a missing row. **NO
-   CREDENTIAL IS EVER RECORDED** — no password, bearer token, assertion, or
-   request/response body; a modify names the attributes it changed and never
-   their values, a compare says whether it matched and not what was tried, and
-   the query string redacts `code`, `id_token_hint` and the rest of
-   `REDACTED_QUERY_KEYS`. The one field read out of an admin body is `action`,
-   by name and capped, and widening that would put a pasted JWT on a web page.
-   And the VOCABULARY IS A TABLE — `CATEGORIES` and `ACTIONS` — from which the
-   console's filter selects and the API's `actions` member are both built, so an
-   action cannot occur and be unfilterable nor be offered and never occur. A new
-   action is a row there and nothing else.
-
-   **Both its settings are read per event, not captured at require time**
-   (`maxEvents()`, `protocolCallsRecorded()`), which is what the `runtime: true`
-   on `audit.maxEvents` and `audit.protocolCalls` claims — see the config
-   section below for why a captured `const` is the one thing `/admin/config`
-   cannot reach.
-
-   **There is no clear operation and there must not be one.** An erase control
-   on an unprotected console would make an audit log unable to answer the one
-   question it exists for. Restarting the service is how you get an empty one;
-   it is in memory and dies with the process like everything else here.
-
-3d. **`claim_attributes.js` is the THIRD reader of `vc_claims.js`'s catalogue,
-   and it is a library like the other two.** `vc_claims.js` says what an issued
-   CREDENTIAL carries and `vc_verifier_config.js` says what the mock Verifier
-   ASKS FOR; this says which LDAP attributes a TOKEN or an ASSERTION carries,
-   per claim set, and it is the second half of `/admin/claims`. It registers no
-   route and requires `helpers.js`, `admin_stats.js`, `vc_claims.js` and
-   `audit.js`, none of which requires it back.
-
-   **The catalogue is not copied and the three selections are not shared**, and
-   both halves of that matter. One catalogue, because two lists of spellings is
-   one list that will eventually be wrong about `schacDateOfBirth` while both
-   look right alone. Three selections, because "issue a credential carrying a
-   claim the access token does not" and "ask for a claim nothing here issues"
-   are the mismatches a client's error paths are built for, and a single page
-   setting all three would make both impossible to produce.
-
-   **The merge into a token is INVERTED, and that is what keeps the four
-   issuance sites unchanged.** `admin_stats.js` offers `setAttributeResolver()`
-   and this module fills it at ITS require time; `jwtClaims()` and
-   `samlAttributes()` then merge what comes back. It has to be that direction —
-   `vc_claims.js` requires `admin_stats.js`, so a require the other way closes a
-   loop (rule 2). Do not "simplify" it by calling this module from `oauth2.js`
-   and the two assertion builders instead: four edited call sites are four that
-   drift and a fifth added later with none. **`server.js` requires this module
-   itself**, ahead of the modules that issue, because an unfilled slot means
-   tokens issued without their configured attributes and `admin.js` requiring it
-   would only make that true by accident.
-
-   **Nothing is selected on a fresh start, in any of the four sets.** Unlike
-   `/admin/vc`'s ten defaults — which reproduce what that issuer already carried
-   — this page changes what every client of this service receives, so it does
-   nothing until it is asked to.
-
-   **Precedence is three deep and two of the three are only visible in a
-   collision**: the protocol's own claim wins (an ID Token always carries
-   `name`, `given_name`, `family_name`, `preferred_username` and `email`, so
-   ticking `cn`, `givenName`, `sn`, `uid` or `mail` on THAT set changes nothing
-   a client sees), then a typed claim of the same name, then the attribute. In
-   the two assertion builders that had to be written as a FILTER rather than as
-   an assignment order, because an assertion is a list of elements: a duplicate
-   name is not an overwrite, it is two `<Attribute>` elements with one name and
-   a relying party reading whichever was emitted first. SAML 1.1 filters on
-   NAMESPACE AND NAME together, since that profile splits a claim URI into the
-   two.
-
-3d-ii. **`group_claims.js` is the FOURTH library over that catalogue's
-   territory, and it is the only one that reads the directory's GROUPS.**
-   `vc_claims.js` says what a CREDENTIAL carries, `vc_verifier_config.js` what
-   the Verifier ASKS FOR, `claim_attributes.js` which ATTRIBUTES a token
-   carries; this puts the GROUPS somebody is a member of into all four claim
-   sets at once. It registers no route and requires `helpers.js`, `config.js`
-   and `admin_stats.js`, none of which requires it back.
-
-   **IT IS AUTOMATIC AND THEREFORE NOT A SELECTION.** There is nothing to tick
-   per user and nothing to tick per set — with `groups.claim` on, all four
-   carry it. That is the deliberate opposite of `/admin/claims`'s three
-   selections, and it is why the control is a `config.js` ROW rather than a
-   form: four settings on `/admin/config`, which already has a page and already
-   has `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
-   satisfied by there being no new control. **A second form on `/admin/claims`
-   would be a second door to one setting**, which is the two-stores mistake
-   rule 5 exists for.
-
-   **ON BY DEFAULT IS DEFENSIBLE ONLY BECAUSE THE CLAIM IS OMITTED FOR SOMEBODY
-   IN NO GROUP** — absent, not an empty array. On a fresh start the only people
-   in a group are the three the directory seeds, so a caller who never touched
-   `ou=groups` gets exactly the tokens it got before. An empty array would be a
-   new member in every token every existing client parses, which is what
-   `claim_attributes.js` defaults its selection to nothing to avoid.
-
-   **TWO INVERSIONS, and each fails rule 3e's test in a different direction.**
-   `admin_stats.js` offers `setGroupResolver()` and this module fills it (a
-   require the other way closes a cycle, since this module requires that one for
-   `identityKeyOf()`, the set ids and the reserved names); and this module offers
-   `setDirectory()`, which `ldap_server.js` fills with `groupsOfUser()` — a
-   require reaching THAT module would drag every `/ldap` route to the front of
-   the router. What it buys is the thing every inversion here buys: NO ISSUANCE
-   SITE CHANGED.
-
-   **`ldap_server.js` OWNS WHAT A GROUP IS; THIS OWNS WHAT A TOKEN BELIEVES.**
-   `groupsOfUser()` applies both group rules and resolves `member`,
-   `uniqueMember` and `memberUid` exactly as the console's member list does —
-   `memberUid` holds a bare name and the other two hold a DN, and treating them
-   alike is how every `posixGroup` membership silently stops reaching a token.
-   It reports BOTH directions (`via` for the group's own attributes,
-   `viaMemberOf` for the person's claim) and applies neither, because which one
-   a token believes is `groups.claimFromMemberOf` and that is a policy. Same
-   split as `oauth2_bcp.js` and `oauth2.js`. **An entry is not required**: a
-   group listing a DN nothing is stored at is a dangling member from the group's
-   side and is still the group saying so.
-
-   **PRECEDENCE IS NOW THREE DEEP IN A SECOND SENSE**, under the one rule 3d
-   describes: a typed claim wins over a directory attribute, and both win over
-   the groups claim — which is the only one of the three nobody named on a page.
-   In `samlAttributes()` that is a FILTER for the reason stated there, and the
-   groups layer is filtered against BOTH layers above it. A `groups.claimName`
-   naming something this service sets itself is REFUSED AT ISSUANCE, not at
-   configuration time, because `config.js` requires nothing from this repository
-   and a copied reserved list is one that goes wrong.
-
-   **A SAML ATTRIBUTE IS MULTI-VALUED and both builders now say so.** `values`
-   is an array of `<AttributeValue>` children under one `<Attribute>`; `value`
-   is untouched and is what every existing caller passes. One element per group
-   with the same name is not a multi-valued attribute — it is a relying party
-   reading the first and silently seeing one group where the person is in four,
-   the exact defect `samlAttributes()`'s dedup filter exists to prevent.
-
-   **CARRYING A GROUP IS NOT GRANTING ONE.** No endpoint here reads this claim
-   and nothing decides anything on one, which is the same distinction this
-   service already draws between an identity being RECORDED and one being
-   AUTHENTICATED. What stopped being true is the OTHER half of the old sentence
-   — "no token carries a group from this directory" — and the two halves are
-   split on `/admin/groups`, on `/admin/claims` and in README.md rather than
-   merged back into one claim that is now half wrong.
-
-3d-iii. **`scim_map.js` is the FOURTH library over that catalogue's territory,
-   and it is the only one of the four that is NOT a selection.** `vc_claims.js`
-   says what a CREDENTIAL carries, `vc_verifier_config.js` what the Verifier ASKS
-   FOR, `claim_attributes.js` which ATTRIBUTES a token carries, and each of those
-   is a set of tick boxes. This says which LDAP attribute each SCIM MEMBER is, in
-   both directions, and there is nothing to tick: RFC 7643 decides what a User
-   carries, so the only question left is where each member is stored. That is a
-   mapping, and a mapping is a table. It registers no route and requires
-   `helpers.js` and `vc_claims.js`, neither of which requires it back.
-
-   **THE CONVERSIONS ARE HERE RATHER THAN IN `scim.js` FOR ONE REASON**, and it
-   is the route-order one: `admin.js` draws the mapping table on `/admin/scim`
-   and must be able to require what it draws. A require from the console into
-   `scim.js` would drag every `/scim` route — and, since that module requires
-   `ldap_server.js`, every `/ldap` route — into the express router ahead of the
-   console's own, and `/sts-metadata` is built by walking that router. So there
-   are two readers of two different halves: `scim.js` reads the CONVERSIONS on
-   every request, `admin.js` reads the CATALOGUE to draw it.
-
-   **NOTHING IN IT TOUCHES A DIRECTORY.** It is handed an entry object — the
-   `{dn, origin, createdAt, modifiedAt, attributes}` shape `entryObject()`
-   produces — and hands back a SCIM resource, or the reverse. The placement rules
-   (where a person's entry goes, what counts as a group) stay in the one module
-   that already owns them.
-
-   **THE SPELLINGS ARE CHECKED AGAINST THE CATALOGUE, NOT COPIED FROM IT.**
-   `checkSpellings()` runs at require time and WARNS where a row disagrees with
-   `vc_claims.js` — the same rule `learnName()` follows, one module earlier, and
-   able to name which of the two tables is wrong where that function could only
-   report that a second spelling had turned up. Its two INVENTIONS,
-   `scimActive` and `scimExternalId`, are merged into `CANONICAL_NAMES` through
-   `learnName()` like every other name; they are a FIFTH source into that table,
-   which is affordable only because the check exists.
-
-   **FOUR DECISIONS IN IT ARE LOAD-BEARING and each is easy to undo.** The SCIM
-   `id` IS THE ENTRY'S DN — RFC 7643 section 3.1 asks for an opaque
-   server-assigned identifier and the DN already is one, where a `uid` is not
-   unique in this tree and a synthesised id would be a stored second definition
-   that goes stale on a rename; the cost, that a rename gives the same person a
-   new id, is stated on the page rather than hidden. A PUT REPLACES ONLY WHAT IS
-   INSIDE THE MAPPING'S WINDOW, because read strictly it would delete
-   `schacDateOfBirth`, `authnMethod` and every `x509*` attribute the moment a
-   client updated a phone number — facts SCIM never knew about and cannot
-   restore. THREE ATTRIBUTES ARE DROPPED ON THE WAY THROUGH — `entryDN`,
-   `createTimestamp`, `modifyTimestamp` — because none of them is really on the
-   entry, and carrying them through WROTE `entryDN`, which is exactly the stored
-   copy of the DN the synthesis exists to prevent. And A TYPE ON A MULTI-VALUED
-   MEMBER IS SCIM'S IDEA: `telephoneNumber` and `mobile` are two attribute types
-   and one SCIM member, so the type says which one a value came from and which
-   one it goes to, and `primary` is emitted and never stored.
 
 3e. **`admin_stats.js` now has three inverted hooks and one require of a
    library, and they are four different problems rather than a pattern.**
@@ -544,1200 +161,87 @@ the one place a reader goes when a handshake is failing.
    resolver is the one to check a new proposal against: it was added only after
    showing it failed that test BOTH ways round.
 
-3f. **`oauth2_bcp.js` is a library like `dpop.js`, and it is a MODE rather than a
-   change of behaviour.** It holds this service's model of RFC 9700 (the OAuth 2.0
-   Security Best Current Practice) — the whole of that BCP's section 2, as a table
-   of requirements with a check citing each by id. It registers nothing and
-   requires only `crypto`, `helpers.js` and `config.js`, so it cannot join a cycle
-   and its position in the require order does not matter. **`app.js` requires it
-   too**, for one decision (section 2.6's "no CORS at the authorization
-   endpoint"), which is safe for exactly that reason and is the only middleware
-   this mode touches. Six things in it are load-bearing:
 
-   **The flag is the whole contract, and it is RESTART-ONLY.** `oauth2.rfc9700`
-   is OFF by default and every entry point in the module returns "no opinion"
-   while it is, so the service behaves EXACTLY as it did before the file
-   existed. That is not timidity: every existing caller of this mock uses an
-   unregistered `redirect_uri`, no PKCE or the implicit grant, and a client is
-   exercised by both answers — one that has only met a permissive server has
-   never run its own refusal paths, and one that has only met a strict server
-   cannot reproduce the behaviour it is trying to detect. It stopped being a
-   runtime setting the moment it grew a consequence that happens before the
-   service is listening: `global.https` derives its default from it, so it binds
-   the main port as HTTPS. A flag that was runtime for its checks and
-   restart-only for its socket is the silent disagreement the config.js header
-   warns about — /admin/config would report the mode as on while every
-   authorization response still went out over plain HTTP.
-
-   **It decides; `oauth2.js` answers.** This module never touches `res`. What a
-   refusal LOOKS like is protocol knowledge and stays there — the same split
-   `authn.js` has — and the order is load-bearing rather than stylistic: the
-   `redirect_uri` is matched FIRST and a failure is answered as a 400 on this
-   service, because reporting `error=invalid_request` by redirecting to an
-   unvalidated URI is still the browser being forwarded to an arbitrary URI, and
-   an attacker does not mind which parameters ride along. Everything after that
-   check may be reported to the client.
-
-   **THREE THINGS OUTSIDE THE AUTHORIZATION ENDPOINT, and each is at a funnel
-   rather than a call site.** Refresh token lineage is recorded inside
-   `refreshToken()` in `oauth2.js` — the one function that mints one, so no
-   grant can issue a refresh token outside its family; the sender-constraining
-   note is inside `tokenSet()`, the one place a grant mints a token set; and the
-   client-authentication and grant-type checks are ABOVE the grant switch at the
-   token endpoint, because a client that cannot authenticate has not
-   authenticated whichever grant it was about to ask for. Do not move any of
-   them into a branch — five branches means a sixth added later with none, which
-   is the same reasoning that keeps `signJwt()` the single counter.
-
-   **A REFRESH TOKEN CARRIES ITS RESOURCES, and forgetting that was a hole.**
-   RFC 8707 narrows an access token's audience; the refresh token has to carry
-   the same list or the grant WIDENS ITSELF BY BEING RENEWED — the refreshed
-   access token would get this service's default audience, which is broader than
-   what was authorized. `refreshToken()` records `resources`, the refresh grant
-   reads them back for the new audience, and a refresh naming one the grant does
-   not carry is `invalid_target`. The same shape as the scope check one field
-   over.
-
-   **THE IDLE TIMEOUT IS ON THE FAMILY AND REFUSES RATHER THAN REVOKING.**
-   `lastUsedAt` lives on the family and is touched at `noteRefreshRotated()` —
-   at the SUCCESSFUL redemption, so a run of refused attempts cannot keep a
-   chain alive. It refuses without revoking the family because an idle chain is
-   a client that went away and a replayed one is a chain that was copied;
-   collapsing the two would make the replay refusal, which says something
-   serious, indistinguishable from an afternoon off.
-
-   **REVOCATION IS STILL `stats.revoke()` AND THIS MODULE NEVER CALLS IT.**
-   `checkRefreshRequest()` returns the jtis a replay should kill and `oauth2.js`
-   revokes them, which keeps both rules intact at once: the one-store rule (the
-   revocation set `/oauth2/revoke` and the console write to is the only one), and
-   this module's own — it decides, the protocol acts. A rotated token is revoked
-   through the same call, which is why a retired refresh token also reports
-   inactive at `/oauth2/introspect` rather than merely failing to refresh.
-
-   **The transaction check runs where the values are SPENT.** An authorization
-   request runs through `/oauth2/authorize` twice — once before the sign-in
-   screen and once on the way back with a session — so a reuse check at the top
-   of that endpoint refuses every request in the service for reusing its own
-   values between its own two passes. It is called from
-   `issueAuthorizationResponse()` immediately before a code is minted, and the
-   token endpoint marks the transaction finished when the code is redeemed. A
-   value presented again BEFORE that is a reloaded tab, not a second
-   transaction, and refusing it is how a check like this gets turned off.
-
-   **What the mode refuses, the metadata stops advertising**, and it happens in
-   `asMetadata()` for the reason the two discovery documents are built from one
-   object at all: narrowing one of them would produce exactly the drift that
-   arrangement exists to prevent.
-
-   **A REFUSAL AT AN ENDPOINT NEEDS THE MATCHING REFUSAL AT REGISTRATION.**
-   `checkClientRegistration()` refuses metadata the other endpoints would refuse
-   in use — the password grant, the implicit grant, a response type naming
-   `token`, an `http` redirect URI off the loopback — because a registration is
-   a document the client KEEPS and acts on, and recording a permission this
-   server will always refuse is the discovery document's promise broken in the
-   other direction. It refuses rather than silently returning different
-   metadata, which RFC 7591 also permits: a client that registered for
-   `password` and got a registration quietly without it would have to diff two
-   documents to notice. **When a new refusal is added to an endpoint, look for
-   the registration member that would have recorded it.**
-
-   **ONE DECISION ABOUT FORWARDED HEADERS, SHARED.** `helpers.forwardedFrom()`
-   decides whether `X-Forwarded-Proto`/`X-Forwarded-Host` are believed, and both
-   `baseUrlOf()` and `dpop.js`'s `htuOf()` go through it. They used to disagree
-   — dpop believed them unconditionally and baseUrlOf ignored them — and each
-   answer was wrong for the deployment the other was written for: behind a proxy
-   the metadata published the last hop's URLs, and without one a client could
-   choose the `htu` its own proof was checked against, which unbinds the proof.
-   `global.trustProxy` is OFF by default and the htu refusal NAMES it. Do not
-   let a third function make this decision a third way.
-
-   **NO CLIENT CERTIFICATE IS EVER READ FROM A HEADER.** `X-Client-Cert` and its
-   dozen vendor spellings are listed on `/tls/forwarded` and read by nothing:
-   a certificate in a header is one anybody can forge, so RFC 8705 binding and
-   mTLS client authentication both take it off the TLS handshake. The cost —
-   a proxy terminating mTLS cannot pass the certificate through — is stated
-   rather than hidden, and the headers a request carried are SHOWN so that
-   ignoring them is visible rather than silent.
-
-   **RESOURCE INDICATORS AND THE AUDIENCE CHECK ARE FEATURES, NOT MODE
-   BEHAVIOUR.** RFC 8707 `resource` is honoured in both modes and the protected
-   endpoints refuse a token issued for another audience in both, because a
-   request that sends no `resource` is unaffected either way — the flag contract
-   ("mode off changes nothing") is about existing callers and no existing caller
-   sends it. Two details in the check are easy to get wrong: it applies only to
-   a token this service VERIFIED (a foreign token's `aud` is a string nobody can
-   check), and it matches on the PATH rather than the whole URL, because every
-   token carries `<base>/resource` where the base is whatever URL minted it — a
-   whole-URL comparison refuses a token minted at localhost and presented at
-   127.0.0.1, while a token narrowed to somebody else always has a different
-   path.
-
-   **THE REPLAY RELAXATION IS THE ONE THING THE TWO MODES ANSWER DIFFERENTLY
-   ABOUT A CODE.** `redeemedCodes` in `oauth2.js` answers an IDENTICAL repeat
-   with the tokens it already bought, for the reason written where it is
-   declared. RFC 9700 section 4.5 says a real server refuses that, so
-   `checkCodeReplay()` does — and revokes the access, refresh and ID Tokens that
-   code bought (RFC 6749 section 10.5), through `stats.revoke()` called by
-   `oauth2.js`, never by this module. It sits BELOW the two refusals that are
-   more specific — a repeat that differs, and a code whose lifetime ran out —
-   because those are already refusals in both modes and each deserves its own
-   sentence.
-
-   **TWO REQUIREMENTS ARE IN THE TABLE AS `enforced: 'no'` BECAUSE THEY ARE THE
-   CLIENT'S**, not because they were skipped: the client must validate the ID
-   Token's nonce and must not use a token before that succeeds. Nothing this
-   server observes separates a client that checks from one that does not. What
-   it can do instead is `oauth2.breakIdTokenNonce` — a deliberately wrong nonce,
-   off by default, NOT part of this mode (it is useful in either), reported on
-   `GET /oauth2/rfc9700` and logged on every token it spoils. That is the same
-   device as `/spnego`'s three knobs and the reserved password `invalid`: a
-   reachable negative. Do not fold it into the mode — a compliance flag that
-   also breaks tokens is a flag nobody will turn on.
-
-   **THE TLS REQUIREMENT IS NOT A CHECK AND MUST NOT BE MADE ONE.** "An
-   authorization response MUST NOT be sent over an unencrypted connection"
-   cannot be refused per request — by the time anything here runs the request
-   has already arrived, and refusing it would report the problem down the same
-   channel. It is a property of the SOCKET, so `global.https` settles it at
-   `listen()` in `server.js`, using `tls_server.js`'s ONE per-start certificate
-   rather than a second pair (see rule 6: that is the same reasoning that put
-   LDAPS 636 on it). The row in `REQUIREMENTS` therefore has FUNCTIONS for
-   `enforced` and `note` — the only row that does — and `state()` calls them, so
-   the table stays the single source rather than half of that row's meaning
-   moving into the view. It reports `deployment` when the port is TLS and `no`
-   with the reason when somebody has set `global.https` false to run the checks
-   over plain http, which is a case that must stay reachable: a client that
-   cannot trust a certificate regenerated every start should still be able to
-   exercise the rest. `GET /oauth2/rfc9700` publishes every row with `enforced`
-   as yes / detected / always / deployment / no, and a compliance mode that
-   quietly skipped a requirement it advertises would be the most misleading
-   thing in this repository. New requirements are rows in `REQUIREMENTS` and the
-   checks cite them by id; do not add a check with no row.
-
-   **The SCHEME is derived and nothing pins it.** `baseUrlOf()` builds every URL
-   from `req.protocol` and the Host header, so an https.Server moves the RFC
-   8414 document, the OpenID Provider Configuration, the OID4VCI and OID4VP
-   metadata, the federation metadata, the DID document and the `iss` of every
-   token together, with no module told about any of it. Do not "fix" that by
-   hardcoding a scheme anywhere — it would be wrong on the default plain
-   listener. The ONE exception is a PINNED `oauth2.issuer`: `issuerOf()` in
-   `oauth2.js` upgrades an `http://` pin to `https://` when the port is TLS and
-   logs it, because a client MUST reject a document whose issuer is not the
-   identifier it fetched from, and that failure names the issuer rather than the
-   scheme. Pinning a different HOST still produces the mismatch it exists for.
-
-3j. **`authorization_servers.js` makes one process BE several authorization
-   servers, and the document is the server rather than a description of one.**
-   The path component both discovery shapes carry selects one; its endpoints
-   live under that name (`/{id}/oauth2/…`, registered in one block in
-   `oauth2.js` so the prefixed set cannot drift from the unprefixed one); and
-   the capabilities in its document DRIVE those endpoints. A library requiring
-   only `helpers.js`. Nine things:
-
-   **EVERY AUTHORIZATION SERVER STARTS EQUAL, and every name is one.** An
-   unconfigured profile has the defaults `asMetadata()` builds, and a name
-   nobody has configured is CREATED on first sight — by an endpoint or by a
-   metadata fetch, since reading the document is accessing the server. It is
-   marked `autoCreated` so the console can tell the two apart. Bounded at
-   `MAX_PROFILES`, past which a name is still SERVED with the defaults and
-   simply not recorded: the id comes off a URL path, so any caller can invent
-   one, and a load generator must not take the feature away from the names that
-   matter.
-
-   **`capabilitiesOf()` IS READ BY BOTH THE DOCUMENT AND THE ENDPOINTS.** That
-   is the whole of how they are kept in step — there is no second table of what
-   `tenant1` does that could disagree with what `tenant1` advertises. An
-   enforceable member is marked `enforces` on its catalogue row; anything else
-   is published and not read.
-
-   **A REMOVED MEMBER MEANS THE CHECK DOES NOT RUN**, and that is the honest
-   reading rather than a gap: a client cannot learn from an absent
-   `code_challenge_methods_supported` that PKCE is unavailable, so a server that
-   refused every method on the strength of having removed the member would be
-   enforcing something it never said. `capabilityList()` returns null for it and
-   every caller distinguishes null from an empty list.
-
-   **A CREDENTIAL DOES NOT CROSS BETWEEN THEM.** The authorization code carries
-   `authorization_server` and the token endpoint refuses one issued by another.
-   They publish different capabilities and are presented to a client as separate
-   servers; one process serving several must not let a credential leak between
-   them.
-
-   **`asBaseOf(req)` IS WHAT EVERY ISSUER AND AUDIENCE IS BUILT FROM.** A named
-   authorization server is its own issuer, so its tokens' `iss`, their `aud`,
-   and the RFC 9207 `iss` on its authorization responses all carry its path —
-   and its document says the same, which is what a conforming client checks.
-   **The sign-in return URL has to carry it too**: `returnTo` was hard-coded to
-   `/oauth2/authorize`, which sent every named server's SECOND pass — the one
-   that issues the code — to the default server, and the code came out belonging
-   to somebody else with nothing on the way through looking wrong.
-
-   And five things from before:
-
-   **A CATALOGUE, NOT A SCHEMA.** Any member is settable, including one this
-   service has never heard of, because publishing something a client did not
-   expect is half the point of a mock. That is the deliberate OPPOSITE of
-   `applications.js`, which refuses an attribute outside its table — that table
-   is a published contract about what an entry carries, and this is a way to lie
-   on purpose. Do not add validation here.
-
-   **THE PROFILE IS APPLIED TWICE, and it has to be.** `asMetadata()` applies it,
-   and then `oidcMetadata()`'s `Object.assign` overwrites every member OpenID
-   Connect Discovery adds — so it is applied again at the end of that function.
-   A profile that set `userinfo_endpoint` would otherwise work in the RFC 8414
-   document and do nothing in the OIDC one.
-
-   **IT IS APPLIED LAST, AFTER `bcp.applyToMetadata()`.** A profile is somebody
-   saying "publish this", and a mode quietly winning would make the control
-   appear not to work. A profile re-advertising the implicit grant the mode
-   refuses is a document that lies about this server, which is the case the
-   drift report exists for.
-
-   **DRIFT MEANS SOMETHING NARROWER NOW.** It used to be "this document lies
-   about this service", which cannot happen for an enforced member any more —
-   the document IS the behaviour. `driftOf()` therefore SKIPS a member with an
-   `enforces` row and reports the rest: what this service cannot honour however
-   it is set. Those stay publishable, because a misconfigured document is a
-   client error path worth running, and they stay reported.
-
-   **AN UNCONFIGURED PATH IS NOT AN ERROR.** It publishes the ordinary document
-   with the issuer taken from the path, which is what this service has always
-   done — so adding this feature changed nothing for any existing caller, and a
-   deleted profile leaves its URLs answering.
-
-3k. **SPIFFE IS SIX MODULES AND THE SPLIT IS BY WHAT WOULD OTHERWISE DRIFT.**
-   `spiffe_id.js` (the ID grammar), `spiffe_ca.js` (the authorities, minting,
-   the bundle), `spiffe_registry.js` (entries and agents, directory-backed),
-   `spiffe_grpc.js` (loading the protos, binding, the wrappers),
-   `spiffe_workload.js`, `spiffe_api.js` (the handlers) and `spiffe_auth.js`
-   (who is calling) are all LIBRARIES — they register nothing — and only
-   `spiffe_server.js` registers routes and starts listeners. Nine things are
-   load-bearing:
-
-   **THE TWO SURFACES ARE AUTHENTICATED DIFFERENTLY BECAUSE THEIR
-   SPECIFICATIONS SAY OPPOSITE THINGS, and reading that as an inconsistency is
-   the mistake to avoid.** The SPIFFE Workload Endpoint specification says the
-   endpoint "MUST NOT require any direct authentication of its clients" and that
-   "Transport Layer Security MUST NOT be required" — bootstrapping: a workload
-   has no secret and no root of trust until this call gives it one. A real SPIRE
-   *server*, by contrast, binds a TCP port whose callers present an X509-SVID
-   over mutual TLS and authorizes every method against what the caller IS. So:
-   `spiffe.authRequired` reaches the SPIRE Server API and DELIBERATELY NOT the
-   Workload API. Do not "fix" the asymmetry.
-
-   **NOTHING ATTESTS A WORKLOAD OR A NODE, WHICH IS A DIFFERENT CLAIM FROM
-   "NOBODY IS AUTHENTICATED" AND THE TWO MUST STAY APART.** A real agent reads
-   the peer credentials of its Unix socket — `SO_PEERCRED`, giving pid and from
-   that uid, gid, executable, container, pod — and turns them into selectors.
-   **Node has no portable way to read them**: `net.Socket` exposes no such call
-   and `/proc/net/unix` does not record the peer. So `spiffe_auth.js` identifies
-   a Workload API caller by the TRANSPORT it arrived on, the ENDPOINT it reached
-   and its PEER ADDRESS, and by nothing else. Two consequences:
-
-   * **Selector matching now DECIDES the answer** (`spiffe.attestWorkloads`,
-     on by default). `selectorsMatch()` computes exactly what SPIRE would — the
-     entry's selectors a SUBSET of the workload's, not equal, not intersecting —
-     and the Workload API uses it, which it did not before. An INVENTED entry
-     carries the caller's STABLE selectors (transport and endpoint, never
-     `peer:` — its port is ephemeral and a fresh entry would be invented per
-     connection until the registry hit its cap).
-   * **The selectors are spelt `transport:`, `endpoint:` and `peer:`** and never
-     `unix:` or `k8s:`. Writing `unix:uid:1000` for a uid nothing read would be
-     inventing an attested fact, which is the `wauth` argument again. An
-     ASSERTED selector — `spiffe.acceptAssertedSelectors`, OFF by default, sent
-     in an `x-sts-mock-workload-selector` header — is passed through VERBATIM,
-     because it is the caller's own claim rather than this service's invention,
-     and it exists so that a client's "these matched and those did not" path can
-     be exercised at all.
-
-   **THE SPIRE SERVER API'S AUTHORIZATION TABLE IS SPIRE'S OWN, COPIED ROW FOR
-   ROW.** `POLICY` in `spiffe_auth.js` is `pkg/server/authpolicy/policy_data.json`
-   restricted to the forty-two methods here, and it is copied rather than
-   reasoned out: a table derived from what each method "obviously" needs
-   disagrees with SPIRE in two or three places and the client author who meets
-   the disagreement cannot tell which end is wrong. Where a row looks surprising
-   — `Debug.GetInfo` is LOCAL-ONLY, so an admin SVID over TCP is refused it —
-   that is SPIRE's answer and the surprise is the point. A method with NO ROW is
-   REFUSED and logged as a defect here; the other default fails silently
-   forever. **It decides and never answers**: `spiffe_auth.js` returns a
-   `{ status, message }` descriptor and `spiffe_grpc.js` maps it, the same split
-   `oauth2_bcp.js` has with `oauth2.js`. **The check is in the wrapper**, so
-   there is no authorization code in any of the forty-two handlers and there
-   must not be.
-
-   **THE `admin` AND `downstream` FLAGS ON AN ENTRY ARE NOW READ.** They were
-   recorded, reported, and consulted by nothing, and this file said so. They are
-   read on every call and never cached, so an `ldapmodify` of `spiffeAdmin`
-   changes what that identity may do on the NEXT one. `spiffe.adminIds` is the
-   other way in and is SPIRE's own `admin_ids`: it needs no entry.
-
-   **`Agent.RenewAgent` STOPPED BEING UNIMPLEMENTED because of it**, and the
-   refusal it replaced is the argument to keep in view: "nothing here
-   authenticates the caller, so answering would mean renewing whichever agent
-   the caller named". Something does now, so the method renews the agent on the
-   CONNECTION and never one named in the request — and with `spiffe.authRequired`
-   off it answers `Unimplemented` with that same sentence.
-
-   **AN ACCEPTED CREDENTIAL IS AN IDENTITY**, through the funnel every other
-   family uses. Three acceptances reach it: an X509-SVID over mutual TLS (ONCE
-   PER CONNECTION — the credential was accepted at the handshake, which is
-   `tls_server.js`'s decision made again), an agent attesting, and a JWT-SVID
-   verified at `ValidateJWTSVID`. Being ISSUED an SVID is not one of them.
-   `ldap_server.js`'s `spiffePlan()` is the fourth placement plan (rule 6) and
-   `entryBySpiffeSubject()` is what makes the same identity arriving three ways
-   ONE entry.
-
-   **`spiffe.autoCreateEntries` OFF IS THE INTERESTING SETTING**, and it is the
-   one thing here that must not be quietly removed: with it off, a caller
-   matching no entry gets an EMPTY SVID LIST, which is what a real agent does
-   for an unregistered workload and the only way to run a client's "I have no
-   identity" path.
-
-   **THE STREAMS STAY OPEN.** Four Workload API methods are server streams and a
-   real client holds `FetchX509SVID` for the life of the process. `serverStream()`
-   in `spiffe_grpc.js` deliberately does NOT call `end()`, and
-   `pushOnRotation()` re-sends at half the SVID lifetime. A Workload API that
-   writes once and ends looks perfect on the first fetch and puts `go-spiffe`
-   into a reconnect loop — and re-sending is what makes a client's ROTATION path
-   run without anybody waiting an hour. The push callback returns false once the
-   peer has gone, which is what stops the timer; a timer that outlived its stream
-   writes to a dead one and grpc-js reports that as an unhandled server error.
-
-   **THE REGISTRY IS THE DIRECTORY, exactly as `applications.js`'s is** (rule
-   3g). Two containers, because they hold different KINDS of thing: an entry
-   under `ou=entries,ou=spiffe` is CONFIGURATION deciding what gets issued, and
-   an entry under `ou=agents,ou=spiffe` is a RECORD of something that happened —
-   which is why `EDITABLE` covers the first and nothing about an agent is
-   editable. NO MAP SHADOWS THEM, so an `ldapmodify` of `spiffeX509SvidTtl`
-   changes the next SVID. `ldap_server.js` fills `setDirectory()` at its require
-   time and the dependency is NOT inverted (rule 3e's test fails both ways
-   round: no cycle, no route moves).
-
-   **TWO PKIs IN ONE PROCESS, ON PURPOSE.** The SPIFFE CA is not
-   `tls_server.js`'s certificate and must not become it: that one is a leaf with
-   `CA:FALSE` and `serverAuth`, and a trust domain's root and a host's TLS
-   identity are unrelated trust decisions. The X.509 authority is **EC P-256 by
-   default** — what SPIRE issues — which is why the four PKI modules are
-   VENDORED from the debugger: `node-forge`, which `helpers.js` and
-   `tls_server.js` use, cannot sign with an EC key at all. **`spiffe_ca.js`'s
-   initialisation is ASYNC** (Web Crypto), which nothing else in this service is:
-   one promise started at require time, and every entry point awaits `ready()`
-   itself so no caller can forget. `state()` is the one synchronous exception and
-   says why.
-
-   **A FOREIGN BUNDLE IS PUSHED IN AND NEVER FETCHED.** `RefreshBundle` refuses,
-   naming the URL it is not fetching. Same refusal as `wreqptr` and `jwks_uri`,
-   and holding it in two files and not a third would be no position at all. The
-   bundle document IS checked — every JWK needs a `use`, because a consumer MUST
-   IGNORE one without it, so an unchecked bundle verifies nothing and reports no
-   error.
-
-   **SIX OF THE 42 SPIRE METHODS ARE UNIMPLEMENTED AND EACH PUBLISHES A
-   REASON**, in `NOT_IMPLEMENTED` and on `GET /spiffe`. A table saying 42 of 42
-   would be the most misleading thing in this repository — the same rule
-   `oauth2_bcp.js` follows by publishing its `enforced: 'no'` rows. It was SEVEN
-   until `RenewAgent` became answerable; the note above that table records what
-   its reason was and why it no longer holds. **Do not implement a WIT method by
-   inventing the token format**: that is the `wauth`-is-a-refusal argument, and
-   code written against the invention would work here and interoperate with
-   nothing.
-
-   **TWO gRPC TRAPS, BOTH ALREADY PAID FOR.** `keepCase: true` does not reach
-   protobufjs's built-in well-known types, so a `google.protobuf.Struct` is built
-   with **camelCase** members (`stringValue`, not `string_value`) while every
-   other field in the family is snake_case — the wrong spelling serialises to
-   NOTHING, with no throw and no warning. And protobufjs wraps exactly one
-   well-known type, `Any`: a plain object assigned to a Struct field becomes a
-   Struct with no fields. `ValidateJWTSVID` answered 200 with empty `claims`
-   until a real client asked for them.
-
-3i. **`client_auth.js` verifies all six token-endpoint methods, and it is the
-   PROTOCOL half of section 2.5.** `oauth2_bcp.js` decides whether a client has
-   to authenticate at all (the policy); this decides whether what arrived proves
-   it (the mechanics). It registers nothing and requires `helpers.js`,
-   `config.js` and `mtls.js`, so it cannot join a cycle. Four things:
-
-   **NOTHING FALLS THROUGH UNCHECKED ANY MORE.** `private_key_jwt` and
-   `client_secret_jwt` used to be advertised and ACCEPTED without an assertion
-   being looked at — worse than not offering them, because a client author came
-   away believing a check had happened. A method this file cannot verify is now
-   REFUSED, and `token_endpoint_auth_methods_supported` is built from
-   `METHODS` so the metadata cannot advertise one that would not be.
-
-   **THE METHOD DECIDES THE ALGORITHM FAMILY, NOT THE HEADER.** An assertion
-   nominating `HS256` for `private_key_jwt` is refused rather than verified —
-   verifying it would use the client's PUBLIC key as an HMAC secret, which is
-   the classic JWT forgery and one anybody can perform.
-
-   **THE UNVERIFIED `sub` SELECTS, IT DOES NOT ESTABLISH.** OIDC Core section 9
-   lets a `private_key_jwt` request omit `client_id`, so `clientFrom()` reads
-   the assertion's `sub` unverified — safe for exactly one purpose, choosing
-   which registered client to check AGAINST, because the assertion is then
-   verified against that client's keys with `iss` and `sub` required to match.
-   Do not read anything else out of an unverified assertion.
-
-   **`jwks_uri` IS RECORDED AND NEVER FOLLOWED**, which is the same refusal
-   `wsfed.js` gives `wreqptr`: fetching a URL somebody registered in order to
-   verify a credential is a server-side request forgery with a citation
-   attached. Holding that position in one file and not the other would be no
-   position at all.
-
-3h. **`mtls.js` is a library like `dpop.js`, and it is the OTHER half of RFC
-   9700 section 2.2.** `dpop.js` binds a token to a KEY proved per request;
-   this binds it to the CLIENT CERTIFICATE the TLS connection was made with (RFC
-   8705 section 3). It registers nothing and requires only `helpers.js` and
-   `config.js`, so it cannot join a cycle. Five things are load-bearing:
-
-   **`dpop.js` REQUIRES IT, and that is where the resource-server check goes.**
-   `presentedAccessToken()` there is the single check `/oauth2/userinfo` and the
-   three credential endpoints share — the same reasoning that put that function
-   in `dpop.js` rather than in `vc_issuer.js`. A second check beside it would be
-   a fourth caller nobody updated.
-
-   **The thumbprint is of the DER**, base64url, unpadded — not the PEM, not the
-   public key, not hex. Every other spelling looks right in a log and matches
-   nothing, so `thumbprintOf()` is the only place it is computed and both ends
-   of the comparison go through it.
-
-   **An UNVERIFIED certificate still binds.** `server.js` sets
-   `rejectUnauthorized: false` on the main listener, and that is not a hole: RFC
-   8705 section 3 binds to the CERTIFICATE and permits a self-signed one
-   explicitly — the proof is that the same key completed this handshake, not
-   that a CA vouched for it. Requiring verification would make the feature
-   unreachable, since `/tls/trust` starts empty by design.
-
-   **The confirmation is MERGED with the DPoP one, never replaces it.** A client
-   that presented a certificate AND sent a proof demonstrated both, and a token
-   recording one would discard a check somebody performed. The REFRESH token is
-   bound too — otherwise the long-lived half of the grant stays a bearer
-   credential that mints bound tokens for whoever holds it, which is worse than
-   not binding at all because the `cnf` on what it mints implies a guarantee
-   nobody checked.
-
-   **The request reaches `accessToken()` through ONE funnel.** The token
-   endpoint's `issue()` adds `request: req` to every grant's options, so six
-   call sites did not have to remember it — five that would and a sixth added
-   later that would not, the reasoning that keeps `signJwt()` the single counter.
-   Only available where the main port is TLS, and
-   `tls_client_certificate_bound_access_tokens` is advertised only there: a
-   client reads a metadata member as a promise.
-
-3g. **`applications.js` is a library like `dpop.js`, and THE DIRECTORY IS ITS
-   STORE.** It holds every application this service has been asked about — an
-   OAuth client, an OIDC relying party, a SAML 2.0 or 1.1 service provider, a
-   WS-Federation application, a WS-Trust relying party, the OID4VP verifier, a
-   Kerberos service — as entries under `ou=applications`. It registers no route
-   and requires only `helpers.js` and `audit.js`, so it cannot join a cycle;
-   `admin_stats.js`, `oauth2.js`, `wsfed.js`, `wstrust.js`, `krb5_kdc.js` and
-   `krb5_service.js` require it in the ordinary direction, and `ldap_server.js`
-   fills its `setDirectory()` slot at require time for the reason
-   `vc_claims.js`'s is filled (rule 6). Six things are load-bearing:
-
-   **A SIGHTING MAY NAME SEVERAL KINDS, AND TWO PROTOCOLS NEED IT TO.** `seen()`
-   takes a list as readily as a string and accumulates them. A `wtrealm` is a
-   WS-FEDERATION application AND the audience of whichever assertion it was
-   handed; an `AppliesTo` handed a SAML 2.0 assertion is a WS-Trust relying party
-   AND that assertion's service provider. Recording only the second of each left
-   `wsfed-relying-party` a kind NO code path produced — offered by the console's
-   filter and by the management API's enum, and matching nothing, forever. Pass a
-   list rather than calling `seen()` twice: two calls count two authentications
-   for one act, which is what `counts: false` exists to prevent one field over.
-
-   **A KERBEROS SERVICE IS RECORDED AT BOTH ENDS, AND THAT IS NOT A DOUBLE
-   ENTRY.** The KDC records an SPN when it ISSUES a service ticket
-   (`krb5_kdc.js`'s TGS handler) and `krb5_service.js` records it again when it
-   ACCEPTS one, under the same `SPN@REALM` identifier, so the two land on one
-   entry with two descriptions. The acceptor's half is not redundant: it is the
-   only one that fires for a ticket some OTHER KDC issued — a real Active
-   Directory, which the parent project's real-DC and relay jobs use — where the
-   client was recorded and the service was not. It goes in `accept()` and NOT in
-   `spnego.js`, which calls that function for every check it makes and adds none
-   of its own; a second call there would count one ticket twice.
-
-   **THERE IS NO MAP SHADOWING THE ENTRIES.** Every read is a directory read and
-   nothing is cached, which is what makes an `ldapmodify` of `oauthRedirectUri`
-   change what RFC 9700 mode accepts on the NEXT request. A cache added for
-   speed would quietly undo the whole design, and on a mock whose store is a Map
-   in this process there is nothing to gain by one. `oauth2.js`'s
-   `registeredClients` Map is GONE for the same reason — the RFC 7591
-   registrations are entries, reached through `registrationOf()`.
-
-   **THE SPELLING TABLE IS TWO LISTS AND ONE DOOR.** `ldap_server.js`'s
-   `CANONICAL_NAMES` puts the conventional capitalisation back on a name the
-   store lower-cased. It is `STANDARD_NAMES` (types somebody else defined, the
-   specification named per group) plus `OWN_NAMES` (this service's inventions),
-   each written ONCE as the canonical spelling with the lookup key derived by
-   `toLowerCase()` — never as `lower: 'Mixed'` pairs, where a typo in the key is
-   invisible and the table fails silently at its only job. It covers ~150 names
-   rather than the ~30 this service writes, deliberately: the directory is
-   schemaless and a certificate subject arrives as attributes nobody here chose,
-   so a table that knew only its own writes would be wrong exactly where a reader
-   needs it. FOUR SOURCES merge — the two lists, `vc_claims.js`'s catalogue and
-   `applications.js`'s schema — and all four go through `learnName()`, which
-   keeps the first spelling and WARNS on a second rather than letting merge order
-   decide silently. Add a name to a list, never to the map; `memberOf` is in
-   neither category and says so where it sits.
-
-   **THE STORE'S TWO DIRECTIONS ARE NOT SYMMETRICAL, and that is the fix for
-   the DN.** A WRITE speaks in attribute objects — all a record has to say — but
-   `readApplication()` and `allApplications()` hand back the whole ENTRY (`dn`,
-   `origin`, `createdAt`, `modifiedAt`, `operational`, `attributes`), the same
-   shape `objectFor()` gives the console for a person. It has to be the entry,
-   because THE DN IS NOT AN ATTRIBUTE — it is the key the entry is stored under
-   — so a caller handed only the attributes had no way to learn where the
-   application lives, and every applications page could show the `cn` and
-   nothing else. The DN is published inside `attributes` as `entryDN` (RFC 5020,
-   and what `matchable()` already calls it) and SYNTHESISED on every read: a
-   stored copy is a second definition of one fact and the one that goes stale,
-   which `applicationEntry()`'s rename fallback shows is a case that happens.
-   Two consequences to keep. `view()` exposes `attributes` as the WHOLE entry
-   and `fields` as the schema half `recordFromAttributes()` understands — they
-   are different questions and the narrow one was being served under the wide
-   one's name. And every attribute lookup in `applications.js` goes through
-   `byLowerName()`, because names now arrive canonically spelled on the way out
-   and lower-cased in the store; an index assuming either produces a record with
-   an empty identifier rather than an error.
-
-   **THE ATTRIBUTES WIN OVER THE STORED DOCUMENT.** RFC 7591 permits arbitrary
-   metadata and RFC 7592's read must return what was registered, which no fixed
-   attribute set can represent — so the whole registration is kept verbatim in
-   `appRegistrationJson`. When the record is rebuilt that document is the
-   STARTING POINT and every member with an attribute of its own is overwritten
-   from the attribute. Reverse those and an operator's edit is silently ignored
-   by the one check that matters, which is the two-stores failure in miniature.
-
-   **THE SCHEMA IS A TABLE AND IT IS A VOCABULARY, NOT A CONSTRAINT.** node-ldapjs
-   has no schema subsystem (its whole `lib/` mentions objectClass three times: a
-   default filter and two result-code names) and it is a submodule this repo does
-   not modify, so there was nothing to register with. `SCHEMA.attributes` is the
-   definition: the entry is built by WALKING it, `/ldap/applications` publishes
-   it, and an attribute not in it is REFUSED rather than written. `multi`
-   accumulates and `single` is assigned — get that backwards on a counter and the
-   entry grows a value per sign-in, which is `applyVcAttributes()`'s second rule.
-   Where a registered class fits it is used (`applicationProcess`, RFC 4519);
-   `stsApplication` is invented because nothing standard has a `client_id`.
-
-   **THE APPLICATION FUNNEL IS NOT THE USER FUNNEL, and cannot be.** A person is
-   recorded at `recordAuthentication()`; an application is recorded where its own
-   protocol accepts it, because in the authorization code flow the person is
-   authenticated in `authn.js`, which knows nothing about OAuth and never reads a
-   `client_id`. `counts: true` exactly where a credential was accepted FOR that
-   application — the authorization endpoint counts, the token endpoint does not,
-   since redeeming the code is the same transaction continuing.
-
-   **`ou=applications` IS ITS OWN CONTAINER AND MUST STAY OUT OF THE ou=users
-   SWEEPS.** `populateVcAttributes()` would give an OAuth client a birthdate and
-   `/admin/groups` reports membership from there; both already walk `ou=users`
-   only. This is the OPPOSITE decision from `didPlan()`, where being outside
-   those sweeps was the bug because a DID names a person.
-
-   **THE CONSOLE IS NOT A THIRD DOOR.** `/admin/applications` and
-   `POST /admin-api/applications/{action}` both call functions in THIS module —
-   `createApplication`, `updateApplication`, `deleteApplication`,
-   `forgetRegistration` — which do the same read-modify-write `seen()` does
-   against the same entries. A form post and an `ldapmodify` are one act
-   arriving by two routes, which is what keeps the one-store rule intact with
-   three ways in. `applicationsView()` builds the HTML and the JSON together and
-   the API throws the markup away, the way `usersView()`/`groupsView()` already
-   do; the drill-down pages its ATTRIBUTE list under `attributesPage` rather
-   than the bare `page`, which is `pagingOf()`'s convention for a view holding a
-   list that is not the top-level one.
-
-   **WHAT MAY BE CHANGED IS DECLARED AND NOT DERIVED, and the line is the
-   `EDITABLE` table here rather than a judgement at each call site.** Declared is
-   what the application may DO — redirect URIs, grant types, scopes, secret,
-   auth method — which is configuration and is what RFC 9700 mode reads. Derived
-   is what HAPPENED — the counters, the sightings, the kinds, the protocols,
-   `appRedirectUriObserved` — and a form that could rewrite it would make the
-   page lie about this service's own behaviour, indistinguishably from the
-   recording being broken. `ldapmodify` still reaches everything: refusing it
-   HERE is the difference between offering an operation and merely not
-   preventing it. The console's selects are built from the same table the
-   actions validate against, so a form cannot offer a field the action refuses.
-
-   **`clientConfigOf()` IS WHAT THE SECURITY CHECKS READ, NOT `registrationOf()`.**
-   The two answer different questions — "what may this client do" versus "what
-   did it register" — and they stopped coinciding the moment the console could
-   create an application with redirect URIs and no registration behind it. So
-   the RFC 9700 checks in `oauth2.js` pass `clientConfigOf()`, which is built
-   from the ATTRIBUTES; `appRegistered` records how an application got here and
-   not whether what it holds counts. `registrationOf()` is still what RFC 7592
-   and the UserInfo signing algorithm read, because those are genuinely
-   questions about the registration.
-
-   **TWO ATTRIBUTES HOLD CREDENTIALS IN THE CLEAR** — `oauthClientSecret` and
-   `appRegistrationAccessToken` — which is the `/krb5/principals` decision about
-   the Kerberos passwords, made again and for the same reason. Now that RFC 9700
-   mode CHECKS that secret, anyone who can read the directory can authenticate as
-   that client; that is the honest state of a service that authenticates nobody.
-   They are never given to `audit.js`, whose no-credential rule is untouched.
-
-4. **`wsfed.js` must stay after `oauth2.js` in the require order**, and that is a
-   dependency rather than a preference: it signs users in to the browser session
-   `oauth2.js` owns, through the `startSession` / `sessionOf` / `endSession` it
-   exports, so that single sign-on works across the two protocols. The dependency is
-   one-way — `oauth2.js` knows nothing about WS-Federation — which is what keeps it
-   out of the cycles rule 2 exists to avoid. Do not give WS-Federation a session store
-   of its own to "decouple" them: two stores would each look correct alone and never
-   see each other, and the symptom is a sign-on that silently is not single.
-
-5. **`admin.js` must stay after `oauth2.js` too, for the same reason**: it reads that
-   `sessions` map so the metrics page can report real sign-on sessions. And the same
-   one-store rule applies to REVOCATION — the set of revoked jtis lives in
-   `admin_stats.js` and serves both the console and RFC 7009's `/oauth2/revoke`. Two
-   sets would each look correct alone and never see each other, and a token revoked
-   from the console would keep introspecting as active with no error to point at.
-
-6. **`ldap_server.js` must stay after `admin.js` AND after `tls_server.js`, and it
-   INVERTS a dependency the same way `helpers.js` does.** The second half of that is
-   new and is a plain require rather than an inversion: it serves `tls_server.js`'s
-   server certificate and key on 636, and neither thing that forces an inversion
-   applies — that module knows nothing about this one, so there is no cycle, and its
-   routes (`/tls*`) collide with nothing here. What the require DOES do is pull those
-   routes into the express router at that point, so `server.js` requires
-   `./tls_server` BEFORE `./ldap_server` to keep "the require order is the route
-   order" true rather than a fiction node quietly corrects. It changes no output —
-   `/sts-metadata` sorts its rows by path within a group. Its embedded directory grows an entry under
-   `ou=users` for anybody who authenticates through any of the families here, and
-   `admin_stats.recordAuthentication()` is already the single funnel all of them
-   pass at the moment a credential is ACCEPTED — so one observer there is one place
-   and not sixteen. **A verified TLS client certificate is one of them and is the
-   odd one: its identity is not a name but a DN**, so its entry is named from the
-   subject's CN (or the leaf RDN where there is none), every other RDN of the
-   subject becomes an attribute, and the issuer, serial, validity and fingerprint go
-   on beside them as `x509*` attributes that are this service's own names and not
-   schema. `certificatePlan()` carries the placement rules and what they cost.
-
-   **A DECENTRALIZED IDENTIFIER is the THIRD shape and A SPIFFE IDENTITY IS THE
-   FOURTH; there is one plan per shape** — `certificatePlan()`, `didPlan()`,
-   `spiffePlan()`, `namePlan()`, chosen in `autoCreateUser()` and decided in
-   each. A DID is neither a DN nor a name but
-   one long opaque string, so its entry is named by a DIGEST of it —
-   `uid=did-<12 hex>,ou=users` — with the identifier whole on the entry as
-   `didSubject` and its method as `didMethod`. Written out, a `did:jwk` is a DN
-   of several hundred characters of key material; given a container of its own,
-   `ou=dids`, it would sit outside `populateVcAttributes()`'s sweep and
-   `/admin/groups`, which both walk `ou=users`. **On those entries the `uid` is
-   NOT the identity**, which is the one thing that does not generalise from the
-   other two plans: `didSubject` is, `locateEntry()` finds the entry by it (the
-   same way it finds a certificate's by `x509subject`), and `personaKeyOf()`
-   invents the person FROM it — seed the persona from the digest instead and the
-   startup sweep describes a different person from the one the authentication
-   path already wrote.
-
-   **A SPIFFE IDENTITY IS FILED THE SAME WAY AND FOR THE SAME REASONS, and the
-   one place it differs from a DID is why it does not fold.** `spiffePlan()`
-   names the entry `uid=spiffe-<12 hex>,ou=users`, puts the identifier whole on
-   it as `spiffeSubject` (multi-valued) with `spiffeTrustDomain` and
-   `spiffePath` beside it, and `locateEntry()` finds it by
-   `entryBySpiffeSubject()` — never by rebuilding the digest, so the naming rule
-   can change without orphaning anything. That lookup is the whole of "reuse the
-   identity if it is already here": the same workload arriving as an X509-SVID
-   at the SPIRE Server API, as an attesting agent and as a JWT-SVID at
-   `ValidateJWTSVID` lands on ONE entry with one description per route.
-   **It deliberately does NOT consult `existingUserEntry()`**, which is the
-   opposite of what `namePlan()` does: the last segment of a SPIFFE path is
-   exactly the kind of short common word (`db`, `web`, `api`) that collides with
-   a person somebody signed in as, and a workload called `db` is not the DBA.
-   And a workload is filed with the PEOPLE rather than under `ou=applications`,
-   which is a decision: that container holds what this service was ASKED ABOUT —
-   an application is the audience of a token — and a SPIFFE identity is the
-   SUBJECT of one, like the TLS client certificate for a machine that already
-   lands in `ou=users`.
-
-   **The three DIDs come from the Decentralized Identity endpoints, and each
-   reaches the funnel at the point its own credential is accepted.**
-   `subjectClaimsFrom()` in `vc_issuer.js` records the person an access token
-   names — HERE and not at the two credential endpoints, because it is the single
-   point that decides who a credential is about, so a batch of five proofs is one
-   record and a deferred issuance is not counted twice. `buildCredentialFor()`
-   records the credential's SUBJECT when it is DID-shaped, one per credential,
-   because a batch is several holder keys and therefore several DIDs; the `did:`
-   guard is load-bearing rather than tidy — the other two formats name their
-   subject with the token's own `sub`, or with a `urn:uuid:` minted fresh per
-   credential, and recording those would evict real people from a store with a
-   fixed maximum to hold identifiers nothing will present again.
-   `/oid4vp/response` records the holder BELOW the refusal, so a presentation
-   that failed a check records nothing. And `/did/generate` records what it
-   MINTED, but only for `?method=jwk`: the `web` branch returns this service's
-   own DID, and an entry for it would file the issuer among the people.
-
-   But this module requires `admin_stats.js` (it needs
-   `identityOf`'s normalisation, so `alice`, `urn:sts-mock:user:alice` and
-   `alice@REALM` seed ONE entry), which means `admin_stats.js` cannot require it
-   back: that is the cycle rule 2 exists for. So `admin_stats.js` offers
-   `setUserObserver()` and this module fills it at require time. The observer's
-   return value is ignored and a throw from it is caught — a directory must never
-   be able to fail an authentication. Do not "simplify" that into a require in the
-   other direction, and do not seed the entry at each authentication site instead:
-   sixteen call sites means a seventeenth that is not.
-
-   **A container it does NOT sweep, and that is the point of it.**
-   `ou=applications` is `applications.js`'s store (rule 3g) and this module is
-   what makes it one — `readApplication`, `writeApplication`, `allApplications`
-   and `countApplications`, filled into that module's `setDirectory()` slot at
-   require time, plus `GET /ldap/applications`. The division is exact and worth
-   keeping: THAT module owns the schema and both conversions, THIS one owns
-   where the container is, how an entry is created and what the cap is. Note
-   that `writeApplication()` REPLACES rather than merging, which is the one
-   place this file breaks `applyVcAttributes()`'s fill-only-what-is-absent rule
-   — deliberately, because the record being written was read from that entry a
-   moment ago, so merging would make it impossible ever to REMOVE a value and a
-   redirect URI deleted with `ldapmodify` would come back on the next request.
-
-   **ONE ENTRY PER PERSON, AND IT IS ENFORCED AT FOUR DOORS RATHER THAN ASSUMED
-   AT ONE.** Most of it was already true by accident: `identityOf()` normalises
-   `rcbj`, `urn:sts-mock:user:rcbj` and `rcbj@STS.MOCK` to one key, so every
-   name-shaped family folds onto `uid=rcbj,ou=users` before this module sees
-   them. What did not fold was the identity that is a DN — a certificate saying
-   `CN=rcbj` became a SECOND object beside the entry `rcbj` already had, in
-   either order of arrival. `existingUserEntry()` is the whole of the fix and
-   BOTH plans consult it: the lookup is by the entry's own NAMING RDN VALUE and
-   by any `uid` it carries, case-insensitively (the store already keys DNs
-   lower-cased), scoped to entries DIRECTLY UNDER `ou=users` because placement
-   is the only rule a schemaless directory cannot be lied to about. `namePlan()`
-   merges a `uid` onto an entry it folds onto, since that entry was named by
-   somebody else's attribute and the username was a fact nothing on it recorded.
-   The other three doors are `server.add` (LDAP_ENTRY_ALREADY_EXISTS, 68, naming
-   the entry that holds the name), and `createUser()`, which the console form and
-   `POST /admin-api/users/create` share. **Do not add a fifth way to create an
-   entry under `ou=users` without routing it through that function** — the fold
-   can be undone from any door that does not.
-
-   **A DID IS THE ONE IDENTITY THAT GENERALLY CANNOT FOLD, and where this service
-   knows whose it is, it does.** A DID names nobody by itself, which is why
-   `didPlan()` names its entry by a digest. But `vc_issuer.js` decides who a
-   credential is about from the access token and derives the holder DID from the
-   proved key in ONE call, so it passes `linkedTo` on the funnel and the
-   identifier goes onto that person's entry as a `didSubject` value instead. That
-   REVERSES an argument written at that call site — one wallet, several holder
-   keys, "a directory that filed them all under the access token's name could not
-   tell them apart" — and the reversal is sound because `didSubject` is
-   multi-valued: all of them are on one entry rather than one each on several.
-   Three consequences are load-bearing. `entryByDidSubject()` is consulted by the
-   UNLINKED branch too, or the same DID presented later at the Verifier — where
-   nothing says whose it is — creates the very entry the link avoided.
-   `personaKeyOf()` prefers the DID only where the DID NAMED the entry (its uid is
-   `didUid(did)`), or a folded entry would be filled from two different invented
-   people. And `plan.personaKey` exists for the same reason on the way in.
-
-   **A SECOND hook runs the other way, and it is the console that offers it.**
-   `/admin/users?user=<name>` shows that user's directory object — every attribute,
-   operational ones included — and `admin.js` must NOT require this module to get
-   it: `server.js` requires `admin.js` FIRST, so a require from there would pull
-   `/ldap` and `/ldap/directory` into the router ahead of the console's routes, and
-   `GET /sts-metadata` is built by walking that router. So `admin.js` exports
-   `setDirectoryReader()` and this module fills it with `objectFor()` at require
-   time. `objectFor()` is given the identity key the console files a person under,
-   which is the same normalised local name `autoCreateUser()` built the DN from —
-   pass anything else and the two silently stop naming the same entry.
-
-   **The console's THIRD slot is the only one that WRITES.** `admin.js` offers
-   `setDirectoryWriter()` and this module fills it with `createUser()`, for the
-   same route-order reason the two readers exist. It carries that function and
-   NOT a way to write an arbitrary entry, so what a username may be — and the
-   refusal of one already here — has one definition rather than one per surface.
-
-   **A THIRD hook is the same direction as the second, and there is one rule it
-   carries that is not obvious from the code.** `/admin/groups` lists this
-   directory's groups and drills into one; `admin.js` offers `setGroupReader()`
-   and this module fills it with `groupsFor()`, for exactly the route-order reason
-   above. What that function decides — and what must not be reimplemented in
-   `admin.js`, which renders and decides nothing — is **what counts as a group**,
-   and it is two rules rather than one: an entry UNDER `ou=groups`, or an entry
-   carrying a group `objectClass` wherever it sits. Both, because the directory is
-   schemaless and a client can `add` a `groupOfNames` under `ou=users` or an entry
-   with no `objectClass` at all under the groups container; either rule alone
-   answers for one of those and silently loses the other, so each row says which
-   rule caught it. The three disagreements it reports are the point of the page and
-   none of them is a defect to fix: a **dangling** member (this directory does not
-   do referential integrity, so a delete leaves the DN behind), a member that is
-   itself a **group** (nesting is shown, never expanded — nothing here walks it),
-   and an entry whose own `memberOf` names a group that does not list it back
-   (nothing here maintains `memberOf`; it is not even a standard attribute). Note
-   also that `memberUid` holds a bare name where `member` and `uniqueMember` hold a
-   DN — resolving the three alike is how every `posixGroup` member gets reported as
-   dangling.
-
-   **A FOURTH HOOK POINTS AT `vc_claims.js` and it writes rather than reads.**
-   `/admin/vc` chooses which LDAP attributes an issued Verifiable Credential
-   carries, so those attributes have to exist on people: this module fills
-   `vcClaims.setDirectory()` with `vcAttributesFor()` (one person's attributes, for
-   a claim value) and `populateVcAttributes()` (the sweep). The sweep runs when the
-   selection changes, when an entry is created, when a returning person
-   authenticates, and once at startup. Three rules in it are load-bearing —
-   it fills only what is ABSENT (so an operator's `ldapmodify` and the seeded
-   people's own names survive), it writes ONE value rather than appending (or an
-   entry accumulates a birthdate per sign-in), and it walks entries UNDER
-   `ou=users` only rather than everything carrying a `person` objectClass, because
-   this directory is schemaless and a client can put that class on a group.
-   Auto-created entries also take their `cn`, `sn`, `givenName`, `displayName` and
-   `mail` from the invented persona now rather than from the login name — those
-   are attributes a credential asserts, and `given_name: "dave"` taught a wallet
-   nothing — while the `uid` and the DN stay the login name, which is the identity.
-
-   **HOW SOMEBODY AUTHENTICATED IS WRITTEN ONTO THE ENTRY THEY ALREADY HAVE,
-   and that is what a WebAuthn SECOND FACTOR adds to this directory.** The two
-   roles land differently and neither needs a call site of its own:
-   passwordless WebAuthn is an authentication, so it reaches the funnel and
-   `autoCreateUser()` creates the entry exactly as a password sign-in does; a
-   second factor authenticates nobody new — the person is the one the password
-   step named — so it creates nothing and `applyAuthenticationFactors()` writes
-   a FLAG on the entry that exists. It reads the `amr`/`acr` that
-   `recordAuthentication()` now passes through on the observer, beside
-   `certificate`, and writes three of this service's own attribute names:
-   `authnMethod` (every RFC 8176 method ever used here, APPENDED),
-   `mfaAuthenticated` (TRUE/FALSE for the MOST RECENT authentication,
-   ASSIGNED — appending would accumulate one value per sign-in, the trap
-   `applyVcAttributes()`'s second rule is about) and `mfaLastAuthTime` (when
-   multi-factor last happened, never cleared). Two rules: NOTHING IS WRITTEN
-   WHERE NOTHING WAS STATED, because most families here set no `amr` at all and
-   `mfaAuthenticated: FALSE` on everybody would turn "never told" into
-   "checked, and it was one factor"; and TWO FACTORS MEANS TWO, so a
-   passwordless `["hwk"]` is FALSE.
-
-   **A GROUP HERE GRANTS NOTHING**, and both pages say so where a reader will see
-   it. No endpoint reads a group and nothing decides anything on one. The same is
-   true of those three authentication-factor attributes, and of them it is true
-   twice over — nothing reads them back and no token carries them either. On a
-   service that authenticates nobody it could hardly be otherwise — but a console
-   that listed groups beside the tokens page without saying it would let somebody
-   conclude that adding a user to `cn=directory-admins` changed what their token
-   could do.
-
-   **A TOKEN DOES CARRY A GROUP NOW, WHICH IS A DIFFERENT SENTENCE** — see rule
-   3d-ii and `groups.claim`, which is ON by default. `groupsOfUser()` here is
-   what answers it, filled into `group_claims.js`'s `setDirectory()` slot at
-   require time beside the four hooks above; it is the FIFTH and the same shape
-   as the fourth. Do not merge the two sentences back together: carrying a fact
-   is not acting on it, and no Kerberos PAC carries a group either way.
-
-`userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
-`firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
-them, not because they are especially general. The last two are read by three parsers
-— the WS-Trust RST, WS-Federation's `wreq`, and the `wresult` the mock relying party
-is POSTed — and they match on **local name with the namespace ignored** because the
-trust namespace alone has four versions in use. That is what lets one parser answer
-WS-Trust 1.0 through 1.4 instead of four.
-
-6a. **`scim.js` must stay after `ldap_server.js`, and the interesting thing
-   about it is that it is a PLAIN REQUIRE where five things in that file are
-   inverted hooks.** It requires that module directly, for the twelve functions
-   that make `ou=users` and `ou=groups` a store, and requiring it from anywhere
-   EARLIER would pull every `/ldap` route into the express router at that point.
-   Rule 3e says a slot is what you reach for when a require would close a cycle
-   or move a route, and to test a new proposal BOTH WAYS ROUND before adding one.
-   This proposal fails that test both ways — there is no cycle (`ldap_server.js`
-   knows nothing about SCIM) and no route moves (the `/ldap` routes are already
-   registered by the time this file is read) — so it is a require. It must still
-   come before `sts_metadata.js`, which is last for everybody, and it starts
-   NOTHING: it is HTTP all the way down, so requiring it is the whole of its
-   installation.
-
-   **IT PROVISIONS INTO THE DIRECTORY AND THERE IS NO SECOND STORE.** A
-   `POST /scim/v2/Users` and an `ldapadd` create the same entry, a SCIM PATCH and
-   an `ldapmodify` change it the same way, and a person provisioned over SCIM
-   appears on `/admin/users`, is swept for credential-claim attributes, and lands
-   in whatever group a client puts them in. That is the one-store rule (rule 5)
-   with a fourth door, and it is what makes the feature worth having: the
-   interesting property of a SCIM endpoint is that what it writes is what
-   everything else then reads.
-
-   **AND THE FOURTH DOOR CALLS THE SAME FUNCTION THE SECOND AND THIRD DO.** A
-   SCIM create goes through `createUser()` — the one the console's form and
-   `POST /admin-api/users/create` already share — so there is ONE reading of what
-   creating a person means at every door but `ldapadd`. This module builds no DN,
-   runs no uniqueness scan and applies no name rule of its own; it translates
-   that function's refusals into a status and a `scimType`, which is the only
-   part a SCIM client needs and the only part `createUser()` cannot know.
-
-   **It was written the other way first and each of the three home-made rules was
-   weaker**, which is why this is worth stating rather than assuming: the DN was
-   built as `uid=<name>,ou=users` directly, skipping `namePlan()`'s FOLD onto an
-   entry that is already this person's under another naming attribute — two
-   objects for one person, the exact thing that fold exists to prevent; the
-   uniqueness scan compared the `uid` ATTRIBUTE only, so somebody whose entry a
-   client certificate had named by `cn` was invisible to it and SCIM created them
-   twice; and the name-syntax list had already drifted from `createUser()`'s by
-   one character. `nameUsableInDn()` and `normalizeDn()` are exported from
-   `ldap_server.js` for the same reason — a group create has no `createUser()` to
-   defer to, so the CHECK is shared even though the door is not.
-
-   **ONE ACT IS ONE AUDIT ROW.** `createUser()` writes its own `user.create`, and
-   it now takes a `protocol` so that row says SCIM rather than LDAP; `scim.js`
-   therefore records only the update and the delete. A row from both would be one
-   act counted twice at the SAME layer, which is rule 3c's warning — unlike the
-   HTTP call row `app.js` writes, which is a different layer and is meant to be
-   there.
-
-   **IT IS THE FIFTEENTH PROTOCOL FAMILY, AND IT BECAME THE FIFTEENTH
-   AUTHENTICATION ONE WHEN THESE ENDPOINTS STARTED REQUIRING A CREDENTIAL** —
-   which is why "fourteen" became fifteen throughout this file and README.md —
-   and then sixteen, when the SPIRE Server API started requiring an X509-SVID
-   (rule 3k). Both counts mean "families reaching `recordAuthentication()`".
-   The change is narrower than it sounds and both halves have to be kept
-   straight. Three of the schemes `scim_auth.js` offers present a credential on
-   EVERY REQUEST (Basic, Digest, HOBA), so accepting one is an authentication
-   like a WS-Trust UsernameToken and reaches `recordAuthentication()`; the other
-   three do NOT, because each continues an authentication already recorded where
-   it was accepted — a token when it was issued, a cookie when its session
-   began, a certificate once per CONNECTION, which is a decision
-   `tls_server.js` made deliberately and which counting per request here would
-   undo from the other end.
-
-   **WHAT DID NOT CHANGE IS THAT BEING PROVISIONED IS NOT AUTHENTICATING.** The
-   person a SCIM client CREATES has signed in to nothing, so they still have a
-   directory entry with `origin: scim` and no row on `/admin/users` until they
-   turn up and authenticate. That is the distinction this service draws
-   everywhere else between an identity being RECORDED and one having
-   AUTHENTICATED, and it survives intact; do not add a `recordAuthentication()`
-   call for the provisioned person to make the two pages agree.
-
-6a-ii. **`scim_auth.js` IS WHO IS ASKING AT `/scim/v2`, AND IT IS THE ONLY
-   AUTHENTICATION THIS SERVICE ENFORCES ANYWHERE.** A library like `scim_map.js`
-   — it registers nothing and NEVER TOUCHES `res`: it decides and `scim.js`
-   answers in SCIM's own error shape, the same split `oauth2_bcp.js` has with
-   `oauth2.js`. It requires `helpers.js`, `config.js`, `dpop.js`, `mtls.js`,
-   `admin_stats.js`, `audit.js` by way of those, `authn.js`, `tls_server.js` and
-   `ldap_server.js`; the last three register routes, and requiring them is safe
-   for rule 3e's reason applied rather than assumed — `scim.js` is the only
-   thing that requires this file and it already sits after all three in
-   `server.js`, so there is no cycle and no route moves. Eight things:
-
-   **THE TABLE IS THE MODULE.** `SCHEMES` is the single source for the
-   WWW-Authenticate challenge, for `authenticationSchemes` in the
-   ServiceProviderConfig, for `GET /scim`, and for `/admin/scim`'s per-scheme
-   counters. A scheme turned off vanishes from the challenge and from the
-   published document TOGETHER, which is the property that matters: a client
-   reads a published scheme as a promise and a challenge as an instruction.
-   **Do not add a scheme RFC 7644 section 2 does not name** — the temptation is
-   an API key in a header, which is what most real integrations use, is in no
-   specification, and would interoperate with nothing.
-
-   **RFC 7644 SECTION 2 HAS EXACTLY TWO NORMATIVE SENTENCES** and both are
-   implemented rather than approximated: a provider SHALL indicate its schemes
-   in `WWW-Authenticate` (every 401 carries one header per offered scheme), and
-   a provider MUST be able to map an authenticated client to an access control
-   policy (two OAuth scopes, with every other scheme granting both). The section
-   NAMES six schemes and all six are here. It defines no credential of its own.
-
-   **THE BEARER CHECK IS `dpop.presentedAccessToken()` THROUGH A CAPTURING
-   RESPONSE.** That function is the single check `/oauth2/userinfo` and the
-   three credential endpoints share and it carries the DPoP proof and nonce
-   handshake, the RFC 8705 certificate binding, the RFC 9700 query-string
-   refusal and the audience check — so a fifth implementation was out of the
-   question. What it will not do is speak SCIM: it ANSWERS, with an OAuth-shaped
-   body. So it is handed a response object that records, and what it would have
-   said is translated. THE HEADERS IT SET ARE KEPT VERBATIM, which is the part
-   that matters — `DPoP-Nonce` and `use_dpop_nonce` are how a wallet learns to
-   retry.
-
-   **ONLY THE OAUTH SCHEMES CARRY SCOPES, AND THAT HAS A CONSEQUENCE WORTH
-   STATING.** A caller who cannot get a scope can use Basic instead. Which is
-   why every scheme has a switch of its own: a deployment exercising a client's
-   scope handling turns the other five off. `scim:read` and `scim:write` do NOT
-   imply one another, deliberately, so that a read-only provisioning credential
-   is something this service can produce.
-
-   **TWO SCHEMES REALLY VERIFY SOMETHING AND IT IS THE KERBEROS ARGUMENT BOTH
-   TIMES.** Digest hashes the password into the response, so a server accepting
-   anything would not be performing the exchange and the client's own digest
-   code would go unexercised — hence any username, one shared password
-   (`scim.digestPassword`). HOBA's signature is genuinely verified for the same
-   reason; what is permissive there is the REGISTRATION, which is
-   unauthenticated for the reason `POST /tls/trust` is — it is how a caller GETS
-   a credential. Between them they make five negatives reachable that no
-   permissive server can produce, including the one worth knowing: a replayed
-   nonce count is refused WITHOUT `stale=true`, because `stale` means "your
-   credential was fine, try again" and a replay is the opposite claim.
-
-   **WHICH SCHEMES REACH THE AUTHENTICATION FUNNEL IS `recorded` ON THE ROW**,
-   and the rule is the one this service applies everywhere: recorded at the
-   moment a credential is ACCEPTED, never again while that act continues. See
-   rule 6a above for the three and three.
-
-   **THE DISCOVERY ENDPOINTS ARE OPEN BY DEFAULT** (`scim.authDiscovery`), which
-   is `POST /tls/trust`'s bootstrapping argument: the ServiceProviderConfig is
-   where a client READS which schemes exist, so demanding a credential to fetch
-   it means a client must already know the answer to the question it is asking.
-
-   **A CREDENTIAL THAT WAS PRESENTED AND FAILED IS ALWAYS A REFUSAL**, even with
-   `scim.authRequired` off. A client testing its expired-token path must not get
-   a 200 because the endpoint would also have accepted nobody.
-
-   **THE ServiceProviderConfig PUBLISHES THREE SCHEMES scimmy CANNOT
-   VALIDATE.** RFC 7643 section 5's five canonical `type` values do not cover
-   RFC 7644 section 2's six schemes — there is none for a client certificate, a
-   cookie or HOBA — and scimmy enforces the five, correctly. So the four
-   canonical rows go through `SCIMMY.Config` and the other three are appended to
-   the SERIALISED document by `scim.js`, from the same table. Note also that
-   `authenticationSchemes` is the one scimmy property that is CUMULATIVE:
-   `applyCapabilities()` resets it before setting it, or the array would grow by
-   four every time somebody read the document.
-
-   **THE ROUTES ARE REGISTERED ONE BY ONE AND NOT BEHIND `scimmy-routers`.** That
-   package exists and would have done it in a line. It mounts an express
-   `Router`, and `registeredRoutes()` in `sts_metadata.js` skips any layer with
-   no `.route` — so every SCIM endpoint would have been INVISIBLE to the drift
-   check, silently, which is the one thing that page exists to prevent. Its
-   constructor also REQUIRES an authentication scheme and a handler, and what
-   this service would have installed is a handler that accepts everything dressed
-   as a check.
-
-   **THE DEPENDENCY WAS WEIGHED THE OPPOSITE WAY FROM `swagger-ui-dist`.**
-   `scimmy` is 735 KB unpacked with NO runtime dependencies, and it brings the
-   RFC 7643 schema characteristics, the section 3.4.2.2 filter grammar and the
-   section 3.5.2 PATCH path grammar — the last being where every hand-rolled SCIM
-   server is subtly wrong, since `emails[type eq "work"].value` is a path and not
-   a property name. TWO THINGS IT DOES NOT DO look as though it does.
-   `Resource#read()` does NOT apply the filter it parsed — it hands the resource
-   instance to the egress handler, so a handler ignoring `.filter` returns
-   everybody for every query and looks correct until somebody filters. And
-   `Filter#match()` THROWS on a nested attribute a resource lacks
-   (`Object.entries(undefined)`), which for `emails.value co "…"` against anybody
-   with no mail is the ordinary case; `toScimUser()` pads every multi-valued and
-   complex member and `prune()` takes the padding off before the wire. Both are
-   documented where they are worked around, the way `toSearchEntry()`'s ldapjs
-   workaround is.
-
-   **ANYTHING A HANDLER THROWS THAT IS NOT A `SCIMMY.Types.Error` COMES BACK AS A
-   404.** `Resource#read()` and `#write()` catch and re-throw as "Resource not
-   found", so an ordinary programming mistake inside an egress handler surfaces
-   to the client as a missing user. `handle()` logs the original whole, which is
-   the only thing that makes such a defect findable.
-
-6a. **`spiffe_server.js` must stay after `ldap_server.js` AND after
-   `tls_server.js`, and it INVERTS one dependency the way `ldap_server.js`
-   inverts five.** The `tls_server.js` half is the newer of the two and is a
-   plain require rather than an inversion, arrived at by rule 3e's test applied
-   both ways round: `spiffe_auth.js` needs `dnRfc4514()` — the ONE spelling of a
-   certificate subject, which `scim_auth.js` requires for the same reason, since
-   two spellings of one DN is two people on `/admin/users` — and that module
-   knows nothing about SPIFFE, so there is no cycle, and its `/tls*` routes are
-   already registered by the time this is read, so no route moves. The plain half first: the
-   SPIFFE registry's store is the directory under `ou=spiffe`, and that module
-   fills `spiffe_registry.js`'s `setDirectory()` slot at ITS require time — so
-   requiring this any earlier leaves the registry with no store at the moment
-   `listen()` writes the seed entries. It is the FOURTH module whose own
-   listeners start from `listen()` in `server.js` rather than at require time,
-   and for the reason the other three carry: binding can fail, and a `require`
-   that throws takes the whole service down where a route cannot. FOUR sockets,
-   each reported SEPARATELY (`GET /spiffe`, `/admin/spiffe`), because "the
-   Workload API socket is up and the SPIRE Server API port is not" is an
-   ordinary outcome and one flag could only report one of them — the lesson
-   `ldap_server.js` records about 389 and 636, applied before it had to be learnt
-   again.
-
-   **The inversion is the CONSOLE.** `/admin/spiffe` must report which listeners
-   bound, and only this module knows — but `admin.js` cannot require it, because
-   `server.js` requires `admin.js` FIRST and the require would pull `/spiffe` and
-   the bundle endpoint into the router ahead of every `/admin` route, which
-   `GET /sts-metadata` walks. So `admin.js` offers `setSpiffeReader()` and this
-   module fills it at require time — the same shape `setDirectoryReader()`,
-   `setGroupReader()` and `setScimReader()` have. `admin.js` DOES require
-   `spiffe_ca.js` and `spiffe_registry.js` directly: they register nothing, so
-   neither thing that forces a slot applies.
-
-   **THE UNIX SOCKET IS THE ONE THING THIS SERVICE PUTS ON A FILESYSTEM**, and
-   the distinction is worth keeping: it is a rendezvous point, it holds no bytes,
-   it is unlinked on close, and a fresh process makes a fresh one. TCP-only would
-   have been filesystem-clean and unreachable by every real client, because
-   `SPIFFE_ENDPOINT_SOCKET` means a `unix://` path to `go-spiffe`,
-   `spiffe-helper` and the SPIRE agent. A STALE socket is unlinked before
-   binding; something at that path that is NOT a socket is left alone and
-   reported, because deleting a file named in configuration on the strength of a
-   typo is not this service's decision to make.
-
-7. **`admin_api.js` must stay after `admin.js`, and the rule it carries is about
-   the FUTURE rather than about load order.** The plain dependency first: it
-   requires that module for the four action functions and the per-page JSON
-   views, so it must come after it. Nothing else about its position matters — it
-   registers no wildcard and collides with no path.
-
-   The rule that does matter is **a control added to `/admin` gets an operation
-   on `/admin-api` in the same commit** — `/admin/users` grew its first form
-   (create a person in the directory) and `POST /admin-api/users/:action` with
-   its one `create` action arrived with it — — a CONTROL, which is why a page with no
-   form on it needs only its GET. Not eventually, and not when somebody
-   asks: an API that covers eight of nine controls is worse than one that covers
-   none, because the ninth is found by a caller who has already written the code
-   that assumed it. A page with no form on it still needs its GET —
-   `/admin-api/audit` is the one, and it is the audit page having nothing to
-   change rather than an operation nobody got round to. `/admin/users` USED to
-   be a second such page and no longer is.
-
-   Two things make that cheap rather than a matter of discipline, and one thing
-   cannot be made cheap at all:
-
-   * **The API decides nothing.** Every POST calls the SAME action function the
-     console's form posts to — `tokenAction`, `usersAction`, `claimsAction`,
-     `vcAction`, `vpConfigAction` — with `action` taken from the URL instead of from a hidden
-     input, and every GET calls the same JSON view the page's `?format=json`
-     answers. Those views are now functions in `admin.js` (`consoleJson`,
-     `metricsJson`, `tokensView`, `usersView`, `groupsView`, `claimsJson`,
-     `vcJson`, `vpConfigJson`) for exactly this reason: they used to be built
-     inline in the route handlers, which was fine while there was one caller. So
-     adding an action to a console switch is most of adding it here, and what
-     remains is one row of `admin_api.js`'s table.
-   * **The OpenAPI document is GENERATED from that table** (`admin_api_spec.js`),
-     so an operation cannot exist and be undocumented, nor be documented and not
-     exist. Do not write a spec file beside the code — that is the thing that is
-     wrong within a month.
-   * **What no code here can check is a new console control with no row.**
-     Nothing in this service can see a form appear on a page. So the parity is
-     asserted from outside, by the parent project's `tests/admin_api.js`, and it
-     reads the facts off the SERVICE rather than off a list in the test: the
-     console's page list comes back in `GET /admin-api/status`, and each action
-     handler, asked for an action that does not exist, replies naming the ones
-     that do. Add an action to a switch and that sentence grows; the test then
-     fails until the API has an operation for it.
-
-   One consequence for the console side: `usersView()` and `groupsView()` build
-   the HTML as well as the JSON, and `/admin-api` throws the markup away. That is
-   what `/admin/users?format=json` has always done, it is a string concatenation
-   on a mock, and the alternative — a second set of builders for the same data —
-   is the thing this whole arrangement exists to prevent.
-
-7a. **THE BREADCRUMB TRAIL IS IN THE SHELL AND IT IS ON EVERY PAGE.**
-   `page()` draws `trailBar()` under the nav on all of them — `Admin console ›
-   Applications › rfc9700-debugger`, and on `/admin` itself the one crumb. It is
-   not the nav said twice: the nav answers "what else is there", the trail
-   answers "where am I and how do I get back", and the tab for the section a
-   reader is standing IN is exactly the tab that says nothing about the page they
-   are standing ON. That was the original bug — `item.path === active` is true on
-   `/admin/applications` and on `/admin/applications?application=x` alike, and the
-   active tab is drawn as plain text, so the one control pointing at the list was
-   the one control the shell had turned off.
-
-   A drill-down view returns `up` — `upTo(section, leaf, listView)` — and
-   `respond()` threads it to `page()`. It makes the active tab a LINK as well.
-   **The section label comes from `NAV`**, so a renamed tab cannot leave a trail
-   naming the old one. **The last crumb is never a link**: a crumb that reloads
-   the page you are on teaches a reader not to trust the ones beside it.
-
-   **WHAT MAKES IT A BREADCRUMB RATHER THAN A LINK TO THE SECTION IS
-   `listViewOf()`.** A drill-down link carries the list's filter and page, and the
-   section crumb spends it, so back lands where the reader was. `LIST_PARAMS` is a
-   WHITELIST PER SECTION and must stay one — what comes out of it goes into a URL
-   this service hands to a browser, which is the rule `backTo()` already follows.
-
-   **THREE PLACES DROP IT IF NOBODY CARRIES IT, and they are already handled.**
-   A drill-down's own controls carry the whole query (`pageParamsOf()`), so they
-   are free. `perPageForm()` is a GET form — it posts its own fields and nothing
-   else — so the filter is spelt out as hidden inputs, and its PAGE deliberately
-   is not: `per` is what that form changes. And every form on the applications and
-   authorization-server drill-downs carries one opaque `back` field, which the
-   POST handler REBUILDS through `listViewFromBack()` rather than echoing. **A new
-   form on either of those pages needs `carryBack` in it**, or an edit made
-   through it silently costs the reader their place in the list.
-
-   **A NEW DRILL-DOWN NEEDS `up` AND NOTHING CAN CHECK THAT IT HAS ONE**, the same
-   gap rule 7 describes: no code here can see a page appear. The four are
-   `?user=`, `?group=`, `?application=` and `?profile=`, and every branch of those
-   views sets it — the not-found branches included, since a page saying "no such
-   group" is the page a reader most needs a way off. A parameter that merely
-   FILTERS a list is not a drill-down and must not pass `up`: the section crumb
-   would then point at the page the reader is already on.
+---
+
+## The require order in `server.js` IS the route order
+
+Because of rule 1. Every constraint below is a DEPENDENCY, not a preference, and
+each one's argument lives in the directory `CLAUDE.md` of the module that carries
+it — this table says only what the constraint is, so that somebody adding a
+require can see at a glance whether they are about to break one.
+
+| # | Required | Constraint | Argument in |
+|---|---|---|---|
+| 1 | `common/config_file` | First of all. Every reader of `CONFIG_FILE` is below it. | `common/CLAUDE.md` |
+| 2 | `common/app` | Before every protocol module — they register against it, and middleware only applies to routes added after it. Requiring it is also what installs the JWT recorder (rule 3e). | `common/CLAUDE.md` |
+| 3–4 | `common/helpers`, `common/config` | `config.js` is below `helpers.js` and requires nothing here. | `common/CLAUDE.md` |
+| 5 | `common/claim_attributes` | Ahead of everything that ISSUES, because requiring it fills `setAttributeResolver()`. An empty slot means tokens without their configured attributes. | `common/CLAUDE.md` |
+| 6 | `common/group_claims` | Same reason, for `setGroupResolver()`. | `common/CLAUDE.md` |
+| 7 | `ws-trust/wstrust` | No constraint. | `ws-trust/CLAUDE.md` |
+| 8 | `authn/authn` | Before `oauth-oidc/oauth2` — it owns the session that module reads, and fills `audit.js`'s `setActorResolver()`. | `authn/CLAUDE.md` |
+| 9 | `oauth-oidc/oauth2` | Before `ws-federation/wsfed` and before `admin-ui/admin`. | `oauth-oidc/CLAUDE.md` |
+| 10 | `ws-federation/wsfed` | **After `oauth2`** — rule 4. Single sign-on across the two protocols. | `ws-federation/CLAUDE.md` |
+| 11–14 | `oid4vc/*` | `vc_offers` before `vc_issuer`; both read `vc_configs`, which is why that module exists (rule 2). | `oid4vc/CLAUDE.md` |
+| 15–16 | `kerberos/krb5_kdc`, `krb5_service` | Their listeners start from `listen()`, not here. | `kerberos/CLAUDE.md` |
+| 17 | `kerberos/spnego` | **After `krb5_service`** — it calls that module's `accept()` and adds no check of its own. | `kerberos/CLAUDE.md` |
+| 18 | `admin-ui/admin` | **After `oauth2`** — rule 5. And before `ldap`, `scim` and `spiffe`, which is why it offers five slots rather than requiring them. | `admin-ui/CLAUDE.md` |
+| 19 | `mgmt-api/admin_api` | **After `admin-ui/admin`** — rule 7. It calls that module's action functions and JSON views. | `mgmt-api/CLAUDE.md` |
+| 20 | `tls/tls_server` | **Before `ldap/ldap_server`**, which serves its certificate and key on 636. | `tls/CLAUDE.md` |
+| 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills five slots at require time. | `ldap/CLAUDE.md` |
+| 22 | `scim/scim` | **After `ldap/ldap_server`** — a plain require, and rule 3e's test is why. | `scim/CLAUDE.md` |
+| 23 | `spiffe/spiffe_server` | **After `ldap/ldap_server` and `tls/tls_server`.** Its registry's store is the directory. | `spiffe/CLAUDE.md` |
+| 24 | `sts_metadata` | **Last, for everybody.** It reads the router to list what everything else registered. | this file, below |
+
+### Where the numbered rules live now
+
+The prose throughout this repository cites rules by number, and the numbering is
+kept rather than renumbered — a renumber would silently invalidate every citation
+in every file, including the ones in the source comments. This is the index.
+
+| Rule | About | File |
+|---|---|---|
+| 1 | Requiring a module registers its endpoints | this file |
+| 2 | `vc_configs.js` / `vc_offers.js` break require cycles | this file, `oid4vc/CLAUDE.md` |
+| 3 | A library registers nothing (`dpop.js`) | this file |
+| 3a, 3a-ii | `vc_claims.js`, `vc_verifier_config.js` | `oid4vc/CLAUDE.md` |
+| 3b, 3c, 3d, 3d-ii | `admin_stats.js`, `audit.js`, `claim_attributes.js`, `group_claims.js` | `common/CLAUDE.md` |
+| 3d-iii | `scim_map.js` | `scim/CLAUDE.md` |
+| 3e | The inverted hooks, and the test for adding one | this file |
+| 3f, 3h, 3i, 3j | `oauth2_bcp.js`, `mtls.js`, `client_auth.js`, `authorization_servers.js` | `oauth-oidc/CLAUDE.md` |
+| 3g | `applications.js` | `common/CLAUDE.md` |
+| 3k | SPIFFE's six modules | `spiffe/CLAUDE.md` |
+| 4 | `wsfed.js` after `oauth2.js` | `ws-federation/CLAUDE.md` |
+| 5 | `admin.js` after `oauth2.js` | `admin-ui/CLAUDE.md` |
+| 6 | `ldap_server.js` after `admin.js` and `tls_server.js` | `ldap/CLAUDE.md` |
+| 6a (SCIM), 6a-ii | `scim.js`, `scim_auth.js` | `scim/CLAUDE.md` |
+| 6a (SPIFFE) | `spiffe_server.js` | `spiffe/CLAUDE.md` |
+| 7, 7a | The console/API parity rule, the breadcrumb trail | `mgmt-api/CLAUDE.md`, `admin-ui/CLAUDE.md` |
+
+Two rules share the number `6a` and always did — one for SCIM and one for
+SPIFFE. They are now in different files, which is the first thing that has ever
+made that collision harmless.
+
+---
+
+## Four modules start listeners from `listen()`, not at require time
+
+The two Kerberos modules, `ldap_server.js` AND `tls_server.js` are the exception to
+rule 1 in one direction only: requiring them registers their HTTP views
+(`/KdcProxy`, `/krb5/principals`, `/ldap`, `/tls`) like everything else, but their
+**own listeners are started from `listen()` in `server.js`, not at require time** —
+binding a port can fail, and a `require` that throws takes the whole service down
+where a route cannot. A failure to bind is RECORDED rather than thrown, and both
+`ldap_server.js` and `tls_server.js` publish it (`listening` / `listenError` on
+`GET /ldap` and `GET /tls`), because the HTTP view answers 200 either way and there
+is otherwise no way to tell a running listener from one whose port was already taken
+— by the host's own slapd, or by a second copy of this service.
+
+The fourth is `spiffe/spiffe_server.js`, with four sockets of its own.
+Each is reported SEPARATELY, because "389 is up and 636 is not" is the
+ordinary outcome of a host run and one flag could only report one of them.
+
+---
 
 ## `frame-ancestors` is the one CSP clause a page may not drop
 
@@ -1764,6 +268,7 @@ Two rules come out of it:
 404. Fixing the header was the whole fix; a prettier 404 would break that test
 silently.
 
+
 ## Three pages here have a script on them, and each is the same exception
 
 `app.js` sets `script-src 'none'` for the whole service, and the reason is in its
@@ -1782,97 +287,12 @@ fallback nobody sees: with the script blocked the button is the whole mechanism,
 it is labelled for a person rather than hidden. A fourth scripted page needs the
 same argument made again — do not add one by analogy.
 
-## `/admin-api/docs` is the only page here with an *explorer* script
 
-`app.js` sets `script-src 'none'` for the whole service, and the reason is in its
-own comment: it is what makes the family of reflected-content problems moot rather
-than merely unlikely. The API explorer needs a script, so it is the one page that
-relaxes that header — on two routes, in exactly two clauses (`script-src 'self'`
-and an added `connect-src 'self'`), with `default-src 'none'` and everything else
-untouched.
+The fourth scripted page is `/admin-api/docs` — see `mgmt-api/CLAUDE.md`,
+where the same argument is made a fourth time and the dependency it replaced
+is weighed.
 
-**The script is a separate resource for that reason and no other.** `'self'` is
-enough for a file; an inline block would have needed `'unsafe-inline'`, which is
-the clause that would make the relaxation matter. Do not inline it, and do not add
-a second scripted page without asking whether it needs to be one.
-
-It is also **this repository's own explorer rather than Swagger UI**, and that was
-weighed rather than skipped: `swagger-ui-dist` is 11.7 MB unpacked with an
-install-time telemetry dependency, in a service whose package.json is deliberately
-short and whose image is built in containers that may have no network beyond the
-registry. What it would have bought is a familiar look for an API with no
-authentication, no OAuth flows and no polymorphic bodies. `admin_api_explorer.js`
-is ~250 lines, has no dependency, and does the same three things — read the
-document, fill a form, show the response — plus the equivalent `curl` line, which
-is what an operator of a mock actually copies.
-
-## `config.js` is the only place a setting is read
-
-Configuration used to be forty-odd `process.env.X || 'a default'` expressions spread
-over twelve modules. Each was readable where it stood and the set of them was not:
-there was no way to ask this service what it was configured with, no way to change
-anything without restarting it, and no list anywhere of what could be changed at all
-— the answer was a grep, and the grep only found the ones spelt the way you guessed.
-
-**A new setting is a row in `SETTINGS` and nothing else.** The row carries the key
-(which is both the dot path in the appconfig file and the name every surface uses),
-the environment variable, the type, the default, the prose, and `runtime`. From that
-one row it appears in `/admin/config`, in `GET /admin-api/config`, in the OpenAPI
-document's `Config` schema, and in the startup audit — none of which has a list of
-its own to update. A `process.env` read added anywhere else is invisible to all four,
-which is the state this file exists to end.
-
-**`runtime: false` is a claim you have to be able to defend.** It means the value was
-consumed before the service was listening, so changing it now would do nothing — and
-`set` refuses it with the `restartReason` rather than accepting it, because an
-accepted change that does nothing reads as having worked. Three kinds qualify and it
-is worth knowing which: a **bound socket** (the HTTP port AND ITS SCHEME — see
-`global.https`, which is why `oauth2.rfc9700` is restart-only — both TLS ports,
-both LDAP ports, both Kerberos ports); **material derived at startup** (the TLS certificate is
-issued for `tls.hostnames`/`tls.ips` at boot, and the Kerberos principal database and
-every long-term key in it comes from the realm, the SIDs and the passwords at require
-time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
-setting runtime when the thing derived from it is not rebuilt is worse than marking
-it restart-only, because the two then disagree silently.
-
-**A runtime setting must be READ WHERE IT IS USED.** That is why so many of the
-module-level `const`s became functions — `vciBatchSize()`, `clockSkewSeconds()`,
-`maxEntries()`. A `const` captured at require time is the one thing `/admin/config`
-cannot change, and it fails in the direction that looks like the console is broken.
-
-**Resolution order is override, env var, LEGACY env var, appconfig file, built-in
-default.** Env beating the file is what keeps every existing container and test
-working: nothing in the parent project sets these variables in compose, but
-`tests/krb5_spnego_http.js` sets `KRB5_REALM`, `KRB5_KDC_PORT` and
-`KRB5_SERVICE_PORT` before requiring the KDC in-process, and that still wins. The
-legacy level has exactly one occupant: `STS_ISSUER`, which used to be a single value
-serving as the SAML assertion issuer, the WS-Trust token issuer AND the
-WS-Federation entityID. Those are three different things that shared a default — an
-entityID names the identity provider, an Issuer names whoever signed an assertion —
-so they are now `saml.issuer`, `wstrust.issuer` and `wsfed.entityId`, all three still
-fed by `STS_ISSUER` when it is set.
-
-**It is a library (rule 3) and it sits UNDER `helpers.js`.** It requires only bunyan
-and `process.env.CONFIG_FILE`, and makes a bunyan logger of its own rather than
-taking the shared one, because `helpers.js` requires IT. A cycle here would hand
-`helpers.js` a half-initialised module whose `value` is undefined, and the symptom
-would arrive somewhere else entirely as "value is not a function".
-
-**The three `env/*.js` files were GENERATED from the table** and carry every key with
-the value the expression in the module used to have, so a run with the shipped file
-behaves exactly as one with the old file that carried only `logLevel`. Two settings
-are deliberately absent because their default is DERIVED from another
-(`krb5.serviceDomains` from the realm, `oid4vp.walletUrl` from `oid4vci.walletUrl`);
-they carry `derived: true`, which is what keeps the startup audit from reporting them
-as drift. That audit — `auditAppconfig()` — logs a setting the file omits and a key
-the table does not know, and does neither when the file carries none of these keys at
-all, which is the ordinary case for the parent project's in-process tests: they load
-this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's config.
-
-**`tests/Dockerfile` in the parent project copies this file.** It is under
-`helpers.js` in the graph, so every in-process job that loads `krb5_kdc.js`,
-`app.js` or `spnego.js` needs it; missing, the failure is `Cannot find module
-'./config'` before any test has run.
+---
 
 ## Adding an endpoint costs one entry in `sts_metadata.js`
 
@@ -1891,6 +311,7 @@ missing. A list of fifty specifications that did not mention that this service
 checks no passwords and validates no access tokens would be the most misleading thing
 in the repository.
 
+
 ## Code style
 
 * **No one-liner `try`/`catch`.** Braces and a body, always.
@@ -1901,6 +322,7 @@ in the repository.
   is what gets shown" is a reason. An empty block is not.
 * Comments carry the *reasoning*, especially where something went wrong once. The
   density in this codebase is deliberate; match it rather than trimming it.
+
 
 ## node-ldapjs is a SUBMODULE, it is nested, and it is not modified
 
@@ -1923,32 +345,6 @@ them have already cost something:
   about 200 packages and a dozen advisories that have nothing to do with this
   service. `.npmrc` carries `omit=dev` and the Dockerfile passes `--omit=dev` as
   well; the duplication is deliberate.
-* **The library is NOT patched.** Everything in `ldap_server.js` is handlers
-  registered against its public API — LDAPS included, which is a second
-  `createServer({ certificate, key })` instance and a fan-out over the operation
-  methods, not a reach into the internal `routes` map — so the submodule stays a usable copy of
-  ldapjs rather than a fork nobody else can consume — and the api on the other
-  side of the exchange runs the same code. Two of its defects are routed around
-  rather than fixed, both in `SearchResponse.send()`: a second, case-sensitive
-  attribute filter that silently drops every attribute whose conventional spelling
-  has a capital in it from a SELECTIVE search (and which `nofiltering` does not
-  disable, contrary to its documentation), and a `messageId` that defaults to 1 so
-  the early branch which avoids that filter throws on every search after the first
-  on a connection. `toSearchEntry()` builds a `SearchResultEntry` instance with the
-  response's `messageId`, which sidesteps both. The comments there explain it;
-  read them before "simplifying" that function back to a plain object.
-
-## The JSON-LD contexts are load-bearing
-
-`bbs2023.js` reads the three files in `contexts/` **at require time, at module
-scope**. A missing one is not a degraded feature — the service does not start. They
-are vendored rather than fetched because Data Integrity signs canonicalized
-statements, so a one-byte difference in a context fails every signature later and
-looks like a crypto bug.
-
-`bbs2023.js` resolves two layouts: `../client/src/contexts` (its position in the
-parent project) and `./contexts` (this repo). Do not simplify that away — it is what
-let the file be copied here unchanged.
 
 ## The signing key is regenerated on every start
 
@@ -1957,6 +353,7 @@ Deliberate, and two things depend on it: the `kid` is derived from the key mater
 keys, and every document that carries or describes the key is served
 `Cache-Control: no-store`. If you add a document that publishes the key, it needs
 that header too.
+
 
 ## Tests
 
@@ -2028,282 +425,58 @@ minutes, a SAML 1.1 signature whose reference does not resolve because `Assertio
 was not named. A passive requestor that issues a good token to a working relying party
 looks finished and proves almost nothing.
 
+
 ## Things this service deliberately does not do
 
-Worth knowing before "fixing" one of them:
+Worth knowing before "fixing" one of them. **This is an INDEX, not a summary** —
+each line names the thing and points at the file that argues it, because an
+argument in two places is an argument that will disagree with itself.
 
-* **It is permissive on purpose, and it can be told not to be.** Everything in this
-  list is the default; `oauth2.rfc9700` turns the OAuth 2.0 / OIDC authorization
-  flow into an RFC 9700-conforming one (see rule 3f and `oauth2_bcp.js`) and, with
-  it, **turns the main port into an HTTPS listener** on the certificate 8443, 9443
-  and LDAPS 636 already share — so there is then no plain listener in this process
-  and `/tls/trust` has to be bootstrapped with verification off. The flag is OFF by
-  default, changes nothing until it is set, and is RESTART-ONLY because of that
-  socket. What it does and does not enforce is published at `GET /oauth2/rfc9700`
-  rather than left to be read out of the code. Nothing else here has such a mode.
-* **An OAuth client is not a person, and now it has somewhere to be.** It is still
-  skipped by `autoCreateUser()` — `ou=users` is for people — but every client,
-  relying party, service provider and Kerberos service gets an entry under
-  `ou=applications` instead (rule 3g). That container is a REGISTRY rather than a
-  record: the RFC 7591 registrations live there, nothing caches them, and an
-  `ldapmodify` — or a form on `/admin/applications`, or a POST to
-  `/admin-api/applications/{action}`, which are the same functions — changes what
-  the protocol endpoints do. What those two will NOT change is the derived half:
-  the counters and the sightings are what happened, and only LDAP reaches them.
-* **It checks ONE credential, and only in RFC 9700 mode: a registered client's
-  secret.** Section 2.5 conditions its requirement on a process for issuing
-  credentials existing, and `POST /oauth2/register` is one — so a client that
-  registered HERE as confidential must present the `client_secret` this service
-  minted for it at the token endpoint. Nothing else changes: a `client_id` this
-  service never registered has no credential on file and is untouched, a
-  registered public client has nothing to authenticate with, and a client
-  declaring `private_key_jwt` is ACCEPTED AND NOT VERIFIED (reported as such,
-  because an unverified assertion that is accepted looks exactly like a verified
-  one from the client's side). **No end user's password is checked in that mode
-  or any other**, which is the next bullet and is not affected by this one.
-* **It checks no password.** The username typed at `/authn/login` — or at
-  `/wsfed/login`, which creates the same session — becomes the identity in every
-  token and every assertion.
-* **The LDAP directory takes that further: EVERY BIND SUCCEEDS**, any DN and any
-  password, anonymous included — **on LDAPS (636) exactly as on the plain port**,
-  since the two listeners share one set of handlers. TLS there keeps the password off
-  the wire and does not make it checked, and a client certificate is never even asked
-  for on that socket. The single exception is the literal password
-  `invalid`, which is refused with `LDAP_INVALID_CREDENTIALS` (49). That exception
-  is not a softening; it is what keeps result code 49 reachable, and 49 is the code
-  an LDAP client's error handling is built around. The directory is also
-  SCHEMALESS on purpose, and `GET /ldap` says so rather than leaving a reader to
-  infer a schema that is not there. Four structural rules are still enforced (an
-  add needs its parent, a delete needs a leaf, a modify `delete` of an absent
-  attribute is 16, and an attribute's last value takes the attribute with it),
-  a FIFTH is this service's own rather than the protocol's (an add under
-  `ou=users` whose username is already here is 68, because one person is one
-  entry however they got in — LDAP has no notion of a username and a real
-  directory would get this from the schema subsystem this mock does not have),
-  and one is deliberately NOT: deleting a user leaves its DN in every group that lists
-  it, because referential integrity is a directory feature and not a protocol rule.
-* **Kerberos is the exception, and cannot not be.** The password there *is* the key:
-  pre-authentication and the AS-REP's enc-part are both encrypted under it, so a KDC
-  accepting anything would still have to pick a key the client could not guess. So it
-  does the permissive equivalent — **any username authenticates and every user account
-  shares one password** (`password!`, `KRB5_USER_PASSWORD`), with a name nobody
-  configured created on first sight by `findOrCreateUser()`. Three things stay
-  refusals on purpose: a **service**-shaped (multi-component) name is created only
-  for a host this service is willing to BE — `KRB5_SERVICE_DOMAINS`, the realm's own
-  domain plus `localhost`, `sts` and `127.0.0.1` — and anything else stays
-  `KDC_ERR_S_PRINCIPAL_UNKNOWN`; the names in `KRB5_UNKNOWN_USERS` stay unknown so
-  `KDC_ERR_C_PRINCIPAL_UNKNOWN` is still reachable; and a wrong password is still
-  `KDC_ERR_PREAUTH_FAILED`. That service exception is new (2026-08-17) and it is not
-  a softening of the argument against inventing services: this process is both the
-  KDC and the acceptor, `krb5_service.js` looks the presented SPN up in the same
-  table, so a name created on demand is one the service can decrypt — which was the
-  whole objection. It exists because a client derives `HTTP/<url host>` and every
-  way of reaching this stack produced an SPN nobody had configured. Service,
-  computer and `krbtgt` accounts keep their own distinct passwords — the two krbtgts
-  and the trust must be three different secrets or assertions about which key sealed
-  what pass for the wrong reason.
-* **It does not verify access tokens it did not issue — except at UserInfo.**
-  OID4VCI lets the authorization server be somebody else, so at the three
-  credential endpoints a foreign token is accepted as-is. The consequence for DPoP
-  is stated in `presentedAccessToken()` (in `dpop.js`, shared by all four
-  protected endpoints): for such a token, `cnf.jkt` is a claim anyone could have
-  written, and the binding is real only for tokens this service issued.
-  `/oauth2/userinfo` is the exception and is meant to be — it answers "who did YOU
-  authenticate", so it checks the signature, the `typ`, revocation and the
-  `openid` scope, and refuses anything else rather than inventing a profile.
-* **There is no "DPoP required" mode.** Nonce mode makes proofs fresher, not
-  mandatory; a request with no `DPoP` header is a Bearer request and is answered as
-  one, so turning nonce mode on cannot break the Bearer clients this service also
-  exists to exercise.
-* **One password is rejected** — the literal string `invalid` on the password grant,
-  on WS-Trust and at the WS-Federation sign-in screen — so a negative test has
-  something to fail on in every protocol here.
-* **A verified client certificate on the TLS listeners is not a login**, and no
-  revocation is checked there. Verification means one thing exactly: OpenSSL built a
-  chain from what the client sent to an anchor somebody POSTed to `/tls/trust`. No
-  session starts, no token is issued, no endpoint will let its holder do anything an
-  anonymous caller cannot, and a revoked certificate verifies here and would not
-  verify anywhere that matters. All of that is stated in the report itself rather
-  than left to be discovered — a mock that quietly turned a certificate into an
-  identity would teach a client something false about every server it will ever meet.
-  **It IS recorded, which is a different claim and the two must not be merged.** When
-  a handshake completes with a certificate that verified, `tls_server.js` calls
-  `stats.recordAuthentication()` — the same funnel every other family uses — so the
-  subject DN appears on `/admin/users` under protocol `TLS` and the directory's
-  observer seeds an entry for it. Three things there are load-bearing: it happens on
-  `secureConnection` and **not in the request handler**, because the credential was
-  accepted at the handshake and per-request counting would report one connection's six
-  requests as six authentications; it happens only when `authorized` is true, so a
-  certificate that failed records nothing on the permissive listener; and the identity
-  is the subject in **RFC 4514 form** (leaf first, values escaped), which is a
-  different string from the display DN shown beside it and is the one the directory
-  builds from.
-* **The values in an issued credential are invented, and nothing verifies them.**
-  `/admin/vc` says which LDAP attributes a credential carries; the value is read
-  from that person's directory entry, and what the entry lacks is generated from
-  their username — deterministically, so one username is one invented person across
-  restarts, and in obviously fictional ranges (RFC 2606 mail domains, `555-01xx`
-  numbers, streets called `Placeholder`). A verifier that believed a birthdate from
-  here would be believing a web form. Nothing reads a credential claim back either:
-  no token, assertion or PAC carries one and no endpoint decides anything on one.
-* **A presentation that VERIFIES is not a sign-on either.** The OID4VP Verifier
-  checks properly — issuer signature, every Disclosure digest against `_sd`, the Key
-  Binding JWT including `sd_hash`, the nonce, the audience, the validity window and
-  whether the claims asked for arrived — and then says yes on a web page and stops.
-  No session starts, no token is issued and nothing else in this service reads what
-  was presented. **It IS recorded, which is a different claim and the two must
-  not be merged** — the same distinction a verified TLS client certificate
-  draws. The holder goes through `recordAuthentication()` like every other
-  accepted credential, so it appears on `/admin/users` and the directory seeds
-  an entry for it; what the row says is that an identity presented a credential
-  here and it verified, and nothing more. What it asks for is configuration
-  (`/admin/vc-verifier-config`) and
-  is deliberately a SEPARATE setting from what the issuer mints (`/admin/vc`), so
-  that asking for a claim no credential here carries stays reachable: that is the
-  only way to exercise a wallet's "I cannot satisfy this request" path, and one page
-  setting both would make it impossible to produce. Asking for NO claim is a setting
-  too — DCQL reads an absent `claims` member as the whole credential.
-* **SCIM WRITES INTO THE DIRECTORY AND IS THE ONE SURFACE HERE THAT ASKS WHO IS
-  DOING IT.** The `/scim/v2` endpoints create, replace, patch and DELETE
-  accounts, so they are the exception to everything above: a credential is
-  REQUIRED (`scim.authRequired`), all six schemes RFC 7644 section 2 names are
-  offered, and the OAuth ones must carry `scim:read` or `scim:write` — the first
-  scope requirement anywhere in this service. **It is still a turnstile rather
-  than a lock**, which is a different sentence and the one that matters: anybody
-  can get a token with either scope from any grant, any password but `invalid`
-  passes Basic, any username passes Digest with the one shared password, and
-  anybody can register a HOBA key for any name. What it buys is that a client's
-  401, 403, challenge-response and scope handling can be exercised at all — none
-  of which an open endpoint can produce. See rule 6a-ii and `scim_auth.js`.
-  **`active: false` DEACTIVATES NOBODY**: it is
-  stored as `scimActive` and read by nothing, so no bind is refused, no token
-  withheld and no session ended. That is the same carrying-is-not-acting
-  distinction this service draws about a group, and it matters more here than
-  anywhere else because deprovisioning is the single most common thing a SCIM
-  client is built to do — a mock that pretended to disable an account would let
-  somebody ship a path that has never worked. There is no ETag and no
-  `changePassword`, both ADVERTISED as unsupported rather than half-implemented
-  (a version over a one-second timestamp is a concurrency control a client
-  trusts and that is wrong; and no password here is checked outside Digest).
-  `/Me` is an ALIAS now that there can be an authenticated subject, delegating
-  to the same User handlers, and its 501 is kept for the two cases where it is
-  still right — an anonymous caller, and POST. A member naming nothing is
-  ACCEPTED, because refusing it would make the
-  dangling-member state `/admin/groups` exists to report impossible to produce.
-* **The audit log at `/admin/audit` is HISTORY where the rest of the console is
-  STATE**, and it is the one page here that can answer *when* and *by whom*.
-  Six categories — a credential accepted in any of the sixteen families, a
-  sign-on session created or ended, every LDAP operation over 389 and 636 alike,
-  every console page and form, every management API call, every other endpoint
-  call — recorded at the five funnels rule 3c names. **No credential is ever in
-  a row** and the page says so; **one act usually produces several rows** (a
-  sign-in writes three, at three layers) and the page says that too, because a
-  reader counting rows will otherwise read them as duplicates; and **it observes
-  itself**, since drawing it is console access, which is stated rather than
-  suppressed — a blind spot exactly where the reader stands is worse than an
-  extra row. What it deliberately does not record is the CLIENT'S ADDRESS: on a
-  mock reached over a compose bridge that is a fact about docker, and a column
-  right on a laptop and quietly wrong everywhere else is worse than none. It
-  records the CHANNEL instead (`http`, `ldap`, `ldaps`, `grpc`, `internal`).
-* **A group in the directory now reaches a token, and still grants nothing.**
-  `groups.claim` (ON by default) puts a claim naming somebody's group membership
-  in every access token, ID Token and both SAML assertions; `groups.claimName`,
-  `groups.claimValue` (`cn` or the whole DN) and `groups.claimFromMemberOf`
-  shape it. It is the one feature here that reads `ou=groups` back out. Nothing
-  reads the claim: no endpoint checks it and nothing decides anything on it, so
-  the two sentences are kept apart everywhere they appear. It is defensible as
-  ON by default only because the claim is OMITTED ENTIRELY for somebody in no
-  group — see rule 3d-ii.
-* **NOTHING IN SPIFFE IS ATTESTED, AND THAT IS NOW A NARROWER SENTENCE THAN IT
-  WAS.** No workload and no node: a Workload API caller is identified by its
-  transport, the endpoint it reached and its peer address — node cannot read a
-  Unix socket's peer credentials — so any caller that reaches the socket still
-  gets an identity, and an agent's attestation payload is written down as
-  claimed, which is why every agent entry carries a selector valued
-  `unverified:true`. **What changed is the OTHER half**: the SPIRE Server API's
-  TCP port is MUTUAL TLS, its callers present an X509-SVID verified against the
-  trust bundle, and every method is authorized against SPIRE's own table. Those
-  are two different claims and merging them back into one gets both wrong.
-  Selector matching also DECIDES which entries answer a Workload API caller
-  now (`spiffe.attestWorkloads`), which is narrowing without attesting.
-  What IS refused: a Workload API call with no `workload.spiffe.io: true` header
-  (every conforming implementation refuses it, and a client that omits it has a
-  bug nothing else will report), a JWT-SVID with no audience, a
-  `ValidateJWTSVID` that does not really verify, an entry in another trust
-  domain or under `/spire`, a banned agent, a join token this server did not
-  mint or that has expired or been spent or was minted for another agent, an
-  X509-SVID that no authority here signed or that is outside its validity
-  window, every method the caller's entity is not allowed, and a federated
-  bundle whose JWKs have no `use`. `spiffe.authRequired` off restores the whole
-  of the old posture. See rule 3k, `spiffe_auth.js` and `GET /spiffe`.
-* **The admin console at `/admin` is not protected and holds nothing on disk.** It is
-  the one surface that can change what the protocol endpoints do — it revokes tokens
-  through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
-  future access token, ID Token and SAML assertion. Custom claims are **additive**:
-  the names this service sets itself are refused at configuration time, because an
-  `exp` settable from a web form would produce tokens that fail to verify with nothing
-  pointing back at the page. The same page's other half puts **LDAP attributes** in
-  those four, whose values come off the person's own entry rather than out of the form
-  — see rule 3d, and note that the additive rule holds there too: the protocol's own
-  claim wins, then a typed one, then the attribute. It deliberately does not invalidate assertions, tickets
-  or credentials (nothing consults this service about those, so the button would be a
-  lie), does not end sign-on sessions (`wsignout1.0` has cleanup to fan out), and does
-  not touch refresh tokens' claims. Its `/admin/users` page lists every userid
-  presented to this service in an interaction that SUCCEEDED, across all twelve
-  families, and drills into one's sessions and the tokens issued on each. Two rules
-  hold it up and both are easy to break by accident: **one row is one local name**
-  (`alice`, `urn:sts-mock:user:alice` and `alice@REALM` are one identity — the prefix
-  is derived from `userFor()` rather than written down, so changing that function
-  cannot silently split every user in two), and **a token is placed under a session by
-  the optional third argument to `signJwt()`**, never by a claim — no token here
-  carries a session identifier and adding one would change what every client receives.
-  A new authentication point needs one `stats.recordAuthentication()` call at the
-  moment the credential is ACCEPTED, not when the request arrives.
-  **That page now has one control and it writes to the DIRECTORY rather than to
-  the list it sits above** — create a person under `ou=users` before they
-  authenticate, refusing a username that is already there. It goes through
-  `ldap_server.js`'s `createUser()`, which `POST /admin-api/users/create` calls
-  too and which an `ldapadd` gets the same refusal from; the message says the
-  new entry will NOT appear in that page's own table until they authenticate,
-  because "who this service has SEEN" and "what the directory HOLDS" are the two
-  different questions this console keeps apart everywhere else. See README.md.
-  **"The observer is installed" is not the same claim as "this protocol calls the
-  funnel", and WS-Trust is what that cost.** Three of its paths accepted a
-  credential without ever reaching `recordAuthentication()`, so each produced
-  somebody who had authenticated here and appeared on no page and in no
-  directory: `Validate` and `Cancel` answered above the `authenticate()` call, a
-  request carrying both a UsernameToken and an `OnBehalfOf` returned at the
-  delegation branch before the UsernameToken had been looked at, and a `Renew`
-  with no security header read the assertion out of its own `RenewTarget` and
-  recorded that as the credential. Two rules come out of it and both generalise
-  to the next family: authenticate ABOVE the branch on the operation rather than
-  inside the branches that happen to need a subject, and look for a credential in
-  `wsse:Security` — anywhere else, only OUTSIDE the elements that hold somebody
-  else's token, since a document with four identities in it answers "which comes
-  first" and not "who is asking".
-  **And the funnel being reached is still not the whole chain: `ldap.autocreateUsers`
-  was `false` in all three `env/*.js` files**, which beats its default, so no
-  protocol seeded a directory entry anywhere any of them was loaded — while
-  `config.js`'s own description for it described a BIND behaviour that has never
-  existed, the default said `false` where four documents said ON, the `bool`
-  coercion turned an unrecognised spelling into `false` rather than the default,
-  and `tests/api_ldap.js` SKIPPED its own check with a warning whenever it found
-  the feature off. An appconfig value is the last word; a default nobody reaches
-  is not a default, and a test that opts out when its subject is disabled is how
-  a setting stays wrong for as long as that one did.
-  Its `/admin/groups` page is the one page here that reports the DIRECTORY rather
-  than what this service has issued, and the difference between the two lists is
-  the thing to keep straight: the directory holds an entry for whoever somebody
-  wrote one for — the three people it seeds at startup included — while
-  `/admin/users` holds whoever has actually presented a credential. So a member
-  row links to that page only for somebody this service has seen authenticate and
-  is marked *never here* otherwise; a link drawn unconditionally would usually
-  land on "nothing here has authenticated as alice", which reads as a broken link
-  rather than as the answer it is. See rule 6 for the rest of it.
-* **WS-Federation's `wauth` is refused rather than faked.** A relying party demanding
-  multi-factor against a password-only session gets an error and two ways forward, not
-  an assertion claiming a second factor that did not happen. It is the one thing in
-  this profile that could trivially have been faked, and faking it would have taught a
-  relying party something false about how a person signed in. Likewise `wreqptr` is
-  never dereferenced: fetching a URL handed over in a query parameter is a
-  server-side request forgery with a specification citation attached.
+| It does not | Where the argument is |
+|---|---|
+| Enforce anything by default — `oauth2.rfc9700` is the one mode, off unless set | `oauth-oidc/CLAUDE.md` |
+| Check any end user's password, in any protocol | `authn/CLAUDE.md` |
+| Check any credential except a registered client's secret, in RFC 9700 mode only | `oauth-oidc/CLAUDE.md` |
+| Refuse any LDAP bind — any DN, any password, anonymous, on 389 and 636 alike | `ldap/CLAUDE.md` |
+| Check a Kerberos password, though it cannot not check the KEY | `kerberos/CLAUDE.md` |
+| Verify an access token it did not issue, except at UserInfo | `oauth-oidc/CLAUDE.md` |
+| Require DPoP — nonce mode makes proofs fresher, not mandatory | `oauth-oidc/CLAUDE.md` |
+| Turn a verified client certificate into a login | `tls/CLAUDE.md` |
+| Verify anything in an issued credential's values, which are invented | `oid4vc/CLAUDE.md` |
+| Turn a verified presentation into a sign-on | `oid4vc/CLAUDE.md` |
+| Deactivate anybody on SCIM `active: false` | `scim/CLAUDE.md` |
+| Attest a workload or a node | `spiffe/CLAUDE.md` |
+| Let a group grant anything, though a token now carries one | `admin-ui/CLAUDE.md`, `common/CLAUDE.md` |
+| Protect the admin console, or persist anything at all | `admin-ui/CLAUDE.md` |
+| Fake WS-Federation's `wauth`, or dereference `wreqptr` | `ws-federation/CLAUDE.md` |
+| Publish a SAML 2.0 Web SSO profile | `saml/CLAUDE.md` |
+
+Two exceptions to the whole of that list, and both are worth knowing before
+reading further. **The SCIM endpoints REQUIRE a credential** — in any of the six
+schemes RFC 7644 section 2 names, with the OAuth ones needing `scim:read` or
+`scim:write` — because they create and DELETE accounts. And **the SPIRE Server
+API requires an X509-SVID over mutual TLS** and authorizes every method against
+SPIRE's own per-method table, because what comes out of that surface is a
+credential another service will believe. Both are a turnstile rather than a lock,
+and each can be turned off (`scim.authRequired`, `spiffe.authRequired`).
+
+**The Workload API is the opposite case and the distinction matters**: it
+authenticates nobody because its specification says it MUST NOT — a workload has
+no root of trust until that call gives it one. What it lacks there is
+ATTESTATION, not authentication.
+
+## The parent project's paths into this repository are now wrong
+
+`../oauth2-oidc-debugger` reaches into this one by FLAT PATH in three places, and
+the 2026-08-23 reorganisation broke all three: `tests/Dockerfile` has ~20
+`COPY sts/<file>.js` lines, `tests/module_paths.js`'s `mockStsModule()` resolves
+`sts/<name>.js`, and `tests/krb5_codec_sync.js` and `tests/bbs2023_cryptosuite.js`
+byte-compare vendored copies at fixed paths.
+
+**Nothing over there was changed**, deliberately: its `sts/` gitlink is pinned at
+`cae2066`, which is before `applications.js` existed, so its suite is not running
+against current code anyway and the fix has to land in the same commit as the
+gitlink bump. What that commit needs is written down in
+`docs/parent-project-migration.md`. Do not bump the pin without it — four Kerberos
+jobs die at load with `Cannot find module`, which names a module rather than a
+reorganisation.

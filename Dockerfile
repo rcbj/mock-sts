@@ -1,4 +1,4 @@
-# The mock STS: eight protocol families in one small Node service. See README.md.
+# The mock STS: sixteen protocol families in one small Node service. See README.md.
 #
 # Pinned to Node 24.16.0 via nvm rather than an official node image, which is what
 # the project this was extracted from does for all of its services.
@@ -66,32 +66,53 @@ COPY .npmrc ./
 COPY node-ldapjs ./node-ldapjs
 RUN npm install --omit=dev && npm cache clean --force
 
-# The service is eleven modules, and server.js is only the shell that requires the
-# other ten and listens. They are copied as a GROUP for exactly the reason the
-# individual COPY lines below exist for their files: a module left out is not a
-# missing feature, it is a MODULE_NOT_FOUND at startup, so the container never
-# listens and every STS-backed job in the suite fails on a timeout that says
-# nothing about the cause. This wildcard is deliberate — a per-file list here
-# would have to be edited every time a module is added, and forgetting is silent
-# until the containerized run.
-COPY *.js ./
-# The JSON-LD contexts the bbs-2023 cryptosuite (bbs2023.js, copied above) loads AT
-# REQUIRE TIME. Mandatory: the module reads them at module scope, so a missing one is
-# not a degraded feature — the service does not start at all. In the parent project
-# these live in the client's tree and bbs2023.js looks there first; here they are a
-# sibling directory, which is that function's second candidate.
-COPY contexts ./contexts
-# The vendored `.proto` files, read AT REQUIRE TIME by spiffe_grpc.js — the same
-# mandatory relationship the contexts above have, and with the same consequence:
-# that module loads them at module scope, so a missing one is not a degraded
-# SPIFFE feature, it is a container that never listens. They are the SPIFFE
-# project's own workloadapi.proto and the spire-api-sdk's, verbatim; the wire
-# matching what a real client expects is the entire reason @grpc/grpc-js is a
-# dependency here, so a local edit to one of these would give that up silently.
-COPY protos ./protos
+# THE WHOLE SOURCE TREE IN ONE LINE, and that is deliberate rather than lazy.
+#
+# The service is a shell: server.js requires the other modules and listens, so a
+# module that never reaches the image is not a missing feature but a
+# MODULE_NOT_FOUND before anything binds the port — the container never answers
+# /healthcheck and every STS-backed job in the parent project's suite fails on a
+# timeout that says nothing about the cause.
+#
+# This used to be `COPY *.js ./` plus one line each for contexts, protos and env,
+# and the wildcard's comment said why: a per-file list would have to be edited
+# every time a module was added, and forgetting is silent until the containerized
+# run. The 2026-08-23 reorganisation moved every module into a subdirectory
+# (common/, oauth-oidc/, kerberos/, ldap/, scim/, spiffe/, admin-ui/, mgmt-api/
+# and the rest), which put that exact trap back one level up: a per-DIRECTORY
+# list has the same failure, and a new protocol family is a likelier thing to add
+# than a new sibling of server.js ever was.
+#
+# So the context is copied whole and .dockerignore decides what is in it. That is
+# the only arrangement in which adding a directory cannot be forgotten. Three
+# things ride along that are read AT REQUIRE TIME and whose absence is a service
+# that does not start rather than a degraded feature, which is the reason to be
+# sure they are here:
+#
+#   common/vendored/contexts  the JSON-LD contexts bbs2023.js loads at module
+#                             scope. They are a SIBLING of that module because it
+#                             is a byte-identical copy of the parent project's
+#                             and resolves path.join(__dirname, 'contexts') — so
+#                             they move when it moves and the file is not edited.
+#   spiffe/protos             the SPIFFE project's own workloadapi.proto and the
+#                             spire-api-sdk's, read by spiffe/spiffe_grpc.js at
+#                             module scope. Verbatim: the wire matching what a
+#                             real client expects is the entire reason
+#                             @grpc/grpc-js is a dependency here.
+#   env                       the appconfig files. CONFIG_FILE selects one.
+#
+# node_modules, .git, the documentation and the CI definitions are excluded in
+# .dockerignore; node-ldapjs is copied above, ahead of the install, and copying
+# it again here is a no-op on identical content.
+COPY . ./
 # The service selects its configuration (log level) with CONFIG_FILE, the same
 # way api and client do. The compose files override this per stack.
-COPY env ./env
+#
+# The path is RELATIVE and it is resolved against the package root rather than
+# against the directory of whichever module read it — see common/config_file.js.
+# Before the reorganisation every reader sat in the package root and that was
+# true by accident; it is now true on purpose, and this string did not have to
+# change.
 ENV CONFIG_FILE=./env/local.js
 
 # 8081 is the HTTP service. The rest are the listeners that are NOT HTTP and so
