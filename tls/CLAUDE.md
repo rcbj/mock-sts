@@ -24,7 +24,7 @@ be reachable BEFORE anything is trusted — have to be called the first time wit
 verification off.
 
 Its own sockets: they speak **HTTP**, so they look as though they belong on the
-plain listener — but they are HTTPS on 8443 and 9443, and `GET /sts-metadata` walks
+plain listener — but they are HTTPS on 8443 and 9443, and `GET /admin/sts-metadata` walks
 the plain listener's router, which cannot see them. Its four rows there are the
 plain-HTTP views only, and the listeners are described in their text. Its truststore
 for CLIENT certificates is empty at startup and is filled at runtime through
@@ -70,7 +70,7 @@ the one place a reader goes when a handshake is failing.
   every X509-SVID it mints onto the holder's directory entry, using **the same six
   `x509*` attributes this path writes**, and `spiffe_ca.js` cannot require this
   module — `admin.js` requires that one and is required first, so the require
-  would move every `/tls*` route ahead of the console's and `GET /sts-metadata`
+  would move every `/tls*` route ahead of the console's and `GET /admin/sts-metadata`
   walks that router. Two spellings of one DN is two people on `/admin/users`,
   which is the sentence the export comment here has always carried; there are now
   four callers of it rather than two. `common/CLAUDE.md` has the argument,

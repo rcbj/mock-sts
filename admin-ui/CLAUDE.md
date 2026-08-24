@@ -49,6 +49,24 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    same mistake the last crumb rule exists to prevent. The section is visible
    where it is useful, which is the sidebar heading above the page you are on.
 
+   **PROTOCOLS HAS A THIRD LEVEL AND NOTHING ELSE DOES.** An item in a section's
+   `items` is either a page (`path` + `label`) or a GROUP (`title` + `what` +
+   `items`), and `isNavGroup()` is the single predicate that decides which.
+   There are three groups, all under Protocols — **OAuth2 / OIDC** (authorization
+   servers, custom claims), **Verifiable Credentials** (credential claims,
+   verifier request) and **SPIFFE** (SPIFFE, registration entries, agents) —
+   with SCIM left ungrouped beside them. Three rules, each the section rule one
+   level down: a group **is not a crumb** and has no page, so `trailBar()` is
+   untouched by grouping and must stay that way; `NAV` is still **derived**, now
+   through `sectionPages()`, which flattens a group's pages into the section
+   holding it, so `upTo()`, the trail and `consoleJson().pages` cannot tell a
+   grouped page from an ungrouped one; and **nesting stops at one level** — a
+   group holds pages, never another group, enforced only by `sectionPages()` not
+   recursing. The markup is an `<li>` holding a heading and a `<ul>`, INSIDE the
+   section's list rather than a second list beside it: a group is three of that
+   list's items said together, and a sibling list would tell a screen reader the
+   section ended where the group began.
+
    **WHAT MAKES IT A BREADCRUMB RATHER THAN A LINK TO THE SECTION IS
    `listViewOf()`.** A drill-down link carries the list's filter and page, and the
    section crumb spends it, so back lands where the reader was. `LIST_PARAMS` is a
@@ -76,6 +94,30 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
 
 ---
 
+## ONE PAGE OF THIS CONSOLE IS NOT IN THIS DIRECTORY
+
+`/admin/sts-metadata` — *Service metadata*, the last item in the sidebar — is
+built by `../sts_metadata.js`. It moved under `/admin` on 2026-08-24 from
+`/sts-metadata`, and the split of labour is worth knowing before either half is
+edited:
+
+* **That module builds the body; `page()` supplies everything around it.** It
+  calls `respond()`, exported from `admin.js` for exactly this one caller, so
+  the page gets the sidebar, the trail, the gate banner and the `?format=json`
+  half without a second implementation of any of them.
+* **Its classes are in `page()`'s style block**, marked as that page's —
+  `.lead`, `.m`, `.why`, `.eff`, `.bad`, `.none`, `.protos`, `a.btn`. They are
+  there because `page()` emits the console's ONLY `<style>`, and a second one
+  inside `<body>` is markup no validator accepts.
+* **The require goes one way and must stay that way.** `sts_metadata.js`
+  requires this module; this module must never require it back. That file is
+  the LAST thing `server.js` loads — it lists what every other module
+  registered — so a require from here would drag every console route behind it,
+  and rule 6's route order is what `/admin/sts-metadata` is built by walking.
+* **It is gated by construction**, not by a check of its own: the
+  `app.use('/admin', ...)` below is above every route registered after it, and
+  that file's route is registered last of all.
+
 ## The layout: two columns, one card, and no script
 
 `page()` draws `.shell` holding `.side` (the sidebar) and `.main` (the card). It
@@ -95,7 +137,7 @@ bug rather than a markup one.
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,
 `../scim/scim.js` and `../spiffe/spiffe_server.js`, so this module cannot require
 any of them: the require would pull `/ldap`, `/scim` and `/spiffe` into the
-express router ahead of every `/admin` route, and `GET /sts-metadata` is built by
+express router ahead of every `/admin` route, and `GET /admin/sts-metadata` is built by
 walking that router. So this module OFFERS slots and they fill them at their own
 require time — `setDirectoryReader()`, `setGroupReader()`, `setDirectoryWriter()`,
 `setSpiffeReader()`, `setScimReader()`. The pattern and its entry test are rule 3e

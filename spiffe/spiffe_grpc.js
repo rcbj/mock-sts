@@ -137,12 +137,12 @@ Object.keys(SERVICES).forEach(function (name) {
   }
 });
 
-// What each surface publishes, for `/spiffe` and `/sts-metadata` — which cannot
-// see a gRPC method any more than they can see a raw socket, so the list is
-// built HERE from the loaded definitions rather than typed out. A method that
-// exists and goes undescribed is the drift `sts_metadata.js` exists to prevent,
-// and this is the only way to have the same property for a surface Express
-// knows nothing about.
+// What each surface publishes, for `/spiffe` and `/admin/sts-metadata` — which
+// cannot see a gRPC method any more than they can see a raw socket, so the list
+// is built HERE from the loaded definitions rather than typed out. A method
+// that exists and goes undescribed is the drift `sts_metadata.js` exists to
+// prevent, and this is the only way to have the same property for a surface
+// Express knows nothing about.
 function methodsOf(serviceName) {
   const service = SERVICES[serviceName];
   return Object.keys(service).map(function (key) {

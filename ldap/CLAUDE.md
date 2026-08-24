@@ -34,7 +34,7 @@ ldapjs implements none, and this repository does not patch that submodule.
    routes into the express router at that point, so `server.js` requires
    `./tls_server` BEFORE `./ldap_server` to keep "the require order is the route
    order" true rather than a fiction node quietly corrects. It changes no output —
-   `/sts-metadata` sorts its rows by path within a group. Its embedded directory grows an entry under
+   `/admin/sts-metadata` sorts its rows by path within a group. Its embedded directory grows an entry under
    `ou=users` for anybody who authenticates through any of the families here, and
    `admin_stats.recordAuthentication()` is already the single funnel all of them
    pass at the moment a credential is ACCEPTED — so one observer there is one place
@@ -205,7 +205,7 @@ ldapjs implements none, and this repository does not patch that submodule.
    operational ones included — and `admin.js` must NOT require this module to get
    it: `server.js` requires `admin.js` FIRST, so a require from there would pull
    `/ldap` and `/ldap/directory` into the router ahead of the console's routes, and
-   `GET /sts-metadata` is built by walking that router. So `admin.js` exports
+   `GET /admin/sts-metadata` is built by walking that router. So `admin.js` exports
    `setDirectoryReader()` and this module fills it with `objectFor()` at require
    time. `objectFor()` is given the identity key the console files a person under,
    which is the same normalised local name `autoCreateUser()` built the DN from —

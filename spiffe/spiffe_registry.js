@@ -16,8 +16,8 @@
 // `ldap_server.js` fills its `setDirectory()` slot at ITS require time, which is
 // the same inversion `applications.js` and `vc_claims.js` use and for the same
 // reason: a require reaching that module from here would drag every `/ldap`
-// route to the front of the express router, and `GET /sts-metadata` is built by
-// walking that router.
+// route to the front of the express router, and `GET /admin/sts-metadata` is
+// built by walking that router.
 //
 // ---------------------------------------------------------------------------
 // THE DIVISION IS EXACTLY `applications.js`'s, DELIBERATELY

@@ -8,9 +8,9 @@
 // Everything else in this service is HTTP behind the one plain listener in
 // server.js. This is not: it is TLS, so it is its own socket — a third one
 // beside the KDC's port 88 and the directory's 389 — and it has the same
-// consequences those two have. `GET /sts-metadata` is built by walking the
-// Express router, so it cannot see a socket; the two rows it carries for this
-// module are the plain-HTTP views below, and the listeners themselves are
+// consequences those two have. `GET /admin/sts-metadata` is built by walking
+// the Express router, so it cannot see a socket; the two rows it carries for
+// this module are the plain-HTTP views below, and the listeners themselves are
 // described in their text.
 //
 // ---------------------------------------------------------------------------
@@ -1024,10 +1024,10 @@ permissiveServer.on('tlsClientError', function (error, socket) {
 // ---------------------------------------------------------------------------
 // The plain-HTTP views.
 //
-// These are the only surfaces of this module that /sts-metadata can see, since
-// that page is built by walking the Express router and the two listeners above
-// are sockets. They are also the only way to configure the truststore, and
-// they are on the MAIN port on purpose — see the header, including what
+// These are the only surfaces of this module that /admin/sts-metadata can see,
+// since that page is built by walking the Express router and the two listeners
+// above are sockets. They are also the only way to configure the truststore,
+// and they are on the MAIN port on purpose — see the header, including what
 // global.https changes about that.
 // ---------------------------------------------------------------------------
 
@@ -1180,7 +1180,8 @@ app.get('/tls', function (req, res) {
     'entry beside it. <a href="/ldap">GET /ldap</a> says where. Both are a ' +
     'record of what happened; neither is a credential.</p>' +
     '<p class="sub"><a href="/tls?format=json">This page as JSON</a> ' +
-    '&middot; <a href="/sts-metadata">everything this service speaks</a></p>';
+    '&middot; <a href="/admin/sts-metadata">everything this service ' +
+    'speaks</a></p>';
   res.status(200).type('html').set('Cache-Control', 'no-store')
      .send(pageShell('TLS endpoint', inner));
   log.debug('Leaving GET /tls.');

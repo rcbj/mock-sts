@@ -214,7 +214,7 @@ into the LDAP directory, entry for entry, with **no store of its own**.
    and must be able to require what it draws. A require from the console into
    `scim.js` would drag every `/scim` route — and, since that module requires
    `ldap_server.js`, every `/ldap` route — into the express router ahead of the
-   console's own, and `/sts-metadata` is built by walking that router. So there
+   console's own, and `/admin/sts-metadata` is built by walking that router. So there
    are two readers of two different halves: `scim.js` reads the CONVERSIONS on
    every request, `admin.js` reads the CATALOGUE to draw it.
 

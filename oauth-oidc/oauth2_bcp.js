@@ -127,8 +127,8 @@ const clientAuth = require('./client_auth');
 // One row per normative statement this mode has an opinion about, and it is the
 // single source for three things: the checks below cite an id from it, the
 // `GET /oauth2/rfc9700` view is built from it, and the coverage note on
-// /sts-metadata was written from it. A requirement that is not in here is not
-// enforced, which is exactly what a reader wants to be able to establish.
+// /admin/sts-metadata was written from it. A requirement that is not in here is
+// not enforced, which is exactly what a reader wants to be able to establish.
 //
 // `enforced` is one of:
 //   'yes'      — this server refuses the request when the mode is on

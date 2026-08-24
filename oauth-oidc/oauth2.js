@@ -600,8 +600,8 @@ function oidcMetadata(req, issuer) {
     // discover by sending one and watching it be ignored. The authorization
     // endpoint honours prompt=none and prompt=login (and nothing else), and it
     // does not accept a `claims` parameter, a `request` object or a `request_uri`
-    // — which is the same "no request object here" the /sts-metadata coverage
-    // note already says in prose.
+    // — which is the same "no request object here" the /admin/sts-metadata
+    // coverage note already says in prose.
     prompt_values_supported: ['none', 'login'],
     claims_parameter_supported: false,
     request_parameter_supported: false,
@@ -2252,7 +2252,7 @@ app.post('/oauth2/userinfo', userinfoResponse);
 // So it is a runtime switch rather than configuration: a test, or somebody
 // reading the page, can turn it on, watch the retry, and turn it off again
 // without restarting the service. GET reports; POST {"required": true|false}
-// sets. Listed on /sts-metadata as non-spec, because it is.
+// sets. Listed on /admin/sts-metadata as non-spec, because it is.
 // ---------------------------------------------------------------------------
 app.get('/dpop/nonce-mode', function (req, res) {
   log.debug("Entering the DPoP nonce-mode endpoint (read).");

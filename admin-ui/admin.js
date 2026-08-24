@@ -134,10 +134,11 @@ const scimMap = require('../scim/scim_map');
 // The groups claim: which directory groups reach a token, whether it is on, and
 // what it would say about one person. A LIBRARY like the line above — it
 // registers no route, so requiring it here cannot reorder the router
-// /sts-metadata is built by walking, and it requires helpers.js, config.js and
-// admin_stats.js, none of which requires this file. It is required for the same
-// reason claim_attributes.js is: the page and the management API both report
-// this feature, and neither should be reading its four settings itself.
+// /admin/sts-metadata is built by walking, and it requires helpers.js,
+// config.js and admin_stats.js, none of which requires this file. It is
+// required for the same reason claim_attributes.js is: the page and the
+// management API both report this feature, and neither should be reading its
+// four settings itself.
 const groupClaims = require('../common/group_claims');
 // The audit log: what happened here, in order, as rows rather than as counters.
 // A library like the three above — it registers no route — so requiring it here
@@ -164,9 +165,9 @@ const authorizationServers = require('../oauth-oidc/authorization_servers');
 // **`spiffe_server.js` is deliberately NOT required here.** That module
 // registers the bundle endpoint and /spiffe, and server.js requires this file
 // FIRST — so a require from here would pull those routes into the express
-// router ahead of the console's own, and GET /sts-metadata is built by walking
-// that router. What this page needs from it is two facts about sockets, and
-// they arrive through a reader slot instead: the same inversion
+// router ahead of the console's own, and GET /admin/sts-metadata is built by
+// walking that router. What this page needs from it is two facts about sockets,
+// and they arrive through a reader slot instead: the same inversion
 // setDirectoryReader(), setGroupReader() and setScimReader() already use, and
 // justified by rule 3e's test in exactly the same way.
 const spiffeCa = require('../spiffe/spiffe_ca');
@@ -266,6 +267,46 @@ const MAX_WHO = 12;
 // protocol, so they are an Overview at the top; and the configuration page and
 // the admin roles below it are what this service is set up with, so they sit
 // with the service metadata.
+//
+// PROTOCOLS HAS A THIRD LEVEL NOW, AND ONLY PROTOCOLS DOES. Eight pages under
+// one heading is the same list the row across the top was — a reader looking
+// for `Registration entries` had to know that entries are a SPIFFE idea before
+// the label could tell them anything — and the eight are not eight peers
+// either: three configure what this service ISSUES over OAuth2/OIDC, three are
+// the workload-identity side, one is the verifier's request and one is
+// provisioning. So an item in a section may be a page (`path` + `label`) or a
+// GROUP (`title` + `items`), and `isNavGroup()` is the one place that decides
+// which. Three rules about a group, each the section rule one level down:
+//
+//   * A GROUP IS NOT A CRUMB AND HAS NO PAGE, for exactly the reason a section
+//     does not. `trailBar()` is therefore untouched by this and must stay that
+//     way — the trail is still `Admin console › Registration entries › <id>`.
+//   * `NAV` IS STILL DERIVED, now through `sectionPages()`, which flattens a
+//     group's pages into the section that holds it. Everything downstream —
+//     `upTo()`, the trail, `consoleJson().pages` — reads NAV and so cannot tell
+//     a grouped page from an ungrouped one, which is the point: grouping is a
+//     fact about the SIDEBAR, not about the pages.
+//   * NESTING STOPS HERE. A group holds pages, never another group. Nothing
+//     enforces it beyond `sectionPages()` not recursing, which is deliberate —
+//     a fourth level would be a sidebar that needs its own breadcrumb.
+//
+// ONE PLACEMENT IN HERE IS A JUDGEMENT RATHER THAN AN OBVIOUS FACT, and it is
+// worth knowing which. `Credential claims` (`/admin/vc`) is the OID4VCI
+// ISSUER's claim configuration, so it could be argued into OAuth2 / OIDC — the
+// issuer is an OAuth2 authorization server wearing another hat, and the page
+// sits beside `Custom claims` in the code. It is under Verifiable Credentials
+// because the reader looking for it is thinking about a CREDENTIAL rather than
+// about a token, and because the two halves of the credential lifecycle —
+// what the issuer puts in and what the verifier asks for — answer each other
+// and are worth reading together. `SCIM` is left ungrouped beside the three
+// groups for a smaller reason: a group of one is a heading buying nothing.
+// ONE ROW BELOW IS A PAGE THIS FILE DOES NOT DRAW. `Service metadata`
+// (`/admin/sts-metadata`) is built by `../sts_metadata.js`, which derives its
+// whole content from the live express router and therefore has to be the LAST
+// module server.js loads; it calls `respond()` for this shell. Nothing about
+// the nav knows that, and that is the point — a page here is a `path` and a
+// `label` whoever builds it. It was `/sts-metadata`, outside the console
+// altogether, until 2026-08-24.
 const SECTIONS = [
   { title: 'Overview',
     what: 'What this service has done, across all of it.',
@@ -278,14 +319,30 @@ const SECTIONS = [
     what: 'One page per family, each configuring or reporting what that ' +
           'protocol does here.',
     items: [
-      { path: '/admin/authorization-servers', label: 'Authorization servers' },
-      { path: '/admin/claims', label: 'Custom claims' },
-      { path: '/admin/vc', label: 'Credential claims' },
-      { path: '/admin/vc-verifier-config', label: 'Verifier request' },
-      { path: '/admin/scim', label: 'SCIM' },
-      { path: '/admin/spiffe', label: 'SPIFFE' },
-      { path: '/admin/spiffe/entries', label: 'Registration entries' },
-      { path: '/admin/spiffe/agents', label: 'Agents' }
+      { title: 'OAuth2 / OIDC',
+        what: 'Which authorization server a flow runs against, and what this ' +
+              'service puts into what it issues.',
+        items: [
+          { path: '/admin/authorization-servers',
+            label: 'Authorization servers' },
+          { path: '/admin/claims', label: 'Custom claims' }
+        ] },
+      { title: 'Verifiable Credentials',
+        what: 'Both halves: what the OID4VCI issuer puts in a credential, ' +
+              'and what the OID4VP verifier asks a wallet to present.',
+        items: [
+          { path: '/admin/vc', label: 'Credential claims' },
+          { path: '/admin/vc-verifier-config', label: 'Verifier request' }
+        ] },
+      { title: 'SPIFFE',
+        what: 'Workload identity: the trust domain, the entries that decide ' +
+              'what a workload gets, and the agents that ask for it.',
+        items: [
+          { path: '/admin/spiffe', label: 'SPIFFE' },
+          { path: '/admin/spiffe/entries', label: 'Registration entries' },
+          { path: '/admin/spiffe/agents', label: 'Agents' }
+        ] },
+      { path: '/admin/scim', label: 'SCIM' }
     ] },
   { title: 'Directory',
     what: 'The embedded LDAP directory, and the identities this service has ' +
@@ -306,16 +363,44 @@ const SECTIONS = [
     items: [
       { path: '/admin/config', label: 'Configuration' },
       { path: '/admin/rbac', label: 'Admin roles' },
-      { path: '/sts-metadata', label: 'Service metadata' }
+      { path: '/admin/sts-metadata', label: 'Service metadata' }
     ] }
 ];
 
+// Is this row of a section's `items` a GROUP of pages rather than a page? One
+// predicate, used by both the flattening and the sidebar, so the two cannot
+// disagree about what they are looking at. A group has `items`; a page has a
+// `path` and never has `items`.
+function isNavGroup(item) {
+  return item != null && Array.isArray(item.items);
+}
+
+// Every PAGE in one section, in sidebar order, with a group's pages spliced in
+// where the group sits. One level only — see the note above SECTIONS.
+function sectionPages(section) {
+  log.debug("Entering sectionPages(). section=" + section.title);
+  const pages = [];
+  section.items.forEach(function (item) {
+    if (isNavGroup(item)) {
+      item.items.forEach(function (page) {
+        pages.push(page);
+      });
+      return;
+    }
+    pages.push(item);
+  });
+  log.debug("Leaving sectionPages(). " + pages.length + " page(s).");
+  return pages;
+}
+
 // Every page in every section, flattened, with the section it belongs to on each
 // row. Derived rather than typed for the reason above; the `section` member is
-// what lets the sidebar bold the right heading without a second lookup.
+// what lets the sidebar bold the right heading without a second lookup. A page
+// inside a group is flattened to the same shape as one outside it, so nothing
+// downstream of here can tell them apart.
 const NAV = [];
 SECTIONS.forEach(function (section) {
-  section.items.forEach(function (item) {
+  sectionPages(section).forEach(function (item) {
     NAV.push({ path: item.path, label: item.label, section: section.title });
   });
 });
@@ -444,22 +529,23 @@ function upTo(path, leaf, listView) {
 // crumb: there is no page behind it. The section containing the page being drawn
 // is marked, so a reader who arrived on a deep link can see where they are
 // without reading every label.
+//
+// A GROUP inside a section is drawn as an `<li>` holding a heading and a `<ul>`
+// of its own, rather than as a second `<ul>` beside the first: a group belongs
+// INSIDE the section's list — it is three of that list's items said together —
+// and a sibling list would tell a screen reader the section ended where the
+// group began. Its heading is plain text for the same reason the section's is,
+// and the marker on the group holding the current page is a rule down the left
+// like the section's, one level in.
 function navBar(active, up) {
   log.debug("Entering navBar(). active=" + active);
   const html = '<nav aria-label="Admin console sections">' +
     SECTIONS.map(function (section) {
-      const inThisSection = section.items.filter(function (item) {
+      const inThisSection = sectionPages(section).filter(function (item) {
         return item.path === active;
       }).length > 0;
       const links = section.items.map(function (item) {
-        if (item.path === active) {
-          if (up) {
-            return '<li><a class="here" href="' + esc(up.href) + '" title="Back to ' +
-                   esc(up.label) + '">' + esc(item.label) + '</a></li>';
-          }
-          return '<li><span class="here">' + esc(item.label) + '</span></li>';
-        }
-        return '<li><a href="' + esc(item.path) + '">' + esc(item.label) + '</a></li>';
+        return navItem(item, active, up);
       }).join('');
       return '<div class="navsec' + (inThisSection ? ' open' : '') + '">' +
         '<p class="navhead" title="' + esc(section.what) + '">' +
@@ -467,6 +553,45 @@ function navBar(active, up) {
     }).join('') + '</nav>';
   log.debug("Leaving navBar(). " + SECTIONS.length + " section(s).");
   return html;
+}
+
+// One row of a section's list: a page, or a group holding pages.
+function navItem(item, active, up) {
+  log.debug("Entering navItem(). " + (isNavGroup(item) ? 'group ' + item.title
+                                                       : 'page ' + item.path));
+  if (!isNavGroup(item)) {
+    log.debug("Leaving navItem(). A page.");
+    return navLink(item, active, up);
+  }
+  const open = item.items.filter(function (page) {
+    return page.path === active;
+  }).length > 0;
+  const html = '<li class="navgrp' + (open ? ' open' : '') + '">' +
+    '<p class="navsub" title="' + esc(item.what) + '">' + esc(item.title) +
+    '</p><ul>' + item.items.map(function (page) {
+      return navLink(page, active, up);
+    }).join('') + '</ul></li>';
+  log.debug("Leaving navItem(). A group of " + item.items.length + " page(s).");
+  return html;
+}
+
+// One page's link. Split out of navBar() when groups arrived so that a page
+// draws the same way at either depth — the active-tab-is-a-link rule above is
+// the kind that gets applied to one of two copies.
+function navLink(item, active, up) {
+  log.debug("Entering navLink(). path=" + item.path);
+  if (item.path === active) {
+    if (up) {
+      log.debug("Leaving navLink(). Active, and a drill-down.");
+      return '<li><a class="here" href="' + esc(up.href) + '" title="Back to ' +
+             esc(up.label) + '">' + esc(item.label) + '</a></li>';
+    }
+    log.debug("Leaving navLink(). Active.");
+    return '<li><span class="here">' + esc(item.label) + '</span></li>';
+  }
+  log.debug("Leaving navLink().");
+  return '<li><a href="' + esc(item.path) + '">' + esc(item.label) +
+         '</a></li>';
 }
 
 // How long a leaf crumb may be before it is cut. A group's leaf is a DN and a
@@ -670,6 +795,20 @@ function page(title, active, inner, up, gate) {
     // second selected item beside the selected one.
     '.navsec.open{border-left:3px solid #12107c;margin-left:-14px;padding-left:11px}' +
     '.navsec.open .navhead{color:#12107c}' +
+    // A GROUP INSIDE A SECTION. It is an <li>, so `nav li` has already given it
+    // the item metrics; what these rules do is take the item LOOK back off it
+    // (it is a heading with a list under it, not a thing to click) and indent
+    // the list it holds behind a hairline, which is what says "these three are
+    // one thing" without a second colour or a box.
+    '.navgrp{margin:6px 0 4px}' +
+    // The group heading. Smaller than the section's and sentence-cased rather
+    // than upper, so that two headings above one link cannot be read as two
+    // sections — the section is the shout, the group is the aside.
+    '.navsub{margin:0 0 3px;padding:0 6px;font-size:.78em;color:#6a6a80;' +
+    'font-weight:700;letter-spacing:.01em}' +
+    '.navgrp.open .navsub{color:#12107c}' +
+    '.navgrp>ul{margin:0;padding-left:8px;border-left:1px solid #e2e2ea}' +
+    '.navgrp.open>ul{border-left-color:#c3c0e0}' +
     'nav ul{list-style:none;margin:0;padding:0}' +
     'nav li{margin:0;font-size:1em}' +
     'nav a,nav .here{display:block;padding:3px 6px;border-radius:5px;text-decoration:none;' +
@@ -730,6 +869,53 @@ function page(title, active, inner, up, gate) {
     '.pagenav .here{background:#12107c;border-color:#12107c;color:#fff;font-weight:700}' +
     '.pagenav .off{color:#aaa;background:#f7f7fa}' +
     '.pagenav .where{border:0;background:none;color:#666;padding-left:.4em}' +
+    // ---------------------------------------------------------------------
+    // THE SERVICE METADATA PAGE'S OWN CLASSES, AND WHY THEY ARE IN THIS FILE
+    // RATHER THAN IN THE ONE THAT USES THEM.
+    //
+    // `/admin/sts-metadata` is built by `../sts_metadata.js` — it derives its
+    // whole content from the live express router, which is why it is the last
+    // module server.js loads — but it is drawn by page() like every other
+    // console page, and page() emits the ONLY <style> this console has. A
+    // <style> of its own would have to sit inside <body>, which browsers accept
+    // and no validator does, and there would then be two stylesheets to keep in
+    // step. So its classes live here, the way .tile's and .state-valid's do: a
+    // shared stylesheet with a few page-specific rules in it.
+    // ---------------------------------------------------------------------
+    // A paragraph of explanation above a table. Wider and quieter than body
+    // text; `.sub` is the page subtitle and cannot double as this, because that
+    // one is metrics-sized and appears once.
+    '.lead{color:#555;font-size:.85em;margin:0 0 12px;max-width:62rem}' +
+    '.m{font-weight:600;color:#0b6b4f;white-space:nowrap}' +
+    '.none{color:#999}' +
+    // Why a path is not a link, beside the path. Italic and grey because it is
+    // an aside about the row rather than part of it.
+    '.why{color:#999;font-size:.85em;font-style:italic}' +
+    '.eff{color:#b26a00;cursor:help}' +
+    '.bad{color:#b00020;font-weight:600}' +
+    'td.p{width:22%}td.n{width:16%}td.s{width:14%}' +
+    'td.p a{text-decoration:none}td.p a:hover code{text-decoration:underline}' +
+    // A LINK THAT LOOKS LIKE A BUTTON, which is not decoration here: the
+    // download control has to be an <a download> — this service serves no
+    // script anywhere, so nothing else can hand a browser a file — and a
+    // control that saves a document should not read as a sentence.
+    'a.btn{display:inline-block;padding:5px 10px;border-radius:5px;' +
+    'border:1px solid #12107c;background:#12107c;color:#fff;font-size:.8em;' +
+    'text-decoration:none}' +
+    'a.btn:hover{background:#0d0b5e;color:#fff}' +
+    // The protocol cards at the top of that page. Flex rather than grid for the
+    // reason the shell is: what is wanted at a narrow width is "the row becomes
+    // fewer columns", which flex-wrap does for nothing. `flex:1 1 15rem` lets
+    // the last row stretch rather than leaving a ragged gap.
+    '.protos{display:flex;flex-wrap:wrap;gap:9px;margin:.6em 0 1.4em}' +
+    '.proto{flex:1 1 15rem;border:1px solid #e2e2ea;border-radius:8px;' +
+    'padding:9px 12px;background:#fbfbfd}' +
+    '.proto a,.proto .n{font-weight:700;font-size:.85em;line-height:1.3}' +
+    '.proto .n{color:#222}' +
+    '.proto .d{font-size:.75em;color:#666;margin-top:3px;line-height:1.4}' +
+    // The count and the specification links. Smallest thing on the card,
+    // because it is the one part a reader scans rather than reads.
+    '.proto .c{font-size:.72em;color:#8a8a99;margin-top:5px}' +
     // The narrow case. One breakpoint and no more: below it the sidebar stops
     // being sticky and sits above the page as an ordinary block, which is what
     // flex-wrap has already done to it by then — the rule only undoes the
@@ -1841,7 +2027,8 @@ app.get('/admin/metrics', function (req, res) {
     '<h2>Endpoint calls</h2>' +
     '<p class="note">Keyed on the route Express matched, not on the URL requested, so ' +
     '<code>/oauth2/register/:client_id</code> is one row rather than one row per client. These are ' +
-    'the same route patterns <a href="/sts-metadata">/sts-metadata</a> lists.</p>' +
+    'the same route patterns <a href="/admin/sts-metadata">' +
+    '/admin/sts-metadata</a> lists.</p>' +
     callTable(snap) +
 
     '<h2>Tokens</h2>' +
@@ -2775,10 +2962,10 @@ app.get('/admin/audit', function (req, res) {
 // route order rather than a cycle. server.js requires ./admin before
 // ./ldap_server (that module needs admin_stats' identity normalisation, and the
 // console reads oauth2's sessions), so a require from here would pull the
-// directory's routes into the router AHEAD of the console's — and /sts-metadata is
-// built by walking that router. So the direction is inverted the same way
-// admin_stats.js's user observer is: this file offers a slot, and ldap_server.js
-// fills it at its own require time.
+// directory's routes into the router AHEAD of the console's — and
+// /admin/sts-metadata is built by walking that router. So the direction is
+// inverted the same way admin_stats.js's user observer is: this file offers a
+// slot, and ldap_server.js fills it at its own require time.
 //
 // It stays null when that module was never required. That is a real state — the
 // directory is the newest thing here and a build without it must still render this
@@ -2883,8 +3070,8 @@ function setGroupReader(fn) {
 // reason as the two above, and it passes rule 3e's test for the same two
 // grounds: requiring scim.js from here would pull every /scim route — and, since
 // that module requires ldap_server.js, every /ldap route too — into the express
-// router ahead of the console's own, and /sts-metadata is built by walking that
-// router.
+// router ahead of the console's own, and /admin/sts-metadata is built by
+// walking that router.
 //
 // What it holds is scim.js's description(), which is the same object GET
 // /scim?format=json answers with. So /admin/scim shows what that page shows
@@ -2896,9 +3083,9 @@ function setGroupReader(fn) {
 // The SPIFFE listeners, through a slot for the reason given beside the requires
 // above: this file must not require spiffe_server.js. What it holds is that
 // module's `bindings()` and its bundle path — two facts about SOCKETS, which
-// neither this page nor /sts-metadata can see any other way, so a page without
-// this reports "nothing bound" and cannot tell that from a listener whose port
-// was taken.
+// neither this page nor /admin/sts-metadata can see any other way, so a page
+// without this reports "nothing bound" and cannot tell that from a listener
+// whose port was taken.
 let spiffeReader = null;
 
 function setSpiffeReader(fn) {
@@ -4889,10 +5076,10 @@ app.get('/admin/applications', function (req, res) {
 // **A profile changes the document and not the endpoints**, and the page says so
 // three times because it is the one thing here that could mislead badly.
 // Everywhere else in this service a document disagreeing with the code is a
-// defect — /sts-metadata exists to report exactly that — and here it is the
-// feature. So every view computes the DRIFT: which overridden members disagree
-// with what this service would actually publish, and which removals hide
-// something real.
+// defect — /admin/sts-metadata exists to report exactly that — and here it is
+// the feature. So every view computes the DRIFT: which overridden members
+// disagree with what this service would actually publish, and which removals
+// hide something real.
 // ---------------------------------------------------------------------------
 const AS_CAVEAT =
   '<p class="note"><strong>What a document says is what that authorization server DOES.</strong> ' +
@@ -4927,9 +5114,9 @@ function asDriftRows(id) {
 
 // A request-shaped stand-in, so the document can be built outside a request.
 // The host is this service's own default, which is what /admin/config and
-// /sts-metadata already assume when they name a URL: the console is being read
-// by somebody who reached this process, and the comparison is about MEMBERS
-// rather than about hostnames.
+// /admin/sts-metadata already assume when they name a URL: the console is being
+// read by somebody who reached this process, and the comparison is about
+// MEMBERS rather than about hostnames.
 function asTruthRequest() {
   return {
     protocol: config.value('global.https') ? 'https' : 'http',
@@ -7841,7 +8028,8 @@ function spiffePage(req) {
     '</div></form>' +
 
     '<h2>The gRPC listeners</h2>' +
-    '<p>Neither <code>/sts-metadata</code> nor this page can see a socket, so ' +
+    '<p>Neither <code>/admin/sts-metadata</code> nor this page can see a ' +
+    'socket, so ' +
     'this table is the only place that reports whether each one actually ' +
     'bound. All four are restart-only.</p>' +
     '<table><tr><th>Surface</th><th>Address</th><th>State</th>' +
@@ -8693,6 +8881,16 @@ app.post('/admin/spiffe/agents', function (req, res) {
 
 
 module.exports = {
+  // THE SHELL, for the one module outside this file that draws a console page:
+  // `../sts_metadata.js`, which builds `/admin/sts-metadata` from the live
+  // express router and cannot live in here (it must be the LAST module
+  // server.js loads, or it would be the reason a route is missing from its own
+  // list). `respond()` is what it calls; `page()` is exported beside it because
+  // a caller that needed the shell without the ?format=json half would
+  // otherwise reimplement respond() badly. Neither decides anything: what that
+  // page SAYS is entirely that module's.
+  respond: respond,
+  page: page,
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
   // Filled by spiffe_server.js at its require time, for the reason beside the

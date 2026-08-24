@@ -75,8 +75,8 @@
 //
 // The four POST routes take the action as a PATH PARAMETER — /admin-api/
 // tokens/revoke, one express pattern `:action` behind six real URLs. That keeps
-// the router honest (one row in GET /sts-metadata per resource, showing the
-// parameter) while the OpenAPI document lists each URL as the separate
+// the router honest (one row in GET /admin/sts-metadata per resource, showing
+// the parameter) while the OpenAPI document lists each URL as the separate
 // operation it is, which is what makes the explorer's per-action forms
 // possible. An unknown action is not a 404: it reaches the console's own
 // handler and comes back as its "Unknown action" refusal, naming the ones that
@@ -211,7 +211,7 @@ const ROUTES = [
                  'service as the request reached it, so a document fetched ' +
                  'through a proxy or a published port names the address the ' +
                  'caller can use.',
-    mirrors: 'GET /sts-metadata',
+    mirrors: 'GET /admin/sts-metadata',
     responseDescription: 'The document.',
     responseSchema: { type: 'object',
                       description: 'An OpenAPI 3.1.0 document.' },
@@ -1995,7 +1995,8 @@ const ROUTES = [
                  'path and its sequence, every federated trust domain, and ' +
                  'whether each of the four gRPC listeners actually bound — ' +
                  'which nothing else can tell you, because neither this API ' +
-                 'nor GET /sts-metadata can see a socket.\n\nThe reply also ' +
+                 'nor GET /admin/sts-metadata can see a socket.\n\nThe ' +
+                 'reply also ' +
                  'carries `authentication`: whether the SPIRE Server API is ' +
                  'enforcing mutual TLS (`spiffe.authRequired`), which ' +
                  'identities are administrators, and the whole per-method ' +

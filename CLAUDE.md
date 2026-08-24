@@ -320,10 +320,17 @@ is weighed.
 
 ## Adding an endpoint costs one entry in `sts_metadata.js`
 
-`GET /sts-metadata` reads the endpoint list **from the running Express router**, so
+`GET /admin/sts-metadata` reads the endpoint list **from the running Express router**, so
 it cannot go stale — but it reports two kinds of drift and the parent project's
 `tests/sts_metadata.js` fails on both: a route registered and undescribed, and a
 description whose path is not registered (what a rename produces). See README.md.
+
+It is a **console page** since 2026-08-24 (it was `/sts-metadata`), so it is
+behind `admin.authRequired` and is drawn by `admin.js`'s `page()`: this module
+builds the body and `admin.respond()` supplies the shell. Adding a PROTOCOL
+family costs a card in that file's `PROTOCOLS` as well as the entry above —
+the page reports an endpoint group no card claims, so leaving it out fails the
+same test rather than going quietly.
 
 Reading the router has one blind spot: **a protocol that registers no route is
 invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are — and
@@ -386,7 +393,7 @@ parent project need only this service and should be ported:
 
 | Test | What it covers |
 |---|---|
-| `tests/sts_metadata.js` | the `/sts-metadata` drift checks — that the page lists exactly what the router registers, that every method reaches a handler, that every link resolves, and that no specification claim is idle |
+| `tests/sts_metadata.js` | the `/admin/sts-metadata` drift checks — that the page lists exactly what the router registers, that every method reaches a handler, that every link resolves, and that no specification claim is idle |
 | `tests/admin_api.js` | the management API at `/admin-api`: its OpenAPI document, the PARITY it exists to keep — every `/admin` page and every action of its four handlers has an operation, read off this service's own answers rather than off a list in the test — every documented schema property checked against a live reply, and that a revocation made through the API is dead at `/oauth2/introspect`. It restores everything it changes, including the tokens its bulk revocations touched |
 | `tests/sts_dpop.js` | RFC 9449 end to end over HTTP: all twelve section 4.3 checks, the `cnf.jkt` binding on access and refresh tokens, `dpop_jkt`, `jti` replay, and the nonce handshake in both shapes. Almost entirely negatives, because a DPoP server that issues bound tokens and accepts good proofs looks finished and can be worth nothing |
 | `tests/oauth2_sts_endpoints.js` | every endpoint the RFC 8414 metadata advertises answers, and every token verifies against the advertised JWKS |

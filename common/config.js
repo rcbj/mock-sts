@@ -1275,7 +1275,8 @@ const SETTINGS = [
     env: 'STS_SPIFFE_ENABLED', type: 'bool', dflt: true, runtime: true,
     description: 'Whether the three SPIFFE surfaces answer. Off, the routes ' +
                  'are still registered and the gRPC listeners still bound — ' +
-                 'so /sts-metadata still describes them and /spiffe still ' +
+                 'so /admin/sts-metadata still describes them and /spiffe ' +
+                 'still ' +
                  'says what this is — but the bundle endpoint answers 404 and ' +
                  'every gRPC call is refused with Unavailable. Read per ' +
                  'request, so it can be turned off without a restart; the ' +

@@ -39,8 +39,8 @@
 // mapping table on /admin/scim even though admin.js is required BEFORE
 // ldap_server.js. That is the whole reason the conversions live here rather than
 // in `scim.js`: a require from the console into the SCIM module would drag the
-// /scim routes into the express router ahead of /admin, and /sts-metadata is
-// built by walking that router.
+// /scim routes into the express router ahead of /admin, and /admin/sts-metadata
+// is built by walking that router.
 //
 // So there are two readers and they read different halves:
 //
