@@ -23,10 +23,26 @@
 # part. `minima` is the theme GitHub Pages ships; the markdown stays readable in
 # the repository, which is where a maintainer actually reads it.
 #
-# BEFORE THE FIRST RUN, somebody has to set Settings → Pages → Source to
-# "GitHub Actions" once. Until that is done this job fails at the deploy step
-# with a message about Pages not being enabled — which names the API and not the
-# setting, so it is worth knowing in advance.
+# BEFORE THE FIRST RUN, Pages has to EXIST for this repository and be set to
+# build from GitHub Actions. The paragraph that used to be here said somebody had
+# to do that by hand in Settings → Pages, and nobody did: every run from the
+# first one on 2026-08-23 to 2026-08-24 failed, all four of them in the same
+# place. It is also not the deploy step that fails, which is what that paragraph
+# predicted — configure-pages asks the API for the site before anything is built
+# and gets `Not Found`, so the failure arrives second, the site is never built,
+# and the error names the REST endpoint rather than the setting:
+#
+#     Get Pages site failed. Please verify that the repository has Pages
+#     enabled and configured to build using GitHub Actions
+#     HttpError: Not Found - .../rest/pages/pages#get-a-apiname-pages-site
+#
+# `enablement: true` below is the fix, and it is preferred over doing it once by
+# hand for the reason the hand version already demonstrated: a setting nobody can
+# see from the repository is a setting that does not get made. The action creates
+# the Pages site with `build_type: workflow` on the first run and is a no-op on
+# every run after, which is also what makes a fork or a re-created repository
+# work with no out-of-band step. It needs no secret — `pages: write` below is the
+# permission it uses.
 name: Deploy docs to GitHub Pages
 
 on:
@@ -68,9 +84,15 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      # `enablement: true` — create the Pages site if this repository has none,
+      # rather than failing with a 404 that names the REST endpoint. See the
+      # header comment: the by-hand alternative was the arrangement here for four
+      # runs and all four failed.
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       # `source: ./docs` — the site is that directory and nothing above it, so
       # README.md, the CLAUDE.md files and the source tree are not published. The
