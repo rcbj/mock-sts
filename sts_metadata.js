@@ -1104,6 +1104,21 @@ const ENDPOINTS = [
           'POST only.' },
 
   // --- service ---
+  { path: '/', group: 'Service', name: 'The front page',
+    specs: [],
+    what: 'What this service is, in one card: the project on GitHub, its ' +
+          'issues, the documentation site, and the admin console on this ' +
+          'instance. It lists NO endpoints on purpose — this page is the ' +
+          'list, it is generated, and a hand-written set of highlights on ' +
+          'the front door would be a second copy of it that nothing checks. ' +
+          'It was an unrouted path until 2026-08-24, so the answer to the ' +
+          'one URL a person types first was Express\'s "Cannot GET /".' },
+  { path: '/logo.png', group: 'Service', name: 'The logo on the front page',
+    specs: [],
+    what: 'The only image this service serves: the parent project\'s logo, ' +
+          'resized and reduced to 31 kB, read from disk once at startup. If ' +
+          'it could not be read this answers 404 in its own words rather ' +
+          'than Express\'s, and the front page is drawn without it.' },
   { path: '/healthcheck', group: 'Service', name: 'Health check',
     specs: [], what: 'Liveness only. Answers 200 with a JSON message; used by the compose healthcheck.' },
   { path: '/docs', group: 'Service', name: 'Service documentation',

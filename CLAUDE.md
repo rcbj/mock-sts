@@ -20,6 +20,7 @@ files did not change; the paths did.
 |---|---|
 | `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `admin_stats.js`, `audit.js`, `applications.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
+| `home/` | The front door: `GET /` and the one image on it. |
 | `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles. |
 | `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. |
 | `saml/` | The two assertion builders. No Web SSO profile. |
@@ -217,6 +218,7 @@ require can see at a glance whether they are about to break one.
 | 3–4 | `common/helpers`, `common/config` | `config.js` is below `helpers.js` and requires nothing here. | `common/CLAUDE.md` |
 | 5 | `common/claim_attributes` | Ahead of everything that ISSUES, because requiring it fills `setAttributeResolver()`. An empty slot means tokens without their configured attributes. | `common/CLAUDE.md` |
 | 6 | `common/group_claims` | Same reason, for `setGroupResolver()`. | `common/CLAUDE.md` |
+| 6a | `home/home` | No constraint. Two EXACT paths (`/` and `/logo.png`) and nothing but the app behind them; first among the route modules so that the page a person meets first heads the list on `/admin/sts-metadata`. | `home/CLAUDE.md` |
 | 7 | `ws-trust/wstrust` | No constraint. | `ws-trust/CLAUDE.md` |
 | 8 | `authn/authn` | Before `oauth-oidc/oauth2` — it owns the session that module reads, and fills `audit.js`'s `setActorResolver()`. | `authn/CLAUDE.md` |
 | 9 | `oauth-oidc/oauth2` | Before `ws-federation/wsfed` and before `admin-ui/admin`. | `oauth-oidc/CLAUDE.md` |

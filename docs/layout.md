@@ -31,6 +31,7 @@ tls/                 the 8443 and 9443 listeners
 oid4vc/              OpenID4VCI, OpenID4VP, DID Core
 admin-ui/            the console at /admin
 mgmt-api/            /admin-api and its generated OpenAPI document
+home/                the front door: GET / and the logo on it
 
 env/                 the appconfig files; CONFIG_FILE selects one
 docs/                this site
