@@ -3,9 +3,11 @@
 // ---------------------------------------------------------------------------
 // One place that decides what CONFIG_FILE means.
 //
-// Fourteen modules in this service read the appconfig file directly —
+// Thirteen modules in this service read the appconfig file directly —
 // `require(process.env.CONFIG_FILE)` — for one thing each: the bunyan log level
-// they need before config.js exists. That was harmless while every module sat
+// they need before config.js exists. (It was fourteen until 2026-08-24:
+// helpers.js's read had been dead for some time and was removed when CONFIG_FILE
+// became optional, since `require(undefined)` throws.) That was harmless while every module sat
 // in the package root, because node resolves a RELATIVE require against the
 // directory of the module doing the requiring, and every one of them was in the
 // same directory the `./env` tree hangs off.
@@ -18,8 +20,8 @@
 //
 // and the Dockerfile bakes the same string in as an ENV. Read from
 // common/config.js that path is `common/env/local.js`, which does not exist —
-// so config.js and helpers.js, whose reads are UNGUARDED, would die with
-// MODULE_NOT_FOUND naming a path nobody typed, and the eleven guarded reads
+// so config.js, whose read is the only UNGUARDED one left, would die with
+// MODULE_NOT_FOUND naming a path nobody typed, and the twelve guarded reads
 // (the vendored PKI modules and the Kerberos codec, which fall back to "info"
 // so a test can load them with no configuration at all) would quietly log at
 // the wrong level with nothing to point at.
@@ -27,7 +29,7 @@
 // So the variable is made ABSOLUTE once, before anything reads it, and every
 // later `require(process.env.CONFIG_FILE)` in any directory then resolves to
 // the same file. It is a mutation of process.env on purpose: the alternative is
-// changing fourteen read sites, four of which are VENDORED files this
+// changing thirteen read sites, four of which are VENDORED files this
 // repository may not edit (see common/vendored/CLAUDE.md).
 //
 // Three callers require this first and between them cover every way the service

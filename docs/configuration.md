@@ -24,10 +24,35 @@ Five levels, first match wins:
 2. **The environment variable**
 3. **A legacy environment variable** — there is exactly one, `STS_ISSUER`
 4. **The appconfig file** named by `CONFIG_FILE`
-5. **The built-in default**
+5. **`env/defaults.js`** — the default appconfig file that 4 is unioned on top of
 
 Environment beating the file is deliberate: it is what keeps existing containers
 and test harnesses working when the shipped `env/*.js` files carry every key.
+
+**There is no sixth level.** A setting with no value in 4 or 5 and no variable in
+2 or 3 **stops this service from starting**, naming every such setting and both
+places its value could go. A value that arrives from a constant buried in a
+module is a value nobody can find, change or see on a page, which is the state
+this arrangement exists to end — so there is no silent fallback underneath the
+table to lead back into it.
+
+**Levels 4 and 5 are one layer, unioned.** `env/defaults.js` carries a default
+for every setting; the file `CONFIG_FILE` names is merged over it key by key and
+**the operator's value wins wherever both carry a key**. So a config file may
+carry as few keys as its author likes and still be complete, and a setting added
+to the table tomorrow does not break every config file in the world on the day it
+is added. `env/defaults.js` is GENERATED from the table — `node
+env/generate_defaults.js` — and is not the file to edit; to configure a
+deployment, edit the file `CONFIG_FILE` names or set the environment variable.
+
+**Every setting has an environment variable**, and three settings are exempt from
+the refusal above because their default is DERIVED from a neighbour rather than
+written in a file: `global.https` from `oauth2.rfc9700`, `oid4vp.walletUrl` from
+`oid4vci.walletUrl`, and `krb5.serviceDomains` from `krb5.realm`. Each still has
+its own key and its own variable, and setting either replaces the derivation.
+
+The README carries the full table: every appconfig key, its environment variable,
+its default and whether it can be changed without a restart.
 
 `STS_ISSUER` is the one legacy level because it used to be a single value serving
 as the SAML assertion issuer, the WS-Trust token issuer AND the WS-Federation
@@ -145,6 +170,52 @@ compliance flag that also breaks tokens is a flag nobody will turn on. It exists
 because "the client must validate the nonce" is a requirement no server can
 check, and a reachable negative is the only way to find out whether a client
 does.
+
+### The four token lifetimes
+
+| Setting | Default | Allowed |
+|---|---|---|
+| `oauth2.accessTokenTtlS` | `3600` (one hour) | 30–2592000, in steps of 30 |
+| `oauth2.idTokenTtlS` | `3600` (one hour) | 30–2592000, in steps of 30 |
+| `oauth2.refreshTokenTtlS` | `86400` (twenty-four hours) | 30–2592000, in steps of 30 |
+| `oauth2.clockSkewS` | `30` | 0–300, in steps of 30 |
+
+All four are runtime settings, read per token, and there is a page of their own
+for them at `/admin/token-lifetimes` as well as the usual row on `/admin/config`.
+
+Set one low and the next token dies on cue, which is the reason to point a client
+at a mock at all:
+
+```bash
+curl -s -X POST localhost:8081/admin-api/token-lifetimes/set \
+  -H 'content-type: application/json' \
+  -d '{"oauth2.accessTokenTtlS": 60}'
+```
+
+**A change reaches the next token and nothing already issued.** A lifetime is
+stamped into a token as its `exp` when it is signed; to take one already in a
+client's hands out of circulation, revoke it at `/oauth2/revoke` or on
+`/admin/tokens`.
+
+**Every lifetime is a whole number of thirty-second units**, and that is a
+decision rather than a formatting rule: below half a minute a token expires
+between the response being written and the client reading it, and the hour that
+costs goes on debugging the wrong half of the exchange.
+
+`oauth2.clockSkewS` is not a lifetime. It is the allowance applied to `exp` and
+`nbf` wherever this service reads back a token it signed — introspection,
+UserInfo, the refresh grant, token exchange, the DPoP-bound access token check —
+**and** to the state every console screen reports, so the console and the
+endpoints never disagree about what has expired. It never changes what goes into
+a token. It is a different setting from `oauth2.clientAssertionSkewS`, which is
+how far out a *client's* assertion may be (RFC 7523): one is somebody else's
+clock, the other is this service's own.
+
+> **`oauth2.refreshTokenTtlS` changed on 2026-08-24**, from thirty days to
+> twenty-four hours. Set it to `2592000` for the old behaviour. It is not
+> `oauth2.refreshIdleSeconds`, which is RFC 9700 mode's inactivity timeout on a
+> refresh *chain* and is measured from the last redemption rather than from
+> issuance.
 
 ## Reading the current configuration
 

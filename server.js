@@ -324,7 +324,8 @@ function announce() {
   log.info('The admin console is at /admin: /admin/metrics counts every call, token, assertion, ' +
            'ticket and session; /admin/tokens lists every JWT, SAML assertion and Kerberos ticket ' +
            'issued and invalidates access tokens, ID Tokens and refresh tokens (only those three ' +
-           'can be); /admin/claims adds custom claims to future tokens and assertions. It is NOT ' +
+           'can be); /admin/claims adds custom claims to future tokens and /admin/saml-attributes ' +
+           'to future assertions. It is NOT ' +
            'protected — nothing in this service is — so do not put this port on a public address.');
   // The KDC's sockets are started here rather than at require time so that a
   // failure to bind (port 88 is privileged) is reported by a running service

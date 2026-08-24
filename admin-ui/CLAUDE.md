@@ -52,10 +52,17 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    **PROTOCOLS HAS A THIRD LEVEL AND NOTHING ELSE DOES.** An item in a section's
    `items` is either a page (`path` + `label`) or a GROUP (`title` + `what` +
    `items`), and `isNavGroup()` is the single predicate that decides which.
-   There are three groups, all under Protocols — **OAuth2 / OIDC** (authorization
-   servers, custom claims), **Verifiable Credentials** (credential claims,
-   verifier request) and **SPIFFE** (SPIFFE, registration entries, agents) —
-   with SCIM left ungrouped beside them. Three rules, each the section rule one
+   There are four groups, all under Protocols — **OAuth2 / OIDC** (authorization
+   servers, token lifetimes, custom claims), **SAML** (custom SAML attributes),
+   **Verifiable Credentials** (credential claims, verifier request) and
+   **SPIFFE** (SPIFFE, registration entries, agents) — with SCIM left ungrouped
+   beside them. **SAML holds ONE page and is the exception to the rule that
+   makes SCIM ungrouped** ("a group of one is a heading buying nothing"): the
+   heading names a protocol family this service speaks in two versions and two
+   profiles, and the page under it configures one aspect of that family, where
+   SCIM's one page IS the whole of SCIM here. The test for the next group of one
+   is that question and not this precedent — does the heading name more than the
+   page under it does? Three rules, each the section rule one
    level down: a group **is not a crumb** and has no page, so `trailBar()` is
    untouched by grouping and must stay that way; `NAV` is still **derived**, now
    through `sectionPages()`, which flattens a group's pages into the section
@@ -91,6 +98,79 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    FILTERS a list is not a drill-down and must not pass `up`: the section crumb
    would then point at the page the reader is already on.
 
+
+---
+
+## `/admin/token-lifetimes` IS FOUR CONFIG ROWS ON A PAGE, AND THAT NEEDED AN ARGUMENT
+
+The access token, ID Token and refresh token lifetimes and the clock skew
+applied when one is read back. Every one of them is a `config.js` row, so
+`/admin/config` already had a form for all four and `POST /admin-api/config/set`
+already had the operation — which is exactly the situation `/admin/scim`'s
+header cites when it says it has no form, because "a second form here would be a
+second door to one setting".
+
+**The rule that header applies is the ONE-STORE rule, and it is untouched here:
+there is no store.** This page holds nothing and decides nothing; its form calls
+`config.setOverride()`, the same function `/admin/config`'s Save calls, against
+the same override map. What breaks the one-store rule is a second PLACE THE
+VALUE LIVES. Two forms over one function are two doors, which this service has
+deliberately elsewhere — four of them onto one group membership (rule 8a).
+
+**What is different from SCIM's case is the reader's task**, and that is the
+test for a third page of this shape:
+
+* These four are a QUANTITY somebody sets to a specific number to watch
+  something happen, repeatedly, within one session — *make it a minute so I can
+  see my client refresh*. `/admin/config` is a table of every setting this
+  service has with a text box each; finding four of them in it, every time, is
+  the cost this page removes. Nothing about SCIM's thirteen settings is used
+  that way.
+* They INTERACT, and a page can say so where a flat table cannot.
+  `tokenLifetimeWarnings()` reports the two combinations that are legal and
+  surprising: an access token that outlives the refresh token (a grant that can
+  never usefully be renewed) and a skew at least as long as the access token's
+  own life (an access token that is never refused anywhere, introspection
+  included). **Neither is refused** — this service exists to be made to
+  misbehave on purpose — and both are states a real deployment reaches.
+* The question the page answers, *why is my client being refused*, is usually
+  answered "the token expired", so the count of what already has belongs beside
+  the numbers that decided it.
+
+**A page that started keeping its own copy of a value would be the thing both
+rules exist to prevent.** That, and not the number of forms, is what to check a
+fourth page of this kind against.
+
+**EXPIRY IS REPORTED ON EVERY SCREEN THAT REPORTS TOKEN STATE, AND ONE OF THEM
+WAS COUNTING IT AND NOT SHOWING IT.** `/admin/tokens` and the user drill-down's
+token tables always had a state column from `stats.tokenStateOf()`. What did not
+was `/admin/users`, whose row carried `tokens.expired` — computed in
+`userRows()` since it was written — behind a table that printed only *Tokens*,
+*Valid* and *Revoked*. So a person reading "12 issued, 1 valid" had to guess
+what the other eleven were, and the difference is NOT expired: a revoked token,
+one not yet valid and one with no expiry stated all sit in it, so the
+subtraction is silently wrong. It is a column now, and the drill-down gained the
+matching tile beside *tokens still valid* for the same reason.
+
+**All of them count against the same clock the endpoints use**, because
+`tokenStateOf()` applies `oauth2.clockSkewS` — see `oauth-oidc/CLAUDE.md`. A
+console that called a token expired while `/oauth2/introspect` reported it
+active would send somebody to debug the wrong half, and this page is where they
+come to find out why a client was refused. `artifactStateOf()` deliberately does
+NOT take that allowance: nothing here reads a SAML assertion or a Kerberos
+ticket back, so there is no endpoint for it to agree with, and an OAuth setting
+stretching a ticket's lifetime on a page would be inventing a tolerance the KDC
+never applied.
+
+Two more things about it worth keeping if any of it is reworked. **The bounds on
+the inputs come off the settings** — `min`, `max` and `step` from
+`config.describe()`, rendered into the `number` inputs — so the browser's
+refusal and the server's are the same three numbers rather than two lists that
+can drift; the server still checks, because an input attribute constrains a
+person and not a JSON body. And **`number` was added to the shell's
+`input[type=text],…` selector** when this page arrived: its four inputs were the
+console's first, and without it they were the one control in the card drawn in
+the browser's default chrome.
 
 ---
 
@@ -160,10 +240,16 @@ owns the store, and reimplementing any of it here is how the console and an
   nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
-  future access token, ID Token and SAML assertion. Custom claims are **additive**:
+  future access token, ID Token and SAML assertion — the tokens on `/admin/claims`
+  and the assertions on `/admin/saml-attributes` since 2026-08-24, **two pages onto
+  one store**: one `CLAIM_SETS`, one `setClaimSet()`, one `claimsAction()` taking the
+  set ids the door carries, and one audit row per change whichever door made it.
+  Custom claims are **additive**:
   the names this service sets itself are refused at configuration time, because an
   `exp` settable from a web form would produce tokens that fail to verify with nothing
-  pointing back at the page. The same page's other half puts **LDAP attributes** in
+  pointing back at the page — and that list is a JWT rule, not enforced for a SAML
+  attribute, because `exp` collides with nothing in an assertion. The other half of
+  each set puts **LDAP attributes** in
   those four, whose values come off the person's own entry rather than out of the form
   — see rule 3d, and note that the additive rule holds there too: the protocol's own
   claim wins, then a typed one, then the attribute. It deliberately does not invalidate assertions, tickets

@@ -6,10 +6,16 @@
 // WHICH LDAP ATTRIBUTES THE FOUR TOKEN AND ASSERTION SETS CARRY.
 //
 // admin_stats.js already holds the four CUSTOM CLAIM sets — a name and a value
-// somebody typed on /admin/claims, with ${placeholders}. This holds the other
-// half of that page: a SELECTION out of the directory's user-object attribute
-// catalogue, per set, whose value is not typed anywhere because it is read off
-// that person's entry under ou=users.
+// somebody typed on /admin/claims or /admin/saml-attributes, with
+// ${placeholders}. This holds the other half of those pages: a SELECTION out of
+// the directory's user-object attribute catalogue, per set, whose value is not
+// typed anywhere because it is read off that person's entry under ou=users.
+//
+// TWO PAGES SINCE 2026-08-24 AND STILL ONE SELECTION PER SET. The console shows
+// the two JWT sets on /admin/claims and the two SAML ones on
+// /admin/saml-attributes; nothing here knows that, and nothing here should — a
+// per-page store would be the second store this whole arrangement exists to
+// prevent, and the catalogue below is published by both replies in full.
 //
 // The difference between the two halves is the whole reason this file exists.
 // A typed claim is a constant (or a placeholder over the sign-in), and it says
@@ -34,7 +40,8 @@
 //
 //   vc_claims.js's own selection   what an issued CREDENTIAL carries   /admin/vc
 //   vc_verifier_config.js          what the mock Verifier ASKS FOR     /admin/vc-verifier-config
-//   this file                      what a TOKEN or ASSERTION carries   /admin/claims
+//   this file                      what a TOKEN carries                /admin/claims
+//   this file (the same store)     what an ASSERTION carries           /admin/saml-attributes
 //
 // Keeping them separate is what makes "issue a credential carrying a claim the
 // access token does not" and "ask for a claim nothing here issues" reachable.
@@ -87,7 +94,7 @@ const stats = require('./admin_stats');
 // copied, and the spellings live over there.
 const vcClaims = require('../oid4vc/vc_claims');
 // The event log. Every change here writes a row of its own, because the HTTP row
-// app.js records for the same POST says that /admin/claims was posted to and not
+// app.js records for the same POST says that a claims page was posted to and not
 // WHICH set gained WHICH attribute — see recordChange() below.
 const audit = require('./audit');
 
@@ -145,8 +152,9 @@ function selectedRows(setId) {
   });
 }
 
-// Canonically spelled, because this list is published: /admin/claims answers it
-// in its JSON and GET /admin-api/claims serves the same object. A reply naming
+// Canonically spelled, because this list is published: both claim-set pages
+// answer it in their JSON and GET /admin-api/claims and GET
+// /admin-api/saml-attributes serve the same object. A reply naming
 // `schacdateofbirth` beside a catalogue naming `schacDateOfBirth` reads as two
 // different attributes.
 function selectedNames(setId) {
@@ -173,7 +181,7 @@ function allNames() {
 // nothing out of a request body is recorded there beyond the action name, on
 // purpose, because those bodies carry pasted JWTs on this service.
 //
-// So the fact that /admin/claims was posted to and the fact that the ID Token
+// So the fact that a claims page was posted to and the fact that the ID Token
 // set gained `mail` and lost `title` are two different facts at two layers, and
 // this is the second one. audit.js's header states the rule they are both
 // instances of — one act produces several events, and collapsing them would
@@ -449,9 +457,10 @@ stats.setAttributeResolver({
 });
 
 log.info('The claim-attribute selection is loaded: /admin/claims can now put ' +
-         'LDAP attributes from the directory into an access token, an ID Token, ' +
-         'a SAML 2.0 assertion and a SAML 1.1 assertion. Nothing is selected on ' +
-         'a fresh start, so this changes no token until somebody asks it to.');
+         'LDAP attributes from the directory into an access token and an ID ' +
+         'Token, and /admin/saml-attributes into a SAML 2.0 assertion and a ' +
+         'SAML 1.1 one. Nothing is selected on a fresh start, so this changes ' +
+         'no token until somebody asks it to.');
 
 module.exports = {
   CATALOGUE: CATALOGUE,

@@ -95,12 +95,15 @@
 // ---------------------------------------------------------------------------
 // IT IS A LIBRARY (rule 3), AND ITS DIRECTORY HALF IS INVERTED (rule 6).
 //
-// It registers no route and requires `helpers.js` and `audit.js` (and `crypto`)
-// — neither of which requires it back, so it cannot join a cycle and its position in
-// the require order does not matter. `admin_stats.js` requires it in the
-// ORDINARY direction (there is no fifth hook here; see rule 3e — a slot is what
-// you reach for when a require would close a cycle or move a route, and this one
-// would do neither).
+// It registers no route and requires `helpers.js`, `audit.js` and `config.js`
+// (and `crypto`) — none of which requires it back, so it cannot join a cycle
+// and its position in the require order does not matter. `config.js` requires
+// nothing from this repository at all, which is the property that makes it safe
+// to reach for here; it is read by the startup seeding at the foot of this file
+// and by nothing else. `admin_stats.js` requires it in the ORDINARY direction
+// (there is no fifth hook here; see rule 3e — a slot is what you reach for when
+// a require would close a cycle or move a route, and this one would do
+// neither).
 //
 // The DIRECTORY half has to be inverted, for the reason `vc_claims.js`'s is:
 // `ldap_server.js` is last in the require order because requiring it pulls every
@@ -136,7 +139,8 @@
 // ===========================================================================
 
 const crypto = require('crypto');
-const { log } = require('./helpers');
+const config = require('./config');
+const { log, nowSec, randomId } = require('./helpers');
 const audit = require('./audit');
 
 // ---------------------------------------------------------------------------
@@ -1576,6 +1580,209 @@ function maxApplications() {
   return (backing && backing.maxApplications && backing.maxApplications()) || null;
 }
 
+// ---------------------------------------------------------------------------
+// THIS SERVICE'S OWN TWO APPLICATIONS, SEEDED AT STARTUP.
+//
+// Every other entry in this registry arrives because somebody PRESENTED an
+// identifier — a client_id at the authorization endpoint, a wtrealm on a
+// wsignin1.0, an SPN in a TGS request. Two applications never do, and they are
+// the two a reader is most likely to go looking for: the ADMIN CONSOLE at
+// /admin and the MANAGEMENT API at /admin-api. They are surfaces of THIS
+// process, so no caller ever names them from outside, and until this ran the
+// one question the registry exists to answer — what applications have you
+// seen? — came back with everything except the two things the reader was
+// standing in.
+//
+// THEY ARE SEEDED AS FULL RFC 7591 REGISTRATIONS AND NOT AS LABELS, which is
+// the decision here. A descriptive entry would be a row on a page; a
+// registration is a CLIENT: its secret is what RFC 9700 mode (section 2.5)
+// checks, its redirect URI is what that mode matches by exact string, and GET
+// /oauth2/register/sts-admin-console answers with the document below to
+// whoever holds the registration access token on the entry. So the two rows
+// are drivable by the thing this service exists for rather than merely
+// visible.
+//
+// NOTHING SERVES /admin/callback, and it is said here because somebody will
+// look for it. The console's gate is a sign-on session and two directory
+// groups (`admin_rbac.js`), not an OAuth flow, so the redirect URI below is
+// what the console WOULD use if that gate ever moved onto OIDC. It is ON THE
+// ENTRY rather than in a comment because this container IS the registry: an
+// `ldapmodify`, a form on /admin/applications or a PUT to
+// /oauth2/register/{id} changes it, and the change is what the checks then
+// read. The same goes for the two scopes on the API's registration, which are
+// named after the console's two roles and GRANT NOTHING — nothing under
+// /admin-api is gated at all, and a scope that looked like a permission
+// without being one would be worse than no scope.
+//
+// THE SECRETS ARE MINTED PER START and sit in the clear on an entry in a
+// directory where every bind succeeds. That is the decision `oauthClientSecret`
+// argues at length in its schema row, made once more here and for the same
+// reason; they die with the process, and neither is ever written to the audit
+// log.
+//
+// SEEDED ONLY WHERE THE IDENTIFIER IS FREE, which is `spiffe_registry.js`'s
+// seeding rule and is here for its reason: an operator who deleted one of these
+// meant it, and re-creating it would make the delete button appear not to work.
+// Nothing here is persisted, so the next restart does seed them again.
+//
+// `applications.seedInternal` turns the whole of this off. It is restart-only
+// because it runs once, as `ldap_server.js` fills the directory slot above.
+// ---------------------------------------------------------------------------
+
+// Where this service answers, as a URL, at a moment when THERE IS NO REQUEST to
+// read a Host header from — `helpers.js` and `vc_did.js` fall back to
+// 'localhost:' + PORT at the same wall. It is a starting value and not a fact:
+// a deployment behind a proxy wants its own name, and putting one there is an
+// ldapmodify of oauthRedirectUri.
+function internalBaseUrl() {
+  log.debug("Entering internalBaseUrl().");
+  const scheme = config.value('global.https') ? 'https' : 'http';
+  const base = scheme + '://localhost:' + config.value('global.port');
+  log.debug("Leaving internalBaseUrl(). base=" + base);
+  return base;
+}
+
+// The two, built fresh on each call because each carries two credentials that
+// are generated rather than declared.
+function internalApplications() {
+  log.debug("Entering internalApplications().");
+  const base = internalBaseUrl();
+  const issued = nowSec();
+  const rows = [
+    { identifier: 'sts-admin-console',
+      name: 'Admin console',
+      kinds: ['oauth2-client', 'oidc-relying-party'],
+      protocols: ['OAuth 2.0 / OIDC'],
+      description: 'seeded at startup: this service\'s own admin console at ' +
+                   '/admin (applications.seedInternal)',
+      registration: {
+        client_id: 'sts-admin-console',
+        client_name: 'Admin console',
+        client_id_issued_at: issued,
+        client_secret: randomId(24),
+        client_secret_expires_at: 0,
+        registration_access_token: randomId(24),
+        registration_client_uri: base + '/oauth2/register/sts-admin-console',
+        client_uri: base + '/admin',
+        application_type: 'web',
+        redirect_uris: [base + '/admin/callback'],
+        post_logout_redirect_uris: [base + '/admin'],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        scope: 'openid profile email',
+        token_endpoint_auth_method: 'client_secret_basic'
+      } },
+    { identifier: 'sts-management-api',
+      name: 'Management API',
+      kinds: ['oauth2-client'],
+      protocols: ['OAuth 2.0'],
+      description: 'seeded at startup: this service\'s own management API at ' +
+                   '/admin-api (applications.seedInternal)',
+      registration: {
+        client_id: 'sts-management-api',
+        client_name: 'Management API',
+        client_id_issued_at: issued,
+        client_secret: randomId(24),
+        client_secret_expires_at: 0,
+        registration_access_token: randomId(24),
+        registration_client_uri: base + '/oauth2/register/sts-management-api',
+        client_uri: base + '/admin-api/docs',
+        application_type: 'web',
+        // NO redirect URI and no response type: this one is a back-channel
+        // client on client_credentials, and a redirect URI on it would be a
+        // registration saying it can do a flow it cannot.
+        redirect_uris: [],
+        grant_types: ['client_credentials'],
+        response_types: [],
+        scope: 'admin:read admin:write',
+        token_endpoint_auth_method: 'client_secret_basic'
+      } }
+  ];
+  log.debug("Leaving internalApplications(). " + rows.length + " row(s).");
+  return rows;
+}
+
+// One of them. Returns whether an entry was CREATED, which is not the same as
+// whether all is well: an identifier already in the registry is the ordinary
+// outcome of an operator having made one by hand, and it is left exactly as it
+// is rather than overwritten.
+function seedInternalApplication(spec) {
+  log.debug("Entering seedInternalApplication(). identifier=" +
+            spec.identifier);
+  const loaded = load(spec.identifier);
+  if (loaded.known) {
+    log.debug("Leaving seedInternalApplication(). It is already here and was " +
+              "left alone.");
+    return false;
+  }
+  const record = loaded.record;
+  const now = Date.now();
+  record.registered = true;
+  record.firstAt = now;
+  record.lastAt = now;
+  record.name = spec.name;
+  spec.kinds.forEach(function (kind) {
+    addTo(record.kinds, kind);
+  });
+  spec.protocols.forEach(function (protocol) {
+    addTo(record.protocols, protocol);
+  });
+  addTo(record.descriptions, spec.description);
+  applyRegistrationFields(record, spec.registration);
+  if (!save(record)) {
+    log.warn('applications: "' + spec.identifier + '" was not seeded — the ' +
+             'ou=applications container is full (applications.max) or the ' +
+             'directory is. Nothing else is affected; the surface it names ' +
+             'answers exactly as it did.');
+    log.debug("Leaving seedInternalApplication(). The container would not " +
+              "take it.");
+    return false;
+  }
+  // The same row an RFC 7591 registration writes, with the channel saying
+  // where it came from. NO CREDENTIAL IS NAMED — audit.js's rule, and this is
+  // one of the two places in this module that holds one.
+  audit.audit({
+    action: 'application.create', actor: '', protocol: 'internal',
+    channel: 'internal', target: spec.identifier,
+    summary: 'Application "' + spec.identifier + '" was seeded at startup (' +
+             spec.name + ')',
+    detail: { identifier: spec.identifier, kinds: spec.kinds.join(', '),
+              registered: true, seeded: true }
+  });
+  log.debug("Leaving seedInternalApplication(). Created.");
+  return true;
+}
+
+// Called by `ldap_server.js` the moment it has filled setDirectory() — which is
+// the earliest point at which there is a container to write into, and the
+// latest at which the entries are there before anything can ask for them.
+function seedInternalApplications() {
+  log.debug("Entering seedInternalApplications().");
+  if (!config.value('applications.seedInternal')) {
+    log.info('applications: the console and the management API were not ' +
+             'seeded as applications; applications.seedInternal is off.');
+    log.debug("Leaving seedInternalApplications(). The setting is off.");
+    return 0;
+  }
+  if (!store()) {
+    log.warn('applications: the console and the management API were not ' +
+             'seeded — there is no directory in this process, so there is no ' +
+             'ou=applications container to put them in. See store().');
+    log.debug("Leaving seedInternalApplications(). There is no directory.");
+    return 0;
+  }
+  const rows = internalApplications();
+  let made = 0;
+  rows.forEach(function (one) {
+    if (seedInternalApplication(one)) made++;
+  });
+  log.info('applications: ' + made + ' of this service\'s own ' + rows.length +
+           ' application(s) were seeded. They are ORDINARY entries — edit ' +
+           'one, or delete it, and it stays that way until a restart.');
+  log.debug("Leaving seedInternalApplications(). " + made + " created.");
+  return made;
+}
+
 module.exports = {
   KINDS: KINDS,
   KIND_IDS: KIND_IDS,
@@ -1595,6 +1802,7 @@ module.exports = {
   labelFor: labelFor,
   editableAttributes: editableAttributes,
   createApplication: createApplication,
+  seedInternalApplications: seedInternalApplications,
   updateApplication: updateApplication,
   deleteApplication: deleteApplication,
   list: list,

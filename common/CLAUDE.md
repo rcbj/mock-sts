@@ -7,7 +7,7 @@ more than one family needs it, not because it felt general.
 | File | What it is |
 |---|---|
 | `config_file.js` | The one place that decides what `CONFIG_FILE` means. Requires nothing at all. |
-| `config.js` | Every setting this service has. The only module `helpers.js` depends on. |
+| `config.js` | Every setting this service has, and the refusal to start without one. The only module `helpers.js` depends on. |
 | `helpers.js` | Log, keys, `signJwt()`, `userFor()`, the cross-protocol parsers. |
 | `app.js` | The express app and every middleware. Requiring it is how a protocol module gets somewhere to register. |
 | `admin_stats.js` | The counters, the revocation set, and `recordAuthentication()` — the single authentication funnel. |
@@ -92,7 +92,9 @@ there was no way to ask this service what it was configured with, no way to chan
 anything without restarting it, and no list anywhere of what could be changed at all
 — the answer was a grep, and the grep only found the ones spelt the way you guessed.
 
-**A new setting is a row in `SETTINGS` and nothing else.** The row carries the key
+**A new setting is a row in `SETTINGS` and a regenerated `env/defaults.js`** —
+`node env/generate_defaults.js`, and the service tells you when you have forgotten
+by refusing to start and naming the row. The row carries the key
 (which is both the dot path in the appconfig file and the name every surface uses),
 the environment variable, the type, the default, the prose, and `runtime`. From that
 one row it appears in `/admin/config`, in `GET /admin-api/config`, in the OpenAPI
@@ -113,14 +115,33 @@ time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
 setting runtime when the thing derived from it is not rebuilt is worse than marking
 it restart-only, because the two then disagree silently.
 
+**A ROW MAY NARROW ITS TYPE, and only the `int` type can so far.** `min`, `max`
+and `step` are OPTIONAL members of a row that `TYPES.int.check()` applies; a row
+carrying none of them behaves exactly as every int row did before they existed,
+which is what kept the forty-odd existing ones untouched. They arrived for the
+four token-lifetime settings (`oauth-oidc/CLAUDE.md` argues the numbers), where
+the bounds are part of what the setting MEANS rather than a validation nicety: a
+lifetime of nine seconds and a clock skew of a fortnight are both typeable, both
+pass "is it a whole number", and both produce a service whose tokens are wrong
+in a way that reads as a client bug. **`step` is a MULTIPLE-OF rather than a
+slider increment**, counted from `min` so that a floor which is not itself a
+multiple of the step is still reachable. `describe()` publishes all three, so
+`/admin/config`, the console's own pages and the OpenAPI `ConfigSetting` schema
+render the same three numbers the check enforces — the bound is declared once
+and nothing repeats it. **Put a new constraint here rather than at the call
+site**: this is the only place one refusal can serve the console form, the
+management API and an environment variable read at startup, and the last of
+those has nowhere else to be caught.
+
 **A runtime setting must be READ WHERE IT IS USED.** That is why so many of the
 module-level `const`s became functions — `vciBatchSize()`, `clockSkewSeconds()`,
 `maxEntries()`. A `const` captured at require time is the one thing `/admin/config`
 cannot change, and it fails in the direction that looks like the console is broken.
 
-**Resolution order is override, env var, LEGACY env var, appconfig file, built-in
-default.** Env beating the file is what keeps every existing container and test
-working: nothing in the parent project sets these variables in compose, but
+**Resolution order is override, env var, LEGACY env var, the appconfig file
+`CONFIG_FILE` names, `env/defaults.js`.** Env beating the file is what keeps every
+existing container and test working: nothing in the parent project sets these
+variables in compose, but
 `tests/krb5_spnego_http.js` sets `KRB5_REALM`, `KRB5_KDC_PORT` and
 `KRB5_SERVICE_PORT` before requiring the KDC in-process, and that still wins. The
 legacy level has exactly one occupant: `STS_ISSUER`, which used to be a single value
@@ -130,6 +151,66 @@ entityID names the identity provider, an Issuer names whoever signed an assertio
 so they are now `saml.issuer`, `wstrust.issuer` and `wsfed.entityId`, all three still
 fed by `STS_ISSUER` when it is set.
 
+**AND THERE IS NO SIXTH LEVEL — `requireComplete()` REFUSES TO START INSTEAD.**
+A setting with no value in either appconfig file and no environment variable
+stops the process, by name, listing both places its value could go. That is the
+2026-08-24 change and it is the point of the table rather than a strictness bolted
+onto it: a value arriving from a constant buried in a module is a value nobody
+can find, change or see on a page, which is the state this file exists to end,
+and a silent fallback underneath it was one way back in. The `dflt` column is
+still there and is still where a default is WRITTEN DOWN — beside the paragraph
+saying why it is the default — but it is documentation and a generator input
+rather than a source the service leans on. `process.exit(1)` rather than a throw,
+because a throw out of a require lands as a stack trace whose top frame is node's
+module loader and the reason ends up three screens above where anybody looks.
+
+**WHAT THAT REFUSAL CAN ACTUALLY CATCH IS A MAINTAINER'S MISTAKE, NOT AN
+OPERATOR'S**, and knowing which is the difference between the rule being useful
+and being a trap. **The appconfig layer is TWO FILES unioned**: `env/defaults.js`
+carries a default for every non-derived row, and the file `CONFIG_FILE` names is
+merged over it key by key with the operator's value winning. So an operator's
+file can never be incomplete — only smaller — and three things follow, each of
+which had to be true at once:
+
+* a config file that is NOT this service's still loads every module here, which
+  is what the parent project's in-process Kerberos jobs need (`CONFIG_FILE`
+  pointing at the TEST suite's config, which carries `logLevel` and nothing else
+  of ours);
+* a row added to `SETTINGS` tomorrow does not break every config file in the
+  world on the day it is added;
+* so the refusal fires on the one case left — a row here with no row in
+  `env/defaults.js`, which is a setting somebody added and did not finish adding,
+  caught at the first start after the mistake.
+
+**`env/defaults.js` IS GENERATED AND MUST NOT BE HAND-EDITED.** `node
+env/generate_defaults.js` writes it from the `dflt` column. Two copies of a
+default is one copy that will be wrong, and wrong in the quietest way — the
+service running on one value while `/admin/config`, the OpenAPI document's
+`default` property and README.md's table all report the other. That generator
+neutralises `process.exit` for the length of its own `require` of this module,
+because regenerating the file is the one moment when an incomplete
+`env/defaults.js` is EXPECTED; the bypass is in the build tool and deliberately
+not a flag here, since a flag in the service is a flag somebody can leave on.
+
+**`resolve()` READS THE TWO FILES SEPARATELY EVEN THOUGH THEY ARE UNIONED**, and
+that is not redundancy: `appconfig` is the union and is what the bootstrap logger
+reads, while `resolve()` digs the operator's file and then `env/defaults.js` so
+it can say WHICH — `source: 'appconfig'` against `source: 'defaults'`. A value
+from the operator's file and the same value from the defaults are
+indistinguishable once merged, and "where did this come from?" is the question
+`/admin/config` exists to answer. `auditAppconfig()` reads the operator's file
+alone for the same reason: audited against the union it would answer "nothing is
+missing" every time and be dead code that looked alive.
+
+**`logLevel` IS THE ONE KEY THAT IS NOT DISTINCTIVE OF THIS SERVICE** and the
+audit's "somebody else's file" branch has to exclude it. Every appconfig file in
+this ecosystem has one — the parent's api, its client, its test suites — because
+it is the only setting that predates this table. Counting it made that branch
+almost unreachable for the very case it was written for, and the result was a
+hundred-and-fourteen-name warning on every in-process Kerberos run. Both drift
+warnings now cap their name list at twelve and a count, for the same reason: a
+list long enough to scroll is a list nobody reads.
+
 **It is a library (rule 3) and it sits UNDER `helpers.js`.** It requires only bunyan
 and `process.env.CONFIG_FILE`, and makes a bunyan logger of its own rather than
 taking the shared one, because `helpers.js` requires IT. A cycle here would hand
@@ -138,19 +219,27 @@ would arrive somewhere else entirely as "value is not a function".
 
 **The three `env/*.js` files were GENERATED from the table** and carry every key with
 the value the expression in the module used to have, so a run with the shipped file
-behaves exactly as one with the old file that carried only `logLevel`. Two settings
-are deliberately absent because their default is DERIVED from another
-(`krb5.serviceDomains` from the realm, `oid4vp.walletUrl` from `oid4vci.walletUrl`);
-they carry `derived: true`, which is what keeps the startup audit from reporting them
-as drift. That audit — `auditAppconfig()` — logs a setting the file omits and a key
-the table does not know, and does neither when the file carries none of these keys at
-all, which is the ordinary case for the parent project's in-process tests: they load
-this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's config.
+behaves exactly as one with the old file that carried only `logLevel`. THREE settings
+are deliberately absent from all four files, `env/defaults.js` included, because
+their default is DERIVED from another (`krb5.serviceDomains` from the realm,
+`oid4vp.walletUrl` from `oid4vci.walletUrl`, `global.https` from `oauth2.rfc9700`);
+they carry `derived: true`, which keeps the startup audit from reporting them as
+drift AND exempts them from the refusal above — a literal in a file would freeze the
+derivation at whatever it evaluated to the day the file was written, so demanding one
+would be demanding the one thing that is wrong. That audit — `auditAppconfig()` —
+logs a setting the file omits and a key the table does not know, and does neither
+when the file carries none of this service's DISTINCTIVE keys, which is the ordinary
+case for the parent project's in-process tests: they load this service's KDC modules
+with `CONFIG_FILE` pointing at the TEST suite's config.
 
 **`tests/Dockerfile` in the parent project copies this file.** It is under
 `helpers.js` in the graph, so every in-process job that loads `krb5_kdc.js`,
 `app.js` or `spnego.js` needs it; missing, the failure is `Cannot find module
-'./config'` before any test has run.
+'./config'` before any test has run. **IT NOW NEEDS `env/defaults.js` TOO**, and
+that is a new line in a file the pin bump has to touch anyway (see
+`docs/parent-project-migration.md`): this module requires it by absolute path off
+the package root, so without it every in-process job dies at load with `Cannot
+find module` naming a file the operator never mentioned.
 
 
 ---
@@ -206,6 +295,22 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    says genuinely differs per operation. Do not add a recording site beside a
    funnel — that is how a category comes to be counted twice for one act.
 
+   **One request is deliberately not an event: a `/healthcheck` that answered
+   200** (`QUIET_WHEN_OK` / `isQuietProbe()` in `recordHttp()`). It is asked
+   every few seconds for the whole life of the service — the compose
+   healthcheck, the CI wait loop, every launcher in the parent project — and it
+   always answers the same thing, so recorded it is by a wide margin the most
+   common row here and it pushes everything a person came to the page to read
+   off the end of a capped list. Note what the rule matches on: a probe that
+   answered anything ELSE is still recorded, because a failing healthcheck is
+   precisely the event somebody hunting a start-up failure is looking for, and
+   it happens once rather than every five seconds. **The counters are
+   untouched** — `/admin/metrics` counts the call as it always did, since a
+   counter is one row however often it goes up. This is a rule about the event
+   log, where one act is one line, and not about how much the service was asked
+   to do. Anything added to that list needs the same two properties: constant,
+   and uninteresting when it succeeds.
+
    **The one inverted dependency is the ACTOR.** An HTTP row wants the
    signed-in user's name and only `authn.js` can supply it, but `authn.js`
    requires `app.js` and `app.js` requires this — so `audit.js` offers
@@ -245,7 +350,11 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    and it is a library like the other two.** `vc_claims.js` says what an issued
    CREDENTIAL carries and `vc_verifier_config.js` says what the mock Verifier
    ASKS FOR; this says which LDAP attributes a TOKEN or an ASSERTION carries,
-   per claim set, and it is the second half of `/admin/claims`. It registers no
+   per claim set, and it is the second half of BOTH claim-set pages —
+   `/admin/claims` for the two JWT sets and `/admin/saml-attributes` for the two
+   SAML ones, which is a split of the CONSOLE and not of anything here: this
+   file still holds one selection per set and answers both pages through it. It
+   registers no
    route and requires `helpers.js`, `admin_stats.js`, `vc_claims.js` and
    `audit.js`, none of which requires it back.
 
@@ -297,12 +406,14 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
 
    **IT IS AUTOMATIC AND THEREFORE NOT A SELECTION.** There is nothing to tick
    per user and nothing to tick per set — with `groups.claim` on, all four
-   carry it. That is the deliberate opposite of `/admin/claims`'s three
+   carry it — which is also why it is REPORTED by both claim-set pages and
+   owned by neither. That is the deliberate opposite of `/admin/claims`'s three
    selections, and it is why the control is a `config.js` ROW rather than a
    form: four settings on `/admin/config`, which already has a page and already
    has `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
    satisfied by there being no new control. **A second form on `/admin/claims`
-   would be a second door to one setting**, which is the two-stores mistake
+   or on `/admin/saml-attributes` would be a second door to one setting** —
+   three doors now that there are two pages — which is the two-stores mistake
    rule 5 exists for.
 
    **ON BY DEFAULT IS DEFENSIBLE ONLY BECAUSE THE CLAIM IS OMITTED FOR SOMEBODY
@@ -354,7 +465,7 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    service already draws between an identity being RECORDED and one being
    AUTHENTICATED. What stopped being true is the OTHER half of the old sentence
    — "no token carries a group from this directory" — and the two halves are
-   split on `/admin/groups`, on `/admin/claims` and in README.md rather than
+   split on `/admin/groups`, on both claim-set pages and in README.md rather than
    merged back into one claim that is now half wrong.
 
 
@@ -365,11 +476,12 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    OAuth client, an OIDC relying party, a SAML 2.0 or 1.1 service provider, a
    WS-Federation application, a WS-Trust relying party, the OID4VP verifier, a
    Kerberos service — as entries under `ou=applications`. It registers no route
-   and requires only `helpers.js` and `audit.js`, so it cannot join a cycle;
+   and requires only `helpers.js`, `audit.js` and `config.js`, so it cannot join
+   a cycle;
    `admin_stats.js`, `oauth2.js`, `wsfed.js`, `wstrust.js`, `krb5_kdc.js` and
    `krb5_service.js` require it in the ordinary direction, and `ldap_server.js`
    fills its `setDirectory()` slot at require time for the reason
-   `vc_claims.js`'s is filled (rule 6). Six things are load-bearing:
+   `vc_claims.js`'s is filled (rule 6). Seven things are load-bearing:
 
    **A SIGHTING MAY NAME SEVERAL KINDS, AND TWO PROTOCOLS NEED IT TO.** `seen()`
    takes a list as readily as a string and accumulates them. A `wtrealm` is a
@@ -502,6 +614,29 @@ this service's KDC modules with `CONFIG_FILE` pointing at the TEST suite's confi
    not whether what it holds counts. `registrationOf()` is still what RFC 7592
    and the UserInfo signing algorithm read, because those are genuinely
    questions about the registration.
+
+   **THE TWO APPLICATIONS THAT ARE THIS PROCESS ARE SEEDED AT STARTUP, AND
+   THEY ARE REGISTRATIONS RATHER THAN LABELS.** Every other entry arrives
+   because a caller PRESENTED an identifier; the admin console and the
+   management API are surfaces of this process, so nobody ever does, and the
+   registry answered "what applications have you seen?" with everything except
+   the two things the reader was standing in. `seedInternalApplications()` at
+   the foot of this file writes `sts-admin-console` (a confidential OIDC
+   relying party on the code grant) and `sts-management-api` (a confidential
+   client on `client_credentials`), each with a secret and an RFC 7592
+   registration access token minted at startup — so `clientConfigOf()` answers
+   for them, RFC 9700 mode checks those secrets, and `GET
+   /oauth2/register/{id}` reads back. Four rules on it. The call sits in
+   `ldap_server.js` IMMEDIATELY AFTER `setDirectory()` — the earliest moment
+   there is a container, and the reason it cannot live in that file's `seed()`,
+   which builds the tree and does not know this schema. It is seeded ONLY WHERE
+   THE IDENTIFIER IS FREE (`spiffe_registry.js`'s rule: an operator who deleted
+   one meant it). Nothing serves `/admin/callback` and the API's two scopes
+   grant nothing — the console's gate is a sign-on session and two directory
+   groups, `/admin-api` is not gated at all, and both facts are on the entry
+   rather than in a comment because an `ldapmodify` of them is a configuration
+   change. And `applications.seedInternal` turns it off, restart-only because
+   this runs once at require time.
 
    **TWO ATTRIBUTES HOLD CREDENTIALS IN THE CLEAR** — `oauthClientSecret` and
    `appRegistrationAccessToken` — which is the `/krb5/principals` decision about

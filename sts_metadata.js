@@ -1431,14 +1431,27 @@ const ENDPOINTS = [
           'audit.protocolCalls on /admin/config change the cap and whether the noisiest category ' +
           'is recorded at all.' },
   { path: '/admin/claims', group: 'Admin', name: 'Custom claims',
-    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
-    effect: 'changes what every FUTURE access token, ID Token and SAML assertion contains',
-    what: 'NON-SPEC. Four claim sets — OAuth 2.0 access token, OIDC ID Token, SAML 2.0 Attribute, ' +
-          'SAML 1.1 Attribute — added to every artifact of that kind issued from then on. ADDITIVE ' +
-          'only: a claim this service sets itself is refused rather than overridden, because every ' +
-          'one of those is load-bearing (a settable exp would produce tokens that fail to verify ' +
-          'with nothing pointing back at the page). Values may carry ${username}-style ' +
-          'placeholders. Add ?format=json; POST the same JSON to set a set.' },
+    specs: ['rfc7519', 'oidc'],
+    effect: 'changes what every FUTURE access token and ID Token contains',
+    what: 'NON-SPEC. Two claim sets — OAuth 2.0 access token, OIDC ID Token — added to every ' +
+          'token of that kind issued from then on. ADDITIVE only: a claim this service sets ' +
+          'itself is refused rather than overridden, because every one of those is load-bearing ' +
+          '(a settable exp would produce tokens that fail to verify with nothing pointing back at ' +
+          'the page). Values may carry ${username}-style placeholders. Add ?format=json; POST the ' +
+          'same JSON to set a set. The two SAML sets moved to /admin/saml-attributes on ' +
+          '2026-08-24; the store behind both pages is one store.' },
+  { path: '/admin/saml-attributes', group: 'Admin', name: 'Custom SAML attributes',
+    specs: ['saml2', 'saml11'],
+    effect: 'changes what every FUTURE SAML assertion contains',
+    what: 'NON-SPEC. The other two sets of the same store — SAML 2.0 Attribute (Name, optional ' +
+          'NameFormat) and SAML 1.1 Attribute (AttributeName, AttributeNamespace, defaulted to ' +
+          'the WS-Federation claim namespace) — added to every assertion of that kind issued from ' +
+          'then on. The 2.0 set reaches what WS-Trust issues with a 2.0 token type and the 1.1 ' +
+          'set what WS-Federation\'s passive requestor profile carries. ADDITIVE only, and the ' +
+          'reserved JWT claim names do NOT apply here: they are load-bearing in a token and ' +
+          'collide with nothing in an assertion. Each set also carries a selection of LDAP ' +
+          'attribute types whose values are read off the person\'s own directory entry. Add ' +
+          '?format=json; POST the same JSON to set a set.' },
   { path: '/admin/vc', group: 'Admin', name: 'Credential claims',
     specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
     effect: 'changes what every FUTURE Verifiable Credential contains, AND writes to the LDAP ' +
@@ -1461,17 +1474,40 @@ const ENDPOINTS = [
     specs: [],
     effect: 'changes what every FUTURE token, assertion, ticket and search is ' +
             'built with, for the settings that are changeable at all',
-    what: 'NON-SPEC. Every setting this service has — forty-five of them, ' +
-          'grouped by the protocol they belong to — with the effective value ' +
+    what: 'NON-SPEC. Every setting this service has, grouped by the protocol ' +
+          'they belong to, with the effective value ' +
           'of each and, which is the part that was not answerable before, ' +
           'WHERE THAT VALUE CAME FROM: a runtime override set here, an ' +
           'environment variable, the appconfig file this process was started ' +
-          'with, or the built-in default. Twenty-three of them can be changed ' +
-          'while the service runs; the rest were consumed at startup (a bound ' +
+          'with, or env/defaults.js under it — and there is no fifth, since a ' +
+          'setting with a value in none of them stops this service from ' +
+          'starting. The page itself says how many there ' +
+          'are and how many can be changed while the service runs, counted ' +
+          'off config.js\'s table — this sentence used to carry the two ' +
+          'numbers and had drifted by half. The rest were consumed at ' +
+          'startup (a bound ' +
           'socket, the TLS certificate\'s names, the Kerberos principal ' +
           'database and its long-term keys, the directory\'s base DN) and are ' +
           'shown with the reason rather than hidden. Changes are IN MEMORY and ' +
           'are gone on restart — nothing writes to the appconfig file.' },
+  { path: '/admin/token-lifetimes', group: 'Admin', name: 'Token lifetimes',
+    specs: ['rfc6749', 'rfc7519', 'oidc'],
+    effect: 'changes how long every FUTURE access token, ID Token and refresh ' +
+            'token is good for, and what this service believes when it reads ' +
+            'one back',
+    what: 'NON-SPEC. Four of the settings on /admin/config, on a page of ' +
+          'their own because they are the ones somebody sets to a specific ' +
+          'number to watch something happen: the access token, ID Token and ' +
+          'refresh token lifetimes, and the clock skew applied wherever this ' +
+          'service reads back a token it signed. Every lifetime is a whole ' +
+          'number of thirty-second units and the skew is capped at 300. It ' +
+          'writes through the same function /admin/config does — there is no ' +
+          'second store — and a change reaches the NEXT token, since a ' +
+          'lifetime is stamped into one as its exp claim when it is signed. ' +
+          'The page also counts what has already expired, against the same ' +
+          'clock /oauth2/introspect uses. Add ?format=json; ' +
+          'POST {"action":"set","oauth2.accessTokenTtlS":60} for the same ' +
+          'thing without a browser.' },
   { path: '/admin/vc-verifier-config', group: 'Admin', name: 'Verifier request (the bar door)',
     specs: ['oid4vp', 'sd-jwt-vc', 'vcdm', 'rfc4519'],
     effect: 'changes the dcql_query of every FUTURE OID4VP Authorization Request',
@@ -1731,8 +1767,8 @@ const ENDPOINTS = [
   { path: '/admin-api/config', group: 'Management API', name: 'Configuration',
     specs: [],
     what: 'NON-SPEC. Every setting, its effective value, and the source of ' +
-          'that value — override, environment variable, appconfig file or ' +
-          'built-in default. Mirrors GET /admin/config.' },
+          'that value — override, environment variable, the appconfig file ' +
+          'or env/defaults.js under it. Mirrors GET /admin/config.' },
   { path: '/admin-api/config/:action', group: 'Management API',
     name: 'Configuration actions',
     specs: [],
@@ -1746,21 +1782,63 @@ const ENDPOINTS = [
           'change is in memory and gone on restart, and reset-all is what a ' +
           'test should call to put the service back. Mirrors POST ' +
           '/admin/config.' },
+  { path: '/admin-api/token-lifetimes', group: 'Management API',
+    name: 'Token lifetimes',
+    specs: ['rfc6749', 'rfc7519', 'oidc'],
+    what: 'NON-SPEC. The three lifetimes and the clock skew, as full ' +
+          'configuration rows (bounds, source, default) and as four plain ' +
+          'numbers, with a count of what has already been issued under them ' +
+          'and how much of it has expired. Mirrors GET ' +
+          '/admin/token-lifetimes.' },
+  { path: '/admin-api/token-lifetimes/:action', group: 'Management API',
+    name: 'Token lifetime actions',
+    specs: ['rfc6749', 'rfc7519', 'oidc'],
+    effect: 'changes how long every FUTURE token issued here is good for',
+    what: 'NON-SPEC. Two URLs behind one pattern: set and defaults. set is ' +
+          'ALL-OR-NOTHING and, unlike POST /admin-api/config/set-many, ' +
+          'REFUSES a property that is not one of the four rather than ' +
+          'ignoring it — that door is for a form posting a whole section, ' +
+          'this one is for a caller that means to set a lifetime, where a ' +
+          'misspelt key that succeeded and changed nothing is the worst ' +
+          'possible answer. defaults clears the override on these four only, ' +
+          'leaving any other setting alone. Nothing already issued changes. ' +
+          'Mirrors POST /admin/token-lifetimes.' },
   { path: '/admin-api/claims', group: 'Management API', name: 'Custom claims',
-    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
-    what: 'NON-SPEC. The four custom claim sets and the rules that govern them: ' +
+    specs: ['rfc7519', 'oidc'],
+    what: 'NON-SPEC. The two JWT claim sets and the rules that govern them: ' +
           'the claim names this service sets itself and will not let you ' +
           'override, and the placeholders a value may use. Mirrors GET ' +
           '/admin/claims.' },
   { path: '/admin-api/claims/:action', group: 'Management API',
     name: 'Custom claim actions',
-    specs: ['rfc7519', 'oidc', 'saml2', 'saml11'],
-    effect: 'changes what every FUTURE access token, ID Token and SAML ' +
-            'assertion contains',
-    what: 'NON-SPEC. Four URLs behind one pattern: add, remove, clear, replace. ' +
-          'ADDITIVE only — a claim this service sets itself is refused rather ' +
-          'than overridden, because every one of those is load-bearing. Nothing ' +
-          'already issued changes. Mirrors POST /admin/claims.' },
+    specs: ['rfc7519', 'oidc'],
+    effect: 'changes what every FUTURE access token and ID Token contains',
+    what: 'NON-SPEC. Seven URLs behind one pattern: add, remove, clear, ' +
+          'replace, and the three that set the DIRECTORY ATTRIBUTE half — ' +
+          'attributes, attributes-all, attributes-clear. ADDITIVE only — a ' +
+          'claim this service sets itself is refused rather than overridden, ' +
+          'because every one of those is load-bearing. A `set` of saml2 or ' +
+          'saml11 is refused here and named: that door is ' +
+          '/admin-api/saml-attributes. Nothing already issued changes. Mirrors ' +
+          'POST /admin/claims.' },
+  { path: '/admin-api/saml-attributes', group: 'Management API',
+    name: 'Custom SAML attributes',
+    specs: ['saml2', 'saml11'],
+    what: 'NON-SPEC. The two SAML attribute sets of the same store, the ' +
+          'catalogue of LDAP attribute types they choose from, and the one ' +
+          'rule that is theirs: the AttributeNamespace a SAML 1.1 attribute ' +
+          'gets when the call does not name one. There is no reserved-name ' +
+          'list here and the absence is the answer — that list is a JWT rule. ' +
+          'Mirrors GET /admin/saml-attributes.' },
+  { path: '/admin-api/saml-attributes/:action', group: 'Management API',
+    name: 'Custom SAML attribute actions',
+    specs: ['saml2', 'saml11'],
+    effect: 'changes what every FUTURE SAML assertion contains',
+    what: 'NON-SPEC. The same seven URLs behind one pattern, on the two SAML ' +
+          'sets: add, remove, clear, replace, attributes, attributes-all, ' +
+          'attributes-clear. One action function and one store behind this and ' +
+          '/admin-api/claims/:action alike; what differs is which sets each ' +
+          'accepts. Mirrors POST /admin/saml-attributes.' },
   { path: '/admin-api/credential-claims', group: 'Management API',
     name: 'Credential claims',
     specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'rfc4519'],

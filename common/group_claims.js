@@ -321,7 +321,7 @@ function subjectOf(context) {
 //
 // `setId` is accepted and deliberately unread: all four sets carry the claim,
 // because "automatically" is what this feature is for and a per-set selection
-// is what /admin/claims already offers for everything that wants one. It stays
+// is what the claim-set pages already offer for everything that wants one. It stays
 // in the signature because the resolver contract has it and because a future
 // per-set rule would go here rather than at four call sites.
 // ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ function samlAttributesFor(setId, context) {
   return [attribute];
 }
 
-// The feature's own state, for /admin/claims and GET /admin-api/claims. Built
+// The feature's own state, for both claim-set pages and both their GETs. Built
 // here rather than in admin.js because two surfaces answer it and neither of
 // them should be reading the four settings itself.
 function state() {

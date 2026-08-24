@@ -139,48 +139,115 @@ that would have to lie about one.
 
 ### Configuration
 
-`CONFIG_FILE` selects a configuration from `env/`, and since 2026-08 that file
-carries **every setting this service has** — 107 of them, 70 changeable while
-running, grouped by the protocol they belong to: the three issuers, the
-listeners, the OID4VCI and OID4VP tuning, the Kerberos realm, SIDs, passwords and
-clock, the directory's base DN and limits, the audit log's cap, the SCIM
-endpoints' authentication schemes, the SPIFFE trust domain and what its two gRPC
-surfaces check, and the three that put the authorization flow into RFC 9700
-mode. (The startup log line reports the count, and it is the number to trust:
-this paragraph is prose and the table is the source. Three settings are
-*derived* from a neighbour and are deliberately absent from the file — `global.https` from
-`oauth2.rfc9700`, the Kerberos service domains from the realm, and the OID4VP
-wallet from the OID4VCI one.) At the default log level `debug` the service
-logs every endpoint call (path, request and response headers and bodies, status,
-elapsed time) and every assertion, JWT and SD-JWT VC both before and after
-signing or encryption, which is the point of a mock.
+`CONFIG_FILE` selects a configuration from `env/`, and that file carries **every
+setting this service has** — 118 of them, 78 changeable while running, grouped
+by the protocol they belong to: the three issuers, the listeners, the OID4VCI
+and OID4VP tuning, the Kerberos realm, SIDs, passwords and clock, the
+directory's base DN and limits, the audit log's cap, the SCIM endpoints'
+authentication schemes, the SPIFFE trust domain and what its two gRPC surfaces
+check, and the three that put the authorization flow into RFC 9700 mode. (The
+startup log line reports the count, and it is the number to trust: this
+paragraph is prose and `common/config.js`'s table is the source.) At the default
+log level `debug` the service logs every endpoint call — path, request and
+response headers and bodies, status, elapsed time — and every assertion, JWT and
+SD-JWT VC both before and after signing or encryption, which is the point of a
+mock.
 
-A value can arrive from four places, and **higher beats lower**:
+**Every one of the 118 is listed below**, with its appconfig key, its
+environment variable, its default and whether it can be changed without a
+restart. That table is generated from the same row `/admin/config` renders, so
+it cannot describe a setting this service does not have.
 
-| | |
-|---|---|
-| a runtime override | set on `/admin/config` or through `POST /admin-api/config/set`; in memory, gone on restart |
-| an environment variable | `STS_PORT`, `KRB5_REALM`, … — one per setting, and every one that worked before still does |
-| the appconfig file | the `CONFIG_FILE` module, e.g. `env/local.js` |
-| the built-in default | what the expression in the module carried before the table existed |
+#### Where a value comes from
 
-`config.js` is the table. It is the one place that says, for each setting, what
-it does, what its environment variable is, what the default is and why, and
-**whether changing it while the service runs does anything**. Thirty-three of
-the fifty-seven can be changed at runtime; the other twenty-four were consumed by
-the time the service was listening — a bound socket, the TLS certificate's
-names, the Kerberos principal database and its long-term keys, the directory's
-base DN — and are refused with the reason rather than accepted and ignored.
+Highest wins:
 
+| | Where | Survives a restart? |
+|---|---|---|
+| 1 | a **runtime override** — set on `/admin/config` or through `POST /admin-api/config/set` | no, in memory only |
+| 2 | the setting's **environment variable** — `STS_PORT`, `KRB5_REALM`, … | yes |
+| 3 | its **legacy** environment variable, where it has one — only `STS_ISSUER` does | yes |
+| 4 | the **appconfig file** `CONFIG_FILE` names, e.g. `env/local.js` | yes |
+| 5 | **`env/defaults.js`**, the default appconfig file that 4 is unioned on top of | yes |
+
+**And there is no sixth. A setting with no value in 4 or 5 and no variable in 2
+or 3 stops this service from starting**, naming every such setting and both
+places its value could go:
+
+```
+config: FATAL — 2 setting(s) have no value in the appconfig layer and no environment variable:
+
+  ldap.baseDn         LDAP_BASE_DN
+  spiffe.trustDomain  STS_SPIFFE_TRUST_DOMAIN
+
+Each must be set in ./env/local.js, in ./env/defaults.js (the default appconfig
+file every other one is unioned on top of), or as the environment variable
+beside it.
+```
+
+That is the point of the whole arrangement rather than a strictness for its own
+sake. A value that arrives from a constant buried in a module is a value nobody
+can find, change, or see on a page — which is the state this table was built to
+end, and a silent fallback underneath it would have quietly kept one way back
+into it.
+
+**Layers 4 and 5 are one layer, unioned.** `env/defaults.js` carries a default
+for every setting; the file `CONFIG_FILE` names is merged over it key by key,
+and **the operator's value wins wherever both carry a key**. So a config file
+may carry as few keys as its author likes and still be complete — a file
+carrying only `logLevel` resolves everything else through the defaults, which is
+what lets the parent project's in-process Kerberos jobs point `CONFIG_FILE` at
+their own test config and still load these modules. It also means a setting
+added to the table tomorrow does not break every config file in the world on the
+day it is added. What the refusal above actually catches is the one case left: a
+setting added to `common/config.js`'s table with no row in `env/defaults.js`,
+which is a setting somebody added and did not finish adding.
+
+**`env/defaults.js` is GENERATED and is not the file to edit.** `node
+env/generate_defaults.js` writes it from the table's `dflt` column, which is
+where each default is written down next to the paragraph explaining why it is
+the default. Two copies of a default is one copy that will be wrong, and wrong
+in the quietest possible way — the service running on one value while
+`/admin/config`, the OpenAPI document and this table all report the other. To
+configure a deployment, edit the file `CONFIG_FILE` names, or set the
+environment variable.
+
+**Three settings are exempt from the refusal and from both files**, marked
+*(derived)* in the table: `global.https` takes its default from
+`oauth2.rfc9700`, `oid4vp.walletUrl` from `oid4vci.walletUrl`, and
+`krb5.serviceDomains` from `krb5.realm`. Their default is a function of a
+neighbour, so a literal in a file would freeze the derivation at whatever it
+evaluated to the day the file was written. Each still has its own environment
+variable and its own appconfig key, and setting either replaces the derivation.
+
+**Runtime overrides are in memory and are gone on restart.** Layer 1 is the
+admin console and the management API, and **nothing here ever writes to an
+appconfig file** — an edit lasts for the life of the process, the same
+arrangement as the custom claims and the credential claims. `POST
+/admin-api/config/reset-all` is what a test should call to put the service back;
+a restart does the same thing. A setting the table marks restart-only is
+**refused** with the reason rather than accepted and ignored, because an
+accepted change that does nothing reads as having worked.
+
+`common/config.js` is the table, and it is the one place that says, for each
+setting, what it does, what its environment variable is, what the default is and
+*why*, and whether changing it while the service runs does anything.
 `/admin/config` renders that table with the effective value of each setting and
-**where that value came from**, which is the question it exists to answer: the
-four sources are indistinguishable once a value has been read. `GET
+**which of the five places above it came from** — the question it exists to
+answer, since the five are indistinguishable once a value has been read. `GET
 /admin-api/config` is the same thing over JSON, and `POST
 /admin-api/config/{set,set-many,reset,reset-all}` are its four actions.
-`set-many` is all-or-nothing, so a section's Save cannot half-apply. **Nothing
-here writes to the appconfig file** — an edit lasts for the life of the process,
-the same arrangement as the custom claims next door, and `reset-all` is what a
-test should call to put the service back.
+`set-many` is all-or-nothing, so a section's Save cannot half-apply.
+
+**An environment variable is a string and the table knows what to do with it.**
+A `bool` takes `1/true/yes/on` and `0/false/no/off` in either case; anything else
+is warned about and falls back to that setting's own default, so
+`LDAP_AUTOCREATE_USERS=treu` does not silently turn a feature off. A `csv` is a
+comma-separated list, trimmed, and may be written as a real array in an appconfig
+file. An `int` may narrow itself with a minimum, a maximum and a multiple-of —
+the four token lifetimes do — and the same three numbers constrain the console's
+form, the management API and the variable read at startup, because there is one
+check rather than three.
 
 **`STS_ISSUER` was one value doing three jobs** and is now three settings.
 `saml.issuer` is the `<saml:Issuer>` of every SAML assertion (WS-Federation's
@@ -190,16 +257,16 @@ federation metadata. They shared a default and nothing else — an entityID name
 the identity provider, an Issuer names whoever signed an assertion — so a
 deployment that needed one of them to be its own real name had to change all
 three. All three still default to `urn:wstrust:mock:sts` and all three are still
-fed by `STS_ISSUER` when it is set.
+fed by `STS_ISSUER` when it is set, which is the whole of layer 3.
 
-**The OAuth 2.0 / OIDC issuer identifier is new and is empty by default**, which
-means each response names the base URL the request arrived on — what makes one
-process answer correctly as `localhost`, as `sts` on a compose network and
-through a published port. Set `oauth2.issuer` to pin it, which is how a
-conforming client's "the issuer is not the one I fetched from" refusal is
-produced on purpose. Only the identifier moves: every endpoint in the discovery
-document stays on the request's base URL, because an endpoint has to be
-reachable and a pinned issuer may not be.
+**The OAuth 2.0 / OIDC issuer identifier is empty by default**, which means each
+response names the base URL the request arrived on — what makes one process
+answer correctly as `localhost`, as `sts` on a compose network and through a
+published port. Set `oauth2.issuer` to pin it, which is how a conforming
+client's "the issuer is not the one I fetched from" refusal is produced on
+purpose. Only the identifier moves: every endpoint in the discovery document
+stays on the request's base URL, because an endpoint has to be reachable and a
+pinned issuer may not be.
 
 **Seven listeners, not one.** 8081 is the HTTP service — or the HTTPS one, if
 `global.https` or the `oauth2.rfc9700` it defaults from is set, in which case it
@@ -214,7 +281,21 @@ privileged, a host run is usually not root, and a require that throws would take
 whole service down over a protocol family the caller may not be using. Set
 `KRB5_KDC_PORT`, `LDAP_PORT`, `LDAPS_PORT`, `STS_TLS_PORT` and `STS_MTLS_PORT` to
 something unprivileged or unoccupied for a host run, and remember that the parent
-project's api allowlists the port it will reach on each of them.
+project's api allowlists the port it will reach on each of them: its
+`krb5AllowedPorts` and `ldapAllowedPorts` have to allow whatever these become,
+and its default list carries `1389` and `1636` for exactly that reason.
+
+
+**`CONFIG_FILE` is the one environment variable with no appconfig key**, and it
+cannot have one: it is what chooses the file. It names a JavaScript module,
+resolved against this package root and then against the working directory, so
+the documented `./env/local.js` works from wherever the process was started —
+fourteen modules read it directly for the one thing they need before the table
+exists, a bunyan log level, and a relative path would otherwise resolve against
+each of their own directories (see `common/config_file.js`). It defaults to
+nothing: unset, every value comes from `env/defaults.js` or from the
+environment. A file that cannot be loaded is fatal and says so, because
+continuing would mean starting a service configured as nobody asked for.
 
 In Docker:
 
@@ -239,53 +320,257 @@ Via Docker-Compose:
 ```bash
 docker-compose up
 ```
-### Environment
 
-| Variable | What it does |
-|---|---|
-| `STS_PORT` | the port to listen on (default `8081`) |
-| `CONFIG_FILE` | which file in `env/` to read (default `./env/local.js`) |
-| `OID4VCI_WALLET_URL` | **the base URL the BROWSER uses for the wallet.** The Credential Offer pages and the verifier's request pages hand the End-User back by appending `/vc-issuance-1.html` or `/vc-presentation-1.html` to it. Its default of `http://localhost:3000` is right only when the browser and the wallet share a host; get it wrong and the hand-off lands on an unreachable origin, and because the URL still *contains* the wallet page a `urlContains` wait passes and the failure looks like an unrelated timeout |
-| `OID4VP_WALLET_URL` | the same for the presentation side; falls back to `OID4VCI_WALLET_URL` |
-| `OID4VP_CLAIMS` | which claims the mock Verifier asks a wallet for (default `given_name,family_name`). It is now the value the process *starts* with rather than the value it uses: `/admin/vc-verifier-config` changes it while running, and Reset on that page comes back here |
-| `OID4VCI_AUTHORIZATION_SERVER` | point the issuer metadata at a *different* authorization server (a real IdP) while the credential endpoint stays here |
-| `OID4VCI_SD_JWT_ISSUER_DID` / `OID4VCI_LDP_VC_ISSUER_DID` | switch the **plain** credential configurations over to naming the issuer by DID. Off by default — see *The issuer named by a DID* |
+### Every setting
 
-And for Kerberos, none of which needs setting for the defaults to work:
+Generated from `common/config.js`'s table — the same rows `/admin/config`
+renders and `GET /admin-api/config` answers, so this list cannot describe a
+setting this service does not have or miss one it does.
 
-| Variable | What it does |
-|---|---|
-| `KRB5_KDC_PORT` | the KDC's TCP **and** UDP port (default `88`). Both transports are bound to the *same* number on purpose — a client that fails over from UDP after `KRB_ERR_RESPONSE_TOO_BIG` retries at the address it already had. If the parent project's api is relaying to this KDC, its `krb5AllowedPorts` has to allow whatever this becomes |
-| `KRB5_REALM` / `KRB5_TRUSTED_REALM` | the two realms (`EXAMPLE.COM`, `PARTNER.COM`). One KDC answering for both is the one simplification here — it hides finding the other realm's KDC and none of the protocol |
-| `KRB5_TRUST_PASSWORD`, `KRB5_KRBTGT_PASSWORD`, `KRB5_TRUSTED_KRBTGT_PASSWORD` | the long-term keys behind `krbtgt/<realm>` and the trust principal. A trust is not a setting: it is one principal whose key both realms hold |
-| `KRB5_USER_PASSWORD` | **the password every user account shares** (default `password!`). Not per-account, because there are no per-account secrets here — see *Any username, one password* |
-| `KRB5_UNKNOWN_USERS` | the usernames that are refused rather than created (default `nosuchuser,nobody`), so `KDC_ERR_C_PRINCIPAL_UNKNOWN` is still something a test can produce on purpose |
-| `KRB5_DOMAIN_SID` / `KRB5_TRUSTED_DOMAIN_SID` | the domain SIDs the PACs are built from. Fixed made-up values; what matters is that they are the same in every ticket, since a service compares SIDs and not names |
-| `KRB5_CLOCK_SKEW` | the tolerance, in seconds (default `300` — AD's) |
-| `KRB5_CLOCK_OFFSET` | **make the KDC lie about its clock**, in seconds (default `0`), so a client's `KRB_AP_ERR_SKEW` handling can be driven deliberately instead of by breaking a machine's time |
-| `KRB5_SERVICE_PORT` / `KRB5_SERVICE_PRINCIPAL` | the ticket-protected service's TCP port (`8888`) and the principal whose key it holds (`HTTP/web.example.com`) |
-| `KRB5_SERVICE_DOMAINS` | the hosts a **service principal is created on demand** for (default: the realm's domain, `localhost`, `sts`, `127.0.0.1`). An entry matches a host that is it or ends with a dot and it; an SPN outside them stays `KDC_ERR_S_PRINCIPAL_UNKNOWN`. Set it to an empty string to create nothing, which is the behaviour before 2026-08-17 |
-| `KRB5_AUTO_SERVICE_PASSWORD` | the password shared by every service created that way (default `auto-service-password`), **published** by `GET /krb5/principals` like the user one — it is what lets a debugger open such a ticket and read the PAC inside it. Configured service accounts keep their own |
+How to read it. **The appconfig key is the dot path in the file**, so
+`oid4vci.batchSize` is `oid4vci: { batchSize: … }`; `logLevel` is the one key
+that sits at the top level rather than in a section, because it was there before
+this table existed and moving it would have broken every config file for no
+gain. **Every setting has an environment variable and it beats the file.**
+**Change while running** says whether `/admin/config` and `POST
+/admin-api/config/set` will take it: *restart* means the value was consumed
+before the service was listening — a bound socket, the TLS certificate's names,
+the Kerberos principal database and its long-term keys, the directory tree's
+root — and the reason is on the row. ***(derived)*** marks the three whose
+default is computed from a neighbouring setting rather than written in a file.
 
-And LDAP's, which is the other protocol here that is not HTTP:
+The *What it does* column is the first sentence or two of the setting's own
+description. The full paragraph — with the reasoning, which is usually the
+record of something having gone wrong once — is in `common/config.js` beside the
+row, and on `/admin/config` beside the input.
 
-| Variable | What it does |
-|---|---|
-| `LDAP_PORT` | the directory's TCP port (default `389`). It is privileged, so the container binds it as root and a host run usually cannot — that is what this is for. If the parent project's api is opening this directory, its `ldapAllowedPorts` has to allow whatever this becomes; the same coupling `KRB5_KDC_PORT` has, and for the same reason |
-| `LDAPS_PORT` | the same directory over TLS (default `636`, the IANA-assigned one). Privileged for the reason 389 is, and bound by a **second server object** rather than by an option on the first — ldapjs decides between a `net.Server` and a `tls.Server` at construction — so the two fail independently and are reported independently. There is no StartTLS to turn on instead: it is an extended operation, ldapjs implements none, and this repository does not patch that submodule |
-| `LDAP_BASE_DN` | the naming context (default `dc=example,dc=com`). `ou=users` and `ou=groups` are derived from it rather than configured, because two variables that could disagree with it would put entries in a tree nobody is searching |
-| `LDAP_AUTOCREATE_USERS` | **an entry under `ou=users` for anybody who authenticates through ANY protocol family here.** On by default; only an explicit `0`, `false`, `no` or `off` turns it off, so a misspelling stays safe. An LDAP bind does not seed one (the identity a bind presents is a DN, which already names an object here) and neither does an OAuth client. A verified **TLS client certificate** does, and it is the one identity that is a DN rather than a name — see the TLS section for where its entry goes. **One entry per person whatever brought them**: every family here normalises to one key, a certificate saying `CN=rcbj` folds onto the entry `rcbj` already has, and an `ldapadd`, the console form and `POST /admin-api/users/create` all refuse a username that is taken |
-| `LDAP_MAX_ENTRIES` | how large the directory may grow (default `2000`). It is in memory and it grows on its own, so an unbounded one is a memory leak with a protocol in front of it; new entries are then refused with `LDAP_ADMIN_LIMIT_EXCEEDED` rather than silently dropped |
-| `LDAP_SIZE_LIMIT` | the largest result this server will return from one search (default `500`), on top of whatever the client asks for. A search of a directory this small will never reach it — but a client that has never seen `LDAP_SIZE_LIMIT_EXCEEDED` has never handled a paged result either |
 
-And TLS's, the third thing here that is not on the HTTP listener:
+Four things about these settings do not fit in a cell and have cost real time:
 
-| Variable | What it does |
-|---|---|
-| `STS_TLS_PORT` | the listener that **asks** for a client certificate and never refuses one (default `8443`) |
-| `STS_MTLS_PORT` | the listener that **requires** one (default `9443`). Two ports rather than a flag, because "does this server require a client certificate" is a question a debugger answers by connecting twice, and it needs a server that answers each way |
-| `STS_TLS_HOSTNAMES` | the dNSNames the self-signed server certificate is issued for (default `localhost,sts,sts-mock,sts.example.com`). A certificate naming only one of the ways this stack is reached produces a hostname-verification failure that is about this service rather than about anything the caller is debugging |
-| `STS_TLS_IPS` | the iPAddress names on the same certificate (default `127.0.0.1`) |
+* **`OID4VCI_WALLET_URL` is the base URL the BROWSER uses**, not one this
+  service fetches. The Credential Offer pages and the verifier's request pages
+  hand the End-User back by appending `/vc-issuance-1.html` or
+  `/vc-presentation-1.html` to it, so its default of `http://localhost:3000` is
+  right only when the browser and the wallet share a host. Get it wrong and the
+  hand-off lands on an unreachable origin — and because the URL still *contains*
+  the wallet page, a `urlContains` wait passes and the failure looks like an
+  unrelated timeout.
+* **`KRB5_KDC_PORT` is the TCP *and* UDP port.** Both transports are bound to the
+  same number on purpose: a client that fails over from UDP after
+  `KRB_ERR_RESPONSE_TOO_BIG` retries at the address it already had.
+* **`LDAPS_PORT` is bound by a second server object**, not by an option on the
+  first — ldapjs decides between a `net.Server` and a `tls.Server` at
+  construction — so 389 and 636 fail independently and `GET /ldap` reports each
+  separately. There is no StartTLS to turn on instead: it is an extended
+  operation, ldapjs implements none, and this repository does not patch that
+  submodule. And `LDAP_BASE_DN` is the only naming context there is —
+  `ou=users`, `ou=groups`, `ou=applications` and `ou=spiffe` are derived from it
+  rather than configured, because two variables that could disagree with it
+  would put entries in a tree nobody is searching.
+* **`STS_TLS_PORT` and `STS_MTLS_PORT` are two ports rather than one port and a
+  flag.** 8443 *asks* for a client certificate and never refuses one; 9443
+  *requires* one. "Does this server require a client certificate" is a question
+  a debugger answers by connecting twice, so it needs a server that answers each
+  way at the same time.
+
+
+#### Global
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `global.host` | `STS_HOST` | `0.0.0.0` | **restart** — the listener is bound when the process starts | The address the HTTP listener binds. 0.0.0.0 is every interface, which is what a container needs; 127.0.0.1 confines this service to the machine it runs on. |
+| `global.port` | `STS_PORT` | `8081` | **restart** — the listener is bound when the process starts | The port everything HTTP here answers on: the protocol endpoints, the console and this API. The two TLS listeners are separate and are under TLS below. |
+| `global.https` *(derived)* | `STS_HTTPS` | `false` | **restart** — the listener is bound when the process starts, and its scheme is decided there | Serve the main port over HTTPS, with the SAME certificate and key the 8443, 9443 and LDAPS 636 listeners use — one self-signed pair generated per start, so a caller trusts this service once rather than four times. |
+| `global.trustProxy` | `STS_TRUST_PROXY` | `false` | yes | Believe X-Forwarded-Proto and X-Forwarded-Host — which is what a TLS-terminating reverse proxy sets to say what the CLIENT used. |
+| `logLevel` | `STS_LOG_LEVEL` | `info` | yes | debug is the useful level for a mock whose job is to show what it did: every endpoint call, and every token and assertion both before and after it was signed. |
+
+#### OAuth 2.0 / OIDC
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `oauth2.issuer` | `STS_OAUTH2_ISSUER` | *(empty)* | yes | The `issuer` in the RFC 8414 and OpenID Provider metadata, and the `iss` of every token signed here. |
+| `oauth2.rfc9700` | `STS_OAUTH2_RFC9700` | `false` | **restart** — it decides whether the main port is bound as HTTPS (global.https), and a listener is bound when the process starts | Enforce RFC 9700 (OAuth 2.0 Security Best Current Practice) on the authorization flow: exact-string redirect URI matching with the loopback port exception, no open redirects, no http redirect URI off the loopback, PKCE required of public clients with S256 only, PKCE downgrade and value-reuse refused, a nonce required with any id_token, and no response type that issues an access token from the authorization endpoint. |
+| `oauth2.breakIdTokenNonce` | `STS_OAUTH2_BREAK_ID_TOKEN_NONCE` | `false` | yes | Put a DELIBERATELY WRONG nonce in every ID Token that should carry one. |
+| `oauth2.refreshIdleSeconds` | `STS_OAUTH2_REFRESH_IDLE_SECONDS` | `86400` | yes | In RFC 9700 mode, how long a refresh CHAIN may go unused before it stops working — section 2.2.2 says a refresh token SHOULD expire after a period of client inactivity, and says the period is deployment-dependent, which is why this is a setting rather than a constant. |
+| `oauth2.revokeRefreshOnLogout` | `STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT` | `true` | yes | In RFC 9700 mode, end a browser sign-on session and every refresh token issued ON that session is revoked — the section MAY that names logout and a password change as the examples. |
+| `oauth2.clientAssertionSkewS` | `STS_OAUTH2_CLIENT_ASSERTION_SKEW_S` | `60` | yes | How far out a client assertion's exp, nbf and iat may be and still be accepted (RFC 7523 section 3, private_key_jwt and client_secret_jwt). Sixty seconds is the usual allowance for two machines that are not synchronised. |
+| `oauth2.accessTokenTtlS` | `STS_OAUTH2_ACCESS_TOKEN_TTL_S` | `3600` | yes | How long an access token is good for: its `exp` is this many seconds after it was signed, and it is the `expires_in` of every token response that carries one. One hour by default. |
+| `oauth2.idTokenTtlS` | `STS_OAUTH2_ID_TOKEN_TTL_S` | `3600` | yes | How long an ID Token is good for. |
+| `oauth2.refreshTokenTtlS` | `STS_OAUTH2_REFRESH_TOKEN_TTL_S` | `86400` | yes | The ABSOLUTE lifetime of a refresh token — the `exp` on the token itself, enforced in both modes by the refresh grant. |
+| `oauth2.clockSkewS` | `STS_OAUTH2_CLOCK_SKEW_S` | `30` | yes | The allowance applied to `exp` and `nbf` EVERYWHERE this service reads back a token it issued: introspection, UserInfo, the refresh grant, token exchange, the DPoP-bound access token check, and the expiry every console screen reports. |
+| `oauth2.redirectUris` | `STS_OAUTH2_REDIRECT_URIS` | *(empty)* | yes | The redirect URIs RFC 9700 mode compares an authorization request against, by EXACT STRING MATCH — for every client that did not register its own redirect_uris at POST /oauth2/register, which is every client this service has only ever seen at the authorization endpoint. |
+| `oauth2.loopbackPortWildcard` | `STS_OAUTH2_LOOPBACK_PORT_WILDCARD` | `true` | yes | In RFC 9700 mode, allow a registered LOOPBACK redirect URI (127.0.0.1, [::1] or localhost) to match on any port — RFC 8252 section 7.3, because a native application cannot reserve one. |
+
+#### Admin console
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `admin.authRequired` | `ADMIN_AUTH_REQUIRED` | `true` | yes | When on, every /admin page and every /admin form needs a browser sign-on session from the authentication service at /authn/login, and the person signed in needs a console role: admin.readGroup to READ a page, admin.writeGroup to POST a form. |
+| `admin.readGroup` | `ADMIN_READ_GROUP` | `admin-read` | yes | The cn of the directory group whose members may READ the console — every page, and every ?format=json view of one. It is an ordinary group under ou=groups, so an ldapmodify, a SCIM PATCH and the /admin/rbac screen are three doors onto the same membership. |
+| `admin.writeGroup` | `ADMIN_WRITE_GROUP` | `admin-write` | yes | The cn of the directory group whose members may POST a console form — revoke a token, add a claim, change a setting, grant a role. |
+| `admin.openWhenEmpty` | `ADMIN_OPEN_WHEN_EMPTY` | `true` | yes | What happens while NEITHER role group has a single member: ON, anybody who signs in holds both roles and the console says so in a banner on every page; OFF, nobody can get in at all. |
+
+#### Applications
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `applications.max` | `STS_APPLICATIONS_MAX` | `500` | yes | How many entries may live under ou=applications — an OAuth client_id, a WS-Federation wtrealm, a SAML entityID, a WS-Trust AppliesTo, a Kerberos SPN. |
+| `applications.seedInternal` | `STS_APPLICATIONS_SEED_INTERNAL` | `true` | **restart** — the two entries are written once, as ldap_server.js is required and fills the registry's directory slot | Create an application entry for the ADMIN CONSOLE at /admin and one for the MANAGEMENT API at /admin-api when this service starts, under ou=applications with everything else. |
+
+#### SAML
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `saml.issuer` | `STS_SAML_ISSUER`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The <saml:Issuer> of every SAML 2.0 assertion and the Issuer attribute of every SAML 1.1 one. WS-Federation's assertions are built by the same two functions, so this is their issuer too, and it is what /wsfed/rp checks a presented assertion against. |
+
+#### WS-Trust
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `wstrust.issuer` | `STS_WSTRUST_ISSUER`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The `iss` of the JWT this STS returns in a RequestSecurityTokenResponse, and the issuer named on GET /sts. A SAML token requested through WS-Trust is built by the SAML modules and carries the SAML issuer above. |
+
+#### WS-Federation
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `wsfed.entityId` | `STS_WSFED_ENTITY_ID`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The entityID in the federation metadata at /FederationMetadata/2007-06/FederationMetadata.xml. Split from the SAML issuer because the two are different things that happened to share a value: this names the IdP, that names whoever signed an assertion. |
+
+#### TLS
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `tls.port` | `STS_TLS_PORT` | `8443` | **restart** — the listener is bound when the process starts | The permissive listener: it always asks for a client certificate, never refuses one, and reports what it saw. |
+| `tls.mutualPort` | `STS_MTLS_PORT` | `9443` | **restart** — the listener is bound when the process starts | The strict listener: node refuses an unverified client certificate during the handshake, so nothing in this service runs for one. |
+| `tls.hostnames` | `STS_TLS_HOSTNAMES` | `localhost,sts,sts-mock,sts.example.com` | **restart** — the server certificate is issued at startup for these names | The subjectAltName DNS entries on the certificate both TLS listeners present. |
+| `tls.ips` | `STS_TLS_IPS` | `127.0.0.1` | **restart** — the server certificate is issued at startup for these addresses | The subjectAltName IP entries on the same certificate. |
+
+#### OID4VCI
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `oid4vci.walletUrl` | `OID4VCI_WALLET_URL` | `http://localhost:3000` | yes | Where the wallet lives, as a URL the BROWSER can use. The Credential Offer pages send the End-User here, so it is the debugger's own address rather than anything this service serves. |
+| `oid4vci.authorizationServer` | `OID4VCI_AUTHORIZATION_SERVER` | *(empty)* | yes | Set this to advertise a SEPARATE authorization server in the credential issuer metadata's authorization_servers. Empty — the default — means this service is its own, which is the arrangement every test here uses. |
+| `oid4vci.batchSize` | `OID4VCI_BATCH_SIZE` | `4` | yes | batch_credential_issuance.batch_size in the issuer metadata: how many proofs one credential request may carry, and therefore how many credentials come back from it. |
+| `oid4vci.deferredReadyMs` | `OID4VCI_DEFERRED_READY_MS` | `4000` | yes | How long a deferred credential stays issuance_pending before it is ready. Long enough that a wallet has to poll and short enough that a test does not time out. |
+| `oid4vci.deferredIntervalS` | `OID4VCI_DEFERRED_INTERVAL_S` | `2` | yes | The `interval` this issuer asks a wallet to wait between deferred polls. |
+| `oid4vci.offerUsername` | `OID4VCI_OFFER_USERNAME` | `diploma.student` | yes | Whose credential the issuer-initiated offer pages build. The claims come from that person's directory entry. |
+| `oid4vci.requestEncryptionRequired` | `OID4VCI_REQUEST_ENCRYPTION_REQUIRED` | `false` | yes | When on, a credential request that is not a JWE is refused. The negative worth having: a wallet cannot prove it encrypts by encrypting when the issuer accepts plaintext too. |
+| `oid4vci.sdJwtIssuerDid` | `OID4VCI_SD_JWT_ISSUER_DID` | `false` | **restart** — vc_did.js reads it once at require time, and the issuer metadata is built from what it read | Switch the PLAIN dc+sd-jwt credential configuration over to naming its issuer by did:web instead of by https URL — what a deployment that had gone to DIDs throughout would look like. |
+| `oid4vci.ldpVcIssuerDid` | `OID4VCI_LDP_VC_ISSUER_DID` | `false` | **restart** — vc_did.js reads it once at require time, and the issuer metadata is built from what it read | The same for the PLAIN ldp_vc configuration. |
+
+#### OID4VP
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `oid4vp.clientId` | `OID4VP_CLIENT_ID` | `sts-mock-verifier` | yes | The client_id the mock Verifier presents in its Authorization Request, and the `aud` the Key Binding JWT must name. |
+| `oid4vp.walletUrl` *(derived)* | `OID4VP_WALLET_URL` | `http://localhost:3000` | yes | Where the Verifier sends the holder to present. Falls back to the OID4VCI wallet URL, since it is the same wallet in every arrangement this service is used in. |
+| `oid4vp.kbMaxAgeS` | `OID4VP_KB_MAX_AGE_S` | `600` | yes | How old a Key Binding JWT's `iat` may be before the Verifier rejects the presentation as a replay. |
+| `oid4vp.claims` | `OID4VP_CLAIMS` | `given_name,family_name` | yes | The mock Verifier's STARTING request, and — this is the part worth knowing — the target its Reset returns to. It is not the live list: /admin/vc-verifier-config owns that, and copies this at startup. |
+
+#### Kerberos
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `krb5.realm` | `KRB5_REALM` | `EXAMPLE.COM` | **restart** — the principal database and every long-term key in it are derived from the realm at startup | The realm this KDC serves. Its lower-cased form is the domain, which is where the default service domains and the PAC's domain name come from. |
+| `krb5.kdcPort` | `KRB5_KDC_PORT` | `88` | **restart** — the TCP and UDP sockets are bound when the process starts | The KDC listens on TCP and UDP alike. 88 is privileged, so a host run that is not root fails to bind it — which is recorded rather than thrown, and reported by GET /krb5/principals. 0 asks for any free port. |
+| `krb5.servicePort` | `KRB5_SERVICE_PORT` | `8888` | **restart** — the socket is bound when the process starts | The Kerberized test service that accepts an AP-REQ. |
+| `krb5.servicePrincipal` | `KRB5_SERVICE_PRINCIPAL` | `HTTP/web.example.com` | **restart** — the account and its long-term keys are created at startup | The SPN that test service holds, in the usual service/hostname form. |
+| `krb5.clockSkew` | `KRB5_CLOCK_SKEW` | `300` | yes | How far apart the KDC will let its clock and a client's be. RFC 4120 suggests five minutes and this is where KRB_AP_ERR_SKEW comes from. |
+| `krb5.clockOffset` | `KRB5_CLOCK_OFFSET` | `0` | yes | Moves this KDC's clock deliberately, so a skew failure can be produced on purpose rather than by changing the machine's time. |
+| `krb5.userPassword` | `KRB5_USER_PASSWORD` | `password!` | **restart** — every user's long-term keys are derived from it at startup | The password every user account here has. It is PUBLISHED by GET /krb5/principals on purpose: a debugger whose accounts are unusable without reading the source is worse than one that says what they are. |
+| `krb5.unknownUsers` | `KRB5_UNKNOWN_USERS` | `nosuchuser,nobody` | yes | Usernames this KDC refuses to create on demand, so KDC_ERR_C_PRINCIPAL_UNKNOWN stays reachable. |
+| `krb5.serviceDomains` *(derived)* | `KRB5_SERVICE_DOMAINS` | `example.com,localhost,sts,127.0.0.1` | **restart** — the service accounts are created at startup | The host domains a service principal is created on demand for. Setting it to an empty string creates nothing, which is the behaviour this service had before the setting existed. |
+| `krb5.autoServicePassword` | `KRB5_AUTO_SERVICE_PASSWORD` | `auto-service-password` | **restart** — those accounts' long-term keys are derived from it at startup | One password for every service created on demand, and it is published for the same reason the user password is: it is what lets a reader decrypt a service ticket this mock issued and read the PAC inside it. |
+| `krb5.krbtgtPassword` | `KRB5_KRBTGT_PASSWORD` | `krbtgt-mock-password` | **restart** — the krbtgt keys are derived from it at startup | The key that seals every Ticket-Granting Ticket this realm issues. |
+| `krb5.domainSid` | `KRB5_DOMAIN_SID` | `S-1-5-21-1004336348-1177238915-682003330` | **restart** — every principal's PAC identity is built at startup | The domain SID every account's PAC is built under. A Kerberos ticket says who you are; a Windows service authorizes on the SIDs in the PAC. |
+| `krb5.trustedRealm` | `KRB5_TRUSTED_REALM` | `PARTNER.COM` | **restart** — the second realm and the trust between them are built at startup | The second realm, for cross-realm referrals. A trust is not a flag: it is a shared key held by one principal in each realm. |
+| `krb5.trustPassword` | `KRB5_TRUST_PASSWORD` | `inter-realm-trust-password` | **restart** — the inter-realm key is derived from it at startup | The shared secret both realms hold for the cross-realm trust. |
+| `krb5.trustedDomainSid` | `KRB5_TRUSTED_DOMAIN_SID` | `S-1-5-21-2035427030-2118130302-1178042555` | **restart** — the trusted realm's principals are built at startup | The other realm's domain SID. It differs from this one on purpose: SID filtering across a trust is about whose domain a SID belongs to. |
+| `krb5.trustedKrbtgtPassword` | `KRB5_TRUSTED_KRBTGT_PASSWORD` | `partner-krbtgt-password` | **restart** — that realm's krbtgt keys are derived from it at startup | The krbtgt password of the trusted realm. |
+| `krb5.s2kparams` | `KRB5_S2KPARAMS` | `omit` | yes | Whether PA-ETYPE-INFO2 carries s2kparams. Windows Server omits it and this mock sent it, which is the one difference the captured real-DC exchange found; omit is therefore the default and send is kept so a client that reads it can be exercised. |
+
+#### LDAP
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `ldap.port` | `LDAP_PORT` | `389` | **restart** — the socket is bound when the process starts | The plain LDAP listener. 389 is privileged, so a host run that is not root fails to bind it — recorded rather than thrown, and reported by GET /ldap. |
+| `ldap.tlsPort` | `LDAPS_PORT` | `636` | **restart** — the socket is bound when the process starts | The LDAPS listener, which serves the certificate the TLS module generated. It binds independently of 389, so "389 is up and 636 is not" is an ordinary outcome and each reports itself separately. |
+| `ldap.baseDn` | `LDAP_BASE_DN` | `dc=example,dc=com` | **restart** — the directory tree is built under it at startup | The root of the embedded directory. ou=users and ou=groups hang off it. |
+| `ldap.autocreateUsers` | `LDAP_AUTOCREATE_USERS` | `true` | yes | When on, an entry appears at uid=<name>,ou=users,<base> the first time anybody authenticates to this service through ANY protocol. On by default: a directory that fills up as you use the other protocols is the thing this one is here to show. |
+| `ldap.maxEntries` | `LDAP_MAX_ENTRIES` | `2000` | yes | How large the directory may grow. A ceiling rather than a target: entries appear for anybody who authenticates through any protocol here. |
+| `ldap.sizeLimit` | `LDAP_SIZE_LIMIT` | `500` | yes | The server-side size limit for a search, which is what produces LDAP_SIZE_LIMIT_EXCEEDED. |
+
+#### SCIM
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `scim.enabled` | `SCIM_ENABLED` | `true` | yes | When on, the SCIM 2.0 endpoints under /scim/v2 create, read, replace, patch and delete entries in the embedded directory. On by default, like every other protocol family here. |
+| `scim.maxResults` | `SCIM_MAX_RESULTS` | `200` | yes | The largest page a list or a search will return, published as filter.maxResults in the ServiceProviderConfig and used as the page size when a client asks for none. |
+| `scim.bulkMaxOperations` | `SCIM_BULK_MAX_OPERATIONS` | `100` | yes | How many operations one POST /scim/v2/Bulk may carry, published as bulk.maxOperations. A request carrying more is refused with 413 and the payloadTooLarge scimType, which is a reachable negative worth having. |
+| `scim.bulkMaxPayloadSize` | `SCIM_BULK_MAX_PAYLOAD_SIZE` | `1048576` | yes | The largest BulkRequest body in bytes, published as bulk.maxPayloadSize and CHECKED against that number rather than against the express body parser's service-wide 5 MB. |
+| `scim.authRequired` | `SCIM_AUTH_REQUIRED` | `true` | yes | When on, every SCIM endpoint refuses a request that carries no credential with 401 and a WWW-Authenticate header per offered scheme (RFC 7644 section 2 makes that header a SHALL). |
+| `scim.authDiscovery` | `SCIM_AUTH_DISCOVERY` | `false` | yes | Whether /ServiceProviderConfig, /ResourceTypes and /Schemas need a credential as well. |
+| `scim.authRealm` | `SCIM_AUTH_REALM` | `SCIM` | yes | The protection space named in every WWW-Authenticate challenge, and — for HTTP Digest and HOBA — a value that is hashed or signed OVER, so changing it invalidates every credential computed against the old one. |
+| `scim.scopeRead` | `SCIM_SCOPE_READ` | `scim:read` | yes | The OAuth 2.0 scope an access token must carry to read at /scim/v2 — the first scope requirement anywhere in this service. |
+| `scim.scopeWrite` | `SCIM_SCOPE_WRITE` | `scim:write` | yes | The scope needed to create, replace, patch, delete or bulk. |
+| `scim.authBearer` | `SCIM_AUTH_BEARER` | `true` | yes | Whether an access token is accepted, as Bearer (RFC 6750) or — when it is bound — as DPoP (RFC 9449). |
+| `scim.authBasic` | `SCIM_AUTH_BASIC` | `true` | yes | Any username with any password except the reserved "invalid", which is refused so that a 401 stays reachable. RFC 7644 section 2 DISCOURAGES this scheme in those words, and it is offered anyway because it is what a provisioning client most often meets. |
+| `scim.authDigest` | `SCIM_AUTH_DIGEST` | `true` | yes | RFC 7616, with SHA-256, SHA-512-256 and MD5 offered in that order and the -sess variants accepted. |
+| `scim.digestPassword` | `SCIM_DIGEST_PASSWORD` | `password!` | yes | The password every username shares for HTTP Digest — the same value KRB5_USER_PASSWORD defaults to, so that there is one fact to remember rather than two. |
+| `scim.digestNonceSeconds` | `SCIM_DIGEST_NONCE_SECONDS` | `300` | yes | How long a Digest nonce stays usable. After it a credential is refused with stale=true, which RFC 7616 section 3.3 says a client should retry with the same credentials rather than prompting a person — a path most hand-written clients have never run. |
+| `scim.authHoba` | `SCIM_AUTH_HOBA` | `true` | yes | HTTP Origin-Bound Authentication (RFC 7486), the signature-based scheme RFC 7644 section 2 names and the only one of the six with no shared secret in it. Also turns POST /.well-known/hoba/register on or off. |
+| `scim.hobaMaxAgeSeconds` | `SCIM_HOBA_MAX_AGE_SECONDS` | `600` | yes | The max-age published in the HOBA challenge and enforced on the signature. |
+| `scim.authCookie` | `SCIM_AUTH_COOKIE` | `true` | yes | Whether the browser sign-on session this service already has — the one /authn/login creates and WS-Federation shares — authenticates a SCIM request. RFC 7644 section 2 names cookies explicitly. |
+| `scim.authClientCert` | `SCIM_AUTH_CLIENT_CERT` | `true` | yes | Mutual TLS, the first scheme RFC 7644 section 2 names. It applies only where the request arrived over TLS with a certificate that VERIFIED against an anchor POSTed to /tls/trust, so on the main port only when global.https is on. |
+
+#### Group claim
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `groups.claim` | `STS_GROUPS_CLAIM` | `true` | yes | When on, every OAuth 2.0 access token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries a claim naming the directory groups the person is a member of. |
+| `groups.claimName` | `STS_GROUPS_CLAIM_NAME` | `groups` | yes | What the claim is called: the JWT member name, the SAML 2.0 Attribute Name and the SAML 1.1 AttributeName. `groups` is the conventional spelling and what most relying parties look for, but `roles` and a URI are both common and both worth being able to produce. |
+| `groups.claimValue` | `STS_GROUPS_CLAIM_VALUE` | `cn` | yes | Whether each value is the group's common name (`developers`) or its whole DN (`cn=developers,ou=groups,dc=example,dc=com`). |
+| `groups.claimFromMemberOf` | `STS_GROUPS_CLAIM_FROM_MEMBEROF` | `true` | yes | Whether a group named by the PERSON'S own `memberOf` counts as membership when the group entry does not list them back. |
+
+#### Audit log
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `audit.maxEvents` | `AUDIT_MAX_EVENTS` | `5000` | yes | How many audit events /admin/audit keeps before the oldest are dropped. What was dropped is COUNTED and shown, so a truncated log says it was truncated rather than implying the cap is all there ever was. |
+| `audit.protocolCalls` | `AUDIT_PROTOCOL_CALLS` | `true` | yes | Whether every call into a protocol endpoint gets an audit event. |
+
+#### SPIFFE
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `spiffe.enabled` | `STS_SPIFFE_ENABLED` | `true` | yes | Whether the three SPIFFE surfaces answer. |
+| `spiffe.trustDomain` | `STS_SPIFFE_TRUST_DOMAIN` | `example.org` | **restart** — the X.509 and JWT authorities are generated at startup and every certificate they hold names this trust domain | The trust domain this service is the issuing authority for: the authority part of every SPIFFE ID it mints, so spiffe://example.org/… by default. |
+| `spiffe.x509KeyType` | `STS_SPIFFE_X509_KEY_TYPE` | `ec-p256` | **restart** — the X.509 authority is generated with this key type at startup | The key the trust domain's X.509 authority is generated with, and therefore the key type of every X509-SVID it signs. EC P-256 by default because that is what SPIRE issues and what the X509-SVID specification recommends. |
+| `spiffe.jwtKeyType` | `STS_SPIFFE_JWT_KEY_TYPE` | `ec-p256` | **restart** — the JWT authority is generated with this key type at startup | The key the trust domain's JWT authority is generated with, which decides the `alg` of every JWT-SVID: ES256, ES384, ES512 or RS256. |
+| `spiffe.caTtl` | `STS_SPIFFE_CA_TTL` | `86400` | **restart** — the authority certificate is issued for this long at startup | How long the X.509 authority's own certificate is valid. |
+| `spiffe.svidTtl` | `STS_SPIFFE_SVID_TTL` | `3600` | yes | The default lifetime of an X509-SVID. A registration entry may name its own and that wins; this is what an entry with no `x509SvidTtl` gets. |
+| `spiffe.jwtSvidTtl` | `STS_SPIFFE_JWT_SVID_TTL` | `300` | yes | The default lifetime of a JWT-SVID. Much shorter than the X.509 one on purpose and in both SPIRE and here: a JWT-SVID is a bearer credential — whoever holds it can present it — where an X509-SVID is bound to a private key. |
+| `spiffe.refreshHint` | `STS_SPIFFE_REFRESH_HINT` | `300` | yes | The `spiffe_refresh_hint` published in the bundle: how often a consumer should come back for it. |
+| `spiffe.svidSubject` | `STS_SPIFFE_SVID_SUBJECT` | `C=US,O=SPIRE` | yes | The X.501 subject written into every X509-SVID. The SPIFFE ID is in a URI subjectAltName and IS the identity; this is decoration, and it is SPIRE's own value by default so that an SVID from here looks like one from there. |
+| `spiffe.autoCreateEntries` | `STS_SPIFFE_AUTOCREATE_ENTRIES` | `true` | yes | THIS IS THE SETTING THAT MAKES THIS A MOCK. |
+| `spiffe.requireSecurityHeader` | `STS_SPIFFE_REQUIRE_SECURITY_HEADER` | `true` | yes | The Workload Endpoint specification says a client MUST send `workload.spiffe.io: true` on every call and a server MUST refuse one without it. |
+| `spiffe.authRequired` | `STS_SPIFFE_AUTH_REQUIRED` | `true` | **restart** — the SPIRE Server API's TCP port is bound as mutual TLS or as plain gRPC when the process starts, and a setting that changed the checks without changing the socket would report a mode this service was not in | ON, the SPIRE Server API behaves the way a real spire-server does: its TCP port is MUTUAL TLS, a caller presents an X509-SVID from this trust domain, and every method is authorized against SPIRE's own table — local, agent, admin, downstream — which GET /spiffe publishes in full. |
+| `spiffe.trustLocalSocket` | `STS_SPIFFE_TRUST_LOCAL_SOCKET` | `true` | yes | A real SPIRE server trusts its private Unix socket outright — the access control is the socket's filesystem permissions — and a caller there is the `local` entity, which may do everything an admin may and two things an admin may not. |
+| `spiffe.adminIds` | `STS_SPIFFE_ADMIN_IDS` | *(empty)* | yes | SPIFFE IDs whose holders are administrators of the SPIRE Server API, separated by commas or spaces — SPIRE's own `admin_ids`, and like SPIRE's it needs NO registration entry behind it. |
+| `spiffe.clockSkew` | `STS_SPIFFE_CLOCK_SKEW` | `60` | yes | How far out a caller's clock may be when its X509-SVID is checked for validity. |
+| `spiffe.attestWorkloads` | `STS_SPIFFE_ATTEST_WORKLOADS` | `true` | yes | ON, a Workload API caller is IDENTIFIED from what this service can actually see about it — the transport, the endpoint it reached, its peer address — and is answered with the registration entries whose selectors that identification matches, which is what a real agent does. |
+| `spiffe.acceptAssertedSelectors` | `STS_SPIFFE_ACCEPT_ASSERTED_SELECTORS` | `false` | yes | OFF by default, and it is the one setting here that is not attestation of any kind. |
+| `spiffe.maxEntries` | `STS_SPIFFE_MAX_ENTRIES` | `500` | yes | How many entries may live under ou=spiffe. Past it a new one is REFUSED and the SVID request that would have created it is answered without one — the registry is a directory container and a container has a size, the same cap ou=applications has. |
+| `spiffe.maxAgents` | `STS_SPIFFE_MAX_AGENTS` | `200` | yes | How many attested agents are held. The agent id comes off whatever the caller sent, so any caller can invent one; past the cap the oldest is dropped rather than the newest refused, because an agent that cannot attest is an agent that cannot do anything at all. |
+| `spiffe.maxFederatedBundles` | `STS_SPIFFE_MAX_FEDERATED_BUNDLES` | `32` | yes | How many foreign trust domains' bundles are held. They are PASTED IN and never fetched — see /spiffe — so this bounds what an operator or the SPIRE Server API can add, not what any polling loop could accumulate. |
+| `spiffe.bundlePath` | `STS_SPIFFE_BUNDLE_PATH` | `/spiffe/bundle` | **restart** — the route is registered at require time, and the require order is the route order | Where the trust bundle is published. A real federation partner is configured with this URL and polls it. |
+| `spiffe.workloadSocketEnabled` | `STS_SPIFFE_WORKLOAD_SOCKET_ENABLED` | `true` | **restart** — the listener is bound when the process starts | Whether the Workload API is served on a Unix domain socket. ON by default because that is what SPIFFE_ENDPOINT_SOCKET means to every real client — go-spiffe, spiffe-helper, the SPIRE agent — so without it nothing connects unconfigured. |
+| `spiffe.workloadSocket` | `STS_SPIFFE_WORKLOAD_SOCKET` | `/tmp/spire-agent/public/api.sock` | **restart** — the listener is bound when the process starts | Where that socket lives. SPIRE's own default path, so a client that was pointed at a SPIRE agent needs no change. |
+| `spiffe.workloadPort` | `STS_SPIFFE_WORKLOAD_PORT` | `8092` | **restart** — the listener is bound when the process starts | The Workload API over TCP, which the Workload Endpoint specification permits (tcp://host:port) and which is how this is reached from another container or from a host that cannot share the socket. 0 turns it off and leaves the Unix socket alone. |
+| `spiffe.serverPort` | `STS_SPIFFE_SERVER_PORT` | `8181` | **restart** — the listener is bound when the process starts | The SPIRE Server API — Entry, Agent, Bundle, SVID, TrustDomain and Debug — over gRPC. |
+| `spiffe.serverSocketEnabled` | `STS_SPIFFE_SERVER_SOCKET_ENABLED` | `false` | **restart** — the listener is bound when the process starts | Whether the SPIRE Server API is also served on a Unix socket, which is where a real spire-server keeps its administrative API. |
+| `spiffe.serverSocket` | `STS_SPIFFE_SERVER_SOCKET` | `/tmp/spire-server/private/api.sock` | **restart** — the listener is bound when the process starts | Where that socket lives when it is on. SPIRE's own default path, for the same reason the Workload API's is. |
+| `spiffe.grpcHost` | `STS_SPIFFE_GRPC_HOST` | `0.0.0.0` | **restart** — the listeners are bound when the process starts | The address both TCP gRPC listeners bind. 0.0.0.0 is every interface, which is what a container needs; 127.0.0.1 confines them to the machine this runs on. |
 
 ## How it is put together
 
@@ -835,7 +1120,8 @@ rotation.* This service could not authenticate a client it had not registered, s
 client**: redeeming a refresh token retires it, through the same revocation set
 `/oauth2/revoke` and the console write to, so the retired token also reports
 `active: false` at `/oauth2/introspect`. Without the mode a refresh token stays
-usable for its whole thirty days, which is the state this requirement is about.
+usable for the whole of its life — twenty-four hours by default, and whatever
+`oauth2.refreshTokenTtlS` says — which is the state this requirement is about.
 
 Rotation alone is half of it. The reason a retired token is *remembered* rather than
 merely revoked is **replay detection**: one coming back means the chain has been
@@ -1858,6 +2144,43 @@ history stays: this registry records what this service has *seen*, and losing th
 an application was ever here because its registration was withdrawn would be
 losing the fact rather than the configuration.
 
+#### The two applications that are this process
+
+Every entry described so far arrives because somebody *presented* an identifier.
+Two applications never do — the **admin console** at `/admin` and the
+**management API** at `/admin-api` are surfaces of this process, so no caller
+ever names them — and until they were seeded, the one question this registry
+exists to answer came back with everything except the two things the reader was
+standing in.
+
+They are created at startup, under `ou=applications` with everything else, and
+they are **full RFC 7591 registrations rather than labels**: `sts-admin-console`
+is a confidential OpenID Connect relying party on the authorization code grant,
+`sts-management-api` is a confidential OAuth client on `client_credentials`, and
+each carries a `client_secret` and a registration access token minted at start.
+So they are clients that can be *exercised* — `clientConfigOf()` answers for
+them, RFC 9700 mode checks those secrets by the same rule it checks anybody
+else's, and `GET /oauth2/register/sts-admin-console` hands back the registration
+to whoever holds its token — rather than two rows on a page.
+
+Two things about them are deliberately *not* true, and both are on the entries
+rather than in a footnote, because this container is the registry and an
+`ldapmodify` of either is a configuration change. **Nothing serves
+`/admin/callback`**: the console's gate is a sign-on session and two directory
+groups, not an OAuth flow, so that redirect URI is what the console *would* use
+if the gate ever moved onto OIDC. And the management API's two scopes —
+`admin:read`, `admin:write` — **grant nothing**, because nothing under
+`/admin-api` is gated at all; they are named after the console's two roles and a
+scope that looked like a permission without being one would be worse than no
+scope.
+
+They are seeded only where the identifier is free, which is the rule the SPIFFE
+registration entries follow: an operator who deleted one of them meant it, and
+re-creating it would make the delete button appear not to work. Nothing here is
+persisted, so the next restart seeds them again — with new secrets.
+`applications.seedInternal` turns the whole of it off, and is restart-only
+because it happens once, as the directory hands the registry its store.
+
 #### The schema, and what "schema" can honestly mean
 
 `node-ldapjs` has **no schema subsystem**. It is protocol machinery — messages,
@@ -2100,13 +2423,27 @@ Two things it deliberately does not have. **No client address**: this service is
 
 Two settings on `/admin/config` change it and both take effect immediately, because `audit.js` reads them per event rather than capturing them at require time. `audit.maxEvents` (5,000) is the cap, and what was dropped is counted and shown, so a truncated log says it was truncated instead of implying the cap is all there ever was — lowering it from 5,000 to 100 discards the excess on the very next event rather than one row per event for the next 4,900. `audit.protocolCalls` (on) is whether ordinary protocol endpoint calls get a row at all; it is far and away the noisiest category, since every JWKS poll and metadata fetch is one, and turning it off is how somebody watching the directory or the console gets a readable page. It never touches the other five categories, and `/admin/metrics` counts every call either way.
 
-**`/admin/claims`** decides what every *future* access token, ID Token, SAML 2.0 assertion and SAML 1.1 assertion carries. Four sets rather than one, because the four are genuinely different vocabularies: an access token and an ID Token go to different readers (a resource server and a client), and SAML 1.1 splits the claim URI into an `AttributeNamespace` and an `AttributeName` where SAML 2.0 has one `Name`. They are **additive** — a configured claim is added to what the protocol already puts in the artifact and never replaces one — and the names this service sets itself are **refused at configuration time** rather than silently dropped at issuance, because every one of them is load-bearing: an `exp` settable from a web form would produce tokens that fail to verify with nothing anywhere pointing back at the page, and a settable `scope` would quietly change what UserInfo answers. The same rule protects the SAML side for a different reason: a WS-Federation relying party keys off the claim URIs `claimsFor()` writes, so a custom attribute that displaced one would break a sign-in somewhere that looks nothing like this console.
+**`/admin/token-lifetimes`** decides how long what this service issues is good for, and it is the page to reach for when the question is *why has my client stopped working*. Three lifetimes and one allowance, all four in seconds: an **access token** and an **ID Token** last an hour by default, a **refresh token** twenty-four hours, and the **clock skew** — thirty seconds — is how far out a clock may be before this service stops believing a token it signed itself.
 
-Values may contain `${username}`-style placeholders, because a claim that can only be a constant cannot exercise the thing worth testing — that a claim carrying the signed-in user's identity reaches the relying party. **An unknown placeholder is left exactly as written** rather than replaced with the empty string: a `${dept}` that silently became `""` is a bug that looks like a configuration mistake, and one that still says `${dept}` names itself. A JWT claim value is typed when it unambiguously looks like JSON (an object, an array, a bare `true`/`false`/`null`, a number) and is a string otherwise, which has one consequence the page states rather than leaving to be discovered: a claim whose value is genuinely the four characters `true` cannot be configured, and `"true"` is the escape. SAML attribute values are never typed — the XML content model is text.
+They were constants in the source until 2026-08-24 and could not be changed without a restart, which had the lifetimes exactly backwards: the reason to point a client at a mock is to make something happen on demand, and *make it expire in a minute so I can watch the refresh* is the commonest thing anybody wants of a token endpoint. Set the access token to 60 and the next one dies in a minute; set the ID Token to something different from the access token and watch which of the two your client actually notices, which is how a client that is quietly treating the ID Token as a session gives itself away.
 
-**Each of the four sets has a second half, and it is the half worth exercising.** A typed claim is a constant, or a constant with the signed-in name interpolated into it — whatever the person at the keyboard said. Underneath each set is a table of **LDAP attribute types** with a checkbox against each, and a ticked one becomes a claim whose value is read off that person's own entry under `ou=users`. So an `ldapmodify` against `uid=alice,ou=users` changes the next access token, and an LDAP client and an OIDC client pointed at this service are shown the same person rather than two people with the same name. That is a thing no amount of typing into a form can demonstrate, and until now only a Verifiable Credential could do it. The controls are the ones the table implies — **Update** installs exactly the ticked boxes, **Select all** and **Delete all** are the extremes — and all three are form posts rather than script, because `script-src 'none'` covers this page like every other one here: a browser-side "tick everything" would leave the boxes ticked and the set unchanged until somebody pressed Update, and would leave nothing in the audit log.
+Two things about it are worth knowing before the first surprise. **A change reaches the next token and nothing already issued** — a lifetime is stamped into a token as its `exp` claim when it is signed, so nothing on this page can shorten one already in a client's hands; `/admin/tokens` is where you take an issued token out of circulation, by revoking it. And **every lifetime is a whole number of thirty-second units**, which is not a formatting rule: below half a minute a token expires between the response being written and the client reading it, and the hour that costs is spent debugging the wrong half of the exchange. The skew is capped at 300 seconds for a related reason — five minutes is what Kerberos allows here, and a wider window has stopped being a tolerance and become a lifetime extension nobody asked for.
 
-**The catalogue is `vc_claims.js`'s and is not a second copy of it**, which makes this the *third* page choosing from one list of attribute types: `/admin/vc` picks what an issued credential carries, `/admin/vc-verifier-config` picks what the mock Verifier asks for, and this picks what a token or an assertion carries. Two catalogues would be two lists of spellings, and one of them would eventually be wrong about `schacDateOfBirth` while both looked right on their own. The four *selections*, though, are deliberately independent of each other and of the other two pages — an access token carrying `employee_number` while the ID Token carries only `email` is a normal arrangement that a single list could not express, and keeping them apart is what makes "issue a credential carrying a claim the access token does not" reachable at all. Nothing is selected on a fresh start in any of the four, because this page changes what every client of this service receives and a mock that began issuing a `birthdate` in every access token because a feature was added would break the tests of everyone who upgraded.
+**The skew moves the console and the endpoints together, which is the point of its being one setting.** It is applied wherever this service reads back a token it issued — `/oauth2/introspect`, UserInfo, the refresh grant, token exchange, the DPoP-bound access token check — *and* to the state every console screen reports. So a token `/admin/tokens` calls **expired** is one introspection reports `active: false` for, in both directions and at every value: raise the skew and a token that just died is accepted again everywhere at once. A page that disagreed with the endpoint would be worse than a page with no state column, because it is believed. It is deliberately **not** the same setting as `oauth2.clientAssertionSkewS`, which is how far out a *client's* assertion may be under RFC 7523 — somebody else's clock, on a credential this service did not mint.
+
+**The refresh default changed from thirty days to twenty-four hours** with this page. A client that held a refresh token across a long test run now meets an ordinary `invalid_grant` where it did not; `oauth2.refreshTokenTtlS: 2592000` in the appconfig file is exactly the old behaviour. It is a different setting from RFC 9700 mode's `oauth2.refreshIdleSeconds`, which is measured from the last time anything in a refresh *chain* was redeemed rather than from issuance — a busy client keeps its grant indefinitely under that one and is still walled by this one.
+
+All four are ordinary `config.js` rows, so they are on `/admin/config` too and this page writes through the same function — one store, two doors. The management API has a narrow door of its own at `GET /admin-api/token-lifetimes` and `POST /admin-api/token-lifetimes/set`, which differs from `POST /admin-api/config/set-many` in one way that matters to a test: it **refuses** a key that is not one of the four instead of ignoring it, so a misspelt `oauth2.accessTokenTtlsS` fails loudly rather than succeeding and changing nothing. `POST /admin-api/token-lifetimes/defaults` puts the four back without disturbing any other setting.
+
+Every screen that reports token state now reports **expired** as its own answer rather than leaving it to be inferred: the users list gained an *Expired* column beside *Valid* and *Revoked*, and a person's drill-down a matching tile. The count was always there and was simply not shown, so "12 issued, 1 valid" left eleven to be guessed at — and the guess is wrong, because a revoked token, one not yet valid and one with no expiry stated all sit in that difference.
+
+**`/admin/claims` and `/admin/saml-attributes`** decide what every *future* access token, ID Token, SAML 2.0 assertion and SAML 1.1 assertion carries. Four sets rather than one, because the four are genuinely different vocabularies: an access token and an ID Token go to different readers (a resource server and a client), and SAML 1.1 splits the claim URI into an `AttributeNamespace` and an `AttributeName` where SAML 2.0 has one `Name`. **Two pages onto one store since 2026-08-24**: the tokens are on *Custom claims* under OAuth2 / OIDC and the assertions on *Custom SAML attributes* under the console's own SAML group, because a reader who came to change what a WS-Federation assertion carries had to read past two token sets and a page of JWT rules that do not apply to them. What did not split is anything underneath — one `CLAIM_SETS` object, one `setClaimSet()`, one action function taking the set ids the door carries, and one audit row per change whichever page or API operation made it. A `set` of `saml2` posted to the claims door is refused **by name**, and the refusal says where that set lives. They are **additive** — a configured claim is added to what the protocol already puts in the artifact and never replaces one — and the names this service sets itself are **refused at configuration time** rather than silently dropped at issuance, because every one of them is load-bearing: an `exp` settable from a web form would produce tokens that fail to verify with nothing anywhere pointing back at the page, and a settable `scope` would quietly change what UserInfo answers. The reserved *list* is a JWT rule and is enforced for the two token sets alone — an assertion attribute called `exp` collides with nothing — but the additive rule itself protects the SAML side just as hard, for a different reason: a WS-Federation relying party keys off the claim URIs `claimsFor()` writes, so a custom attribute that displaced one would break a sign-in somewhere that looks nothing like this console.
+
+Values may contain `${username}`-style placeholders, because a claim that can only be a constant cannot exercise the thing worth testing — that a claim carrying the signed-in user's identity reaches the relying party. **An unknown placeholder is left exactly as written** rather than replaced with the empty string: a `${dept}` that silently became `""` is a bug that looks like a configuration mistake, and one that still says `${dept}` names itself. A JWT claim value is typed when it unambiguously looks like JSON (an object, an array, a bare `true`/`false`/`null`, a number) and is a string otherwise, which has one consequence the page states rather than leaving to be discovered: a claim whose value is genuinely the four characters `true` cannot be configured, and `"true"` is the escape. SAML attribute values are never typed — the XML content model is text — and the *placeholders* an assertion expands are a shorter list than a token's, which the SAML page states rather than leaving to be found on the wire: an assertion is built from a subject and an audience, so `${subject}`, `${audience}`, `${now}` and `${iso}` resolve and a `${username}` written there arrives as the eleven characters it was written as.
+
+**Each of the four sets has a second half, and it is the half worth exercising.** A typed claim is a constant, or a constant with the signed-in name interpolated into it — whatever the person at the keyboard said. Underneath each set is a table of **LDAP attribute types** with a checkbox against each, and a ticked one becomes a claim whose value is read off that person's own entry under `ou=users`. So an `ldapmodify` against `uid=alice,ou=users` changes the next access token — and the next assertion, from the identical table on the SAML page — and an LDAP client, an OIDC client and a SAML relying party pointed at this service are shown the same person rather than three people with the same name. That is a thing no amount of typing into a form can demonstrate, and until now only a Verifiable Credential could do it. The controls are the ones the table implies — **Update** installs exactly the ticked boxes, **Select all** and **Delete all** are the extremes — and all three are form posts rather than script, because `script-src 'none'` covers both pages like every other one here: a browser-side "tick everything" would leave the boxes ticked and the set unchanged until somebody pressed Update, and would leave nothing in the audit log.
+
+**The catalogue is `vc_claims.js`'s and is not a second copy of it**, which makes these the *third and fourth* pages choosing from one list of attribute types: `/admin/vc` picks what an issued credential carries, `/admin/vc-verifier-config` picks what the mock Verifier asks for, and these two pick what a token and what an assertion carry. Two catalogues would be two lists of spellings, and one of them would eventually be wrong about `schacDateOfBirth` while both looked right on their own. The four *selections*, though, are deliberately independent of each other and of the other two pages — an access token carrying `employee_number` while the ID Token carries only `email` is a normal arrangement that a single list could not express, and keeping them apart is what makes "issue a credential carrying a claim the access token does not" reachable at all. Nothing is selected on a fresh start in any of the four, because this page changes what every client of this service receives and a mock that began issuing a `birthdate` in every access token because a feature was added would break the tests of everyone who upgraded.
 
 **Three rules decide what a claim's value actually is, and they are stated on the page because two of them only show up in the collision.** The protocol's own claim wins: an ID Token always carries `name`, `given_name`, `family_name`, `preferred_username` and `email` built from the sign-in, so ticking `cn`, `givenName`, `sn`, `uid` or `mail` *on that set* changes nothing the client sees — while the same five reach an access token from the directory, because the protocol sets none of them there. Then a typed claim beats a directory attribute of the same name, since somebody who wrote `email` by hand said something more specific than somebody who ticked `mail`. Then the attribute, read from the entry, or invented from the username where the entry has nothing — deterministically, so one username is one invented person across restarts. A nested claim stays nested in a JWT (`address.locality` is a member of an `address` object, per OIDC Core 5.1.1) and becomes the attribute's literal name in an assertion, where the content model cannot nest; both families then call one claim by one name.
 
@@ -2156,7 +2493,7 @@ Everything the console holds is **in memory and dies with the process**, like th
 
 #### The pages, and how they are grouped
 
-**The navigation is a grouped list down the left rather than a row of tabs across the top.** Seventeen tabs on one line wrapped to three rows on a laptop, and a reader looking for *Verifier request* had to read all seventeen labels to find out it was not *Credential claims*. The five sections are **Overview** (the console index, metrics, issued tokens), **Protocols** (authorization servers, custom claims, credential claims, the verifier request, SCIM, and SPIFFE with its registration entries and agents), **Directory** (users, groups, applications), **Monitoring** (the audit log) and **Server configuration** (configuration, admin roles, the service metadata). The breadcrumb trail is unchanged and deliberately does **not** gain a crumb for the section: a section has no page of its own, so its crumb could not be a link, and a dead crumb in the middle of a trail is the same mistake the last-crumb rule exists to prevent.
+**The navigation is a grouped list down the left rather than a row of tabs across the top.** Seventeen tabs on one line wrapped to three rows on a laptop, and a reader looking for *Verifier request* had to read all seventeen labels to find out it was not *Credential claims*. The five sections are **Overview** (the console index), **Protocols** (authorization servers, token lifetimes, custom claims, the custom SAML attributes, credential claims, the verifier request, SCIM, and SPIFFE with its registration entries and agents), **Directory** (users, groups, applications), **Monitoring** (metrics, issued tokens, the audit log) and **Server configuration** (configuration, admin roles, the service metadata). Monitoring holds its three in widening detail — how much this service has done, what came out of it, and what happened in order — because those are three ways of asking one question and filing the counters away from the events they count helps nobody. **Overview** is a section of one on purpose: `/admin` is where a reader lands and the only page whose job is to point at the others, so it is the one page that cannot sit under a heading naming a kind of content. The breadcrumb trail is unchanged and deliberately does **not** gain a crumb for the section: a section has no page of its own, so its crumb could not be a link, and a dead crumb in the middle of a trail is the same mistake the last-crumb rule exists to prevent.
 
 Three things the console deliberately does **not** do. It does not invalidate a SAML assertion, a Kerberos ticket or a credential: none of those has a revocation mechanism a relying party consults — an assertion is valid because its signature verifies and its `Conditions` hold, and nothing about this service is asked — so a button claiming to revoke one would change a number here and nothing at all out there. It does not end a sign-on session, because `/oauth2/logout` and `wsignout1.0` already do and the second has cleanup to fan out to every relying party the session signed into; a third way to end one would be a third way to get that wrong. And it adds no claims to refresh tokens: a refresh token is presented back to this server and to nothing else, so a claim in one reaches no relying party and would only make the two halves of a grant disagree.
 

@@ -36,9 +36,17 @@
 // directory rather than the package root — see common/config_file.js, which is
 // required first for that reason and requires nothing itself.
 require('./config_file').resolveConfigFile();
-const appconfig = require(process.env.CONFIG_FILE);
+// NOTE that this module no longer requires CONFIG_FILE itself. It did — for the
+// log level, before config.js existed — and the binding was dead by the time
+// this was written, which mattered once CONFIG_FILE became optional: an unset
+// variable made `require(undefined)` throw a TypeError naming an "id" argument
+// nobody typed, out of a module that had no use for what it was loading.
+// resolveConfigFile() above is still called, because eleven OTHER modules read
+// the variable directly and this is one of the three places that runs early
+// enough to make it absolute for them.
+//
 // Every setting this service has, resolved from the runtime overrides, the
-// environment, the appconfig file and the built-in defaults in that order.
+// environment, and the two appconfig files in that order.
 // It is BELOW this module in the dependency graph and requires nothing from
 // here, which is what keeps the graph a tree (rule 3).
 const config = require('./config');

@@ -56,6 +56,15 @@ const mtls = require('./mtls');
 // route and requires only helpers.js, config.js and client_auth.js, so
 // requiring it here cannot create a cycle.
 const bcp = require('./oauth2_bcp');
+// For one value: `oauth2.clockSkewS`, the allowance applied to `exp` and `nbf`
+// wherever this service reads back a token it signed. config.js requires
+// NOTHING from this repository — it is the module helpers.js itself sits on top
+// of — so this is still a leaf and the no-cycle property above is unchanged.
+// It is read here rather than passed in because presentedAccessToken() is the
+// single check the four protected endpoints share: a skew applied at three of
+// them and not the fourth is a token that is alive at UserInfo and dead at the
+// credential endpoint, which reads as a wallet bug from both sides.
+const config = require('../common/config');
 const log = helpers.log;
 const b64u = helpers.b64u;
 const jsonFromB64u = helpers.jsonFromB64u;
@@ -639,7 +648,9 @@ function presentedAccessToken(req, res, where) {
   let claims = null;
   let verified = false;
   try {
-    claims = jwt.verify(accessToken, STS.certPem, { algorithms: ['RS256'] });
+    claims = jwt.verify(accessToken, STS.certPem,
+                        { algorithms: ['RS256'],
+                          clockTolerance: config.value('oauth2.clockSkewS') });
     verified = true;
   } catch (e) {
     log.debug("This access token is not one of ours, so its claims are read unverified: " +

@@ -26,6 +26,10 @@ const { log, logArtifact, PORT, STS, baseUrlOf, bbsKeyPair } = require('../commo
 // directory grows an entry off. A library — it registers no route and requires only
 // helpers.js — so requiring it here cannot move a route or make a cycle.
 const stats = require('../common/admin_stats');
+// The configuration table, for the two DID flags below. A library like the
+// others here: it registers no route and requires nothing from this repository,
+// so it cannot join a cycle wherever it is required from.
+const config = require('../common/config');
 const { VCI_CONFIGS } = require('./vc_configs');
 // ---------------------------------------------------------------------------
 // This issuer's DECENTRALIZED IDENTIFIER (W3C DID Core 1.0).
@@ -59,13 +63,21 @@ const { VCI_CONFIGS } = require('./vc_configs');
 //               (/.well-known/jwt-vc-issuer) is what the plain configuration must
 //               go on exercising.
 // ---------------------------------------------------------------------------
-function didFlag(name) {
-  return String(process.env[name] || '').toLowerCase() === 'true';
-}
+// BOTH ARE READ FROM THE CONFIGURATION TABLE, and were `process.env` here until
+// 2026-08-24. They were the last two environment variables in this service with
+// no row in config.js, which cost two things: they could not be set in an
+// appconfig file at all, and `didFlag()` compared against the literal 'true', so
+// `OID4VCI_LDP_VC_ISSUER_DID=1` was silently false where every other boolean
+// setting here takes 1/yes/on. `oid4vci.sdJwtIssuerDid` and
+// `oid4vci.ldpVcIssuerDid` are those variables, unchanged in name and default.
+//
+// Still read ONCE, at require time, which is why the table marks them
+// restart-only: the metadata below is built from what they said, and a value
+// that changed underneath it would leave a credential and the document
+// describing it disagreeing about how the issuer is named.
+const SD_JWT_ISSUER_DID = config.value('oid4vci.sdJwtIssuerDid');
 
-const SD_JWT_ISSUER_DID = didFlag('OID4VCI_SD_JWT_ISSUER_DID');
-
-const LDP_VC_ISSUER_DID = didFlag('OID4VCI_LDP_VC_ISSUER_DID');
+const LDP_VC_ISSUER_DID = config.value('oid4vci.ldpVcIssuerDid');
 
 // did:web for whatever host this request arrived on, so the same container
 // works at localhost:8081, sts:8081 and behind a published port without being

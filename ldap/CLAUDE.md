@@ -157,7 +157,20 @@ ldapjs implements none, and this repository does not patch that submodule.
    and `countApplications`, filled into that module's `setDirectory()` slot at
    require time, plus `GET /ldap/applications`. The division is exact and worth
    keeping: THAT module owns the schema and both conversions, THIS one owns
-   where the container is, how an entry is created and what the cap is. Note
+   where the container is, how an entry is created and what the cap is.
+
+   **AND ONE CALL IN THIS FILE PUTS TWO ENTRIES IN THAT CONTAINER.** Immediately
+   after that slot is filled — the earliest moment there is somewhere to write
+   to — `applications.seedInternalApplications()` seeds the two applications no
+   caller will ever name, because they are surfaces of this process: the console
+   at `/admin` and the management API at `/admin-api`. It is a call rather than
+   two more `putEntry()` blocks in `seed()` on purpose. `seed()` builds the TREE,
+   which is this file's half, while what those two entries hold is a pair of RFC
+   7591 registrations, which is that module's — and it could not run in `seed()`
+   anyway, thousands of lines before the slot it goes through exists.
+   `applications.seedInternal` turns it off, restart-only for the same reason.
+
+   Note
    that `writeApplication()` REPLACES rather than merging, which is the one
    place this file breaks `applyVcAttributes()`'s fill-only-what-is-absent rule
    — deliberately, because the record being written was read from that entry a

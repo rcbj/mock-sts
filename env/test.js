@@ -54,7 +54,28 @@ var config = {
     // stops working (0 turns it off), and whether ending a sign-on session
     // revokes the refresh tokens issued on it.
     refreshIdleSeconds: 86400,
-    revokeRefreshOnLogout: true
+    revokeRefreshOnLogout: true,
+
+    // HOW LONG WHAT THIS SERVICE ISSUES IS GOOD FOR. Three lifetimes and one
+    // allowance, all in seconds, all read PER TOKEN — so changing one on
+    // /admin/token-lifetimes or through POST /admin-api/token-lifetimes/set
+    // applies to the next token issued and to nothing already in a client's
+    // hands. Every lifetime must be a whole number of THIRTY-SECOND units
+    // (these exist to be set short and watched, and below half a minute a
+    // token expires between the response being written and the client reading
+    // it); the skew is capped at 300, which is what krb5.clockSkew allows.
+    //
+    // refreshTokenTtlS IS A BEHAVIOUR CHANGE: it was thirty days as a constant
+    // in oauth-oidc/oauth2.js and is twenty-four hours here. Put 2592000 back
+    // for exactly the old behaviour.
+    //
+    // clockSkewS is NOT clientAssertionSkewS above it: that one is how far out
+    // a CLIENT'S assertion may be (RFC 7523), this is how far out this
+    // service's own clock may be when it reads back a token it signed.
+    accessTokenTtlS: 3600,
+    idTokenTtlS: 3600,
+    refreshTokenTtlS: 86400,
+    clockSkewS: 30
   },
 
   // --- The admin console -------------------------------------------------
@@ -80,7 +101,22 @@ var config = {
   // — so this is a directory limit: past it a new application is refused rather
   // than an old one evicted.
   applications: {
-    max: 500
+    max: 500,
+
+    // Create an application entry for the ADMIN CONSOLE at /admin and one for
+    // the MANAGEMENT API at /admin-api when this service starts. Every other
+    // entry in the registry arrives because a caller presented an identifier,
+    // and these two surfaces are this process — so without this the registry
+    // listed everything except the two things the reader was standing in. They
+    // are seeded as FULL RFC 7591 registrations (the console a confidential
+    // OIDC relying party on the code grant, this API a confidential client on
+    // client_credentials, each with a secret minted at startup), so they are
+    // clients that can be exercised rather than rows on a page. Nothing serves
+    // /admin/callback and the API's two scopes grant nothing — the console's
+    // gate is a sign-on session and two directory groups, and /admin-api is
+    // not gated at all. Restart to apply; seeded only where the identifier is
+    // free, so a deleted one stays deleted until the next start.
+    seedInternal: true
   },
 
   // --- SAML --------------------------------------------------------------
@@ -114,7 +150,17 @@ var config = {
     deferredReadyMs: 4000,
     deferredIntervalS: 2,
     offerUsername: "diploma.student",
-    requestEncryptionRequired: false
+    requestEncryptionRequired: false,
+
+    // Name the issuer of the PLAIN credential configurations by did:web
+    // rather than by https URL — what a deployment that had gone to DIDs
+    // throughout would look like. Both OFF, for two different reasons
+    // config.js gives; the IdentityCredentialDid configurations always use
+    // a DID whatever these are, so both routes are live in one issuer.
+    // Restart to apply: vc_did.js reads them once, and the issuer metadata
+    // is built from what it read.
+    sdJwtIssuerDid: false,
+    ldpVcIssuerDid: false
   },
 
   // --- OID4VP ------------------------------------------------------------

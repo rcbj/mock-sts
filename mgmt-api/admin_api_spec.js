@@ -240,6 +240,23 @@ const CONFIG_SETTING = openObject(
             description: 'How a value posted for it is coerced and checked.' },
     enumValues: { type: 'array', items: { type: 'string' },
                   description: 'Present on `enum` settings only.' },
+    // Present on an `int` setting whose row narrows it, and absent everywhere
+    // else — the same way `enumValues` is present on an enum and nowhere else.
+    // They are DOCUMENTED rather than left implicit because a client rendering
+    // an input for a setting has no other way to learn what will be refused,
+    // and the four token lifetimes are the settings somebody actually types a
+    // number into.
+    min: { type: 'integer',
+           description: 'The lowest value POST /config/set will take, on an ' +
+                        'int setting that declares one.' },
+    max: { type: 'integer',
+           description: 'The highest value it will take.' },
+    step: { type: 'integer',
+            description: 'The value must be a MULTIPLE of this, counted from ' +
+                         '`min`. The four token lifetimes use 30: they exist ' +
+                         'to be set short and watched, and below half a ' +
+                         'minute a token expires between the response being ' +
+                         'written and the client reading it.' },
     value: { description: 'The effective value, coerced to its type: a number ' +
                           'for int/port, a boolean for bool, an array of ' +
                           'strings for csv.' },
@@ -249,13 +266,21 @@ const CONFIG_SETTING = openObject(
                          'would carry.' },
     source: {
       type: 'string',
-      enum: ['override', 'env', 'env-legacy', 'appconfig', 'default'],
+      enum: ['override', 'env', 'env-legacy', 'appconfig', 'defaults', 'default'],
       description: 'Where the effective value came from, highest first: a ' +
                    'runtime override set through this API or the console; the ' +
                    'setting\'s own environment variable; the LEGACY variable ' +
                    'named in `legacyEnv` (STS_ISSUER still feeds the three ' +
-                   'issuers carved out of it); the appconfig file; the ' +
-                   'built-in default.'
+                   'issuers carved out of it); the appconfig file CONFIG_FILE ' +
+                   'names; `env/defaults.js`, the DEFAULT appconfig file that ' +
+                   'one is unioned on top of. `default` is the sixth and is ' +
+                   'reachable only for the three DERIVED settings ' +
+                   '(`global.https`, `oid4vp.walletUrl`, ' +
+                   '`krb5.serviceDomains`), whose value is a function of a ' +
+                   'neighbouring setting rather than a literal in any file: ' +
+                   'for every other setting, no value in either appconfig ' +
+                   'file and no environment variable stops this service from ' +
+                   'STARTING, so there is nothing left to fall back to.'
     },
     editable: {
       type: 'boolean',
@@ -274,14 +299,252 @@ const CONFIG_SETTING = openObject(
                  description: 'An older variable that still feeds it. Only ' +
                               'the three issuers have one.' },
     appconfigPath: { type: 'string' },
-    default: { description: 'The built-in default, which is what the shipped ' +
-                            'appconfig files were seeded with.' },
+    default: { description: 'The built-in default — the `dflt` column of ' +
+                            'config.js\'s table, which `env/defaults.js` is ' +
+                            'GENERATED from and which the three shipped ' +
+                            'appconfig files were seeded with. It is what the ' +
+                            'value WOULD be with nothing set anywhere, and is ' +
+                            'no longer a source in its own right: see ' +
+                            '`source`.' },
     overridden: { type: 'boolean',
                   description: 'Whether a runtime override is in force. Equal ' +
                                'to `source === "override"`, and reported ' +
                                'separately so a caller can filter without ' +
                                'matching a string.' }
   });
+
+// ---------------------------------------------------------------------------
+// THE PROPERTIES BOTH CLAIM-SET REPLIES CARRY.
+//
+// GET /admin-api/claims answers for the two JWT sets and GET
+// /admin-api/saml-attributes for the two SAML ones — two console pages onto
+// one store since 2026-08-24 — and everything except ONE property each is the
+// same shape answered twice. So the shape is written once and each schema adds
+// what is genuinely its own: `reservedJwtClaims` for the tokens, because that
+// list is enforced for `kind === 'jwt'` alone, and `defaultSaml11Namespace`
+// for the assertions, because nothing else has one.
+//
+// Copied instead, this would be the pair of schemas that disagree about
+// `attributeCatalogue` within a month — and the parent project's
+// tests/admin_api.js checks each documented property against a LIVE reply, so
+// the disagreement would surface as a test failure naming a property rather
+// than as anything pointing here.
+// ---------------------------------------------------------------------------
+const CLAIM_SET_PROPS = {
+      placeholders: {
+        description: 'The ${...} substitutions a value may use.'
+      },
+      precedence: {
+        type: 'string',
+        description: 'Stated in the reply and not only in this document, ' +
+                     'because it only shows up when both halves of a set ' +
+                     'name one claim: the typed one wins.'
+      },
+      attributeCatalogue: {
+        type: 'array',
+        description: 'Every LDAP attribute type a set may carry, and which ' +
+                     'of the four currently carries it. It is the same ' +
+                     'catalogue the credential claims choose from — one list ' +
+                     'of spellings, because two would eventually disagree ' +
+                     'about what `schacDateOfBirth` is called.',
+        items: openObject('One attribute type.', {
+          ldap: {
+            type: 'string',
+            description: 'Spelled the way its schema document spells it, ' +
+                         'which is what the `attributes` field of a POST takes.'
+          },
+          claim: {
+            type: 'string',
+            description: 'The claim it becomes. A dot means NESTED in a JWT ' +
+                         '(`address.locality` is a member of an `address` ' +
+                         'object) and is the attribute\'s literal name in an ' +
+                         'assertion, where the content model cannot nest.'
+          },
+          label: { type: 'string' },
+          schema: {
+            type: 'string',
+            description: 'Where the attribute type is defined. Three of them ' +
+                         'are not RFC 4519/4524/2798: there is no standard ' +
+                         'type for a birthdate or a nationality, so the ' +
+                         'SCHAC schema\'s names are borrowed rather than ' +
+                         'invented.'
+          },
+          sets: openObject(
+            'Which of the FOUR sets carries it, keyed by set id — all ' +
+            'four, not only the two this reply configures: the ' +
+            'catalogue is one list and a per-page view of it would ' +
+            'answer "which sets carry mail" with half the truth.', {})
+        })
+      },
+      groups: openObject(
+        'The groups claim. The one thing on this page that is not chosen per ' +
+        'set: with groups.claim on, ALL FOUR carry a claim naming the ' +
+        'directory groups the subject is a member of, and somebody in no ' +
+        'group gets no claim at all rather than an empty list. There is no ' +
+        'operation beside this: its four settings are config.js\'s, so POST ' +
+        '/admin-api/config/set is the door and a second one would be a ' +
+        'second store for one setting.',
+        {
+          enabled: { type: 'boolean', description: 'groups.claim.' },
+          loaded: {
+            type: 'boolean',
+            description: 'Whether the embedded directory is loaded in this ' +
+                         'process. False means there are no groups to read ' +
+                         'and nothing else is affected.'
+          },
+          claim: {
+            type: 'string',
+            description: 'What the claim is called (groups.claimName): the ' +
+                         'JWT member name and the SAML Attribute name. A ' +
+                         'name this service sets itself is refused at ' +
+                         'issuance and `problem` says so.'
+          },
+          valueForm: {
+            type: 'string',
+            description: '`cn` or `dn` (groups.claimValue) — whether each ' +
+                         'value is the group\'s common name or its whole DN. ' +
+                         'Both are what somebody\'s real identity provider ' +
+                         'does, and a client that has only parsed one has ' +
+                         'never run the other path.'
+          },
+          memberOfCounts: {
+            type: 'boolean',
+            description: 'groups.claimFromMemberOf — whether a group named ' +
+                         'by the PERSON\'s own memberOf counts when the group ' +
+                         'entry does not list them back. Nothing here ' +
+                         'maintains memberOf, so that disagreement is ' +
+                         'reachable in one operation and this is which side ' +
+                         'a token believes.'
+          },
+          sets: {
+            type: 'array', items: { type: 'string' },
+            description: 'The sets that carry it, which is all four.'
+          },
+          problem: {
+            type: 'string',
+            description: 'Why a claim that is switched ON is not arriving. ' +
+                         'Empty when there is nothing wrong.'
+          },
+          grants: { type: 'string' },
+          precedence: { type: 'string' },
+          settings: { type: 'array', items: { type: 'string' } },
+          preview: openObject(
+            'What the claim would carry for the previewed person, built by ' +
+            'the function the ISSUANCE path calls so it cannot disagree with ' +
+            'the token.',
+            {
+              user: { type: 'string' },
+              key: { type: 'string' },
+              dn: {
+                type: 'string',
+                description: 'Where this person\'s entry is, or would be. ' +
+                             'Reported either way: a group can list a DN ' +
+                             'nothing is stored at, and that is still the ' +
+                             'group saying so.'
+              },
+              entryFound: { type: 'boolean' },
+              reason: {
+                type: 'string',
+                description: 'Why the claim is empty, when it is. Usually ' +
+                             'the ordinary answer — this person is in no ' +
+                             'group — rather than a fault.'
+              },
+              values: {
+                type: 'array', items: { type: 'string' },
+                description: 'Exactly what the claim would carry. Absent ' +
+                             'from the token entirely when this is empty.'
+              },
+              groups: {
+                type: 'array',
+                description: 'Every group naming this person, and how.',
+                items: openObject('One group.', {
+                  dn: { type: 'string' },
+                  cn: { type: 'string' },
+                  rule: {
+                    type: 'string',
+                    description: 'What made it a group: `placement` (under ' +
+                                 'ou=groups), `objectClass`, or `both`.'
+                  },
+                  via: {
+                    type: 'array', items: { type: 'string' },
+                    description: 'The group\'s own membership attributes ' +
+                                 'that name this person — member, ' +
+                                 'uniqueMember, memberUid. Empty when only ' +
+                                 'memberOf found it.'
+                  },
+                  viaMemberOf: {
+                    type: 'boolean',
+                    description: 'Whether the PERSON\'s own memberOf names ' +
+                                 'this group. Counted only when ' +
+                                 'memberOfCounts is true.'
+                  }
+                })
+              }
+            })
+        }),
+
+      preview: openObject(
+        'One person\'s value for every attribute in the catalogue, selected ' +
+        'or not, so a caller can see what selecting one WOULD produce.',
+        {
+          user: { type: 'string' },
+          entryFound: {
+            type: 'boolean',
+            description: 'Whether the directory holds this person at all. ' +
+                         'False means every value below was generated from ' +
+                         'the username — the same invented person every ' +
+                         'time — and that is a different answer from "the ' +
+                         'entry says so", which the values alone cannot tell ' +
+                         'you.'
+          },
+          byLdap: openObject(
+            'Keyed by the LOWER-CASED attribute name, because that is what ' +
+            'the store holds. Each value carries the claim, the value and ' +
+            'the source it came from.', {})
+        }),
+      sets: {
+        type: 'array',
+        items: openObject('One set.', {
+          id: {
+            type: 'string',
+            description: 'What the `set` field of every POST here takes.'
+          },
+          label: { type: 'string' },
+          claims: { type: 'array', items: CLAIM_ENTRY },
+          attributes: {
+            type: 'array', items: { type: 'string' },
+            description: 'The LDAP attribute types this set carries, ' +
+                         'canonically spelled and in CATALOGUE order rather ' +
+                         'than in the order they were chosen — the order ' +
+                         'reaches the token, and a list that reordered ' +
+                         'itself would look like a different token to ' +
+                         'anything diffing them. Empty on a fresh start, in ' +
+                         'all four sets: this changes what every client ' +
+                         'receives, so it does nothing until asked.'
+          },
+          attributeClaims: openObject(
+            'What those attributes would put in this set right now for the ' +
+            'previewed person, nested as the token would carry it. Built by ' +
+            'the function the ISSUANCE path calls, so it cannot disagree ' +
+            'with the token.', {}),
+          attributeReport: {
+            type: 'array',
+            description: 'The same, flat, with where each value came from.',
+            items: openObject('One claim.', {
+              ldap: { type: 'string' },
+              claim: { type: 'string' },
+              value: { type: 'string' },
+              source: {
+                type: 'string',
+                description: '`directory` when the entry carries it, ' +
+                             '`generated` when it was invented from the ' +
+                             'username.'
+              }
+            })
+          }
+        })
+      }
+};
 
 const SCHEMAS = {
   ActionResult: ACTION_RESULT,
@@ -773,6 +1036,17 @@ const SCHEMAS = {
                      'the file to edit to make a change survive a restart. ' +
                      'Nothing here ever writes to it.'
       },
+      defaultsFile: {
+        type: 'string',
+        description: 'The DEFAULT appconfig file, which `configFile` is ' +
+                     'unioned on top of key by key with the operator\'s value ' +
+                     'winning. It carries a default for every setting, which ' +
+                     'is what lets `configFile` be as small as its author ' +
+                     'likes while a setting with no value ANYWHERE — in ' +
+                     'either file and in no environment variable — stops this ' +
+                     'service from starting. A setting whose `source` is ' +
+                     '`defaults` came from here.'
+      },
       settingCount: { type: 'integer' },
       editableCount: {
         type: 'integer',
@@ -796,9 +1070,77 @@ const SCHEMAS = {
       }
     }),
 
-  ClaimSets: openObject(
-    'The four custom claim sets and the rules that govern them.',
+  TokenLifetimes: openObject(
+    'How long an access token, an ID Token and a refresh token issued here ' +
+    'are good for, the clock skew applied when one is read back, and what ' +
+    'has already been issued under them. Four of the settings GET /config ' +
+    'returns, under a name that promises four.',
     {
+      lifetimes: openObject(
+        'The four effective values in seconds, for a caller that wants the ' +
+        'number rather than the provenance.',
+        {
+          accessTokenTtlS: { type: 'integer' },
+          idTokenTtlS: { type: 'integer' },
+          refreshTokenTtlS: { type: 'integer' },
+          clockSkewS: {
+            type: 'integer',
+            description: 'The allowance applied to `exp` and `nbf` wherever ' +
+                         'this service reads back a token it signed — ' +
+                         'introspection, UserInfo, the refresh grant, token ' +
+                         'exchange, the DPoP-bound access token check, and ' +
+                         'the state reported here and on the console. It ' +
+                         'never changes what goes INTO a token, and it is a ' +
+                         'different setting from oauth2.clientAssertionSkewS, ' +
+                         'which is about a CLIENT\'s clock.'
+          }
+        }),
+      settings: {
+        type: 'array',
+        description: 'The same four as full configuration rows — bounds, ' +
+                     'source, default and prose — in the shape GET /config ' +
+                     'uses, so a client renders them with one piece of code.',
+        items: CONFIG_SETTING
+      },
+      tokens: openObject(
+        'What has already been issued, counted against the same clock the ' +
+        'endpoints use: `clockSkewS` is applied here too, so a token counted ' +
+        'expired is one POST /oauth2/introspect will report inactive. ' +
+        'CHANGING A LIFETIME DOES NOT MOVE THESE — a lifetime is stamped ' +
+        'into a token as its exp claim when it is signed.',
+        {
+          held: { type: 'integer' },
+          forgotten: { type: 'integer' },
+          cap: { type: 'integer' },
+          revoked: { type: 'integer' },
+          byKind: {
+            type: 'array',
+            description: 'One row per token kind, which is what tells the ' +
+                         'three lifetimes apart in the counts.',
+            items: openObject('One kind.', {
+              kind: { type: 'string' },
+              issued: { type: 'integer' },
+              valid: { type: 'integer' },
+              expired: { type: 'integer' },
+              revoked: { type: 'integer' },
+              notYetValid: { type: 'integer' },
+              noExpiry: { type: 'integer' },
+              bound: { type: 'integer' }
+            })
+          }
+        }),
+      now: {
+        type: 'integer',
+        description: 'This service\'s clock, in milliseconds, as the counts ' +
+                     'above were taken against it.'
+      }
+    }),
+
+  ClaimSets: openObject(
+    'The two JWT claim sets — the OAuth 2.0 access token and the OIDC ID ' +
+    'Token — and the rules that govern them. The two SAML sets are at GET ' +
+    '/admin-api/saml-attributes; one store answers both.',
+    Object.assign({
       reservedJwtClaims: {
         type: 'array', items: { type: 'string' },
         description: 'Claim names this service sets itself. Adding one is ' +
@@ -807,218 +1149,26 @@ const SCHEMAS = {
                      'produce tokens that fail to verify with nothing ' +
                      'pointing back at the operation that caused it.'
       },
-      placeholders: {
-        description: 'The ${...} substitutions a value may use.'
-      },
-      defaultSaml11Namespace: { type: 'string' },
-      precedence: {
-        type: 'string',
-        description: 'Stated in the reply and not only in this document, ' +
-                     'because it only shows up when both halves of a set ' +
-                     'name one claim: the typed one wins.'
-      },
-      attributeCatalogue: {
-        type: 'array',
-        description: 'Every LDAP attribute type a set may carry, and which ' +
-                     'of the four currently carries it. It is the same ' +
-                     'catalogue the credential claims choose from — one list ' +
-                     'of spellings, because two would eventually disagree ' +
-                     'about what `schacDateOfBirth` is called.',
-        items: openObject('One attribute type.', {
-          ldap: {
-            type: 'string',
-            description: 'Spelled the way its schema document spells it, ' +
-                         'which is what the `attributes` field of a POST takes.'
-          },
-          claim: {
-            type: 'string',
-            description: 'The claim it becomes. A dot means NESTED in a JWT ' +
-                         '(`address.locality` is a member of an `address` ' +
-                         'object) and is the attribute\'s literal name in an ' +
-                         'assertion, where the content model cannot nest.'
-          },
-          label: { type: 'string' },
-          schema: {
-            type: 'string',
-            description: 'Where the attribute type is defined. Three of them ' +
-                         'are not RFC 4519/4524/2798: there is no standard ' +
-                         'type for a birthdate or a nationality, so the ' +
-                         'SCHAC schema\'s names are borrowed rather than ' +
-                         'invented.'
-          },
-          sets: openObject(
-            'Which of the four sets carries it, keyed by set id.', {})
-        })
-      },
-      groups: openObject(
-        'The groups claim. The one thing on this page that is not chosen per ' +
-        'set: with groups.claim on, ALL FOUR carry a claim naming the ' +
-        'directory groups the subject is a member of, and somebody in no ' +
-        'group gets no claim at all rather than an empty list. There is no ' +
-        'operation beside this: its four settings are config.js\'s, so POST ' +
-        '/admin-api/config/set is the door and a second one would be a ' +
-        'second store for one setting.',
-        {
-          enabled: { type: 'boolean', description: 'groups.claim.' },
-          loaded: {
-            type: 'boolean',
-            description: 'Whether the embedded directory is loaded in this ' +
-                         'process. False means there are no groups to read ' +
-                         'and nothing else is affected.'
-          },
-          claim: {
-            type: 'string',
-            description: 'What the claim is called (groups.claimName): the ' +
-                         'JWT member name and the SAML Attribute name. A ' +
-                         'name this service sets itself is refused at ' +
-                         'issuance and `problem` says so.'
-          },
-          valueForm: {
-            type: 'string',
-            description: '`cn` or `dn` (groups.claimValue) — whether each ' +
-                         'value is the group\'s common name or its whole DN. ' +
-                         'Both are what somebody\'s real identity provider ' +
-                         'does, and a client that has only parsed one has ' +
-                         'never run the other path.'
-          },
-          memberOfCounts: {
-            type: 'boolean',
-            description: 'groups.claimFromMemberOf — whether a group named ' +
-                         'by the PERSON\'s own memberOf counts when the group ' +
-                         'entry does not list them back. Nothing here ' +
-                         'maintains memberOf, so that disagreement is ' +
-                         'reachable in one operation and this is which side ' +
-                         'a token believes.'
-          },
-          sets: {
-            type: 'array', items: { type: 'string' },
-            description: 'The sets that carry it, which is all four.'
-          },
-          problem: {
-            type: 'string',
-            description: 'Why a claim that is switched ON is not arriving. ' +
-                         'Empty when there is nothing wrong.'
-          },
-          grants: { type: 'string' },
-          precedence: { type: 'string' },
-          settings: { type: 'array', items: { type: 'string' } },
-          preview: openObject(
-            'What the claim would carry for the previewed person, built by ' +
-            'the function the ISSUANCE path calls so it cannot disagree with ' +
-            'the token.',
-            {
-              user: { type: 'string' },
-              key: { type: 'string' },
-              dn: {
-                type: 'string',
-                description: 'Where this person\'s entry is, or would be. ' +
-                             'Reported either way: a group can list a DN ' +
-                             'nothing is stored at, and that is still the ' +
-                             'group saying so.'
-              },
-              entryFound: { type: 'boolean' },
-              reason: {
-                type: 'string',
-                description: 'Why the claim is empty, when it is. Usually ' +
-                             'the ordinary answer — this person is in no ' +
-                             'group — rather than a fault.'
-              },
-              values: {
-                type: 'array', items: { type: 'string' },
-                description: 'Exactly what the claim would carry. Absent ' +
-                             'from the token entirely when this is empty.'
-              },
-              groups: {
-                type: 'array',
-                description: 'Every group naming this person, and how.',
-                items: openObject('One group.', {
-                  dn: { type: 'string' },
-                  cn: { type: 'string' },
-                  rule: {
-                    type: 'string',
-                    description: 'What made it a group: `placement` (under ' +
-                                 'ou=groups), `objectClass`, or `both`.'
-                  },
-                  via: {
-                    type: 'array', items: { type: 'string' },
-                    description: 'The group\'s own membership attributes ' +
-                                 'that name this person — member, ' +
-                                 'uniqueMember, memberUid. Empty when only ' +
-                                 'memberOf found it.'
-                  },
-                  viaMemberOf: {
-                    type: 'boolean',
-                    description: 'Whether the PERSON\'s own memberOf names ' +
-                                 'this group. Counted only when ' +
-                                 'memberOfCounts is true.'
-                  }
-                })
-              }
-            })
-        }),
+    }, CLAIM_SET_PROPS)),
 
-      preview: openObject(
-        'One person\'s value for every attribute in the catalogue, selected ' +
-        'or not, so a caller can see what selecting one WOULD produce.',
-        {
-          user: { type: 'string' },
-          entryFound: {
-            type: 'boolean',
-            description: 'Whether the directory holds this person at all. ' +
-                         'False means every value below was generated from ' +
-                         'the username — the same invented person every ' +
-                         'time — and that is a different answer from "the ' +
-                         'entry says so", which the values alone cannot tell ' +
-                         'you.'
-          },
-          byLdap: openObject(
-            'Keyed by the LOWER-CASED attribute name, because that is what ' +
-            'the store holds. Each value carries the claim, the value and ' +
-            'the source it came from.', {})
-        }),
-      sets: {
-        type: 'array',
-        items: openObject('One set.', {
-          id: {
-            type: 'string',
-            description: 'What the `set` field of every POST here takes.'
-          },
-          label: { type: 'string' },
-          claims: { type: 'array', items: CLAIM_ENTRY },
-          attributes: {
-            type: 'array', items: { type: 'string' },
-            description: 'The LDAP attribute types this set carries, ' +
-                         'canonically spelled and in CATALOGUE order rather ' +
-                         'than in the order they were chosen — the order ' +
-                         'reaches the token, and a list that reordered ' +
-                         'itself would look like a different token to ' +
-                         'anything diffing them. Empty on a fresh start, in ' +
-                         'all four sets: this changes what every client ' +
-                         'receives, so it does nothing until asked.'
-          },
-          attributeClaims: openObject(
-            'What those attributes would put in this set right now for the ' +
-            'previewed person, nested as the token would carry it. Built by ' +
-            'the function the ISSUANCE path calls, so it cannot disagree ' +
-            'with the token.', {}),
-          attributeReport: {
-            type: 'array',
-            description: 'The same, flat, with where each value came from.',
-            items: openObject('One claim.', {
-              ldap: { type: 'string' },
-              claim: { type: 'string' },
-              value: { type: 'string' },
-              source: {
-                type: 'string',
-                description: '`directory` when the entry carries it, ' +
-                             '`generated` when it was invented from the ' +
-                             'username.'
-              }
-            })
-          }
-        })
+  SamlAttributeSets: openObject(
+    'The two SAML attribute sets — SAML 2.0 and SAML 1.1 (WS-Federation) — ' +
+    'and the rules that govern them. Everything here is the shape GET ' +
+    '/admin-api/claims answers for the two JWT sets, minus the reserved ' +
+    'claim names, which are a JWT rule and are not enforced for an ' +
+    'assertion attribute, plus the one rule that is this family\'s.',
+    Object.assign({
+      defaultSaml11Namespace: {
+        type: 'string',
+        description: 'The AttributeNamespace a SAML 1.1 attribute gets when ' +
+                     'the call does not name one — the WS-Federation claim ' +
+                     'namespace every relying party already reads, so an ' +
+                     'attribute added with a name and a value alone arrives ' +
+                     'somewhere useful instead of in a namespace nothing ' +
+                     'looks in. SAML 2.0 has no equivalent: NameFormat is ' +
+                     'optional there and is left off unless it is given.'
       }
-    }),
+    }, CLAIM_SET_PROPS)),
 
   CredentialClaims: openObject(
     'Which claims a Verifiable Credential issued from now on carries, chosen ' +
@@ -1597,10 +1747,23 @@ const TAG_DESCRIPTIONS = {
                'no clear operation: an erase control on an unprotected ' +
                'surface would make an audit log unable to answer the one ' +
                'question it exists for.',
-  'Custom claims': 'What to add to every access token, ID Token and SAML ' +
-                   'assertion issued from now on.',
+  'Custom claims': 'What to add to every access token and ID Token issued ' +
+                   'from now on. The assertions are next door, under Custom ' +
+                   'SAML attributes.',
+  'Custom SAML attributes': 'What to add to every SAML 2.0 and SAML 1.1 ' +
+                            'assertion issued from now on — WS-Trust\'s and ' +
+                            'WS-Federation\'s alike. The same store the ' +
+                            'custom claims are in, and the same two halves: ' +
+                            'a typed attribute and a directory one.',
   'Credential claims': 'What an issued Verifiable Credential carries.',
-  'Verifier request': 'What the mock OID4VP Verifier asks a wallet for.'
+  'Verifier request': 'What the mock OID4VP Verifier asks a wallet for.',
+  'Token lifetimes': 'How long an access token, an ID Token and a refresh ' +
+                     'token issued here last, and how far out a clock may be ' +
+                     'before this service stops believing one of its own. ' +
+                     'Four of the settings under Configuration, behind a ' +
+                     'name that promises four rather than forty-nine — and a ' +
+                     'door that refuses a key it does not recognise instead ' +
+                     'of ignoring it.'
 };
 
 module.exports = {
