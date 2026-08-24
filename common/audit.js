@@ -223,7 +223,9 @@ const ACTIONS = [
   { action: 'admin.change', category: 'admin',
     label: 'A console form was posted' },
   // The SUBSTANCE of a claim-set change, as against the HTTP row that says a
-  // form was posted to /admin/claims. Both are recorded and they answer
+  // form was posted to /admin/claims or /admin/saml-attributes — one row shape
+  // for both, because there is one store behind the two pages. Both are
+  // recorded and they answer
   // different questions: `admin.change` says somebody was at that page at that
   // moment, this says what the four claim sets now contain. The second matters
   // more than it looks — a custom claim reaches every access token, ID Token
@@ -564,6 +566,36 @@ function httpActionFor(path, method) {
   return 'protocol.call';
 }
 
+// A LIVENESS PROBE THAT SUCCEEDED IS NOT AN EVENT.
+//
+// `/healthcheck` is asked every few seconds for the whole life of the service —
+// by the compose healthcheck, by the CI wait loop, by every launcher in the
+// parent project — and it always answers the same 200. Recorded, it is by a
+// wide margin the most common row in the log and it pushes everything a person
+// came to this page to read off the end of a capped list: at the default cap an
+// idle service can hold nothing else at all.
+//
+// A FAILED probe is still recorded, and that is the point of matching on the
+// status rather than on the path alone. A healthcheck answering anything other
+// than 200 is exactly the event somebody hunting a start-up failure wants to
+// find, and it happens once rather than every five seconds.
+//
+// THE COUNTERS ARE UNTOUCHED. `/admin/metrics` counts this call as it always
+// did, because a counter is one row however often it goes up — this is a rule
+// about the event LOG, where one act is one line, and not about how much the
+// service was asked to do.
+const QUIET_WHEN_OK = ['/healthcheck'];
+
+function isQuietProbe(req, res, path) {
+  log.debug("Entering isQuietProbe(). " + path);
+  const method = String(req.method || '').toUpperCase();
+  const quiet = QUIET_WHEN_OK.indexOf(path) >= 0 &&
+      (method === 'GET' || method === 'HEAD') &&
+      parseInt(res.statusCode, 10) === 200;
+  log.debug("Leaving isQuietProbe(). " + quiet);
+  return quiet;
+}
+
 // Called once per answered request, from app.js's call log, beside
 // stats.recordCall(). `req` is still live at that point — the response has been
 // flushed, but the request object has not gone anywhere — which is what lets
@@ -575,6 +607,11 @@ function recordHttp(req, res, detail) {
   // it is interesting, and a path that carried it would make every distinct
   // ?page= a different-looking row for the same page view.
   const path = String(req.originalUrl || '/').split('?')[0];
+  if (isQuietProbe(req, res, path)) {
+    log.debug("Leaving recordHttp(). A successful liveness probe; not " +
+              "recorded.");
+    return null;
+  }
   const action = httpActionFor(path, req.method);
   if (action === 'protocol.call' && !protocolCallsRecorded()) {
     log.debug("Leaving recordHttp(). audit.protocolCalls is off; not recorded.");

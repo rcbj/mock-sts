@@ -11,7 +11,8 @@
 //
 //   vc_claims.js            what an issued CREDENTIAL carries      /admin/vc
 //   vc_verifier_config.js   what the mock Verifier ASKS FOR        /admin/vc-verifier-config
-//   claim_attributes.js     what a TOKEN or ASSERTION carries      /admin/claims
+//   claim_attributes.js     what a TOKEN carries                   /admin/claims
+//   claim_attributes.js     what an ASSERTION carries              /admin/saml-attributes
 //   this file               what a SCIM RESOURCE is made of        /admin/scim
 //
 // The first three are SELECTIONS out of one catalogue and are deliberately

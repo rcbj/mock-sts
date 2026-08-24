@@ -26,14 +26,48 @@
 //   3. its LEGACY env var, if any  STS_ISSUER still feeds the three issuers
 //                                  that were carved out of it
 //   4. the APPCONFIG file          the CONFIG_FILE module, e.g. env/local.js
-//   5. the BUILT-IN DEFAULT        the value the expression in the module used
-//                                  to carry, unchanged
+//   5. env/defaults.js             the DEFAULT appconfig file, which 4 is
+//                                  unioned on top of
+//
+// AND THERE IS NO SIXTH. A setting with no value in 4 or 5 and no variable in
+// 2 or 3 STOPS THIS SERVICE FROM STARTING — see requireComplete() at the foot
+// of this file. That is the 2026-08-24 change and it is the point of the whole
+// arrangement: a value nobody configured, arriving from a constant somewhere in
+// a module, is exactly what made "what is this service configured with?"
+// unanswerable before this table existed, and leaving a silent fallback under
+// the table would have kept one way of asking the question wrong.
+//
+// 4 AND 5 ARE ONE LAYER, UNIONED, and that is what makes the refusal above
+// affordable. `appconfig` below is env/defaults.js with the operator's file
+// merged over it key by key, the operator's value winning wherever the two
+// carry the same key. So:
+//
+//   * a config file may carry as few keys as it likes and still be complete —
+//     which is what keeps the parent project's in-process Kerberos jobs
+//     working, since they point CONFIG_FILE at the TEST suite's own config and
+//     it carries none of this service's keys;
+//   * a setting added to this table tomorrow does not break every config file
+//     in the world on the day it is added, so long as env/defaults.js gains its
+//     row — and env/defaults.js is GENERATED from the `dflt` column here, so
+//     that is one edit rather than two;
+//   * the refusal then fires on the one case it is for: a row in this table
+//     with no row in env/defaults.js, which is a setting somebody added and did
+//     not finish adding.
 //
 // The order is what makes this backwards compatible rather than merely similar:
 // every env var that worked before works now and still beats the file, and a
 // service started with no env vars at all and the shipped appconfig behaves
-// exactly as it did — the appconfig files were seeded with the built-in
-// defaults, so 4 and 5 agree.
+// exactly as it did — the shipped files were seeded with the built-in defaults,
+// so 4 and 5 agree wherever both carry a key.
+//
+// THREE SETTINGS ARE EXEMPT from the refusal, and they are the three marked
+// `derived`: `global.https` comes from `oauth2.rfc9700`, `oid4vp.walletUrl`
+// from `oid4vci.walletUrl`, and `krb5.serviceDomains` from `krb5.realm`. Their
+// default is a FUNCTION of a neighbour, so writing a literal for them in
+// env/defaults.js would freeze the derivation at whatever it evaluated to the
+// day the file was written — which is why they are deliberately absent from
+// every appconfig file here, and why demanding one would be demanding the one
+// thing that is wrong.
 //
 // ---------------------------------------------------------------------------
 // RUNTIME vs RESTART, and why the distinction is honest rather than cautious.
@@ -89,9 +123,79 @@
 // subdirectory now, and a relative `./env/local.js` resolves against THIS
 // directory rather than the package root — see common/config_file.js, which is
 // required first for that reason and requires nothing itself.
-require('./config_file').resolveConfigFile();
+const configFile = require('./config_file');
+configFile.resolveConfigFile();
+const path = require('path');
 const bunyan = require('bunyan');
-const appconfig = require(process.env.CONFIG_FILE);
+
+// ---------------------------------------------------------------------------
+// THE APPCONFIG LAYER, which is TWO FILES unioned rather than one.
+//
+// env/defaults.js is the base and is not selected by anything: it carries the
+// `dflt` of every non-derived row in the table below, and is GENERATED from
+// that column so the two cannot drift. The operator's file — whatever
+// CONFIG_FILE names — is merged over it, and the operator's value wins wherever
+// both carry a key. See the header: it is the union that makes the startup
+// refusal affordable, because it means no config file can be INCOMPLETE, only
+// smaller than this one.
+//
+// CONFIG_FILE MAY NOW BE UNSET, which it could not be before: `require(undefined)`
+// threw a TypeError naming an "id" argument nobody typed. With a base file there
+// is something to fall back to, so an unset variable means "the defaults" and
+// says so. (helpers.js still requires CONFIG_FILE unguarded, so that is a
+// property of THIS module rather than of the whole service — a leaf module
+// loaded by a test can now be loaded with no configuration at all.)
+//
+// A file that cannot be loaded is FATAL and is not swallowed. Every other
+// failure here is reported and carried on from, because a stale key must not
+// stop a service starting; a config file that does not parse is different in
+// kind — every value the operator meant to set is missing, and continuing would
+// mean starting a service configured as nobody asked for.
+// ---------------------------------------------------------------------------
+const DEFAULTS_FILE = path.join(configFile.ROOT, 'env', 'defaults.js');
+const defaults = require(DEFAULTS_FILE);
+
+// A two-file union. Plain objects merge key by key; everything else — a scalar,
+// an array, a Date — is REPLACED wholesale by the override, because a merged
+// array is neither file's list and an operator writing `tls: { hostnames: [...] }`
+// means that list rather than that list appended to ours.
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function union(base, over) {
+  const out = {};
+  Object.keys(base || {}).forEach(function (key) { out[key] = base[key]; });
+  Object.keys(over || {}).forEach(function (key) {
+    if (isPlainObject(out[key]) && isPlainObject(over[key])) {
+      out[key] = union(out[key], over[key]);
+      return;
+    }
+    out[key] = over[key];
+  });
+  return out;
+}
+
+// What the operator's file actually carried, kept SEPARATELY from the union.
+// auditAppconfig() reads this one: the union can never be missing a key, so an
+// audit against it could not answer the question that audit exists to answer —
+// "does the file I am editing still list the whole surface?".
+let operatorConfig = {};
+if (process.env.CONFIG_FILE) {
+  try {
+    operatorConfig = require(process.env.CONFIG_FILE);
+  } catch (err) {
+    // Fatal, and deliberately before any logger exists — bunyan would need a
+    // level out of the file that just failed to load.
+    process.stderr.write('config: FATAL — the appconfig file ' +
+      process.env.CONFIG_FILE + ' could not be loaded: ' + err.message + '\n' +
+      'CONFIG_FILE names a JavaScript module, resolved against this package ' +
+      'root and then against the working directory (see common/config_file.js).\n');
+    process.exit(1);
+  }
+}
+
+const appconfig = union(defaults, operatorConfig);
 
 const log = bunyan.createLogger({ name: 'sts-config',
                                   level: appconfig.logLevel || 'info' });
@@ -118,19 +222,52 @@ const TYPES = {
 
   // An integer. Rejects the empty string rather than reading it as 0, because
   // "" is what an emptied form field sends and 0 is a port.
+  //
+  // A ROW MAY NARROW IT with `min`, `max` and `step`, and all three are
+  // OPTIONAL — a row that carries none of them behaves exactly as every int row
+  // did before they existed, which is what keeps the forty-odd existing ones
+  // untouched. They arrived for the four token-lifetime settings, where the
+  // bounds are part of what the setting MEANS rather than a validation nicety:
+  // a lifetime of nine seconds and a clock skew of a fortnight are both
+  // typeable, both accepted by "is it a whole number", and both produce a
+  // service whose tokens are wrong in a way that reads as a client bug. Refusing
+  // them BY NAME here is the only place the refusal can be made once for the
+  // console form, the management API and an environment variable read at
+  // startup.
+  //
+  // `step` is a MULTIPLE-OF rather than a slider increment: 30 means the value
+  // must be a whole number of thirty-second units. It is checked against `min`
+  // rather than against zero, so a row whose floor is not itself a multiple of
+  // the step still has a reachable floor.
   int: {
     parse: function (raw) {
       const n = parseInt(String(raw), 10);
       return Number.isFinite(n) ? n : 0;
     },
     text: function (v) { return String(v); },
-    check: function (raw) {
+    check: function (raw, setting) {
       const s = String(raw).trim();
       if (!s) {
         return 'must be a number';
       }
       if (!/^-?\d+$/.test(s)) {
         return 'must be a whole number, got "' + raw + '"';
+      }
+      const n = parseInt(s, 10);
+      const min = setting && setting.min;
+      const max = setting && setting.max;
+      const step = setting && setting.step;
+      if (typeof min === 'number' && n < min) {
+        return 'must be at least ' + min + ', got ' + n;
+      }
+      if (typeof max === 'number' && n > max) {
+        return 'must be at most ' + max + ', got ' + n;
+      }
+      if (typeof step === 'number' && step > 1 &&
+          (n - (typeof min === 'number' ? min : 0)) % step !== 0) {
+        return 'must be a multiple of ' + step +
+               (typeof min === 'number' && min % step !== 0 ? ' above ' + min : '') +
+               ', got ' + n;
       }
       return null;
     }
@@ -456,8 +593,12 @@ const SETTINGS = [
                  'from issuance, so a client that refreshes every hour keeps ' +
                  'its grant indefinitely and one that stops is cut off a day ' +
                  'later. 0 turns it off while leaving the rest of the mode ' +
-                 'alone. The absolute thirty-day expiry on the token itself ' +
-                 'is unaffected and still applies in both modes.' },
+                 'alone. The ABSOLUTE expiry on the token itself is a ' +
+                 'different setting (oauth2.refreshTokenTtlS, twenty-four ' +
+                 'hours by default) and is unaffected by this one and applies ' +
+                 'in both modes: this is a wall measured from the last ' +
+                 'redemption, that one is a wall measured from issuance, and ' +
+                 'a chain stops working at whichever comes first.' },
 
   // Also section 2.2.2, and its own setting because "expire after inactivity"
   // and "revoke after a security event" are different policies a deployment
@@ -490,6 +631,115 @@ const SETTINGS = [
                  'is also how long past its expiry an assertion\'s jti is ' +
                  'remembered, so the replay cache and the expiry check cover ' +
                  'exactly the same span with no gap between them.' },
+
+  // ---------------------------------------------------------------------
+  // HOW LONG WHAT THIS SERVICE ISSUES IS GOOD FOR, and how far out a clock may
+  // be before it stops believing its own tokens.
+  //
+  // Four rows, added 2026-08-24, replacing three module-level `const`s in
+  // `oauth-oidc/oauth2.js` (`ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL` and the
+  // ID Token's reuse of the first). Everything about the shape of them is the
+  // runtime rule at the top of this file read literally: a lifetime captured
+  // in a `const` at require time is the one thing /admin/config cannot change,
+  // and this is the setting a person most wants to change without restarting —
+  // "make it expire in a minute so I can watch my client refresh" is the whole
+  // reason somebody points a client at a mock.
+  //
+  // WHY THREE ROWS RATHER THAN ONE. The access token and the ID Token shared a
+  // constant and are not the same thing: the access token is presented to a
+  // resource server and the ID Token is consumed once, at sign-in, by the
+  // client — and a client that treats the ID Token as a session is exactly the
+  // mistake a mock should be able to produce on demand. The refresh token is
+  // the third because it is the long-lived half of the grant, and the
+  // interesting states are the ones where the three DISAGREE.
+  //
+  // THE GRANULARITY IS THIRTY SECONDS (`step: 30`), which is a decision about
+  // what these settings are FOR rather than a formatting rule. They exist to be
+  // set to something short and watched; below half a minute a token expires
+  // between the response being written and the client reading it, and the
+  // client author debugs their own code for an hour. `min` is one step for the
+  // same reason. `max` is thirty days on all three lifetimes because that is
+  // what `REFRESH_TOKEN_TTL` was before these rows existed — a ceiling that
+  // made the OLD default unreachable would be a setting that cannot be put
+  // back the way it was.
+  //
+  // THE REFRESH DEFAULT IS A BEHAVIOUR CHANGE AND IS THE ONE THING HERE TO
+  // KNOW BEFORE UPGRADING: it was thirty days and is now twenty-four hours. A
+  // client holding a refresh token across two days of a test run will be
+  // refused where it was not, and the refusal is an ordinary `invalid_grant`
+  // from the refresh grant. Set `oauth2.refreshTokenTtlS` to 2592000 to have
+  // exactly the old behaviour back. It is stated in the description below as
+  // well as here, because the person who meets it is reading the console
+  // rather than this file.
+  { key: 'oauth2.accessTokenTtlS', group: 'OAuth 2.0 / OIDC',
+    label: 'Access token lifetime (s)',
+    env: 'STS_OAUTH2_ACCESS_TOKEN_TTL_S', type: 'int', dflt: 3600,
+    min: 30, max: 2592000, step: 30, runtime: true,
+    description: 'How long an access token is good for: its `exp` is this many ' +
+                 'seconds after it was signed, and it is the `expires_in` of ' +
+                 'every token response that carries one. One hour by default. ' +
+                 'Read PER TOKEN, so a change here applies to the next one ' +
+                 'issued and to nothing already in a client\'s hands — a token ' +
+                 'is a signed statement about its own expiry and cannot be ' +
+                 'shortened after the fact. Must be a whole number of ' +
+                 'THIRTY-SECOND units: these settings exist to be set short and ' +
+                 'watched, and a lifetime under half a minute expires between ' +
+                 'the response being written and the client reading it. ' +
+                 'Set it low to exercise a client\'s refresh path on demand; ' +
+                 'the tokens page reports what has already expired.' },
+
+  { key: 'oauth2.idTokenTtlS', group: 'OAuth 2.0 / OIDC',
+    label: 'ID Token lifetime (s)',
+    env: 'STS_OAUTH2_ID_TOKEN_TTL_S', type: 'int', dflt: 3600,
+    min: 30, max: 2592000, step: 30, runtime: true,
+    description: 'How long an ID Token is good for. One hour by default, and ' +
+                 'SEPARATE from the access token\'s even though the two shared ' +
+                 'one constant until 2026-08-24 — an ID Token is consumed once, ' +
+                 'at sign-in, by the client itself, and a client that keeps ' +
+                 'presenting it as though it were a session is the defect this ' +
+                 'row makes reproducible: give the two different lifetimes and ' +
+                 'watch which one the client actually notices. Thirty-second ' +
+                 'granularity, like the other two.' },
+
+  { key: 'oauth2.refreshTokenTtlS', group: 'OAuth 2.0 / OIDC',
+    label: 'Refresh token lifetime (s)',
+    env: 'STS_OAUTH2_REFRESH_TOKEN_TTL_S', type: 'int', dflt: 86400,
+    min: 30, max: 2592000, step: 30, runtime: true,
+    description: 'The ABSOLUTE lifetime of a refresh token — the `exp` on the ' +
+                 'token itself, enforced in both modes by the refresh grant. ' +
+                 'TWENTY-FOUR HOURS by default, and that IS A CHANGE: it was ' +
+                 'thirty days, so a client that held one across a long test run ' +
+                 'now meets an invalid_grant where it did not. Set this to ' +
+                 '2592000 for exactly the old behaviour. It is not the same ' +
+                 'setting as oauth2.refreshIdleSeconds, which is RFC 9700 ' +
+                 'mode\'s INACTIVITY timeout on a refresh CHAIN and is measured ' +
+                 'from the last redemption rather than from issuance: this one ' +
+                 'is a wall a chain cannot be refreshed past however busy it is.' },
+
+  // The fourth is not a lifetime, and it is deliberately NOT folded into
+  // `oauth2.clientAssertionSkewS` beside it: that one is how far out a CLIENT'S
+  // assertion may be (RFC 7523, a credential somebody else's clock stamped),
+  // and this is how far out THIS SERVICE'S OWN clock may be when it reads back
+  // a token it signed. They move for different reasons — one is about the
+  // client's machine and one is about this one — and a deployment that wants a
+  // strict assertion check and a forgiving expiry reading, or the reverse, has
+  // to be able to say so.
+  { key: 'oauth2.clockSkewS', group: 'OAuth 2.0 / OIDC',
+    label: 'Token clock skew (s)',
+    env: 'STS_OAUTH2_CLOCK_SKEW_S', type: 'int', dflt: 30,
+    min: 0, max: 300, step: 30, runtime: true,
+    description: 'The allowance applied to `exp` and `nbf` EVERYWHERE this ' +
+                 'service reads back a token it issued: introspection, ' +
+                 'UserInfo, the refresh grant, token exchange, the DPoP-bound ' +
+                 'access token check, and the expiry every console screen ' +
+                 'reports. Thirty seconds by default, capped at 300 — five ' +
+                 'minutes is the allowance Kerberos uses (see krb5.clockSkew) ' +
+                 'and a window wider than that stops being a tolerance and ' +
+                 'starts being a lifetime extension nobody asked for. 0 means ' +
+                 'no allowance at all, which is the strict reading and is ' +
+                 'useful for showing a client exactly when a token dies. ' +
+                 'It never changes what is PUT in a token — only what this ' +
+                 'service believes when it reads one back.' },
 
   { key: 'oauth2.redirectUris', group: 'OAuth 2.0 / OIDC',
     label: 'Registered redirect URIs',
@@ -609,6 +859,35 @@ const SETTINGS = [
                  'caps the whole tree, so a runaway client_id generator ' +
                  'cannot fill the directory and stop people being created.' },
 
+  // Two applications nothing external ever names, because they are surfaces of
+  // THIS process: the console and this API. Every other entry in the registry
+  // arrives because a caller presented an identifier, so without this the one
+  // question the registry exists to answer — what applications have you seen? —
+  // came back with everything except the two things the reader was standing in.
+  { key: 'applications.seedInternal', group: 'Applications',
+    label: 'Seed the console and this API as applications',
+    env: 'STS_APPLICATIONS_SEED_INTERNAL', type: 'bool', dflt: true,
+    runtime: false,
+    restartReason: 'the two entries are written once, as ldap_server.js is ' +
+                   'required and fills the registry\'s directory slot',
+    description: 'Create an application entry for the ADMIN CONSOLE at ' +
+                 '/admin and one for the MANAGEMENT API at /admin-api when ' +
+                 'this service starts, under ou=applications with everything ' +
+                 'else. They are seeded as FULL RFC 7591 registrations ' +
+                 'rather than as labels: the console as a confidential ' +
+                 'OpenID Connect relying party on the authorization code ' +
+                 'grant, this API as a confidential OAuth client on ' +
+                 'client_credentials, each with a secret minted at startup — ' +
+                 'so they are clients that can be exercised rather than rows ' +
+                 'on a page. Nothing serves /admin/callback: the console\'s ' +
+                 'gate is a sign-on session and two directory groups, so ' +
+                 'that redirect URI is what it WOULD use, and it is on the ' +
+                 'entry rather than in a comment because this container is ' +
+                 'the registry — an ldapmodify of it is a configuration ' +
+                 'change. ON by default. Seeded only where the identifier is ' +
+                 'free, so an operator who deleted one has it stay deleted ' +
+                 'until the next restart.' },
+
   // --- SAML ----------------------------------------------------------------
   { key: 'saml.issuer', group: 'SAML', label: 'Assertion issuer',
     env: 'STS_SAML_ISSUER', legacyEnv: 'STS_ISSUER', type: 'string',
@@ -718,6 +997,54 @@ const SETTINGS = [
                  'The negative worth having: a wallet cannot prove it ' +
                  'encrypts by encrypting when the issuer accepts plaintext ' +
                  'too.' },
+
+  // ---------------------------------------------------------------------
+  // THE TWO DID FLAGS, which were the last two environment variables in this
+  // service with no row here.
+  //
+  // They were read in `oid4vc/vc_did.js` as `didFlag('OID4VCI_SD_JWT_ISSUER_DID')`
+  // — a module-level const, compared against the literal string 'true' — which
+  // is the shape every setting in this table used to have. Two consequences,
+  // and the second is why they moved rather than being left alone: they were
+  // undocumentable as appconfig entries because they were not appconfig
+  // entries, and `OID4VCI_LDP_VC_ISSUER_DID=1` did nothing at all while
+  // `=true` worked, because that comparison was not the `bool` type's.
+  //
+  // Restart-only, and honestly so: `vc_did.js` reads them once at require time
+  // into the two constants its metadata is built from, so a runtime change
+  // would leave the credential and the metadata describing it disagreeing
+  // about how the issuer is named — which is the "reads as having worked"
+  // failure the header warns about.
+  { key: 'oid4vci.sdJwtIssuerDid', group: 'OID4VCI',
+    label: 'Name the SD-JWT VC issuer by DID',
+    env: 'OID4VCI_SD_JWT_ISSUER_DID', type: 'bool', dflt: false,
+    runtime: false,
+    restartReason: 'vc_did.js reads it once at require time, and the issuer ' +
+                   'metadata is built from what it read',
+    description: 'Switch the PLAIN dc+sd-jwt credential configuration over to ' +
+                 'naming its issuer by did:web instead of by https URL — what ' +
+                 'a deployment that had gone to DIDs throughout would look ' +
+                 'like. OFF, because draft-ietf-oauth-sd-jwt-vc defines no ' +
+                 'DID-based issuer signature mechanism, so this is an ' +
+                 'extension and the spec\'s own route ' +
+                 '(/.well-known/jwt-vc-issuer) is what the plain ' +
+                 'configuration must go on exercising. The ' +
+                 'IdentityCredentialDid configuration always names the issuer ' +
+                 'by DID whatever this is, so both routes can be compared in ' +
+                 'one issuer.' },
+
+  { key: 'oid4vci.ldpVcIssuerDid', group: 'OID4VCI',
+    label: 'Name the ldp_vc issuer by DID',
+    env: 'OID4VCI_LDP_VC_ISSUER_DID', type: 'bool', dflt: false,
+    runtime: false,
+    restartReason: 'vc_did.js reads it once at require time, and the issuer ' +
+                   'metadata is built from what it read',
+    description: 'The same for the PLAIN ldp_vc configuration. VC Data Model ' +
+                 '2.0 and Data Integrity are DID-native and naming the issuer ' +
+                 'by DID is ordinary there, so this one is off for a ' +
+                 'narrower reason: ldp_vc\'s verificationMethod is an https ' +
+                 'URL that existing tests dereference, and switching it to a ' +
+                 'DID URL breaks them silently.' },
 
   // --- OID4VP --------------------------------------------------------------
   { key: 'oid4vp.clientId', group: 'OID4VP', label: 'Verifier client ID',
@@ -1623,13 +1950,19 @@ const overrides = {};
 // Reading.
 // ---------------------------------------------------------------------------
 
-// A dot path into the appconfig module. Returns undefined for any missing hop,
+// A dot path into an appconfig module. Returns undefined for any missing hop,
 // so a config file that omits a whole section — every file shipped before this
-// table existed omitted all of them — falls through to the built-in defaults
-// rather than throwing on `appconfig.krb5.realm` where `krb5` is not there.
-function fromAppconfig(path) {
-  let node = appconfig;
-  const parts = String(path).split('.');
+// table existed omitted all of them — falls through to the next layer rather
+// than throwing on `krb5.realm` where `krb5` is not there.
+//
+// It takes the ROOT as an argument rather than closing over one, because the
+// two appconfig files are read separately and the difference between them is
+// reportable: a value from the operator's file and the same value from
+// env/defaults.js are indistinguishable once unioned, and "where did this come
+// from?" is the question /admin/config exists to answer.
+function dig(root, dotted) {
+  let node = root;
+  const parts = String(dotted).split('.');
   for (let i = 0; i < parts.length; i++) {
     if (node === null || typeof node !== 'object') {
       return undefined;
@@ -1638,6 +1971,14 @@ function fromAppconfig(path) {
   }
   return node;
 }
+
+// NOTE that nothing digs the UNION. `appconfig` exists for the bootstrap logger
+// at the top of this file, which needs a log level before the table it would
+// otherwise ask; every other read goes through resolve(), which digs the two
+// files in order precisely so it can report WHICH. A dig-the-union helper was
+// here and was removed rather than left: it returned the same value resolve()
+// does and would have been the obvious thing for a later caller to reach for,
+// which is how a surface loses the ability to say where a value came from.
 
 function settingFor(key) {
   const setting = byKey[key];
@@ -1671,10 +2012,22 @@ function resolve(key) {
   if (setting.legacyEnv && process.env[setting.legacyEnv] !== undefined) {
     return { raw: process.env[setting.legacyEnv], source: 'env-legacy' };
   }
-  const fromFile = fromAppconfig(setting.path || setting.key);
+  // The appconfig layer, read as its two files rather than as the union, so
+  // that the answer says WHICH. `appconfig` is the union of exactly these two
+  // in exactly this order, so this is the same value either way.
+  const dotted = setting.path || setting.key;
+  const fromFile = dig(operatorConfig, dotted);
   if (fromFile !== undefined) {
     return { raw: fromFile, source: 'appconfig' };
   }
+  const fromDefaultsFile = dig(defaults, dotted);
+  if (fromDefaultsFile !== undefined) {
+    return { raw: fromDefaultsFile, source: 'defaults' };
+  }
+  // NOWHERE. For a `derived` setting this is the answer — its default is a
+  // function of a neighbour and env/defaults.js deliberately carries no row for
+  // it. For any other, requireComplete() has already stopped the process, so
+  // this line is only reached in a module loaded on its own by a test.
   return { raw: defaultOf(setting), source: 'default' };
 }
 
@@ -1826,6 +2179,13 @@ function describe(setting) {
     description: setting.description,
     type: setting.type,
     enumValues: setting.enumValues || undefined,
+    // The int bounds, where a row narrows them. `undefined` is dropped by
+    // JSON.stringify, so a row that carries none of them describes exactly as
+    // it did before they existed — which is what keeps the management API's
+    // Config schema and its example true of every other row.
+    min: typeof setting.min === 'number' ? setting.min : undefined,
+    max: typeof setting.max === 'number' ? setting.max : undefined,
+    step: typeof setting.step === 'number' ? setting.step : undefined,
     value: value(setting.key),
     text: text(setting.key),
     source: state.source,
@@ -1866,6 +2226,11 @@ function snapshot() {
   const overridden = Object.keys(overrides);
   const out = {
     configFile: process.env.CONFIG_FILE || null,
+    // The base every appconfig file is unioned on top of. Reported beside the
+    // operator's file rather than left implicit, because a value whose source
+    // is `defaults` names no file otherwise and "where did this come from?" is
+    // the question this whole shape exists to answer.
+    defaultsFile: DEFAULTS_FILE,
     settingCount: SETTINGS.length,
     editableCount: SETTINGS.filter(function (s) { return s.runtime; }).length,
     overridden: overridden,
@@ -1878,37 +2243,46 @@ function snapshot() {
 
 
 // ---------------------------------------------------------------------------
-// Does the appconfig file still match this table?
+// Does the OPERATOR'S appconfig file still match this table?
 //
-// The three files shipped here were GENERATED from it, so they agree the day
+// The three files shipped in env/ were GENERATED from it, so they agree the day
 // they are written. Nothing keeps them agreeing: a setting added below and not
-// added to the files is invisible (it falls through to its built-in default,
-// which is correct but leaves the file claiming to be the whole surface when it
-// is not), and a key left in a file after the setting is removed is read by
-// nobody and says otherwise.
+// added to the files is no longer LISTED there (it resolves through
+// env/defaults.js, which is correct but leaves the file claiming to be the
+// whole surface when it is not), and a key left in a file after the setting is
+// removed is read by nobody and says otherwise.
 //
 // Neither is fatal, so neither throws — a stale config file must not stop a
-// service from starting. Both are logged at startup, which is where somebody
-// who has just changed one of them is looking.
+// service from starting. What IS fatal is a setting with no value ANYWHERE, and
+// that is requireComplete() below rather than this: the two questions look
+// alike and are not the same one. "Your file no longer lists everything" is
+// about the file you are editing. "Nothing anywhere has a value for this" is
+// about the service being unable to say what it is configured with.
+//
+// IT READS `operatorConfig`, NOT THE UNION, and that is the whole reason the
+// two are kept apart at the top of this file. The union can never be missing a
+// key — env/defaults.js carries every non-derived row — so an audit against it
+// would answer "nothing is missing" every time and the warning would be dead
+// code that looked alive.
 // ---------------------------------------------------------------------------
 function auditAppconfig() {
   log.debug("Entering auditAppconfig().");
-  // `derived` settings are left OUT of the shipped files on purpose: their
-  // default is computed from another setting, and a literal in the file would
-  // freeze the derivation at whatever it evaluated to the day it was written.
-  // Counting them as drift would mean warning on every start about the one
-  // thing that is correct.
+  // `derived` settings are left OUT of every appconfig file on purpose,
+  // env/defaults.js included: their default is computed from another setting,
+  // and a literal in a file would freeze the derivation at whatever it
+  // evaluated to the day it was written. Counting them as drift would mean
+  // warning on every start about the one thing that is correct.
   const missing = SETTINGS.filter(function (setting) {
     return !setting.derived &&
-           fromAppconfig(setting.path || setting.key) === undefined;
+           dig(operatorConfig, setting.path || setting.key) === undefined;
   }).map(function (setting) { return setting.key; });
 
   // Every dot path the file actually carries, so a key the table does not know
   // can be named. Only the two levels this table uses are walked; a deeper
   // object under a known group is somebody's own note and is left alone.
   const present = [];
-  Object.keys(appconfig || {}).forEach(function (top) {
-    const node = appconfig[top];
+  Object.keys(operatorConfig || {}).forEach(function (top) {
+    const node = operatorConfig[top];
     if (node && typeof node === 'object' && !Array.isArray(node)) {
       Object.keys(node).forEach(function (leaf) { present.push(top + '.' + leaf); });
       return;
@@ -1924,8 +2298,65 @@ function auditAppconfig() {
   return { missing: missing, unknown: unknown };
 }
 
+// ---------------------------------------------------------------------------
+// EVERY SETTING HAS A VALUE, OR THIS SERVICE DOES NOT START.
+//
+// The rule, stated once: a setting's value must come from the appconfig layer
+// (the operator's file, or env/defaults.js under it) or from an environment
+// variable. There is no sixth source, and a `dflt` in the table above is
+// DOCUMENTATION of what env/defaults.js was generated from rather than a
+// fallback the service quietly leans on.
+//
+// WHAT THIS CAN ACTUALLY CATCH, since it is not what it looks like. The union
+// means an operator's file cannot cause this — a file carrying nothing at all
+// still resolves every key through env/defaults.js. What it catches is a row
+// added to the table with no row in env/defaults.js: a setting somebody added
+// and did not finish adding, which before this check would have shipped as a
+// value nobody could see in any file, on any page, and would have been
+// discovered as a default that could not be changed by editing the file that
+// claims to list it. That is a MAINTAINER'S mistake caught at the first start
+// after it is made, which is where it is cheapest.
+//
+// It refuses BY NAME and says both places the value could go, because a
+// service that exits saying "configuration error" has told nobody anything.
+//
+// process.exit(1) rather than a throw. A throw out of a require lands as a
+// stack trace whose top frame is node's module loader, and the reason ends up
+// three screens above where anybody looks; the exit code is the same either
+// way, and this is a message meant to be read.
+// ---------------------------------------------------------------------------
+function requireComplete() {
+  log.debug("Entering requireComplete().");
+  const orphans = SETTINGS.filter(function (setting) {
+    return !setting.derived && resolve(setting.key).source === 'default';
+  });
+  if (!orphans.length) {
+    log.debug("Leaving requireComplete(). Every setting has a value.");
+    return;
+  }
+  const width = orphans.reduce(function (w, s) {
+    return Math.max(w, s.key.length);
+  }, 0);
+  process.stderr.write(
+    '\nconfig: FATAL — ' + orphans.length + ' setting(s) have no value in the ' +
+    'appconfig layer and no environment variable:\n\n' +
+    orphans.map(function (setting) {
+      return '  ' + setting.key + ' '.repeat(width - setting.key.length + 2) +
+             setting.env;
+    }).join('\n') +
+    '\n\nEach must be set in ' + (process.env.CONFIG_FILE || 'the appconfig file ' +
+    'CONFIG_FILE names') + ', in ' + DEFAULTS_FILE + ' (the default appconfig ' +
+    'file every other one is unioned on top of), or as the environment ' +
+    'variable beside it.\n\nIf one of these was just added to SETTINGS in ' +
+    'common/config.js, env/defaults.js is generated from that table and has ' +
+    'not been regenerated.\n\n');
+  log.debug("Leaving requireComplete(). Refusing to start.");
+  process.exit(1);
+}
+
 log.info('config: ' + SETTINGS.length + ' settings from ' +
-         (process.env.CONFIG_FILE || '(no CONFIG_FILE)') + ', ' +
+         (process.env.CONFIG_FILE || '(no CONFIG_FILE)') + ' over ' +
+         DEFAULTS_FILE + ', ' +
          SETTINGS.filter(function (s) { return s.runtime; }).length +
          ' of them changeable while running. /admin/config shows them all.');
 
@@ -1933,39 +2364,77 @@ log.info('config: ' + SETTINGS.length + ' settings from ' +
 // from is built.
 registerLogger(log);
 
+// BEFORE the drift warnings, because there is no point telling somebody their
+// file is one key short of the table when the service is about to refuse to
+// start over a different key entirely.
+requireComplete();
+
 const audit = auditAppconfig();
+
+// IS THIS FILE EVEN THIS SERVICE'S? The test is whether it carries any key of
+// ours that is DISTINCTIVE, and `logLevel` is the one that is not: every
+// appconfig file in this ecosystem has one — the parent project's api, its
+// client and its test suites included — because it is the only setting that
+// predates this table. Counting it made the branch below almost unreachable for
+// the very case it was written for, since the parent's in-process Kerberos jobs
+// point CONFIG_FILE at a test config that sets exactly that one key and nothing
+// else. The result was a hundred-and-fourteen-name warning on every such run,
+// which is the shape of message people learn to scroll past.
+const DISTINCTIVE = SETTINGS.filter(function (s) {
+  return !s.derived && (s.path || s.key) !== 'logLevel';
+});
 const settable = SETTINGS.filter(function (s) { return !s.derived; }).length;
-if (audit.missing.length === settable) {
+const distinctiveMissing = DISTINCTIVE.filter(function (s) {
+  return audit.missing.indexOf(s.key) >= 0;
+}).length;
+
+// A name list long enough to scroll is a name list nobody reads. Twelve and a
+// count, in the table's own order, so the first few are enough to recognise
+// which section of the file went stale.
+function nameList(keys) {
+  const shown = keys.slice(0, 12).join(', ');
+  return keys.length > 12
+    ? shown + ', and ' + (keys.length - 12) + ' more'
+    : shown;
+}
+
+if (distinctiveMissing === DISTINCTIVE.length) {
   // NOT drift, and not worth a warning: a config file carrying none of these
   // keys is somebody else's file, which is the ordinary case for the parent
   // project's in-process tests — they load this service's KDC modules with
-  // CONFIG_FILE pointing at the TEST suite's config. Every value is a built-in
-  // default, which is what those jobs had before this table existed, and the
-  // KRB5_* variables they set still win over it.
+  // CONFIG_FILE pointing at the TEST suite's config. Every value then comes
+  // from env/defaults.js or from the environment, which is what those jobs had
+  // before this table existed, and the KRB5_* variables they set still win.
+  //
+  // THIS IS THE CASE THE UNION EXISTS FOR. Before env/defaults.js, such a file
+  // meant every value fell through to a built-in default; with the startup
+  // refusal above and no base file, it would instead have meant those jobs
+  // could not load these modules at all.
   log.debug('config: ' + (process.env.CONFIG_FILE || 'the appconfig file') +
-            ' carries none of this service\'s settings, so every value is a ' +
-            'built-in default or comes from the environment.');
+            ' carries none of this service\'s settings, so every value comes ' +
+            'from ' + DEFAULTS_FILE + ' or from the environment.');
 } else if (audit.missing.length) {
   log.warn('config: ' + audit.missing.length + ' setting(s) are not in ' +
            (process.env.CONFIG_FILE || 'the appconfig file') + ' and are ' +
-           'falling back to their built-in defaults: ' +
-           audit.missing.join(', ') + '. That is not an error — the value is ' +
-           'the same either way — but a file that is meant to list the whole ' +
-           'surface no longer does.');
+           'coming from ' + DEFAULTS_FILE + ' instead: ' +
+           nameList(audit.missing) + '. That is not an error — the union is ' +
+           'what that file is for, and the value is the same either way — but ' +
+           'a file that is meant to list the whole surface no longer does.');
 }
 // Guarded the same way, and for the same reason: every key in somebody
 // else's config file is one this service does not know, and saying so
 // forty-five times would bury the case this warning is for — a misspelt
 // key in a file that IS this service's.
-if (audit.unknown.length && audit.missing.length !== settable) {
+if (audit.unknown.length && distinctiveMissing !== DISTINCTIVE.length) {
   log.warn('config: ' + (process.env.CONFIG_FILE || 'the appconfig file') +
            ' carries ' + audit.unknown.length + ' key(s) this service does ' +
-           'not know and is not reading: ' + audit.unknown.join(', ') +
+           'not know and is not reading: ' + nameList(audit.unknown) +
            '. A misspelt key looks exactly like this.');
 }
 
 module.exports = {
   SETTINGS: SETTINGS,
+  DEFAULTS_FILE: DEFAULTS_FILE,
   value: value,
   text: text,
   sourceOf: sourceOf,

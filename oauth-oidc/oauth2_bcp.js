@@ -509,7 +509,9 @@ const REQUIREMENTS = [
           'unknown one. Redeeming a refresh token REVOKES it, through the same set ' +
           '/oauth2/revoke writes to, so the retired token also reports inactive at ' +
           '/oauth2/introspect. Without the mode a refresh token is reusable until it expires ' +
-          'thirty days later, which is the state this requirement exists about.' },
+          'when it expires — twenty-four hours later on the default ' +
+          'oauth2.refreshTokenTtlS, and for as long as that setting says — ' +
+          'which is the state this requirement exists about.' },
 
   { id: 'refresh-replay-family', section: '2.2.2, 4.14.2', level: 'SHOULD',
     appliesTo: 'authorization server', enforced: 'yes',
@@ -1747,8 +1749,9 @@ function checkClientAuthentication(opts) {
 // substance is.
 //
 // A refresh token here is a signed JWT with a `jti`, and until this mode
-// existed it was reusable for the whole thirty days of its life: redeeming one
-// minted a new one and left the old one working. Section 2.2.2 requires public
+// existed it was reusable for the whole of its life — twenty-four hours on the
+// default `oauth2.refreshTokenTtlS`, and thirty days before that setting
+// existed: redeeming one minted a new one and left the old one working. Section 2.2.2 requires public
 // clients' refresh tokens to be sender-constrained OR rotated, and this server
 // cannot authenticate a client it did not register — so ROTATION is applied to
 // every client, which is the safe reading of an unknown one.
@@ -1782,7 +1785,25 @@ function checkClientAuthentication(opts) {
 // it is past a refresh token's own lifetime, and the store is capped. A
 // forgotten family is a check not made, never a false refusal.
 // ---------------------------------------------------------------------------
-const REFRESH_TTL_MS = 30 * 24 * 3600 * 1000;   // matches REFRESH_TOKEN_TTL in oauth2.js
+// How long a family is remembered for, which must be at least as long as the
+// tokens in it live. It was `30 * 24 * 3600 * 1000` with a comment saying it
+// matched `REFRESH_TOKEN_TTL` in oauth2.js — and that constant is now the
+// runtime setting `oauth2.refreshTokenTtlS`, so a fixed number here would have
+// been a comment claiming a match that nothing kept. Read per issuance, like
+// everything else that reads a setting.
+//
+// A FLOOR OF ONE HOUR, and it is not a tolerance being generous. The window is
+// evaluated when a refresh token is MINTED, so lowering the setting cannot
+// shorten a window already granted, but raising it after a mint could leave a
+// family forgotten while its tokens are still presentable — and a forgotten
+// family is a check not made rather than a false refusal (see the header
+// above), which is the safe direction but is also the check silently not
+// happening. An hour of slack costs one Map entry and keeps the ordinary case
+// — somebody dropping the lifetime to a minute to watch a rotation — from
+// discarding the very bookkeeping they are trying to watch.
+function refreshFamilyWindowMs() {
+  return Math.max(config.value('oauth2.refreshTokenTtlS') * 1000, 3600 * 1000);
+}
 const MAX_REFRESH_TOKENS = 2000;
 const refreshTokens = new Map();   // jti -> { family, clientId, rotated, forget }
 const refreshFamilies = new Map(); // family -> { members: [jti], clientId, forget }
@@ -1825,7 +1846,7 @@ function noteRefreshIssued(jti, parentJti, clientId) {
   // The root's own jti names the family. It needs no randomness of its own and
   // it makes a family identifiable in a log line without a second lookup.
   const familyId = (parent && parent.family) || String(jti);
-  const forget = Date.now() + REFRESH_TTL_MS;
+  const forget = Date.now() + refreshFamilyWindowMs();
   refreshTokens.set(String(jti), { family: familyId, clientId: String(clientId || ''),
                                    rotated: false, forget: forget });
   const family = refreshFamilies.get(familyId) ||

@@ -41,10 +41,25 @@ about that line had to change.
      input, and every GET calls the same JSON view the page's `?format=json`
      answers. Those views are now functions in `admin.js` (`consoleJson`,
      `metricsJson`, `tokensView`, `usersView`, `groupsView`, `claimsJson`,
-     `vcJson`, `vpConfigJson`) for exactly this reason: they used to be built
+     `samlAttributesJson`, `vcJson`, `vpConfigJson`) for exactly this reason:
+     they used to be built
      inline in the route handlers, which was fine while there was one caller. So
      adding an action to a console switch is most of adding it here, and what
      remains is one row of `admin_api.js`'s table.
+
+     **TWO RESOURCES CAN SHARE ONE ACTION FUNCTION, and the claim sets are the
+     case.** `/admin-api/claims/:action` and `/admin-api/saml-attributes/:action`
+     both call `claimsAction`, differing only in the third argument — the set ids
+     that door carries, `stats.JWT_CLAIM_SET_IDS` or `stats.SAML_CLAIM_SET_IDS`,
+     which is exactly what the two console pages pass. That is what makes the two
+     resources a mirror of the two PAGES rather than two models of one store. It
+     costs fourteen operations for seven behaviours, so the seven are built once
+     by `claimSetActions(family)` and the family varies the set enum, the noun and
+     the reserved-names rule: fourteen hand-written descriptions would be seven
+     pairs, and the half of each pair nobody edited is the half a caller believes.
+     The parity check that reads the refusal sentence off each resource sees the
+     same seven action names from both, which is the property that makes them
+     one behaviour rather than two.
    * **The OpenAPI document is GENERATED from that table** (`admin_api_spec.js`),
      so an operation cannot exist and be undocumented, nor be documented and not
      exist. Do not write a spec file beside the code — that is the thing that is
@@ -64,6 +79,36 @@ about that line had to change.
    on a mock, and the alternative — a second set of builders for the same data —
    is the thing this whole arrangement exists to prevent.
 
+
+### The narrow door: `/admin-api/token-lifetimes`
+
+Two operations that set four settings `POST /config/set-many` can already set,
+and they are worth reading as a worked example of what rule 7 does and does not
+ask for.
+
+**Rule 7 as written is satisfied by their existing at all**:
+`/admin/token-lifetimes` grew a form, so the form's two actions got two
+operations, in the same change. What is worth arguing is that this is not a
+second STORE and therefore not the mistake rule 5 exists for — the handler calls
+`admin.tokenLifetimesAction`, which writes through `config.setOverride()`, the
+same function against the same override map `POST /config/set` uses. Two doors
+onto one thing, the way `/admin/rbac`, `POST /admin-api/rbac/grant`, an
+`ldapmodify` and a SCIM PATCH are four doors onto one membership.
+
+**What the narrow door buys a CALLER is a refusal the wide one cannot give.**
+`set-many` IGNORES a key it does not know, and that is right for what it is —
+a form posts fields the resource never declared, so an unknown name is ordinary
+there. It is wrong for a caller that means to set a lifetime: a misspelt
+`oauth2.accessTokenTtlsS` succeeds, changes nothing, and reports success. This
+operation refuses anything outside its four BY NAME. **The general door must not
+be narrowed to match** — that would break every form posting a section, which is
+the case it exists for.
+
+The test for a third resource of this shape is therefore not "is this setting
+important" but **"does a caller of the general operation get a wrong answer
+here"**. If the answer is no, the setting belongs on `/config` and nowhere else,
+which is the argument `/admin/scim` and `groups.claim` both already make for
+having no operation of their own.
 
 ---
 

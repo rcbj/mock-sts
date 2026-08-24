@@ -390,6 +390,83 @@ is the point — a caller must never be handed a signature about to expire. The
 map is capped because the key includes a base URL that comes off the Host
 header.
 
+## The three lifetimes and the skew are SETTINGS now, and one default changed
+
+`ACCESS_TOKEN_TTL` (an hour), `REFRESH_TOKEN_TTL` (thirty days) and the ID
+Token's reuse of the first were module-level `const`s in `oauth2.js` until
+2026-08-24. They are four `config.js` rows read through four one-line functions
+— `accessTokenTtl()`, `idTokenTtl()`, `refreshTokenTtl()`, `tokenClockSkew()` —
+and `/admin/token-lifetimes` is the console page over them. Five things about
+that, and the first is the one to read before upgrading anything that points at
+this service.
+
+* **THE REFRESH DEFAULT IS TWENTY-FOUR HOURS AND WAS THIRTY DAYS.** A client
+  holding a refresh token across a long test run now meets an ordinary
+  `invalid_grant` where it did not, and `oauth2.refreshTokenTtlS: 2592000` is
+  exactly the old behaviour. Every sentence in this repository that asserted
+  "thirty days" about a refresh token was CHANGED rather than left to be
+  discovered — `oauth2_bcp.js`'s requirement table and its section 2.2.2 header,
+  `oauth2.js`'s rotation comment, `config.js`'s `refreshIdleSeconds` row and
+  README.md. A default that moves while five documents still name the old number
+  is worse than either number.
+* **THE ACCESS TOKEN AND THE ID TOKEN NO LONGER SHARE A NUMBER.** They shared a
+  constant because an hour suited both, which is not the same as their being one
+  setting: an ID Token is consumed once at sign-in by the client and an access
+  token is presented to a resource server, and a client that treats the ID Token
+  as a session is a defect this mock should be able to produce on demand. Give
+  the two different lifetimes and watch which one the client notices.
+* **A `const` WOULD HAVE BEEN THE BUG.** This is `common/CLAUDE.md`'s rule read
+  literally — a runtime setting must be READ WHERE IT IS USED — and these are
+  the settings where it bites hardest, because "make it a minute so I can watch
+  my client refresh" is why somebody points a client at a mock at all. A value
+  captured at require time is the one thing `/admin/config` cannot change, and
+  it fails in the direction that looks like the console is broken.
+* **THE GRANULARITY IS THIRTY SECONDS AND THE FLOOR IS ONE STEP**, declared as
+  `min`/`max`/`step` on the row rather than checked at a call site — see
+  `common/CLAUDE.md`, since the `int` type grew those for these four. It is a
+  decision about what the settings are FOR: below half a minute a token expires
+  between the response being written and the client reading it, and the client
+  author debugs their own code for an hour. `max` is thirty days on all three
+  because a ceiling that made the OLD default unreachable would be a setting
+  that cannot be put back the way it was.
+* **`oauth2_bcp.js`'s FAMILY WINDOW FOLLOWS THE SETTING.** `REFRESH_TTL_MS` was
+  a fixed thirty days with a comment saying it matched `REFRESH_TOKEN_TTL`; it
+  is `refreshFamilyWindowMs()` now, because a fixed number would have been a
+  comment claiming a match nothing kept. It has a FLOOR OF ONE HOUR: the window
+  is granted when a token is minted, so raising the lifetime afterwards could
+  otherwise leave a family forgotten while its tokens are still presentable —
+  a check silently not made rather than a false refusal, which is the safe
+  direction and still not one to arrive at by accident.
+
+## `oauth2.clockSkewS` is applied at EVERY read-back, and that is the whole point
+
+The allowance passed to `jwt.verify()` as `clockTolerance` wherever this service
+reads back a token it signed. **Six places take it and a seventh is not in this
+directory**: `tokenFailure()`, the refresh grant, token exchange,
+`/oauth2/introspect`, `/oauth2/revoke`, `dpop.js`'s `presentedAccessToken()` —
+the check the four protected endpoints share — and `common/admin_stats.js`'s
+`tokenStateOf()`, which is what every console screen reports state from.
+
+**A verify that did not take it would be a second, stricter opinion about what
+"expired" means, reachable only through whichever endpoint forgot.** The symptom
+is a token that introspects active and is refused at the refresh grant thirty
+seconds before it should be, which reads as a client bug from every side. That
+is also why the console reads the same setting: a page saying "valid" about a
+token `/oauth2/introspect` calls inactive is worse than a page with no state
+column, because it is believed.
+
+**It is NOT `oauth2.clientAssertionSkewS` and must not be merged with it.** That
+one is how far out a CLIENT'S assertion may be under RFC 7523 — somebody else's
+clock, on a credential this service did not mint. This one is how far out THIS
+service's clock may be when reading its own. They move for different reasons,
+and a deployment wanting a strict assertion check and a forgiving expiry reading
+has to be able to say so. Capped at 300, which is what `krb5.clockSkew` allows,
+because a window wider than that has stopped being a tolerance.
+
+**`dpop.js` requires `config.js` for it and is still a leaf** — that module
+requires nothing from this repository, so the no-cycle property rule 3 asserts
+about `dpop.js` is unchanged.
+
 ## What this half deliberately does not do
 
 * **It is permissive on purpose, and it can be told not to be.** Everything in this

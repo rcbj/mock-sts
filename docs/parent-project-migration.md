@@ -72,8 +72,13 @@ COPY sts/oauth-oidc/oauth2_bcp.js sts/oauth-oidc/client_auth.js \
 COPY sts/common/vendored/bbs2023.js ./sts/common/vendored/
 COPY sts/common/vendored/contexts ./sts/common/vendored/contexts
 
-# The submodule's own env/, unchanged: CONFIG_FILE is resolved against the
-# package root, which in this image is ./sts.
+# The submodule's own env/. CONFIG_FILE is resolved against the package root,
+# which in this image is ./sts — and since 2026-08-24 env/defaults.js is
+# REQUIRED BY config.js ITSELF, by absolute path off that root, whatever
+# CONFIG_FILE says. So this must stay a copy of the whole directory: narrowing
+# it to the one file a job names (COPY sts/env/local.js) puts every in-process
+# job back to dying at load with `Cannot find module` for a file nobody
+# mentioned. See sts/common/CLAUDE.md.
 COPY sts/env ./sts/env
 ```
 

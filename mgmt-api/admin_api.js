@@ -91,6 +91,12 @@ const admin = require('../admin-ui/admin');
 // no route; taking the ids from it rather than writing them twice is what stops
 // the OpenAPI document offering a role this service does not have.
 const rbac = require('../admin-ui/admin_rbac');
+// The claim sets, for the `enum` on every `set` field below and for the two
+// lists that decide which of them each action resource carries. Also a library
+// that registers nothing — admin.js has required it long before this line — so
+// taking the ids from it moves no route and cannot let this document offer a
+// set the service does not have.
+const stats = require('../common/admin_stats');
 const spec = require('./admin_api_spec');
 const docs = require('./admin_api_docs');
 const VERSION = require('../package.json').version;
@@ -168,6 +174,271 @@ function detailPagingParameters(lists) {
                           'answered by `' + list.name + 'Paging`. ' +
                           list.description };
   });
+}
+
+// ---------------------------------------------------------------------------
+// THE SEVEN ACTIONS OF A CLAIM SET, FOR WHICHEVER FAMILY OF SETS ASKED.
+//
+// The console has TWO pages onto one store since 2026-08-24 — /admin/claims for
+// the two JWT sets and /admin/saml-attributes for the two SAML ones — so this
+// API has two action resources, and rule 7 means each needs an operation per
+// action. That is fourteen operations describing seven behaviours, and the one
+// thing that must not happen is fourteen DESCRIPTIONS: the copy that is not
+// edited beside the other is the one a caller believes, and a document that
+// disagreed with itself about whether an empty `attributes` clears a set would
+// be worse than one that said nothing.
+//
+// So the rows are built once, here, and the family is what varies:
+//
+//   * WHICH SET IDS the `enum` offers — which is the same restriction
+//     claimsAction()'s `allowed` argument enforces on the way in, so a caller
+//     reading this document cannot construct a call the service will refuse.
+//   * THE NOUN. A JWT set carries claims and a SAML set carries attributes,
+//     which is what each protocol's own readers call them.
+//   * THE RESERVED-NAMES RULE, which is a JWT rule and only a JWT rule:
+//     setClaimSet() checks it for `kind === 'jwt'`, because an assertion
+//     attribute called `exp` collides with nothing. Documenting it on the SAML
+//     operations would tell a caller their call will be refused when it will
+//     succeed.
+//
+// operationIds cannot collide — a generated client would have two methods of
+// one name — so each family carries its own, spelled out rather than derived
+// from a suffix, because `addClaim` and `addSamlAttribute` are what a caller
+// would guess and `addClaim2` is what a suffix would produce.
+// ---------------------------------------------------------------------------
+const JWT_CLAIM_FAMILY = {
+  sets: stats.JWT_CLAIM_SET_IDS,
+  noun: 'claim',
+  carrier: 'token',
+  example: 'id_token',
+  reserved: true,
+  ids: { add: 'addClaim', remove: 'removeClaim', clear: 'clearClaims',
+         replace: 'replaceClaims', attributes: 'setClaimAttributes',
+         all: 'selectAllClaimAttributes', none: 'clearClaimAttributes' }
+};
+
+const SAML_CLAIM_FAMILY = {
+  sets: stats.SAML_CLAIM_SET_IDS,
+  noun: 'attribute',
+  carrier: 'assertion',
+  example: 'saml11',
+  reserved: false,
+  ids: { add: 'addSamlAttribute', remove: 'removeSamlAttribute',
+         clear: 'clearSamlAttributes', replace: 'replaceSamlAttributes',
+         attributes: 'setSamlDirectoryAttributes',
+         all: 'selectAllSamlDirectoryAttributes',
+         none: 'clearSamlDirectoryAttributes' }
+};
+
+function claimSetActions(family) {
+  log.debug("Entering claimSetActions(). " + family.sets.length + " set(s).");
+  const noun = family.noun;
+  const setField = { type: 'string', enum: family.sets.slice() };
+  const rows = [
+    { action: 'add', operationId: family.ids.add,
+      summary: 'Add one ' + noun + ' to one set',
+      description: 'Every ' + family.carrier + ' of that kind issued from now ' +
+                   'on carries it; nothing already issued changes.\n\n' +
+                   'ADDITIVE ONLY. What the protocol puts in is never ' +
+                   'displaced — an ID Token\'s `sub`, a SAML 2.0 assertion\'s ' +
+                   '`name`, a WS-Federation assertion\'s whole identity claim ' +
+                   'list.' +
+                   (family.reserved
+                     ? ' A name this service sets itself is REFUSED rather ' +
+                       'than allowed to win, because every one of those is ' +
+                       'load-bearing — a settable `exp` would produce tokens ' +
+                       'that fail to verify with nothing pointing back at the ' +
+                       'call that caused it. `GET /admin-api/claims` lists the ' +
+                       'refused names.'
+                     : ' There is NO reserved list here: those names are ' +
+                       'load-bearing in a JWT, and an assertion attribute ' +
+                       'called `exp` collides with nothing. An entry with no ' +
+                       'name, and two entries of one name, are still refused.'),
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: {
+          set: setField,
+          name: { type: 'string' },
+          value: { type: 'string',
+                   description: 'May carry a ${...} placeholder.' },
+          nameFormat: { type: 'string',
+                        description: 'The SAML 2.0 set only.' },
+          namespace: { type: 'string',
+                       description: 'The SAML 1.1 set only. Defaults to the ' +
+                                    'WS-Federation claim namespace, which is ' +
+                                    'what every relying party already reads.' }
+        },
+        required: ['set', 'name'],
+        examples: [{ set: family.example, name: 'dept', value: 'engineering' }],
+        additionalProperties: false
+      },
+      responseDescription: 'The set as it now stands, in `claims`.' },
+
+    { action: 'remove', operationId: family.ids.remove,
+      summary: 'Remove one ' + noun + ' from one set',
+      description: 'By name. A name the set does not carry is refused ' +
+                   'rather than treated as already done, because the two ' +
+                   'are different facts and a caller that misspelt a name ' +
+                   'would otherwise be told it succeeded.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: { set: setField, name: { type: 'string' } },
+        required: ['set', 'name'],
+        examples: [{ set: family.example, name: 'dept' }],
+        additionalProperties: false
+      },
+      responseDescription: 'The set as it now stands, in `claims`.' },
+
+    { action: 'clear', operationId: family.ids.clear,
+      summary: 'Empty one set',
+      description: 'Those ' + family.carrier + 's then carry only what the ' +
+                   'protocol puts in them.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: { set: setField },
+        required: ['set'],
+        examples: [{ set: family.example }],
+        additionalProperties: false
+      },
+      responseDescription: 'An empty `claims`.' },
+
+    { action: 'replace', operationId: family.ids.replace,
+      summary: 'Set a whole ' + noun + ' set at once',
+      description: 'The array replaces whatever the set held. An EMPTY ' +
+                   'array is a legitimate call and clears it. Every entry ' +
+                   'is checked by the same rules `add` applies, and a ' +
+                   'single bad entry refuses the whole call — a partial ' +
+                   'replace would leave the set in a state nobody asked ' +
+                   'for.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: {
+          set: setField,
+          claims: { type: 'array',
+                    items: { $ref: '#/components/schemas/ClaimEntry' } }
+        },
+        required: ['set', 'claims'],
+        examples: [{ set: family.example, claims: [
+          { name: 'dept', value: 'engineering' },
+          { name: 'on_behalf_of', value: '${username}' }
+        ] }],
+        additionalProperties: false
+      },
+      responseDescription: 'The set as it now stands, in `claims`.' },
+
+    // --- the directory-attribute half of a set ----------------------------
+    //
+    // Three operations rather than one with a mode, mirroring the console's
+    // three buttons, and the reason is in admin.js beside them: an empty
+    // `attributes` array would otherwise be ambiguous between "clear it" and
+    // "my HTTP client dropped an empty array", which is a real behaviour of
+    // real clients and the kind of ambiguity that silently empties a set.
+    { action: 'attributes', operationId: family.ids.attributes,
+      summary: 'Set which LDAP attributes one set carries',
+      description: 'The array REPLACES the selection for that set. An ' +
+                   'attribute not in the array is removed, which is how ' +
+                   'removal is expressed — there is no per-attribute ' +
+                   'remove, because the console\'s control is a table of ' +
+                   'checkboxes and an API that removed differently would ' +
+                   'be a second model of the same state.\n\nThe value a ' +
+                   'selected attribute carries is the one on that ' +
+                   'person\'s entry under ou=users, or — where the entry ' +
+                   'has nothing — invented from their username, ' +
+                   'deterministically, so one username is one invented ' +
+                   'person across restarts. Unlike POST ' +
+                   '/admin-api/credential-claims/select this does NOT ' +
+                   'sweep the directory: the credential page writes the ' +
+                   'attributes it needs onto every entry, and doing it ' +
+                   'from here as well would mean two pages racing to ' +
+                   'populate one directory. Selecting an attribute nobody ' +
+                   'has an entry value for still produces a ' + noun + '; ' +
+                   'it is generated, and `attributeReport` says so per ' +
+                   'claim.\n\nAn unknown attribute name refuses the WHOLE ' +
+                   'call rather than being skipped: the catalogue is fixed, ' +
+                   'so an unknown name is either a hand-written request that ' +
+                   'deserves an answer or a rename that left a caller ' +
+                   'behind. `attributeCatalogue` in the GET beside this is ' +
+                   'the list — and it is ONE catalogue for all four sets, so ' +
+                   'either GET answers it in full.\n\nA TYPED ' + noun + ' ' +
+                   'of the same name WINS over one of these, and THE ' +
+                   'PROTOCOL\'S OWN beats both — which is worth knowing ' +
+                   'before it is discovered on the wire. An ID Token always ' +
+                   'carries name, given_name, family_name, ' +
+                   'preferred_username and email built from the sign-in, so ' +
+                   'selecting cn, givenName, sn, uid or mail ON THAT SET ' +
+                   'changes nothing the client sees; the same five reach an ' +
+                   'access token from the directory, because the protocol ' +
+                   'sets none of them there. A SAML 2.0 assertion sets ' +
+                   '`name` the same way and a WS-Federation one sets the ' +
+                   'whole identity claim list. Both halves are reported by ' +
+                   'that same GET.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: {
+          set: setField,
+          attributes: { type: 'array', items: { type: 'string' },
+                        description: 'LDAP attribute type names, from ' +
+                                     '`attributeCatalogue`. An EMPTY ' +
+                                     'array clears the selection — and so ' +
+                                     'does an ABSENT one, so a misspelt ' +
+                                     'field name empties the set rather ' +
+                                     'than being refused. The reply names ' +
+                                     'everything it `removed` and the ' +
+                                     'audit log keeps a row saying the ' +
+                                     'same, and `attributes-clear` is how ' +
+                                     'a caller that means it says so.' }
+        },
+        required: ['set', 'attributes'],
+        examples: [{ set: family.example,
+                     attributes: ['mail', 'departmentNumber', 'title'] }],
+        additionalProperties: false
+      },
+      responseDescription: 'What the set carries now, in `attributes`, ' +
+                           'with `added` and `removed`.' },
+
+    { action: 'attributes-all', operationId: family.ids.all,
+      summary: 'Put every catalogued attribute in one set',
+      description: 'Every attribute type in the catalogue, which is a ' +
+                   'legitimate thing to test and makes a large ' +
+                   family.carrier + '. It exists as its own operation so ' +
+                   'that "all of them" does not mean a caller constructing ' +
+                   'the whole list of names that has to be updated whenever ' +
+                   'the catalogue is.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: { set: setField },
+        required: ['set'],
+        examples: [{ set: family.example }],
+        additionalProperties: false
+      },
+      responseDescription: 'The whole catalogue, in `attributes`.' },
+
+    { action: 'attributes-clear', operationId: family.ids.none,
+      summary: 'Take every directory attribute out of one set',
+      description: 'The TYPED ' + noun + 's on that set are untouched — this ' +
+                   'is the other half. Clearing both takes this and `clear`.' +
+                   '\n\nNothing is deleted from the directory: what was ' +
+                   'written onto an entry stays there, because an operator ' +
+                   'may have set it and nothing here has the standing to ' +
+                   'remove it.',
+      requestBodyRequired: true,
+      requestBody: {
+        type: 'object',
+        properties: { set: setField },
+        required: ['set'],
+        examples: [{ set: family.example }],
+        additionalProperties: false
+      },
+      responseDescription: 'An empty `attributes`, and what was `removed`.' }
+  ];
+  log.debug("Leaving claimSetActions(). " + rows.length + " action(s).");
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -787,13 +1058,17 @@ const ROUTES = [
   { method: 'GET', path: BASE + '/config', tag: 'Configuration',
     operationId: 'getConfig',
     summary: 'Every setting this service has, and where each value came from',
-    description: 'The forty-five settings, grouped by protocol, each with its ' +
+    description: 'Every setting, grouped by protocol, each with its ' +
                  'effective value and the SOURCE of that value: a runtime ' +
-                 'override, an environment variable, the appconfig file, or ' +
-                 'the built-in default. The source is the part that was not ' +
-                 'answerable before this resource existed — the four are ' +
-                 'indistinguishable once a value has been read, and the ' +
-                 'question "why is the issuer that?" used to be a grep.\n\n' +
+                 'override, an environment variable, the appconfig file ' +
+                 'CONFIG_FILE names, or `env/defaults.js` under it. The ' +
+                 'source is the part that was not answerable before this ' +
+                 'resource existed — the four are indistinguishable once a ' +
+                 'value has been read, and the question "why is the issuer ' +
+                 'that?" used to be a grep. There is no fifth source: a ' +
+                 'setting with a value in none of them stops this service ' +
+                 'from STARTING rather than falling back to a constant in a ' +
+                 'module.\n\n' +
                  'It also says which settings can be CHANGED while the ' +
                  'service runs. The ones that cannot were consumed at ' +
                  'startup — a bound socket, the TLS certificate\'s names, the ' +
@@ -880,7 +1155,7 @@ const ROUTES = [
         summary: 'Drop one runtime override',
         description: 'The setting falls back to whatever it would have used ' +
                      'had nothing ever been set here — its environment ' +
-                     'variable, the appconfig file, or the built-in default. ' +
+                     'variable, the appconfig file, or `env/defaults.js`. ' +
                      'A setting with no override is refused rather than ' +
                      'treated as already done, because the two are different ' +
                      'facts and a caller that misspelt a key would otherwise ' +
@@ -906,6 +1181,130 @@ const ROUTES = [
         requestBody: { type: 'object', properties: {},
                        additionalProperties: false },
         responseDescription: 'The keys that were cleared, in `cleared`.' } ] },
+
+  // ---------------------------------------------------------------------
+  // The token lifetimes, which are four of the settings above under a name
+  // that promises four rather than forty-nine.
+  //
+  // Rule 7 is satisfied twice over here and it is worth saying which way
+  // round. `/admin/token-lifetimes` grew a form, so it gets its operations —
+  // that is the rule as written. What it does NOT get is a second store: the
+  // handler calls `admin.tokenLifetimesAction`, which writes through
+  // `config.setOverride()`, which is the same function `POST /config/set`
+  // calls against the same override map. So these two operations and the four
+  // Configuration ones are two doors onto one thing, deliberately, in the way
+  // `/admin/rbac` and `ldapmodify` are four doors onto one membership.
+  //
+  // What the narrow door buys a CALLER, which is why it is not merely a
+  // convenience for the page: `POST /config/set-many` takes any key and
+  // ignores what it does not know, which is right for a form posting a whole
+  // section and wrong for a test that means to set a lifetime — a misspelt
+  // key there succeeds and changes nothing. This one refuses anything that is
+  // not one of the four, by name.
+  { method: 'GET', path: BASE + '/token-lifetimes', tag: 'Token lifetimes',
+    operationId: 'getTokenLifetimes',
+    summary: 'How long tokens issued here are good for',
+    description: 'The three lifetimes — access token, ID Token, refresh ' +
+                 'token — and the clock skew applied wherever this service ' +
+                 'reads one of its own tokens back.\n\nAll four are ' +
+                 'ordinary configuration settings and appear in ' +
+                 '`GET /config` too; `settings` here is the same row shape, ' +
+                 'carrying each one\'s bounds, its source and its default. ' +
+                 '`lifetimes` beside it is just the four numbers, for a ' +
+                 'caller that wants the value rather than the ' +
+                 'provenance.\n\nIt also reports WHAT IS ALREADY OUT ' +
+                 'THERE, per kind, counted against the same clock the ' +
+                 'endpoints use — the skew is applied to that count, so a ' +
+                 'token this calls expired is one POST /oauth2/introspect ' +
+                 'will report inactive.\n\nA LIFETIME IS STAMPED INTO A ' +
+                 'TOKEN WHEN IT IS SIGNED, so changing one reaches the next ' +
+                 'token and nothing already issued. To take an issued token ' +
+                 'out of circulation, revoke it under Tokens.',
+    mirrors: 'GET /admin/token-lifetimes',
+    responseDescription: 'The four settings, and what has been issued under ' +
+                         'them.',
+    responseSchema: { $ref: '#/components/schemas/TokenLifetimes' },
+    handler: function (req, res) {
+      log.debug("Entering the management API token lifetimes endpoint.");
+      sendJson(res, 200, admin.tokenLifetimesJson());
+      log.debug("Leaving the management API token lifetimes endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/token-lifetimes/:action',
+    tag: 'Token lifetimes',
+    mirrors: 'POST /admin/token-lifetimes',
+    handler: function (req, res) {
+      log.debug("Entering the management API token lifetimes action.");
+      const body = parseBody(req);
+      const result = admin.tokenLifetimesAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API token lifetimes action.");
+    },
+    actions: [
+      { action: 'set', operationId: 'setTokenLifetimes',
+        summary: 'Set one or more of the four',
+        description: 'IN MEMORY ONLY and gone on restart, like every other ' +
+                     'change made through this API — nothing writes to the ' +
+                     'appconfig file.\n\nName any of the four; the console ' +
+                     'form posts all four at once and a caller may post ' +
+                     'one. ALL-OR-NOTHING: every value is checked before any ' +
+                     'is written, so a body with one bad field changes ' +
+                     'nothing and names it.\n\nUNLIKE ' +
+                     '`POST /config/set-many`, a property that is not one of ' +
+                     'the four is REFUSED rather than ignored. That door is ' +
+                     'for a form posting a whole section, where an unknown ' +
+                     'field is ordinary; this one is for a caller that means ' +
+                     'to set a lifetime, where a misspelt key that succeeded ' +
+                     'and changed nothing is the worst possible ' +
+                     'answer.\n\nEvery lifetime must be a whole number of ' +
+                     'THIRTY-SECOND units, between 30 and 2592000 (thirty ' +
+                     'days). The skew is 0 to 300 in the same units. Those ' +
+                     'bounds are on each setting\'s row in the GET, so a ' +
+                     'client can render them rather than repeat ' +
+                     'them.\n\nThe change applies to the NEXT token ' +
+                     'signed. Nothing already issued is affected: a lifetime ' +
+                     'is a claim inside a signed statement.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          description: 'One property per lifetime, named by its dot path. ' +
+                       'Any subset of the four.',
+          properties: {
+            'oauth2.accessTokenTtlS': { type: 'integer' },
+            'oauth2.idTokenTtlS': { type: 'integer' },
+            'oauth2.refreshTokenTtlS': { type: 'integer' },
+            'oauth2.clockSkewS': { type: 'integer' }
+          },
+          examples: [{ 'oauth2.accessTokenTtlS': 60,
+                       'oauth2.idTokenTtlS': 60,
+                       'oauth2.refreshTokenTtlS': 86400,
+                       'oauth2.clockSkewS': 30 }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was applied, in `applied`, and what ' +
+                             'actually changed, in `changed`.' },
+
+      { action: 'defaults', operationId: 'resetTokenLifetimes',
+        summary: 'Put the four back',
+        description: 'Clears the runtime override on THESE FOUR ONLY, so ' +
+                     'each falls back to its environment variable, the ' +
+                     'appconfig file, or `env/defaults.js` — one hour, ' +
+                     'one hour, twenty-four hours and thirty ' +
+                     'seconds.\n\nIt is deliberately not ' +
+                     '`POST /config/reset-all`, which would also drop an ' +
+                     'override somebody set on an unrelated page. A test ' +
+                     'that changed only the lifetimes should call this to ' +
+                     'put the service back; one that changed more should ' +
+                     'call that one.\n\nA setting that was not overridden ' +
+                     'is skipped rather than refused, because this means ' +
+                     '"put these four back" rather than "undo this one ' +
+                     'change" — the per-key refusal is on ' +
+                     '`POST /config/reset`, where it is the right answer.',
+        requestBodyRequired: false,
+        requestBody: { type: 'object', properties: {},
+                       additionalProperties: false },
+        responseDescription: 'The keys that had an override cleared, in ' +
+                             '`cleared`.' } ] },
 
   { method: 'GET', path: BASE + '/claims', tag: 'Custom claims',
     operationId: 'getClaims',
@@ -956,217 +1355,88 @@ const ROUTES = [
       // The `attributes` action's list, in both spellings, exactly as the
       // credential-claims row below takes it. The other six actions ignore it.
       const names = namesOf(req, body, 'attribute', 'attributes');
-      const result = admin.claimsAction(withAction(req, body), names);
+      // The THIRD argument is the family, and it is what makes this resource
+      // the mirror of /admin/claims rather than of the store: a `set` of
+      // `saml2` here is refused by name and sent to /admin-api/saml-attributes,
+      // exactly as the console's own form post is. The action function, the
+      // store and the audit row are the same ones either way.
+      const result = admin.claimsAction(withAction(req, body), names,
+                                        stats.JWT_CLAIM_SET_IDS);
       sendJson(res, result.ok ? 200 : 400, result);
       log.debug("Leaving the management API claims action endpoint.");
     },
-    actions: [
-      { action: 'add', operationId: 'addClaim',
-        summary: 'Add one claim to one set',
-        description: 'Every token or assertion of that kind issued from now ' +
-                     'on carries it; nothing already issued changes.\n\n' +
-                     'ADDITIVE ONLY. A name this service sets itself is ' +
-                     'REFUSED rather than allowed to win, because every one ' +
-                     'of those is load-bearing — a settable `exp` would ' +
-                     'produce tokens that fail to verify with nothing ' +
-                     'pointing back at the call that caused it. `GET ' +
-                     '/admin-api/claims` lists the refused names.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] },
-            name: { type: 'string' },
-            value: { type: 'string',
-                     description: 'May carry a ${...} placeholder.' },
-            nameFormat: { type: 'string',
-                          description: 'The SAML 2.0 set only.' },
-            namespace: { type: 'string',
-                         description: 'The SAML 1.1 set only.' }
-          },
-          required: ['set', 'name'],
-          examples: [{ set: 'id_token', name: 'dept', value: 'engineering' }],
-          additionalProperties: false
-        },
-        responseDescription: 'The set as it now stands, in `claims`.' },
+    actions: claimSetActions(JWT_CLAIM_FAMILY) },
 
-      { action: 'remove', operationId: 'removeClaim',
-        summary: 'Remove one claim from one set',
-        description: 'By name. A name the set does not carry is refused ' +
-                     'rather than treated as already done, because the two ' +
-                     'are different facts and a caller that misspelt a name ' +
-                     'would otherwise be told it succeeded.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] },
-            name: { type: 'string' }
-          },
-          required: ['set', 'name'],
-          examples: [{ set: 'id_token', name: 'dept' }],
-          additionalProperties: false
-        },
-        responseDescription: 'The set as it now stands, in `claims`.' },
+  // -------------------------------------------------------------------------
+  // THE SAML HALF OF THE SAME STORE, mirroring the console page that carries
+  // it. Two resources rather than one taking four sets, because rule 7 is about
+  // the CONTROL: /admin/saml-attributes is its own page with its own forms, and
+  // an API that answered for it under a name promising tokens would leave a
+  // caller reading `getClaims` to find out what an assertion will carry.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/saml-attributes', tag: 'Custom SAML attributes',
+    operationId: 'getSamlAttributes',
+    summary: 'The custom attributes every new SAML assertion will carry',
+    description: 'The two SAML sets — SAML 2.0 Attribute and SAML 1.1 ' +
+                 'Attribute (WS-Federation) — with the rules that govern ' +
+                 'them. The 2.0 set reaches every assertion WS-Trust issues ' +
+                 'with a 2.0 token type; the 1.1 set reaches the 1.1 ones, ' +
+                 'which is what WS-Federation\'s passive requestor profile ' +
+                 'carries, so the 1.1 half is the one a browser sign-in ' +
+                 'exercises.\n\nEach set has TWO HALVES and they are ' +
+                 'configured by different operations. `claims` are TYPED: a ' +
+                 'name and a value somebody wrote, the same for everybody ' +
+                 'except where a ${placeholder} carries the sign-in. ' +
+                 '`attributes` are LDAP ATTRIBUTE TYPES chosen from ' +
+                 '`attributeCatalogue`, whose value is read off that ' +
+                 'person\'s entry under ou=users — so an `ldapmodify` ' +
+                 'changes the next assertion, and an LDAP client and a SAML ' +
+                 'relying party pointed at this service are shown the same ' +
+                 'person.\n\nTHERE IS NO `reservedJwtClaims` HERE and the ' +
+                 'absence is the answer rather than an omission: that list is ' +
+                 'enforced for a JWT set only, because an assertion attribute ' +
+                 'called `exp` collides with nothing. `defaultSaml11Namespace` ' +
+                 'is the rule that IS this family\'s — the namespace a 1.1 ' +
+                 'attribute gets when the call does not name one.\n\nThe two ' +
+                 'JWT sets are at GET /admin-api/claims. One store behind ' +
+                 'both, and one audit row per change whichever door made it.',
+    mirrors: 'GET /admin/saml-attributes',
+    parameters: [
+      { name: 'user', in: 'query', required: false,
+        schema: { type: 'string', default: 'alice' },
+        description: 'Whose attribute values to preview. Defaults to a ' +
+                     'person the directory holds from startup, so the ' +
+                     'preview shows real values on a fresh process. Somebody ' +
+                     'with no entry gets generated values — the same ' +
+                     'invented person every time, seeded from the name — and ' +
+                     '`preview.entryFound` says which of the two happened. It ' +
+                     'is the same parameter, the same cap and the same ' +
+                     'default GET /admin-api/claims takes, deliberately: the ' +
+                     'two replies preview one person unless asked otherwise.' }
+    ],
+    responseDescription: 'The two SAML sets, the attribute catalogue and the ' +
+                         'preview.',
+    responseSchema: { $ref: '#/components/schemas/SamlAttributeSets' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML attributes endpoint.");
+      sendJson(res, 200,
+               admin.samlAttributesJson(admin.claimsPreviewUser(req.query)));
+      log.debug("Leaving the management API SAML attributes endpoint.");
+    } },
 
-      { action: 'clear', operationId: 'clearClaims',
-        summary: 'Empty one set',
-        description: 'Those tokens then carry only what the protocol puts in ' +
-                     'them.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] }
-          },
-          required: ['set'],
-          examples: [{ set: 'id_token' }],
-          additionalProperties: false
-        },
-        responseDescription: 'An empty `claims`.' },
-
-      { action: 'replace', operationId: 'replaceClaims',
-        summary: 'Set a whole claim set at once',
-        description: 'The array replaces whatever the set held. An EMPTY ' +
-                     'array is a legitimate call and clears it. Every entry ' +
-                     'is checked by the same rules `add` applies, and a ' +
-                     'single bad entry refuses the whole call — a partial ' +
-                     'replace would leave the set in a state nobody asked ' +
-                     'for.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] },
-            claims: { type: 'array',
-                      items: { $ref: '#/components/schemas/ClaimEntry' } }
-          },
-          required: ['set', 'claims'],
-          examples: [{ set: 'id_token', claims: [
-            { name: 'dept', value: 'engineering' },
-            { name: 'on_behalf_of', value: '${username}' }
-          ] }],
-          additionalProperties: false
-        },
-        responseDescription: 'The set as it now stands, in `claims`.' },
-
-      // --- the directory-attribute half of a set --------------------------
-      //
-      // Three operations rather than one with a mode, mirroring the console's
-      // three buttons, and the reason is in admin.js beside them: an empty
-      // `attributes` array would otherwise be ambiguous between "clear it" and
-      // "my HTTP client dropped an empty array", which is a real behaviour of
-      // real clients and the kind of ambiguity that silently empties a set.
-      { action: 'attributes', operationId: 'setClaimAttributes',
-        summary: 'Set which LDAP attributes one set carries',
-        description: 'The array REPLACES the selection for that set. An ' +
-                     'attribute not in the array is removed, which is how ' +
-                     'removal is expressed — there is no per-attribute ' +
-                     'remove, because the console\'s control is a table of ' +
-                     'checkboxes and an API that removed differently would ' +
-                     'be a second model of the same state.\n\nThe value a ' +
-                     'selected attribute carries is the one on that ' +
-                     'person\'s entry under ou=users, or — where the entry ' +
-                     'has nothing — invented from their username, ' +
-                     'deterministically, so one username is one invented ' +
-                     'person across restarts. Unlike POST ' +
-                     '/admin-api/credential-claims/select this does NOT ' +
-                     'sweep the directory: the credential page writes the ' +
-                     'attributes it needs onto every entry, and doing it ' +
-                     'from here as well would mean two pages racing to ' +
-                     'populate one directory. Selecting an attribute nobody ' +
-                     'has an entry value for still produces a claim; it is ' +
-                     'generated, and `attributeReport` says so per claim.' +
-                     '\n\nAn unknown attribute name refuses the WHOLE call ' +
-                     'rather than being skipped: the catalogue is fixed, so ' +
-                     'an unknown name is either a hand-written request that ' +
-                     'deserves an answer or a rename that left a caller ' +
-                     'behind. `attributeCatalogue` in GET ' +
-                     '/admin-api/claims is the list.\n\nA TYPED claim of ' +
-                     'the same name WINS over one of these, and THE ' +
-                     'PROTOCOL\'S OWN CLAIM BEATS BOTH — which is worth ' +
-                     'knowing before it is discovered on a token. An ID ' +
-                     'Token always carries name, given_name, family_name, ' +
-                     'preferred_username and email built from the sign-in, ' +
-                     'so selecting cn, givenName, sn, uid or mail ON THAT ' +
-                     'SET changes nothing the client sees; the same five ' +
-                     'reach an access token from the directory, because the ' +
-                     'protocol sets none of them there. A SAML 2.0 assertion ' +
-                     'sets `name` the same way and a WS-Federation one sets ' +
-                     'the whole identity claim list. Both halves are ' +
-                     'reported by that same GET.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] },
-            attributes: { type: 'array', items: { type: 'string' },
-                          description: 'LDAP attribute type names, from ' +
-                                       '`attributeCatalogue`. An EMPTY ' +
-                                       'array clears the selection — and so ' +
-                                       'does an ABSENT one, so a misspelt ' +
-                                       'field name empties the set rather ' +
-                                       'than being refused. The reply names ' +
-                                       'everything it `removed` and the ' +
-                                       'audit log keeps a row saying the ' +
-                                       'same, and `attributes-clear` is how ' +
-                                       'a caller that means it says so.' }
-          },
-          required: ['set', 'attributes'],
-          examples: [{ set: 'access_token',
-                       attributes: ['mail', 'departmentNumber', 'title'] }],
-          additionalProperties: false
-        },
-        responseDescription: 'What the set carries now, in `attributes`, ' +
-                             'with `added` and `removed`.' },
-
-      { action: 'attributes-all', operationId: 'selectAllClaimAttributes',
-        summary: 'Put every catalogued attribute in one set',
-        description: 'Every attribute type in the catalogue, which is a ' +
-                     'legitimate thing to test and makes a large token. It ' +
-                     'exists as its own operation so that "all of them" does ' +
-                     'not mean a caller constructing the whole list of ' +
-                     'names that has to be updated whenever the catalogue ' +
-                     'is.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] }
-          },
-          required: ['set'],
-          examples: [{ set: 'id_token' }],
-          additionalProperties: false
-        },
-        responseDescription: 'The whole catalogue, in `attributes`.' },
-
-      { action: 'attributes-clear', operationId: 'clearClaimAttributes',
-        summary: 'Take every directory attribute out of one set',
-        description: 'The TYPED claims on that set are untouched — this is ' +
-                     'the other half. Clearing both takes this and `clear`.' +
-                     '\n\nNothing is deleted from the directory: what was ' +
-                     'written onto an entry stays there, because an operator ' +
-                     'may have set it and nothing here has the standing to ' +
-                     'remove it.',
-        requestBodyRequired: true,
-        requestBody: {
-          type: 'object',
-          properties: {
-            set: { type: 'string',
-                   enum: ['access_token', 'id_token', 'saml2', 'saml11'] }
-          },
-          required: ['set'],
-          examples: [{ set: 'id_token' }],
-          additionalProperties: false
-        },
-        responseDescription: 'An empty `attributes`, and what was `removed`.' }
-    ] },
+  { method: 'POST', route: BASE + '/saml-attributes/:action',
+    tag: 'Custom SAML attributes',
+    mirrors: 'POST /admin/saml-attributes',
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML attributes action endpoint.");
+      const body = parseBody(req);
+      const names = namesOf(req, body, 'attribute', 'attributes');
+      const result = admin.claimsAction(withAction(req, body), names,
+                                        stats.SAML_CLAIM_SET_IDS);
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SAML attributes action endpoint.");
+    },
+    actions: claimSetActions(SAML_CLAIM_FAMILY) },
 
   { method: 'GET', path: BASE + '/credential-claims', tag: 'Credential claims',
     operationId: 'getCredentialClaims',

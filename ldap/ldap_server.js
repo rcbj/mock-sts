@@ -4845,6 +4845,20 @@ applications.setDirectory({
   maxApplications: maxApplications
 });
 
+// AND THE TWO APPLICATIONS THAT ARE THIS PROCESS, immediately after — because
+// this line is the earliest moment at which there is a container to write into,
+// and the entries have to be there before anything can ask for them.
+//
+// It is here rather than in seed() above for a reason worth keeping: seed()
+// builds the TREE, this module's half of the arrangement, while what these two
+// entries hold is a pair of RFC 7591 registrations, which is that module's
+// half. Writing them up there would mean this file knowing the application
+// schema — the exact division the four functions above exist to avoid — and it
+// could not run there anyway, since the slot they go through is filled on the
+// line above this one. `applications.seedInternal` decides whether it happens
+// at all, and is read over there.
+applications.seedInternalApplications();
+
 // ---------------------------------------------------------------------------
 // THE SPIFFE CONTAINERS AS A STORE.
 //

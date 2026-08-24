@@ -736,9 +736,64 @@ function jwksEndpoint(req, res) {
 
 app.get('/oauth2/jwks', jwksEndpoint);
 
-const ACCESS_TOKEN_TTL = 3600;
+// ---------------------------------------------------------------------------
+// HOW LONG WHAT THIS ENDPOINT ISSUES IS GOOD FOR.
+//
+// These were three module-level `const`s until 2026-08-24 — `ACCESS_TOKEN_TTL`
+// at an hour, `REFRESH_TOKEN_TTL` at thirty days, and the ID Token reusing the
+// first — and they are four functions now for the reason `common/CLAUDE.md`
+// states as a rule: **a runtime setting must be READ WHERE IT IS USED**. A
+// `const` captured at require time is the one thing `/admin/config` cannot
+// change, and it fails in the direction that looks like the console is broken —
+// the page reports the new value, the next token carries the old one, and
+// nothing anywhere says which is in force.
+//
+// So each is a function called per issuance, and each is one line so that the
+// call sites read the way the constants did.
+//
+// TWO THINGS ARE WORTH KNOWING BEFORE CHANGING ANY OF THEM.
+//
+//   * THE ACCESS TOKEN AND THE ID TOKEN NO LONGER SHARE A NUMBER. They shared
+//     `ACCESS_TOKEN_TTL` because an hour suited both, which is not the same
+//     thing as their being one setting: an ID Token is consumed once at
+//     sign-in and an access token is presented to a resource server, and the
+//     interesting test is the one where the two disagree.
+//   * THE REFRESH DEFAULT IS TWENTY-FOUR HOURS AND WAS THIRTY DAYS. Every
+//     sentence in this repository that said "thirty-day" about a refresh token
+//     was changed with it rather than left to be discovered; `2592000` in
+//     `oauth2.refreshTokenTtlS` is exactly the old behaviour.
+//
+// The lifetime is stamped into the token as `exp` at signing time, so changing
+// a setting changes THE NEXT token and nothing already issued. That is a fact
+// about signed statements rather than a limitation of this implementation, and
+// the console says so where somebody might expect otherwise.
+// ---------------------------------------------------------------------------
+function accessTokenTtl() {
+  return config.value('oauth2.accessTokenTtlS');
+}
 
-const REFRESH_TOKEN_TTL = 30 * 24 * 3600;
+function idTokenTtl() {
+  return config.value('oauth2.idTokenTtlS');
+}
+
+function refreshTokenTtl() {
+  return config.value('oauth2.refreshTokenTtlS');
+}
+
+// The allowance applied to `exp` and `nbf` EVERY time this file reads back a
+// token it signed — not to what it puts in one. It is passed to jwt.verify() as
+// `clockTolerance`, which is the library's own name for the same idea, and it
+// is deliberately a different setting from `oauth2.clientAssertionSkewS` (that
+// one is about a CLIENT'S clock; see the row in config.js).
+//
+// EVERY jwt.verify() OF ONE OF OUR OWN TOKENS IN THIS FILE TAKES IT. A verify
+// that did not would be a second, stricter opinion about what "expired" means,
+// reachable only through whichever endpoint forgot — and the symptom is a token
+// that introspects active and is refused at the refresh grant thirty seconds
+// before it should be, which reads as a client bug from every side.
+function tokenClockSkew() {
+  return config.value('oauth2.clockSkewS');
+}
 
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 
@@ -919,7 +974,7 @@ function accessToken(base, opts) {
     iss: issuerOf(base), sub: opts.sub || user.sub,
     aud: opts.audience || base + '/resource',
     client_id: opts.client_id, scope: opts.scope || '', typ: 'Bearer',
-    jti: randomId(16), iat: iat, nbf: iat, exp: iat + ACCESS_TOKEN_TTL,
+    jti: randomId(16), iat: iat, nbf: iat, exp: iat + accessTokenTtl(),
     username: user.username
   };
   if (opts.act) payload.act = opts.act;
@@ -980,7 +1035,7 @@ function refreshToken(base, opts) {
     // wider than what was authorized. A grant cannot widen itself by being
     // renewed.
     resources: (opts.resources && opts.resources.length) ? opts.resources : undefined,
-    iat: iat, nbf: iat, exp: iat + REFRESH_TOKEN_TTL,
+    iat: iat, nbf: iat, exp: iat + refreshTokenTtl(),
     // RFC 9449 section 5: a refresh token issued to a PUBLIC client alongside a
     // DPoP-bound access token is itself bound to the same key. A wallet is a
     // public client and cannot authenticate, so without this the long-lived half
@@ -1029,7 +1084,7 @@ function idToken(base, opts) {
   const user = opts.user || userFor(opts.username);
   const payload = {
     iss: issuerOf(base), sub: opts.sub || user.sub, aud: opts.client_id, typ: 'ID',
-    iat: iat, nbf: iat, exp: iat + ACCESS_TOKEN_TTL, auth_time: opts.auth_time || iat,
+    iat: iat, nbf: iat, exp: iat + idTokenTtl(), auth_time: opts.auth_time || iat,
     azp: opts.client_id, jti: randomId(16),
     name: user.name, given_name: user.given_name, family_name: user.family_name,
     preferred_username: user.preferred_username, email: user.email,
@@ -1100,7 +1155,7 @@ function tokenSet(base, opts) {
     // how the wallet learns it must send a proof on every subsequent call — a
     // bound token announced as Bearer would be presented as one and refused.
     token_type: opts.jkt ? 'DPoP' : 'Bearer',
-    expires_in: ACCESS_TOKEN_TTL,
+    expires_in: accessTokenTtl(),
     scope: opts.scope || ''
   };
   if (opts.authorization_details) body.authorization_details = opts.authorization_details;
@@ -1498,7 +1553,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
                                              : undefined,
                                            session_id: sessionId, grant: flow });
     out.token_type = 'Bearer';
-    out.expires_in = ACCESS_TOKEN_TTL;
+    out.expires_in = accessTokenTtl();
     out.scope = scope;
   }
   if (types.indexOf('id_token') >= 0) {
@@ -2105,7 +2160,7 @@ const USERINFO_SCOPE_CLAIMS = {
 function tokenFailure(token) {
   log.debug("Entering tokenFailure().");
   try {
-    jwt.verify(token, STS.certPem, { algorithms: ['RS256'] });
+    jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
     log.debug("Leaving tokenFailure(). It verifies after all.");
     return '';
   } catch (e) {
@@ -2871,7 +2926,8 @@ function tokenEndpoint(req, res) {
   if (grant === 'refresh_token') {
     let claims;
     try {
-      claims = jwt.verify(String(body.refresh_token || ''), STS.certPem, { algorithms: ['RS256'] });
+      claims = jwt.verify(String(body.refresh_token || ''), STS.certPem,
+                          { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
     } catch (e) {
       log.error('the refresh token is not valid: ' + e.message);
       log.debug("Leaving the token endpoint. The grant was refused.");
@@ -3000,7 +3056,8 @@ function tokenEndpoint(req, res) {
     // After the new token set exists, not before: a failure between the two
     // would otherwise leave a client with no working refresh token and nothing
     // to show for it. Both calls are no-ops while the mode is off, which is what
-    // keeps a refresh token reusable for its whole thirty days by default.
+    // keeps a refresh token reusable for the whole of its life by default —
+    // `oauth2.refreshTokenTtlS`, twenty-four hours unless it has been changed.
     if (bcp.enabled()) {
       bcp.noteRefreshRotated(claims.jti);
       stats.revoke(claims.jti, 'RFC 9700 section 2.2.2: rotated on use');
@@ -3104,7 +3161,8 @@ function tokenEndpoint(req, res) {
     // that never happened.
     let subjectVerified = true;
     try {
-      subject = jwt.verify(subjectToken, STS.certPem, { algorithms: ['RS256'] });
+      subject = jwt.verify(subjectToken, STS.certPem,
+                           { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
     } catch (e) {
       // A token from somewhere else: exchange it anyway, but say who it was for
       // as best it can be read.
@@ -3195,7 +3253,7 @@ function introspectEndpoint(req, res) {
   if (!token) return inactive();
   let claims;
   try {
-    claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'] });
+    claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
   } catch (e) {
     // Expired, forged, or simply not one of ours.
     log.debug("Introspection: the token does not verify (" + e.message + "), so it is inactive.");
@@ -3232,7 +3290,7 @@ function revokeEndpoint(req, res) {
   const token = String(body.token || '');
   if (token) {
     try {
-      const claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'] });
+      const claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
       if (claims.jti) stats.revoke(claims.jti, 'the RFC 7009 revocation endpoint');
     } catch (e) {
       // RFC 7009: an invalid token is still a successful revocation.

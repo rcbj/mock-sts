@@ -22,6 +22,8 @@
 //                         rows rather than as counters, filtered and paged
 //   GET  /admin/claims    the custom claims every new token will carry
 //   POST /admin/claims    add, remove, clear, or replace a whole set
+//   GET  /admin/saml-attributes   the same two halves for the two SAML sets
+//   POST /admin/saml-attributes   the same seven actions, on those two sets
 //
 // Every GET also answers `?format=json`, and every POST answers JSON when it was
 // sent JSON. That is not decoration: the four tests this repository still owes the
@@ -264,9 +266,37 @@ const MAX_WHO = 12;
 // registration entries and agents are SPIFFE, and authorization servers are
 // OAuth, so all three are protocol pages; the console index, the metrics and the
 // issued-token list describe the SERVICE'S OWN state rather than any one
-// protocol, so they are an Overview at the top; and the configuration page and
+// protocol, so they were an Overview at the top; and the configuration page and
 // the admin roles below it are what this service is set up with, so they sit
 // with the service metadata.
+//
+// TWO OF THOSE THREE MOVED TO MONITORING ON 2026-08-24, and what the move
+// corrected is the question the section was answering. "Describes the service's
+// own state rather than a protocol" is true of Metrics and Tokens, and it is
+// equally true of the Audit log — which was in Monitoring by itself — so the
+// old split was not between two kinds of page, it was between two kinds of
+// ANSWER: a number, a list, and a history of what this service has done. Those
+// are three ways of asking one question, and a reader who wants to know what
+// happened should find all three under one heading rather than learn that the
+// counters are filed away from the events they count.
+//
+// So Monitoring holds them in widening detail — Metrics (how much), Tokens
+// (what came out), Audit log (what happened, in order) — and its `what` was
+// rewritten with them, because "history rather than state" was the sentence
+// that made the old split sound principled and is now false of two of its three
+// pages. A section description that survives the pages moving under it is a
+// description that was never about them.
+//
+// OVERVIEW IS A SECTION OF ONE NOW, and that is deliberate rather than a
+// leftover. `/admin` is where a reader LANDS: it is the only page here whose job
+// is to point at the others, so it is the one page that cannot sit under a
+// heading naming a kind of content. Folding it into Monitoring would put the
+// front door inside one of the rooms. The rule this trades against is the one
+// stated for GROUPS below — a group of one is a heading buying nothing, which is
+// why SCIM is ungrouped — and it does not reach here: a group's heading competes
+// with the pages beside it inside a section, while a section's heading is the
+// top-level structure, and dropping this one would leave `/admin` as a page
+// under no heading at all in a sidebar where every other page has one.
 //
 // PROTOCOLS HAS A THIRD LEVEL NOW, AND ONLY PROTOCOLS DOES. Eight pages under
 // one heading is the same list the row across the top was — a reader looking
@@ -298,8 +328,22 @@ const MAX_WHO = 12;
 // because the reader looking for it is thinking about a CREDENTIAL rather than
 // about a token, and because the two halves of the credential lifecycle —
 // what the issuer puts in and what the verifier asks for — answer each other
-// and are worth reading together. `SCIM` is left ungrouped beside the three
-// groups for a smaller reason: a group of one is a heading buying nothing.
+// and are worth reading together.
+//
+// `SAML` IS A GROUP WITH ONE PAGE IN IT AND THAT IS AN EXCEPTION WORTH
+// ARGUING, because the rule right beside it says the opposite: `SCIM` is left
+// ungrouped for the smaller reason that a group of one is a heading buying
+// nothing, and it still is. What makes SAML different is that the heading names
+// a PROTOCOL FAMILY this service speaks in two versions and two profiles, and
+// the page under it — `Custom SAML attributes` (`/admin/saml-attributes`), the
+// two assertion claim sets, moved off `/admin/claims` on 2026-08-24 — is one
+// aspect of that family rather than the whole of it. A reader looking for what
+// a WS-Federation assertion will carry looks for the word SAML; ungrouped, that
+// page would sit among the protocol pages reading as something OAuth-adjacent,
+// which is exactly the confusion the grouping was introduced to end. SCIM's one
+// page IS the whole of SCIM here, so its heading would say the label twice.
+// The test for a second group of one is that question and not this precedent:
+// does the heading name more than the page under it does?
 // ONE ROW BELOW IS A PAGE THIS FILE DOES NOT DRAW. `Service metadata`
 // (`/admin/sts-metadata`) is built by `../sts_metadata.js`, which derives its
 // whole content from the live express router and therefore has to be the LAST
@@ -309,23 +353,28 @@ const MAX_WHO = 12;
 // altogether, until 2026-08-24.
 const SECTIONS = [
   { title: 'Overview',
-    what: 'What this service has done, across all of it.',
+    what: 'Where a reader lands, and what it points at.',
     items: [
-      { path: '/admin', label: 'Console' },
-      { path: '/admin/metrics', label: 'Metrics' },
-      { path: '/admin/tokens', label: 'Tokens' }
+      { path: '/admin', label: 'Console' }
     ] },
   { title: 'Protocols',
     what: 'One page per family, each configuring or reporting what that ' +
           'protocol does here.',
     items: [
       { title: 'OAuth2 / OIDC',
-        what: 'Which authorization server a flow runs against, and what this ' +
-              'service puts into what it issues.',
+        what: 'Which authorization server a flow runs against, how long what ' +
+              'it issues lasts, and what this service puts into it.',
         items: [
           { path: '/admin/authorization-servers',
             label: 'Authorization servers' },
+          { path: '/admin/token-lifetimes', label: 'Token lifetimes' },
           { path: '/admin/claims', label: 'Custom claims' }
+        ] },
+      { title: 'SAML',
+        what: 'What this service puts into an assertion — 2.0 and 1.1 alike, ' +
+              'which is what WS-Trust and WS-Federation carry.',
+        items: [
+          { path: '/admin/saml-attributes', label: 'Custom SAML attributes' }
         ] },
       { title: 'Verifiable Credentials',
         what: 'Both halves: what the OID4VCI issuer puts in a credential, ' +
@@ -354,8 +403,11 @@ const SECTIONS = [
       { path: '/admin/applications', label: 'Applications' }
     ] },
   { title: 'Monitoring',
-    what: 'History rather than state: what happened, in order.',
+    what: 'What this service has done: how much of it, what came out, and ' +
+          'what happened in order.',
     items: [
+      { path: '/admin/metrics', label: 'Metrics' },
+      { path: '/admin/tokens', label: 'Tokens' },
       { path: '/admin/audit', label: 'Audit log' }
     ] },
   { title: 'Server configuration',
@@ -853,7 +905,12 @@ function page(title, active, inner, up, gate) {
     'button{padding:5px 10px;border-radius:5px;border:1px solid #12107c;background:#12107c;color:#fff;' +
     'font-size:.8em;cursor:pointer}button.secondary{background:#fff;color:#12107c}' +
     'button.danger{background:#b00020;border-color:#b00020}' +
-    'input[type=text],textarea,select{box-sizing:border-box;padding:6px 8px;border:1px solid #bbb;' +
+    // `number` joined this list with /admin/token-lifetimes, whose four inputs
+    // are the console's first. Without it they are the one control in the card
+    // drawn in the browser's default chrome, beside a form that matches
+    // everything else — which reads as a half-finished page rather than as a
+    // missing selector.
+    'input[type=text],input[type=number],textarea,select{box-sizing:border-box;padding:6px 8px;border:1px solid #bbb;' +
     'border-radius:5px;font-size:.85em;font-family:inherit}' +
     'textarea{width:100%;min-height:7rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
     '.formrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.5em 0}' +
@@ -1804,9 +1861,13 @@ app.get('/admin', function (req, res) {
     'one refresh token, everything for one subject, or everything of one kind. Revocation here is ' +
     'the SAME revocation RFC 7009\'s <code>/oauth2/revoke</code> performs, so introspection, ' +
     'UserInfo and the refresh grant all honour it.</li>' +
-    '<li><a href="/admin/claims">Custom claims</a> — what to add to every OAuth 2.0 access token, ' +
-    'every OIDC ID Token, and every SAML 2.0 and SAML 1.1 assertion this service issues from now ' +
-    'on. Additive only: a custom claim is never allowed to displace one the protocol defines.</li>' +
+    '<li><a href="/admin/claims">Custom claims</a> — what to add to every OAuth 2.0 access token ' +
+    'and every OIDC ID Token this service issues from now on. Additive only: a custom claim is ' +
+    'never allowed to displace one the protocol defines.</li>' +
+    '<li><a href="/admin/saml-attributes">Custom SAML attributes</a> — the same two halves for ' +
+    'the assertions: every SAML 2.0 and SAML 1.1 attribute added to what WS-Trust and ' +
+    'WS-Federation issue from now on. One store behind both pages; two vocabularies, because a ' +
+    'SAML attribute is not spelled like a JWT claim and 1.1 is not spelled like 2.0.</li>' +
     '<li><a href="/admin/vc">Credential claims</a> — which claims a Verifiable Credential issued ' +
     'from now on carries, chosen from a catalogue of LDAP attribute types rather than of claim ' +
     'names: the value of a claim is the value on that person\'s directory entry. Saving a ' +
@@ -2917,6 +2978,18 @@ app.get('/admin/audit', function (req, res) {
     'categories, and <a href="/admin/metrics">the metrics page</a> counts every call either ' +
     'way.</p>' +
 
+    '<p class="note"><strong>One request is deliberately never a row here: ' +
+    '<code>GET /healthcheck</code> when it answered 200.</strong> It is asked ' +
+    'every few seconds for the whole life of this service — by the compose ' +
+    'healthcheck and by every launcher that waits for it to come up — and it ' +
+    'always answers the same thing, so recorded it would be by a wide margin ' +
+    'the most common row on this page and would push everything you came here ' +
+    'to read off the end of the cap above. A probe that answered anything ' +
+    'ELSE is recorded as usual, which is the half worth knowing: a failing ' +
+    'healthcheck is exactly the event somebody hunting a start-up failure is ' +
+    'looking for. <a href="/admin/metrics">The metrics page</a> counts every ' +
+    'probe either way.</p>' +
+
     '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' +
     MAX_ROWS + ' rows a page) and both work with <code>?format=json</code>, whose reply ' +
     'carries <code>page</code>, <code>pages</code> and <code>matched</code> so a test can ' +
@@ -3443,6 +3516,13 @@ function userDetailPage(req, key) {
   const params = pageParamsOf(req.query);
   const back = queryWith(params, {});
   const valid = detail.tokens.filter(function (t) { return t.state === 'valid'; }).length;
+  // Counted beside `valid` because "issued" minus "valid" is not "expired" — a
+  // revoked token, one not yet valid and one with no expiry stated all sit in
+  // that difference, and a reader doing the subtraction gets the wrong answer
+  // silently. It is its own tile for the same reason the users table grew its
+  // own column: a token running out of time is the ordinary end of a token and
+  // the first thing to check when a client starts being refused.
+  const expired = detail.tokens.filter(function (t) { return t.state === 'expired'; }).length;
   // Read before the markup is assembled rather than inside it, because it is also
   // one of the keys of the JSON view below and reading it twice could show a page
   // and a JSON body that disagree about a directory another request just changed.
@@ -3499,6 +3579,7 @@ function userDetailPage(req, key) {
       tile(live.length, 'active sessions') +
       tile(detail.tokens.length, 'tokens issued') +
       tile(valid, 'tokens still valid') +
+      tile(expired, 'tokens expired') +
       tile(detail.artifacts.length, 'assertions, tickets, credentials') +
     '</div>' +
     '<p class="note">Everything below is about the identity <code>' + esc(row.name) + '</code>, ' +
@@ -3694,6 +3775,14 @@ function usersListPage(req) {
       '<td class="num">' + (liveByUser[row.key] || 0) + '</td>' +
       '<td class="num">' + row.tokens.issued + '</td>' +
       '<td class="num state-valid">' + row.tokens.valid + '</td>' +
+      // EXPIRED IS ITS OWN COLUMN. It was counted in userRows() and shown
+      // nowhere, so this table drew "12 issued, 1 valid" and left the other
+      // eleven to be read as revoked, forgotten or broken. They are none of
+      // those: a token whose lifetime ran out is the ordinary end of a token,
+      // and it is the specific thing somebody comes to this page to check
+      // after a client started being refused. Same clock as everywhere else —
+      // tokenStateOf(), which applies oauth2.clockSkewS.
+      '<td class="num state-expired">' + row.tokens.expired + '</td>' +
       '<td class="num state-revoked">' + row.tokens.revoked + '</td>' +
       '<td class="num">' + row.artifacts + '</td>' +
       '<td>' + esc(row.firstAt ? whenText(row.firstAt) : '—') + '</td>' +
@@ -3787,9 +3876,10 @@ function usersListPage(req) {
     nav +
     '<table><tr><th>User</th><th>Kind</th><th>Authenticated</th><th>Protocols</th><th>Realms</th>' +
     '<th class="num">Sessions</th><th class="num">Tokens</th><th class="num">Valid</th>' +
+    '<th class="num">Expired</th>' +
     '<th class="num">Revoked</th><th class="num">Artifacts</th><th>First seen</th>' +
     '<th>Last activity</th><th></th></tr>' +
-    (rows || '<tr><td colspan="13">Nobody matches. Nothing has authenticated here yet unless a ' +
+    (rows || '<tr><td colspan="14">Nobody matches. Nothing has authenticated here yet unless a ' +
              'filter above is hiding it.</td></tr>') + '</table>' +
     nav +
     '<p class="note">' + filtered.length + ' identit' + (filtered.length === 1 ? 'y' : 'ies') +
@@ -5868,20 +5958,38 @@ app.post('/admin/rbac', function (req, res) {
 
 // ---------------------------------------------------------------------------
 // GET /admin/claims, POST /admin/claims
+// GET /admin/saml-attributes, POST /admin/saml-attributes
 // ---------------------------------------------------------------------------
+// TWO PAGES, ONE ACTION FUNCTION AND ONE STORE. The four claim sets used to be
+// four sections of /admin/claims; since 2026-08-24 the two JWT sets are there
+// and the two SAML ones are on /admin/saml-attributes, under the console's own
+// SAML group. What did NOT split is anything underneath: `CLAIM_SETS` is one
+// object in admin_stats.js, `setClaimSet()` is the one door onto it, and this
+// one function is what both pages and both /admin-api resources post to. A
+// second action function would have been a second set of rules about reserved
+// names and duplicates that agreed with the first until one of them changed.
+//
 // `names` is the second argument for the same reason vcAction() has one: a list
 // that may appear more than once in a form body is not something
 // helpers.parseBody() can answer, so the caller reads it with listField() and
 // hands it in. It is only read by the `attributes` action; the other six ignore
 // it.
-function claimsAction(body, names) {
+//
+// `allowed` is the third and it is what makes the SPLIT real rather than
+// cosmetic: it is the set ids the door being knocked on carries, so a POST to
+// /admin/claims naming `saml2` is refused by name instead of quietly changing a
+// set whose page it is not on and then redirecting to a page that cannot show
+// what it did. It defaults to all four, which is what a caller that has not
+// been given a family — nothing today — would get.
+function claimsAction(body, names, allowed) {
   log.debug("Entering claimsAction(). action=" + (body.action || '(none)'));
   const action = String(body.action || '');
   const setId = String(body.set || '');
-  if (stats.CLAIM_SET_IDS.indexOf(setId) < 0) {
-    log.debug("Leaving claimsAction(). No such set.");
-    return { ok: false, errors: ['There is no claim set called "' + setId + '". The four are: ' +
-                                 stats.CLAIM_SET_IDS.join(', ') + '.'] };
+  const sets = allowed && allowed.length ? allowed : stats.CLAIM_SET_IDS;
+  if (sets.indexOf(setId) < 0) {
+    log.debug("Leaving claimsAction(). No such set here.");
+    return { ok: false, errors: ['There is no claim set called "' + setId + '" here. The ones ' +
+                                 'this door carries are: ' + sets.join(', ') + '.'] };
   }
   const label = stats.CLAIM_SETS[setId].label;
 
@@ -6021,12 +6129,26 @@ app.post('/admin/claims', function (req, res) {
   // carries one `attributes` array. Neither spelling is wrong and refusing
   // either would make the console's own form and the API's document disagree.
   const names = listField(req, body, 'attribute').concat(listField(req, body, 'attributes'));
-  const result = claimsAction(body, names);
-  // Back to the page the reader was on, preview user and all: the four tables
+  const result = claimsAction(body, names, stats.JWT_CLAIM_SET_IDS);
+  // Back to the page the reader was on, preview user and all: the two tables
   // show that person's values, and a redirect that dropped the parameter would
   // answer "what did that do" with somebody else's row.
   respondToAction(req, res, claimsPageUrl(req.query), result);
   log.debug("Leaving the admin claims action endpoint.");
+});
+
+// The same handler for the SAML half, and it is a SEPARATE ROUTE rather than a
+// hidden field on the one above for two reasons that are both about the reply:
+// the redirect has to land back on the page the form was on, and the refusal
+// for a set this page does not carry has to name the sets it does. Everything
+// between those two lines is the same function on the same store.
+app.post('/admin/saml-attributes', function (req, res) {
+  log.debug("Entering the admin SAML attributes action endpoint.");
+  const body = parseBody(req);
+  const names = listField(req, body, 'attribute').concat(listField(req, body, 'attributes'));
+  const result = claimsAction(body, names, stats.SAML_CLAIM_SET_IDS);
+  respondToAction(req, res, samlAttributesPageUrl(req.query), result);
+  log.debug("Leaving the admin SAML attributes action endpoint.");
 });
 
 // Which person the four tables show values for, and where the page sends itself
@@ -6047,6 +6169,17 @@ function claimsPreviewUser(query) {
 // reads as the action having done something it did not.
 function claimsPageUrl(query) {
   return '/admin/claims?user=' + encodeURIComponent(claimsPreviewUser(query));
+}
+
+// The same for the SAML page. Two functions rather than one taking a path,
+// because these are the two strings the two POST handlers redirect to and a
+// caller that passed the wrong path would send a reader to the page their form
+// was NOT on — which is the one failure this helper exists to prevent. The
+// preview user is read by the same function for both, deliberately: the two
+// pages preview the same person unless somebody says otherwise, exactly as
+// /admin/vc already does.
+function samlAttributesPageUrl(query) {
+  return '/admin/saml-attributes?user=' + encodeURIComponent(claimsPreviewUser(query));
 }
 
 // ---------------------------------------------------------------------------
@@ -6124,12 +6257,22 @@ function claimAttributeSection(setId, previewUser, values, pageUrl) {
 // One set, rendered: what is in it, a way to remove each, and a way to add another.
 // The three sets differ in the extra field each needs, which is why the form is
 // built from the set's kind rather than being one form four times.
+//
+// IT IS THE SAME FUNCTION ON BOTH PAGES and only the NOUN changes: a JWT set
+// carries claims and a SAML set carries attributes, which is what each
+// protocol's own readers call them, and a page headed "Custom SAML attributes"
+// whose tables said "claim" would be teaching the wrong word for the thing it
+// is about to put in an assertion. Everything else — the two halves, the three
+// buttons, the precedence — is one behaviour and is drawn once.
 function claimSetSection(setId, previewUser, values, pageUrl) {
   log.debug("Entering claimSetSection(). setId=" + setId);
   const set = stats.CLAIM_SETS[setId];
   const claims = stats.claimSet(setId);
   const isSaml2 = setId === 'saml2';
   const isSaml11 = setId === 'saml11';
+  const isSaml = isSaml2 || isSaml11;
+  const noun = isSaml ? 'attribute' : 'claim';
+  const carrier = isSaml ? 'assertions' : 'tokens';
   const extraHeader = isSaml2 ? '<th>NameFormat</th>' : (isSaml11 ? '<th>AttributeNamespace</th>' : '');
 
   const rows = claims.map(function (claim) {
@@ -6161,10 +6304,10 @@ function claimSetSection(setId, previewUser, values, pageUrl) {
     // touch. The headings say which half is which: they are configured
     // separately, audited separately, and only one of them can be wrong in a way
     // the directory explains.
-    '<p class="sub">Typed claims &mdash; a name and a value, the same for everybody.</p>' +
+    '<p class="sub">Typed ' + noun + 's &mdash; a name and a value, the same for everybody.</p>' +
     '<table><tr><th>Name</th>' + extraHeader + '<th>Value</th><th></th></tr>' +
-    (rows || '<tr><td colspan="' + (extraHeader ? 4 : 3) + '">No custom claim is configured; ' +
-             'these tokens carry only what the protocol puts in them.</td></tr>') + '</table>' +
+    (rows || '<tr><td colspan="' + (extraHeader ? 4 : 3) + '">No custom ' + noun + ' is configured; ' +
+             'these ' + carrier + ' carry only what the protocol puts in them.</td></tr>') + '</table>' +
     '<form method="post" action="' + esc(pageUrl) + '"><div class="formrow">' +
       '<input type="hidden" name="action" value="add">' +
       '<input type="hidden" name="set" value="' + esc(setId) + '">' +
@@ -6276,27 +6419,34 @@ function groupClaimSection(previewUser) {
         'The entry would be at <code>' + esc(answer.dn) + '</code>.</p>');
 }
 
-// The four sets and the rules that govern them. The rules are in the reply and
-// not only on the page because the first thing a caller of POST .../claims/add
-// needs is the list of names it will refuse.
-function claimsJson(previewUser) {
-  log.debug("Entering claimsJson(). previewUser=" + previewUser);
+// One family of sets and the rules that govern them. The rules are in the reply
+// and not only on the page because the first thing a caller of POST
+// .../claims/add needs is the list of names it will refuse.
+//
+// TWO CALLERS, ONE BUILDER, for the reason claimsAction() has one: the two
+// pages differ in WHICH sets they carry and in one rule each — the reserved JWT
+// names apply to a token and the default SAML 1.1 namespace to an assertion —
+// and everything else about the reply is the same fact answered twice. Two
+// builders would have been two previews that could disagree about one person,
+// which is precisely the thing every preview here is built through the issuance
+// path to prevent.
+function claimSetsJson(ids, previewUser) {
+  log.debug("Entering claimSetsJson(). " + ids.length + " set(s).");
   const user = previewUser || 'alice';
   const json = {
-    reservedJwtClaims: stats.RESERVED_JWT_CLAIMS,
     placeholders: stats.PLACEHOLDERS,
-    defaultSaml11Namespace: stats.DEFAULT_SAML11_NAMESPACE,
     // The catalogue every set chooses from, so a caller can discover the legal
     // values of `attributes` without reading this service's source or guessing
-    // at LDAP spellings. `sets` says which of the four carries each, which is
-    // the same fact the console's four tables draw and is answered here once
-    // rather than repeated inside every set below.
+    // at LDAP spellings. `sets` says which of the FOUR carries each — all four,
+    // not only the ones in this reply, because the catalogue is one list and a
+    // per-page view of it would answer "which sets carry mail" with half the
+    // truth.
     attributeCatalogue: claimAttributes.catalogueRows(),
     // Stated rather than left to be discovered, because the two halves of a set
     // are one screen apart and the precedence only shows up when both name one
     // claim.
     precedence: 'A typed claim wins over a directory attribute of the same name.',
-    sets: stats.CLAIM_SET_IDS.map(function (id) {
+    sets: ids.map(function (id) {
       const preview = claimAttributes.previewFor(id, user);
       return { id: id, label: stats.CLAIM_SETS[id].label,
                claims: stats.claimSet(id),
@@ -6318,10 +6468,11 @@ function claimsJson(previewUser) {
     // directory".
     preview: Object.assign({ user: user }, claimAttributes.catalogueValuesFor(user)),
     // The groups claim, which is the one thing here that is not chosen per set:
-    // all four carry it or none does. Its settings are config.js's, so this is
-    // a report and there is no operation beside it — POST
-    // /admin-api/config/set is the door, and a second one would be a second
-    // store for one setting.
+    // all four carry it or none does — which is also why it is reported by BOTH
+    // pages' replies rather than by the one it was written on. Its settings are
+    // config.js's, so this is a report and there is no operation beside it —
+    // POST /admin-api/config/set is the door, and a second one would be a
+    // second store for one setting.
     //
     // `preview` is built by the function the ISSUANCE path calls, for the
     // reason every other preview here is: a caller with no browser has no other
@@ -6330,39 +6481,74 @@ function claimsJson(previewUser) {
     groups: Object.assign(groupClaims.state(),
                           { preview: groupClaims.groupsOf(user) })
   };
+  log.debug("Leaving claimSetsJson(). " + json.sets.length + " set(s).");
+  return json;
+}
+
+// The two JWT sets, and the one rule that is theirs alone: the claim names this
+// service sets itself and refuses. It is in the reply rather than only in the
+// document because the first thing a caller of POST /admin-api/claims/add needs
+// is the list of names it will be refused for.
+function claimsJson(previewUser) {
+  log.debug("Entering claimsJson(). previewUser=" + previewUser);
+  const json = Object.assign(
+    { reservedJwtClaims: stats.RESERVED_JWT_CLAIMS },
+    claimSetsJson(stats.JWT_CLAIM_SET_IDS, previewUser));
   log.debug("Leaving claimsJson(). " + json.sets.length + " set(s).");
   return json;
 }
 
-app.get('/admin/claims', function (req, res) {
-  log.debug("Entering the admin claims page.");
-  const setSelect = stats.CLAIM_SET_IDS.map(function (id) {
-    return '<option value="' + esc(id) + '">' + esc(stats.CLAIM_SETS[id].label) + '</option>';
-  }).join('');
-  const previewUser = claimsPreviewUser(req.query);
-  const pageUrl = claimsPageUrl(req.query);
-  // ONE read of the directory and one invented persona for the whole page, not
-  // one per set: the four tables show the same catalogue of values for the same
-  // person, and four reads of one entry per render would be three that exist
-  // only because the sections were written separately.
-  const values = claimAttributes.catalogueValuesFor(previewUser);
+// The two SAML sets, and the one rule that is theirs: the namespace a SAML 1.1
+// attribute gets when nobody names one. THERE IS NO `reservedJwtClaims` HERE
+// and its absence is the honest answer rather than an oversight — that list is
+// enforced for a JWT set only (admin_stats.js's setClaimSet() checks `kind`),
+// because an assertion attribute called `exp` collides with nothing. Reporting
+// it here would have told a caller their call would be refused when it will
+// succeed.
+function samlAttributesJson(previewUser) {
+  log.debug("Entering samlAttributesJson(). previewUser=" + previewUser);
+  const json = Object.assign(
+    { defaultSaml11Namespace: stats.DEFAULT_SAML11_NAMESPACE },
+    claimSetsJson(stats.SAML_CLAIM_SET_IDS, previewUser));
+  log.debug("Leaving samlAttributesJson(). " + json.sets.length + " set(s).");
+  return json;
+}
 
-  const inner = messagesOf(req) +
-    '<p class="note">What to add to every token and assertion this service issues <em>from now ' +
-    'on</em>. Nothing already issued changes — a token is a signed document and this page cannot ' +
-    'reach inside one. Four sets, because the four are different vocabularies: an OAuth access ' +
-    'token and an OIDC ID Token go to different readers (a resource server and a client), and SAML ' +
-    '2.0 and SAML 1.1 spell an attribute differently enough that one list could not serve both.</p>' +
+// ---------------------------------------------------------------------------
+// THE PROSE BOTH PAGES NEED, WRITTEN ONCE.
+//
+// /admin/claims and /admin/saml-attributes are the same two halves — a typed
+// entry and a ticked directory attribute — put into two different vocabularies,
+// so most of what each page has to explain is one explanation. It is factored
+// into these four helpers rather than copied, because the copy that is not
+// edited alongside the other is the one a reader believes: two pages disagreeing
+// about what `${username}` does, or about whether a typed entry wins, would be
+// worse than either page saying nothing.
+//
+// `family` is 'jwt' or 'saml' and is the ONLY thing that varies. Where the two
+// genuinely differ — a JWT value is typed and a SAML one is always text, a JWT
+// nests and an assertion cannot — the difference is stated rather than
+// generalised away, because that pair of facts is exactly what somebody
+// comparing an ID Token with an assertion has come here to find.
+// ---------------------------------------------------------------------------
+function claimHalvesNote(family) {
+  const noun = family === 'saml' ? 'attribute' : 'claim';
+  const carrier = family === 'saml' ? 'assertion' : 'token';
+  return '<p class="note">Each set has <strong>two halves</strong>. A <em>typed ' + noun +
+    '</em> is a name and a value somebody wrote here, the same for everybody except where it ' +
+    'carries a <code>${placeholder}</code>. A <em>directory attribute</em> is ticked from the ' +
+    'catalogue below and its value is whatever that person\'s entry under <code>ou=users</code> ' +
+    'says — so an <code>ldapmodify</code> changes the next ' + carrier + ', and an LDAP client ' +
+    'and a relying party pointed at this service are shown the same person. That is the half ' +
+    'worth exercising, and until the catalogue existed only a Verifiable Credential could do ' +
+    'it.</p>';
+}
 
-    '<p class="note">Each set has <strong>two halves</strong>. A <em>typed claim</em> is a name and ' +
-    'a value somebody wrote here, the same for everybody except where it carries a ' +
-    '<code>${placeholder}</code>. A <em>directory attribute</em> is ticked from the catalogue below ' +
-    'and its value is whatever that person\'s entry under <code>ou=users</code> says — so an ' +
-    '<code>ldapmodify</code> changes the next token, and an LDAP client and an OIDC client pointed ' +
-    'at this service are shown the same person. That is the half worth exercising, and until now ' +
-    'only a Verifiable Credential could do it.</p>' +
-
-    '<form method="get" action="/admin/claims"><div class="formrow">' +
+// The "show me somebody" form. It is a GET form posting to the page's own path,
+// so the preview user survives in the URL and every action form on the page can
+// carry it into its redirect — see claimsPageUrl().
+function claimPreviewForm(path, previewUser, values) {
+  return '<form method="get" action="' + esc(path) + '"><div class="formrow">' +
     '<label for="user">Show the values for</label>' +
     '<input type="text" id="user" name="user" size="20" value="' + esc(previewUser) + '">' +
     '<button class="secondary">Show</button>' +
@@ -6371,97 +6557,292 @@ app.get('/admin/claims', function (req, res) {
         'what an LDAP client reads from it.'
       : 'This person has no entry in the directory — nobody has authenticated as them and nothing ' +
         'was added by hand — so every value below is generated. It will be the same one next ' +
-        'time: the invented person is seeded from the username.') + '</span></div></form>' +
+        'time: the invented person is seeded from the username.') + '</span></div></form>';
+}
+
+function attributeCatalogueNotes(family) {
+  const saml = family === 'saml';
+  const otherPage = saml
+    ? '<a href="/admin/claims">the custom claims page</a>'
+    : '<a href="/admin/saml-attributes">the SAML attributes page</a>';
+  const otherThing = saml ? 'an access token or an ID Token carries' : 'an assertion carries';
+  return '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
+    '<p class="note">The catalogue is of <strong>LDAP attribute types</strong> and not of ' +
+    (saml ? 'attribute names' : 'claim names') + ', and it is the same catalogue ' +
+    otherPage + ' and <a href="/admin/vc">the credential claims page</a> choose from — one list ' +
+    'of spellings, because two would eventually disagree about what <code>schacDateOfBirth</code> ' +
+    'is called while both looked right. The value is the one on that person\'s entry under ' +
+    '<code>ou=users</code>; where the entry has nothing, it is invented from the username — the ' +
+    'same invented person every time, across restarts, in obviously fictional ranges. Three rows ' +
+    'are not RFC 4519/4524/2798: there is no standard attribute type for a birthdate or a ' +
+    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
+    '<p class="note">The <strong>four selections are independent</strong>, and that is the point ' +
+    'of having four: an access token carrying <code>employee_number</code> and a SAML 2.0 ' +
+    'assertion carrying <code>email</code> is a normal arrangement and a single list could not ' +
+    'express it. The two on this page are independent of what ' + otherThing + ' — ticked on ' +
+    otherPage + ' — and of what a <a href="/admin/vc">credential</a> carries and what the ' +
+    '<a href="/admin/vc-verifier-config">Verifier asks for</a>, deliberately: that is what keeps ' +
+    '"issue a credential carrying a claim the access token does not" reachable.</p>' +
+    (saml
+      ? '<p class="note">A <strong>nested</strong> claim cannot stay nested here. A SAML ' +
+        'Attribute\'s content model is a name and text values, so <code>address.locality</code> ' +
+        'arrives as an attribute whose NAME is the dotted path, where a JWT would carry a ' +
+        '<code>locality</code> member of an <code>address</code> object (OIDC Core 5.1.1). Both ' +
+        'families then call one claim by one name, which is the property somebody comparing an ' +
+        'ID Token with an assertion needs.</p>'
+      : '<p class="note">A <strong>nested</strong> claim stays nested in a JWT: ' +
+        '<code>address.locality</code> is a <code>locality</code> member of an <code>address</code> ' +
+        'object, which is what OIDC Core 5.1.1 defines. A SAML Attribute has no way to spell that — ' +
+        'the content model is a name and text values — so the assertion carries the dotted path as ' +
+        'the attribute\'s name. Both families then call one claim by one name, which is the ' +
+        'property somebody comparing an ID Token with an assertion needs.</p>') +
+    '<p class="note"><strong>A typed ' + (saml ? 'attribute' : 'claim') + ' of the same name ' +
+    'wins.</strong> Somebody who wrote <code>email</code> by hand on the set that also has ' +
+    '<code>mail</code> ticked has said something specific, and the specific thing beats the ' +
+    'general one. In an assertion that has to be a filter rather than an overwrite: two ' +
+    '<code>&lt;Attribute&gt;</code> elements with one name would leave a relying party reading ' +
+    'whichever the builder emitted first.</p>' +
+    (saml
+      ? '<p class="note"><strong>And the protocol\'s own attribute beats both</strong>, which is ' +
+        'worth knowing before it is discovered in an assertion. A SAML 2.0 assertion sets ' +
+        '<code>name</code> from the sign-in and a WS-Federation one sets the whole identity claim ' +
+        'list, so ticking <code>cn</code>, <code>givenName</code>, <code>sn</code>, ' +
+        '<code>uid</code> or <code>mail</code> may change nothing a relying party sees. The rule ' +
+        'is not this page\'s: a configured attribute is ADDED to an assertion and never ' +
+        'substituted into one, because an attribute a relying party keys off that a web form ' +
+        'could displace would break a sign-in somewhere that looks nothing like this page.</p>'
+      : '<p class="note"><strong>And the protocol\'s own claim beats both</strong>, which is worth ' +
+        'knowing before it is discovered on a token. An ID Token always carries <code>name</code>, ' +
+        '<code>given_name</code>, <code>family_name</code>, <code>preferred_username</code> and ' +
+        '<code>email</code> built from the sign-in, so ticking <code>cn</code>, ' +
+        '<code>givenName</code>, <code>sn</code>, <code>uid</code> or <code>mail</code> <em>on ' +
+        'that set</em> changes nothing the client sees — the same five reach an access token, ' +
+        'where the protocol sets none of them, and reach it from the directory. The rule is not ' +
+        'new and is not this page\'s: a configured claim is added to a token and never ' +
+        'substituted into one, because a claim a relying party keys off that a web form could ' +
+        'displace would break a sign-in somewhere that looks nothing like this page.</p>') +
+    '<p class="note"><strong>None of it is verified and none of it grants anything.</strong> This ' +
+    'service authenticates nobody — the username typed at the sign-in screen is the identity in ' +
+    'everything it issues — so a birthdate from here is a birthdate from a web form. No endpoint ' +
+    'here reads one of these back or decides anything on one. That is true of the groups claim as ' +
+    'well: it is carried, and a group on that person\'s entry still grants them nothing &mdash; ' +
+    'see <a href="/admin/groups">the groups page</a>.</p>';
+}
+
+// WHICH PLACEHOLDERS ACTUALLY EXPAND IN AN ASSERTION, which is not the list the
+// claims page advertises and is worth being exact about rather than tidy.
+//
+// A placeholder is expanded against the CONTEXT the issuance path hands
+// admin_stats.expandValue(), and the two assertion builders hand it
+// `{ subject, audience }` — saml2.js and saml11.js, the same one line each —
+// where oauth2.js hands a token's whole claim context. So `${username}`,
+// `${email}` and the rest of PLACEHOLDERS reach an assertion as the characters
+// they were written as. That is the documented behaviour of an unknown
+// placeholder (it names itself rather than silently becoming empty), and it is
+// not a defect of this page — but a page that recited the JWT list under a SAML
+// heading would be telling somebody their attribute will carry a name when it
+// will carry `${username}`. `${now}` and `${iso}` are computed inside
+// expandValue() and so work everywhere.
+const SAML_PLACEHOLDERS = ['subject', 'audience', 'now', 'iso'];
+
+function claimValueNotes(family) {
+  const saml = family === 'saml';
+  return '<h2>Values</h2>' +
+    '<p class="note">A value may contain <code>${placeholders}</code>, because a value that can ' +
+    'only be a constant cannot exercise the thing worth testing — that an ' +
+    (saml ? 'attribute' : 'claim') + ' carrying the signed-in user\'s identity reaches the ' +
+    'relying party. ' +
+    (saml
+      ? 'The ones an ASSERTION expands are ' + codeList(SAML_PLACEHOLDERS) + ', and that is a ' +
+        'shorter list than <a href="/admin/claims">the token page\'s</a> on purpose rather than ' +
+        'by oversight: an assertion is built from a subject and an audience, so the names a ' +
+        'JWT context carries — <code>${username}</code>, <code>${email}</code> and the rest — ' +
+        'have nothing to expand against here and arrive as the characters they were written as. ' +
+        '<code>${subject}</code> is the one that carries the signed-in identity.'
+      : 'The ones understood are ' + codeList(stats.PLACEHOLDERS) + '.') +
+    ' An unknown one ' +
+    'is left as it was written rather than replaced with nothing: <code>${dept}</code> that ' +
+    'silently became an empty string is a bug that looks like a configuration mistake, and one ' +
+    'that still says <code>${dept}</code> names itself.</p>' +
+    (saml
+      ? '<p class="note"><strong>A SAML attribute value is never typed.</strong> The XML content ' +
+        'model is text, so <code>true</code> and <code>{"a":1}</code> reach the relying party as ' +
+        'the characters they were written as — which is the opposite of what the same value does ' +
+        'in a JWT, where it would arrive as a boolean and an object. That difference is worth ' +
+        'knowing rather than discovering: a client library that parses an assertion attribute ' +
+        'into a boolean is doing that on its own.</p>'
+      : '<p class="note">A JWT claim value is typed: text that unambiguously looks like JSON — an ' +
+        'object, an array, a bare <code>true</code>/<code>false</code>/<code>null</code>, or a ' +
+        'number — is used as that JSON, and anything else is a string. One consequence, stated ' +
+        'rather than left to be discovered: a claim whose value is genuinely the four characters ' +
+        '<code>true</code> cannot be configured, because a text field cannot tell the two apart. ' +
+        'Write <code>"true"</code>, which parses as the JSON string. <a href="/admin/saml-' +
+        'attributes">SAML attribute values</a> are never typed — the XML content model is ' +
+        'text.</p>');
+}
+
+// The "replace a whole set" form, which is the one a test wants: POST the same
+// thing as JSON and get JSON back. The SELECT is built from the ids the page
+// carries, so the SAML page cannot offer a token set and the claims page cannot
+// offer an assertion one — the same restriction claimsAction()'s `allowed`
+// enforces on the way in, said in the markup so it is not only a refusal.
+function replaceSetForm(ids, pageUrl, family) {
+  const options = ids.map(function (id) {
+    return '<option value="' + esc(id) + '">' + esc(stats.CLAIM_SETS[id].label) + '</option>';
+  }).join('');
+  const noun = family === 'saml' ? 'attributes' : 'claims';
+  return '<h2>Replace a whole set</h2>' +
+    '<p class="note">The form a test wants. POST the same thing as JSON to get JSON back. This ' +
+    'replaces the <em>typed</em> ' + noun + ' only; the directory attributes ticked above are a ' +
+    'separate action (<code>attributes</code>) and are left alone by it.</p>' +
+    '<form method="post" action="' + esc(pageUrl) + '">' +
+      '<input type="hidden" name="action" value="replace">' +
+      '<div class="formrow"><label for="set">Set</label>' +
+      '<select id="set" name="set">' + options + '</select></div>' +
+      '<textarea name="claims" spellcheck="false">[{"name": "dept", "value": "engineering"}, ' +
+      '{"name": "on_behalf_of", "value": "${username}"}]</textarea>' +
+      '<div class="formrow"><button>Replace</button></div>' +
+    '</form>';
+}
+
+app.get('/admin/claims', function (req, res) {
+  log.debug("Entering the admin claims page.");
+  const previewUser = claimsPreviewUser(req.query);
+  const pageUrl = claimsPageUrl(req.query);
+  // ONE read of the directory and one invented persona for the whole page, not
+  // one per set: both tables show the same catalogue of values for the same
+  // person, and a read of one entry per section would be one that exists only
+  // because the sections were written separately.
+  const values = claimAttributes.catalogueValuesFor(previewUser);
+
+  const inner = messagesOf(req) +
+    '<p class="note">What to add to every <strong>token</strong> this service issues <em>from now ' +
+    'on</em>. Nothing already issued changes — a token is a signed document and this page cannot ' +
+    'reach inside one. Two sets, because an OAuth 2.0 access token and an OIDC ID Token go to ' +
+    'different readers: one to a resource server and one to a client, and the interesting ' +
+    'configuration is usually the one where they DIFFER.</p>' +
+
+    '<p class="note">The other two sets are next door. <strong>SAML 2.0 and SAML 1.1 assertions ' +
+    'are configured on <a href="/admin/saml-attributes">Custom SAML attributes</a></strong>, ' +
+    'under SAML, because those two spell an attribute differently enough from a JWT claim — and ' +
+    'from each other — that one page had to explain three vocabularies before a reader could ' +
+    'change one. The store is the same one either way, and so is the audit row.</p>' +
+
+    claimHalvesNote('jwt') +
+
+    claimPreviewForm('/admin/claims', previewUser, values) +
 
     '<div class="warn"><strong>Custom claims are additive.</strong> A configured claim is added to ' +
     'what the protocol already puts in the token and never replaces one. The names this service ' +
     'sets itself are refused rather than silently ignored: ' +
     codeList(stats.RESERVED_JWT_CLAIMS) + '. Every one of them is ' +
     'load-bearing somewhere here — an <code>exp</code> settable from a web form would produce ' +
-    'tokens that fail to verify with nothing pointing back at this page.</div>' +
+    'tokens that fail to verify with nothing pointing back at this page. The list is a JWT rule ' +
+    'and only a JWT rule: an <a href="/admin/saml-attributes">assertion attribute</a> called ' +
+    '<code>exp</code> collides with nothing and is allowed.</div>' +
 
-    '<h2>The four sets</h2>' +
-    stats.CLAIM_SET_IDS.map(function (id) {
+    '<h2>The two token sets</h2>' +
+    stats.JWT_CLAIM_SET_IDS.map(function (id) {
       return claimSetSection(id, previewUser, values, pageUrl);
     }).join('') +
 
     groupClaimSection(previewUser) +
 
-    '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
-    '<p class="note">The catalogue is of <strong>LDAP attribute types</strong> and not of claim ' +
-    'names, and it is the same catalogue <a href="/admin/vc">the credential claims page</a> ' +
-    'chooses from — one list of spellings, because two would eventually disagree about what ' +
-    '<code>schacDateOfBirth</code> is called while both looked right. The value is the one on that ' +
-    'person\'s entry under <code>ou=users</code>; where the entry has nothing, it is invented from ' +
-    'the username — the same invented person every time, across restarts, in obviously fictional ' +
-    'ranges. Three rows are not RFC 4519/4524/2798: there is no standard attribute type for a ' +
-    'birthdate or a nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
-    '<p class="note">The four selections are <strong>independent</strong>, which is the point of ' +
-    'having four: an access token carrying <code>employee_number</code> and an ID Token carrying ' +
-    '<code>email</code> is a normal arrangement and a single list could not express it. They are ' +
-    'also independent of what a <a href="/admin/vc">credential</a> carries and of what the ' +
-    '<a href="/admin/vc-verifier-config">Verifier asks for</a>, deliberately — that is what keeps ' +
-    '"issue a credential carrying a claim the access token does not" reachable.</p>' +
-    '<p class="note">A <strong>nested</strong> claim stays nested in a JWT: <code>address.locality' +
-    '</code> is a <code>locality</code> member of an <code>address</code> object, which is what ' +
-    'OIDC Core 5.1.1 defines. A SAML Attribute has no way to spell that — the content model is a ' +
-    'name and text values — so the assertion carries the dotted path as the attribute\'s name. ' +
-    'Both families then call one claim by one name, which is the property somebody comparing an ID ' +
-    'Token with an assertion needs.</p>' +
-    '<p class="note"><strong>A typed claim of the same name wins.</strong> Somebody who wrote ' +
-    '<code>email</code> by hand on the set that also has <code>mail</code> ticked has said ' +
-    'something specific, and the specific thing beats the general one. In an assertion that has to ' +
-    'be a filter rather than an overwrite: two <code>&lt;Attribute&gt;</code> elements with one ' +
-    'name would leave a relying party reading whichever the builder emitted first.</p>' +
-    '<p class="note"><strong>And the protocol\'s own claim beats both</strong>, which is worth ' +
-    'knowing before it is discovered on a token. An ID Token always carries <code>name</code>, ' +
-    '<code>given_name</code>, <code>family_name</code>, <code>preferred_username</code> and ' +
-    '<code>email</code> built from the sign-in, so ticking <code>cn</code>, <code>givenName</code>, ' +
-    '<code>sn</code>, <code>uid</code> or <code>mail</code> <em>on that set</em> changes nothing ' +
-    'the client sees — the same five reach an access token, where the protocol sets none of them, ' +
-    'and reach it from the directory. A SAML 2.0 assertion sets <code>name</code> the same way, and ' +
-    'a WS-Federation one sets the whole identity claim list. The rule is not new and is not this ' +
-    'page\'s: a configured claim is added to a token and never substituted into one, because a ' +
-    'claim a relying party keys off that a web form could displace would break a sign-in somewhere ' +
-    'that looks nothing like this page.</p>' +
-    '<p class="note"><strong>None of it is verified and none of it grants anything.</strong> This ' +
-    'service authenticates nobody — the username typed at the sign-in screen is the identity in ' +
-    'every token it issues — so a birthdate from here is a birthdate from a web form. No endpoint ' +
-    'here reads one of these claims back or decides anything on one. That is true of the groups ' +
-    'claim below as well: a token carries it, and a group on that person\'s entry still grants ' +
-    'them nothing &mdash; see <a href="/admin/groups">the groups page</a>.</p>' +
+    attributeCatalogueNotes('jwt') +
 
-    '<h2>Values</h2>' +
-    '<p class="note">A value may contain <code>${placeholders}</code>, because a claim that can only ' +
-    'be a constant cannot exercise the thing worth testing — that a claim carrying the signed-in ' +
-    'user\'s identity reaches the relying party. The ones understood are ' +
-    codeList(stats.PLACEHOLDERS) + '. An unknown one is left as it was ' +
-    'written rather than replaced with nothing: <code>${dept}</code> that silently became an empty ' +
-    'string is a bug that looks like a configuration mistake, and one that still says ' +
-    '<code>${dept}</code> names itself.</p>' +
-    '<p class="note">A JWT claim value is typed: text that unambiguously looks like JSON — an ' +
-    'object, an array, a bare <code>true</code>/<code>false</code>/<code>null</code>, or a number — ' +
-    'is used as that JSON, and anything else is a string. One consequence, stated rather than left ' +
-    'to be discovered: a claim whose value is genuinely the four characters <code>true</code> cannot ' +
-    'be configured, because a text field cannot tell the two apart. Write <code>"true"</code>, which ' +
-    'parses as the JSON string. SAML attribute values are never typed — the XML content model is ' +
-    'text.</p>' +
+    claimValueNotes('jwt') +
 
-    '<h2>Replace a whole set</h2>' +
-    '<p class="note">The form a test wants. POST the same thing as JSON to get JSON back. This ' +
-    'replaces the <em>typed</em> claims only; the directory attributes ticked above are a separate ' +
-    'action (<code>attributes</code>) and are left alone by it.</p>' +
-    '<form method="post" action="' + esc(pageUrl) + '">' +
-      '<input type="hidden" name="action" value="replace">' +
-      '<div class="formrow"><label for="set">Set</label>' +
-      '<select id="set" name="set">' + setSelect + '</select></div>' +
-      '<textarea name="claims" spellcheck="false">[{"name": "dept", "value": "engineering"}, ' +
-      '{"name": "on_behalf_of", "value": "${username}"}]</textarea>' +
-      '<div class="formrow"><button>Replace</button></div>' +
-    '</form>';
+    replaceSetForm(stats.JWT_CLAIM_SET_IDS, pageUrl, 'jwt');
 
   respond(req, res, claimsJson(previewUser), 'Custom claims', '/admin/claims', inner);
   log.debug("Leaving the admin claims page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/saml-attributes
+//
+// THE SAME TWO HALVES FOR THE TWO ASSERTION VOCABULARIES, on their own page and
+// under the console's own SAML group since 2026-08-24. It was four sections of
+// /admin/claims, and the reason for moving is not tidiness: a reader who has
+// come to add an attribute to a WS-Federation assertion had to read past an
+// OAuth access token and an OIDC ID Token, in a page whose every warning was
+// about JWT claim names that do not apply to them. The two SAML sets differ
+// from the JWT pair in three ways that all have to be said on whichever page
+// carries them — a NameFormat, an AttributeNamespace, and a content model that
+// is text and cannot nest — so saying them here costs one page and buys two
+// that are each about one thing.
+//
+// WHAT DID NOT MOVE IS THE STORE. admin_stats.js still holds one CLAIM_SETS
+// object with all four sets in it, setClaimSet() is still the one door onto it,
+// and claimsAction() is still the one function both pages post to. This page is
+// a VIEW of two of those sets and an `allowed` list on the way in; it is not a
+// second place assertions are configured.
+// ---------------------------------------------------------------------------
+app.get('/admin/saml-attributes', function (req, res) {
+  log.debug("Entering the admin SAML attributes page.");
+  const previewUser = claimsPreviewUser(req.query);
+  const pageUrl = samlAttributesPageUrl(req.query);
+  const values = claimAttributes.catalogueValuesFor(previewUser);
+
+  const inner = messagesOf(req) +
+    '<p class="note">What to add to every <strong>SAML assertion</strong> this service issues ' +
+    '<em>from now on</em>. Nothing already issued changes — an assertion is a signed document and ' +
+    'this page cannot reach inside one. Two sets, because SAML 2.0 and SAML 1.1 spell an ' +
+    'attribute differently enough that one list could not serve both: 2.0 has ' +
+    '<code>Name</code> and an optional <code>NameFormat</code>, and 1.1 has ' +
+    '<code>AttributeName</code> and a required <code>AttributeNamespace</code>.</p>' +
+
+    '<p class="note"><strong>Where these assertions come from.</strong> The SAML 2.0 set reaches ' +
+    'every assertion <a href="/admin/sts-metadata">WS-Trust</a> issues with a 2.0 token type; the ' +
+    'SAML 1.1 set reaches the 1.1 ones, which is what <strong>WS-Federation\'s passive requestor ' +
+    'profile</strong> carries — so the 1.1 half is the one a browser sign-in exercises. There is ' +
+    'no SAML 2.0 Web SSO profile here, deliberately, so no assertion of that kind reaches a ' +
+    'browser: the 2.0 set is exercised by a WS-Trust client.</p>' +
+
+    '<p class="note">Tokens are next door. <strong>The OAuth 2.0 access token and the OIDC ID ' +
+    'Token are configured on <a href="/admin/claims">Custom claims</a></strong>, under OAuth2 / ' +
+    'OIDC. The store behind both pages is one store — the same four sets, the same ' +
+    '<code>ldapmodify</code>-visible directory attributes, and one row in ' +
+    '<a href="/admin/audit">the audit log</a> per change whichever page made it.</p>' +
+
+    claimHalvesNote('saml') +
+
+    claimPreviewForm('/admin/saml-attributes', previewUser, values) +
+
+    '<div class="warn"><strong>Custom attributes are additive.</strong> A configured attribute is ' +
+    'added to what the protocol already puts in the assertion and never replaces one — a SAML 2.0 ' +
+    'assertion sets <code>name</code> from the sign-in and a WS-Federation one sets the whole ' +
+    'identity claim list, and neither can be displaced from here. <strong>The reserved list on ' +
+    '<a href="/admin/claims">the claims page</a> does not apply to these two sets</strong>: those ' +
+    'names are load-bearing in a JWT, and an assertion attribute called <code>exp</code> or ' +
+    '<code>scope</code> collides with nothing. What is refused here is the same thing that is ' +
+    'refused there — an entry with no name, and two entries of one name, because the second would ' +
+    'win silently.</div>' +
+
+    '<h2>The two assertion sets</h2>' +
+    stats.SAML_CLAIM_SET_IDS.map(function (id) {
+      return claimSetSection(id, previewUser, values, pageUrl);
+    }).join('') +
+
+    groupClaimSection(previewUser) +
+
+    attributeCatalogueNotes('saml') +
+
+    claimValueNotes('saml') +
+
+    '<h2>The SAML 1.1 namespace</h2>' +
+    '<p class="note">A SAML 1.1 attribute is a NAME IN A NAMESPACE, and an attribute configured ' +
+    'without one gets <code>' + esc(stats.DEFAULT_SAML11_NAMESPACE) + '</code> — the claim ' +
+    'namespace every WS-Federation relying party already reads. That default is why an attribute ' +
+    'added with a name and a value alone arrives somewhere useful instead of in a namespace ' +
+    'nothing looks in. SAML 2.0 has no equivalent: <code>NameFormat</code> is optional there and ' +
+    'is left off unless it is typed.</p>' +
+
+    replaceSetForm(stats.SAML_CLAIM_SET_IDS, pageUrl, 'saml');
+
+  respond(req, res, samlAttributesJson(previewUser), 'Custom SAML attributes',
+          '/admin/saml-attributes', inner);
+  log.debug("Leaving the admin SAML attributes page.");
 });
 
 // ---------------------------------------------------------------------------
@@ -7174,8 +7555,14 @@ app.get('/admin/vc-verifier-config', function (req, res) {
 // EVERY ROW SAYS WHERE ITS VALUE CAME FROM. That is the question this page
 // exists to answer and it is the one that used to require a grep: a value can
 // arrive from a runtime override, from an environment variable (its own or the
-// legacy STS_ISSUER), from the appconfig file, or from the built-in default,
-// and the four are indistinguishable once they have been read.
+// legacy STS_ISSUER), from the appconfig file this process was started with, or
+// from env/defaults.js under it — and the four are indistinguishable once they
+// have been read.
+//
+// THERE IS NO FIFTH, since 2026-08-24: a setting with a value in none of them
+// stops this service from starting rather than quietly taking a constant out of
+// a module. So a value shown here is a value somebody can find in a file, which
+// is what makes the Source column worth reading at all.
 //
 // A restart-only row is SHOWN and its input is DISABLED, with the reason beside
 // it. Both halves matter. Hiding it would answer "what is this service
@@ -7189,11 +7576,23 @@ app.get('/admin/vc-verifier-config', function (req, res) {
 // explorer at /admin-api/docs is the single exception.
 // ---------------------------------------------------------------------------
 
-// The four sources, as a phrase a reader can act on. `env-legacy` is its own
+// The five sources, as a phrase a reader can act on. `env-legacy` is its own
 // case rather than being folded into `env`, because the variable it names is
 // not the one the rest of the row talks about — being told the value comes from
 // "the environment" while STS_SAML_ISSUER is unset is the kind of true answer
 // that costs twenty minutes.
+//
+// `defaults` is a case for exactly the same reason. The appconfig layer is TWO
+// files unioned — env/defaults.js, and whatever CONFIG_FILE names over it — and
+// telling somebody a value comes from "the appconfig file" when their file does
+// not mention it would send them to edit a line that is not there. So the two
+// halves of that layer are named separately and each names its own file.
+//
+// The last line is now unreachable for anything but a `derived` setting:
+// config.js refuses to start when a non-derived setting has no value in either
+// file and no environment variable. It stays because the three derived ones DO
+// resolve through their `dflt`, which is a function of a neighbour rather than a
+// literal anybody could have written in a file.
 function sourceNote(setting) {
   if (setting.source === 'override') {
     return 'set here, in memory only';
@@ -7207,7 +7606,10 @@ function sourceNote(setting) {
   if (setting.source === 'appconfig') {
     return 'from ' + (process.env.CONFIG_FILE || 'the appconfig file');
   }
-  return 'built-in default';
+  if (setting.source === 'defaults') {
+    return 'from ' + config.DEFAULTS_FILE + ' (the default appconfig file)';
+  }
+  return 'derived from another setting';
 }
 
 function configRow(setting) {
@@ -7399,6 +7801,415 @@ app.post('/admin/config', function (req, res) {
   respondToAction(req, res, '/admin/config', result);
   log.debug("Leaving the admin configuration action endpoint.");
 });
+
+// ---------------------------------------------------------------------------
+// /admin/token-lifetimes — HOW LONG WHAT THIS SERVICE ISSUES IS GOOD FOR.
+//
+// Four settings, all of them `config.js` rows, on a page of their own under
+// Protocols › OAuth2 / OIDC. They were three module-level `const`s in
+// `../oauth-oidc/oauth2.js` until 2026-08-24 and could not be changed at all
+// without a restart.
+//
+// WHY THIS IS A PAGE AND NOT JUST FOUR MORE ROWS ON /admin/config, which is the
+// question `/admin/scim`'s header answers the other way — it has no form
+// precisely because everything about SCIM that can be changed is a config row
+// and "a second form here would be a second door to one setting". The rule that
+// header is applying is the ONE-STORE rule, and it is untouched here: there is
+// no store. This page holds nothing, decides nothing, and writes through
+// `config.setOverride()` — the same function `/admin/config`'s Save and
+// `POST /admin-api/config/set` call, against the same override map. What would
+// break the rule is a second PLACE THE VALUE LIVES, and there is none. What is
+// different from SCIM's case is what the reader is doing:
+//
+//   * These four are a QUANTITY somebody sets to a specific number to watch
+//     something happen, over and over, in a session — "make it a minute so I
+//     can see my client refresh". `/admin/config`'s form is a table of
+//     forty-nine settings with a text box each; finding four of them in it,
+//     every time, is the cost this page removes.
+//   * They INTERACT, and a page can say so where a flat table cannot. An access
+//     token that outlives the refresh token is a grant that can never be
+//     renewed; a clock skew larger than the lifetime is a token that is never
+//     expired. Both are legal here — this service refuses nothing it can
+//     merely explain — and both are worth being told about before the client
+//     author debugs their own code for an hour.
+//   * The answer to "why is my client being refused" is usually "the token
+//     expired", and the numbers that decide it are worth having beside the
+//     count of what already has.
+//
+// The test for a THIRD page like this one is the same as rule 3e's for a hook:
+// it earns its place when the reader's task is not the one /admin/config
+// serves, and it costs a reader nothing only while it writes through the same
+// function. A page that started keeping its own copy of a value would be the
+// thing both rules exist to prevent.
+//
+// NOTHING ALREADY ISSUED CHANGES, and the page says so twice. A lifetime is
+// stamped into a token as `exp` when it is signed, so a change here reaches the
+// NEXT token. That is a fact about signed statements, not a limitation, and
+// somebody who did not expect it will read the tokens table below and conclude
+// the setting did not take.
+// ---------------------------------------------------------------------------
+
+// The four keys, in the order the page draws them: the three lifetimes, then
+// the allowance applied when reading one back. Written once, and every part of
+// this page and its two API operations is derived from it, so a fifth setting
+// is one entry here.
+const TOKEN_LIFETIME_KEYS = ['oauth2.accessTokenTtlS', 'oauth2.idTokenTtlS',
+                             'oauth2.refreshTokenTtlS', 'oauth2.clockSkewS'];
+
+// Which token kind each lifetime governs, so the page can put the count of what
+// is already out there beside the number that decided it. `oauth2.clockSkewS`
+// governs no kind — it is applied when a token of any kind is read back — and
+// is deliberately absent rather than mapped to something plausible.
+const TOKEN_LIFETIME_KINDS = {
+  'oauth2.accessTokenTtlS': 'access_token',
+  'oauth2.idTokenTtlS': 'id_token',
+  'oauth2.refreshTokenTtlS': 'refresh_token'
+};
+
+// Seconds as a person reads them. Deliberately approximate above an hour and
+// exact below one: the interesting settings on this page are the short ones,
+// and "90 minutes" is the answer somebody wants for 5400 while "1.04 days" is
+// nobody's answer for 90000. The exact number is always beside it in its own
+// column, so this is a gloss rather than the value.
+function humanSeconds(seconds) {
+  const n = Number(seconds) || 0;
+  if (n === 0) return 'no allowance at all';
+  if (n < 60) return n + ' second' + (n === 1 ? '' : 's');
+  if (n < 3600) {
+    const minutes = n / 60;
+    return (Number.isInteger(minutes) ? minutes : minutes.toFixed(1)) +
+           ' minute' + (minutes === 1 ? '' : 's');
+  }
+  if (n < 86400) {
+    const hours = n / 3600;
+    return (Number.isInteger(hours) ? hours : hours.toFixed(1)) +
+           ' hour' + (hours === 1 ? '' : 's');
+  }
+  const days = n / 86400;
+  return (Number.isInteger(days) ? days : days.toFixed(1)) + ' day' + (days === 1 ? '' : 's');
+}
+
+// One row of the form. A `number` input rather than the text box /admin/config
+// draws, with `min`, `max` and `step` off the setting itself — the bounds are
+// declared in config.js's table and are rendered here rather than repeated, so
+// the browser's own refusal and the server's are the same three numbers. The
+// server still checks: an input attribute is a convenience for a person and no
+// constraint at all on a JSON body or a curl.
+function tokenLifetimeRow(setting, snapshot) {
+  const id = 'tl-' + setting.key.replace(/\./g, '-');
+  const kind = TOKEN_LIFETIME_KINDS[setting.key];
+  const counts = kind
+    ? (snapshot.tokens.byKind.filter(function (row) { return row.kind === kind; })[0] || null)
+    : null;
+  const issued = counts
+    ? '<span class="state-valid">' + counts.valid + ' valid</span>, ' +
+      '<span class="state-expired">' + counts.expired + ' expired</span>, ' +
+      '<span class="state-revoked">' + counts.revoked + ' revoked</span>'
+    : '<span class="state-none">—</span>';
+  return '<tr>' +
+    '<td><label for="' + esc(id) + '">' + esc(setting.label) + '</label>' +
+    '<div class="note"><code>' + esc(setting.key) + '</code>' +
+    (setting.env ? ', <code>' + esc(setting.env) + '</code>' : '') + '</div></td>' +
+    '<td><input type="number" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+      ' value="' + esc(setting.text) + '"' +
+      (typeof setting.min === 'number' ? ' min="' + setting.min + '"' : '') +
+      (typeof setting.max === 'number' ? ' max="' + setting.max + '"' : '') +
+      (typeof setting.step === 'number' ? ' step="' + setting.step + '"' : '') +
+      ' size="10"></td>' +
+    '<td>' + esc(humanSeconds(setting.value)) + '</td>' +
+    '<td>' + esc(String(typeof setting.min === 'number' ? setting.min : 0)) + '&ndash;' +
+      esc(String(typeof setting.max === 'number' ? setting.max : '')) +
+      (typeof setting.step === 'number'
+        ? ', in ' + esc(String(setting.step)) + 's'
+        : '') + '</td>' +
+    '<td>' + (setting.overridden
+      ? '<strong>' + esc(sourceNote(setting)) + '</strong>'
+      : esc(sourceNote(setting))) + '</td>' +
+    '<td>' + issued + '</td></tr>';
+}
+
+// The two ways these four can be set to something legal and surprising. Neither
+// is refused — this service exists to be pointed at a client and made to
+// misbehave on purpose, and both of these are reachable states a real
+// deployment can get into — but a page that showed the numbers and not the
+// consequence would leave the consequence to be discovered from a client that
+// stopped working.
+function tokenLifetimeWarnings() {
+  const access = config.value('oauth2.accessTokenTtlS');
+  const refresh = config.value('oauth2.refreshTokenTtlS');
+  const skew = config.value('oauth2.clockSkewS');
+  const notes = [];
+  if (access >= refresh) {
+    notes.push('<strong>The access token lives at least as long as the refresh token</strong> (' +
+      esc(humanSeconds(access)) + ' against ' + esc(humanSeconds(refresh)) + '). That is legal ' +
+      'and it is issued exactly as configured, but the grant can never usefully be renewed: by ' +
+      'the time a client needs a new access token, the credential it would renew with has ' +
+      'expired too. It is a good way to watch a client discover that it has no way back.');
+  }
+  if (skew >= access) {
+    notes.push('<strong>The clock skew is at least as long as the access token’s own ' +
+      'lifetime</strong> (' + esc(humanSeconds(skew)) + ' against ' + esc(humanSeconds(access)) +
+      '). Every endpoint that reads one back will accept it for its whole life and then for as ' +
+      'long again, so an expired access token is never refused anywhere here — including at ' +
+      'introspection, which will keep reporting it active. Lower the skew, or raise the ' +
+      'lifetime, unless that is the thing being tested.');
+  }
+  if (!notes.length) return '';
+  return notes.map(function (note) { return '<div class="warn">' + note + '</div>'; }).join('');
+}
+
+// The action switch. Two actions, and both write through config.js.
+//
+// `set` is ALL-OR-NOTHING for the reason configAction()'s set-many is: this
+// form posts four fields at once, and applying two of them before refusing the
+// third would leave the service issuing tokens with a lifetime combination
+// nobody asked for and the page showing it as though it had been chosen.
+//
+// `defaults` clears the runtime override on these four ONLY. It is not
+// config.js's reset-all, which would also drop an unrelated override somebody
+// set on another page — that is the sort of button that is used once and
+// regretted, and "reset all" already exists on /admin/config for whoever wants
+// it.
+function tokenLifetimesAction(body) {
+  log.debug("Entering tokenLifetimesAction(). action=" + (body && body.action));
+  const action = String((body && body.action) || '').trim();
+
+  if (action === 'set') {
+    // Only the four this page owns, and only the ones actually posted. A JSON
+    // caller that sends one of them is setting one of them; a form sends all
+    // four. A field named here that is NOT one of the four is refused by name
+    // rather than ignored, because this action's whole surface is four keys and
+    // a caller that misspelt one deserves to be told rather than to watch
+    // nothing happen.
+    const posted = Object.keys(body || {}).filter(function (name) { return name !== 'action'; });
+    const unknown = posted.filter(function (name) {
+      return TOKEN_LIFETIME_KEYS.indexOf(name) < 0;
+    });
+    if (unknown.length) {
+      log.debug("Leaving tokenLifetimesAction(). Unknown field(s): " + unknown.join(', '));
+      return { ok: false, errors: ['This action sets only ' + TOKEN_LIFETIME_KEYS.join(', ') +
+        '. It was also given: ' + unknown.join(', ') + '. Every other setting is on ' +
+        '/admin/config and POST /admin-api/config/set.'] };
+    }
+    const wanted = posted.filter(function (name) { return TOKEN_LIFETIME_KEYS.indexOf(name) >= 0; });
+    if (!wanted.length) {
+      log.debug("Leaving tokenLifetimesAction(). Nothing was posted.");
+      return { ok: false, errors: ['No lifetime was posted. Name at least one of ' +
+        TOKEN_LIFETIME_KEYS.join(', ') + '.'] };
+    }
+    const errors = [];
+    wanted.forEach(function (key) {
+      const problem = config.checkOverride(key, body[key]);
+      if (problem) errors.push(problem);
+    });
+    if (errors.length) {
+      log.debug("Leaving tokenLifetimesAction(). Refused: " + errors.length + " problem(s).");
+      return { ok: false, errors: errors };
+    }
+    const changed = [];
+    wanted.forEach(function (key) {
+      const before = config.text(key);
+      config.setOverride(key, body[key]);
+      if (config.text(key) !== before) changed.push(key);
+    });
+    log.debug("Leaving tokenLifetimesAction(). " + changed.length + " changed.");
+    return { ok: true, applied: wanted, changed: changed,
+             settings: wanted.map(function (key) {
+               return config.describe(configSettingFor(key));
+             }),
+             message: (changed.length
+               ? changed.length + ' setting(s) changed: ' + changed.map(function (key) {
+                   return key + ' = ' + config.text(key) + 's';
+                 }).join(', ') + '.'
+               : 'Nothing changed — every value posted was the one already in force.') +
+               ' It applies to the NEXT token signed; nothing already issued is affected, ' +
+               'because a lifetime is stamped into a token as its exp claim. Gone on restart.' };
+  }
+
+  if (action === 'defaults') {
+    // clearOverride() refuses a key that was never overridden, which is the
+    // right answer for a caller naming one key and the wrong one for a button
+    // meaning "put these four back". So the refusals are counted rather than
+    // returned: a page where three of the four were overridden must not fail
+    // because the fourth was already where it belonged.
+    const cleared = [];
+    TOKEN_LIFETIME_KEYS.forEach(function (key) {
+      if (config.clearOverride(key).ok) cleared.push(key);
+    });
+    log.debug("Leaving tokenLifetimesAction(). Cleared " + cleared.length + ".");
+    return { ok: true, cleared: cleared,
+             settings: TOKEN_LIFETIME_KEYS.map(function (key) {
+               return config.describe(configSettingFor(key));
+             }),
+             message: cleared.length
+               ? cleared.length + ' override(s) cleared: ' + cleared.join(', ') + '. Each is ' +
+                 'back to its environment or appconfig value.'
+               : 'None of the four was overridden here, so nothing changed — they are ' +
+                 'already coming from the environment or from one of the two appconfig ' +
+                 'files.' };
+  }
+
+  log.debug("Leaving tokenLifetimesAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The two are: set, defaults.'] };
+}
+
+// The JSON view, answered by GET /admin/token-lifetimes?format=json and by
+// GET /admin-api/token-lifetimes. Built here rather than in the route so the
+// page and the API cannot come to describe different settings — the rule
+// usersView() and groupsView() follow for the same reason.
+function tokenLifetimesJson() {
+  log.debug("Entering tokenLifetimesJson().");
+  const snapshot = stats.snapshot();
+  const settings = TOKEN_LIFETIME_KEYS.map(function (key) {
+    return config.describe(configSettingFor(key));
+  });
+  const json = {
+    // The effective seconds, flat, for a caller that wants the number and not
+    // the provenance. The `settings` array beside it is the whole row —
+    // bounds, source, default, description — which is what a console or an
+    // explorer needs and what a test asserting "it is 3600" does not.
+    lifetimes: {
+      accessTokenTtlS: config.value('oauth2.accessTokenTtlS'),
+      idTokenTtlS: config.value('oauth2.idTokenTtlS'),
+      refreshTokenTtlS: config.value('oauth2.refreshTokenTtlS'),
+      clockSkewS: config.value('oauth2.clockSkewS')
+    },
+    settings: settings,
+    // What is already out there, per kind, against the same clock the endpoints
+    // use — stats.tokenStateOf() applies oauth2.clockSkewS, so a token this
+    // says is expired is one /oauth2/introspect will call inactive.
+    tokens: {
+      held: snapshot.tokens.held, forgotten: snapshot.tokens.forgotten,
+      cap: snapshot.tokens.cap, revoked: snapshot.tokens.revoked,
+      byKind: snapshot.tokens.byKind
+    },
+    now: snapshot.now
+  };
+  log.debug("Leaving tokenLifetimesJson(). " + settings.length + " setting(s).");
+  return json;
+}
+
+app.get('/admin/token-lifetimes', function (req, res) {
+  log.debug("Entering the admin token lifetimes page.");
+  const json = tokenLifetimesJson();
+  const settings = json.settings;
+  const snapshot = { tokens: json.tokens };
+  const anyOverridden = settings.some(function (setting) { return setting.overridden; });
+
+  const inner = messagesOf(req) +
+    '<p class="note">How long an access token, an ID Token and a refresh token issued here are ' +
+    'good for, and how far out a clock may be before this service stops believing one of its ' +
+    'own. All four are <a href="/admin/config">configuration settings</a> and this page is a ' +
+    'shorter way to the same four rows — it writes through the same function, so a change ' +
+    'made here and one made there are one change.</p>' +
+
+    '<div class="warn"><strong>A change applies to the NEXT token and to nothing already ' +
+    'issued.</strong> A lifetime is stamped into a token as its <code>exp</code> claim when it ' +
+    'is signed, so a token in a client’s hands cannot be shortened or extended afterwards ' +
+    'by anything on this page. That is a property of a signed statement rather than a ' +
+    'limitation here — to take an issued token out of circulation, revoke it on ' +
+    '<a href="/admin/tokens">the tokens page</a>. Changes are in memory and are gone on ' +
+    'restart; to make one stick, put it in <code>' +
+    esc(process.env.CONFIG_FILE || 'env/local.js') + '</code>.</div>' +
+
+    tokenLifetimeWarnings() +
+
+    '<h2>The four settings</h2>' +
+    '<p class="note">Every lifetime is a whole number of <strong>thirty-second</strong> units. ' +
+    'That is not a formatting rule: these exist to be set short and watched, and below half a ' +
+    'minute a token expires between the response being written and the client reading it, which ' +
+    'is an hour spent debugging the wrong half. The clock skew is capped at <strong>300 ' +
+    'seconds</strong> — five minutes is the allowance Kerberos uses here ' +
+    '(<code>krb5.clockSkew</code>), and a window wider than that has stopped being a tolerance ' +
+    'and become a lifetime extension nobody asked for.</p>' +
+    '<form method="post" action="/admin/token-lifetimes">' +
+    '<input type="hidden" name="action" value="set">' +
+    '<table><tr><th>Setting</th><th>Seconds</th><th>Which is</th><th>Allowed</th>' +
+    '<th>Source</th><th>Tokens of that kind held here</th></tr>' +
+    settings.map(function (setting) { return tokenLifetimeRow(setting, snapshot); }).join('') +
+    '</table>' +
+    '<p><button>Save lifetimes</button> ' +
+    '<span class="note">All four are checked before any is applied — a form that took two ' +
+    'and refused the third would leave this service issuing a combination nobody chose.</span>' +
+    '</p></form>' +
+
+    (anyOverridden
+      ? '<div class="ok">' +
+        esc(String(settings.filter(function (s) { return s.overridden; }).length)) +
+        ' of the four are set here, in memory only. ' +
+        '<form method="post" action="/admin/token-lifetimes" class="inline">' +
+        '<input type="hidden" name="action" value="defaults">' +
+        '<button class="secondary">Put these four back</button></form>' +
+        ' It clears the override on these four only, and leaves any other setting alone — ' +
+        '<a href="/admin/config">Configuration</a> has the reset-all.</div>'
+      : '<p class="note">None of the four is overridden: each is coming from its environment ' +
+        'variable, from <code>' + esc(process.env.CONFIG_FILE || 'the appconfig file') +
+        '</code>, or from <code>' + esc(config.DEFAULTS_FILE) + '</code> under it. ' +
+        'The <em>Source</em> column says which.</p>') +
+
+    '<h2>The clock skew is not a lifetime, and it is not the assertion skew either</h2>' +
+    '<p class="note"><code>oauth2.clockSkewS</code> is the allowance applied to <code>exp</code> ' +
+    'and <code>nbf</code> at every place this service reads back a token it signed: ' +
+    '<code>/oauth2/introspect</code>, UserInfo, the refresh grant, token exchange, the ' +
+    'DPoP-bound access token check the four protected endpoints share, and the state column on ' +
+    'every console screen that reports one. It never changes what goes INTO a token. ' +
+    'It is deliberately a different setting from <code>oauth2.clientAssertionSkewS</code>, ' +
+    'which is how far out a <em>client’s</em> assertion may be under RFC 7523 ' +
+    '(<code>private_key_jwt</code> and <code>client_secret_jwt</code>): one is about somebody ' +
+    'else’s clock and one is about this service’s, and a deployment wanting a strict ' +
+    'check on one and a forgiving reading of the other has to be able to say so.</p>' +
+
+    '<h2>What is already out there</h2>' +
+    '<p class="note">Counted against the same clock the endpoints use — the skew above is ' +
+    'applied here too, so a token this table calls expired is one ' +
+    '<code>/oauth2/introspect</code> will report inactive. ' +
+    esc(String(json.tokens.held)) + ' token(s) are held, of the most recent ' +
+    esc(String(json.tokens.cap)) + '; ' + esc(String(json.tokens.forgotten)) +
+    ' older one(s) have been forgotten. Every one of them, with its own expiry, is on ' +
+    '<a href="/admin/tokens">the tokens page</a>.</p>' +
+    '<table><tr><th>Kind</th><th class="num">Issued</th><th class="num">Valid</th>' +
+    '<th class="num">Expired</th><th class="num">Revoked</th><th class="num">Not yet valid</th>' +
+    '<th class="num">No expiry stated</th></tr>' +
+    (json.tokens.byKind.map(function (row) {
+      return '<tr><td><code>' + esc(row.kind) + '</code></td>' +
+        '<td class="num">' + row.issued + '</td>' +
+        '<td class="num state-valid">' + row.valid + '</td>' +
+        '<td class="num state-expired">' + row.expired + '</td>' +
+        '<td class="num state-revoked">' + row.revoked + '</td>' +
+        '<td class="num state-expired">' + row.notYetValid + '</td>' +
+        '<td class="num state-none">' + row.noExpiry + '</td></tr>';
+    }).join('') || '<tr><td colspan="7">Nothing has been issued yet.</td></tr>') +
+    '</table>' +
+
+    '<h2>Two lifetimes this page does not set</h2>' +
+    '<p class="note">An <strong>authorization code</strong> is good for five minutes and is not ' +
+    'configurable: it is redeemed within seconds of being issued or it is a bug in the client, ' +
+    'and a code that could be made long-lived would be an invitation to build one that is. ' +
+    'RFC 9700 mode’s <strong>refresh idle timeout</strong> ' +
+    '(<code>oauth2.refreshIdleSeconds</code>, on <a href="/admin/config">Configuration</a>) is a ' +
+    'different question from the refresh lifetime above: it is measured from the last time any ' +
+    'token in a refresh CHAIN was redeemed rather than from issuance, so a busy client keeps its ' +
+    'grant indefinitely and a quiet one is cut off. The lifetime here is a wall the chain cannot ' +
+    'be refreshed past however busy it is.</p>' +
+
+    '<p class="note">The same four over JSON are at ' +
+    '<code>/admin/token-lifetimes?format=json</code> and ' +
+    '<code>GET /admin-api/token-lifetimes</code>; the two actions on this page are ' +
+    '<code>POST /admin-api/token-lifetimes/set</code> and <code>/defaults</code>. They are also ' +
+    'four ordinary rows of <code>GET /admin-api/config</code>.</p>';
+
+  respond(req, res, json, 'Token lifetimes', '/admin/token-lifetimes', inner);
+  log.debug("Leaving the admin token lifetimes page.");
+});
+
+app.post('/admin/token-lifetimes', function (req, res) {
+  log.debug("Entering the admin token lifetimes action endpoint.");
+  const body = parseBody(req);
+  const result = tokenLifetimesAction(body);
+  respondToAction(req, res, '/admin/token-lifetimes', result);
+  log.debug("Leaving the admin token lifetimes action endpoint.");
+});
+
 
 // ---------------------------------------------------------------------------
 // /admin/scim — WHAT THE PROVISIONING SURFACE HAS DONE.
@@ -7733,10 +8544,17 @@ app.get('/admin/config', function (req, res) {
     'belongs to. A value can arrive from four places and the <em>Source</em> ' +
     'column says which: a runtime override set on this page, an environment ' +
     'variable, the appconfig file this process was started with (<code>' +
-    esc(snapshot.configFile || '(none)') + '</code>), or the built-in default. ' +
-    'Higher beats lower, so an environment variable set on the container still ' +
-    'wins over the file — which is what keeps every existing deployment working ' +
-    'unchanged.</p>' +
+    esc(snapshot.configFile || '(none)') + '</code>), or <code>' +
+    esc(snapshot.defaultsFile) + '</code> — the default appconfig file that one ' +
+    'is unioned on top of. Higher beats lower, so an environment variable set ' +
+    'on the container still wins over the file — which is what keeps every ' +
+    'existing deployment working unchanged.</p>' +
+
+    '<p class="note"><strong>There is no fifth place.</strong> A setting with no ' +
+    'value in either appconfig file and no environment variable stops this ' +
+    'service from starting, by name, rather than falling back to a constant ' +
+    'buried in a module. So every value below is one somebody can find in a ' +
+    'file — which is what makes the <em>Source</em> column worth reading.</p>' +
 
     '<div class="warn"><strong>Changes here are in memory and are gone on ' +
     'restart.</strong> Nothing writes to the appconfig file. That is the same ' +
@@ -7765,8 +8583,8 @@ app.get('/admin/config', function (req, res) {
         '<input type="hidden" name="action" value="reset-all">' +
         '<button class="secondary">Reset all</button></form></div>'
       : '<p class="note">No runtime overrides are in force: every value below ' +
-        'is coming from the environment, the appconfig file or a built-in ' +
-        'default.</p>') +
+        'is coming from the environment or from one of the two appconfig ' +
+        'files.</p>') +
 
     snapshot.groups.map(configSection).join('') +
 
@@ -8910,6 +9728,14 @@ module.exports = {
   vcAction: vcAction,
   vpConfigAction: vpConfigAction,
   configAction: configAction,
+  // The token-lifetimes page's own action. It writes through config.js like
+  // configAction does — see the header above it for why it is a page of its own
+  // and not four more rows on /admin/config — and it is exported separately
+  // because rule 7 is about the CONTROL: the form on that page has two actions,
+  // so the API has two operations, and pointing them at configAction instead
+  // would give a caller a door that took any of forty-nine settings under a
+  // name that promised four.
+  tokenLifetimesAction: tokenLifetimesAction,
   // The JSON views, one per page, for the same reason. See the block comment
   // above consoleJson().
   consoleJson: consoleJson,
@@ -8946,6 +9772,12 @@ module.exports = {
   // with this one.
   gateStateFor: gateStateFor,
   claimsJson: claimsJson,
+  // The SAML half of the same store, as its own view, because it is its own
+  // page: GET /admin-api/saml-attributes answers this and GET /admin-api/claims
+  // answers the one above. There is no third function underneath them — both
+  // are claimSetsJson() with a different list of set ids and the one rule that
+  // is theirs alone.
+  samlAttributesJson: samlAttributesJson,
   // Which person the claims page shows attribute values for. Exported for the
   // same reason vcPreviewUser is: GET /admin-api/claims takes the same `user`
   // parameter, and a second reader of that query string would be a second cap
@@ -8956,6 +9788,7 @@ module.exports = {
   vpConfigJson: vpConfigJson,
   scimJson: scimJson,
   configJson: configJson,
+  tokenLifetimesJson: tokenLifetimesJson,
   // A body field that may appear more than once. Exported because the
   // management API takes the same two spellings of a list (`attribute` and
   // `attributes`), and reading a repeated form field is not something

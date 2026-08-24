@@ -57,6 +57,14 @@ const { log, setJwtRecorder, userFor } = require('./helpers');
 // normalised the identity, which is what lets an audit row and a /admin/users
 // row name the same person.
 const audit = require('./audit');
+// For one value: `oauth2.clockSkewS`, the allowance the OAuth endpoints apply
+// when they read back a token this service signed. It is read HERE so that the
+// state a console screen reports is the state the endpoints will act on — a
+// page saying "valid" about a token /oauth2/introspect calls inactive (or the
+// reverse) is worse than a page with no state column at all, because it is
+// believed. config.js requires nothing from this repository, so this is a plain
+// require in the ordinary direction and closes no cycle (rule 3b).
+const config = require('./config');
 // The application registry — what was on the OTHER side of an authentication.
 // See the note where it is called, below, for why this is a plain require and
 // not the fifth inverted hook on this module.
@@ -1066,6 +1074,13 @@ function recordAuthentication(detail) {
 //   saml2          <saml:Attribute Name="..." NameFormat="...">
 //   saml11         <saml:Attribute AttributeName="..." AttributeNamespace="...">
 //
+// ONE STORE, TWO PAGES. The first two are configured on /admin/claims and the
+// last two on /admin/saml-attributes, and that split is a fact about the
+// CONSOLE rather than about this file: setClaimSet() is the one door onto all
+// four, so a set is changed the same way and audited the same way whichever
+// page or API operation reached it. JWT_CLAIM_SET_IDS and SAML_CLAIM_SET_IDS
+// below are what each page filters by, derived from `kind`.
+//
 // They are ADDITIVE. A configured claim is added to what the protocol already
 // puts in the token; it never replaces one, and the reserved list below is what
 // enforces that. The reason is that every reserved name is load-bearing somewhere
@@ -1088,6 +1103,26 @@ const CLAIM_SETS = {
 
 const CLAIM_SET_IDS = Object.keys(CLAIM_SETS);
 
+// THE FOUR SETS ARE ONE STORE AND TWO CONSOLE PAGES, and these two lists are
+// what says which page a set is on: /admin/claims configures the two JWT sets
+// and /admin/saml-attributes the two SAML ones (2026-08-24; before that, one
+// page carried all four and a reader configuring an assertion had to read past
+// two token sets to reach it).
+//
+// DERIVED FROM `kind` rather than typed out, for the reason NAV is derived from
+// SECTIONS in admin-ui/admin.js: a set added to CLAIM_SETS and forgotten in a
+// hand-written list would be a set with a store, an issuance path and no page
+// to configure it on, and nothing would fail. `jwt` is the OAuth/OIDC half;
+// everything else is an assertion. The STORE did not split and must not — one
+// object, one setClaimSet(), one audit row per change, however many pages reach
+// it.
+const JWT_CLAIM_SET_IDS = CLAIM_SET_IDS.filter(function (id) {
+  return CLAIM_SETS[id].kind === 'jwt';
+});
+const SAML_CLAIM_SET_IDS = CLAIM_SET_IDS.filter(function (id) {
+  return CLAIM_SETS[id].kind !== 'jwt';
+});
+
 // The default namespace a SAML 1.1 attribute gets when the admin does not name
 // one. It is the claim namespace every WS-Federation relying party already reads,
 // which makes an attribute configured with just a name arrive somewhere useful
@@ -1097,7 +1132,7 @@ const DEFAULT_SAML11_NAMESPACE = 'http://schemas.xmlsoap.org/ws/2005/05/identity
 // ---------------------------------------------------------------------------
 // THE OTHER HALF OF A CLAIM SET, AND WHY IT ARRIVES THROUGH A SLOT.
 //
-// /admin/claims now offers two things per set: the typed claims below, and a
+// The claim-set pages offer two things per set: the typed claims below, and a
 // SELECTION of LDAP attribute types whose values are read off the person's entry
 // under ou=users. The selection and the reading live in claim_attributes.js,
 // which cannot be required from here — it requires vc_claims.js, vc_claims.js
@@ -1463,10 +1498,27 @@ function samlAttributes(id, context) {
 // ---------------------------------------------------------------------------
 // Reading the state back.
 // ---------------------------------------------------------------------------
+// WHAT A TOKEN'S STATE IS, AGAINST THE SAME CLOCK THE ENDPOINTS USE.
+//
+// `oauth2.clockSkewS` is passed to jwt.verify() as `clockTolerance` at every
+// place this service reads back a token it signed — introspection, UserInfo,
+// the refresh grant, token exchange, the DPoP-bound access token check — so it
+// is applied here too, and for a reason worth stating rather than assuming.
+// Without it, a token inside the allowance is REPORTED expired here and
+// ACCEPTED there. That is not a cosmetic disagreement: this page is where
+// somebody goes to find out why their client was refused, and a state column
+// that contradicts the endpoint sends them to debug the wrong half. The
+// console does not decide what expired means — `oauth2.js` does, and this
+// reads the same setting.
+//
+// The skew widens the window in both directions, which is what a tolerance is:
+// a token is expired only once it is past `exp` PLUS the allowance, and not yet
+// valid only while it is before `nbf` MINUS it.
 function tokenStateOf(record, nowMs) {
   if (record.revoked || (record.jti && revokedJtis.has(record.jti))) return 'revoked';
-  if (record.exp && record.exp * 1000 <= nowMs) return 'expired';
-  if (record.nbf && record.nbf * 1000 > nowMs) return 'not yet valid';
+  const skewMs = config.value('oauth2.clockSkewS') * 1000;
+  if (record.exp && record.exp * 1000 + skewMs <= nowMs) return 'expired';
+  if (record.nbf && record.nbf * 1000 - skewMs > nowMs) return 'not yet valid';
   if (!record.exp) return 'no expiry stated';
   return 'valid';
 }
@@ -1489,6 +1541,15 @@ function tokenList() {
 // function beside tokenStateOf() because both are read by the merged list below and
 // two definitions of "expired" in one table is the kind of disagreement nobody
 // notices until the two rows are next to each other.
+//
+// IT DELIBERATELY DOES NOT APPLY `oauth2.clockSkewS`, and that is not the
+// disagreement the paragraph above warns about. That setting exists so this
+// page agrees with the endpoint that will read the token back, and there is no
+// such endpoint for a SAML assertion or a Kerberos ticket: nothing here reads
+// one of those back at all, so there is nothing to agree with, and an OAuth
+// allowance silently stretching a ticket's lifetime on a page would be this
+// service inventing a tolerance that its KDC (which has `krb5.clockSkew`, a
+// different setting with a different owner) never applied.
 function artifactStateOf(record, nowMs) {
   if (!record.expiresAt) return 'no expiry stated';
   return record.expiresAt <= nowMs ? 'expired' : 'valid';
@@ -1914,6 +1975,8 @@ module.exports = {
   MAX_USERS: MAX_USERS,
   MAX_EVENTS_PER_USER: MAX_EVENTS_PER_USER,
   CLAIM_SET_IDS: CLAIM_SET_IDS,
+  JWT_CLAIM_SET_IDS: JWT_CLAIM_SET_IDS,
+  SAML_CLAIM_SET_IDS: SAML_CLAIM_SET_IDS,
   CLAIM_SETS: CLAIM_SETS,
   RESERVED_JWT_CLAIMS: RESERVED_JWT_CLAIMS,
   PLACEHOLDERS: PLACEHOLDERS,
