@@ -26,11 +26,16 @@ npm install
 CONFIG_FILE=./env/local.js node server.js
 ```
 
-Then open <http://localhost:8081/admin/sts-metadata> — every protocol this
-service speaks, and every endpoint it registers, read off the live Express
-router, with a sentence about each and a link to the specification it
-implements. It is a page of the admin console, so it asks you to sign in first:
-any username will do, because no password is checked anywhere in this service.
+Then open <http://localhost:8081/> — a front page with the four things worth
+having on one: this repository, its issues, this site, and the admin console on
+that instance.
+
+The page worth going to next is <http://localhost:8081/admin/sts-metadata> —
+every protocol this service speaks, and every endpoint it registers, read off
+the live Express router, with a sentence about each and a link to the
+specification it implements. It is a page of the admin console, so it asks you
+to sign in first: any username will do, because no password is checked anywhere
+in this service.
 
 [Getting started](getting-started.md) has the rest: the ports, the container, and
 what to do when 389 or 88 will not bind.

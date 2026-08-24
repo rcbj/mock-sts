@@ -44,6 +44,7 @@ the package root. **The files did not change; the paths did.**
 | `kerberos/` | the KDC, the acceptor, SPNEGO, and the codec |
 | `ldap/` · `scim/` · `tls/` · `spiffe/` · `oid4vc/` | one family each |
 | `admin-ui/` · `mgmt-api/` | the console and the management API |
+| `home/` | the front door — `GET /`, and the one image this service serves |
 | `docs/` | the user-facing documentation, published as a GitHub Pages site |
 
 At the package root there are exactly two modules: **`server.js`**, the shell that

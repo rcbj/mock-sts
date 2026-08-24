@@ -119,6 +119,15 @@ require('./common/claim_attributes');
 // that no directory is loaded.
 require('./common/group_claims');
 
+// The front door: GET / and the one image on it. It is first among the modules
+// that register routes, and the position is a preference rather than a
+// dependency — it requires nothing but the app, registers two EXACT paths that
+// nothing else here could shadow, and being first is what puts the page a
+// person meets first at the top of the list on /admin/sts-metadata. Before this
+// module existed the root of this service was an unrouted path, so the answer
+// to the one URL somebody types first was Express's `Cannot GET /`.
+require('./home/home');
+
 require('./ws-trust/wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
 // person to, and the session store it fills. FIRST of the modules that use it,
@@ -293,6 +302,10 @@ function announce() {
              'bound to it — cnf["x5t#S256"] — which the protected endpoints ' +
              'then check. A request with none is unaffected.');
   }
+  log.info('The front page is at / — what this service is, the project on ' +
+           'GitHub, its issues, the documentation site, and the admin ' +
+           'console on this instance. Every endpoint is listed inside the ' +
+           'console, at /admin/sts-metadata.');
   log.info('RFC 8414 metadata at /.well-known/oauth-authorization-server; ' +
            'OpenID Provider Configuration at /.well-known/openid-configuration; JWKS at /oauth2/jwks');
   log.info('OID4VCI issuer metadata at /.well-known/openid-credential-issuer; ' +
