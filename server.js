@@ -73,7 +73,7 @@
 //   vc_did.js        the did:web document and the DIF domain linkage credential
 //   vc_issuer.js     OID4VCI: metadata, proofs, the three credential formats
 //   vc_verifier.js   OID4VP: the request, and verifying what comes back
-//   sts_metadata.js  GET /sts-metadata — every endpoint and every spec, listed
+//   sts_metadata.js  GET /admin/sts-metadata — every endpoint and spec, listed
 //
 // **Requiring a module registers its endpoints.** Each one does `app.get(...)` at
 // its top level against the shared app from app.js, rather than exporting a
@@ -100,13 +100,13 @@ const { log, PORT, HOST } = require('./common/helpers');
 const config = require('./common/config');
 
 // Which LDAP attributes the four claim sets carry. A LIBRARY — it registers no
-// route, so this line adds nothing to /sts-metadata and its position in the route
-// order is not a position at all. It is required HERE, ahead of the modules that
-// issue, because requiring it is what fills admin_stats.js's attribute-resolver
-// slot, and an empty slot means tokens issued without their configured
-// attributes. admin.js requires it too, which would be enough today by accident;
-// this line is what makes it true on purpose, and what keeps it true for a
-// process that loads the protocol modules without the console.
+// route, so this line adds nothing to /admin/sts-metadata and its position in
+// the route order is not a position at all. It is required HERE, ahead of the
+// modules that issue, because requiring it is what fills admin_stats.js's
+// attribute-resolver slot, and an empty slot means tokens issued without their
+// configured attributes. admin.js requires it too, which would be enough today
+// by accident; this line is what makes it true on purpose, and what keeps it
+// true for a process that loads the protocol modules without the console.
 require('./common/claim_attributes');
 
 // The groups claim: for anybody who is a member of a group in the embedded
@@ -122,8 +122,9 @@ require('./common/group_claims');
 require('./ws-trust/wstrust');
 // The authentication service: the sign-in screen every protocol here sends a
 // person to, and the session store it fills. FIRST of the modules that use it,
-// because require order is route order on the /sts-metadata page and the thing
-// that authenticates should be listed before the protocols that lean on it.
+// because require order is route order on the /admin/sts-metadata page and the
+// thing that authenticates should be listed before the protocols that lean on
+// it.
 require('./authn/authn');
 require('./oauth-oidc/oauth2');
 // WS-Federation's passive requestor profile. It must come AFTER authn.js and the
@@ -223,8 +224,8 @@ require('./scim/scim');
 // Three server-side surfaces: the BUNDLE ENDPOINT (plain HTTPS, registered by
 // requiring this), the WORKLOAD API and the SPIRE SERVER API (both gRPC, on a
 // Unix socket and a TCP port each). The gRPC listeners are invisible to
-// /sts-metadata for the same reason the KDC's, the directory's and the TLS
-// endpoint's sockets are, so they are described by hand there.
+// /admin/sts-metadata for the same reason the KDC's, the directory's and the
+// TLS endpoint's sockets are, so they are described by hand there.
 //
 // It must come AFTER ./ldap_server, and it is a dependency rather than a
 // preference: the SPIFFE registry's store is the directory under ou=spiffe, and
@@ -311,8 +312,12 @@ function announce() {
   log.info('A SPNEGO-protected page (RFC 4559 over RFC 4178) is advertised at /spnego and ' +
            'lives at /spnego/protected; ?mic=require, ?mech=none and ?mutual=off make the ' +
            'negotiation fail in one specific way each.');
-  log.info('Every endpoint and every specification this service implements is listed at ' +
-           '/sts-metadata (add ?format=json for the machine-readable form).');
+  log.info('Every protocol, every endpoint and every specification this ' +
+           'service implements is listed at /admin/sts-metadata (add ' +
+           '?format=json for the machine-readable form, or use the Download ' +
+           'button on the page). It is a console page, so it is behind ' +
+           'admin.authRequired like the rest of /admin; it was at ' +
+           '/sts-metadata until 2026-08-24.');
   log.info('The management API is at /admin-api — every /admin control over JSON, with ' +
            'its OpenAPI 3.1 document at /admin-api/openapi.json and an explorer that ' +
            'calls it at /admin-api/docs. It is NOT protected either.');
@@ -324,8 +329,8 @@ function announce() {
   // The KDC's sockets are started here rather than at require time so that a
   // failure to bind (port 88 is privileged) is reported by a running service
   // instead of preventing it from starting at all. GET /krb5/principals says what
-  // this KDC knows; GET /sts-metadata cannot see a raw socket, so the listener has
-  // its own entry there.
+  // this KDC knows; GET /admin/sts-metadata cannot see a raw socket, so the
+  // listener has its own entry there.
   const kdcListeners = krb5.listen();
   kdcListeners.whenReady.then(function (ready) {
     log.info('krb5: the KDC is reachable on TCP and UDP ' + ready.port + '; MS-KKDCP at /KdcProxy; ' +
@@ -338,8 +343,8 @@ function announce() {
   krb5Service.listen();
   // The LDAP directory's socket, started here for the same reason the KDC's is.
   // GET /ldap says what it is and GET /ldap/directory shows every entry in it;
-  // GET /sts-metadata cannot see a raw socket, so the listener has its own entry
-  // there beside the KDC's.
+  // GET /admin/sts-metadata cannot see a raw socket, so the listener has its
+  // own entry there beside the KDC's.
   const ldapListener = ldapServer.listen();
   ldapListener.whenReady.then(function (ready) {
     log.info('ldap: the directory is reachable on TCP ' + ready.port +
@@ -361,12 +366,12 @@ function announce() {
   });
   // The two HTTPS listeners, started here for the same reason the other two
   // sockets are. GET /tls describes them and hands out the server certificate;
-  // GET /sts-metadata cannot see a socket, so they are described by hand there
-  // beside the KDC's and the directory's.
+  // GET /admin/sts-metadata cannot see a socket, so they are described by hand
+  // there beside the KDC's and the directory's.
   // The two gRPC listeners, started here for the reason the other four sockets
   // are. GET /spiffe describes all three surfaces and reports whether each
-  // socket bound; GET /sts-metadata cannot see one, so they are described by
-  // hand there beside the KDC's, the directory's and the TLS endpoint's.
+  // socket bound; GET /admin/sts-metadata cannot see one, so they are described
+  // by hand there beside the KDC's, the directory's and the TLS endpoint's.
   const spiffeListeners = spiffeServer.listen();
   spiffeListeners.whenReady.then(function (ready) {
     const up = ready.workload.concat(ready.api)

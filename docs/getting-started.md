@@ -116,10 +116,17 @@ alternative and needs the client pointed at `tcp://host:8092` explicitly.
 
 ```bash
 curl -s localhost:8081/healthcheck
-curl -s localhost:8081/sts-metadata | head -40
+curl -s -L localhost:8081/admin/sts-metadata | head -40
 ```
 
-`/sts-metadata` is the sharper of the two. It reads the endpoint list off the
+The second one is **behind the console gate** (`admin.authRequired`, on by
+default): with no session it answers a 302 to the sign-in screen, which is why
+the `-L` is there and why what comes back is that screen rather than the page.
+Open it in a browser and sign in — any username, since this service checks no
+password — or read the same service through `/admin-api`, which is not gated.
+`ADMIN_AUTH_REQUIRED=false` turns the gate off entirely.
+
+`/admin/sts-metadata` is the sharper of the two. It reads the endpoint list off the
 live Express router, so it answers only once every protocol module has registered
 its routes — a module that loaded but registered nothing shows up there and not
 in the liveness probe. Add `?format=json` and look at `undocumentedPaths`,

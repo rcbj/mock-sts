@@ -76,11 +76,11 @@
 // It reaches the directory through a SLOT that `ldap_server.js` fills at its
 // own require time, for the reason `admin.js`'s five slots exist (rule 3e):
 // requiring `ldap_server.js` from here would pull every `/ldap` route into the
-// express router ahead of every `/admin` route, and `GET /sts-metadata` is built
-// by walking that router. The slot is on THIS module rather than a sixth on
-// `admin.js` because what fills it is one coherent thing — the group functions
-// — and because both callers of it (`admin.js` and `admin_api.js`) want the
-// decisions here rather than the raw directory.
+// express router ahead of every `/admin` route, and `GET /admin/sts-metadata`
+// is built by walking that router. The slot is on THIS module rather than a
+// sixth on `admin.js` because what fills it is one coherent thing — the group
+// functions — and because both callers of it (`admin.js` and `admin_api.js`)
+// want the decisions here rather than the raw directory.
 //
 // The slot takes ONE OBJECT where `admin.js` deliberately takes five separate
 // functions, and the concern stated there — "a module that filled a combined

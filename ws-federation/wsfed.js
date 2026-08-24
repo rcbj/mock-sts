@@ -1011,9 +1011,9 @@ function passiveRequestor(req, res) {
 }
 
 // What GET /wsfed says when it is followed bare, which is what a reader clicking it
-// from /sts-metadata does. GET /sts answers the same way for the same reason: an
-// endpoint that 400s at a person who wanted to know what it was is a bad first
-// impression of a service whose entire purpose is to be looked at.
+// from /admin/sts-metadata does. GET /sts answers the same way for the same
+// reason: an endpoint that 400s at a person who wanted to know what it was is a
+// bad first impression of a service whose entire purpose is to be looked at.
 function descriptionPage(base) {
   log.debug("Entering descriptionPage().");
   const inner = '<h1>WS-Federation 1.2 — passive requestor endpoint</h1>' +

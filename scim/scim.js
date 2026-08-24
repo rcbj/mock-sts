@@ -1043,8 +1043,8 @@ function auditScim(action, dn, attributes, req) {
 //     but the day somebody adds one, `/Users/.search` would start being routed
 //     as an id of `.search`, and the failure would be a 404 for a request that
 //     looks perfectly correct.
-//   * every one of these is visible to `GET /sts-metadata`, which is the reason
-//     they are here rather than behind a mounted Router. See the header.
+//   * every one of these is visible to `GET /admin/sts-metadata`, which is the
+// reason     they are here rather than behind a mounted Router. See the header.
 // ---------------------------------------------------------------------------
 
 // --- discovery (section 4) -------------------------------------------------
@@ -1551,7 +1551,7 @@ function pageShell(title, inner) {
 }
 
 // What this surface is, as data. Shared by the page and by ?format=json so the
-// two cannot disagree — the same reason /sts-metadata reads the router.
+// two cannot disagree — the same reason /admin/sts-metadata reads the router.
 function description(req) {
   log.debug("Entering description().");
   const base = baseUrlOf(req);
@@ -1872,7 +1872,7 @@ app.get('/scim', function (req, res) {
 // it passes rule 3e's test on both grounds: a require from admin.js into this
 // module would pull every /scim route — and, because this module requires
 // ldap_server.js, every /ldap route as well — into the express router ahead of
-// the console's own, and /sts-metadata is built by walking that router.
+// the console's own, and /admin/sts-metadata is built by walking that router.
 //
 // Guarded, exactly as those two are: a copy of admin.js without the slot costs a
 // warning rather than a TypeError at require time, which would take the whole

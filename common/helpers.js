@@ -476,8 +476,9 @@ function userFor(username) {
 // preference — `admin-ui/admin.js` requires `spiffe_ca.js`, and `server.js`
 // requires `admin.js` at 18 and `tls_server.js` at 20, so a require from that
 // module would pull every `/tls*` route into the express router ahead of the
-// console's and `GET /sts-metadata` walks that router. A leaf in `helpers.js`
-// moves no route and closes no cycle, which is what a shared spelling has to be.
+// console's and `GET /admin/sts-metadata` walks that router. A leaf in
+// `helpers.js` moves no route and closes no cycle, which is what a shared
+// spelling has to be.
 //
 // WHY THIS FORM AT ALL, and why it is not what a report shows. Node hands a
 // subject back most-significant-first (`C=US, O=Example, CN=alice`) and

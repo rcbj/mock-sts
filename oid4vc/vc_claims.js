@@ -499,9 +499,9 @@ function generatedFor(name) {
 //
 // ldap_server.js is the LAST module server.js requires, and the reasons are in
 // CLAUDE.md rule 6 — requiring it from here would drag its routes into the
-// express router ahead of every console route, and /sts-metadata is built by
-// walking that router. vc_issuer.js requiring it would be worse still: that is
-// module 88 of 142 in the require order.
+// express router ahead of every console route, and /admin/sts-metadata is built
+// by walking that router. vc_issuer.js requiring it would be worse still: that
+// is module 88 of 142 in the require order.
 //
 // So the dependency is inverted exactly as admin_stats.js's user observer and
 // admin.js's directory reader are: this module offers a slot, and ldap_server.js

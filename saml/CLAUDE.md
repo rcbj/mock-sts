@@ -11,7 +11,7 @@ The two assertion builders, and nothing else.
 AuthnRequest, no Response — and that is deliberate rather than an omission. These
 two modules exist to be CALLED: `ws-trust/wstrust.js` asks for an assertion to put
 in an `RSTR`, and `ws-federation/wsfed.js` asks for one to put in a `wresult`.
-Neither builder registers a route, and `GET /sts-metadata` therefore lists no SAML
+Neither builder registers a route, and `GET /admin/sts-metadata` therefore lists no SAML
 endpoint. It is also why the federation metadata publishes no `IDPSSODescriptor`.
 See README.md before inferring from the absence that it was overlooked.
 

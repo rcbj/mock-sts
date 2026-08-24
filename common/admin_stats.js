@@ -1177,7 +1177,7 @@ function resolvedSamlAttributes(id, context) {
 //   * what it needs is the DIRECTORY's group membership, and only
 //     ldap_server.js can answer that — the last module server.js requires, so
 //     any require reaching it drags every /ldap route to the front of the
-//     express router that /sts-metadata is built by walking.
+//     express router that /admin/sts-metadata is built by walking.
 //
 // What it buys is the same thing the attribute resolver above buys: NO
 // ISSUANCE SITE CHANGED. oauth2.js's calls to jwtClaims() and the two assertion

@@ -258,7 +258,7 @@ function blank(id) {
            overrides: {}, removed: [], at: 0,
            // When this authorization server was first ASKED FOR, and how many
            // times. An auto-created one has been asked for once by definition;
-           // the count is what /sts-metadata lists the accessed ones by.
+           // the count is what /admin/sts-metadata lists the accessed ones by.
            createdAt: Date.now(), seenAt: 0, seen: 0, autoCreated: false };
 }
 

@@ -469,7 +469,7 @@ function jktOf(claims) {
   return (claims && claims.cnf && typeof claims.cnf.jkt === 'string') ? claims.cnf.jkt : '';
 }
 
-// For tests and for /sts-metadata: what this server will accept.
+// For tests and for /admin/sts-metadata: what this server will accept.
 function state() {
   return {
     signing_alg_values_supported: SIGNING_ALGS,

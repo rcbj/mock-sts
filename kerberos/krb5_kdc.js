@@ -16,11 +16,11 @@
 //    and a require that throws takes the whole service down. So the KKDCP route
 //    IS registered at require time, for consistency, and the sockets are started
 //    by an exported `listen()` that server.js calls and whose failure it reports.
-//  * **`GET /sts-metadata` cannot see a raw socket.** That page's whole design is
-//    that it reads the live Express router and so cannot go stale — and a protocol
-//    family it cannot see is the one way it can. The port-88 listener therefore
-//    needs an explicit entry there; the drift test in tests/sts_metadata.js has to
-//    tolerate an entry with no route behind it.
+//  * **`GET /admin/sts-metadata` cannot see a raw socket.** That page's whole
+//    design is that it reads the live Express router and so cannot go stale —
+//    and a protocol family it cannot see is the one way it can. The port-88
+//    listener therefore needs an explicit entry there; the drift test in
+//    tests/sts_metadata.js has to tolerate an entry with no route behind it.
 //  * **Port 88 is privileged.** In the container this process is root and binds it
 //    directly. A host run is not root, so `KRB5_KDC_PORT` exists — and if it is
 //    changed, the api's `krb5AllowedPorts` has to allow the new one or the relay

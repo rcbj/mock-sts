@@ -179,14 +179,14 @@ const admin = require('../admin-ui/admin');
 // with nothing here. What the require DOES do is pull those routes into the
 // express router at this point rather than after this module's, so server.js
 // now requires ./tls_server BEFORE ./ldap_server to say so out loud. It changes
-// no output — /sts-metadata sorts its rows by path within a group — and the
-// line over there is for the next reader rather than for the page.
+// no output — /admin/sts-metadata sorts its rows by path within a group — and
+// the line over there is for the next reader rather than for the page.
 const tlsServer = require('../tls/tls_server');
 // WHICH attributes a person's entry should carry so that the credentials this
 // service issues have something to say, and what to invent for them. Another
 // plain require and not a third inversion, for the same reasons as tls_server.js
 // above: vc_claims.js is a LIBRARY — it registers no route, so requiring it adds
-// nothing to the express router and cannot reorder /sts-metadata — and it
+// nothing to the express router and cannot reorder /admin/sts-metadata — and it
 // requires only helpers.js, so there is no cycle to make. The traffic in the
 // other direction, this module's two functions that IT calls, does go through a
 // slot: see the setDirectory() install further down.
@@ -194,12 +194,13 @@ const vcClaims = require('../oid4vc/vc_claims');
 
 // The groups claim: which directory groups reach an access token, an ID Token
 // and both SAML assertions. A plain require for exactly the reasons above —
-// it is a LIBRARY (it registers no route, so it cannot reorder /sts-metadata)
-// and it requires helpers.js, config.js and admin_stats.js, none of which
-// requires this file. The traffic in the other direction, groupsOfUser(), goes
-// through its setDirectory() slot further down, because THAT module must not
-// require this one: it is read from admin_stats.js's resolver, which every
-// issuance site reaches long before the directory's routes should exist.
+// it is a LIBRARY (it registers no route, so it cannot reorder
+// /admin/sts-metadata) and it requires helpers.js, config.js and
+// admin_stats.js, none of which requires this file. The traffic in the other
+// direction, groupsOfUser(), goes through its setDirectory() slot further down,
+// because THAT module must not require this one: it is read from
+// admin_stats.js's resolver, which every issuance site reaches long before the
+// directory's routes should exist.
 const groupClaims = require('../common/group_claims');
 // The admin console's two roles, which are two groups in THIS directory. Required
 // outright rather than through a slot in the other direction because it registers
@@ -2631,9 +2632,9 @@ function vcAttributesFor(key) {
 // require this module and read `entries`. It must not: server.js requires ./admin
 // before ./ldap_server (rule 6 — this module needs admin_stats' identity
 // normalisation), and a require from admin.js would drag this module's routes in
-// ahead of the console's, which reorders the express router that /sts-metadata
-// reads. So admin.js offers a slot and this module fills it, exactly as
-// admin_stats.js does for the observer.
+// ahead of the console's, which reorders the express router that
+// /admin/sts-metadata reads. So admin.js offers a slot and this module fills
+// it, exactly as admin_stats.js does for the observer.
 //
 // It is given the IDENTITY KEY the console files a person under — the local name,
 // with `urn:sts-mock:user:` and any realm already stripped — which is the same
@@ -3400,9 +3401,9 @@ if (typeof admin.setDirectoryWriter === 'function') {
 // through a slot because IT must not require THIS module — it is read by
 // vc_issuer.js, which server.js requires fifty lines before ./admin, and a
 // require from there would drag this directory's routes to the front of the
-// express router that /sts-metadata is built by walking. Guarded like the two
-// above: an older vc_claims.js without the slot costs a warning, not a service
-// that will not start.
+// express router that /admin/sts-metadata is built by walking. Guarded like the
+// two above: an older vc_claims.js without the slot costs a warning, not a
+// service that will not start.
 if (typeof vcClaims.setDirectory === 'function') {
   vcClaims.setDirectory({ attributesFor: vcAttributesFor, populate: populateVcAttributes });
 } else {
@@ -3441,8 +3442,8 @@ if (typeof groupClaims.setDirectory === 'function') {
 // `ou=groups` by default. It is a slot rather than a require in the other
 // direction for exactly the reason the console's own five are (rule 3e): a
 // require of this module from there would pull every `/ldap` route into the
-// express router ahead of every `/admin` route, and `GET /sts-metadata` is
-// built by walking that router.
+// express router ahead of every `/admin` route, and `GET /admin/sts-metadata`
+// is built by walking that router.
 //
 // WHAT CROSSES IS THIS MODULE'S OWN FUNCTIONS AND NOT A COPY OF ITS RULES, the
 // same division the five above keep. `groupsOfUser()` answers whether somebody
@@ -4278,8 +4279,8 @@ server.unbind(function (req, res, next) {
 // ---------------------------------------------------------------------------
 // The HTTP views.
 //
-// GET /sts-metadata is built by walking the express router, so a protocol that
-// registers no route is invisible to it — which is exactly what a raw TCP
+// GET /admin/sts-metadata is built by walking the express router, so a protocol
+// that registers no route is invisible to it — which is exactly what a raw TCP
 // listener is. These two routes are what make this directory visible from a
 // browser AND what make it appear in that index; the listener itself is
 // described by hand there, as the KDC's is.
@@ -4309,8 +4310,8 @@ function pageShell(title, inner) {
 }
 
 // What this directory is, as data. Shared by the page and by ?format=json so
-// the two cannot disagree — which is the same reason /sts-metadata reads the
-// router rather than a written-down list.
+// the two cannot disagree — which is the same reason /admin/sts-metadata reads
+// the router rather than a written-down list.
 function description(req) {
   log.debug('Entering description().');
   const host = String(req.get('host') || 'localhost').split(':')[0];
@@ -4534,7 +4535,8 @@ app.get('/ldap', function (req, res) {
     '<p class="sub"><a href="/ldap?format=json">This page as JSON</a> ' +
     '&middot; <a href="/ldap/applications">the application registry</a> ' +
     '&middot; <a href="/ldap/directory">every entry in the directory</a> ' +
-    '&middot; <a href="/sts-metadata">everything this service speaks</a></p>';
+    '&middot; <a href="/admin/sts-metadata">everything this service ' +
+    'speaks</a></p>';
   res.status(200).type('html').send(pageShell('LDAP directory', inner));
   log.debug('Leaving GET /ldap.');
 });

@@ -58,9 +58,9 @@ const auth = require('./spiffe_auth');
 // The console, for one slot and nothing else. `admin.js` cannot require THIS
 // module — server.js requires it first, so the require would pull the bundle
 // endpoint and /spiffe into the express router ahead of every /admin route, and
-// GET /sts-metadata is built by walking that router. So it offers a slot and
-// this module fills it at require time, the same shape setDirectoryReader(),
-// setGroupReader() and setScimReader() already have.
+// GET /admin/sts-metadata is built by walking that router. So it offers a slot
+// and this module fills it at require time, the same shape
+// setDirectoryReader(), setGroupReader() and setScimReader() already have.
 //
 // What crosses is two facts about SOCKETS — which of the four bound, and where
 // the bundle is — because a page cannot see a socket any other way. Requiring
@@ -373,7 +373,7 @@ function description(req) {
       agents: base + '/admin/spiffe/agents',
       api: base + '/admin-api/spiffe',
       directory: base + '/ldap/spiffe',
-      metadata: base + '/sts-metadata'
+      metadata: base + '/admin/sts-metadata'
     }
   };
   log.debug('Leaving description().');

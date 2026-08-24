@@ -27,7 +27,7 @@
 // because both ends of the exchange read it — vc_verifier.js early in the require
 // order, admin.js late — and a require between those two in either direction
 // would drag one module's routes into the router at the other's position, which
-// is what `GET /sts-metadata` is built by walking.
+// is what `GET /admin/sts-metadata` is built by walking.
 //
 // ---------------------------------------------------------------------------
 // THE CATALOGUE IS vc_claims.js's CATALOGUE, TURNED AROUND.

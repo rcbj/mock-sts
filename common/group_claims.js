@@ -67,9 +67,9 @@
 // **AND THE DIRECTORY ARRIVES THROUGH A SECOND SLOT, pointing the other way.**
 // The membership can only be answered by `ldap_server.js`, which is the LAST
 // module `server.js` requires (rule 6): requiring it from here would drag every
-// `/ldap` route to the front of the express router that `/sts-metadata` is
-// built by walking. So this file offers `setDirectory()` and that one fills it,
-// the same shape `vc_claims.js` and `applications.js` already have.
+// `/ldap` route to the front of the express router that `/admin/sts-metadata`
+// is built by walking. So this file offers `setDirectory()` and that one fills
+// it, the same shape `vc_claims.js` and `applications.js` already have.
 //
 // **THE CLAIM IS OMITTED ENTIRELY FOR SOMEBODY IN NO GROUP.** Not an empty
 // array — absent. That is what makes `groups.claim` defensible as ON by

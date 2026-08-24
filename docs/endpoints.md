@@ -12,9 +12,16 @@ a month with nothing to say so.
 Ask the service instead:
 
 ```bash
-curl -s localhost:8081/sts-metadata            # a page
-curl -s 'localhost:8081/sts-metadata?format=json' | jq
+curl -s localhost:8081/admin/sts-metadata            # a page
+curl -s 'localhost:8081/admin/sts-metadata?format=json' | jq
 ```
+
+Both are **behind the console gate** since the page moved into `/admin` on
+2026-08-24: with no browser sign-on session the first is a 302 to the sign-in
+screen and the second is a `401 login_required`, because a redirect to an HTML
+login screen is not an answer a program can read. Sign in at `/authn/login`
+(any username; no password is checked anywhere here), or set
+`ADMIN_AUTH_REQUIRED=false`. Nothing under `/admin-api` is gated.
 
 ## What that page is
 
@@ -22,16 +29,25 @@ It reads the endpoint list **off the running Express router**, so it cannot go
 stale by omission. Each row carries the method, the path, a sentence about what
 the endpoint is for, and a link to the specification it implements.
 
-It also reports **drift**, in three arrays, and the parent project's
-`tests/sts_metadata.js` fails on all three:
+It also reports **drift**, in six arrays, and the parent project's
+`tests/sts_metadata.js` fails on all six:
 
 | Field | Means |
 |---|---|
 | `undocumentedPaths` | A route is registered and nothing describes it |
 | `stalePaths` | Something describes a path that is not registered — what a rename produces |
 | `unknownSpecIds` | A description cites a specification the page does not know |
+| `unknownProtocolGroups` | A protocol card at the top names an endpoint group with no rows |
+| `unknownProtocolSpecIds` | A protocol card cites a specification the page does not know |
+| `unclaimedGroups` | A group of endpoints no protocol card claims — a family added to the service and not to the page |
 
-All three empty is the service agreeing with its own description of itself. That
+The last three are about the one part of the page that is **not** derived: the
+thirteen protocol cards at the top. Two of those families register no route at
+all and four live mostly on a raw socket, so the list cannot be read off the
+router — and a hand-written list on a derived page is exactly the thing that
+needs checking.
+
+All six empty is the service agreeing with its own description of itself. That
 is the check worth running after any change that adds or renames a route.
 
 ## Its one blind spot
@@ -50,7 +66,7 @@ there or it goes unlisted with nothing failing.
 
 The TLS listeners on 8443 and 9443 are a milder version of the same thing: they
 speak HTTP, so they look as though they belong on the plain listener, but
-`/sts-metadata` walks the *plain* listener's router and cannot see them. Their
+`/admin/sts-metadata` walks the *plain* listener's router and cannot see them. Their
 rows there are the plain-HTTP views only, and the listeners are described in the
 text.
 

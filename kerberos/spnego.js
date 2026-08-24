@@ -253,7 +253,8 @@ app.get('/spnego', function (req, res) {
     '</ul>' +
     '<p class="sub"><a href="/spnego?format=json">This page as JSON</a> ' +
     '&middot; <a href="/krb5/principals">the KDC&rsquo;s principals</a> ' +
-    '&middot; <a href="/sts-metadata">everything this service speaks</a></p>';
+    '&middot; <a href="/admin/sts-metadata">everything this service ' +
+    'speaks</a></p>';
   res.status(200).type('html').send(page('SPNEGO-protected page', inner));
   log.debug('Leaving GET /spnego.');
 });

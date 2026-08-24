@@ -11,7 +11,7 @@ them, not both — if a page here starts explaining why a module inverts a
 dependency, it is in the wrong file.
 
 **Do not restate what the service publishes about itself.** This project's
-strongest documentation is live: `GET /sts-metadata` lists every endpoint from
+strongest documentation is live: `GET /admin/sts-metadata` lists every endpoint from
 the running Express router and cannot go stale, `GET /oauth2/rfc9700` publishes
 every requirement with what is and is not enforced, `GET /spiffe` publishes the
 forty-two SPIRE methods with a reason for each of the six that are unimplemented,

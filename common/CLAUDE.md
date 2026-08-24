@@ -58,7 +58,7 @@ identically — **two spellings of one DN is two people on `/admin/users`** — 
 that module CANNOT require `tls_server.js`. Rule 3e's test says why:
 `admin-ui/admin.js` requires `spiffe_ca.js`, and `server.js` requires `admin.js`
 at 18 and `tls_server.js` at 20, so the require would pull every `/tls*` route
-into the router ahead of the console's and `GET /sts-metadata` walks that router.
+into the router ahead of the console's and `GET /admin/sts-metadata` walks that router.
 A leaf here moves no route and closes no cycle. **It takes BOTH shapes of DN node
 produces** — the object from `getPeerCertificate()` and the newline-separated
 string from `crypto.X509Certificate` — which is the whole reason it is one
