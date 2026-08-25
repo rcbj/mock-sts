@@ -97,24 +97,58 @@ before you build a test on it.
 | **The statistics and the audit log** | Including the audit sequence numbers, so one realm's rows are contiguous. |
 | **The six settings that are NAMES** | The SAML 2.0 entityID, the SAML 1.1 providerID, the WS-Federation entityID, the WS-Trust issuer, the SAML assertion issuer and the OpenID4VP verifier client id. A new realm is created with each suffixed with its id, because two realms carrying one entityID is two identity providers claiming one name. They are ordinary settings — change them, or unset them to go back to sharing the process's name. |
 
-### Not separated — the embedded directory
+### Separated — the embedded directory, as a subtree
 
-One `ou=users`, one `ou=groups` and one `ou=applications` for the whole process,
-because LDAP answers on a socket with no path to put a segment in. So:
+Each realm owns a subtree of the one naming context:
 
-- the same person signing in to two realms is **one directory entry**;
-- an **OAuth client** registered once can be used in every realm;
-- a **SAML service provider** entry is shared, though the metadata published for
-  it is per realm;
-- the **SPIFFE registry** is shared;
-- **the two admin console roles are held once** — there is no per-realm
-  administrator.
+```
+dc=example,dc=com                 the DEFAULT realm  (ldap.baseDn itself)
+dc=acme,dc=example,dc=com         the realm `acme`
+```
 
-### Not separated — the four socket families
+with its own `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and
+SPIFFE containers under each. So:
+
+- the same name signing in to two realms is **two entries**, one per realm;
+- an **OAuth client** registered under one realm is unknown to every other;
+- a **SAML service provider** entry belongs to the realm it was created in;
+- the **SPIFFE registry** is per realm, though the trust domain and the signing
+  authority in front of it are not;
+- and a realm is reachable over LDAP: `ldapsearch -b "dc=acme,dc=example,dc=com"`.
+
+That last point is *why* the realm is in the DN rather than in a partition of its
+own. LDAP answers on a socket with no path to put a segment in — a search arrives
+carrying a base DN and nothing else — so a **name** is the only thing a client
+could ever use to say which realm it means.
+
+A subtree search from `dc=example,dc=com` still returns every realm's entries,
+because that is what a naming context *is*. What is isolated is the container
+each realm reads and writes: `ou=users,dc=example,dc=com` holds no `acme` person.
+
+### Not separated — the two admin console roles
+
+Deliberately. They are groups in the **default realm's** `ou=groups`, read there
+whichever realm the console is reached in, and a grant made through
+`/realm/acme/admin-api/rbac/grant` lands there too and says so in its reply.
+
+There is one administrator roster for the process on purpose: a role is
+permission to change what *every* realm does — `/admin/config` writes the realm
+it is reached in, and `/admin/realms` can delete a realm outright — so a
+per-realm roster would mean anybody who can create a realm can administer the
+whole service.
+
+The console's sign-on follows the roster. It accepts the default realm's session
+and no other, and an unauthenticated reader of *any* realm's console is sent to
+the **default realm's** sign-in screen — then returned to the realm page they
+asked for. Sign in once, in one realm; read every realm.
+
+### Not separated — three socket families
 
 Kerberos (over raw UDP/TCP 88 *and* over MS-KKDCP — `/KdcProxy` is reachable
-under a prefix but reaches the same KDC behind it), the two TLS listeners, LDAP's
-389 and 636, and SPIFFE's four sockets. A socket has no path in it.
+under a prefix but reaches the same KDC behind it), the two TLS listeners, and
+SPIFFE's four sockets. A socket has no path in it. LDAP's 389 and 636 were on
+this list until the directory was partitioned: the sockets are still shared, but
+what they serve is told apart by DN.
 
 Kerberos is the one with an obvious way forward, and it is written down here
 rather than left to be rediscovered: Kerberos already *has* a realm, so the
@@ -166,5 +200,7 @@ log and signing key. That is deliberate rather than thorough: a realm re-created
 with the same id inheriting the last one's sessions would be the most surprising
 thing a re-created realm could do.
 
-Nothing is removed from the directory, because nothing there belongs to a realm.
-The default realm cannot be removed at all.
+The realm's **directory subtree goes too** — its people, groups, applications,
+federation relationships and SPIFFE registrations — so `dc=acme,dc=example,dc=com`
+answers `NoSuchObject` afterwards and a realm re-created under that id starts
+with a fresh seeded tree. The default realm cannot be removed at all.

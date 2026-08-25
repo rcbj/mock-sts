@@ -485,11 +485,12 @@ provider**, which is exactly the moment a deliberate click is worth having.
 
 ## Tests
 
-**THERE IS ONE NOW, AND IT IS THE ONLY TEST IN THIS REPOSITORY** — a protocol
-test goes in the parent project's suite instead, which is where
-`tests/saml11_sso.js` went on the day it was written; this one stays because it
-builds a TOPOLOGY out of this service rather than driving one copy of it. The
-root `CLAUDE.md`'s *Tests* section draws that line.
+**THERE IS ONE NOW, AND IT IS THE INTEGRATION TEST OF THE TWO THIS REPOSITORY
+HOLDS** — a protocol test goes in the parent project's suite instead, which is
+where `tests/saml11_sso.js` went on the day it was written; this one stays
+because it builds a TOPOLOGY out of this service rather than driving one copy of
+it. The other is `tests/`, which asserts module contracts in process and drives
+nothing. The root `CLAUDE.md`'s *Tests* section draws both lines.
 `../federation-e2e/` is a three-container stack — two instances of this service
 and a web application that has never heard of federation — driven end to end
 with 56 assertions. `./run.sh` builds and runs it; `./run-host.sh` runs the same

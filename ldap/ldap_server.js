@@ -133,6 +133,13 @@ const ldap = require('ldapjs');
 const app = require('../common/app');
 const { log, xmlEscape } = require('../common/helpers');
 const config = require('../common/config');
+// THE TRUST REALM REGISTRY, and this module is the one place in this service
+// that needs more of it than the ambient value. It reads `currentId()` to build
+// a DN, `get()`/`run()` to seed a named realm's subtree the moment it is
+// defined, and `DEFAULT_ID` to pin the two admin console roles to the default
+// realm. It requires only config.js, so it closes no cycle and moves no route
+// — the ordinary direction, no slot. See the naming-context block below.
+const realms = require('../common/realms');
 const stats = require('../common/admin_stats');
 // The application registry. This module is its STORE — see the applications
 // section below — so the dependency runs both ways in the shape rule 6
@@ -239,27 +246,97 @@ const LDAP_PORT = config.value('ldap.port');
 // scheme it already was. Every client speaks it anyway.
 const LDAPS_PORT = config.value('ldap.tlsPort');
 
-// The naming context this directory serves. Everything below it is ours;
-// anything outside it is answered LDAP_NO_SUCH_OBJECT, which is what a real
-// server does for a base DN it holds no data for.
-const BASE_DN = config.value('ldap.baseDn');
+// ---------------------------------------------------------------------------
+// THE NAMING CONTEXT, AND THE SUBTREE EACH TRUST REALM OWNS INSIDE IT.
+//
+// `ROOT_DN` is what the SOCKET serves — `ldap.baseDn`, one naming context, one
+// tree, published in the root DSE and answered for on 389 and 636. Everything
+// below it is ours; anything outside it is LDAP_NO_SUCH_OBJECT, which is what a
+// real server does for a base DN it holds no data for.
+//
+// `baseDn()` is what the AMBIENT REALM owns, and it is a SUBTREE of that:
+//
+//     the default realm    dc=example,dc=com                 (ROOT_DN itself)
+//     the realm `acme`     dc=acme,dc=example,dc=com
+//
+// so `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and the two
+// SPIFFE containers exist once per realm and share nothing. A person created
+// under `/realm/acme` is `uid=…,ou=users,dc=acme,dc=example,dc=com` and is
+// invisible to every search based at the default realm's `ou=users`.
+//
+// **WHY A SUBTREE RATHER THAN A PARTITIONED STORE.** The realm is ambient in an
+// AsyncLocalStorage that `app.js`'s first middleware enters, and that middleware
+// runs on an HTTP request. **LDAP has no HTTP request.** An `ldapsearch` arrives
+// on 389 carrying a bind DN and a base DN and nothing else — no path, no header,
+// nowhere to put a realm segment — so if the partition were a Map per realm,
+// selected by an ambient value, an LDAP client could never reach any realm but
+// the default one. Putting the realm IN THE DN is what makes
+// `ldapsearch -b "dc=acme,dc=example,dc=com"` mean what it says, and it is the
+// only shape that does. One Map keyed by DN also leaves `groupIndexNow()`, the
+// root DSE and every containment check exactly as they were.
+//
+// The alternative considered and rejected was a LISTENER per realm. It isolates
+// just as well and it costs the thing this feature is for: a port is bound when
+// the process starts, so realms would have stopped being creatable at runtime.
+//
+// **WHY THE REALM'S BASE IS DERIVED AND NOT CONFIGURED.** `ldap.baseDn` is
+// restart-only because *the tree is built under it at startup* — the
+// "material derived at startup" kind, which `common/CLAUDE.md` names as the
+// case that must never be given the `realmRuntime` marker. So a realm cannot
+// carry `ldap.baseDn`, and its base is computed from its id instead. That is
+// not a limitation working around a rule; it is the rule being right. Two
+// realms are told apart by their ids everywhere else in this service, and a
+// configurable base would let two of them name one subtree.
+//
+// The RDN attribute type is taken from the root's own first RDN so the tree
+// stays homogeneous: a `dc=example,dc=com` root gives `dc=acme,…`, and an
+// `o=example` root gives `o=acme,…` rather than a dc grafted onto an o.
+// ---------------------------------------------------------------------------
+const ROOT_DN = config.value('ldap.baseDn');
 
-// Where auto-created people and hand-made groups are expected to live. They are
-// derived rather than configured: two variables that could disagree with
-// BASE_DN would produce entries in a tree nobody is searching.
-const USERS_DN = 'ou=users,' + BASE_DN;
-const GROUPS_DN = 'ou=groups,' + BASE_DN;
+// `dc` for the ordinary root, whatever the root uses otherwise. Computed once:
+// ROOT_DN cannot change while the process runs.
+const REALM_RDN_TYPE = (function () {
+  const first = String(ROOT_DN).split(',')[0];
+  const type = first.indexOf('=') > 0 ? first.split('=')[0].trim() : 'dc';
+  return type || 'dc';
+})();
+
+// The base DN of a NAMED realm. Exported and used by the purge, by the
+// default-realm pinning the admin console needs, and by every page that lists
+// what a realm owns.
+function realmBaseDn(id) {
+  if (!id || id === realms.DEFAULT_ID) {
+    return ROOT_DN;
+  }
+  return REALM_RDN_TYPE + '=' + id + ',' + ROOT_DN;
+}
+
+// The base DN of whatever realm is ambient. THE function every DN below is
+// built from — the same shape `helpers.baseUrlOf()` has for URLs, and for the
+// same reason: one place that knows about realms, and a hundred call sites that
+// do not.
+function baseDn() {
+  return realmBaseDn(realms.currentId());
+}
+
+// Where auto-created people and hand-made groups live. Derived rather than
+// configured: two values that could disagree with the base would produce
+// entries in a tree nobody is searching.
+function usersDn() {
+  return 'ou=users,' + baseDn();
+}
+
+function groupsDn() {
+  return 'ou=groups,' + baseDn();
+}
+
 // The third container, and the one whose entries are a REGISTRY rather than a
 // description of one. See the applications section further down.
-const APPLICATIONS_DN = 'ou=applications,' + BASE_DN;
-// The fourth and fifth, and they are `spiffe_registry.js`'s store the way
-// ou=applications is `applications.js`'s. TWO containers rather than one,
-// because they hold different KINDS of thing: an entry under ou=entries is
-// CONFIGURATION deciding what will be issued, and an entry under ou=agents is a
-// RECORD of something that happened. The same split ou=applications draws
-// internally between what an application may do and what it has done — made
-// structural here, because a registration entry and an attested agent share no
-// attributes at all.
+function applicationsDn() {
+  return 'ou=applications,' + baseDn();
+}
+
 // The SIXTH container, and it is `federation/federation.js`'s store the way
 // ou=applications is `applications.js`'s. It is a container of its own rather
 // than a corner of ou=applications for a reason worth keeping: an application
@@ -268,11 +345,29 @@ const APPLICATIONS_DN = 'ou=applications,' + BASE_DN;
 // Filing a party that authenticates people TO this service among the parties
 // that consume what it issues would make the one question ou=applications
 // exists to answer unanswerable.
-const FEDERATIONS_DN = 'ou=federations,' + BASE_DN;
+function federationsDn() {
+  return 'ou=federations,' + baseDn();
+}
 
-const SPIFFE_DN = 'ou=spiffe,' + BASE_DN;
-const SPIFFE_ENTRIES_DN = 'ou=entries,' + SPIFFE_DN;
-const SPIFFE_AGENTS_DN = 'ou=agents,' + SPIFFE_DN;
+// The fourth and fifth, and they are `spiffe_registry.js`'s store the way
+// ou=applications is `applications.js`'s. TWO containers rather than one,
+// because they hold different KINDS of thing: an entry under ou=entries is
+// CONFIGURATION deciding what will be issued, and an entry under ou=agents is a
+// RECORD of something that happened. The same split ou=applications draws
+// internally between what an application may do and what it has done — made
+// structural here, because a registration entry and an attested agent share no
+// attributes at all.
+function spiffeDn() {
+  return 'ou=spiffe,' + baseDn();
+}
+
+function spiffeEntriesDn() {
+  return 'ou=entries,' + spiffeDn();
+}
+
+function spiffeAgentsDn() {
+  return 'ou=agents,' + spiffeDn();
+}
 
 // Only an explicit "0" or "false" turns the auto-creation off, so a missing or
 // misspelled variable leaves it ON — the safe direction here, because the
@@ -382,6 +477,102 @@ let directoryVersion = 0;
 
 function touchDirectory() {
   directoryVersion++;
+}
+
+// ---------------------------------------------------------------------------
+// EVERY WALK OF THIS TREE THAT MEANS "WHAT IS IN THIS REALM" GOES THROUGH HERE.
+//
+// One Map holds every realm's subtree (see the naming-context block above), so
+// `entries.forEach()` means "every entry in the process" and almost nothing here
+// wants that. It wanted it before realms had directories of their own, when the
+// two were the same thing — which is exactly why this is a function with a name
+// rather than a filter copied into twenty callers: the ones that were written
+// when there was nothing to distinguish read as though they had considered it.
+//
+// **THE LEAK THIS FIXES WAS NOT HYPOTHETICAL.** `allGroupEntries()` walked the
+// whole Map and asked `groupRuleFor()` about each entry, and that predicate
+// answers `'objectClass'` for anything carrying a group class WHEREVER it sits —
+// a deliberate rule, so that a group somebody put outside `ou=groups` still
+// counts. With one tree that was generous; with a tree per realm it meant the
+// default realm listing `acme`'s groups as its own. The fix is not to tighten
+// `groupRuleFor()` — its rule is still right INSIDE a realm — it is to stop
+// showing it entries that belong to somebody else.
+//
+// `entries.forEach()` survives at the sites that are about the WHOLE tree and
+// are correct that way: the LDAP handlers, which serve a socket that has no
+// realm and answer for the naming context; `hasChildren()`, which is a question
+// about one DN; and the purge, which is deleting a realm.
+// ---------------------------------------------------------------------------
+// THE DEFAULT REALM IS THE ONE THAT NEEDS THE SECOND HALF OF THIS, and missing
+// it is the bug this function was written twice for.
+//
+// Every other realm's base is a SIBLING — `dc=acme,…` and `dc=beta,…` contain
+// nothing of each other's, so "under my base" is the whole test. The default
+// realm's base is ROOT_DN, and every realm's subtree is UNDER it, because that
+// is what makes `ldapsearch -b "dc=example,dc=com"` return the whole naming
+// context the way LDAP says it should. So "under my base" listed `acme`'s
+// groups as the default realm's own, and the first run after the enumerators
+// were scoped still showed four groups where there are two.
+//
+// The default realm is therefore the root MINUS every other realm's subtree.
+// Written as a carve-out rather than by moving the default realm down to
+// `dc=default,dc=example,dc=com`, which would have been symmetrical and is the
+// one thing that cannot be done: it renames every entry this service has ever
+// had, and it breaks the property the whole realm design rests on — that a
+// service with no realms defined behaves exactly as it did. With none defined
+// this list is empty and the loop below never runs.
+//
+// Note it is NOT applied to an LDAP search. A subtree search based at
+// `dc=example,dc=com` returning every realm's entries is correct — that is what
+// a naming context IS, and a directory that hid part of its own tree from a
+// client that asked for it would be lying about the thing LDAP exists to
+// answer. What is isolated is the CONTAINER: `ou=users,dc=example,dc=com` holds
+// no `acme` person, and that is the boundary every reader here means.
+// It answers with the bases that lie STRICTLY INSIDE this realm's, which is the
+// rule rather than "every realm but me" — and the difference is not pedantry.
+// `realms.list()` includes the default realm, whose base is ROOT_DN, so
+// "every realm but me" carved the ROOT out of `acme` and left `acme` reporting
+// an empty directory. Asking about containment instead is right in both
+// directions and needs no special case for either: nothing is inside a
+// non-default realm's base, so the loop below does nothing there, and every
+// realm is inside the default one's, which is exactly what has to be removed.
+function containedRealmBases() {
+  if (!realms.active()) {
+    return [];
+  }
+  const base = baseDn();
+  return realms.list()
+    .map(function (realm) { return realmBaseDn(realm.id); })
+    .filter(function (other) {
+      return normalizeDn(other) !== normalizeDn(base) && isUnder(other, base);
+    });
+}
+
+function eachEntryInRealm(fn) {
+  const base = baseDn();
+  const carved = containedRealmBases();
+  entries.forEach(function (stored) {
+    if (!isUnder(stored.dn, base)) {
+      return;
+    }
+    for (let i = 0; i < carved.length; i++) {
+      if (isUnder(stored.dn, carved[i])) {
+        return;
+      }
+    }
+    fn(stored);
+  });
+}
+
+// How many entries THIS REALM holds. `entries.size` is the whole Map — one tree
+// with every realm's subtree in it — and every page that shows this number is a
+// page about one realm. The `ldap.maxEntries` cap is deliberately NOT computed
+// from this: the cap is on the Map, because the Map is what occupies memory, and
+// a per-realm cap would let n realms hold n times the ceiling somebody set.
+function realmEntryCount() {
+  let n = 0;
+  eachEntryInRealm(function () { n++; });
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -936,26 +1127,26 @@ function toSearchEntry(stored, requested, messageId) {
 // ---------------------------------------------------------------------------
 function seed() {
   log.debug('Entering seed().');
-  const dcValue = BASE_DN.split(',')[0].split('=')[1] || 'example';
-  putEntry(BASE_DN, {
+  const dcValue = baseDn().split(',')[0].split('=')[1] || 'example';
+  putEntry(baseDn(), {
     objectClass: ['top', 'domain', 'dcObject'],
     dc: dcValue,
     description: 'The mock STS directory. Every bind succeeds; nothing here ' +
       'is a real account.'
   }, { origin: 'seed' });
-  putEntry(USERS_DN, {
+  putEntry(usersDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'users',
     description: 'People. An entry appears here for anyone who authenticates ' +
       'to this service through any protocol.'
   }, { origin: 'seed' });
-  putEntry(GROUPS_DN, {
+  putEntry(groupsDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'groups',
     description: 'Groups, as groupOfNames — membership is the multi-valued ' +
       '`member` attribute holding the DN of each member.'
   }, { origin: 'seed' });
-  putEntry(APPLICATIONS_DN, {
+  putEntry(applicationsDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'applications',
     description: 'Applications: the OAuth clients, OpenID Connect relying ' +
@@ -966,7 +1157,7 @@ function seed() {
       'the protocol endpoints do. applications.js holds the schema; GET ' +
       '/ldap/applications publishes it.'
   }, { origin: 'seed' });
-  putEntry(FEDERATIONS_DN, {
+  putEntry(federationsDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'federations',
     description: 'Federation relationships: the foreign identity providers ' +
@@ -980,7 +1171,7 @@ function seed() {
       'federation/federation.js holds the schema; GET /ldap/federations ' +
       'publishes it.'
   }, { origin: 'seed' });
-  putEntry(SPIFFE_DN, {
+  putEntry(spiffeDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'spiffe',
     description: 'The SPIFFE trust domain this service is the issuing ' +
@@ -988,7 +1179,7 @@ function seed() {
       'which decide what gets issued) and agents (what has attested). ' +
       'spiffe_registry.js holds the schema; GET /ldap/spiffe publishes it.'
   }, { origin: 'seed' });
-  putEntry(SPIFFE_ENTRIES_DN, {
+  putEntry(spiffeEntriesDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'entries',
     description: 'SPIFFE registration entries. THIS CONTAINER IS THE ' +
@@ -996,7 +1187,7 @@ function seed() {
       'lifetime of the next SVID the Workload API hands out, because nothing ' +
       'caches these.'
   }, { origin: 'seed' });
-  putEntry(SPIFFE_AGENTS_DN, {
+  putEntry(spiffeAgentsDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'agents',
     description: 'SPIFFE agents that have attested here. A RECORD rather ' +
@@ -1005,7 +1196,7 @@ function seed() {
       'Node attestation is never verified — whatever an agent claimed is ' +
       'what is written down.'
   }, { origin: 'seed' });
-  putEntry('cn=admin,' + BASE_DN, {
+  putEntry('cn=admin,' + baseDn(), {
     objectClass: ['top', 'person', 'organizationalRole'],
     cn: 'admin',
     sn: 'Administrator',
@@ -1020,7 +1211,7 @@ function seed() {
     { uid: 'carol', cn: 'Carol Carter', sn: 'Carter', given: 'Carol',
       title: 'Directory Administrator' }
   ].forEach(function (person) {
-    putEntry('uid=' + person.uid + ',' + USERS_DN, {
+    putEntry('uid=' + person.uid + ',' + usersDn(), {
       objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
       uid: person.uid,
       cn: person.cn,
@@ -1032,23 +1223,121 @@ function seed() {
       description: 'Seeded, not authenticated.'
     }, { origin: 'seed' });
   });
-  putEntry('cn=developers,' + GROUPS_DN, {
+  putEntry('cn=developers,' + groupsDn(), {
     objectClass: ['top', 'groupOfNames'],
     cn: 'developers',
     description: 'A groupOfNames. Membership is the `member` attribute.',
-    member: ['uid=alice,' + USERS_DN, 'uid=bob,' + USERS_DN]
+    member: ['uid=alice,' + usersDn(), 'uid=bob,' + usersDn()]
   }, { origin: 'seed' });
-  putEntry('cn=directory-admins,' + GROUPS_DN, {
+  putEntry('cn=directory-admins,' + groupsDn(), {
     objectClass: ['top', 'groupOfNames'],
     cn: 'directory-admins',
     description: 'A second group, so a search for groups returns more than one.',
-    member: ['uid=carol,' + USERS_DN]
+    member: ['uid=carol,' + usersDn()]
   }, { origin: 'seed' });
-  log.info('ldap: seeded ' + entries.size + ' entries under ' + BASE_DN + '.');
+  // COUNTED UNDER THIS BASE rather than `entries.size`, which is the whole Map
+  // — one tree holding every realm's subtree. Reporting the total here would
+  // have said "seeded 33 entries under dc=acme,…" the moment a second realm
+  // existed, which is the kind of number somebody checks a directory against.
+  let seeded = 0;
+  eachEntryInRealm(function () { seeded++; });
+  log.info('ldap: seeded ' + seeded + ' entries under ' + baseDn() + '.');
   log.debug('Leaving seed().');
 }
 
+// The default realm's subtree, at require time, exactly as before realms
+// existed: `realms.currentId()` is the default outside any request, so
+// `baseDn()` is ROOT_DN and every DN seed() writes is the one it always wrote.
 seed();
+
+// ---------------------------------------------------------------------------
+// A REALM'S SUBTREE IS BUILT WHEN THE REALM IS, AND EMPTIED WHEN IT IS REMOVED.
+//
+// **WHY ON CREATE RATHER THAN LAZILY.** Every other per-realm store in this
+// service is built on first touch (`realms.keyed()`), and that works because
+// every one of them is reached through a request that has already entered the
+// realm. This one is not: an `ldapsearch` on 389 arrives with a base DN and no
+// realm at all, so "first touch" for the directory can be a client asking for
+// `dc=acme,dc=example,dc=com` — and the honest answer to that, if the subtree
+// were not there, is LDAP_NO_SUCH_OBJECT. A realm that exists over HTTP and
+// does not exist over LDAP is exactly the kind of half-truth this service is
+// supposed to make impossible to build. So the subtree exists from the moment
+// the realm does. `realms.onCreate()` was added for this and has one caller.
+//
+// **IT IS THE SAME seed(), RUN IN THE REALM.** Not a copy, and not a reduced
+// version: a realm is a whole logical copy of this service, so its directory
+// starts as the same smallest-useful tree — the six containers, the bind
+// account, alice, bob, carol and the two groups — under its own base. Anything
+// else would mean a realm where an `ldapsearch` teaches less than the default
+// one does, and the seeded people are the reason that search shows anything at
+// all. They are separate objects from the default realm's: `uid=alice,ou=users,
+// dc=acme,dc=example,dc=com` shares nothing with `uid=alice,ou=users,
+// dc=example,dc=com` but a first name.
+//
+// **THE TWO ADMIN ROLE GROUPS ARE NOT SEEDED ANYWHERE AND ARE NOT THE POINT
+// HERE.** `ou=groups` under a realm is that realm's, but the console reads the
+// roles from the DEFAULT realm only — see the note above the admin_rbac
+// setDirectory() install further down. A `cn=admin-write` created inside `acme`
+// is an ordinary group in acme's directory and grants nothing.
+// ---------------------------------------------------------------------------
+realms.onCreate(function (id) {
+  log.debug('Entering the realm directory builder. id=' + id);
+  realms.run(realms.get(id), function () {
+    seed();
+    // The vc-attribute sweep, for the reason it is run once after the default
+    // seed: the seeded people are written before anything reads them, and a
+    // realm whose alice had no birthdate while her credential asserted one is
+    // the same disagreement in a new place.
+    populateVcAttributes();
+  });
+  log.info('ldap: built the "' + id + '" realm\'s subtree at ' +
+           realmBaseDn(id) + '.');
+  log.debug('Leaving the realm directory builder.');
+});
+
+// ---------------------------------------------------------------------------
+// AND REMOVING A REALM TAKES ITS SUBTREE WITH IT.
+//
+// The same argument `realms.js` makes for every other store: a realm created
+// again under the same id must not inherit the last one's people, groups,
+// applications, federation relationships or SPIFFE registrations. Here it is
+// sharper than elsewhere, because those are the things somebody would go
+// looking for by DN — a re-created `acme` whose `uid=alice` was somebody else's
+// alice is a directory that lies.
+//
+// **NOTHING IS EVER DELETED FROM `ou=users` — EXCEPT WITH THE REALM THAT OWNED
+// IT.** That rule is about a PERSON being removed while their realm stands, and
+// it holds: no door here deletes an entry from a realm that still exists. This
+// is the realm itself going away, and leaving its subtree behind would not be
+// keeping the rule, it would be leaking a tree nobody can reach — every path to
+// it, HTTP and LDAP alike, named a realm that is gone.
+// ---------------------------------------------------------------------------
+realms.onRemove(function (id) {
+  log.debug('Entering the realm directory purge. id=' + id);
+  const base = realmBaseDn(id);
+  if (base === ROOT_DN) {
+    // Defensive: the default realm cannot be removed (realms.js refuses to
+    // define it in the first place), and if that ever changed this must not be
+    // the line that empties the whole directory.
+    log.warn('ldap: refusing to purge the root naming context for realm "' +
+             id + '".');
+    log.debug('Leaving the realm directory purge. Refused.');
+    return;
+  }
+  let removed = 0;
+  Array.from(entries.keys()).forEach(function (dn) {
+    if (isUnder(dn, base)) {
+      entries.delete(dn);
+      removed++;
+    }
+  });
+  if (removed) {
+    touchDirectory();
+  }
+  log.info('ldap: purged ' + removed + ' entry/entries under ' + base +
+           ' with the "' + id + '" realm.');
+  log.debug('Leaving the realm directory purge.');
+});
 
 // An RFC 4514 DN split into its RDNs, leaf first. The split is on commas that
 // are NOT escaped, because a value may legitimately contain one — `O=Example\,
@@ -1228,7 +1517,7 @@ function entryByDidSubject(did) {
     return null;
   }
   let found = null;
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     if (found) {
       return;
     }
@@ -1254,7 +1543,7 @@ function entryBySpiffeSubject(id) {
     return null;
   }
   let found = null;
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     if (found) {
       return;
     }
@@ -1276,14 +1565,14 @@ function existingUserEntry(name) {
   // The common case first and without a scan: this is called on every
   // authentication, and the overwhelming majority of them are a returning person
   // whose entry is exactly where namePlan() put it.
-  const direct = getEntry('uid=' + name + ',' + USERS_DN);
+  const direct = getEntry('uid=' + name + ',' + usersDn());
   if (direct) {
     log.debug('Leaving existingUserEntry().');
     return direct;
   }
-  const parent = normalizeDn(USERS_DN);
+  const parent = normalizeDn(usersDn());
   let found = null;
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     if (found) {
       return;
     }
@@ -1381,7 +1670,7 @@ function certificatePlan(info) {
 
   let dn;
   const already = naming ? existingUserEntry(naming.value) : null;
-  if (subject && isUnder(subject, BASE_DN) && getEntry(parentDn(subject))) {
+  if (subject && isUnder(subject, baseDn()) && getEntry(parentDn(subject))) {
     dn = subject;
   } else if (already) {
     // THE PERSON THIS CERTIFICATE NAMES IS ALREADY HERE, so this is not a new
@@ -1402,12 +1691,12 @@ function certificatePlan(info) {
     // it keys on the whole DN.
     dn = already.dn;
   } else if (naming) {
-    dn = naming.attribute + '=' + naming.rdnValue + ',' + USERS_DN;
+    dn = naming.attribute + '=' + naming.rdnValue + ',' + usersDn();
   } else {
     // A subject with no parsable RDN at all. It is still an identity that
     // authenticated, so it gets an entry rather than being dropped; `uid=` is
     // the shape every other auto-created entry here uses.
-    dn = 'uid=' + escapeDnValue(subject || 'unknown') + ',' + USERS_DN;
+    dn = 'uid=' + escapeDnValue(subject || 'unknown') + ',' + usersDn();
   }
 
   const attributes = {
@@ -1497,7 +1786,7 @@ function namePlan(name) {
   const already = existingUserEntry(name);
   log.debug('Leaving namePlan().' + (already ? ' Folding onto ' + already.dn + '.' : ''));
   return {
-    dn: already ? already.dn : 'uid=' + name + ',' + USERS_DN,
+    dn: already ? already.dn : 'uid=' + name + ',' + usersDn(),
     attributes: {
       objectClass: ['top', 'person', 'organizationalPerson', 'inetOrgPerson'],
       uid: name,
@@ -1618,7 +1907,7 @@ function didPlan(info) {
   // places.
   const recorded = entryByDidSubject(did);
   const dn = recorded ? recorded.dn
-                      : 'uid=' + escapeDnValue(uid) + ',' + USERS_DN;
+                      : 'uid=' + escapeDnValue(uid) + ',' + usersDn();
   log.debug('Leaving didPlan(). ' + (recorded ? 'Already recorded at ' + dn + '.'
                                               : 'uid=' + uid + ' for ' + did.slice(0, 48)));
   // Nothing to merge onto an entry that already exists. Unlike a certificate,
@@ -1731,7 +2020,7 @@ function spiffePlan(info) {
   // attesting, a JWT-SVID validated — land on ONE entry.
   const recorded = entryBySpiffeSubject(id);
   const dn = recorded ? recorded.dn
-                      : 'uid=' + escapeDnValue(uid) + ',' + USERS_DN;
+                      : 'uid=' + escapeDnValue(uid) + ',' + usersDn();
   log.debug('Leaving spiffePlan(). ' + (recorded ? 'Already recorded at ' + dn + '.'
                                                  : 'uid=' + uid + ' for ' + id));
   return {
@@ -2793,8 +3082,8 @@ function populateVcAttributes() {
   let examined = 0;
   let changed = 0;
   const before = new Map();
-  entries.forEach(function (stored) {
-    if (!isUnder(stored.dn, USERS_DN) || normalizeDn(stored.dn) === normalizeDn(USERS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (!isUnder(stored.dn, usersDn()) || normalizeDn(stored.dn) === normalizeDn(usersDn())) {
       return;
     }
     examined++;
@@ -2807,12 +3096,12 @@ function populateVcAttributes() {
   // entries changed" says nothing about whether the attribute somebody just
   // ticked actually landed anywhere.
   let values = 0;
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (before.has(stored.dn)) {
       values += Object.keys(stored.attributes).length - before.get(stored.dn);
     }
   });
-  log.info('ldap: swept ' + examined + ' entry/entries under ' + USERS_DN + ' for the ' +
+  log.info('ldap: swept ' + examined + ' entry/entries under ' + usersDn() + ' for the ' +
            wanted.length + ' attribute(s) the credential claim set asks for; ' + changed +
            ' entry/entries gained ' + values + ' value(s).');
   log.debug('Leaving populateVcAttributes(). ' + changed + ' of ' + examined + ' changed.');
@@ -2895,7 +3184,7 @@ function locateEntry(key) {
       return { dn: direct.dn, stored: direct };
     }
     let found = null;
-    entries.forEach(function (entry) {
+    eachEntryInRealm(function (entry) {
       if (found) {
         return;
       }
@@ -2952,7 +3241,7 @@ function locateEntry(key) {
     log.debug('Leaving locateEntry(). A name, found at ' + already.dn + '.');
     return { dn: already.dn, stored: already };
   }
-  const dn = 'uid=' + key + ',' + USERS_DN;
+  const dn = 'uid=' + key + ',' + usersDn();
   log.debug('Leaving locateEntry(). A name, so ' + dn + ' (nothing there yet).');
   return { dn: dn, stored: null };
 }
@@ -2979,7 +3268,7 @@ function objectFor(name) {
   const alsoNamed = [];
   if (key && !DN_SHAPED.test(key) && !DID_SHAPED.test(key) &&
       !SPIFFE_SHAPED.test(key)) {
-    entries.forEach(function (entry) {
+    eachEntryInRealm(function (entry) {
       if (normalizeDn(entry.dn) === normalizeDn(dn)) {
         return;
       }
@@ -2995,8 +3284,8 @@ function objectFor(name) {
     found: !!stored,
     entry: null,
     alsoNamed: alsoNamed.sort(),
-    baseDn: BASE_DN,
-    usersDn: USERS_DN,
+    baseDn: baseDn(),
+    usersDn: usersDn(),
     port: boundPort,
     listening: listening,
     listenError: listenError,
@@ -3007,7 +3296,7 @@ function objectFor(name) {
     ldapsPort: secureServer ? boundTlsPort : null,
     ldapsListening: tlsListening,
     autoCreateUsers: autocreateUsers(),
-    entryCount: entries.size,
+    entryCount: realmEntryCount(),
     maxEntries: maxEntries(),
     // Not `entryCount >= maxEntries` computed by the caller: the cap is this
     // module's and a second copy of the comparison is a second thing to keep
@@ -3082,8 +3371,8 @@ const MEMBER_ATTRIBUTES = [
 // Is this entry a group, and by which rule? Returns '' for "it is not one".
 function groupRuleFor(stored) {
   log.debug('Entering groupRuleFor().');
-  const under = isUnder(stored.dn, GROUPS_DN) &&
-                normalizeDn(stored.dn) !== normalizeDn(GROUPS_DN);
+  const under = isUnder(stored.dn, groupsDn()) &&
+                normalizeDn(stored.dn) !== normalizeDn(groupsDn());
   const classes = (stored.attributes.objectclass || []).map(function (value) {
     return String(value).toLowerCase();
   });
@@ -3143,7 +3432,7 @@ function resolveMember(value, attribute) {
   log.debug('Entering resolveMember().');
   const raw = String(value == null ? '' : value);
   const holds = attribute.holds;
-  const dn = holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
+  const dn = holds === 'uid' ? 'uid=' + raw + ',' + usersDn() : raw;
   const stored = getEntry(dn);
   const rule = stored ? groupRuleFor(stored) : '';
   log.debug('Leaving resolveMember().');
@@ -3205,7 +3494,7 @@ function claimedMembersOf(groupDn) {
   }
   const out = [];
   const key = normalizeDn(groupDn);
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     const claims = (entry.attributes.memberof || []).some(function (value) {
       return normalizeDn(value) === key;
     });
@@ -3230,15 +3519,15 @@ function claimedMembersOf(groupDn) {
 // come to disagree about whether a socket is up.
 function directoryState() {
   return {
-    baseDn: BASE_DN,
-    usersDn: USERS_DN,
-    groupsDn: GROUPS_DN,
+    baseDn: baseDn(),
+    usersDn: usersDn(),
+    groupsDn: groupsDn(),
     port: boundPort,
     listening: listening,
     listenError: listenError,
     ldapsPort: secureServer ? boundTlsPort : null,
     ldapsListening: tlsListening,
-    entryCount: entries.size,
+    entryCount: realmEntryCount(),
     maxEntries: maxEntries()
   };
 }
@@ -3260,7 +3549,7 @@ function groupsFor(dn) {
   out.group = null;
 
   const groups = [];
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     const rule = groupRuleFor(entry);
     if (!rule) {
       return;
@@ -3426,13 +3715,32 @@ function groupsFor(dn) {
 //             group finds nothing and is skipped — which is what the old walk
 //             did by returning early on an empty rule.
 // ---------------------------------------------------------------------------
-let groupIndex = null;
-
-let groupIndexVersion = -1;
-
-let groupIndexSize = -1;
-
-let groupIndexBuilds = 0;
+// ---------------------------------------------------------------------------
+// THE INDEX IS PER REALM, AND IT HAS TO BE.
+//
+// `buildGroupIndex()` walks the AMBIENT realm's subtree and classifies each
+// entry with `groupRuleFor()`, which asks `isUnder(dn, groupsDn())` — an
+// ambient question. So an index built while the default realm was ambient
+// describes the default realm and describes it wrongly for every other one, and
+// a single module-level cache would have handed it out to all of them. The
+// symptom would have been the worst kind: a `groups` claim in a token issued
+// under `/realm/acme` naming the DEFAULT realm's groups, correct-looking,
+// verifiable, and wrong.
+//
+// `realms.keyed()` is the ordinary tool for this — one value per realm, built
+// lazily, purged with the realm. The four fields travel together in one object
+// because they are one cache: a version that outlived its index would rebuild
+// nothing and answer from a stale one.
+//
+// `size` is still compared against `entries.size`, the WHOLE Map, and that is
+// deliberate. It is the net described above touchDirectory() — a second line of
+// defence against a writer that forgot to bump the version — and a net that
+// fires slightly too often costs a rebuild, while one scoped to the realm would
+// miss the case where another realm's write is the only thing that changed.
+// ---------------------------------------------------------------------------
+const groupIndexes = realms.keyed(function () {
+  return { index: null, version: -1, size: -1, builds: 0 };
+});
 
 const NO_GROUPS = new Map();
 
@@ -3440,7 +3748,7 @@ function buildGroupIndex() {
   log.debug('Entering buildGroupIndex().');
   const byMember = new Map();
   const byDn = new Map();
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     const rule = groupRuleFor(entry);
     if (!rule) {
       return;
@@ -3466,7 +3774,7 @@ function buildGroupIndex() {
         // Resolving it to the DN it MEANS here, at build time, is what lets the
         // lookup be a single Map.get — and it is exactly the resolution the old
         // walk did per value per token.
-        const dn = attribute.holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
+        const dn = attribute.holds === 'uid' ? 'uid=' + raw + ',' + usersDn() : raw;
         const memberKey = normalizeDn(dn);
         let groups = byMember.get(memberKey);
         if (!groups) {
@@ -3489,9 +3797,9 @@ function buildGroupIndex() {
       });
     });
   });
-  groupIndexBuilds++;
+  groupIndexes().builds++;
   log.debug('Leaving buildGroupIndex(). ' + byDn.size + ' group(s) and ' +
-            byMember.size + ' member name(s), built ' + groupIndexBuilds +
+            byMember.size + ' member name(s), built ' + groupIndexes().builds +
             ' time(s) so far.');
   return { byMember: byMember, byDn: byDn };
 }
@@ -3499,21 +3807,22 @@ function buildGroupIndex() {
 // The index, rebuilt if anything has been written since it was made. See the
 // block above for why the size is checked as well as the version.
 function groupIndexNow() {
-  if (groupIndex && groupIndexVersion === directoryVersion &&
-      groupIndexSize === entries.size) {
-    return groupIndex;
+  const cache = groupIndexes();
+  if (cache.index && cache.version === directoryVersion &&
+      cache.size === entries.size) {
+    return cache.index;
   }
-  groupIndex = buildGroupIndex();
-  groupIndexVersion = directoryVersion;
-  groupIndexSize = entries.size;
-  return groupIndex;
+  cache.index = buildGroupIndex();
+  cache.version = directoryVersion;
+  cache.size = entries.size;
+  return cache.index;
 }
 
 function groupsOfUser(key) {
   log.debug('Entering groupsOfUser(). key=' + key);
   const wanted = String(key == null ? '' : key).trim();
   const out = { key: wanted, dn: '', entryFound: false, groups: [],
-                baseDn: BASE_DN, groupsDn: GROUPS_DN };
+                baseDn: baseDn(), groupsDn: groupsDn() };
   if (!wanted) {
     log.debug('Leaving groupsOfUser(). There was no identity to look up.');
     return out;
@@ -3706,17 +4015,61 @@ if (typeof groupClaims.setDirectory === 'function') {
 // checks every member it needs and refuses a partial object with an error line
 // naming what was missing. Guarded like the five above, so an older
 // `admin_rbac.js` costs a warning rather than a service that will not start.
+// ---------------------------------------------------------------------------
+// AND EVERY ONE OF THEM IS PINNED TO THE DEFAULT REALM. THIS IS THE WHOLE OF
+// "THE CONSOLE AUTHENTICATES AGAINST THE DEFAULT REALM".
+//
+// The directory is per realm now, so `groupsOfUser('alice')` means a different
+// thing in each one — and the two console roles must not. A role is permission
+// to change what EVERY realm's protocol endpoints do: `/admin/config` reached
+// under `/realm/acme` writes acme's overrides, `/admin/realms` can delete a
+// realm outright, and `/admin/applications` edits a registry the SAML and OAuth
+// endpoints read. If the roster were per realm then anybody who could create a
+// realm could grant themselves both roles inside it and walk back out into the
+// default one — the realm feature would have become a privilege escalation.
+//
+// So `inDefaultRealm()` wraps each function in `realms.run(DEFAULT_REALM, …)`.
+// Nine functions rather than a note asking callers to remember, because the
+// caller is `admin_rbac.js` and it has no business knowing that realms exist:
+// what it asked for was "the directory", and what it gets is the one directory
+// that decides this.
+//
+// **THE ADMINISTRATORS THEMSELVES ARE THEREFORE DEFAULT-REALM PEOPLE.**
+// `allPersons()` and `existingUserEntry()` are pinned with the rest, so the
+// roster page lists the default realm's `ou=users` and a grant names an entry
+// there. Somebody who exists only under `dc=acme,dc=example,dc=com` cannot hold
+// a role and cannot be granted one — which is the point, and is why
+// `authn.js`'s console gate resolves its session in the default realm too.
+// The two halves have to agree: a gate that accepted an acme session while the
+// roster could only name default-realm people would let somebody in and then
+// insist they were nobody.
+//
+// It is deliberately NOT applied to `setDirectoryReader()` and
+// `setDirectoryWriter()` above. Those draw the console's USER pages, and
+// `/realm/acme/admin/users` showing the default realm's people instead of
+// acme's would be a console that cannot see the realm it is pointed at. Reading
+// a realm is the console's job; being let in is not the realm's decision.
+// ---------------------------------------------------------------------------
+function inDefaultRealm(fn) {
+  return function () {
+    const args = arguments;
+    return realms.run(realms.DEFAULT_REALM, function () {
+      return fn.apply(null, args);
+    });
+  };
+}
+
 if (typeof adminRbac.setDirectory === 'function') {
   adminRbac.setDirectory({
-    groupsOfUser: groupsOfUser,
-    readGroupEntry: readGroupEntry,
-    writeGroupEntry: writeGroupEntry,
-    groupDnFor: groupDnFor,
+    groupsOfUser: inDefaultRealm(groupsOfUser),
+    readGroupEntry: inDefaultRealm(readGroupEntry),
+    writeGroupEntry: inDefaultRealm(writeGroupEntry),
+    groupDnFor: inDefaultRealm(groupDnFor),
     normalizeDn: normalizeDn,
-    existingUserEntry: existingUserEntry,
+    existingUserEntry: inDefaultRealm(existingUserEntry),
     usernameOfEntry: usernameOfEntry,
     nameUsableInDn: nameUsableInDn,
-    allPersons: allPersons,
+    allPersons: inDefaultRealm(allPersons),
     // THE OTHER DIRECTION OF MEMBERSHIP. `readGroupEntry()` answers what the
     // GROUP lists; this answers who CLAIMS the group through their own
     // `memberOf` while the group does not list them back. `groupsOfUser()`
@@ -3724,9 +4077,13 @@ if (typeof adminRbac.setDirectory === 'function') {
     // the role — and without this the roster page would have shown a console
     // they could use and a list they were not on, which is the one thing a
     // permissions page must never do.
-    claimedMembersOf: claimedMembersOf,
-    usersDn: USERS_DN,
-    groupsDn: GROUPS_DN
+    claimedMembersOf: inDefaultRealm(claimedMembersOf),
+    // STRINGS, and the DEFAULT realm's — evaluated once, here, rather than read
+    // per call. That is correct precisely because these are pinned: the default
+    // realm's base DN cannot change while the process runs, so there is nothing
+    // to re-read, and a function would only invite somebody to make it ambient.
+    usersDn: realms.run(realms.DEFAULT_REALM, usersDn),
+    groupsDn: realms.run(realms.DEFAULT_REALM, groupsDn)
   });
 } else {
   log.warn('ldap: admin_rbac.js offers no setDirectory(), so the admin ' +
@@ -3745,10 +4102,15 @@ populateVcAttributes();
 // ---------------------------------------------------------------------------
 // The server, and its handlers.
 //
-// Every handler is registered against BASE_DN and against '' — the second is
-// the ROOT DSE and anything outside the naming context. A client that binds
-// before it knows the base DN reads the root DSE first, and a server that had no
-// handler for it answers LDAP_UNAVAILABLE, which reads as the server being down.
+// Every handler is registered against '' — the ROOT DSE and everything else —
+// and each decides for itself whether the DN it was given is inside ROOT_DN. A
+// client that binds before it knows the base DN reads the root DSE first, and a
+// server that had no handler for it answers LDAP_UNAVAILABLE, which reads as the
+// server being down.
+//
+// Registering at '' rather than at the base is also what lets one socket serve
+// every trust realm: a realm's subtree is `dc=<id>,` + ROOT_DN, and the handlers
+// reach it because they were never scoped to a base in the first place.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // TWO SERVERS, ONE SET OF HANDLERS.
@@ -4020,7 +4382,7 @@ function membershipsNaming(dn) {
   const uid = (splitRdns(dn)[0] || '').toLowerCase().indexOf('uid=') === 0
     ? unescapeDnValue(rdnPairs(splitRdns(dn)[0])[0].value) : '';
   let count = 0;
-  entries.forEach(function (entry) {
+  eachEntryInRealm(function (entry) {
     const names = MEMBER_ATTRIBUTES.some(function (attribute) {
       return (entry.attributes[attribute.name] || []).some(function (value) {
         return attribute.holds === 'uid'
@@ -4115,9 +4477,16 @@ server.add('', function (req, res, next) {
   log.debug('Entering the LDAP add handler.');
   const dn = req.dn.toString();
   log.info('ldap: ADD ' + dn);
-  if (!isUnder(dn, BASE_DN)) {
+  // ROOT_DN, not baseDn(): THIS IS THE SOCKET, and the socket has no realm.
+  // An LDAP client operating on `dc=acme,dc=example,dc=com` arrives with no
+  // ambient realm at all, so asking whether its DN is under the DEFAULT realm's
+  // base would refuse every realm's subtree — which is the one thing putting the
+  // realm in the DN exists to make possible. The naming context this server
+  // holds is the whole tree; which realm a DN belongs to is decided by where it
+  // sits in that tree, and nothing here has to know.
+  if (!isUnder(dn, ROOT_DN)) {
     log.debug('Leaving the LDAP add handler. Outside the naming context.');
-    return next(new ldap.NoSuchObjectError(BASE_DN));
+    return next(new ldap.NoSuchObjectError(ROOT_DN));
   }
   if (getEntry(dn)) {
     log.debug('Leaving the LDAP add handler. It is already there.');
@@ -4152,7 +4521,7 @@ server.add('', function (req, res, next) {
   // looks for the entry it collided with, which is exactly what the message
   // hands it.
   // ---------------------------------------------------------------------
-  if (normalizeDn(parentDn(dn)) === normalizeDn(USERS_DN)) {
+  if (normalizeDn(parentDn(dn)) === normalizeDn(usersDn())) {
     const proposed = [usernameOfEntry({ dn: dn })].concat(
       req.attributes.filter(function (attr) {
         return String(attr.type).toLowerCase() === 'uid';
@@ -4204,7 +4573,7 @@ server.add('', function (req, res, next) {
   // detail, which is where the disagreement shows up when there is one.
   auditLdap(req, {
     action: audit.directoryActionFor('create', dn,
-                                     { users: USERS_DN, groups: GROUPS_DN }),
+                                     { users: usersDn(), groups: groupsDn() }),
     target: dn,
     summary: 'added ' + dn + ' with ' + Object.keys(attributes).length +
              ' attribute(s)',
@@ -4254,7 +4623,7 @@ server.del('', function (req, res, next) {
   const dangling = membershipsNaming(dn);
   auditLdap(req, {
     action: audit.directoryActionFor('delete', dn,
-                                     { users: USERS_DN, groups: GROUPS_DN }),
+                                     { users: usersDn(), groups: groupsDn() }),
     target: dn,
     summary: 'deleted ' + dn,
     detail: { attributeCount: Object.keys(stored.attributes).length,
@@ -4355,7 +4724,7 @@ server.modify('', function (req, res, next) {
   // anybody who wants them.
   auditLdap(req, {
     action: audit.directoryActionFor('update', dn,
-                                     { users: USERS_DN, groups: GROUPS_DN }),
+                                     { users: usersDn(), groups: groupsDn() }),
     target: dn,
     summary: 'modified ' + dn + ' with ' + req.changes.length + ' change(s)',
     detail: { changes: req.changes.map(function (change) {
@@ -4394,9 +4763,16 @@ server.modifyDN('', function (req, res, next) {
     log.debug('Leaving the LDAP modifyDN handler. The target exists.');
     return next(new ldap.EntryAlreadyExistsError(target));
   }
-  if (!isUnder(target, BASE_DN)) {
+  // ROOT_DN, not baseDn(): THIS IS THE SOCKET, and the socket has no realm.
+  // An LDAP client operating on `dc=acme,dc=example,dc=com` arrives with no
+  // ambient realm at all, so asking whether its DN is under the DEFAULT realm's
+  // base would refuse every realm's subtree — which is the one thing putting the
+  // realm in the DN exists to make possible. The naming context this server
+  // holds is the whole tree; which realm a DN belongs to is decided by where it
+  // sits in that tree, and nothing here has to know.
+  if (!isUnder(target, ROOT_DN)) {
     log.debug('Leaving the LDAP modifyDN handler. Outside the naming context.');
-    return next(new ldap.NoSuchObjectError(BASE_DN));
+    return next(new ldap.NoSuchObjectError(ROOT_DN));
   }
   entries.delete(normalizeDn(dn));
   stored.dn = target;
@@ -4423,7 +4799,7 @@ server.modifyDN('', function (req, res, next) {
   // name beside it rather than as a row that quietly picked one.
   auditLdap(req, {
     action: audit.directoryActionFor('rename', target,
-                                     { users: USERS_DN, groups: GROUPS_DN }),
+                                     { users: usersDn(), groups: groupsDn() }),
     target: target,
     summary: 'renamed ' + dn + ' to ' + target,
     detail: { from: dn, to: target, newRdn: newRdn,
@@ -4494,7 +4870,11 @@ server.search('', function (req, res, next) {
         dn: '',
         attributes: {
           objectclass: ['top', 'LDAProotDSE'],
-          namingcontexts: [BASE_DN],
+          // ROOT_DN: the root DSE names the context the SOCKET serves, which
+          // is the whole tree. Every realm's subtree is inside it, so a client
+          // that reads this and searches from it finds them all — which is
+          // exactly what a naming context means.
+          namingcontexts: [ROOT_DN],
           supportedldapversion: ['3'],
           vendorname: ['mock STS (ldapjs, unmodified, pinned as a submodule)'],
           // supportedControl, supportedExtension and supportedSASLMechanisms
@@ -4528,7 +4908,13 @@ server.search('', function (req, res, next) {
               'root DSE is refused.');
     return next(new ldap.NoSuchObjectError(''));
   }
-  if (!isUnder(base, BASE_DN)) {
+  // ROOT_DN, and this is the line that makes `ldapsearch -b
+  // "dc=acme,dc=example,dc=com"` work: a realm's subtree is INSIDE the naming
+  // context, so a search based there is in-context and is answered from the one
+  // tree. Comparing against the ambient realm's base instead would have made
+  // every realm unreachable from 389 and 636, which is the whole reason the
+  // realm is in the DN rather than in a partitioned store.
+  if (!isUnder(base, ROOT_DN)) {
     log.debug('Leaving the LDAP search handler. Outside the naming context.');
     return next(new ldap.NoSuchObjectError(base));
   }
@@ -4602,7 +4988,7 @@ server.search('', function (req, res, next) {
     }
     res.send(toSearchEntry(stored, req.attributes, res.messageId));
     sent++;
-    if (isUnder(stored.dn, USERS_DN) && normalizeDn(stored.dn) !== normalizeDn(USERS_DN)) {
+    if (isUnder(stored.dn, usersDn()) && normalizeDn(stored.dn) !== normalizeDn(usersDn())) {
       usersSent++;
     }
   }
@@ -4692,9 +5078,9 @@ function description(req) {
     // otherwise silent until somebody's connection is refused.
     listening: listening,
     listenError: listenError,
-    baseDn: BASE_DN,
-    usersDn: USERS_DN,
-    groupsDn: GROUPS_DN,
+    baseDn: baseDn(),
+    usersDn: usersDn(),
+    groupsDn: groupsDn(),
     ldapVersion: 3,
     bindPolicy: 'every bind succeeds — any DN, any password, including an ' +
       'anonymous one — except the literal password "' + REFUSED_PASSWORD +
@@ -4742,19 +5128,19 @@ function description(req) {
       }
     },
     autoCreateUsers: autocreateUsers(),
-    autoCreateRule: 'an entry uid=<name>,' + USERS_DN + ' appears the first ' +
+    autoCreateRule: 'an entry uid=<name>,' + usersDn() + ' appears the first ' +
       'time <name> authenticates to this service through ANY protocol. An ' +
       'LDAP bind does not seed one (it presents a DN, not a user name) and ' +
       'neither does an OAuth client. A verified TLS CLIENT CERTIFICATE is the ' +
       'one identity that is already a DN: its entry keeps the subject\'s own ' +
-      'leaf RDN — cn=alice,' + USERS_DN + ' for CN=alice,O=Example — or the ' +
-      'whole subject where that already lies under ' + BASE_DN + ', and the ' +
+      'leaf RDN — cn=alice,' + usersDn() + ' for CN=alice,O=Example — or the ' +
+      'whole subject where that already lies under ' + baseDn() + ', and the ' +
       'full subject, issuer, serial and validity are on the entry as x509* ' +
       'attributes, which are this service\'s own names and not schema. A ' +
       'DECENTRALIZED IDENTIFIER is the third shape and is neither a name nor a ' +
       'DN: an issued credential\'s did:jwk subject, whatever DID presents to ' +
       'the OID4VP Verifier, the one /did/generate mints. Its entry goes at ' +
-      'uid=did-<12 hex of the SHA-256 of the DID>,' + USERS_DN + ' — a ' +
+      'uid=did-<12 hex of the SHA-256 of the DID>,' + usersDn() + ' — a ' +
       'did:jwk written out in full is a DN of several hundred characters, ' +
       'most of it key material — with the identifier itself kept whole on the ' +
       'entry as didSubject, and its method as didMethod. Search for the ' +
@@ -4905,7 +5291,7 @@ app.get('/ldap', function (req, res) {
 app.get('/ldap/directory', function (req, res) {
   log.debug('Entering GET /ldap/directory.');
   const listed = [];
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     const attributes = {};
     Object.keys(stored.attributes).forEach(function (name) {
       attributes[canonicalName(name)] = stored.attributes[name].slice(0);
@@ -4922,7 +5308,7 @@ app.get('/ldap/directory', function (req, res) {
   if (String(req.query.format || '').toLowerCase() === 'json') {
     log.debug('Leaving GET /ldap/directory. JSON, ' + listed.length +
               ' entry/entries.');
-    return res.status(200).json({ baseDn: BASE_DN, count: listed.length,
+    return res.status(200).json({ baseDn: baseDn(), count: listed.length,
                                   entries: listed });
   }
   const rows = listed.map(function (entry) {
@@ -4935,7 +5321,7 @@ app.get('/ldap/directory', function (req, res) {
   }).join('');
   const inner = '<h1>Every entry in the directory</h1>' +
     '<p class="sub">' + listed.length + ' entry/entries under <code>' +
-    xmlEscape(BASE_DN) + '</code>. This page is not LDAP &mdash; it is this ' +
+    xmlEscape(baseDn()) + '</code>. This page is not LDAP &mdash; it is this ' +
     'service showing its own store, which is how you can tell an empty ' +
     'directory from a search filter that matched nothing.</p>' +
     '<table><tr><th>DN</th><th>Came from</th><th>Attributes</th></tr>' +
@@ -4986,7 +5372,7 @@ app.get('/ldap/directory', function (req, res) {
 // bug because a DID names a person.
 // ---------------------------------------------------------------------------
 function applicationDn(identifier) {
-  return 'cn=' + escapeDnValue(applications.labelFor(identifier)) + ',' + APPLICATIONS_DN;
+  return 'cn=' + escapeDnValue(applications.labelFor(identifier)) + ',' + applicationsDn();
 }
 
 // Find an application by its IDENTIFIER rather than by its DN, because the DN
@@ -5006,8 +5392,8 @@ function applicationEntry(identifier) {
   // entries in one process.
   const wanted = String(identifier);
   let found = null;
-  entries.forEach(function (stored) {
-    if (found || !isUnder(stored.dn, APPLICATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (found || !isUnder(stored.dn, applicationsDn())) {
       return;
     }
     if ((stored.attributes.appidentifier || [])[0] === wanted) {
@@ -5084,8 +5470,8 @@ function readApplication(identifier) {
 
 function applicationCount() {
   let n = 0;
-  entries.forEach(function (stored) {
-    if (isUnder(stored.dn, APPLICATIONS_DN) && normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, applicationsDn()) && normalizeDn(stored.dn) !== normalizeDn(applicationsDn())) {
       n++;
     }
   });
@@ -5095,9 +5481,9 @@ function applicationCount() {
 function allApplications() {
   log.debug('Entering allApplications().');
   const rows = [];
-  entries.forEach(function (stored) {
-    if (isUnder(stored.dn, APPLICATIONS_DN) &&
-        normalizeDn(stored.dn) !== normalizeDn(APPLICATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, applicationsDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(applicationsDn())) {
       rows.push(entryObject(stored));
     }
   });
@@ -5204,7 +5590,7 @@ applications.setDirectory({
   // Two facts about the container itself, for the pages that report where these
   // entries live and how many will fit. They are here rather than in that module
   // because that module deliberately does not know where the container is.
-  containerDn: function () { return APPLICATIONS_DN; },
+  containerDn: function () { return applicationsDn(); },
   maxApplications: maxApplications
 });
 
@@ -5230,7 +5616,7 @@ applications.setDirectory({
 // because somebody tidied a DN.
 // ---------------------------------------------------------------------------
 function federationDn(id) {
-  return 'cn=' + escapeDnValue(String(id)) + ',' + FEDERATIONS_DN;
+  return 'cn=' + escapeDnValue(String(id)) + ',' + federationsDn();
 }
 
 function federationEntry(id) {
@@ -5242,8 +5628,8 @@ function federationEntry(id) {
   }
   const wanted = String(id);
   let found = null;
-  entries.forEach(function (stored) {
-    if (found || !isUnder(stored.dn, FEDERATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (found || !isUnder(stored.dn, federationsDn())) {
       return;
     }
     if ((stored.attributes.fedid || [])[0] === wanted) {
@@ -5261,9 +5647,9 @@ function readFederation(id) {
 
 function federationCount() {
   let n = 0;
-  entries.forEach(function (stored) {
-    if (isUnder(stored.dn, FEDERATIONS_DN) &&
-        normalizeDn(stored.dn) !== normalizeDn(FEDERATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, federationsDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(federationsDn())) {
       n++;
     }
   });
@@ -5273,9 +5659,9 @@ function federationCount() {
 function allFederations() {
   log.debug('Entering allFederations().');
   const rows = [];
-  entries.forEach(function (stored) {
-    if (isUnder(stored.dn, FEDERATIONS_DN) &&
-        normalizeDn(stored.dn) !== normalizeDn(FEDERATIONS_DN)) {
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, federationsDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(federationsDn())) {
       rows.push(entryObject(stored));
     }
   });
@@ -5352,7 +5738,7 @@ federation.setDirectory({
   allFederations: allFederations,
   countFederations: federationCount,
   deleteFederation: deleteFederationEntry,
-  containerDn: function () { return FEDERATIONS_DN; },
+  containerDn: function () { return federationsDn(); },
   maxFederations: maxFederations
 });
 
@@ -5396,12 +5782,12 @@ applications.seedInternalApplications();
 // the same consequence: ON THESE ENTRIES THE cn IS NOT THE IDENTITY.
 // ---------------------------------------------------------------------------
 function spiffeEntryDn(id) {
-  return 'cn=' + escapeDnValue(String(id)) + ',' + SPIFFE_ENTRIES_DN;
+  return 'cn=' + escapeDnValue(String(id)) + ',' + spiffeEntriesDn();
 }
 
 function spiffeAgentDn(id) {
   return 'cn=' + escapeDnValue(spiffeRegistry.agentCnFor(id)) + ',' +
-         SPIFFE_AGENTS_DN;
+         spiffeAgentsDn();
 }
 
 // Find one by its own identifier rather than by its DN, because somebody may
@@ -5414,7 +5800,7 @@ function spiffeStored(containerDn, attributeName, identifier) {
   const wanted = String(identifier);
   const key = String(attributeName).toLowerCase();
   let found = null;
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (found || !isUnder(stored.dn, containerDn)) {
       return;
     }
@@ -5431,7 +5817,7 @@ function spiffeStored(containerDn, attributeName, identifier) {
 
 function spiffeChildren(containerDn) {
   const rows = [];
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (isUnder(stored.dn, containerDn) &&
         normalizeDn(stored.dn) !== normalizeDn(containerDn)) {
       rows.push(entryObject(stored));
@@ -5442,7 +5828,7 @@ function spiffeChildren(containerDn) {
 
 function spiffeChildCount(containerDn) {
   let n = 0;
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (isUnder(stored.dn, containerDn) &&
         normalizeDn(stored.dn) !== normalizeDn(containerDn)) {
       n++;
@@ -5461,7 +5847,7 @@ function spiffeWrite(containerDn, attributeName, identifier, attributes, originL
   log.debug('Entering spiffeWrite(). identifier=' + identifier);
   const existing = spiffeStored(containerDn, attributeName, identifier);
   const dn = existing ? existing.dn
-    : (containerDn === SPIFFE_ENTRIES_DN ? spiffeEntryDn(identifier)
+    : (containerDn === spiffeEntriesDn() ? spiffeEntryDn(identifier)
                                          : spiffeAgentDn(identifier));
   if (!existing && entries.size >= maxEntries()) {
     // Warned rather than thrown, as a full directory always is here: whatever
@@ -5521,36 +5907,36 @@ function spiffeAuditDirectory(action, dn, attributes, created) {
 
 spiffeRegistry.setDirectory({
   readEntry: function (id) {
-    const stored = spiffeStored(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id);
+    const stored = spiffeStored(spiffeEntriesDn(), 'spiffeEntryId', id);
     return stored ? entryObject(stored) : null;
   },
   writeEntry: function (id, attributes) {
-    return spiffeWrite(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id, attributes,
+    return spiffeWrite(spiffeEntriesDn(), 'spiffeEntryId', id, attributes,
                        'spiffe-entry');
   },
   deleteEntry: function (id) {
-    return spiffeDelete(SPIFFE_ENTRIES_DN, 'spiffeEntryId', id);
+    return spiffeDelete(spiffeEntriesDn(), 'spiffeEntryId', id);
   },
-  allEntries: function () { return spiffeChildren(SPIFFE_ENTRIES_DN); },
-  countEntries: function () { return spiffeChildCount(SPIFFE_ENTRIES_DN); },
+  allEntries: function () { return spiffeChildren(spiffeEntriesDn()); },
+  countEntries: function () { return spiffeChildCount(spiffeEntriesDn()); },
   readAgent: function (id) {
-    const stored = spiffeStored(SPIFFE_AGENTS_DN, 'spiffeAgentId', id);
+    const stored = spiffeStored(spiffeAgentsDn(), 'spiffeAgentId', id);
     return stored ? entryObject(stored) : null;
   },
   writeAgent: function (id, attributes) {
-    return spiffeWrite(SPIFFE_AGENTS_DN, 'spiffeAgentId', id, attributes,
+    return spiffeWrite(spiffeAgentsDn(), 'spiffeAgentId', id, attributes,
                        'spiffe-agent');
   },
   deleteAgent: function (id) {
-    return spiffeDelete(SPIFFE_AGENTS_DN, 'spiffeAgentId', id);
+    return spiffeDelete(spiffeAgentsDn(), 'spiffeAgentId', id);
   },
-  allAgents: function () { return spiffeChildren(SPIFFE_AGENTS_DN); },
-  countAgents: function () { return spiffeChildCount(SPIFFE_AGENTS_DN); },
+  allAgents: function () { return spiffeChildren(spiffeAgentsDn()); },
+  countAgents: function () { return spiffeChildCount(spiffeAgentsDn()); },
   // Where the containers are, for the pages that report it. Here rather than in
   // that module because that module deliberately does not know.
-  entriesContainerDn: function () { return SPIFFE_ENTRIES_DN; },
-  agentsContainerDn: function () { return SPIFFE_AGENTS_DN; },
-  containerDn: function () { return SPIFFE_DN; }
+  entriesContainerDn: function () { return spiffeEntriesDn(); },
+  agentsContainerDn: function () { return spiffeAgentsDn(); },
+  containerDn: function () { return spiffeDn(); }
 });
 
 // ---------------------------------------------------------------------------
@@ -5596,13 +5982,13 @@ spiffeRegistry.setDirectory({
 // directory is schemaless, so what an entry IS cannot be read off an
 // objectClass, and placement is the only rule that cannot be argued with.
 function isPersonEntry(stored) {
-  return isUnder(stored.dn, USERS_DN) &&
-         normalizeDn(stored.dn) !== normalizeDn(USERS_DN);
+  return isUnder(stored.dn, usersDn()) &&
+         normalizeDn(stored.dn) !== normalizeDn(usersDn());
 }
 
 function personCount() {
   let n = 0;
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (isPersonEntry(stored)) n++;
   });
   return n;
@@ -5615,7 +6001,7 @@ function personCount() {
 function allPersons() {
   log.debug('Entering allPersons().');
   const rows = [];
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (isPersonEntry(stored)) {
       rows.push(stored);
     }
@@ -5637,7 +6023,7 @@ function readPerson(dn) {
   log.debug('Entering readPerson(). dn=' + dn);
   const stored = getEntry(dn);
   if (!stored || !isPersonEntry(stored)) {
-    log.debug('Leaving readPerson(). ' + (stored ? 'Not under ' + USERS_DN + '.' : 'Nothing there.'));
+    log.debug('Leaving readPerson(). ' + (stored ? 'Not under ' + usersDn() + '.' : 'Nothing there.'));
     return null;
   }
   log.debug('Leaving readPerson(). Found ' + stored.dn + '.');
@@ -5671,7 +6057,7 @@ function writePerson(dn, attributes) {
   log.debug('Entering writePerson(). dn=' + dn);
   const existing = getEntry(dn);
   if (existing && !isPersonEntry(existing)) {
-    log.debug('Leaving writePerson(). ' + dn + ' is not under ' + USERS_DN + '.');
+    log.debug('Leaving writePerson(). ' + dn + ' is not under ' + usersDn() + '.');
     return { ok: false, reason: 'notAPerson', dn: dn };
   }
   if (!existing && entries.size >= maxEntries()) {
@@ -5726,7 +6112,7 @@ function deletePerson(dn) {
 function allGroupEntries() {
   log.debug('Entering allGroupEntries().');
   const rows = [];
-  entries.forEach(function (stored) {
+  eachEntryInRealm(function (stored) {
     if (groupRuleFor(stored)) {
       rows.push(stored);
     }
@@ -5764,7 +6150,7 @@ function readGroupEntry(dn) {
 // one by both rules rather than by where it happens to sit, and stays one if a
 // client moves it.
 function groupDnFor(displayName) {
-  return 'cn=' + escapeDnValue(String(displayName)) + ',' + GROUPS_DN;
+  return 'cn=' + escapeDnValue(String(displayName)) + ',' + groupsDn();
 }
 
 // `origin` says WHICH DOOR wrote it, and it is a parameter rather than the
@@ -5847,10 +6233,10 @@ app.get('/ldap/spiffe', function (req, res) {
   const entries_ = spiffeRegistry.allEntries();
   const agents = spiffeRegistry.allAgents();
   const payload = {
-    baseDn: BASE_DN,
-    container: SPIFFE_DN,
-    entriesContainer: SPIFFE_ENTRIES_DN,
-    agentsContainer: SPIFFE_AGENTS_DN,
+    baseDn: baseDn(),
+    container: spiffeDn(),
+    entriesContainer: spiffeEntriesDn(),
+    agentsContainer: spiffeAgentsDn(),
     entries: entries_.length,
     agents: agents.length,
     maxEntries: spiffeRegistry.maxEntries(),
@@ -5907,9 +6293,9 @@ app.get('/ldap/spiffe', function (req, res) {
     '.sub{color:#666;font-size:.9em}' +
     '</style></head><body><h1>The SPIFFE registry, in the directory</h1>' +
     '<p>' + xmlEscape(payload.sourceOfTruth) + '</p>' +
-    '<p>Registration entries live under <code>' + xmlEscape(SPIFFE_ENTRIES_DN) +
+    '<p>Registration entries live under <code>' + xmlEscape(spiffeEntriesDn()) +
     '</code> (' + entries_.length + ' of at most ' + spiffeRegistry.maxEntries() +
-    ') and attested agents under <code>' + xmlEscape(SPIFFE_AGENTS_DN) +
+    ') and attested agents under <code>' + xmlEscape(spiffeAgentsDn()) +
     '</code> (' + agents.length + ' of at most ' + spiffeRegistry.maxAgents() +
     '). <a href="/spiffe">What SPIFFE is here</a> &middot; ' +
     '<a href="/admin/spiffe">the console</a>.</p>' +
@@ -5938,8 +6324,8 @@ app.get('/ldap/applications', function (req, res) {
   log.debug('Entering GET /ldap/applications.');
   const rows = applications.list();
   const payload = {
-    baseDn: BASE_DN,
-    container: APPLICATIONS_DN,
+    baseDn: baseDn(),
+    container: applicationsDn(),
     count: rows.length,
     max: maxApplications(),
     sourceOfTruth: 'These entries ARE the registry. An ldapmodify here changes what the ' +
@@ -5997,7 +6383,7 @@ app.get('/ldap/applications', function (req, res) {
   }).join('');
   const inner = '<h1>Applications</h1>' +
     '<p class="sub">' + rows.length + ' of a maximum ' + maxApplications() +
-    ' under <code>' + xmlEscape(APPLICATIONS_DN) + '</code>: every OAuth client, ' +
+    ' under <code>' + xmlEscape(applicationsDn()) + '</code>: every OAuth client, ' +
     'OpenID Connect relying party, SAML service provider, WS-Federation application, ' +
     'WS-Trust relying party, OpenID4VP verifier and Kerberos service this instance has ' +
     'been asked about. One entry per unique identifier, so an application that speaks ' +
@@ -6054,8 +6440,8 @@ app.get('/ldap/federations', function (req, res) {
   log.debug('Entering GET /ldap/federations.');
   const rows = federation.list();
   const payload = {
-    baseDn: BASE_DN,
-    container: FEDERATIONS_DN,
+    baseDn: baseDn(),
+    container: federationsDn(),
     count: rows.length,
     max: maxFederations(),
     sourceOfTruth: 'These entries ARE the register. An ldapmodify here is a SECURITY ' +
@@ -6123,7 +6509,7 @@ app.get('/ldap/federations', function (req, res) {
   }).join('');
   const inner = '<h1>Federation relationships</h1>' +
     '<p class="sub">' + rows.length + ' of a maximum ' + maxFederations() +
-    ' under <code>' + xmlEscape(FEDERATIONS_DN) + '</code>: the foreign identity ' +
+    ' under <code>' + xmlEscape(federationsDn()) + '</code>: the foreign identity ' +
     'providers this service consumes assertions from, and the foreign service ' +
     'providers it asserts to. One relationship is one DIRECTION, so a partner in both ' +
     'is two entries.</p>' +
@@ -6185,10 +6571,12 @@ function listen() {
       boundPort = address ? address.port : LDAP_PORT;
       listening = true;
       listenError = '';
+      // ROOT_DN: what this SOCKET serves. A realm's subtree is under it and
+      // is reported per realm on GET /ldap, which does have a realm.
       log.info('ldap: listening on TCP ' + boundPort + ' with base DN ' +
-               BASE_DN + '; ' + entries.size +
+               ROOT_DN + '; ' + entries.size +
                ' entry/entries; GET /ldap describes it.');
-      resolve({ port: boundPort, baseDn: BASE_DN });
+      resolve({ port: boundPort, baseDn: ROOT_DN });
     });
     plainServer.once('error', function (err) {
       // 389 is privileged and it is a well-known port, so the two ways this
@@ -6283,9 +6671,9 @@ module.exports = {
   close: close,
   LDAP_PORT: LDAP_PORT,
   LDAPS_PORT: LDAPS_PORT,
-  BASE_DN: BASE_DN,
-  USERS_DN: USERS_DN,
-  GROUPS_DN: GROUPS_DN,
+  baseDn: baseDn,
+  usersDn: usersDn,
+  groupsDn: groupsDn,
   autocreateUsers: autocreateUsers,
   REFUSED_PASSWORD: REFUSED_PASSWORD,
   maxEntries: maxEntries,
@@ -6297,10 +6685,10 @@ module.exports = {
   objectFor: objectFor,
   groupsFor: groupsFor,
   groupsOfUser: groupsOfUser,
-  APPLICATIONS_DN: APPLICATIONS_DN,
-  SPIFFE_DN: SPIFFE_DN,
-  SPIFFE_ENTRIES_DN: SPIFFE_ENTRIES_DN,
-  SPIFFE_AGENTS_DN: SPIFFE_AGENTS_DN,
+  applicationsDn: applicationsDn,
+  spiffeDn: spiffeDn,
+  spiffeEntriesDn: spiffeEntriesDn,
+  spiffeAgentsDn: spiffeAgentsDn,
   maxApplications: maxApplications,
   // The people and group containers as a store, for scim.js. A plain export
   // rather than a slot somebody fills, because that module is required AFTER
@@ -6346,5 +6734,6 @@ module.exports = {
   // from inside writePerson(), because a batch of fifty creates should sweep
   // once and the caller is what knows the batch is over.
   populateVcAttributes: populateVcAttributes,
-  entryCount: function () { return entries.size; }
+  // THIS REALM's entries, not the Map's. See realmEntryCount().
+  entryCount: realmEntryCount
 };

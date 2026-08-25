@@ -726,12 +726,28 @@ The ordinary reader answers out of the ambient realm's partition, which is right
 for `/oauth2/authorize` and was wrong here: the realm chooser on every page of
 this console is a link to the same page in another realm, and each click landed
 on the sign-in screen — then overwrote the browser's only session cookie, so
-clicking back landed there too. The argument for why the console may ask across
-realms when nothing else here may is in `../authn/CLAUDE.md`, beside the
-function; the short of it is that this guard decides from two groups in the ONE
-shared directory, so the authorization behind the session was never per realm.
+clicking back landed there too. The argument for why the console may ask a
+question no other module here may is in `../authn/CLAUDE.md`, beside the
+function.
+
+**WHAT IT ASKS IS "DOES THE DEFAULT REALM HOLD THIS SESSION", NOT "DOES ANY
+REALM"**, and this paragraph said the second until 2026-08-25. The embedded
+directory became a subtree per realm on that date, so the two roles this guard
+decides from are groups in the DEFAULT realm's `ou=groups` and nowhere else —
+`ldap_server.js` pins the whole RBAC directory there. If an `acme` session still
+opened this console, anybody who can create a realm could grant themselves both
+roles inside it and walk back out into the default realm. So an unauthenticated
+reader of ANY realm's console is sent to the DEFAULT realm's sign-in screen:
+`sendToConsoleSignIn()` runs both `beginAuthentication()` and the redirect inside
+`realms.run(DEFAULT_REALM, …)`, which is what stops `app.js` prefixing the
+Location and what puts the pending transaction in the store the default realm's
+screen will look in. `returnTo` is deliberately NOT run that way — it is
+`req.originalUrl`, which `app.js` leaves alone precisely so it still carries the
+realm, so signing in once returns the reader to the realm page they asked for.
+
 The banner names the realm holding the session when it is not the realm being
-read, because the protocol endpoints in this realm still see none.
+read — which is now every page under a realm prefix — because the protocol
+endpoints in this realm still see none.
 
 **A BROWSER IS REDIRECTED AND A PROGRAM IS REFUSED.** Every page here answers
 `?format=json` and every form takes a JSON body precisely so a test can drive

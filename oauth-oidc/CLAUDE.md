@@ -55,6 +55,29 @@ are facts about `server.js`: `ws-federation/wsfed.js` must be required AFTER
    warns about — /admin/config would report the mode as on while every
    authorization response still went out over plain HTTP.
 
+   **RESTART-ONLY FOR THE PROCESS; A TRUST REALM MAY CARRY IT.** That is the
+   whole of the `realmRuntime` marker, and `oauth2.rfc9700` is the only row in
+   `config.js` that has it. The paragraph above is an argument about a BOUND
+   SOCKET, and a realm has none — it answers on the port this process already
+   opened, in the scheme that port was opened in — so the reason does not reach
+   it, and `enabled()` here reads the setting per request through the realm
+   layer exactly as every runtime row is read. One process therefore serves both
+   passes: permissive at `/oauth2/authorize`, compliant at
+   `/realm/<id>/oauth2/authorize`, with their own issuers, keys, codes and
+   tokens. NOTHING IN THIS MODULE WAS EDITED FOR THAT — it is `config.value()`
+   consulting the ambient realm, which is the property `common/CLAUDE.md` argues
+   the whole realm design rests on.
+
+   What a realm does not bring is a SCHEME, and `mainPortIsTls()` is where that
+   shows: it reads `global.https`, which is a property of the process. A
+   compliant realm on a plain-HTTP service enforces every check in
+   `REQUIREMENTS` and still publishes `http://` endpoints — the combination
+   `global.https` exists to make settable both ways — and it is PUBLISHED rather
+   than hidden, because those four deployment rows come back `no` instead of
+   `deployment` and `GET /oauth2/rfc9700` names the scheme. A stack that wants
+   the compliant pass over HTTPS turns `global.https` on for the whole process
+   and leaves the mode to the realm.
+
    **It decides; `oauth2.js` answers.** This module never touches `res`. What a
    refusal LOOKS like is protocol knowledge and stays there — the same split
    `authn.js` has — and the order is load-bearing rather than stylistic: the

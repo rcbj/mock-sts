@@ -50,6 +50,16 @@ clean.sh
 # here needs it. Excluding it also keeps a change to the test from busting the
 # image layer cache.
 federation-e2e
+# The in-process contract tests, excluded for the same two reasons and a third.
+# They assert this repository's MODULE CONTRACTS by requiring the modules
+# directly, so they are a property of the source tree rather than of the running
+# service: the image exists to run `server.js`, and nothing in it would ever
+# call them. `npm test` is run from a checkout — which is where the modules
+# being asserted are edited — and excluding them keeps an edit to a guard from
+# busting the image layer cache. The `test` script in package.json therefore
+# does not work inside the image, deliberately; package.json itself is copied
+# for its dependency list.
+tests
 docker-compose.yml
 Dockerfile
 .dockerignore

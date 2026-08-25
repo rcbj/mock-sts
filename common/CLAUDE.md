@@ -260,13 +260,43 @@ because that setting is runtime-settable: a realm created under a segment and
 legal there would otherwise become a shadow over the console the moment somebody
 cleared it, and the failure would arrive as "the console stopped existing".
 
+### `onCreate()`: the one store that cannot be built lazily
+
+`keyed()`, `map()`, `arr()` and `obj()` all build a realm's value on FIRST TOUCH,
+and that works because every one of their readers is reached through a request
+that has already entered the realm. **The embedded directory is the exception and
+`realms.onCreate()` exists for it.** It is one tree keyed by DN, served by a
+socket with no path in it, and a realm's isolation is a subtree
+(`dc=acme,dc=example,dc=com`) — so "first touch" can be an `ldapsearch` arriving
+on 389 for a base DN with no realm ambient at all, and the honest answer for a
+subtree that was never built is `LDAP_NO_SUCH_OBJECT`. A realm that exists over
+HTTP and not over LDAP is the kind of half-truth this service exists to make
+impossible, so the subtree exists from the moment the realm does.
+
+It fires AFTER the registry row is written, so a builder may read the realm back
+through `get()`, and a builder that throws leaves a realm that exists rather than
+half of one — the mirror of `onRemove()`, whose purges run after the row is
+deleted. The asymmetry is deliberate in both directions: a realm with an unbuilt
+subtree is recoverable, and a create that failed half way is not.
+
+**One caller.** Adding a second is the same test `keyed()` fails: it has to be
+something a request cannot build on demand.
+
 ### Removing a realm takes its state with it
 
 Every store made here registers a purge and `remove()` calls them all. If removal
 only dropped the registry row, a realm re-created with the same id would inherit
 the last one's sessions and tokens — the single most surprising thing a
-re-created realm could do. Nothing is removed from the directory, because nothing
-there belongs to a realm.
+re-created realm could do. **The directory purges too, and that is new**: it is a
+subtree per realm since 2026-08-25, so `ldap_server.js` registers a purge like
+every other store and removal takes the realm's people, groups, applications,
+federation relationships and SPIFFE registrations with it. That sentence used to
+read "nothing is removed from the directory, because nothing there belongs to a
+realm", and it is worth knowing why the reversal does not break the rule it
+looks like it breaks: *nothing is ever deleted from `ou=users`* is about a PERSON
+being removed while their realm stands, and it still holds. This is the realm
+itself going away, and leaving its subtree behind would leak a tree nobody can
+reach — every path to it, HTTP and LDAP alike, named a realm that is gone.
 
 **A realm cannot remove ITSELF.** The response is a 303 to `/admin/realms`, which
 `app.js` is about to rewrite into the realm being deleted; the reader would be
@@ -324,6 +354,38 @@ every long-term key in it comes from the realm, the SIDs and the passwords at re
 time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
 setting runtime when the thing derived from it is not rebuilt is worse than marking
 it restart-only, because the two then disagree silently.
+
+**`realmRuntime` IS THE ONE EXEMPTION AND IT IS AN APPLICATION OF THAT RULE
+RATHER THAN A HOLE IN IT.** One row carries it — `oauth2.rfc9700` — and the
+argument is short: that flag is restart-only for exactly one reason, that
+`global.https` derives its default from it and a listener's scheme is settled
+when the socket is bound. **A realm binds no socket.** It answers on the port
+this process already opened, in the scheme that port was opened in, so nothing
+about a realm was consumed at startup and `oauth2_bcp.js`'s `enabled()` reads
+the setting per request through the realm layer like any runtime row. So
+`checkOverride(key, raw, forRealm)` takes a third argument, `realms.js`'s
+`checkRealmOverride()` is the only caller that passes it, and the refusal a
+person meets at `/admin/config` in the default realm — and at `POST
+/admin-api/config/set` outside a realm — is unchanged. `describe()` decides
+`editable` the same way, so the console under a realm's prefix offers the
+control the same page in the default realm correctly refuses.
+
+What that buys is the thing two processes used to be needed for: `/oauth2/authorize`
+permissive and `/realm/<id>/oauth2/authorize` enforcing the BCP, in one service.
+What a realm does NOT get is a scheme of its own — the main port is HTTPS or it is
+not, for every realm at once — and that is REPORTED rather than hidden:
+`mainPortIsTls()` is false, `GET /oauth2/rfc9700` says so, and the four
+requirements that are properties of the deployment come back `no` rather than
+`deployment`.
+
+**Do not add a second `realmRuntime` row by analogy.** The test is the paragraph
+above: the restart reason has to be something a realm demonstrably does not have.
+Anything whose value was consumed at startup to build MATERIAL — the TLS
+certificate, the Kerberos principal database, the directory tree — was consumed
+for the whole process, realms included, so marking one of those would be exactly
+the silent disagreement this section warns about. `krb5.realm` is the one
+somebody will reach for first and it is the clearest no; `NAMED_BY_REALM` in
+`realms.js` says the same thing from the other end.
 
 **A ROW MAY NARROW ITS TYPE, and only the `int` type can so far.** `min`, `max`
 and `step` are OPTIONAL members of a row that `TYPES.int.check()` applies; a row

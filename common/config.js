@@ -98,6 +98,49 @@
 // service configured with?" with three quarters of the answer.
 //
 // ---------------------------------------------------------------------------
+// `realmRuntime`: RESTART-ONLY FOR THE PROCESS, SETTABLE ON A REALM.
+//
+// One row carries it — `oauth2.rfc9700` — and it is not a softening of the rule
+// above but an application of it. That flag is restart-only for exactly one
+// reason: `global.https` derives its default from it, so turning it on binds
+// the main port as HTTPS, and a bound socket is the first of the three kinds
+// listed above. A REALM CANNOT BIND A SOCKET. It answers on the port the
+// process already opened, in the scheme that port was opened in, so the reason
+// the flag is restart-only cannot apply to it: nothing about a realm's
+// existence was consumed at startup, and `enabled()` in `oauth2_bcp.js` reads
+// the setting per request, through the realm layer, like every other runtime
+// row here.
+//
+// So `checkOverride(key, raw, true)` — the form `realms.js` calls, and the only
+// caller that passes the third argument — admits a `realmRuntime` row where the
+// process-wide form still refuses it. The refusal a person meets on
+// /admin/config in the DEFAULT realm is unchanged, and so is the one at
+// `POST /admin-api/config/set` outside a realm.
+//
+// What that buys, and it is the reason the marker exists rather than the flag
+// simply being made runtime again: one process can now serve BOTH the
+// permissive pass and the compliant one — `/oauth2/authorize` and
+// `/realm/rfc9700/oauth2/authorize` — which is what a client-exercising matrix
+// wants and what two instances used to be needed for.
+//
+// AND IT HAS A SECOND HALF, which was missing until 2026-08-25: a realm that
+// may carry the mode must not thereby carry a conclusion ABOUT the socket.
+// `global.https` derives its default from this row, so reading that default
+// through the realm layer handed the realm an answer only the process can give.
+// See processValue() further down — the fix is that the derived read is made
+// process-wide, not that the marker is any narrower.
+//
+// DO NOT ADD A SECOND ONE BY ANALOGY. The test is the paragraph above: the
+// restart reason has to be something a realm demonstrably does not have. A
+// setting whose value was consumed at startup to build MATERIAL — the TLS
+// certificate, the Kerberos principal database, the directory tree — is
+// consumed for the whole process, realms included, so `realmRuntime` on one of
+// those would be the silent disagreement this file warns about rather than an
+// exemption from it. `krb5.realm` is the one somebody will reach for first, and
+// it is the clearest no: see `realms.js`'s NAMED_BY_REALM, which says the same
+// thing from the other end.
+//
+// ---------------------------------------------------------------------------
 // This module is a LIBRARY (rule 3): it registers no route, and it requires
 // nothing from this repository — not even `helpers.js`, which requires IT. That
 // is why it makes a bunyan logger of its own rather than taking the shared one:
@@ -437,7 +480,9 @@ const SETTINGS = [
   // be discovered.
   { key: 'global.https', group: 'Global', label: 'HTTPS on the main port',
     env: 'STS_HTTPS', type: 'bool', derived: true,
-    dflt: function () { return value('oauth2.rfc9700'); },
+    // processValue() and not value(): a realm may carry `oauth2.rfc9700`, and
+    // this default is a statement about a bound socket, which no realm bound.
+    dflt: function () { return processValue('oauth2.rfc9700'); },
     runtime: false,
     restartReason: 'the listener is bound when the process starts, and its ' +
                    'scheme is decided there',
@@ -571,11 +616,30 @@ const SETTINGS = [
   // exact silent disagreement the note up there warns about: /admin/config
   // would report the mode as on while every authorization response still went
   // out over plain HTTP.
+  //
+  // AND `realmRuntime`, WHICH IS THE OTHER HALF OF THAT SAME ARGUMENT. The
+  // paragraph above is about a SOCKET, and a realm has none: it answers on the
+  // port this process already bound, in the scheme that port was bound in. So
+  // the one reason this row is restart-only does not reach a realm, and a realm
+  // may carry it — which is how one process serves the permissive pass at
+  // /oauth2/authorize and the compliant one at /realm/<id>/oauth2/authorize.
+  //
+  // What a realm does NOT get with it is a scheme of its own. With the process
+  // on plain http, a realm in this mode enforces every check in oauth2_bcp.js
+  // and still publishes http endpoints — which is the combination `global.https`
+  // exists to make settable both ways, and it is REPORTED rather than hidden:
+  // mainPortIsTls() is false, GET /oauth2/rfc9700 says so, and the four
+  // requirements that are properties of the deployment come back `no` instead
+  // of `deployment`. A stack that wants the compliant pass over https turns
+  // `global.https` on for the PROCESS; see the note on that row.
   { key: 'oauth2.rfc9700', group: 'OAuth 2.0 / OIDC', label: 'RFC 9700 mode',
     env: 'STS_OAUTH2_RFC9700', type: 'bool', dflt: false, runtime: false,
+    realmRuntime: true,
     restartReason: 'it decides whether the main port is bound as HTTPS ' +
                    '(global.https), and a listener is bound when the process ' +
-                   'starts',
+                   'starts. A REALM may carry it even so — a realm binds no ' +
+                   'socket, so it answers in whatever scheme this process was ' +
+                   'started in and only the mode\'s checks change',
     description: 'Enforce RFC 9700 (OAuth 2.0 Security Best Current ' +
                  'Practice) on the authorization flow: exact-string redirect ' +
                  'URI matching with the loopback port exception, no open ' +
@@ -2511,16 +2575,26 @@ const DEFAULT_REALM_ID = 'default';
 
 let realmContext = null;
 
+// Set while a DERIVED default is being resolved for the process rather than for
+// the ambient realm. Declared here rather than beside processValue() below,
+// which is the function that owns it, because `let` is not initialised until
+// its own line runs and realmFor() is called during module evaluation: down
+// there it would be a temporal dead zone rather than a flag. See processValue()
+// for what it is for and why a plain boolean is the right primitive.
+let suppressRealmLayer = false;
+
 function setRealmContext(fn) {
   realmContext = fn;
 }
 
 // The realm whose overrides apply right now, or null: outside a request, with
-// realms off, in the default realm, or for one of the two settings a realm may
-// not carry. Every reader and every writer below goes through this, so the
+// realms off, in the default realm, for one of the two settings a realm may not
+// carry, or while processValue() is resolving something the PROCESS is being
+// asked about. Every reader and every writer below goes through this, so the
 // exemption cannot be true in one direction and false in the other.
 function realmFor(key) {
-  if (!realmContext || String(key).indexOf('realms.') === 0) {
+  if (!realmContext || suppressRealmLayer ||
+      String(key).indexOf('realms.') === 0) {
     return null;
   }
   return realmContext() || null;
@@ -2644,6 +2718,48 @@ function value(key) {
   return TYPES[setting.type].parse(resolve(key).raw, setting);
 }
 
+// ---------------------------------------------------------------------------
+// THE SAME READ WITH THE REALM LAYER SUPPRESSED, for a DERIVED default that is
+// a statement about the PROCESS. One caller: `global.https`.
+//
+// That row is restart-only and carries no `realmRuntime`, so a realm can never
+// SET it — and that was taken for the whole of the lock until 2026-08-25. It is
+// not: a default is resolved by CALLING it, `global.https`'s default is
+// `oauth2.rfc9700`, and that one a realm can set. Through the ordinary value()
+// the closure would answer the realm's question ("is this realm enforcing the
+// BCP?") with the process's ("is this port TLS?"), and the realm would inherit
+// a claim about a socket IT DID NOT BIND: mainPortIsTls() reports sections 2.1
+// and 2.6 as met over a plain connection, and issuerOf() upgrades a pinned
+// http:// issuer to https:// on an http:// port — a discovery document a
+// conforming client MUST reject, whose error names the issuer and never the
+// realm. Nothing was misconfigured for that to happen; it needed only a mock
+// started without STS_HTTPS, which is every mock started without STS_HTTPS,
+// since `derived: true` keeps the row out of the shipped env/*.js files.
+//
+// This is the same reasoning as the realmRuntime paragraph at the top of this
+// file, run the other way: a realm binds no socket, so it may CARRY the mode —
+// and, for that same reason, it may not carry a conclusion ABOUT the socket.
+//
+// A plain boolean and not an AsyncLocalStorage, deliberately: every step
+// between here and the default — settingFor(), resolve(), dig(), the dflt
+// itself — is SYNCHRONOUS. The realm layer needs an ALS because a realm spans
+// awaits; this must not span one at all, and a flag that could would be the
+// bug it exists to prevent. Saved and restored rather than cleared, so a
+// derived default that reads another one nests correctly.
+//
+// No Entering/Leaving pair, for the reason nothing else on this reading path
+// has one: it is reached for every setting read in the service.
+// ---------------------------------------------------------------------------
+function processValue(key) {
+  const was = suppressRealmLayer;
+  suppressRealmLayer = true;
+  try {
+    return value(key);
+  } finally {
+    suppressRealmLayer = was;
+  }
+}
+
 function sourceOf(key) {
   return resolve(key).source;
 }
@@ -2706,14 +2822,21 @@ function applyLogLevel() {
 //
 // Returns an error STRING or null, which is the shape the callers join into
 // their `errors` array.
-function checkOverride(key, raw) {
-  log.debug("Entering checkOverride().");
+// `forRealm` is passed by exactly one caller — `realms.js`'s
+// checkRealmOverride(), which every writing path into a realm's overrides goes
+// through — and it admits the `realmRuntime` rows. See the paragraph on that
+// marker at the top of this file for why that is an application of the
+// restart-only rule rather than a hole in it: a realm binds no socket, so the
+// reason those rows are restart-only is not a reason a REALM cannot carry them.
+// The process-wide form is unchanged and still refuses.
+function checkOverride(key, raw, forRealm) {
+  log.debug("Entering checkOverride(). forRealm=" + !!forRealm);
   const setting = byKey[key];
   if (!setting) {
     log.debug("Leaving checkOverride().");
     return 'Unknown setting "' + key + '".';
   }
-  if (!setting.runtime) {
+  if (!setting.runtime && !(forRealm && setting.realmRuntime)) {
     log.debug("Leaving checkOverride().");
     return '"' + key + '" cannot be changed while this service is running: ' +
       setting.restartReason + '. Set it in the appconfig file or as ' +
@@ -2840,8 +2963,19 @@ function describe(setting) {
     value: value(setting.key),
     text: text(setting.key),
     source: state.source,
-    editable: !!setting.runtime,
-    restartReason: setting.runtime ? undefined : setting.restartReason,
+    // EDITABLE IS ASKED OF THE REALM THE READER IS IN, not of the process. A
+    // `realmRuntime` row is restart-only service-wide and settable on a realm
+    // (see the paragraph on that marker at the top of this file), so
+    // /admin/config drawn under a realm's prefix must offer the control the
+    // same page in the default realm correctly refuses — otherwise the console
+    // would report a setting as unchangeable while POST /admin-api/config/set
+    // on the same path changed it.
+    editable: !!setting.runtime ||
+              !!(setting.realmRuntime && realmFor(setting.key)),
+    restartReason: (setting.runtime ||
+                    (setting.realmRuntime && realmFor(setting.key)))
+      ? undefined
+      : setting.restartReason,
     env: setting.env,
     legacyEnv: setting.legacyEnv,
     appconfigPath: setting.path || setting.key,

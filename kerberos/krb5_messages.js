@@ -343,10 +343,8 @@ function parsePrincipal(text, defaultType) {
 // EncryptedData ::= SEQUENCE { etype [0] Int32, kvno [1] UInt32 OPTIONAL,
 // cipher [2] OCTET STRING }
 function encEncryptedData(d) {
-  log.debug("Entering encEncryptedData().");
   log.debug("Leaving encEncryptedData().");
   log.debug("Entering encEncryptedData().");
-  log.debug("Leaving encEncryptedData().");
   return asn1.encTaggedSequence([
     { tag: 0, value: asn1.encInteger(d.etype) },
     {
@@ -560,10 +558,8 @@ function readEncTicketPart(bytes) {
 }
 
 function encEncTicketPart(p) {
-  log.debug("Entering encEncTicketPart().");
   log.debug("Leaving encEncTicketPart().");
   log.debug("Entering encEncTicketPart().");
-  log.debug("Leaving encEncTicketPart().");
   return asn1.encApplication(APPLICATION.ENC_TICKET_PART,
       asn1.encTaggedSequence([
     { tag: 0, value: asn1.encFlags(p.flags) },
@@ -604,10 +600,8 @@ function encEncTicketPart(p) {
 // KDC-REQ (AS-REQ / TGS-REQ).
 // ---------------------------------------------------------------------------
 function encKdcReqBody(body) {
-  log.debug("Entering encKdcReqBody().");
   log.debug("Leaving encKdcReqBody().");
   log.debug("Entering encKdcReqBody().");
-  log.debug("Leaving encKdcReqBody().");
   return asn1.encTaggedSequence([
     { tag: 0, value: asn1.encFlags(body.kdcOptions || []) },
     { tag: 1, value: body.cname ? encPrincipalName(body.cname) : null },
@@ -801,10 +795,8 @@ function readEncKdcRepPart(bytes) {
 }
 
 function encEncKdcRepPart(p, applicationNumber) {
-  log.debug("Entering encEncKdcRepPart().");
   log.debug("Leaving encEncKdcRepPart().");
   log.debug("Entering encEncKdcRepPart().");
-  log.debug("Leaving encEncKdcRepPart().");
   return asn1.encApplication(applicationNumber || APPLICATION.ENC_AS_REP_PART,
       asn1.encTaggedSequence([
     { tag: 0, value: encEncryptionKey(p.key) },
@@ -845,10 +837,8 @@ function encEncKdcRepPart(p, applicationNumber) {
 // AP-REQ / AP-REP / Authenticator.
 // ---------------------------------------------------------------------------
 function encAuthenticator(a) {
-  log.debug("Entering encAuthenticator().");
   log.debug("Leaving encAuthenticator().");
   log.debug("Entering encAuthenticator().");
-  log.debug("Leaving encAuthenticator().");
   return asn1.encApplication(APPLICATION.AUTHENTICATOR, asn1.encTaggedSequence([
     { tag: 0, value: asn1.encInteger(PVNO) },
     { tag: 1, value: asn1.encGeneralString(a.crealm) },
@@ -931,10 +921,8 @@ function readApRep(bytes) {
 }
 
 function encEncApRepPart(p) {
-  log.debug("Entering encEncApRepPart().");
   log.debug("Leaving encEncApRepPart().");
   log.debug("Entering encEncApRepPart().");
-  log.debug("Leaving encEncApRepPart().");
   return asn1.encApplication(APPLICATION.ENC_AP_REP_PART,
       asn1.encTaggedSequence([
     { tag: 0, value: asn1.encKerberosTime(p.ctime) },
@@ -963,10 +951,8 @@ function readEncApRepPart(bytes) {
 // KRB-ERROR.
 // ---------------------------------------------------------------------------
 function encKrbError(e) {
-  log.debug("Entering encKrbError().");
   log.debug("Leaving encKrbError().");
   log.debug("Entering encKrbError().");
-  log.debug("Leaving encKrbError().");
   return asn1.encApplication(APPLICATION.KRB_ERROR, asn1.encTaggedSequence([
     { tag: 0, value: asn1.encInteger(PVNO) },
     { tag: 1, value: asn1.encInteger(MSG_TYPE.ERROR) },
@@ -1074,10 +1060,8 @@ function readEtypeInfo2(bytes) {
 }
 
 function encEtypeInfo2(entries) {
-  log.debug("Entering encEtypeInfo2().");
   log.debug("Leaving encEtypeInfo2().");
   log.debug("Entering encEtypeInfo2().");
-  log.debug("Leaving encEtypeInfo2().");
   return asn1.encSequenceOf(entries.map(function (e) {
     return asn1.encTaggedSequence([
       { tag: 0, value: asn1.encInteger(e.etype) },
@@ -1159,10 +1143,8 @@ function encPaForUser(u) {
 // has forwarded something unusable. That is checked on read rather than assumed.
 // ---------------------------------------------------------------------------
 function encKrbCredInfo(info) {
-  log.debug("Entering encKrbCredInfo().");
   log.debug("Leaving encKrbCredInfo().");
   log.debug("Entering encKrbCredInfo().");
-  log.debug("Leaving encKrbCredInfo().");
   return asn1.encTaggedSequence([
     { tag: 0, value: encEncryptionKey(info.key) },
     { tag: 1, value: info.prealm ? asn1.encGeneralString(info.prealm) : null },
@@ -1218,10 +1200,8 @@ function readKrbCredInfo(t) {
 }
 
 function encEncKrbCredPart(p) {
-  log.debug("Entering encEncKrbCredPart().");
   log.debug("Leaving encEncKrbCredPart().");
   log.debug("Entering encEncKrbCredPart().");
-  log.debug("Leaving encEncKrbCredPart().");
   return asn1.encApplication(APPLICATION.ENC_KRB_CRED_PART,
       asn1.encTaggedSequence([
     {

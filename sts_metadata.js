@@ -1831,6 +1831,25 @@ const ENDPOINTS = [
           '/admin/config calls. Add ?format=json; POST {"action":"create", ' +
           '"id":"acme"} for the same thing without a browser.' },
 
+  { path: '/admin/realm-switch', group: 'Admin', name: 'Realm chooser target',
+    specs: [],
+    what: 'NON-SPEC. Where the realm chooser in the console header submits, ' +
+          'and the whole of what it does is turn a realm id and a path into ' +
+          'one redirect. It exists because a `<select>` cannot navigate ' +
+          'without script and this console runs none (`script-src ' +
+          '\'none\'`), so the chooser is a GET form rather than an onchange ' +
+          'handler. Two things about it are worth knowing. Its `to` ' +
+          'parameter arrives in a query string and leaves in a Location ' +
+          'header, which is the shape of every open redirect there has ever ' +
+          'been — so it is accepted only as a single-slash-rooted path of at ' +
+          'most 2000 characters, and anything else is REFUSED rather than ' +
+          'corrected, with /admin as the answer to that and to an unknown ' +
+          'realm alike. And the redirect is ABSOLUTE, which is the opposite ' +
+          'of what the rest of this console does: res.location() here ' +
+          'prefixes a rooted target with the CURRENT realm, and that is ' +
+          'exactly wrong for the one endpoint whose purpose is to land you ' +
+          'in a different one. 303, so the reload after it is a GET.' },
+
   { path: '/admin/config', group: 'Admin', name: 'Configuration',
     specs: [],
     effect: 'changes what every FUTURE token, assertion, ticket and search is ' +

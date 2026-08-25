@@ -663,7 +663,7 @@ SCIMMY.Resources.declare(SCIMMY.Resources.User)
         // Resource#read() turns a null into "Unexpected empty value returned by
         // egress handler" — a 500 — where this is a perfectly ordinary 404.
         throw new SCIMMY.Types.Error(404, null,
-          'There is no entry at ' + resource.id + ' under ' + directory.USERS_DN + '.');
+          'There is no entry at ' + resource.id + ' under ' + directory.usersDn() + '.');
       }
       log.debug("Leaving the SCIM User egress handler. One resource.");
       return userResourceFor(entry, req);
@@ -710,7 +710,7 @@ SCIMMY.Resources.declare(SCIMMY.Resources.User)
     const existing = resource.id ? directory.readPerson(resource.id) : null;
     if (resource.id && !existing) {
       throw new SCIMMY.Types.Error(404, null,
-        'There is no entry at ' + resource.id + ' under ' + directory.USERS_DN + '.');
+        'There is no entry at ' + resource.id + ' under ' + directory.usersDn() + '.');
     }
 
     // -----------------------------------------------------------------------
@@ -848,7 +848,7 @@ SCIMMY.Resources.declare(SCIMMY.Resources.User)
           ? 'The entry at ' + resource.id + ' has children, and this directory ' +
             'refuses a delete of anything that is not a leaf (RFC 4511 section ' +
             '4.8). Delete what is under it first.'
-          : 'There is no entry at ' + resource.id + ' under ' + directory.USERS_DN + '.');
+          : 'There is no entry at ' + resource.id + ' under ' + directory.usersDn() + '.');
     }
     // The dangling memberships this delete just created, logged rather than
     // repaired: referential integrity is a directory feature and not a protocol
@@ -1181,7 +1181,7 @@ function meSubject(req) {
     log.debug("Leaving meSubject(). " + key + " has no entry.");
     throw new SCIMMY.Types.Error(404, null,
       'This request authenticated as "' + decision.principal + '", and there is no entry for ' +
-      'them under ' + directory.USERS_DN + ' — so the alias resolves to nothing. That is the ' +
+      'them under ' + directory.usersDn() + ' — so the alias resolves to nothing. That is the ' +
       'ordinary answer for a client_credentials token or a client certificate, neither of ' +
       'which has a person behind it: both are good credentials for provisioning somebody ' +
       'else, and neither is anybody /Me could be. Create the entry first, or use /Users.');
@@ -1294,7 +1294,7 @@ app.get(HOBA_REGISTER_PATH, function (req, res) {
       'Anybody may register any key for any name, and the name is created in the directory if ' +
       'it is new. The SIGNATURE is then really verified, which is the half that makes this ' +
       'worth having — a signature check that passed anything would not be the scheme.',
-    storedAs: 'hobaPublicKey on the person\'s entry under ' + directory.USERS_DN + ', as ' +
+    storedAs: 'hobaPublicKey on the person\'s entry under ' + directory.usersDn() + ', as ' +
               '"<kid> <base64 DER>". An ldapsearch and /admin/users show it.',
     console: baseUrlOf(req) + '/admin/scim',
     surface: baseUrlOf(req) + '/scim'
@@ -1573,9 +1573,9 @@ function description(req) {
             'store and no cache: a SCIM POST and an ldapadd write the same ' +
             'entry, and a person provisioned here appears on /admin/users, in ' +
             'an ldapsearch, and in the attributes their access token carries.',
-      users: directory.USERS_DN,
-      groups: directory.GROUPS_DN,
-      baseDn: directory.BASE_DN,
+      users: directory.usersDn(),
+      groups: directory.groupsDn(),
+      baseDn: directory.baseDn(),
       userCount: directory.personCount(),
       groupCount: directory.allGroupEntries().length,
       entryCount: directory.entryCount(),
@@ -1591,7 +1591,7 @@ function description(req) {
            '"stable for the lifetime of the resource" and is the honest ' +
            'behaviour for a directory-backed server.',
       example: base + BASE + '/Users/' +
-               encodeURIComponent('uid=alice,' + directory.USERS_DN)
+               encodeURIComponent('uid=alice,' + directory.usersDn())
     },
     endpoints: [
       { method: 'GET', path: BASE + '/ServiceProviderConfig',

@@ -417,7 +417,7 @@ are refused at both ends.
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
 | `oauth2.issuer` | `STS_OAUTH2_ISSUER` | *(empty)* | yes | The `issuer` in the RFC 8414 and OpenID Provider metadata, and the `iss` of every token signed here. |
-| `oauth2.rfc9700` | `STS_OAUTH2_RFC9700` | `false` | **restart** — it decides whether the main port is bound as HTTPS (global.https), and a listener is bound when the process starts | Enforce RFC 9700 (OAuth 2.0 Security Best Current Practice) on the authorization flow: exact-string redirect URI matching with the loopback port exception, no open redirects, no http redirect URI off the loopback, PKCE required of public clients with S256 only, PKCE downgrade and value-reuse refused, a nonce required with any id_token, and no response type that issues an access token from the authorization endpoint. |
+| `oauth2.rfc9700` | `STS_OAUTH2_RFC9700` | `false` | **restart** — it decides whether the main port is bound as HTTPS (global.https), and a listener is bound when the process starts. A **trust realm** may carry it even so: a realm binds no socket, so only the mode's checks change | Enforce RFC 9700 (OAuth 2.0 Security Best Current Practice) on the authorization flow: exact-string redirect URI matching with the loopback port exception, no open redirects, no http redirect URI off the loopback, PKCE required of public clients with S256 only, PKCE downgrade and value-reuse refused, a nonce required with any id_token, and no response type that issues an access token from the authorization endpoint. |
 | `oauth2.breakIdTokenNonce` | `STS_OAUTH2_BREAK_ID_TOKEN_NONCE` | `false` | yes | Put a DELIBERATELY WRONG nonce in every ID Token that should carry one. |
 | `oauth2.refreshIdleSeconds` | `STS_OAUTH2_REFRESH_IDLE_SECONDS` | `86400` | yes | In RFC 9700 mode, how long a refresh CHAIN may go unused before it stops working — section 2.2.2 says a refresh token SHOULD expire after a period of client inactivity, and says the period is deployment-dependent, which is why this is a setting rather than a constant. |
 | `oauth2.revokeRefreshOnLogout` | `STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT` | `true` | yes | In RFC 9700 mode, end a browser sign-on session and every refresh token issued ON that session is revoked — the section MAY that names logout and a password change as the examples. |
@@ -825,21 +825,46 @@ Separated, completely, by the path:
   settings on the realm: change them, or unset them to go back to sharing the
   process's name.
 
-**Not separated — the embedded directory.** One `ou=users`, one `ou=groups` and
-one `ou=applications` for the whole process, because LDAP answers on a socket
-with no path to put a segment in. So:
+**Separated — the embedded directory, as a subtree.** Since 2026-08-25 each
+realm owns a subtree of the one naming context:
 
-* the same person can sign in to two realms and be **one directory entry**;
-* an **OAuth client** registered once can be used in every realm;
-* a **SAML service provider** entry is shared, though the metadata published for
-  it is per realm;
-* the **SPIFFE registry** is shared;
-* and **the two admin console roles are held once** — there is no per-realm
-  administrator.
+```
+dc=example,dc=com                 the DEFAULT realm  (ldap.baseDn itself)
+dc=acme,dc=example,dc=com         the realm `acme`
+```
 
-**Not separated — the four socket families.** Kerberos (over raw UDP/TCP 88 and
+with its own `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and
+SPIFFE containers under each. So:
+
+* the same name signing in to two realms is **two entries**, one per realm;
+* an **OAuth client** registered under one realm is unknown to every other;
+* a **SAML service provider** entry belongs to the realm it was created in;
+* the **SPIFFE registry** is per realm — though the trust domain and the signing
+  authority in front of it are not;
+* and `ldapsearch -b "dc=acme,dc=example,dc=com"` reaches it, which is the whole
+  reason the realm is in the DN rather than in a store of its own: LDAP answers
+  on a socket with no path to put a segment in, so a **name** is the only thing
+  a client can carry.
+
+A subtree search from `dc=example,dc=com` still returns every realm's entries,
+because that is what a naming context is. What is isolated is the container each
+realm reads and writes: `ou=users,dc=example,dc=com` holds no `acme` person.
+
+**Not separated — the two admin console roles, deliberately.** They are groups in
+the **default realm's** `ou=groups`, read there whichever realm the console is
+reached in, and a grant made through `/realm/acme/admin-api/rbac/grant` lands
+there too and says so. There is one administrator roster for the process on
+purpose: a role is permission to change what *every* realm does, so a per-realm
+roster would mean anybody who can create a realm can administer the service. The
+console's gate agrees with it — it accepts the default realm's session and no
+other, and an unauthenticated reader of any realm's console is sent to the
+default realm's sign-in screen.
+
+**Not separated — three socket families.** Kerberos (over raw UDP/TCP 88 and
 over MS-KKDCP alike: `/KdcProxy` is reachable under a prefix but reaches the same
-KDC), the two TLS listeners, LDAP's 389 and 636, and SPIFFE's four sockets. A
+KDC), the two TLS listeners, and SPIFFE's four sockets. LDAP's 389 and 636 used
+to be on this list and no longer are — the sockets are still shared, but what
+they serve is partitioned by DN. A
 socket has no path in it. Kerberos is the one with an obvious way forward and it
 is written down rather than left to be rediscovered — Kerberos already HAS a
 realm, so give each trust realm a `krb5.realm` of its own and dispatch on the
@@ -1068,14 +1093,41 @@ path, and pinning still does that untouched.
 
 Two consequences, neither of them hidden:
 
-**`oauth2.rfc9700` is restart-only now.** It used to be a runtime setting and
-stopped being one the moment it grew a consequence that happens before the
-service is listening. A flag that was runtime for its checks and restart-only for
-its socket would report the mode as *on* at `/admin/config` while every
-authorization response still went out over plain HTTP — the silent disagreement
-`config.js` warns about in its own header. Set it in the appconfig file or as
-`STS_OAUTH2_RFC9700` and restart; `POST /admin-api/config/set` refuses it with
-that reason.
+**`oauth2.rfc9700` is restart-only now — for the PROCESS.** It used to be a
+runtime setting and stopped being one the moment it grew a consequence that
+happens before the service is listening. A flag that was runtime for its checks
+and restart-only for its socket would report the mode as *on* at `/admin/config`
+while every authorization response still went out over plain HTTP — the silent
+disagreement `config.js` warns about in its own header. Set it in the appconfig
+file or as `STS_OAUTH2_RFC9700` and restart; `POST /admin-api/config/set`
+refuses it with that reason.
+
+**A TRUST REALM MAY CARRY IT EVEN SO, AND THAT IS THE ONE EXEMPTION IN THIS
+TABLE.** The reason above is about a *bound socket*, and a realm has none: it
+answers on the port this process already opened, in the scheme that port was
+opened in. So `oauth2.rfc9700` is the single row marked `realmRuntime`, and
+
+```bash
+curl -X POST http://localhost:8081/admin-api/realms/create \
+     -H 'Content-Type: application/json' \
+     -d '{"id":"rfc9700","name":"RFC 9700 mode",
+          "overrides":{"oauth2.rfc9700":true}}'
+```
+
+gives one process a permissive authorization server at `/oauth2/authorize` and a
+compliant one at `/realm/rfc9700/oauth2/authorize`, each with its own issuer,
+signing key, codes and tokens. `/admin/config` reached under that prefix offers
+the control the same page in the default realm refuses.
+
+What a realm does **not** bring with it is a scheme. The main port is HTTPS or it
+is not, for every realm at once — so a compliant realm on a plain-HTTP process
+enforces every check and still publishes `http://` endpoints. That is the
+combination `global.https` exists to make settable both ways and it is
+*published* rather than hidden: `GET /oauth2/rfc9700` reports the port's scheme,
+and the four requirements that are properties of the deployment come back `no`
+instead of `deployment`. A stack that wants the compliant pass over HTTPS turns
+`global.https` on for the whole process (`STS_HTTPS=true`) and leaves
+`oauth2.rfc9700` to the realm.
 
 **There is then no plain listener in this process at all**, and `POST /tls/trust`
 and `GET /tls/server-certificate` were on one deliberately — they are what a
@@ -4895,8 +4947,12 @@ Extracted from the OAuth2/OIDC Debugger. Two things were adapted rather than cop
   it rather than staying at the root: keeping them a SIBLING is what let a vendored
   file stay byte-identical.
 
-**The tests did not come with it, and new ones go back there rather than being
-written here.** They live in the parent project's `tests/` directory, and five of
+**The PROTOCOL tests did not come with it, and new ones go back there rather
+than being written here.** (What does live here is `tests/`, added 2026-08-25 —
+in-process assertions about this repository's own module contracts, which no
+caller over HTTP could make; `npm test`, and see `tests/CLAUDE.md` for the line
+between the two.) They live in the parent project's `tests/` directory, and five
+of
 them need only this service — `sts_metadata.js` (the drift checks described
 above), `sts_dpop.js` (the RFC 9449 negatives), `oauth2_sts_endpoints.js`,
 `vc_did.js`, and `saml11_sso.js`, which drives the SAML 1.1 browser profiles over
