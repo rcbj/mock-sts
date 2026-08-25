@@ -494,6 +494,36 @@ const SETTINGS = [
                  'with. That is ASN.1 and crypto tracing rather than this ' +
                  'service\'s account of what it did.' },
 
+  // --- Trust realms --------------------------------------------------------
+  // Two settings, and they are the only two in this table that a realm cannot
+  // set on itself: a realm that could turn realms off, or move the prefix it
+  // was found under, would be doing it half way through the request that found
+  // it. Refused at both ends — see realms.js's setOverride() and this file's
+  // realmOverrideOf().
+  { key: 'realms.enabled', group: 'Trust realms', label: 'Trust realms enabled',
+    env: 'STS_REALMS_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether the realms defined on /admin/realms answer on their ' +
+                 'path prefixes. Turning it OFF leaves every definition in ' +
+                 'place and stops the paths working, which is what to reach ' +
+                 'for when a realm is answering something it should not: ' +
+                 'nothing has to be deleted to find out whether a realm is ' +
+                 'the reason for something. It has NO effect at all until at ' +
+                 'least one realm is defined — with only the built-in default ' +
+                 'realm this service behaves exactly as it did before realms ' +
+                 'existed, and that is a property rather than a coincidence.' },
+
+  { key: 'realms.pathSegment', group: 'Trust realms', label: 'Realm path segment',
+    env: 'STS_REALMS_PATH_SEGMENT', type: 'string', dflt: 'realm', runtime: true,
+    description: 'The segment in front of a realm id, so that the realm ' +
+                 '`acme` is reached at /realm/acme/oauth2/token. Set it to ' +
+                 'the empty string for the bare /acme/oauth2/token shape, ' +
+                 'which is what a client ported from a product that spells ' +
+                 'it that way expects. A realm may never be named after the ' +
+                 'first segment of a path this service already serves, ' +
+                 'WHATEVER this is set to, precisely so that clearing it ' +
+                 'cannot turn an existing realm into a shadow over the ' +
+                 'console or the authorization server.' },
+
   // --- OAuth 2.0 / OpenID Connect -----------------------------------------
   { key: 'oauth2.issuer', group: 'OAuth 2.0 / OIDC', label: 'Issuer identifier',
     env: 'STS_OAUTH2_ISSUER', type: 'string', dflt: '', runtime: true,
@@ -770,6 +800,43 @@ const SETTINGS = [
                  'non-compliant, which is how a native-app client is shown ' +
                  'what happens when it meets a server that got this wrong.' },
 
+  // ---------------------------------------------------------------------
+  // OPENID CONNECT FRONT-CHANNEL LOGOUT 1.0, WHICH IS ONE SETTING OVER THREE
+  // BEHAVIOURS, AND THAT IS WHY IT IS ONE ROW.
+  //
+  // The claim, the advertisement and the fan-out are the same feature seen from
+  // three sides — an ID Token carrying `sid`, a discovery document saying
+  // `frontchannel_logout_supported`, and a sign-out page loading each relying
+  // party's `frontchannel_logout_uri` in an iframe. Three switches would let
+  // somebody advertise a capability whose claim is turned off, which is a
+  // discovery document that lies.
+  //
+  // ON by default, and that is a CAPABILITY rather than a refusal: nothing is
+  // rejected by it and no existing call fails. What it does change is what
+  // every OIDC client receives — an ID Token issued on a browser session grows
+  // a `sid` — which reverses a decision this service documented at length
+  // (admin_stats.js's note that no token here carries a session identifier).
+  // The reasoning behind that note is kept and is why this is switchable: a
+  // claim is added because a specification needs it, and Front-Channel Logout
+  // section 3 is that specification. Turning this OFF restores the tokens and
+  // the metadata this service issued before the feature existed, exactly.
+  { key: 'oauth2.frontchannelLogout', group: 'OAuth 2.0 / OIDC',
+    label: 'OpenID Connect Front-Channel Logout',
+    env: 'STS_OAUTH2_FRONTCHANNEL_LOGOUT', type: 'bool', dflt: true, runtime: true,
+    description: 'Advertise and perform OpenID Connect Front-Channel Logout ' +
+                 '1.0. With it on: the discovery document says ' +
+                 'frontchannel_logout_supported, an ID Token issued on a ' +
+                 'browser sign-on session carries the `sid` claim naming that ' +
+                 'session, and every sign-out — /oauth2/logout, /logout, and ' +
+                 'the console\'s — renders a hidden iframe per relying party ' +
+                 'that registered a frontchannel_logout_uri, with iss and sid ' +
+                 'on it where the client registered ' +
+                 'frontchannel_logout_session_required. Off, none of the three ' +
+                 'happens and the tokens are byte-for-byte what this service ' +
+                 'issued before the feature existed. A client that registers ' +
+                 'no logout URI is never notified either way, and /logout says ' +
+                 'so on its row rather than leaving it out.' },
+
   // --- The admin console ---------------------------------------------------
   //
   // FOUR SETTINGS AND THEY ARE ONE FEATURE. The console at /admin used to be
@@ -888,6 +955,129 @@ const SETTINGS = [
                  'free, so an operator who deleted one has it stay deleted ' +
                  'until the next restart.' },
 
+  // --- Federation ----------------------------------------------------------
+  //
+  // The one feature here that REFUSES by default rather than accepting, and the
+  // settings say so in the direction that matters: the feature is on, every
+  // relationship is off, and a relationship is created disabled. See
+  // federation/CLAUDE.md, where the argument for that inversion is made — a
+  // permissive federation endpoint is not a mock of federation, it is a hole
+  // underneath every other protocol in this service.
+  { key: 'federation.enabled', group: 'Federation',
+    label: 'Federation endpoints answer',
+    env: 'STS_FEDERATION_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether /federation answers at all. ON by default, and that ' +
+                 'is safe in a way it would not be anywhere else here because ' +
+                 'the endpoints do NOTHING without a relationship: a partner ' +
+                 'is created disabled, and one that is enabled and ' +
+                 'half-configured refuses rather than half-works. Turning ' +
+                 'this OFF is the blunt instrument — every federation route ' +
+                 'answers 404 and no partner appears on the sign-in screen, ' +
+                 'without any relationship being changed, which is how to ' +
+                 'take the feature away for one test run and put it back.' },
+
+  { key: 'federation.max', group: 'Federation',
+    label: 'Relationships remembered',
+    env: 'STS_FEDERATION_MAX', type: 'int', dflt: 50, min: 1, max: 5000,
+    runtime: true,
+    description: 'How many entries may live under ou=federations. A directory ' +
+                 'limit, so past it a new relationship is REFUSED rather than ' +
+                 'an old one being evicted — the same rule applications.max ' +
+                 'follows, and it matters more here: an evicted federation ' +
+                 'relationship is a partner that silently stopped being ' +
+                 'trusted. The default is small because these are CONFIGURED ' +
+                 'by hand rather than created by traffic, so fifty is a large ' +
+                 'number of them and a thousand would mean something has gone ' +
+                 'wrong.' },
+
+  { key: 'federation.usernamePrefix', group: 'Federation',
+    label: 'Prefix for federated usernames',
+    env: 'STS_FEDERATION_USERNAME_PREFIX', type: 'string', dflt: '',
+    runtime: true,
+    description: 'Put in front of every username a foreign identity provider ' +
+                 'supplies, so a federated `alice` and the local `alice` are ' +
+                 'two entries. EMPTY by default, which means they are ONE ' +
+                 'entry — and that is a real decision rather than a default ' +
+                 'nobody thought about. Empty is right for a mock being ' +
+                 'pointed at a partner to see what comes back, because a ' +
+                 'prefixed name makes every downstream token and assertion ' +
+                 'look unfamiliar. Set it to something like `fed-` the moment ' +
+                 'the question is whether federated identities share a ' +
+                 'namespace with local ones, which is the question this ' +
+                 'setting exists for. It is applied AFTER the username is ' +
+                 'chosen, so changing it cannot change WHICH incoming value ' +
+                 'was used.' },
+
+  { key: 'federation.loginButtons', group: 'Federation',
+    label: 'Offer partners at the sign-in screen',
+    env: 'STS_FEDERATION_LOGIN_BUTTONS', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Show a button per usable service-provider-side ' +
+                 'relationship on /authn/login, so a federated identity can ' +
+                 'satisfy ANY flow already in progress — an OAuth 2.0 ' +
+                 'authorization request, a WS-Federation sign-in, a SAML ' +
+                 'AuthnRequest, the admin console. That is the whole reason ' +
+                 'the buttons are there rather than only at ' +
+                 '/federation/login/{id}. Only relationships that would ' +
+                 'actually work are offered — a button leading to a refusal ' +
+                 'would be worse than no button.' },
+
+  { key: 'federation.outbound', group: 'Federation',
+    label: 'Make back-channel requests to partners',
+    env: 'STS_FEDERATION_OUTBOUND', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether this service may make an HTTP request OUT, to a ' +
+                 'partner\'s token endpoint, UserInfo endpoint or JWKS. This ' +
+                 'is the only outbound request in the whole repository and ' +
+                 'federation/federation_http.js argues it at length: a URL an ' +
+                 'ADMINISTRATOR configured on a relationship is a different ' +
+                 'thing from a URL an unauthenticated caller REGISTERED, ' +
+                 'which is why oauthJwksUri on an application entry is still ' +
+                 'never followed and wreqptr is still refused. Turn it OFF ' +
+                 'for a deployment with no egress: SAML, SAML 1.1 and ' +
+                 'WS-Federation need no back channel at all, and an OIDC ' +
+                 'partner can still be used with fedResponseType=id_token and ' +
+                 'its keys pasted into fedJwks.' },
+
+  { key: 'federation.outboundTimeoutMs', group: 'Federation',
+    label: 'Back-channel timeout (ms)',
+    env: 'STS_FEDERATION_OUTBOUND_TIMEOUT_MS', type: 'int', dflt: 5000,
+    min: 250, max: 60000, runtime: true,
+    description: 'How long to wait for a partner to answer before giving up. ' +
+                 'It matters more than a timeout usually does because the ' +
+                 'browser is WAITING on it — a federated sign-in is a person ' +
+                 'looking at a blank tab while this service redeems a code — ' +
+                 'so the default is short enough that a dead partner produces ' +
+                 'an error page rather than a hang, and the error names the ' +
+                 'timeout.' },
+
+  { key: 'federation.outboundAllowInsecure', group: 'Federation',
+    label: 'Allow http:// and untrusted TLS to a partner',
+    env: 'STS_FEDERATION_OUTBOUND_ALLOW_INSECURE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, which is the one place this service is ' +
+                 'stricter than a mock would ordinarily be: what travels on ' +
+                 'these requests is a client secret and an authorization ' +
+                 'code, at somebody else\'s service. ON accepts an http:// ' +
+                 'endpoint and a certificate nothing here trusts, which is ' +
+                 'what federating against another mock on localhost needs — ' +
+                 'and it is logged on every request rather than only here, ' +
+                 'because a setting that quietly disabled certificate ' +
+                 'checking would be the worst kind of leftover.' },
+
+  { key: 'federation.requestTtlMin', group: 'Federation',
+    label: 'Outbound request lifetime (minutes)',
+    env: 'STS_FEDERATION_REQUEST_TTL_MIN', type: 'int', dflt: 10, min: 1,
+    max: 120, runtime: true,
+    description: 'How long this service remembers that it sent somebody to a ' +
+                 'partner. The record holds the request id an <AuthnRequest> ' +
+                 'has to be answered against, the OAuth `state` and `nonce`, ' +
+                 'the PKCE verifier and where the person was going before ' +
+                 'any of it started — so when it expires the response is ' +
+                 'refused as unsolicited, which is what a person who left a ' +
+                 'sign-in open over lunch will see. Ten minutes is longer ' +
+                 'than any identity provider takes and short enough that a ' +
+                 'replayed response outlives nothing.' },
+
   // --- SAML ----------------------------------------------------------------
   { key: 'saml.issuer', group: 'SAML', label: 'Assertion issuer',
     env: 'STS_SAML_ISSUER', legacyEnv: 'STS_ISSUER', type: 'string',
@@ -897,6 +1087,236 @@ const SETTINGS = [
                  'assertions are built by the same two functions, so this is ' +
                  'their issuer too, and it is what /wsfed/rp checks a ' +
                  'presented assertion against.' },
+
+  // --- SAML 2.0 Web Browser SSO --------------------------------------------
+  // The profile arrived on 2026-08-24 and brought its own group, which is a
+  // decision rather than a formality: `saml.issuer` above governs what SIGNED
+  // an assertion and is shared by WS-Trust and WS-Federation, and every row
+  // here governs how this service behaves as an IDENTITY PROVIDER in a browser
+  // profile. Folding the two together would have made a change to one of these
+  // look like a change to the assertions WS-Trust hands out, which it is not.
+  { key: 'saml2.entityId', group: 'SAML 2.0', label: 'Identity provider entityID',
+    env: 'STS_SAML2_ENTITY_ID', type: 'string', dflt: 'urn:sts-mock:idp',
+    runtime: true,
+    description: 'The entityID this identity provider publishes in its SAML ' +
+                 '2.0 metadata, and the <saml:Issuer> of every Response and ' +
+                 'Assertion the Web Browser SSO profile issues. It is NOT the ' +
+                 'SAML issuer above: that one names whoever signed an ' +
+                 'assertion and is shared with WS-Trust and WS-Federation, ' +
+                 'and a service provider checks THIS one against the metadata ' +
+                 'it was configured from. They are separate for the reason ' +
+                 'wsfed.entityId is separate from it.' },
+
+  { key: 'saml2.perApplicationEntityId', group: 'SAML 2.0',
+    label: 'An entityID per service provider',
+    env: 'STS_SAML2_PER_APPLICATION_ENTITY_ID', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'ON by default, and it is what makes the metadata at ' +
+                 '/saml2/metadata/{sp} UNIQUE PER APPLICATION: the identity ' +
+                 'provider names itself <entityID>:{sp} in that document and ' +
+                 'in everything it issues to that service provider, the way ' +
+                 'Okta and Ping give each application its own identity ' +
+                 'provider. OFF makes every document carry the entityID above ' +
+                 'and differ only in its endpoint URLs, which is what a ' +
+                 'service provider library that keys its trust store off the ' +
+                 'entityID expects. Both are real deployments, which is why ' +
+                 'it is a setting and not a decision.' },
+
+  { key: 'saml2.assertionLifetimeMin', group: 'SAML 2.0',
+    label: 'Assertion lifetime (minutes)',
+    env: 'STS_SAML2_ASSERTION_LIFETIME_MIN', type: 'int', dflt: 60,
+    runtime: true,
+    description: 'How long an issued assertion is valid for: it becomes ' +
+                 'Conditions/NotOnOrAfter and the bearer ' +
+                 'SubjectConfirmationData/NotOnOrAfter alike. Set it to 1 to ' +
+                 'watch a service provider refuse a stale assertion, which is ' +
+                 'the check most of them get wrong.' },
+
+  { key: 'saml2.signAssertion', group: 'SAML 2.0', label: 'Sign the assertion',
+    env: 'STS_SAML2_SIGN_ASSERTION', type: 'bool', dflt: true, runtime: true,
+    description: 'Sign the <saml:Assertion> itself. ON by default because a ' +
+                 'service provider that verifies anything verifies this, and ' +
+                 'because an assertion that travels on its own — out of an ' +
+                 'ArtifactResponse, say — has nothing else carrying a ' +
+                 'signature. Turning it OFF is a test case rather than a ' +
+                 'mistake: a service provider that accepts an unsigned ' +
+                 'assertion has a hole, and this is how to find out.' },
+
+  { key: 'saml2.signResponse', group: 'SAML 2.0', label: 'Sign the response',
+    env: 'STS_SAML2_SIGN_RESPONSE', type: 'bool', dflt: true, runtime: true,
+    description: 'Sign the <samlp:Response> around the assertion as well, ' +
+                 'which is what AD FS and Keycloak do by default. Both ' +
+                 'signatures are ordinary: the response is signed AFTER the ' +
+                 'assertion inside it, so the assertion\'s own signature is ' +
+                 'part of what the response signature covers. On the HTTP ' +
+                 'Redirect binding this ALSO controls the query-string ' +
+                 'signature of section 3.4.4.1, which is the one a redirect ' +
+                 'response is really verified by.' },
+
+  { key: 'saml2.nameIdFormat', group: 'SAML 2.0', label: 'Default NameID format',
+    env: 'STS_SAML2_NAMEID_FORMAT', type: 'string',
+    dflt: 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified',
+    runtime: true,
+    description: 'The Format on the NameID when the AuthnRequest\'s ' +
+                 'NameIDPolicy asks for none. A request that DOES name one is ' +
+                 'answered with the one it named — any of them, including a ' +
+                 'format this service has never heard of, because a service ' +
+                 'provider being told its own format back is the behaviour ' +
+                 'worth exercising and refusing with InvalidNameIDPolicy ' +
+                 'would remove the test case.' },
+
+  { key: 'saml2.artifactTtlS', group: 'SAML 2.0', label: 'Artifact lifetime (seconds)',
+    env: 'STS_SAML2_ARTIFACT_TTL_S', type: 'int', dflt: 300, runtime: true,
+    description: 'How long a SAML artifact can be resolved for at the ' +
+                 'Artifact Resolution Service. An artifact is ALSO one-shot — ' +
+                 'resolving it destroys it, which section 3.6.4.1 requires and ' +
+                 'which no lifetime can express — so a second ArtifactResolve ' +
+                 'for the same artifact is refused however long this is.' },
+
+  { key: 'saml2.autocreateApplications', group: 'SAML 2.0',
+    label: 'Register a service provider on sight',
+    env: 'STS_SAML2_AUTOCREATE_APPLICATIONS', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'ON by default: an entityID this service has not seen ' +
+                 'before gets an application entry under ou=applications the ' +
+                 'moment it appears in a valid AuthnRequest — or the moment ' +
+                 'somebody asks for its metadata — so nothing has to be ' +
+                 'provisioned before a service provider can be pointed here. ' +
+                 'OFF still ANSWERS the request; it simply records nothing, ' +
+                 'which is what somebody driving a fuzzer at this endpoint ' +
+                 'wants before their directory has ten thousand entries in it.' },
+
+  { key: 'saml2.defaultSingleLogoutService', group: 'SAML 2.0',
+    label: 'Fallback logout return address',
+    env: 'STS_SAML2_DEFAULT_SLO_SERVICE', type: 'string', dflt: '',
+    runtime: true,
+    description: 'Where a <samlp:LogoutResponse> goes when the service ' +
+                 'provider has no SingleLogoutService recorded on its ' +
+                 'application entry. A LogoutRequest carries no return ' +
+                 'address of its own — only SP metadata has one, and this ' +
+                 'service does not consume SP metadata — so without this the ' +
+                 'fallback is the assertion consumer service URL that ' +
+                 'application last used, which is stated on the page rather ' +
+                 'than done quietly. Set it to remove the guess.' },
+
+  // --- SAML 1.1 browser profiles -------------------------------------------
+  // A group of its own, for the reason the SAML 2.0 rows above have one and for
+  // one more besides. The shared reason: `saml.issuer` (group SAML) governs who
+  // SIGNED an assertion and is read by WS-Trust and WS-Federation, and these
+  // rows govern how this service behaves as an identity provider in a BROWSER
+  // profile. The reason peculiar to this group: SAML 1.1 and SAML 2.0 are
+  // different specifications rather than two dialects, their profiles differ in
+  // what they can express, and a single set of rows shared between them would
+  // make `signResponse` mean two things — over there it is an XML signature or
+  // a signed query string depending on the binding, and here there is no
+  // redirect binding for a response at all.
+  { key: 'saml11.providerId', group: 'SAML 1.1', label: 'Identity provider providerID',
+    env: 'STS_SAML11_PROVIDER_ID', type: 'string', dflt: 'urn:sts-mock:idp:saml11',
+    runtime: true,
+    description: 'What this identity provider calls itself in the SAML 1.1 ' +
+                 'browser profiles: the `Issuer` ATTRIBUTE of every assertion ' +
+                 'they issue, the `entityID` of the metadata document at ' +
+                 '/saml11/metadata, and the string whose SHA-1 becomes the ' +
+                 'SourceID inside every type 0x0001 artifact. SAML 1.1 calls ' +
+                 'it a providerID and SAML 2.0 metadata calls the same thing ' +
+                 'an entityID; they are one value and this row is it. It is ' +
+                 'deliberately NOT saml2.entityId — a relying party that ' +
+                 'trusts this service for 1.1 and not for 2.0 is the ordinary ' +
+                 'case, and one value would make that unexpressible.' },
+
+  { key: 'saml11.perApplicationProviderId', group: 'SAML 1.1',
+    label: 'A providerID per relying party',
+    env: 'STS_SAML11_PER_APPLICATION_PROVIDER_ID', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Give every relying party its own providerID — ' +
+                 '`{providerID}:{slug}` — and its own endpoints under the same ' +
+                 'path segment, which is what /saml11/metadata/{rp} publishes. ' +
+                 'Turn it off for a relying party whose trust store is keyed ' +
+                 'off the providerID and which is surprised to meet a new one ' +
+                 'per application. THE ENDPOINTS STAY PER-APPLICATION either ' +
+                 'way, because that is what makes the documents worth having ' +
+                 'separately. It also changes every artifact this service ' +
+                 'mints: the SourceID is a hash of the providerID, so turning ' +
+                 'this off makes one SourceID where there were many.' },
+
+  { key: 'saml11.assertionLifetimeMin', group: 'SAML 1.1',
+    label: 'Assertion lifetime (minutes)',
+    env: 'STS_SAML11_ASSERTION_LIFETIME_MIN', type: 'int', dflt: 60, runtime: true,
+    description: 'How long the browser profiles\' assertions are valid for, in ' +
+                 'the NotBefore and NotOnOrAfter of <saml:Conditions>. It is ' +
+                 'separate from the WS-Federation lifetime for the same reason ' +
+                 'the SAML 2.0 one is: a browser profile assertion is consumed ' +
+                 'within seconds of being issued and a short lifetime here is ' +
+                 'a realistic test, where the same value would make a ' +
+                 'WS-Federation session expire while somebody was reading it.' },
+
+  { key: 'saml11.signAssertion', group: 'SAML 1.1', label: 'Sign the assertion',
+    env: 'STS_SAML11_SIGN_ASSERTION', type: 'bool', dflt: true, runtime: true,
+    description: 'Sign the <saml:Assertion> itself, with ds:Signature as its ' +
+                 'LAST child and the reference naming AssertionID — which is ' +
+                 'where the 1.1 schema puts it and is not where SAML 2.0 does. ' +
+                 'ON by default because the Browser/POST profile REQUIRES a ' +
+                 'signed assertion (saml-profile-1.1 section 4.2.1.4): the ' +
+                 'assertion passes through the browser, so nothing else ' +
+                 'authenticates it. Turning it off is a test case rather than ' +
+                 'a mistake — a relying party that accepts it anyway has a ' +
+                 'hole in it, and this is how somebody finds that out.' },
+
+  { key: 'saml11.signResponse', group: 'SAML 1.1', label: 'Sign the response',
+    env: 'STS_SAML11_SIGN_RESPONSE', type: 'bool', dflt: true, runtime: true,
+    description: 'Sign the <samlp:Response> around the assertion as well, with ' +
+                 'the reference naming ResponseID. Real identity providers ' +
+                 'differ here and both are worth exercising, which is why it ' +
+                 'is a setting: the profile requires the RESPONSE to be signed ' +
+                 'in Browser/POST and says nothing about it for the assertion ' +
+                 'pulled back over the artifact channel, where the SOAP ' +
+                 'exchange is what a relying party is trusting.' },
+
+  { key: 'saml11.nameIdFormat', group: 'SAML 1.1', label: 'Default NameIdentifier format',
+    env: 'STS_SAML11_NAMEID_FORMAT', type: 'string',
+    dflt: 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified',
+    runtime: true,
+    description: 'The Format on the <saml:NameIdentifier> when the request ' +
+                 'asks for none — which in SAML 1.1 is ALWAYS, because the ' +
+                 'profile has no request message to carry a NameIDPolicy in. ' +
+                 'That is the difference from saml2.nameIdFormat, which is a ' +
+                 'default a request routinely overrides: this one is the ' +
+                 'answer unless the non-spec `format` parameter overrides it.' },
+
+  { key: 'saml11.defaultProfile', group: 'SAML 1.1', label: 'Default browser profile',
+    env: 'STS_SAML11_DEFAULT_PROFILE', type: 'enum', enumValues: ['post', 'artifact'],
+    dflt: 'post', runtime: true,
+    description: 'Which profile the inter-site transfer service uses when the ' +
+                 'request does not say: Browser/POST (section 4.2), where the ' +
+                 'assertion travels through the browser in a form POST, or ' +
+                 'Browser/Artifact (section 4.1), where a reference travels ' +
+                 'through the browser and the relying party fetches the ' +
+                 'assertion over SOAP. POST is the default because it needs no ' +
+                 'server behind the relying party\'s assertion consumer, so it ' +
+                 'is the one that works when somebody points this at a URL and ' +
+                 'watches. A request naming `profile` or carrying `SAMLart` ' +
+                 'overrides it.' },
+
+  { key: 'saml11.artifactTtlS', group: 'SAML 1.1', label: 'Artifact lifetime (seconds)',
+    env: 'STS_SAML11_ARTIFACT_TTL_S', type: 'int', dflt: 300, runtime: true,
+    description: 'How long an artifact can be resolved for at the SAML ' +
+                 'responder before it is swept. It is an UPPER bound and not ' +
+                 'the rule that matters: an artifact is resolvable exactly ' +
+                 'ONCE (saml-bindings-1.1 section 3.2.3), so resolving one ' +
+                 'destroys it whatever this says, and no lifetime setting can ' +
+                 'express that. Five minutes is what the profile recommends ' +
+                 'and is generous for an exchange that takes milliseconds.' },
+
+  { key: 'saml11.autocreateApplications', group: 'SAML 1.1',
+    label: 'Register relying parties on sight',
+    env: 'STS_SAML11_AUTOCREATE_APPLICATIONS', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Create an application entry under ou=applications the first ' +
+                 'time a relying party is named — by a TARGET arriving, by a ' +
+                 'metadata document being fetched, or by an artifact being ' +
+                 'resolved. Off means the browser profiles still work and ' +
+                 '/admin/saml11 stays empty, which is what somebody driving a ' +
+                 'load test wants and nobody else does.' },
 
   // --- WS-Trust ------------------------------------------------------------
   { key: 'wstrust.issuer', group: 'WS-Trust', label: 'Token issuer',
@@ -1589,6 +2009,101 @@ const SETTINGS = [
                  'other five categories, and /admin/metrics counts every call ' +
                  'either way.' },
 
+  // --- Delegation ----------------------------------------------------------
+  //
+  // ONE setting, and the absence of a second is deliberate. `audit.protocolCalls`
+  // exists because that log's noisiest source drowns the rest of it; delegation
+  // has no noisy source — an act is a service asking to be somebody, which is
+  // rare and is the thing a person came to the page for — so there is nothing an
+  // off switch would rescue. Runtime and honestly so: delegation.js reads the cap
+  // per act rather than capturing it at require time.
+  { key: 'delegation.maxRecords', group: 'Delegation',
+    label: 'Maximum delegation acts held',
+    env: 'DELEGATION_MAX_RECORDS', type: 'int', dflt: 2000, runtime: true,
+    description: 'How many delegation acts /admin/delegation keeps before the ' +
+                 'oldest are dropped. An act is one exchange in which somebody ' +
+                 'acted on somebody else\'s behalf — a Kerberos S4U request or ' +
+                 'forwarded ticket, a WS-Trust OnBehalfOf or ActAs, an RFC 8693 ' +
+                 'token exchange — and REFUSED attempts are recorded too, which ' +
+                 'is where most of the value is. What was dropped is COUNTED and ' +
+                 'shown, so a truncated list says so rather than implying the ' +
+                 'cap is all there ever was. Lowering it takes effect on the ' +
+                 'next act and discards the excess immediately.' },
+
+  // --- Logout --------------------------------------------------------------
+  //
+  // FOUR SETTINGS AND THEY ARE ONE FEATURE: `GET /logout`, the protocol-
+  // independent sign-out at the root of this service. Three of them exist
+  // because this feature is the first thing here that TAKES SOMETHING AWAY
+  // across families — a Kerberos ticket-granting ticket stops working at the
+  // KDC, an LDAP connection is dropped underneath a client that is using it —
+  // and every refusal in this service is switchable for the reason the RFC 9700
+  // mode is: a client is exercised by both answers, and a refusal that cannot
+  // be turned off removes a test case.
+  //
+  // The fourth (`logout.anyUser`) is not a refusal at all but the opposite: it
+  // is what makes the endpoint drivable by a test that holds no cookie, and
+  // turning it OFF is the tightening rather than the loosening.
+  { key: 'logout.anyUser', group: 'Logout',
+    label: 'Allow /logout to name somebody else',
+    env: 'LOGOUT_ANY_USER', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether GET|POST /logout honours a `username` parameter ' +
+                 'naming somebody other than whoever the session cookie names. ' +
+                 'ON by default, and it grants nothing that was not already ' +
+                 'true: no password is checked at any sign-in screen here, so ' +
+                 'anybody who can reach this port can already BECOME that ' +
+                 'person in one request and log themselves out. What it buys ' +
+                 'is a headless test — the inventory and the termination are ' +
+                 'drivable with no browser and no cookie. Turning it OFF makes ' +
+                 '/logout act on the caller\'s own session and nothing else, ' +
+                 'and 403s a request that names another name; /admin/logout ' +
+                 'and /admin-api/logout are unaffected, because those are the ' +
+                 'operator\'s door and are behind the console\'s two roles.' },
+
+  { key: 'logout.kerberosSignOut', group: 'Logout',
+    label: 'A logout stops older Kerberos tickets at the KDC',
+    env: 'LOGOUT_KERBEROS_SIGN_OUT', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether logging somebody out stamps a SIGN-OUT INSTANT on ' +
+                 'their Kerberos principal, after which a TGS-REQ carrying a ' +
+                 'ticket whose authtime is EARLIER is refused ' +
+                 'KDC_ERR_TGT_REVOKED (20). It is the only thing a KDC can ' +
+                 'honestly do about a credential it handed out and cannot ' +
+                 'recall, and the error code exists for exactly this. What it ' +
+                 'does NOT do is stop a service ticket already in a cache from ' +
+                 'working against the service that accepts it — nothing ' +
+                 'contacts the KDC on that exchange — which is a fact about ' +
+                 'Kerberos rather than a gap here, and /logout says so on the ' +
+                 'row. An AS-REQ still succeeds: signing out is not disabling ' +
+                 'an account, and the next authentication clears the instant. ' +
+                 'Turning it OFF leaves the KDC behaving exactly as it did ' +
+                 'before this feature existed.' },
+
+  { key: 'logout.ldapDisconnect', group: 'Logout',
+    label: 'A logout drops LDAP connections bound as that person',
+    env: 'LOGOUT_LDAP_DISCONNECT', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether logging somebody out closes every connection to the ' +
+                 'embedded directory — 389 and LDAPS 636 alike — whose bind DN ' +
+                 'names them. RFC 4511 section 4.2 makes a bind the ' +
+                 'authorization state of a CONNECTION, so the connection is ' +
+                 'the session and dropping it is the only sign-out LDAP has. ' +
+                 'The client sees its socket close mid-conversation, which is ' +
+                 'what a directory server that revokes a session looks like ' +
+                 'from the other end and is worth being able to point a client ' +
+                 'at. Turning it OFF leaves the connections alone and lists ' +
+                 'them on /logout as untouched rather than hiding them.' },
+
+  { key: 'logout.maxRows', group: 'Logout',
+    label: 'Maximum rows in one logout inventory',
+    env: 'LOGOUT_MAX_ROWS', type: 'int', dflt: 500, runtime: true,
+    description: 'How many live sessions and credentials /logout will list for ' +
+                 'one person before it stops counting them individually. Past ' +
+                 'it the page says how many were not listed and a global ' +
+                 'logout still ends ALL of them — the cap is on what is drawn ' +
+                 'and offered as a checkbox, never on what a termination ' +
+                 'reaches, because a sign-out that silently missed the ' +
+                 'five-hundred-and-first token would be the worst kind of ' +
+                 'wrong here.' },
+
   // --- SPIFFE / SPIRE ------------------------------------------------------
   //
   // The three server-side surfaces of SPIFFE: the bundle endpoint (plain
@@ -1947,6 +2462,60 @@ SETTINGS.forEach(function (setting) {
 const overrides = {};
 
 // ---------------------------------------------------------------------------
+// LAYER 0: WHAT THE CURRENT TRUST REALM SETS. Rule 3m.
+//
+// `realms.js` fills this at ITS require time, and it is an INVERTED HOOK rather
+// than a require in the other direction for rule 3e's reason: that module
+// requires this one — it validates a realm's overrides through checkOverride()
+// and reads its own two settings through value() — so a require back would
+// close a cycle, and node answers a cycle with a half-initialised module whose
+// exports are undefined rather than with an error.
+//
+// The slot answers the CURRENT realm's overrides, or null when there is no
+// realm context, when realms are off, or when the ambient realm is the default
+// one. Null rather than an empty object because this is on the hot path of
+// every setting read in this service.
+//
+// WHAT IT DOES **NOT** COVER, and the reason is not caution: the two `realms.*`
+// settings themselves are read below the realm layer, always. A realm that
+// could set `realms.enabled` could switch realms off from inside a realm, and a
+// realm that could set `realms.pathSegment` would change the prefix that was
+// used to find it — half way through the request that found it. Both are
+// refused at the writing end too (see realms.js's setOverride), so this is the
+// second of two locks on one door; it is here because this is the end that is
+// on the reading path and therefore the end that cannot be got around.
+// ---------------------------------------------------------------------------
+// The id this file reports when nothing is ambient. Spelt here rather than
+// required from realms.js, because that module requires this one — see
+// setRealmContext() below.
+const DEFAULT_REALM_ID = 'default';
+
+let realmContext = null;
+
+function setRealmContext(fn) {
+  realmContext = fn;
+}
+
+// The realm whose overrides apply right now, or null: outside a request, with
+// realms off, in the default realm, or for one of the two settings a realm may
+// not carry. Every reader and every writer below goes through this, so the
+// exemption cannot be true in one direction and false in the other.
+function realmFor(key) {
+  if (!realmContext || String(key).indexOf('realms.') === 0) {
+    return null;
+  }
+  return realmContext() || null;
+}
+
+function realmOverrideOf(key) {
+  const realm = realmFor(key);
+  if (!realm || !Object.prototype.hasOwnProperty.call(realm.overrides, key)) {
+    return undefined;
+  }
+  return realm.overrides[key];
+}
+
+// ---------------------------------------------------------------------------
 // Reading.
 // ---------------------------------------------------------------------------
 
@@ -2003,6 +2572,15 @@ function defaultOf(setting) {
 // somebody adds a level and updates one of them.
 function resolve(key) {
   const setting = settingFor(key);
+  // The current trust realm, above everything — including the service-wide
+  // runtime override, because a realm's value is the more specific statement of
+  // the two and the whole point of a realm is to differ from what the process
+  // as a whole is configured with. See setRealmOverrides() above for the two
+  // keys this layer deliberately cannot carry.
+  const fromRealm = realmOverrideOf(key);
+  if (fromRealm !== undefined) {
+    return { raw: fromRealm, source: 'realm' };
+  }
   if (Object.prototype.hasOwnProperty.call(overrides, key)) {
     return { raw: overrides[key], source: 'override' };
   }
@@ -2122,14 +2700,36 @@ function setOverride(key, raw) {
     log.debug("Leaving setOverride(). Refused: " + problem);
     return { ok: false, errors: [problem] };
   }
-  overrides[key] = raw;
+  // ---------------------------------------------------------------------
+  // A WRITE LANDS WHEREVER IT WAS MADE, AND THAT IS THE WHOLE OF WHAT MAKES
+  // /admin/config REALM-AWARE.
+  //
+  // Setting a value while the `acme` realm is ambient means setting it FOR
+  // `acme` — anything else would be a console page that reads one realm and
+  // writes another, which is the surprise that costs a whole afternoon. So the
+  // write goes to the realm's own override object when there is one and to the
+  // process-wide map otherwise, and every caller — the console's Save, the
+  // token-lifetimes page, POST /admin-api/config/set and whatever is added next
+  // — is realm-correct without knowing this exists.
+  //
+  // The two `realms.*` settings are the exception in both directions: realmFor()
+  // answers null for them, so they always land process-wide. A realm that could
+  // turn realms off, or move its own prefix, would be doing it from inside the
+  // request that found it.
+  // ---------------------------------------------------------------------
+  const realm = realmFor(key);
+  if (realm) {
+    realm.overrides[key] = raw;
+  } else {
+    overrides[key] = raw;
+  }
   // Before the log line, so that a change to the level is in force for the
   // line that announces it rather than one line late.
   applyLogLevel();
   log.info('config: ' + key + ' is now ' + JSON.stringify(text(key)) +
-           ' (runtime override).');
+           (realm ? ' in the "' + realm.id + '" realm.' : ' (runtime override).'));
   log.debug("Leaving setOverride().");
-  return { ok: true, errors: [], key: key };
+  return { ok: true, errors: [], key: key, realm: realm ? realm.id : null };
 }
 
 // Drop one override, so the setting falls back to the environment, the file or
@@ -2141,26 +2741,44 @@ function clearOverride(key) {
     log.debug("Leaving clearOverride(). Unknown key.");
     return { ok: false, errors: ['Unknown setting "' + key + '".'] };
   }
-  if (!Object.prototype.hasOwnProperty.call(overrides, key)) {
+  // The same rule as setOverride(): a reset undoes the override that was made
+  // HERE. In a realm that is the realm's, and the value then falls back to
+  // whatever the process as a whole is configured with — which may itself be a
+  // runtime override, and is left alone.
+  const realm = realmFor(key);
+  const where = realm ? realm.overrides : overrides;
+  if (!Object.prototype.hasOwnProperty.call(where, key)) {
     log.debug("Leaving clearOverride(). Nothing was overridden.");
-    return { ok: false, errors: ['"' + key + '" has no runtime override to ' +
-      'reset; it is already coming from ' + sourceOf(key) + '.'] };
+    return { ok: false, errors: ['"' + key + '" has no ' +
+      (realm ? 'value set in the "' + realm.id + '" realm' : 'runtime override') +
+      ' to reset; it is already coming from ' + sourceOf(key) + '.'] };
   }
-  delete overrides[key];
+  delete where[key];
   applyLogLevel();
-  log.info('config: ' + key + ' is back to its ' + sourceOf(key) + ' value.');
+  log.info('config: ' + key + ' is back to its ' + sourceOf(key) + ' value' +
+           (realm ? ' in the "' + realm.id + '" realm.' : '.'));
   log.debug("Leaving clearOverride().");
-  return { ok: true, errors: [], key: key };
+  return { ok: true, errors: [], key: key, realm: realm ? realm.id : null };
 }
 
 function clearAllOverrides() {
   log.debug("Entering clearAllOverrides().");
-  const keys = Object.keys(overrides);
-  keys.forEach(function (key) { delete overrides[key]; });
+  // In a realm this clears the REALM's settings and leaves the process-wide
+  // overrides alone, which is the same rule the two functions above follow: a
+  // "reset everything" button on a realm's configuration page that also reset
+  // every other realm would be the worst button in this console. `realmFor()`
+  // is asked with a key that is not a realms.* one, since the exemption is per
+  // setting and this is per realm.
+  const realm = realmFor('global.logLevel');
+  const where = realm ? realm.overrides : overrides;
+  const keys = Object.keys(where);
+  keys.forEach(function (key) { delete where[key]; });
   applyLogLevel();
-  log.info('config: ' + keys.length + ' runtime override(s) cleared.');
+  log.info('config: ' + keys.length +
+           (realm ? ' setting(s) cleared in the "' + realm.id + '" realm.'
+                  : ' runtime override(s) cleared.'));
   log.debug("Leaving clearAllOverrides(). " + keys.length + " cleared.");
-  return { ok: true, errors: [], cleared: keys };
+  return { ok: true, errors: [], cleared: keys, realm: realm ? realm.id : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -2223,8 +2841,15 @@ function groups() {
 
 function snapshot() {
   log.debug("Entering snapshot().");
+  // WHICH REALM THIS SNAPSHOT IS OF, and what it sets. Reported rather than
+  // implied, because the same URL answers differently under a realm prefix and
+  // a reader with a JSON body in front of them has no other way to tell which
+  // one they asked.
+  const realm = realmFor('global.logLevel');
   const overridden = Object.keys(overrides);
   const out = {
+    realm: realm ? realm.id : DEFAULT_REALM_ID,
+    realmSettings: realm ? Object.keys(realm.overrides) : [],
     configFile: process.env.CONFIG_FILE || null,
     // The base every appconfig file is unioned on top of. Reported beside the
     // operator's file rather than left implicit, because a value whose source
@@ -2434,6 +3059,7 @@ if (audit.unknown.length && distinctiveMissing !== DISTINCTIVE.length) {
 
 module.exports = {
   SETTINGS: SETTINGS,
+  setRealmContext: setRealmContext,
   DEFAULTS_FILE: DEFAULTS_FILE,
   value: value,
   text: text,

@@ -1,6 +1,6 @@
 ---
 title: What is not checked
-nav_order: 5
+nav_order: 7
 ---
 
 # What is not checked
@@ -27,8 +27,12 @@ service can be told to be strict, it can.
 | Turn a verified presentation into a sign-on | The OID4VP Verifier checks properly and then says yes on a web page and stops |
 | Verify anything in an issued credential's values | They come off the directory entry, and what the entry lacks is *invented* from the username |
 | Deactivate anybody on SCIM `active: false` | Stored as `scimActive` and read by nothing |
+| Restrict WHICH people a federation partner may assert | Any username in a verified assertion is accepted, and an entry is created for them. What IS checked is the partner's signature — see below, where that inversion is argued |
+| Verify a SAML `AuthnRequest`'s signature | Whether it was signed, and the certificate off its `ds:KeyInfo`, are both **recorded** on the service provider's directory entry and neither is checked. That is why `/saml2/metadata` advertises `WantAuthnRequestsSigned="false"`: asking service providers to sign something nothing verifies is worse than not asking |
+| Check which entityID a SAML service provider claims | **Any entityID is accepted**, and the first valid `AuthnRequest` from one creates its application entry. Asking for its metadata does the same — the document is minted for anything asked for |
 | Attest a workload or a node | See SPIFFE, below |
 | Let a group grant anything, bar two | A token now *carries* one; no endpoint reads it. `cn=admin-read` and `cn=admin-write` are the exception and grant the admin console, nothing else |
+| Decide who may delegate to whom, in two of the three families that can | The KDC polices S4U properly, off the same two attributes a real domain uses. WS-Trust `OnBehalfOf`/`ActAs` and RFC 8693 token exchange are unpoliced: anybody may ask for a token about anybody. Every act says which — see below |
 
 **Recorded is not the same claim as authenticated, and the two are kept apart
 everywhere.** A verified TLS client certificate, a verified presentation and an
@@ -37,6 +41,40 @@ entry — because an identity turned up here and something about it was accepted
 None of them starts a session or issues a token. A mock that quietly promoted one
 into the other would teach a client something false about every real server it
 will ever meet.
+
+## Delegation is policed in one family out of three, and the page says which
+
+`/admin/delegation` records every exchange in which somebody acted on somebody
+else's behalf — Kerberos S4U2Self, S4U2Proxy (classic and resource-based) and a
+forwarded ticket-granting ticket; WS-Trust `OnBehalfOf` and `ActAs`; RFC 8693
+token exchange as impersonation and as delegation — against one model, with the
+initial identity, the intermediary acting for them and the target being reached
+on every row.
+
+**Kerberos is the only one of the three that decides anything.** The KDC checks
+`msDS-AllowedToDelegateTo` on the front-end account and
+`msDS-AllowedToActOnBehalfOfOtherIdentity` on the back-end one, enforces the
+asymmetries between them (classic needs forwardable evidence; resource-based
+needs `PA-PAC-OPTIONS` and gets `KDC_ERR_BADOPTION` without it), and refuses with
+a message naming both attributes and their current values. WS-Trust puts no
+authorization on either element and this service adds none; RFC 8693 leaves the
+policy to the authorization server and this one has none — `may_act` is neither
+issued nor read here. Each act states which of the two it was in the field that
+names an attribute for a Kerberos row, so the difference is visible rather than
+inferred.
+
+**Refusals are recorded, and they are the rows worth having.** A refused
+delegation appears in no other list on this service — nothing was accepted, so
+no authentication was recorded — which is why that page keeps a store of its
+own.
+
+One consequence worth stating on a page about what is not checked: under an
+**impersonation** (S4U2Self, a forwarded TGT, `OnBehalfOf`, an RFC 8693 exchange
+with no `actor_token`) nothing in the credential records that a middle tier was
+involved, so the issuer is the only place that fact can ever be seen. That is not
+this service being permissive — it is what impersonation *is* — but it is the
+reason a page like that one belongs on an identity provider rather than on a
+client.
 
 ## Kerberos is the exception, and cannot not be
 
@@ -68,10 +106,68 @@ either, so several refusals are kept deliberately reachable:
 - **WS-Federation's `wauth`** is refused rather than faked. A relying party
   demanding multi-factor against a password-only session gets an error and two
   ways forward, not an assertion claiming a second factor that did not happen.
+- **A SAML 2.0 `ProtocolBinding` this service does not implement is refused by
+  name.** A service provider that asked for PAOS and received a form post would
+  conclude that PAOS worked.
+- **`IsPassive="true"` with no usable session** is answered with a
+  `<samlp:Response>` carrying `NoPassive` rather than with a sign-in screen —
+  which is one of the two SAML status codes a service provider is least likely
+  to have handled. A cancelled sign-in gets `AuthnFailed` at the assertion
+  consumer service, which WS-Federation's passive profile has nowhere to send.
+- **A SAML artifact resolves exactly once.** Resolving destroys it, so a second
+  `ArtifactResolve` for the same artifact is refused with a status naming the
+  reason — the easiest thing in that profile to get wrong and the hardest to
+  notice, because the happy path passes either way.
 - **`wreqptr` is never dereferenced**, and neither is a client's registered
   `jwks_uri`, and neither is a foreign SPIFFE bundle URL. Fetching a URL somebody
   handed you in order to verify a credential is a server-side request forgery
   with a specification citation attached.
+
+## Federation inverts all of this, and it is not a fourth turnstile
+
+Everything above describes this service being **asked** for something. Federation
+is the other direction — it CONSUMES what a foreign identity service issued — and
+there the posture is reversed.
+
+`/federation/acs/{id}` receives an unauthenticated HTTP request that claims to be
+a person. The only thing between "alice signed in at the partner" and "somebody
+POSTed some XML" is the signature check, and the browser sign-on session that
+comes out is **the same session** `/oauth2/authorize`, `/wsfed`, `/saml2/sso`,
+`/saml11/sso` and `/admin` all read.
+
+So "accept any SAML Response" is not a permissive mock of federation. It is an
+authentication bypass for every protocol in this process, reachable with `curl`,
+and the tokens minted afterwards are indistinguishable from any others. There is
+no version of that endpoint which is both useful and permissive, which is why
+this is the one feature here that **has to be configured before it will do
+anything**:
+
+* nothing federated happens until a relationship is created;
+* a relationship is created **disabled**, and enabling it is a second act;
+* an enabled relationship missing a field its protocol needs **refuses and names
+  the field** rather than half-working;
+* an assertion is refused unless it verifies against the certificate configured
+  on that relationship — **not** against a certificate the document brought with
+  it, which is the difference between a signature check and a decoration;
+* the assertion's issuer must be the partner the relationship names, and the
+  response must answer a request this service sent (unless
+  `fedAllowUnsolicited` says otherwise, which is what
+  identity-provider-initiated sign-on is).
+
+**The gate is on the SIGNER, not on the subject.** Past it, everything is as
+permissive as the rest of this service: any username in a verified assertion is
+accepted, any attribute is mapped, nothing about the person is checked, and a
+directory entry is created for them.
+
+**It is also the only thing here that makes an outbound request** — a partner's
+token endpoint, UserInfo or JWKS, for the OpenID Connect and OAuth 2.0 flows.
+That does not soften the refusals above it: `jwks_uri` on a client registration
+and WS-Federation's `wreqptr` are **still never followed**. The difference is who
+supplied the URL. Those come from an unauthenticated caller; a federation
+endpoint was written down by an administrator, and the module that dials it will
+not accept a URL at all — only the *name* of the relationship attribute holding
+one. `federation.outbound` turns it off entirely, and four of the five protocols
+need no back channel.
 
 ## The three surfaces that DO require a credential
 
@@ -152,6 +248,27 @@ rather than closes; `admin.openWhenEmpty` turns that off.
 back in when nobody holds a role — and it means anybody who can reach this port
 can grant themselves both roles through it. Do not put this service on a public
 address.
+
+## A logout cannot recall what has already been issued
+
+`/logout` ends every session and revokes every credential this service can still
+reach — see [signing out](signing-out.md). Three things it **cannot** end, and
+they are listed on the page with the reason rather than left off it:
+
+* a **SAML assertion** already in a service provider's hands
+* a **Kerberos service ticket** already in a cache
+* an **X509-SVID** already minted
+
+The reason is the same in all three cases and is not a limitation of this mock:
+**nothing consults the issuer when they are presented.** A relying party verifies
+a signature and some `Conditions`; a Kerberos service decrypts with its own key;
+an SVID verifies against a bundle. A real identity provider cannot recall any of
+them either.
+
+What a KDC *can* do — and this one does — is refuse the next `TGS-REQ` that
+presents a ticket-granting ticket authenticated before the sign-out, which is
+`KDC_ERR_TGT_REVOKED` (20). That is the whole of what is available, and a
+**service** ticket already issued is untouched by it.
 
 ## The Workload API is the opposite case
 

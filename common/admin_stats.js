@@ -43,6 +43,10 @@
 // ---------------------------------------------------------------------------
 
 const { log, setJwtRecorder, userFor } = require('./helpers');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('./realms');
 // The audit log. A one-way require and it must stay one: audit.js requires
 // helpers.js and config.js and nothing else in this repository, precisely so
 // that this file — which most of the service already requires — can call it
@@ -57,6 +61,14 @@ const { log, setJwtRecorder, userFor } = require('./helpers');
 // normalised the identity, which is what lets an audit row and a /admin/users
 // row name the same person.
 const audit = require('./audit');
+// THE FEDERATION RELEASE FILTER, and it is a plain require in the ordinary
+// direction rather than a hook. Rule 3e's test both ways round: that module
+// registers no route, and it requires only helpers.js, config.js and audit.js —
+// none of which requires this file — so nothing about requiring it from here
+// closes a cycle or moves a route, and a slot would cost a reader an
+// indirection for nothing. It is the same argument applications.js is required
+// under, twenty lines above.
+const federation = require('./../federation/federation');
 // For one value: `oauth2.clockSkewS`, the allowance the OAuth endpoints apply
 // when they read back a token this service signed. It is read HERE so that the
 // state a console screen reports is the state the endpoints will act on — a
@@ -104,11 +116,33 @@ const MAX_EVENTS_PER_USER = 50;
 // that matched no route has no pattern, so its path is used as-is; that IS
 // unbounded (anyone can request any path), which is what MAX_CALL_PATHS bounds.
 // ---------------------------------------------------------------------------
-const calls = new Map();       // "GET /path" -> the row below
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const calls = realms.map();       // "GET /path" -> the row below
 
-let callTotal = 0;
+// ---------------------------------------------------------------------
+// THE COUNTERS THAT ARE NOT IN THE MAPS, PER TRUST REALM.
+//
+// The tables above are realm-partitioned; these five numbers describe them, and
+// a counter left process-wide would count every realm's calls beside a list
+// holding one realm's rows. The metrics page shows both, and the two would
+// disagree by however many realms are running — which reads as a bug in the
+// page rather than as what it is.
+//
+// `realms.obj(factory)` is a plain object per realm, so `nums.callTotal++`
+// works exactly as the bindings it replaced did. `usersForgotten` is
+// DELIBERATELY not in here: the identity register mirrors the embedded
+// directory, which is shared by every realm, so its counter is too.
+// ---------------------------------------------------------------------
+const nums = realms.obj(function () {
+  return { callTotal: 0, callPathsDropped: 0, tokensForgotten: 0,
+           tokensWithoutJti: 0, artifactsForgotten: 0 };
+});
 
-let callPathsDropped = 0;
+
 
 const UNMATCHED_BUCKET = '(other unmatched paths)';
 
@@ -132,7 +166,7 @@ function recordCall(call) {
   if (!matched && calls.size >= MAX_CALL_PATHS) {
     // Collapse rather than grow without limit. Counted, and named on the page, so
     // the collapse is visible rather than a table that mysteriously stops growing.
-    callPathsDropped++;
+    nums.callPathsDropped++;
     path = UNMATCHED_BUCKET;
   }
   const row = callRow(call.method, path);
@@ -144,8 +178,8 @@ function recordCall(call) {
   row.statuses[bucket] = (row.statuses[bucket] || 0) + 1;
   row.lastAt = Date.now();
   row.lastStatus = call.status || 0;
-  callTotal++;
-  log.debug("Leaving recordCall(). " + callTotal + " call(s) recorded in total.");
+  nums.callTotal++;
+  log.debug("Leaving recordCall(). " + nums.callTotal + " call(s) recorded in total.");
 }
 
 // ---------------------------------------------------------------------------
@@ -162,11 +196,14 @@ function recordCall(call) {
 // bearer credentials in a form a browser will render is a page that leaks them.
 // The jti is what the console acts on, and the jti is enough.
 // ---------------------------------------------------------------------------
-const tokens = new Map();      // jti (or a synthetic key) -> the record below
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const tokens = realms.map();      // jti (or a synthetic key) -> the record below
 
-let tokensForgotten = 0;
 
-let tokensWithoutJti = 0;
 
 // What `typ` means, in the vocabulary the console and RFC 7009 use. Every token
 // this server issues is an RS256 JWT signed with the same key, so `typ` is the only
@@ -215,8 +252,8 @@ function recordJwt(payload, signed, context) {
   // The signed UserInfo response is the one that arrives this way.
   let key = payload.jti;
   if (!key) {
-    tokensWithoutJti++;
-    key = 'no-jti-' + tokensWithoutJti;
+    nums.tokensWithoutJti++;
+    key = 'no-jti-' + nums.tokensWithoutJti;
   }
   const record = {
     key: key,
@@ -256,10 +293,10 @@ function recordJwt(payload, signed, context) {
     // Map iterates in insertion order, so the first key is the oldest.
     const oldest = tokens.keys().next().value;
     tokens.delete(oldest);
-    tokensForgotten++;
+    nums.tokensForgotten++;
   }
   tokens.set(key, record);
-  log.debug("Leaving recordJwt(). " + tokens.size + " token(s) held, " + tokensForgotten + " forgotten.");
+  log.debug("Leaving recordJwt(). " + tokens.size + " token(s) held, " + nums.tokensForgotten + " forgotten.");
 }
 
 setJwtRecorder(recordJwt);
@@ -331,16 +368,20 @@ function revokedCount() {
 // millisecond epoch or 0 for "no expiry was stated", which is the honest answer
 // for a couple of them rather than pretending to an expiry of now.
 // ---------------------------------------------------------------------------
-const artifacts = [];
+// PER TRUST REALM. `realms.arr()` is a array that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain array it replaced. See common/realms.js.
+const artifacts = realms.arr();
 
-let artifactsForgotten = 0;
 
 function recordArtifact(kind, detail) {
   const record = Object.assign({ kind: kind, issuedAt: Date.now(), expiresAt: 0, subject: '' }, detail);
   artifacts.push(record);
   if (artifacts.length > MAX_ARTIFACTS) {
     artifacts.shift();
-    artifactsForgotten++;
+    nums.artifactsForgotten++;
   }
   return record;
 }
@@ -1052,7 +1093,26 @@ function recordAuthentication(detail) {
         // Empty for every other family, and that is not an omission to fill in
         // later: a name-shaped identity IS the person, so a link from it to
         // itself would say nothing.
-        linkedTo: info.linkedTo ? identityKeyOf(info.linkedTo) : ''
+        linkedTo: info.linkedTo ? identityKeyOf(info.linkedTo) : '',
+        // WHAT A FOREIGN IDENTITY PROVIDER SAID ABOUT THEM, where a federated
+        // sign-in is what brought us here. Only `federation/federation_sp.js`
+        // sets it, and it is passed through UNTOUCHED for exactly the reason
+        // `certificate` above is: this file counts, and the directory decides
+        // what to do about it. Nothing here reads it.
+        //
+        // It is a FIELD ON THIS PAYLOAD rather than a fourth `event` or a sixth
+        // slot, and that is rule 3e's test applied rather than skipped. A new
+        // event would be wrong on its own terms — this IS an authentication,
+        // and filing it as something else would take a federated sign-in off
+        // /admin/users, which is precisely where somebody looks for one. A new
+        // slot would be an indirection bought for nothing: `certificate` and
+        // `linkedTo` already established that a family with an extra fact about
+        // the identity puts it here, and this is the third.
+        //
+        // The attributes inside it are ALREADY MAPPED to this directory's own
+        // names — federation_map.js owns that vocabulary — so nothing here or
+        // in ldap_server.js has to know what a `urn:oid:` name is.
+        federation: info.federation || null
       });
     } catch (e) {
       log.error('the user observer threw and was ignored; the authentication ' +
@@ -1449,6 +1509,40 @@ function jwtClaims(id, context) {
   claimSet(id).forEach(function (claim) {
     out[claim.name] = typedValue(expandValue(claim.value, context));
   });
+  // ---------------------------------------------------------------------
+  // AND THE FOURTH LAYER, WHICH ONLY EVER REMOVES: the federation release
+  // policy for this audience, if there is one.
+  //
+  // It is LAST because it is a filter rather than a source — the three layers
+  // above decide what this service would put in a token for anybody, and this
+  // decides which of them a particular federation partner is allowed to see.
+  // Applied before the three would mean the precedence rules ran over a list
+  // that had already been cut, so a typed claim could lose to an attribute
+  // claim purely because the typed one was filtered.
+  //
+  // WHAT IT CANNOT TOUCH is anything not in `out`: not `sub`, not `iss`, not
+  // `exp`, none of which is an attribute about a person and every one of which
+  // is what makes the token verifiable at all. `federation/CLAUDE.md` argues
+  // that boundary rather than leaving it to be discovered here.
+  //
+  // NO POLICY IS NOT AN EMPTY POLICY. `releaseFilterFor()` answers null for a
+  // partner with no release list, and null changes nothing — see its header,
+  // where the difference is the whole point.
+  // ---------------------------------------------------------------------
+  const release = federation.releaseFilterFor(context);
+  if (release) {
+    const before = Object.keys(out);
+    before.forEach(function (name) {
+      if (!release.names.has(name)) delete out[name];
+    });
+    const kept = Object.keys(out);
+    if (kept.length !== before.length) {
+      log.info('admin: the federation relationship "' + release.id + '" releases ' +
+               kept.length + ' of ' + before.length + ' custom claim(s) to this ' +
+               'audience; ' + before.filter(function (n) { return !release.names.has(n); })
+                 .join(', ') + ' withheld. The protocol\'s own claims are untouched.');
+    }
+  }
   const names = Object.keys(out);
   if (names.length) {
     log.debug("jwtClaims(): adding " + names.length + " custom claim(s) to a " + id + ": " + names.join(', '));
@@ -1488,7 +1582,22 @@ function samlAttributes(id, context) {
   const fromGroups = resolvedGroupAttributes(id, context).filter(function (attribute) {
     return !names.has(attribute.name);
   });
-  const out = fromGroups.concat(fromDirectory, typed);
+  let out = fromGroups.concat(fromDirectory, typed);
+  // The same fourth layer jwtClaims() applies, and for the same reason it is
+  // last: this decides which of the attributes this service would assert to
+  // ANYBODY a particular federation partner is allowed to see. It removes only,
+  // and it cannot reach the NameID, the Issuer, the Conditions or the
+  // signature — none of which is in this list.
+  const release = federation.releaseFilterFor(context);
+  if (release) {
+    const before = out.length;
+    out = out.filter(function (attribute) { return release.names.has(attribute.name); });
+    if (out.length !== before) {
+      log.info('admin: the federation relationship "' + release.id + '" releases ' +
+               out.length + ' of ' + before + ' custom attribute(s) to this audience. ' +
+               'The assertion\'s own elements are untouched.');
+    }
+  }
   log.debug("Leaving samlAttributes(). " + out.length + " attribute(s), " +
             fromDirectory.length + " of them from the directory and " +
             fromGroups.length + " of them the groups claim.");
@@ -1944,11 +2053,11 @@ function snapshot() {
     startedAt: STARTED_AT,
     uptimeMs: nowMs - STARTED_AT,
     now: nowMs,
-    calls: { total: callTotal, paths: callRows.length, byStatusClass: statusTotals,
-             pathsCollapsed: callPathsDropped, rows: callRows },
-    tokens: { held: tokens.size, forgotten: tokensForgotten, cap: MAX_TOKENS,
+    calls: { total: nums.callTotal, paths: callRows.length, byStatusClass: statusTotals,
+             pathsCollapsed: nums.callPathsDropped, rows: callRows },
+    tokens: { held: tokens.size, forgotten: nums.tokensForgotten, cap: MAX_TOKENS,
               revoked: revokedJtis.size, byKind: Array.from(byKind.values()) },
-    artifacts: { held: artifacts.length, forgotten: artifactsForgotten, cap: MAX_ARTIFACTS,
+    artifacts: { held: artifacts.length, forgotten: nums.artifactsForgotten, cap: MAX_ARTIFACTS,
                  byKind: Array.from(artifactKinds.values()) },
     // Counted, not listed: the whole list is what /admin/users is for, and repeating
     // it inside every metrics reply would make the two disagree the first time one

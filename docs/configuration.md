@@ -162,6 +162,42 @@ not gated by any of these, which is the way back out of that.
 Renaming a role group does not move anybody: the members stay in the old group,
 which stops granting anything the moment the name changes.
 
+### The federation settings, and the one that is stricter than a mock usually is
+
+`federation.enabled` is ON, and that is safe in a way it would not be anywhere
+else here, because the endpoints do **nothing** without a relationship: a partner
+is created disabled, and one that is enabled and half-configured refuses rather
+than half-working. Turning it off makes every `/federation` route 404 without
+changing any relationship — the blunt instrument, for taking the feature away for
+one test run.
+
+`federation.usernamePrefix` is **empty by default, and that is a real decision
+rather than a default nobody thought about.** Empty means a federated `alice` and
+the local `alice` are ONE directory entry, which is right for a mock being
+pointed at a partner to see what comes back — a prefixed name makes every
+downstream token and assertion look unfamiliar. Set it to something like `fed-`
+the moment the question is whether federated identities share a namespace with
+local ones, which is the question it exists for. It is applied *after* the
+username is chosen, so changing it cannot change which incoming value was used.
+
+`federation.outbound` governs **the only outbound HTTP request this service
+makes** — a partner's token endpoint, UserInfo or JWKS. Turn it off for a
+deployment with no egress: SAML, SAML 1.1 and WS-Federation need no back channel
+at all, and an OpenID Connect partner can still be used with
+`fedResponseType: id_token` and its keys pasted into `fedJwks`.
+
+`federation.outboundAllowInsecure` is **OFF by default, which is the one place
+this service is stricter than a mock would ordinarily be.** What travels on those
+requests is a client secret and an authorization code, at somebody else's
+service. ON accepts an `http://` endpoint and a certificate nothing here trusts —
+which is what federating against another mock on localhost needs — and every
+request made under it is logged as insecure, rather than the setting being logged
+once at startup and forgotten.
+
+Everything else about a relationship is not a setting at all: it is an entry
+under `ou=federations`, configured at `/admin/federation`, through `POST
+/admin-api/federation/*`, or with an `ldapmodify`.
+
 ### `oauth2.breakIdTokenNonce`
 
 Off. On, it puts a deliberately wrong `nonce` in every ID Token and logs that it

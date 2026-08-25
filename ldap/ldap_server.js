@@ -146,6 +146,13 @@ const applications = require('../common/applications');
 // is. Its setDirectory() slot is filled below at require time, for the reason
 // every slot in this file exists — a require reaching this module from there
 // would drag every /ldap route to the front of the express router.
+// The federation register's schema and both conversions, on exactly the same
+// terms: THAT module owns what a relationship IS and this one owns where the
+// container is. Its setDirectory() slot is filled below at require time, and it
+// is safe to require in the ordinary direction here for the same reason
+// applications.js is — it registers no route, so nothing about requiring it can
+// move one.
+const federation = require('../federation/federation');
 const spiffeRegistry = require('../spiffe/spiffe_registry');
 const scimMap = require('../scim/scim_map');
 // The audit log. A plain require and it cannot become anything else: audit.js
@@ -253,6 +260,16 @@ const APPLICATIONS_DN = 'ou=applications,' + BASE_DN;
 // internally between what an application may do and what it has done — made
 // structural here, because a registration entry and an attested agent share no
 // attributes at all.
+// The SIXTH container, and it is `federation/federation.js`'s store the way
+// ou=applications is `applications.js`'s. It is a container of its own rather
+// than a corner of ou=applications for a reason worth keeping: an application
+// entry is something this service was ASKED ABOUT, and half the entries here
+// are FOREIGN IDENTITY PROVIDERS, which ask this service for nothing at all.
+// Filing a party that authenticates people TO this service among the parties
+// that consume what it issues would make the one question ou=applications
+// exists to answer unanswerable.
+const FEDERATIONS_DN = 'ou=federations,' + BASE_DN;
+
 const SPIFFE_DN = 'ou=spiffe,' + BASE_DN;
 const SPIFFE_ENTRIES_DN = 'ou=entries,' + SPIFFE_DN;
 const SPIFFE_AGENTS_DN = 'ou=agents,' + SPIFFE_DN;
@@ -288,6 +305,15 @@ function maxEntries() {
 // per call, like every other runtime setting.
 function maxApplications() {
   return config.value('applications.max');
+}
+
+// How many entries may live under ou=federations. The same directory-limit rule
+// applications.max follows — it REFUSES rather than evicting — and it matters
+// more here than there: an evicted application entry is a record that has been
+// lost, and an evicted federation relationship is a partner that silently
+// stopped being trusted.
+function maxFederations() {
+  return config.value('federation.max');
 }
 
 function maxSearchResults() {
@@ -565,7 +591,26 @@ const OWN_NAMES = [
   // with it. That is the same honest position the Kerberos passwords and
   // `oauthClientSecret` are in, and it is on GET /scim rather than left to be
   // found.
-  'hobaPublicKey'
+  'hobaPublicKey',
+
+  // WHERE THIS PERSON CAME FROM, on an entry a FEDERATED sign-in created. Five
+  // names, and they exist because this is the one path in this service where an
+  // entry is created out of somebody ELSE'S assertion — every other entry under
+  // ou=users was made because a credential was presented HERE, and the
+  // difference matters to whoever reads the directory afterwards. A person with
+  // `federationIssuer` on their entry has never authenticated to this service
+  // at all.
+  //
+  // `federationAttribute` is the useful one and the one with no analogue
+  // anywhere else here: it lists which of this entry's OTHER attributes came
+  // off a foreign assertion rather than out of the invented-persona sweep. Both
+  // kinds are ordinary directory attributes and look identical, and applyVcAttributes()
+  // fills in `mail`, `givenName` and the rest for everybody — so without this
+  // there is no way to tell a real email address a partner sent from one this
+  // service made up, which is exactly the question a federated directory entry
+  // raises. Nothing reads it; it is there to be read.
+  'federationRelationship', 'federationIssuer', 'federationSubject',
+  'federationLastSeen', 'federationAttribute'
 ];
 
 // The table itself, built from the two lists. `learnName()` is the ONE way in,
@@ -917,6 +962,20 @@ function seed() {
       'not a copy of one kept elsewhere — so an ldapmodify here changes what ' +
       'the protocol endpoints do. applications.js holds the schema; GET ' +
       '/ldap/applications publishes it.'
+  }, { origin: 'seed' });
+  putEntry(FEDERATIONS_DN, {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'federations',
+    description: 'Federation relationships: the foreign identity providers ' +
+      'this service consumes assertions from, and the foreign service ' +
+      'providers it asserts to. THIS CONTAINER IS THE REGISTER — an ' +
+      'ldapmodify of fedSigningCertificate here changes which signer the next ' +
+      'assertion is verified against, and an ldapmodify of fedEnabled turns a ' +
+      'partner on. It is the one store in this directory whose contents are a ' +
+      'SECURITY DECISION rather than a record: everything else here is ' +
+      'permissive by design, and a federation endpoint cannot be. ' +
+      'federation/federation.js holds the schema; GET /ldap/federations ' +
+      'publishes it.'
   }, { origin: 'seed' });
   putEntry(SPIFFE_DN, {
     objectClass: ['top', 'organizationalUnit'],
@@ -1748,6 +1807,117 @@ function spiffePlan(info) {
 // attributes, no token carries them, and nothing decides anything on them. They
 // are a record of what happened, on the page an LDAP client can see it from.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// WHAT A FOREIGN IDENTITY PROVIDER SAID, WRITTEN ONTO THE ENTRY.
+//
+// This runs on an entry created because somebody signed in SOMEWHERE ELSE, and
+// it is the only path here of that shape. Three rules, and each is a decision
+// rather than a default:
+//
+// **THE PARTNER'S VALUES ARE ASSIGNED, NOT MERGED, AND THEY WIN.** This is the
+// opposite of `applyVcAttributes()`, which fills only what is ABSENT — and the
+// two have to differ, because that one writes an INVENTED persona and this one
+// writes what a real identity provider actually asserted. If it merged, then
+// `alice@example.invalid` — invented for the credential catalogue the first
+// time anybody named alice — would beat the address her employer's identity
+// provider just sent, permanently, with nothing on any page saying why. And if
+// it accumulated, an entry would carry one `mail` value per sign-in.
+//
+// **ONLY THE ATTRIBUTES THE PARTNER SENT ARE TOUCHED.** An attribute that was
+// on the entry before and is not in this assertion is LEFT ALONE rather than
+// removed. A partner that stopped releasing `title` has not said the person has
+// no title, and a directory that deleted attributes on the strength of an
+// omission would lose data on a partner's configuration change.
+//
+// **IT RECORDS WHICH ONES CAME FROM THERE.** `federationAttribute` is the list,
+// and it is the whole reason this function is not three lines: a federated
+// `mail` and an invented `mail` are indistinguishable on the entry, and telling
+// them apart is exactly the question a person reading a federated directory
+// entry has.
+//
+// `federation_map.js` has already turned the partner's vocabulary into this
+// directory's, so nothing here knows what a `urn:oid:` name is — the same
+// division of labour `applications.js` keeps with this file about the
+// applications schema.
+// ---------------------------------------------------------------------------
+function applyFederatedAttributes(stored, info) {
+  log.debug('Entering applyFederatedAttributes(). dn=' + (stored && stored.dn));
+  const federated = info && info.federation;
+  if (!stored || !federated) {
+    log.debug('Leaving applyFederatedAttributes(). Not a federated sign-in.');
+    return false;
+  }
+  let changed = false;
+  // The three facts about WHERE they came from. Multi-valued and accumulated,
+  // because one person can federate through two partners and the second must
+  // not erase the first — the same reason `description` accumulates one line
+  // per protocol.
+  if (addValues(stored, 'federationRelationship', [String(federated.id || '')])) changed = true;
+  if (federated.peer &&
+      addValues(stored, 'federationIssuer', [String(federated.peer)])) changed = true;
+  if (federated.subject &&
+      addValues(stored, 'federationSubject', [String(federated.subject)])) changed = true;
+
+  const attributes = federated.attributes || {};
+  const written = [];
+  Object.keys(attributes).forEach(function (name) {
+    const values = (Array.isArray(attributes[name]) ? attributes[name] : [attributes[name]])
+      .map(function (one) { return String(one); })
+      .filter(function (one) { return one !== ''; });
+    if (!values.length) return;
+    // NEVER the naming attribute, and never the two operational ones. `uid` is
+    // what `namePlan()` put in the RDN, so a partner sending a `uid` that
+    // differs from the username would leave an entry whose DN and whose uid
+    // name two different people — and every lookup here that finds somebody by
+    // name goes through one or the other. The username mapping is where a
+    // partner's own idea of the local name belongs, and it has its own setting.
+    const lower = name.toLowerCase();
+    if (lower === 'uid' || lower === 'objectclass' ||
+        lower === 'createtimestamp' || lower === 'modifytimestamp' ||
+        lower === 'entrydn') {
+      log.debug('applyFederatedAttributes(): not writing "' + name + '" — it names the ' +
+                'entry rather than describing the person.');
+      return;
+    }
+    const canonical = canonicalName(lower);
+    const existing = stored.attributes[lower] || [];
+    const same = existing.length === values.length &&
+      existing.every(function (one, at) { return one === values[at]; });
+    if (!same) {
+      stored.attributes[lower] = values;
+      changed = true;
+    }
+    written.push(canonical);
+  });
+  written.forEach(function (name) {
+    if (addValues(stored, 'federationAttribute', [name])) changed = true;
+  });
+  // ASSIGNED, unlike the three above it: it is a fact about the LAST federated
+  // sign-in, and a history of timestamps would say nothing the audit log does
+  // not already say better.
+  const now = generalizedTime();
+  if ((stored.attributes.federationlastseen || [])[0] !== now) {
+    stored.attributes.federationlastseen = [now];
+    changed = true;
+  }
+  if (!changed) {
+    log.debug('Leaving applyFederatedAttributes(). It already said all of this.');
+    return false;
+  }
+  stored.attributes.modifytimestamp = [now];
+  log.info('ldap: ' + stored.dn + ' records a federated sign-in through ' +
+           federated.id + (federated.peer ? ' (' + federated.peer + ')' : '') + '. ' +
+           (written.length ? written.length + ' attribute(s) came from the partner and ' +
+                             'OVERWROTE whatever was there: ' + written.join(', ') + '.'
+                           : 'The partner sent no attributes this directory maps.') +
+           (federated.unmapped && federated.unmapped.length
+             ? ' ' + federated.unmapped.length + ' more were sent under names nothing ' +
+               'maps and were NOT written: ' + federated.unmapped.join(', ') + '.'
+             : ''));
+  log.debug('Leaving applyFederatedAttributes(). The entry was updated.');
+  return true;
+}
+
 function applyAuthenticationFactors(stored, info) {
   log.debug('Entering applyAuthenticationFactors(). dn=' + (stored && stored.dn));
   if (!stored) {
@@ -2152,6 +2322,19 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). That identity is a client, not a person.');
     return null;
   }
+  // AND THE PER-RELATIONSHIP SWITCH, which is the one place a federated sign-in
+  // is treated differently from every other kind here. `ldap.autocreateUsers`
+  // above is the service-wide answer; `fedAutocreateUsers` is one partner's,
+  // and it exists because a federation partner is the one source of identities
+  // this service does not control the volume of — a partner with ten thousand
+  // people behind it would otherwise fill ou=users the first time somebody
+  // pointed a load generator at it. Off means a session and no entry, which is
+  // a state worth being able to watch.
+  if (info.federation && info.federation.autocreate === false) {
+    log.debug('Leaving autoCreateUser(). fedAutocreateUsers is off on ' +
+              info.federation.id + ', so this federated sign-in leaves no entry.');
+    return null;
+  }
   // FOUR shapes of identity and one placement function each, chosen here and
   // decided there. A client CERTIFICATE identity is a DN (certificatePlan()); a
   // DECENTRALIZED IDENTIFIER is one long opaque string (didPlan()); a SPIFFE
@@ -2216,6 +2399,14 @@ function autoCreateUser(detail) {
     if (applyAuthenticationFactors(existing, info)) {
       changed = true;
     }
+    // AFTER the persona sweep above, and that order is load-bearing: the sweep
+    // fills only what is absent and this OVERWRITES, so a partner's real email
+    // address beats the invented one whichever way round the entry was created.
+    // Reversed, an entry created by a federated sign-in would have its real
+    // values quietly replaced by invented ones on the very next sign-in.
+    if (applyFederatedAttributes(existing, info)) {
+      changed = true;
+    }
     if (changed) {
       existing.attributes.modifytimestamp = [generalizedTime()];
       log.debug('Leaving autoCreateUser(). The entry existed and now records ' +
@@ -2248,6 +2439,10 @@ function autoCreateUser(detail) {
   // single factor was a key rather than a password, on an entry that exists
   // because that sign-in was an authentication in its own right.
   applyAuthenticationFactors(created, info);
+  // Last, for applyVcAttributes()'s sake: see the note on the returning-person
+  // branch above. What a foreign identity provider asserted about somebody
+  // beats what this service invented for them.
+  applyFederatedAttributes(created, info);
   log.info('ldap: created ' + dn + ' because ' + name + ' ' + note + '.');
   // A user created by the SERVICE rather than by a client, and the audit row
   // says so through `channel: 'internal'` — no LDAP client asked for this. It
@@ -3581,6 +3776,122 @@ OPERATIONS.forEach(function (operation) {
   };
 });
 
+// ---------------------------------------------------------------------------
+// THE LIVE CONNECTIONS, AND WHY THIS DIRECTORY HAS TO KEEP ITS OWN LIST.
+//
+// RFC 4511 section 4.2: a Bind establishes the authorization state of a
+// CONNECTION, and it lasts until the next Bind or an Unbind. So in LDAP the
+// connection IS the session — there is no ticket, no cookie and no token — and
+// the only sign-out this protocol has is the connection ending. That is what
+// the protocol-independent `/logout` needs to be able to reach.
+//
+// ldapjs cannot answer it. Its `Server` exposes `connections`, which is node's
+// deprecated net.Server COUNT — a number — and nothing that enumerates the
+// sockets or the DNs bound on them. The submodule is used unmodified (see this
+// repository's CLAUDE.md), so the list is kept HERE, on the underlying
+// net/tls server's own `connection`/`secureConnection` event, which fires for
+// every socket ldapjs will then set up.
+//
+// Three things about it are deliberate:
+//
+//   * **It is a Set of the sockets themselves and nothing else.** The bound DN
+//     is read off `socket.ldap.bindDN` at the moment somebody asks, never
+//     copied here — ldapjs owns that value and re-binding on one connection
+//     changes it. A copy would be a second store of one fact, and the one that
+//     goes stale exactly when it matters.
+//   * **Removal is on `close`**, which node emits for every socket however it
+//     ended, so nothing has to be swept and a client that vanished does not
+//     leave a row behind claiming to be signed in.
+//   * **`listening` on the ldapjs Server is not required.** These handlers are
+//     attached at require time, before `listen()` is called from server.js, so
+//     a connection cannot arrive before there is somewhere to record it.
+// ---------------------------------------------------------------------------
+const liveConnections = new Set();
+
+servers.forEach(function (one) {
+  // `one.server` is the net.Server (or tls.Server) ldapjs built; see
+  // node-ldapjs/lib/server.js, where it is assigned in the constructor. The TLS
+  // one emits `secureConnection` rather than `connection` for a socket that has
+  // completed its handshake, and ldapjs sets its own state up on that same
+  // socket — so both names are listened for and a socket that somehow arrived
+  // twice is a Set member added twice, which is once.
+  ['connection', 'secureConnection'].forEach(function (event) {
+    one.server.on(event, function (socket) {
+      liveConnections.add(socket);
+      socket.on('close', function () { liveConnections.delete(socket); });
+    });
+  });
+});
+
+// Every connection this process currently holds, with who is bound on it. The
+// DN is read live, per the note above; `key` is the console's identity key for
+// that person, derived the same way every other door here derives it, so a row
+// on /logout and a row on /admin/users name one person rather than two.
+function boundConnections() {
+  log.debug("Entering boundConnections().");
+  const out = [];
+  liveConnections.forEach(function (socket) {
+    const dn = (socket.ldap && socket.ldap.bindDN) ? String(socket.ldap.bindDN) : '';
+    // ldapjs seeds an unbound connection with cn=anonymous rather than leaving
+    // it empty — the same trap boundDnOf() documents — and an anonymous
+    // connection is the absence of a bind, so it is reported as one.
+    const bound = dn.toLowerCase() === 'cn=anonymous' ? '' : dn;
+    out.push({
+      id: (socket.ldap && socket.ldap.id) || ((socket.remoteAddress || '?') + ':' +
+                                              (socket.remotePort || '?')),
+      dn: bound,
+      // The console's key for whoever is bound. `getEntry()` is passed so that
+      // an entry's own `uid` wins over the DN's RDN — the same order every
+      // other caller of consoleKeyFor() uses, and the reason a person bound as
+      // `cn=alice,ou=users` (which is how a TLS client certificate seeds one)
+      // still resolves to `alice` rather than to nothing.
+      key: bound ? consoleKeyFor(bound, getEntry(bound)) : '',
+      secure: !!socket.encrypted,
+      port: socket.encrypted ? boundTlsPort : boundPort,
+      socket: socket
+    });
+  });
+  log.debug("Leaving boundConnections(). " + out.length + " connection(s).");
+  return out;
+}
+
+// Close every connection bound as this person, and say which. It is the only
+// sign-out LDAP has (see above), and what the client sees is its socket closing
+// mid-conversation — which is what a directory server revoking a session looks
+// like from the other end, and is worth being able to point a client at.
+//
+// `destroy()` rather than `end()`: end() sends a FIN and waits, and a client
+// that is mid-search can keep the connection alive for as long as it likes,
+// which would make a logout report success and leave the session up. An
+// UNSOLICITED NOTICE OF DISCONNECTION (RFC 4511 section 4.4.1) would be the
+// polite form and ldapjs has no way to send one, which is stated on /logout
+// rather than left as a difference somebody discovers.
+function dropConnectionsFor(key) {
+  log.debug("Entering dropConnectionsFor(). key=" + key);
+  const wanted = String(key || '');
+  const dropped = [];
+  boundConnections().forEach(function (row) {
+    if (!row.key || row.key !== wanted) return;
+    dropped.push({ id: row.id, dn: row.dn, secure: row.secure, port: row.port });
+    try {
+      row.socket.destroy();
+    } catch (e) {
+      // A socket that was already gone throws here, and that is the outcome
+      // being asked for rather than a failure: it is counted as dropped because
+      // it is not connected any more, which is what the caller asked about.
+      log.debug('ldap: a connection bound as ' + row.dn + ' was already gone: ' + e.message);
+    }
+    liveConnections.delete(row.socket);
+  });
+  if (dropped.length) {
+    log.info('ldap: dropped ' + dropped.length + ' connection(s) bound as ' + wanted +
+             ' — RFC 4511 section 4.2 makes the bind the authorization state of the ' +
+             'CONNECTION, so closing it is the only sign-out this protocol has.');
+  }
+  log.debug("Leaving dropConnectionsFor(). " + dropped.length + " dropped.");
+  return dropped;
+}
+
 // NOT fanned out: an error says which listener it came from. Two sockets and
 // one message about "the server" would send a reader to the wrong port, and the
 // two fail in different ways — 389 loses a race with the host's own slapd, 636
@@ -4845,6 +5156,154 @@ applications.setDirectory({
   maxApplications: maxApplications
 });
 
+// ---------------------------------------------------------------------------
+// THE FEDERATION CONTAINER AS A STORE.
+//
+// The applications container's arrangement made again, and a deliberate copy
+// rather than a coincidence for the reason stated above the SPIFFE ones: this
+// file owns WHERE an entry lives, how it is created and what the cap is, and
+// `federation/federation.js` owns what an entry IS. Neither knows the other's
+// half, which is what lets an `ldapmodify`, the console and `/admin-api` be
+// three doors onto one register rather than three registers.
+//
+// **THE DN IS THE ID, with no digest case.** An application entry may be named
+// `cn=app-<12 hex>` because its identifier is whatever a protocol presented and
+// can be any length; a relationship id is CONFIGURED, so `federation.js` simply
+// requires it to be RDN-safe and short and refuses one that is not. That is the
+// difference between a register that is written down and one that is observed,
+// and it is why there is no `federationEntry()` walk equivalent to
+// `applicationEntry()`'s — except that there is, for exactly one case: an entry
+// somebody RENAMED with an ldapmodrdn. The identifier is still on it, so the
+// walk finds it, and the alternative is a register that loses a relationship
+// because somebody tidied a DN.
+// ---------------------------------------------------------------------------
+function federationDn(id) {
+  return 'cn=' + escapeDnValue(String(id)) + ',' + FEDERATIONS_DN;
+}
+
+function federationEntry(id) {
+  log.debug('Entering federationEntry(). id=' + id);
+  const direct = getEntry(federationDn(id));
+  if (direct) {
+    log.debug('Leaving federationEntry(). Found at its DN.');
+    return direct;
+  }
+  const wanted = String(id);
+  let found = null;
+  entries.forEach(function (stored) {
+    if (found || !isUnder(stored.dn, FEDERATIONS_DN)) {
+      return;
+    }
+    if ((stored.attributes.fedid || [])[0] === wanted) {
+      found = stored;
+    }
+  });
+  log.debug('Leaving federationEntry(). ' + (found ? 'Found by fedId.' : 'Not here.'));
+  return found;
+}
+
+function readFederation(id) {
+  const stored = federationEntry(id);
+  return stored ? entryObject(stored) : null;
+}
+
+function federationCount() {
+  let n = 0;
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, FEDERATIONS_DN) &&
+        normalizeDn(stored.dn) !== normalizeDn(FEDERATIONS_DN)) {
+      n++;
+    }
+  });
+  return n;
+}
+
+function allFederations() {
+  log.debug('Entering allFederations().');
+  const rows = [];
+  entries.forEach(function (stored) {
+    if (isUnder(stored.dn, FEDERATIONS_DN) &&
+        normalizeDn(stored.dn) !== normalizeDn(FEDERATIONS_DN)) {
+      rows.push(entryObject(stored));
+    }
+  });
+  log.debug('Leaving allFederations(). ' + rows.length + ' relationship(s).');
+  return rows;
+}
+
+// Create or replace. REPLACE for `writeApplication()`'s reason, which applies
+// with more force here: the record being written was read from this entry a
+// moment ago and changed, so merging would make it impossible ever to REMOVE a
+// value — and the value somebody most wants to be able to remove from one of
+// these entries is a signing certificate that should no longer be trusted.
+function writeFederation(id, attributes) {
+  log.debug('Entering writeFederation(). id=' + id);
+  const existing = federationEntry(id);
+  const dn = existing ? existing.dn : federationDn(id);
+  if (!existing && federationCount() >= maxFederations()) {
+    log.warn('ldap: not creating ' + dn + '; ou=federations holds its maximum of ' +
+             maxFederations() + ' entry/entries (federation.max).');
+    log.debug('Leaving writeFederation(). The container is full.');
+    return false;
+  }
+  if (entries.size >= maxEntries() && !existing) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
+             maxEntries() + ' entries.');
+    log.debug('Leaving writeFederation(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, attributes, { origin: existing ? existing.origin : 'federation' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  auditFederationDirectory(existing ? 'entry.update' : 'entry.create', dn, attributes, !existing);
+  log.debug('Leaving writeFederation(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+function deleteFederationEntry(id) {
+  log.debug('Entering deleteFederationEntry(). id=' + id);
+  const stored = federationEntry(id);
+  if (!stored) {
+    log.debug('Leaving deleteFederationEntry(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
+  auditFederationDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving deleteFederationEntry(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// NO VALUES ARE NAMED, only attribute names — the rule every other LDAP row
+// here follows, and it matters more on these entries than on any other in the
+// directory: `fedClientSecret` is a real credential at a real foreign service,
+// which is a stronger statement than anything oauthClientSecret can make.
+function auditFederationDirectory(action, dn, attributes, created) {
+  audit.audit({
+    action: action,
+    actor: '',
+    protocol: 'LDAP',
+    channel: 'internal',
+    target: dn,
+    summary: 'The federation relationship entry ' + dn + ' was ' +
+             (action === 'entry.delete' ? 'deleted' : (created ? 'created' : 'updated')),
+    detail: { attributes: Object.keys(attributes || {}).sort().join(', ') }
+  });
+}
+
+federation.setDirectory({
+  readFederation: readFederation,
+  writeFederation: writeFederation,
+  allFederations: allFederations,
+  countFederations: federationCount,
+  deleteFederation: deleteFederationEntry,
+  containerDn: function () { return FEDERATIONS_DN; },
+  maxFederations: maxFederations
+});
+
 // AND THE TWO APPLICATIONS THAT ARE THIS PROCESS, immediately after — because
 // this line is the earliest moment at which there is a container to write into,
 // and the entries have to be there before anything can ask for them.
@@ -5525,6 +5984,147 @@ app.get('/ldap/applications', function (req, res) {
   log.debug('Leaving GET /ldap/applications. ' + rows.length + ' application(s).');
 });
 
+// ---------------------------------------------------------------------------
+// GET /ldap/federations — the register as the directory sees it.
+//
+// The applications page's twin, and a page of its own rather than a section of
+// that one for the reason the container is a container of its own: half these
+// entries are FOREIGN IDENTITY PROVIDERS, which ask this service for nothing.
+//
+// It says one thing that page does not have to: **an ldapmodify here is a
+// SECURITY CHANGE.** Everywhere else in this directory an edit changes what
+// this service will hand out; on `fedSigningCertificate` it changes whose
+// assertions this service will believe, and on `fedEnabled` it turns a partner
+// on. That sentence is the whole difference between this container and every
+// other one, so it is at the top rather than in a footnote.
+// ---------------------------------------------------------------------------
+app.get('/ldap/federations', function (req, res) {
+  log.debug('Entering GET /ldap/federations.');
+  const rows = federation.list();
+  const payload = {
+    baseDn: BASE_DN,
+    container: FEDERATIONS_DN,
+    count: rows.length,
+    max: maxFederations(),
+    sourceOfTruth: 'These entries ARE the register. An ldapmodify here is a SECURITY ' +
+      'change: fedSigningCertificate decides whose assertions this service will ' +
+      'believe, and fedEnabled turns a partner on. Nothing caches them.',
+    roles: federation.ROLES,
+    protocols: federation.PROTOCOLS,
+    schema: federation.SCHEMA,
+    relationships: rows.map(function (row) {
+      // The record MINUS the credential, and the entry beside it. The whole
+      // entry's attributes are shown below in the table, secret included — this
+      // is the page that says what the directory holds, and hiding a value here
+      // while an ldapsearch shows it would be a page that lies about its own
+      // subject. What is redacted is the JSON, which is what a script reads.
+      const out = {};
+      Object.keys(row).forEach(function (name) {
+        if (name === 'entry') return;
+        if (name === 'fedClientSecret') {
+          out[name] = row[name] ? '(set — see the entry below)' : '';
+          return;
+        }
+        out[name] = row[name];
+      });
+      out.ready = federation.readinessOf(row).ready;
+      out.missing = federation.readinessOf(row).missing;
+      return out;
+    })
+  };
+  if (String(req.query.format || '').toLowerCase() === 'json') {
+    log.debug('Leaving GET /ldap/federations. JSON, ' + rows.length + ' relationship(s).');
+    return res.status(200).json(payload);
+  }
+  const relRows = rows.map(function (row) {
+    const attrs = Object.keys(row.entry.attributes).sort().map(function (name) {
+      const value = row.entry.attributes[name];
+      return '<code>' + xmlEscape(name) + '</code>: ' +
+        xmlEscape(Array.isArray(value) ? value.join(' | ') : String(value));
+    }).join('<br>');
+    const readiness = federation.readinessOf(row);
+    return '<tr><td><code>' + xmlEscape(row.fedId) + '</code>' +
+      '<br><span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td>' +
+      '<td>' + xmlEscape((federation.roleRow(row.fedRole) || {}).short || row.fedRole) +
+      '<br><span class="sub">' +
+      xmlEscape((federation.protocolRow(row.fedProtocol) || {}).label || row.fedProtocol) +
+      '</span></td>' +
+      '<td>' + (federation.isEnabled(row)
+        ? (readiness.ready ? 'enabled and ready'
+           : 'ENABLED, not configured<br><span class="sub">' +
+             xmlEscape(readiness.missing.join(', ')) + '</span>')
+        : 'disabled') + '</td>' +
+      '<td>' + xmlEscape(row.fedAuthentications || '0') + ' sign-in(s)<br>' +
+      xmlEscape(row.fedUsers || '0') + ' person/people</td>' +
+      '<td>' + attrs + '</td></tr>';
+  }).join('');
+  const classRows = federation.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.where) + (one.standard ? '' : ' <strong>(invented here)</strong>') +
+      '</td><td>' + xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = federation.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code>' +
+      (row.sensitive ? ' <strong>(credential)</strong>' : '') +
+      '</td><td>' + xmlEscape(row.kind) + '</td><td>' + xmlEscape(row.role) +
+      '</td><td>' + xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+  const inner = '<h1>Federation relationships</h1>' +
+    '<p class="sub">' + rows.length + ' of a maximum ' + maxFederations() +
+    ' under <code>' + xmlEscape(FEDERATIONS_DN) + '</code>: the foreign identity ' +
+    'providers this service consumes assertions from, and the foreign service ' +
+    'providers it asserts to. One relationship is one DIRECTION, so a partner in both ' +
+    'is two entries.</p>' +
+    '<p class="sub"><strong>An ldapmodify here is a security change, which is not true ' +
+    'of any other container in this directory.</strong> ' +
+    '<code>fedSigningCertificate</code> decides whose assertions this service will ' +
+    'believe; <code>fedEnabled</code> turns a partner on. Everywhere else here an edit ' +
+    'changes what this service hands out, and every bind to this directory succeeds &mdash; ' +
+    'so this container is exactly as protected as the rest of it, which is to say not at ' +
+    'all. That is the honest state of a mock, and it is why federation is the one feature ' +
+    'here that refuses by default.</p>' +
+    (rows.length
+      ? '<table><tr><th>Relationship</th><th>Direction</th><th>State</th><th>Seen</th>' +
+        '<th>Every attribute</th></tr>' + relRows + '</table>'
+      : '<p class="sub">Nothing yet, and nothing will appear by itself: unlike every ' +
+        'other container here, this one is CONFIGURED. Add a relationship on ' +
+        '<a href="/admin/federation">/admin/federation</a> or through ' +
+        '<code>POST /admin-api/federation/create</code>.</p>') +
+    '<h2>The two directions</h2>' +
+    '<table><tr><th>Role</th><th>What it means</th></tr>' +
+    federation.ROLES.map(function (one) {
+      return '<tr><td>' + xmlEscape(one.short) + '</td><td>' + xmlEscape(one.what) +
+        '</td></tr>';
+    }).join('') + '</table>' +
+    '<h2>The five protocols</h2>' +
+    '<table><tr><th>Protocol</th><th>What happens</th><th>Needs</th></tr>' +
+    federation.PROTOCOLS.map(function (one) {
+      return '<tr><td>' + xmlEscape(one.label) + '</td><td>' + xmlEscape(one.what) +
+        '</td><td><code>' + xmlEscape(one.needs.join(', ')) + '</code></td></tr>';
+    }).join('') + '</table>' +
+    '<h2>The object classes</h2>' +
+    '<table><tr><th>Class</th><th>Where from</th><th>What it brings</th></tr>' +
+    classRows + '</table>' +
+    '<h2>The attributes</h2>' +
+    '<p class="sub"><code>multi</code> accumulates a repeat, <code>single</code> is ' +
+    'assigned. The <code>role</code> column says which direction an attribute is for; ' +
+    'one belonging to the other direction is refused by the console and by the ' +
+    'management API, and an <code>ldapmodify</code> can still write it, where it will ' +
+    'be ignored. <code>fedClientSecret</code> is THIS SERVICE\'S OWN CREDENTIAL AT THE ' +
+    'PARTNER &mdash; a real secret at a real foreign service, which is a stronger ' +
+    'statement than anything else in this directory &mdash; and it is here in the clear ' +
+    'for the reason <code>/krb5/principals</code> prints the Kerberos passwords. It is ' +
+    'never written to the audit log and never shown in the console.</p>' +
+    '<table><tr><th>Attribute</th><th>Values</th><th>Direction</th><th>What it is</th>' +
+    '</tr>' + attrRows + '</table>' +
+    '<p class="sub"><a href="/ldap/federations?format=json">This page as JSON</a> ' +
+    '&middot; <a href="/admin/federation">configure them in the console</a> &middot; ' +
+    '&middot; <a href="/federation">what federation is here</a> &middot; ' +
+    '<a href="/ldap">what this directory is</a></p>';
+  res.status(200).type('html').send(pageShell('Federation relationships', inner));
+  log.debug('Leaving GET /ldap/federations. ' + rows.length + ' relationship(s).');
+});
+
 function listen() {
   log.debug('Entering listen().');
   const whenPlain = new Promise(function (resolve, reject) {
@@ -5661,6 +6261,13 @@ module.exports = {
   writePerson: writePerson,
   deletePerson: deletePerson,
   groupDnFor: groupDnFor,
+  // The live connections, and the only sign-out LDAP has. Read by
+  // ../logout/logout.js, which requires this module in the ordinary direction:
+  // server.js loads it long before that one, so the require moves no route and
+  // closes no cycle, and rule 3e's test therefore asks for no slot. See the
+  // block above boundConnections().
+  boundConnections: boundConnections,
+  dropConnectionsFor: dropConnectionsFor,
   // The DN-syntax rule, shared with createUser() above so that the three doors
   // that create something named cannot disagree about what a name may be.
   nameUsableInDn: nameUsableInDn,

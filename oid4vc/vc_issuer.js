@@ -37,6 +37,10 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
 const app = require('../common/app');
 const config = require('../common/config');
@@ -64,7 +68,12 @@ const { deferredIntervalS, deferredReadyMs, OFFER_TTL_MS, deferredAccessTokens,
         deferredTransactions } = require('./vc_offers');
 // c_nonce values this issuer has handed out and not yet seen used. A nonce is
 // single-use (RFC-conformant behaviour, and it makes replay visible in a test).
-const vciNonces = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const vciNonces = realms.map();
 
 const VCI_NONCE_TTL_MS = 5 * 60 * 1000;
 
@@ -889,7 +898,12 @@ function grantedIdentifiers(accessToken) {
 // endpoint tell a real id from an invented one — and section 11.3 defines
 // invalid_notification_id precisely so that distinction is made.
 // ---------------------------------------------------------------------------
-const notificationIds = new Map();   // id -> { accessToken, expires, event }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const notificationIds = realms.map();   // id -> { accessToken, expires, event }
 
 function newNotificationId(accessToken) {
   log.debug("Entering newNotificationId().");

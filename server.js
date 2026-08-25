@@ -143,6 +143,52 @@ require('./oauth-oidc/oauth2');
 // this module — which is what keeps it out of the cycles the split exists to
 // avoid.
 require('./ws-federation/wsfed');
+// SAML 2.0 Web Browser SSO — the profile this service spent years documenting
+// the absence of. It must come AFTER authn.js for the reason wsfed.js must, and
+// it is a stronger dependency here rather than a weaker one: this module has NO
+// sign-in screen of its own at all and reaches that service's through
+// beginAuthentication(). It has no constraint against wsfed.js in either
+// direction — the two share the session and know nothing about each other — and
+// it sits here so that the two browser SSO profiles read together in the route
+// order and on /admin/sts-metadata.
+require('./saml/saml2_sso');
+// SAML 1.1's two browser profiles, and the SAML responder behind one of them.
+// TWO constraints, and the second is the interesting one. It must come AFTER
+// authn.js for the same reason saml2_sso.js must — no sign-in screen of its own,
+// and beginAuthentication() is how it reaches one. And it must come AFTER
+// saml/saml2_sso.js, because it takes that module's slugOf(): the slug is a
+// HANDLE FOR AN APPLICATION shared by both profiles and by the console, and two
+// spellings of it would make /saml2/metadata/app-1a2b3c and
+// /saml11/metadata/app-9f8e7d name one entry in one directory. That require is
+// in the ordinary direction and closes no cycle. Nothing else passes between
+// them; the two profiles share a registry and a session and know nothing else
+// about each other.
+require('./saml/saml11_sso');
+// FEDERATION, and it is the one module here that consumes rather than issues.
+// ONE constraint, and it is the strongest of the three sign-in dependencies:
+// it must come AFTER authn/authn.js, because it has no sign-in screen of its
+// own AND it does not go through beginAuthentication() either — a federated
+// sign-in ends by calling startSession() directly, since the person has already
+// authenticated somewhere else and there is no screen to show them.
+//
+// No constraint against the four protocol modules above it in either direction.
+// They know nothing about federation and federation knows nothing about them:
+// what joins the two halves is the SESSION, which is authn.js's, so a federated
+// identity satisfies an OAuth 2.0 authorization request, a WS-Federation
+// sign-in or a SAML AuthnRequest without any of those modules being told this
+// one exists. That is the whole design and it is why this require can sit
+// anywhere below line 137.
+//
+// It is placed HERE, after the four browser SSO profiles, so that the route
+// order and /admin/sts-metadata read in the order somebody thinks about them:
+// what this service ISSUES, and then what it CONSUMES.
+//
+// Only federation_sp.js is required. `federation.js`, `federation_map.js` and
+// `federation_http.js` are libraries (rule 3) — they register nothing, so their
+// position is not a position — and each is required by whoever needs it:
+// admin_stats.js and authn.js reach the register directly, and ldap_server.js
+// fills its directory slot at its own require time.
+require('./federation/federation_sp');
 require('./oid4vc/vc_offers');
 require('./oid4vc/vc_did');
 require('./oid4vc/vc_issuer');
@@ -247,6 +293,27 @@ require('./scim/scim');
 // the TLS certificate identifies a host — and one process holding two of them
 // is correct rather than wasteful. See spiffe_ca.js.
 const spiffeServer = require('./spiffe/spiffe_server');
+// ---------------------------------------------------------------------------
+// THE PROTOCOL-INDEPENDENT LOGOUT — SECOND TO LAST, AND THE POSITION IS THE
+// WHOLE OF ITS ARGUMENT.
+//
+// `GET|POST /logout` lists everything this service is still holding for one
+// identity — across the session store, the token registry, the authorization
+// codes, the pre-authorized codes, the directory's bound connections and the
+// Kerberos principal database — and ends what is asked for. So it READS NINE
+// MODULES, and it must come after every one of them.
+//
+// It is a plain require of each rather than nine inverted hooks, and rule 3e's
+// test is why: a slot is what you reach for when a require would close a cycle
+// or move a route, and neither applies here. Every module it requires has
+// already been loaded by the lines above, so each require is a cache hit that
+// registers nothing and moves nothing; and nothing in this service requires
+// that module back, so there is no cycle to close.
+//
+// It is NOT last. `sts_metadata.js` is, for everybody, because it reads the
+// router to list what everything else registered — and a logout endpoint
+// missing from that list would be the exact drift that page exists to catch.
+require('./logout/logout');
 require('./sts_metadata');
 
 // ---------------------------------------------------------------------------

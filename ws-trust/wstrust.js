@@ -61,6 +61,12 @@ const stats = require('../common/admin_stats');
 // library that registers no route, so it cannot move anything in the require
 // order this module sits in.
 const applications = require('../common/applications');
+// The delegation register (/admin/delegation). Two of the eight mechanisms that
+// page knows are this module's — OnBehalfOf and ActAs — and they are the two
+// where nothing is checked at all, which is a fact the page states beside the
+// Kerberos rows where something is. A library like the two above: it registers
+// no route.
+const delegation = require('../common/delegation');
 const WST_NS = 'http://docs.oasis-open.org/ws-sx/ws-trust/200512';
 
 const SOAP12_NS = 'http://www.w3.org/2003/05/soap-envelope';
@@ -102,7 +108,7 @@ function buildToken(tokenType, subject, audience, lifetimeMin) {
   if (tokenType === JWT_TOKEN_TYPE) {
     const raw = buildJwt(subject, audience, lifetimeMin);
     const token = { xml: '<wsse:BinarySecurityToken xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"' +
-      ' ValueType="urn:ietf:params:oauth:token-type:jwt">' + raw + '</wsse:BinarySecurityToken>', ref: '', tokenType: JWT_TOKEN_TYPE };
+      ' ValueType="urn:ietf:params:oauth:token-type:jwt">' + raw + '</wsse:BinarySecurityToken>', ref: '', tokenType: JWT_TOKEN_TYPE, id: '' };
     log.debug("Leaving buildToken(). Issued a JWT.");
     return token;
   }
@@ -114,7 +120,13 @@ function buildToken(tokenType, subject, audience, lifetimeMin) {
     '<wsse:KeyIdentifier ValueType="http://docs.oasis-open.org/wss/oasis-wss-saml-token-profile-1.1#SAMLID">' +
     xmlEscape(id) + '</wsse:KeyIdentifier></wsse:SecurityTokenReference></wst:RequestedAttachedReference>';
   log.debug("Leaving buildToken(). Issued a SAML 2.0 assertion with ID " + id + ".");
-  return { xml: assertion, ref: ref, tokenType: SAML2_TOKEN_TYPE };
+  // `id` is carried out because /admin/delegation quotes the identifier of what
+  // a delegated request PRODUCED, and the AssertionID is the only one either
+  // token type here has: the JWT branch above signs with jwt.sign() directly
+  // rather than through signJwt(), so it carries no jti and is not in the
+  // tokens register either. A row for one of those says so rather than showing
+  // an empty column that reads as a defect.
+  return { xml: assertion, ref: ref, tokenType: SAML2_TOKEN_TYPE, id: id };
 }
 
 function envelope(version, action, bodyInner) {
@@ -264,21 +276,40 @@ function requesterCredential(doc) {
   return null;
 }
 
-// The subject named in `wst:OnBehalfOf` or `wst:ActAs`, or '' when the request
-// delegates nothing.
+// The subject named in `wst:OnBehalfOf` or `wst:ActAs`, and WHICH OF THE TWO it
+// was. `{ subject: '', element: '' }` when the request delegates nothing.
+//
+// The two used to be collapsed with a `||`, which was right for everything that
+// reads this — the token issued is identical either way, because this service
+// polices nothing — and wrong for /admin/delegation, which is where the
+// difference is the whole point. They are not two spellings of one thing:
+//
+//   * `wst:OnBehalfOf` (1.3 §9.2) asks for a token ABOUT somebody. The relying
+//     party is handed an ordinary sign-in and cannot tell a middle tier was
+//     involved. IMPERSONATION.
+//   * `wst14:ActAs` (1.4 §9.3) is composite by definition: the token is about
+//     the named subject AND says the requester is acting. DELEGATION, and the
+//     element to reach for when the far end must be able to tell.
+//
+// A request carrying BOTH takes OnBehalfOf, which is the order the `||` always
+// had; the row says which one it attributed the act to, so the choice is
+// visible rather than silently made.
 function delegatedSubject(doc) {
   log.debug("Entering delegatedSubject().");
-  const obo = firstByLocal(doc, 'OnBehalfOf') || firstByLocal(doc, 'ActAs');
+  const oboEl = firstByLocal(doc, 'OnBehalfOf');
+  const actAsEl = firstByLocal(doc, 'ActAs');
+  const obo = oboEl || actAsEl;
   if (!obo) {
     log.debug("Leaving delegatedSubject(). Nothing is delegated.");
-    return '';
+    return { subject: '', element: '' };
   }
+  const element = oboEl ? 'OnBehalfOf' : 'ActAs';
   const nameId = firstByLocal(obo, 'NameID') ||
     firstByLocal(obo, 'NameIdentifier');
   const named = (nameId && (nameId.textContent || '').trim()) ||
     'delegated-subject';
-  log.debug("Leaving delegatedSubject(). " + named + ".");
-  return named;
+  log.debug("Leaving delegatedSubject(). " + named + " via " + element + ".");
+  return { subject: named, element: element, both: !!(oboEl && actAsEl) };
 }
 
 // Who this request is from, who the token it asks for is about, and whether the
@@ -310,7 +341,8 @@ function authenticate(doc) {
       method: credential.method, note: credential.note
     });
   }
-  const delegated = delegatedSubject(doc);
+  const delegatedBy = delegatedSubject(doc);
+  const delegated = delegatedBy.subject;
   if (delegated) {
     // Recorded, with what it is said plainly: the subject named in an
     // OnBehalfOf presented no credential of their own here. Something else
@@ -325,7 +357,21 @@ function authenticate(doc) {
             'who may perform it.'
     });
     log.debug("Leaving authenticate(). Delegated request (OnBehalfOf/ActAs).");
-    return { ok: true, subject: delegated };
+    // `delegation` carries what /admin/delegation needs and nothing else reads:
+    // WHICH element it was, and WHO presented a credential of their own — the
+    // requester, who is the intermediary of the chain and is the one party this
+    // function's `subject` deliberately does not name. handleRst() records the
+    // act once the token exists; recording it here would claim a credential
+    // that a later failure would have meant nobody held.
+    return {
+      ok: true, subject: delegated,
+      delegation: {
+        element: delegatedBy.element,
+        both: !!delegatedBy.both,
+        requester: credential ? credential.subject : '',
+        requesterMethod: credential ? credential.method : ''
+      }
+    };
   }
   if (credential) {
     log.debug("Leaving authenticate(). Accepted for " + credential.subject +
@@ -480,6 +526,80 @@ function handleRst(rawBody, contentType, options) {
       user: subject || '',
       note: 'a token was issued for this AppliesTo',
       fields: { wstrustAppliesTo: audience, samlEntityId: audience }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE DELEGATION ACT, for /admin/delegation.
+  //
+  // Recorded here rather than in authenticate() for the reason the KDC records
+  // its own at the bottom of handleTgsReq(): this is the first line at which the
+  // token EXISTS, and an act recorded where the decision was made would name a
+  // credential nobody ever held. It is also the only place that knows the
+  // AppliesTo, which is the TARGET of the chain — authenticate() reads the
+  // security header and never sees it.
+  //
+  // Nothing about this is a check. This service accepts any delegation from
+  // anybody about anybody, and the row says so in the column where a Kerberos
+  // row names an attribute. That asymmetry is the most useful thing on the page:
+  // the same picture, policed at one end and not at the other.
+  // ---------------------------------------------------------------------------
+  if (auth.delegation) {
+    const via = auth.delegation.element;
+    delegation.record({
+      protocol: 'WS-Trust',
+      type: via === 'ActAs' ? 'wstrust-actas' : 'wstrust-onbehalfof',
+      outcome: 'issued',
+      initial: {
+        presented: subject,
+        what: 'the subject named in <wst:' + via + '>, who presented nothing here'
+      },
+      intermediary: {
+        // Empty where the request presented no credential of its own, which is
+        // allowed here and is worth seeing: an ANONYMOUS requester asked for a
+        // token about somebody else and got one. The page draws that as a gap
+        // in the chain rather than as a missing value.
+        presented: auth.delegation.requester,
+        what: auth.delegation.requester
+          ? 'the requester, authenticated by ' + auth.delegation.requesterMethod
+          : 'nobody — the request presented no credential of its own, and this ' +
+            'service issued the token anyway'
+      },
+      target: {
+        application: audience,
+        what: audience
+          ? 'the AppliesTo, which is also the assertion\'s audience'
+          : 'unstated — the RST carried no AppliesTo, so the token issued has ' +
+            'no audience restriction at all'
+      },
+      authorizedBy: 'nothing. WS-Trust puts no authorization on ' +
+                    '<wst:' + via + '> and this service adds none: any ' +
+                    'requester may ask for a token about anybody. A real STS ' +
+                    'decides this from policy that has no place in the message.',
+      consumed: auth.delegation.requester
+        ? [{ kind: 'WS-Security credential',
+             note: auth.delegation.requesterMethod }]
+        : [],
+      produced: [{
+        kind: tok.tokenType === SAML2_TOKEN_TYPE ? 'SAML 2.0 assertion' : 'JWT',
+        identifier: tok.id || '',
+        note: tok.id ? 'AssertionID'
+                     : 'this token type carries no identifier here — the ' +
+                       'WS-Trust JWT is signed directly rather than through ' +
+                       'signJwt(), so it has no jti and is in no register'
+      }],
+      note: auth.delegation.both
+        ? 'The request carried BOTH <wst:OnBehalfOf> and <wst14:ActAs>. ' +
+          'OnBehalfOf is what this act is attributed to, which is the order ' +
+          'this service has always read them in.'
+        : (via === 'ActAs'
+            ? 'ActAs is COMPOSITE: the far end is meant to be able to see that ' +
+              'a middle tier is acting. Nothing in the token this service ' +
+              'issues carries that, which is a gap in the mock rather than in ' +
+              'the profile.'
+            : 'OnBehalfOf is IMPERSONATION: the assertion names the subject ' +
+              'and says nothing about the requester, so the relying party sees ' +
+              'an ordinary sign-in.')
     });
   }
 

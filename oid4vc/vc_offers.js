@@ -35,25 +35,49 @@
 // ---------------------------------------------------------------------------
 
 const qrcode = require('qrcode');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const app = require('../common/app');
 const { log, logArtifact, baseUrlOf, randomId, xmlEscape, vciError, userFor,
         walletBaseUrl } = require('../common/helpers');
 const config = require('../common/config');
 const { VCI_CONFIG_ID, vciConfigIds } = require('./vc_configs');
-const credentialOffers = new Map();     // id -> { offer, issuerState, expires }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const credentialOffers = realms.map();     // id -> { offer, issuerState, expires }
 
-const issuerStates = new Map();         // issuer_state -> { configurationIds, expires }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const issuerStates = realms.map();         // issuer_state -> { configurationIds, expires }
 
 // Pre-authorized codes (OID4VCI Appendix H.2 / H.3): the End-User authorized the
 // issuance out of band, so there is no authorization request at all — the code
 // in the offer IS the authorization. `txCode` is the Transaction Code the issuer
 // shows on its own screen and the End-User types into the wallet; `deferred`
 // marks an issuance the credential endpoint will not complete immediately.
-const preAuthorizedCodes = new Map();   // code -> { configurationIds, txCode, user, deferred, expires }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const preAuthorizedCodes = realms.map();   // code -> { configurationIds, txCode, user, deferred, expires }
 
 // Deferred issuance transactions (OID4VCI section 9): the credential endpoint
 // answered 202 with one of these instead of a credential.
-const deferredTransactions = new Map(); // transaction_id -> { claims, holderJwk, readyAt, expires }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const deferredTransactions = realms.map(); // transaction_id -> { claims, holderJwk, readyAt, expires }
 
 // Access tokens minted from a deferred offer: the credential endpoint answers
 // 202 for these instead of issuing straight away.

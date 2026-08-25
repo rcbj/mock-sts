@@ -60,6 +60,10 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const app = require('../common/app');
@@ -111,12 +115,27 @@ const { sessionOf, endSession } = authn;
 // the difference between honouring section 2.1 and being the open redirector it
 // forbids. Every call below is a no-op while `oauth2.rfc9700` is off.
 const bcp = require('./oauth2_bcp');
+// OpenID Connect Front-Channel Logout 1.0 — the `sid` claim below, the two
+// metadata members, the list of relying parties a session has signed into, and
+// the iframe fan-out /oauth2/logout renders. A library (rule 3): it registers
+// nothing, so its place in the require order does not matter, and it requires
+// only helpers.js, config.js, app.js and applications.js — none of which
+// requires it back, so it cannot join a cycle. It exists as a file of its own
+// rather than as code in here for one reason: `/logout` and the console have to
+// render the SAME fan-out, and reaching into this module for it would be a
+// require in the wrong direction.
+const frontchannel = require('./frontchannel_logout');
 // The application registry, which lives in the embedded LDAP directory. A
 // library like the two above — it registers no route and requires only
 // helpers.js and audit.js — so requiring it here cannot create a cycle and
 // cannot move a route. It is where the RFC 7591 registrations are kept and
 // where every client_id this endpoint accepts is recorded.
 const applications = require('../common/applications');
+// The delegation register (/admin/delegation). Exactly ONE thing this module
+// does reaches it — the RFC 8693 token exchange, in both of its shapes — and no
+// other grant here delegates anything. A library like the one above: it
+// registers no route, so it can neither create a cycle nor move one.
+const delegation = require('../common/delegation');
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
 //
@@ -457,7 +476,12 @@ const SIGNED_METADATA_TTL_MS = 60 * 1000;
 
 const MAX_SIGNED_METADATA = 64;
 
-const signedMetadataCache = new Map();   // the claims, serialised -> { signed, until }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const signedMetadataCache = realms.map();   // the claims, serialised -> { signed, until }
 
 // RFC 8414 section 2.1: signed_metadata is a JWT whose claims are the metadata
 // members, signed by the issuer, and carrying iss and sub. Genuinely signed
@@ -622,7 +646,30 @@ function oidcMetadata(req, issuer) {
     // to false, and both are stated because "the OP did not mention it" and "the
     // OP said no" read identically to a client and only one of them is a fact
     // this server is prepared to stand behind.
-    frontchannel_logout_supported: false,
+    // ---------------------------------------------------------------------
+    // FRONT-CHANNEL LOGOUT IS SUPPORTED NOW AND BACK-CHANNEL IS NOT, which is
+    // the honest pair rather than the tidy one.
+    //
+    // Front-Channel Logout 1.0: a relying party registers a
+    // `frontchannel_logout_uri` and every sign-out here loads it in a hidden
+    // iframe, with `iss` and `sid` where the RP registered
+    // `frontchannel_logout_session_required`. `oauth2.frontchannelLogout` turns
+    // it off, and this member follows it — a document advertising a capability
+    // whose claim is switched off would be a document that lies.
+    //
+    // `frontchannel_logout_session_required` here is the PROVIDER's half of the
+    // member and means "this provider can send a sid", which it can for every
+    // token issued on a browser session. It is not a demand on the client: the
+    // per-client member of the same name is what decides whether a given RP is
+    // sent one.
+    //
+    // Back-channel logout stays FALSE and is a different specification: it is a
+    // signed Logout Token POSTed server-to-server, which needs the provider to
+    // reach the RP's network rather than the browser's, and nothing here
+    // implements it. Advertising it because front-channel arrived would be the
+    // overstatement this document exists not to make.
+    frontchannel_logout_supported: frontchannel.enabled(),
+    frontchannel_logout_session_required: frontchannel.enabled(),
     backchannel_logout_supported: false
   });
   // The path-appended form's issuer (see below). Assigned after the merge so it
@@ -797,7 +844,12 @@ function tokenClockSkew() {
 
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 
-const authzCodes = new Map();       // code -> the authorization request it came from
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const authzCodes = realms.map();       // code -> the authorization request it came from
 
 // ---------------------------------------------------------------------------
 // NON-SPEC: what happens when the SAME authorization code arrives twice.
@@ -831,7 +883,12 @@ const authzCodes = new Map();       // code -> the authorization request it came
 // single use is a property of the Credential Offer under test, and
 // tests/sd_jwt_vc_issuance.js asserts that a replayed offer is refused.
 // ---------------------------------------------------------------------------
-const redeemedCodes = new Map();    // code -> the token set it was redeemed for
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const redeemedCodes = realms.map();    // code -> the token set it was redeemed for
 
 // The browser session, the login screen it comes out of and the WebAuthn step
 // beside it all used to be declared here. They are `authn.js` now — see its
@@ -1120,6 +1177,22 @@ function idToken(base, opts) {
       payload.nonce = opts.nonce;
     }
   }
+  // ---------------------------------------------------------------------
+  // `sid` — WHICH BROWSER SESSION THIS TOKEN WAS ISSUED ON.
+  //
+  // OpenID Connect Front-Channel Logout 1.0 section 3. The provider sends the
+  // same value to the relying party's frontchannel_logout_uri when the sign-out
+  // happens, and it is how an RP holding two sessions in one browser knows
+  // WHICH one ended. Without it a notification says only "somebody signed out".
+  //
+  // Emitted only when the token was issued ON a session, which is every
+  // authorization-code and hybrid response and none of the direct grants — a
+  // client_credentials token has no session and a `sid` on one would name
+  // nothing. `admin_stats.js` used to argue at length that no token here should
+  // carry a session identifier; that argument was about inventing one to make a
+  // console page easier, and the setting is what keeps it honoured for anybody
+  // who wants it back.
+  if (opts.session_id && frontchannel.enabled()) payload.sid = opts.session_id;
   if (opts.access_token) payload.at_hash = halfHash(opts.access_token);
   if (opts.code) payload.c_hash = halfHash(opts.code);
   // The ID Token's own custom claim set, separate from the access token's: the two
@@ -1507,6 +1580,18 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
       oauthScope: scope.split(/\s+/).filter(Boolean)
     }
   });
+
+  // THE RELYING PARTY, ON THE SESSION. Front-Channel Logout 1.0 needs to know
+  // which clients a session signed into so that a sign-out has somewhere to
+  // fan out to, and this is the one point where both the client and the session
+  // are in scope — the person was authenticated in authn.js, which never reads
+  // a client_id, and the token endpoint sees the client without the browser.
+  //
+  // It lives ON the session object, which is the same decision wsfed.js makes
+  // about `wsfedRealms` and saml2_sso.js makes about `saml2ServiceProviders`:
+  // the list should die exactly when the session does, and nothing then has to
+  // sweep it.
+  frontchannel.noteClient(authInfo, String(query.client_id));
 
   if (types.indexOf('code') >= 0) {
     const code = randomId(24);
@@ -2067,13 +2152,85 @@ app.get('/oauth2/rfc9700', function (req, res) {
 });
 
 // Ends the session, so the next authorization request prompts again.
+// The shell for the ONE response in this module that is a page rather than a
+// redirect or a line of text. Deliberately tiny and local: this module is an
+// authorization server and not a web site, `admin.js` owns the console's shell,
+// and requiring that module from here would invert rule 5.
+function logoutPage(inner) {
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>Signed out</title><style>' +
+    'body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:2rem auto;' +
+    'max-width:52rem;padding:0 1rem;line-height:1.5;color:#111}' +
+    'h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.6rem}' +
+    '.sub{color:#555;font-size:.9rem}.ok{background:#e8f5e9;border-left:4px solid #2e7d32;' +
+    'padding:.6rem .8rem;margin:1rem 0}' +
+    'table{border-collapse:collapse;width:100%;margin:.6rem 0}' +
+    'th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd;vertical-align:top}' +
+    'code{background:#f4f4f4;padding:.05rem .25rem;border-radius:3px;word-break:break-all}' +
+    '</style></head><body>' + inner + '</body></html>';
+}
+
 function logoutEndpoint(req, res) {
   log.debug("Entering the logout endpoint.");
   // The same session WS-Federation's wsignout1.0 ends, through the same function —
   // one browser session shared by both protocols means signing out of either signs
   // out of both, which is what a person testing them together expects.
-  endSession(req, res);
+  const session = endSession(req, res);
+  // ---------------------------------------------------------------------
+  // FRONT-CHANNEL LOGOUT, AND WHY IT CAN TURN A REDIRECT INTO A PAGE.
+  //
+  // Front-Channel Logout 1.0 works by loading each relying party's
+  // `frontchannel_logout_uri` in an iframe IN THIS BROWSER. A 302 to
+  // post_logout_redirect_uri abandons the document before any of them load, so
+  // where there is a fan-out to perform this endpoint renders it and offers the
+  // return as a LINK — the same trade wsfed.js's sign-out makes about its
+  // cleanup pings, and for the same reason: a redirect that defeats the
+  // notifications is a sign-out that only looks federated.
+  //
+  // WHERE THERE IS NOTHING TO NOTIFY, NOTHING CHANGES. No client on the session
+  // registered a frontchannel_logout_uri — which is every deployment that has
+  // not asked for this — and the redirect below happens exactly as it always
+  // did. That is deliberate: the behaviour of an existing caller must not turn
+  // on a feature it never opted into.
+  // ---------------------------------------------------------------------
+  const notifications = frontchannel.enabled()
+    ? frontchannel.notificationsFor(session, issuerOf(asBaseOf(req))) : [];
+  const notifiable = notifications.filter(function (row) { return !!row.url; });
   const target = req.query.post_logout_redirect_uri;
+  if (notifiable.length) {
+    let checked = target && /^https?:\/\//i.test(String(target)) ? String(target) : '';
+    if (checked) {
+      // The same check the redirect below makes, made before the URL is drawn
+      // as a link rather than followed. A link is not a redirect and RFC 9700
+      // section 2.1 is about the redirect — but an authorization server that
+      // refused to FORWARD a browser to an unregistered URI and then printed it
+      // as a link on its own sign-out page would be splitting a hair at the
+      // reader's expense.
+      const linkCheck = bcp.checkPostLogoutRedirectUri({
+        target: checked, client: applications.clientConfigOf(req.query.client_id)
+      });
+      if (!linkCheck.ok) checked = '';
+    }
+    const inner = '<h1>Signed out</h1>' +
+      '<p class="sub">OpenID Connect RP-Initiated Logout 1.0, with Front-Channel Logout 1.0</p>' +
+      '<div class="ok">' + (session
+        ? 'The session for ' + xmlEscape(session.user.username) + ' has ended. It is the ' +
+          'session WS-Federation and SAML 2.0 share, so those are signed out too.'
+        : 'There was no session to end. The cookie has been cleared anyway.') + '</div>' +
+      frontchannel.render(notifications) +
+      (checked
+        ? '<h2>Return to the relying party</h2><p><a href="' + xmlEscape(checked) + '">' +
+          xmlEscape(checked) + '</a></p><p class="sub">A link and not a redirect: the ' +
+          'notifications above load with this page, and a 302 would abandon them before ' +
+          'they were sent.</p>'
+        : '');
+    res.set('Content-Security-Policy', frontchannel.contentSecurityPolicyFor(notifications));
+    res.status(200).type('text/html').set('Cache-Control', 'no-store').send(logoutPage(inner));
+    log.debug("Leaving the logout endpoint. " + notifiable.length + " relying part" +
+              (notifiable.length === 1 ? 'y was' : 'ies were') + " notified.");
+    return;
+  }
   if (target && /^https?:\/\//i.test(String(target))) {
     // Without RFC 9700 mode this is the plainest open redirector in the
     // service: any absolute http(s) URL in a query parameter, forwarded, with
@@ -2098,6 +2255,71 @@ function logoutEndpoint(req, res) {
 }
 
 app.get('/oauth2/logout', logoutEndpoint);
+
+// ---------------------------------------------------------------------------
+// THE OUTSTANDING AUTHORIZATION CODES FOR ONE PERSON, AND HOW TO END THEM.
+//
+// An authorization code is a live credential: for five minutes it can be
+// redeemed for a token set naming whoever it was issued for. A sign-out that
+// revoked their tokens and left the codes alone would leave the one credential
+// that mints more of them, which is the gap this pair closes for
+// `logout/logout.js`.
+//
+// They are FUNCTIONS rather than an exported Map for the reason
+// `registeredClients` is not exported any more: a caller holding the Map would
+// be a second place that decides what a code is, and the redemption record
+// beside it (`redeemedCodes`, which makes a repeat of one request idempotent)
+// would be missed by anything that only knew about the first. Ending a code
+// here ends BOTH, which is what makes a signed-out code unredeemable rather
+// than merely unissuable.
+//
+// The match is on the USERNAME the code was issued for, normalised by
+// admin_stats.js's identityKeyOf() so that `alice` and `alice@REALM` are one
+// person — the same normalisation every other door in this service uses.
+// ---------------------------------------------------------------------------
+function outstandingCodesFor(key) {
+  log.debug("Entering outstandingCodesFor(). key=" + key);
+  const wanted = String(key || '');
+  const at = Date.now();
+  const out = [];
+  authzCodes.forEach(function (record, code) {
+    const username = (record.user && record.user.username) || '';
+    if (stats.identityKeyOf(username) !== wanted) return;
+    // An expired code is not a live credential and listing it as one would be
+    // offering to end something that has already ended. It is swept here rather
+    // than reported, which is what every other reader of this Map does.
+    if (record.expires && record.expires < at) return;
+    out.push({
+      code: code,
+      clientId: record.client_id || '',
+      redirectUri: record.redirect_uri || '',
+      scope: record.scope || '',
+      username: username,
+      sessionId: record.session_id || '',
+      issuedAt: record.expires ? record.expires - AUTH_CODE_TTL_MS : 0,
+      expiresAt: record.expires || 0
+    });
+  });
+  log.debug("Leaving outstandingCodesFor(). " + out.length + " code(s).");
+  return out;
+}
+
+// End one code. Both stores, for the reason above. Returns whether there was
+// anything to end, so a caller can report "already gone" rather than claiming a
+// revocation it did not perform.
+function dropCode(code) {
+  log.debug("Entering dropCode().");
+  const key = String(code || '');
+  const had = authzCodes.delete(key);
+  // The redemption record too: it is what answers a REPEAT of the same token
+  // request with the tokens it already got, so leaving it behind would let a
+  // client that had already redeemed the code go on getting that answer after
+  // the sign-out. Nothing new would be minted, but a sign-out that hands back a
+  // token set is not a sign-out.
+  const hadRedemption = redeemedCodes.delete(key);
+  log.debug("Leaving dropCode(). " + (had || hadRedemption ? "Ended." : "There was nothing to end."));
+  return had || hadRedemption;
+}
 
 // ---------------------------------------------------------------------------
 // OpenID Connect Core 1.0 section 5.3 — the UserInfo Endpoint.
@@ -3204,6 +3426,101 @@ function tokenEndpoint(req, res) {
       grant: 'token exchange'
     });
     exchanged.issued_token_type = 'urn:ietf:params:oauth:token-type:access_token';
+
+    // ---------------------------------------------------------------------------
+    // THE DELEGATION ACT, for /admin/delegation.
+    //
+    // RFC 8693 defines TWO of them and section 1.1 is explicit that they are
+    // different things, so they are two rows here rather than one with a flag:
+    //
+    //   * no actor_token — IMPERSONATION. What comes back is a token for the
+    //     subject with nothing on it about who exchanged it. The resource
+    //     server cannot tell, and neither can anybody reading the token later,
+    //     which makes this page the only place it is ever visible.
+    //   * an actor_token — DELEGATION (§4.1). What comes back carries `act`
+    //     naming the actor, and `act` NESTS: a second hop appears underneath
+    //     the first rather than replacing it.
+    //
+    // The intermediary is deliberately BOTH an identity and an application. The
+    // client performing the exchange is the application, always; the actor
+    // named in the actor_token is the identity, and only a delegation has one.
+    // An impersonation therefore draws a chain whose middle is an application
+    // and nobody — which is exactly what happened.
+    //
+    // The jti is read back off the token that was just signed rather than
+    // threaded out of issue(). That is one decode of a string this function
+    // already holds, against changing the return type of the one helper every
+    // grant here mints through — and jsonFromB64u() is the same reader the
+    // actor_token was decoded with twelve lines above.
+    let issuedJti = '';
+    try {
+      issuedJti = (jsonFromB64u(String(exchanged.access_token).split('.')[1]) || {}).jti || '';
+    } catch (e) {
+      // The token was signed by this service a line ago, so this cannot
+      // ordinarily fail — and if it somehow does, a row with no identifier on
+      // it is still a row worth having. Swallowed rather than thrown for the
+      // reason the whole of delegation.record() is wrapped: a console page must
+      // not be able to fail a token this endpoint has already issued.
+      log.error('the access token just issued could not be re-read for its jti: ' + e.message);
+    }
+    const audience = String(body.audience || body.resource || '');
+    delegation.record({
+      protocol: 'OAuth 2.0',
+      type: act ? 'oauth-delegation' : 'oauth-impersonation',
+      outcome: 'issued',
+      initial: {
+        presented: subject.username || subject.sub || 'urn:sts-mock:exchanged',
+        what: subjectVerified
+          ? 'the subject of the token presented, which this service signed and ' +
+            'verified — so they were authenticated here, earlier, by whatever ' +
+            'grant produced it'
+          : 'the subject named in a token this service did NOT sign. The name ' +
+            'was read without verifying anything, so this is somebody this ' +
+            'service has been TOLD about rather than one it authenticated'
+      },
+      intermediary: {
+        presented: act ? String(act.sub || '') : '',
+        application: client.client_id,
+        what: act
+          ? 'the actor named in the actor_token, exchanging through client ' +
+            client.client_id
+          : 'the client performing the exchange. No actor_token was sent, so ' +
+            'no identity is named — the client is the whole of the middle here'
+      },
+      target: {
+        application: audience,
+        what: audience
+          ? 'the audience or resource the exchanged token is for'
+          : 'unstated — neither `audience` nor `resource` was sent, so the ' +
+            'token that came back is not addressed to anything in particular'
+      },
+      authorizedBy: 'nothing. RFC 8693 leaves the policy to the authorization ' +
+                    'server and this one has none: any client may exchange any ' +
+                    'token for a token about anybody. The `may_act` claim is ' +
+                    'the mechanism a real deployment would use, and this ' +
+                    'service neither issues nor reads it.',
+      consumed: [{
+        kind: 'subject_token',
+        identifier: String(subject.jti || ''),
+        note: subjectVerified
+          ? 'signed by this service and verified'
+          : 'NOT signed by this service; read without verifying'
+      }].concat(act ? [{
+        kind: 'actor_token',
+        note: 'read without verifying — only its `sub` is taken, which is what ' +
+              'goes into the `act` claim'
+      }] : []),
+      produced: [{
+        kind: 'access_token',
+        identifier: issuedJti,
+        note: act ? 'carries an `act` claim naming ' + String(act.sub || '(nobody)')
+                  : 'carries nothing about the client that exchanged it'
+      }],
+      // No session, and that is a fact about token exchange rather than a gap:
+      // a service exchanging a token on somebody's behalf has no browser
+      // anywhere in it. issue() records the same emptiness on the token itself.
+      sessionId: ''
+    });
     return respond(exchanged);
   }
 
@@ -3435,7 +3752,19 @@ app.get('/tos', function (req, res) {
 module.exports = {
   asMetadata: asMetadata,
   accessToken: accessToken,
-  tokenSet: tokenSet
+  tokenSet: tokenSet,
+  // The outstanding authorization codes, for the protocol-independent logout.
+  // Functions rather than the Map, and both stores behind them — see the block
+  // above outstandingCodesFor(). `logout/logout.js` requires this module in the
+  // ordinary direction: server.js loads it long before that one, so the require
+  // moves no route and closes no cycle.
+  outstandingCodesFor: outstandingCodesFor,
+  dropCode: dropCode,
+  // Which issuer identifier a sign-out should put in a front-channel
+  // notification's `iss`. This process runs several named authorization servers
+  // and an RP is expecting the one that issued ITS tokens, so the caller has to
+  // be able to ask rather than assume the default.
+  issuerOf: issuerOf
   // `registeredClients` used to be exported from here. It is not a Map in this
   // module any more — the registrations are entries under ou=applications, and
   // `applications.registrationOf()` is how anything reads one. Re-exporting a

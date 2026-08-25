@@ -1,6 +1,6 @@
 ---
 title: Parent project migration
-nav_order: 7
+nav_order: 9
 ---
 
 # What `../oauth2-oidc-debugger` needs when the `sts/` pin is bumped
@@ -57,7 +57,17 @@ COPY sts/kerberos/spnego.js sts/kerberos/krb5_spnego.js ./sts/kerberos/
 COPY sts/common/app.js sts/common/helpers.js sts/common/config.js \
      sts/common/config_file.js ./sts/common/
 COPY sts/common/admin_stats.js sts/common/audit.js \
-     sts/common/applications.js ./sts/common/
+     sts/common/applications.js sts/common/delegation.js ./sts/common/
+
+# admin_stats.js requires the FEDERATION REGISTER, for the per-partner attribute
+# release filter it consults at jwtClaims() and samlAttributes(). That module
+# registers no route and requires only config.js, helpers.js and audit.js, so it
+# is a leaf here — but it is a REQUIRE, so a Kerberos job that loads app.js loads
+# it, and without this line dies at startup with "Cannot find module
+# '../federation/federation'". Only the one file: federation_sp.js registers
+# routes and is never loaded in-process, and federation_map.js and
+# federation_http.js are only required by it.
+COPY sts/federation/federation.js ./sts/federation/
 
 # app.js requires oauth2_bcp.js, which pulls client_auth.js and mtls.js behind
 # it. Three files, one directory now.
@@ -84,6 +94,17 @@ COPY sts/env ./sts/env
 
 The old `COPY sts/contexts ./sts/contexts` line goes away — `contexts/` is inside
 `common/vendored/` now.
+
+**`common/delegation.js` is a SECOND addition to the closure and it arrived after
+this document was written** (2026-08-24, the delegation register). `krb5_kdc.js`
+requires it — that is where four of the eight delegation mechanisms are recorded
+— so every in-process Kerberos job needs it in the image. It requires only
+`helpers.js`, `config.js` and `admin_stats.js`, all three of which are already
+copied, so it adds one filename and nothing behind it. This is exactly the case
+the closure walk below exists to catch, and it is written down here rather than
+left to the walk because the symptom is `Cannot find module
+'../common/delegation'` at load, which names a module rather than a missing COPY
+line.
 
 **Rerun the closure walk after the bump.** Seed it with every `sts/**/*.js`
 copied, follow each `require('./x')` and `require('../y/x')`, and require the

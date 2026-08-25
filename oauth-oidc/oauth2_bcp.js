@@ -112,6 +112,10 @@
 // ===========================================================================
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const { log } = require('../common/helpers');
 const config = require('../common/config');
 // HOW a client proves who it is — all six methods, verified. A library like this
@@ -1318,7 +1322,12 @@ function checkPostLogoutRedirectUri(opts) {
 // ---------------------------------------------------------------------------
 const TRANSACTION_TTL_MS = 10 * 60 * 1000;   // twice an authorization code's life
 const MAX_TRANSACTIONS = 500;
-const transactions = new Map();              // 'pkce:x' / 'nonce:x' -> record
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const transactions = realms.map();              // 'pkce:x' / 'nonce:x' -> record
 
 function forgetStaleTransactions() {
   log.debug("Entering forgetStaleTransactions().");
@@ -1805,8 +1814,18 @@ function refreshFamilyWindowMs() {
   return Math.max(config.value('oauth2.refreshTokenTtlS') * 1000, 3600 * 1000);
 }
 const MAX_REFRESH_TOKENS = 2000;
-const refreshTokens = new Map();   // jti -> { family, clientId, rotated, forget }
-const refreshFamilies = new Map(); // family -> { members: [jti], clientId, forget }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const refreshTokens = realms.map();   // jti -> { family, clientId, rotated, forget }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const refreshFamilies = realms.map(); // family -> { members: [jti], clientId, forget }
 
 function forgetStaleRefreshTokens() {
   log.debug("Entering forgetStaleRefreshTokens().");

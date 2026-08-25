@@ -55,6 +55,12 @@ const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const bunyan = require("bunyan");
 const bbs2023 = require('./vendored/bbs2023.js');
+// TRUST REALMS. Two things in this file are per realm and both are here rather
+// than in twenty modules for the same reason: this is where every one of them
+// already looks. `baseUrlOf()` is how eighty call sites build a URL, and `STS`
+// is how eight of them reach a signing key. realms.js requires config.js and
+// nothing else here, so this cannot be a cycle.
+const realms = require('./realms');
 const log = bunyan.createLogger({ name: 'sts',
                                 level: config.value('global.logLevel') });
 // Registering it is what makes global.logLevel a setting rather than a claim:
@@ -186,31 +192,75 @@ function makeStsKeys() {
   };
 }
 
-const STS = makeStsKeys();
+// ---------------------------------------------------------------------------
+// ONE SIGNING KEY PER TRUST REALM, AND `STS` IS A VIEW ONTO THE CURRENT ONE.
+//
+// A realm that shared the process's key would not be a trust realm. The whole
+// claim a realm makes is that a token it issued is ITS token — so a verifier
+// that fetched realm `acme`'s JWKS and is handed a token minted in the default
+// realm must find that the signature does not verify. Two realms on one key
+// would make every realm's tokens interchangeable, which is the one property
+// somebody defining a second realm is trying not to have.
+//
+// LAZY, per realm: `makeStsKeys()` generates a 2048-bit RSA key, which is a
+// tenth of a second, and a realm that has issued nothing has not paid for one.
+// The default realm's is made on the first read, which is during module load
+// here — so a service with no realms does exactly what it did before, at
+// exactly the same moment.
+//
+// A PROXY rather than a function, and the reason is the call sites again: eight
+// modules destructure `const { STS } = require('./helpers')` and then read
+// `STS.kid`, `STS.certPem`, `STS.privateKey`. A function would have been
+// `stsKeys().kid` at every one of them; the proxy leaves all eight untouched
+// and correct. What it forwards is a property READ — there is nothing here that
+// writes to STS after this file has finished, and the one thing that used to
+// (`STS.privateKey = …` below) is now part of what the factory returns.
+// ---------------------------------------------------------------------------
+const stsKeysFor = realms.keyed(function (realm) {
+  const keys = makeStsKeys();
+  // ---------------------------------------------------------------------
+  // THE SAME PRIVATE KEY AS AN ALREADY-PARSED `KeyObject`, and it is here for
+  // speed rather than for tidiness.
+  //
+  // `jwt.sign(payload, pem, ...)` hands node a PEM STRING, and node has to turn
+  // that string into a key before it can sign with it — every single time. That
+  // parse is not a rounding error: under load it measured 21% of this service's
+  // non-idle CPU, against 48% for the RSA signature it was preparing for, so
+  // roughly a third of the cost of issuing a token was re-reading a key that had
+  // not changed since startup. Parsing it once here took one signature from
+  // 1.08ms to 0.48ms and rather more than doubled the token endpoint's
+  // throughput.
+  //
+  // It lives ON the key set rather than beside it because every module that
+  // signs already destructures `STS` from this file, so the eight call sites
+  // needed nothing new imported. `privateKeyPem` is KEPT and is still what the
+  // three XML signers use — xml-crypto takes the PEM — so nothing that read it
+  // before had to change.
+  //
+  // It is derived rather than stored: there is exactly one private key per
+  // realm and this is the same one, so the two cannot drift apart.
+  // ---------------------------------------------------------------------
+  keys.privateKey = crypto.createPrivateKey(keys.privateKeyPem);
+  keys.realm = realm.id;
+  log.info('A signing key was generated for the "' + realm.id + '" realm: kid=' +
+           keys.kid + '.');
+  return keys;
+});
 
-// ---------------------------------------------------------------------------
-// THE SAME PRIVATE KEY AS AN ALREADY-PARSED `KeyObject`, and it is here for
-// speed rather than for tidiness.
-//
-// `jwt.sign(payload, pem, ...)` hands node a PEM STRING, and node has to turn
-// that string into a key before it can sign with it — every single time. That
-// parse is not a rounding error: under load it measured 21% of this service's
-// non-idle CPU, against 48% for the RSA signature it was preparing for, so
-// roughly a third of the cost of issuing a token was re-reading a key that had
-// not changed since startup. Parsing it once here took one signature from
-// 1.08ms to 0.48ms and rather more than doubled the token endpoint's
-// throughput.
-//
-// It lives ON `STS` rather than beside it because every module that signs
-// already destructures `STS` from this file, so the eight call sites needed
-// nothing new imported. `privateKeyPem` is KEPT and is still what the three
-// XML signers use — xml-crypto takes the PEM — so nothing that read it before
-// had to change.
-//
-// It is derived rather than stored: there is exactly one private key in this
-// process and this is the same one, so the two cannot drift apart.
-// ---------------------------------------------------------------------------
-STS.privateKey = crypto.createPrivateKey(STS.privateKeyPem);
+const STS = new Proxy({}, {
+  get: function (target, prop) { return stsKeysFor()[prop]; },
+  has: function (target, prop) { return prop in stsKeysFor(); },
+  ownKeys: function () { return Reflect.ownKeys(stsKeysFor()); },
+  getOwnPropertyDescriptor: function (target, prop) {
+    const d = Object.getOwnPropertyDescriptor(stsKeysFor(), prop);
+    // A proxy may not report a property as non-configurable when its target has
+    // no such property, and this target is permanently empty. Marking every
+    // descriptor configurable is what keeps Object.keys() and a spread legal
+    // over this — the JWKS builder spreads it.
+    return d ? Object.assign({}, d, { configurable: true }) : undefined;
+  }
+});
+
 
 // Every document that carries or describes this key is served `Cache-Control:
 // no-store` (the RFC 8414 metadata, the OID4VCI credential issuer metadata, the
@@ -433,10 +483,24 @@ function forwardedFrom(req) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// IT INCLUDES THE TRUST REALM'S PATH PREFIX, AND THAT ONE LINE IS WHY EIGHTY
+// CALL SITES ARE REALM-AWARE WITHOUT HAVING BEEN EDITED.
+//
+// Every issuer identifier, every RFC 8414 and OpenID Provider metadata
+// document, every SAML entityID and metadata URL, every credential issuer
+// identifier, every did:web, every DPoP `htu` and every redirect this service
+// builds is `baseUrlOf(req)` with a path glued to it. Returning
+// `http://host:8081/realm/acme` here rather than `http://host:8081` makes all
+// of them name the realm the request arrived in — which is exactly what makes
+// two realms two authorization servers rather than one served twice.
+//
+// It is EMPTY in the default realm, so this is the same string it always was.
+// ---------------------------------------------------------------------------
 function baseUrlOf(req) {
   log.debug("Entering baseUrlOf().");
   const from = forwardedFrom(req);
-  const base = from.proto + '://' + from.host;
+  const base = from.proto + '://' + from.host + realms.currentPrefix();
   log.debug("Leaving baseUrlOf(). base=" + base +
             (from.forwarded ? " (from forwarded headers; global.trustProxy is on)" : ""));
   return base;
@@ -598,5 +662,11 @@ module.exports = {
   userFor: userFor,
   hasScope: hasScope,
   escapeRdnValue: escapeRdnValue,
-  dnRfc4514: dnRfc4514
+  dnRfc4514: dnRfc4514,
+  // The whole key set of ONE named realm, for the two callers that need a
+  // realm's key while not in that realm: the console's realm list, which shows
+  // each realm's kid, and the logout that has to know whose token it is looking
+  // at. Everything else reads `STS` and gets the ambient realm's, which is what
+  // it wanted.
+  stsKeysFor: stsKeysFor
 };

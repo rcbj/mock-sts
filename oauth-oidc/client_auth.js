@@ -71,6 +71,10 @@
 // ===========================================================================
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
 const { log } = require('../common/helpers');
 const config = require('../common/config');
@@ -109,7 +113,12 @@ function isAsymmetric(method) {
 // drops the oldest.
 // ---------------------------------------------------------------------------
 const MAX_ASSERTIONS = 1000;
-const seenAssertions = new Map();   // jti -> forget-at
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const seenAssertions = realms.map();   // jti -> forget-at
 
 function forgetStaleAssertions() {
   const now = Date.now();

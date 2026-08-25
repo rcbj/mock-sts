@@ -13,6 +13,7 @@ more than one family needs it, not because it felt general.
 | `admin_stats.js` | The counters, the revocation set, and `recordAuthentication()` — the single authentication funnel. |
 | `audit.js` | What happened, when, and to whom, as discrete events. Sits BESIDE `admin_stats.js`, not under it. |
 | `applications.js` | Every application this service has been asked about, stored in the directory under `ou=applications`. |
+| `delegation.js` | Who acted on whose behalf, through what, to reach what — eight mechanisms across three protocol families in ONE model. |
 | `claim_attributes.js` | Which LDAP attributes a token or an assertion carries, per claim set. |
 | `group_claims.js` | The groups claim, in all four claim sets at once. |
 | `vendored/` | Byte-identical copies of the parent project's files. **Do not edit them here** — see `common/vendored/CLAUDE.md`. |
@@ -83,6 +84,179 @@ throughput rather more than doubled.
 **A new signer picks by library**: jsonwebtoken gets `STS.privateKey`,
 xml-crypto gets `STS.privateKeyPem`. They are the same key and are derived from
 each other, so they cannot drift.
+
+## `realms.js`: several logical copies of this service, in one process
+
+A **trust realm** is a whole mock identity service — its own configuration, its
+own signing key, its own sessions, authorization codes, tokens, offers,
+artifacts, statistics and audit log — answering on the SAME sockets as every
+other and told apart by a segment at the front of the path:
+
+```
+http://host:8081/oauth2/token                the DEFAULT realm
+http://host:8081/realm/acme/oauth2/token     the realm `acme`
+```
+
+**THE DEFAULT REALM HAS AN EMPTY PREFIX AND THAT IS THE WHOLE CONTRACT.** A
+service with no realms defined behaves exactly as it did before this module
+existed — nothing is stripped, no URL is rewritten, no store is partitioned
+differently, no page grows a control. That is a property of ONE predicate,
+`active()`, rather than a claim spread over twenty files, and it is what keeps
+every test, container and client that predates realms working unchanged.
+
+### Forty modules became realm-aware without being edited
+
+The obvious implementation threads a realm argument through every function that
+reads a setting, mints a token or touches a store — several hundred call sites,
+every one of them a chance to drop the argument silently. A token minted for the
+wrong realm looks exactly like a token minted for the right one.
+
+So the realm is **AMBIENT**, held in an `AsyncLocalStorage` that `app.js`'s front
+middleware enters for the whole life of a request. Four consequences, and they
+are why this module is short:
+
+* **`config.value(key)`** consults the current realm's overrides first, so every
+  one of the 200-odd setting reads in this service is realm-aware where it
+  stands. Rule 3m, below.
+* **`helpers.baseUrlOf(req)`** appends the realm's prefix, so every issuer
+  identifier, metadata document, entityID, `did:web`, DPoP `htu`, redirect and
+  form action this service builds names the realm it was built in. That one line
+  brought eighty call sites with it.
+* **`helpers.STS`** is a Proxy onto the CURRENT realm's key set, generated
+  lazily. Eight modules destructure it and read `STS.kid`, `STS.certPem`,
+  `STS.privateKey`; not one of them changed.
+* **A store declared `realms.map()`, `realms.arr()` or `realms.obj()`** is
+  partitioned by realm behind an unchanged Map/Array/Object interface, so
+  converting one was a one-line edit at the declaration and no edit at all at its
+  hundred readers.
+
+`AsyncLocalStorage` is the right primitive rather than a convenient one. A
+request here is a chain of awaits and callbacks — an LDAP search, an RSA
+signature, a gRPC call — and a module-level `currentRealm` variable would be
+correct only until two requests for two realms overlapped: correct in every test
+and wrong in every use, with the failure being a token signed with another
+realm's key under load and nothing else.
+
+**The one place it does not propagate is an EventEmitter listener**, which runs
+in the async context of whatever emitted the event rather than the one it was
+added in. `app.js`'s call log and audit row are written from `res.on('finish')`,
+so that handler re-enters `req.realm` EXPLICITLY. It is not belt and braces:
+without it the statistics land in whichever realm the process happened to be in,
+which under load is a different one.
+
+### Rule 3m: the realm's overrides are an inverted hook into `config.js`
+
+`realms.js` requires `config.js` in the ordinary direction — it validates a
+realm's settings through `checkOverride()` and reads its own two settings
+through `value()`. `config.js` needs the current realm's overrides and cannot
+require this module back, so it offers `setRealmContext()` and this fills it at
+require time. That is rule 3e's shape and it passes rule 3e's test in the one
+direction that matters: a require here would close a cycle.
+
+The slot answers the REALM RECORD rather than its overrides, because
+**`config.js` writes through it too**. `setOverride()` in a realm sets the
+REALM's value — which is what makes `/admin/config`, `/admin/token-lifetimes`
+and `POST /admin-api/config/set` realm-aware without one of them being edited.
+Setting a value while `acme` is ambient means setting it for `acme`; anything
+else would be a console page that reads one realm and writes another.
+
+**TWO SETTINGS ARE EXEMPT IN BOTH DIRECTIONS** and it is not caution:
+`realms.enabled` and `realms.pathSegment` are read below the realm layer,
+always. A realm that could switch realms off would be doing it from inside the
+request that found it, and a realm that could move its own prefix would change
+the prefix that had already been used to find it. They are refused at the writing
+end as well, but the reading end is the lock that cannot be got around.
+
+### A new realm is born with its own names for the things that are NAMES
+
+Six settings here are identifiers rather than behaviour — the SAML 2.0 entityID,
+the SAML 1.1 providerID, the WS-Federation entityID, the WS-Trust issuer, the
+SAML assertion issuer and the OpenID4VP verifier client id — and each defaults to
+a fixed string. Two realms carrying one of those strings is not a configuration
+choice: it is two identity providers claiming one entityID, which a service
+provider is entitled to refuse. So `create()` seeds each with the realm id
+appended.
+
+They are **ORDINARY SETTINGS ON THE REALM**, listed as such on `/admin/realms`,
+which is the whole reason this is done at creation rather than inside the six
+reads: an operator can see what was chosen, change it, or unset it and go back to
+sharing the process's name — a realm deliberately impersonating another being a
+case worth building on a mock. A derivation buried in a getter would give six
+values that could not be seen and could not be changed.
+
+`oauth2.issuer` is deliberately NOT seeded: it defaults to empty, meaning "name
+the base URL this request arrived on", and that already carries the prefix.
+
+### What a realm does NOT separate, and why saying so is the feature
+
+`realmSupport()` is the index, and both `/admin/realms` and `GET /realms` render
+it, so the answer is something this service tells you rather than something a
+reader derives from four directory files. The short version:
+
+* **What a realm separates completely** is what this service ISSUES and
+  everything it holds while issuing it: keys, sessions, authorization codes,
+  tokens, refresh families, DPoP and client-assertion replay state, offers,
+  pre-authorized codes, presentation transactions, SAML request state and
+  artifacts, the claim selections, the verifier's request, the statistics and
+  the audit log.
+* **What it does not separate at all is the DIRECTORY.** One `ou=users`, one
+  `ou=groups` and one `ou=applications` for the whole process, because LDAP
+  answers on a socket with no path to put a segment in. So OAuth client
+  registrations, SAML service provider entries, the SPIFFE registry and **the
+  two admin console roles** are shared — there is no per-realm administrator.
+* **Kerberos, the two TLS listeners and SPIFFE's four sockets are shared**, for
+  the same reason. Kerberos is the one with an obvious way forward, and it is
+  written down in `realmSupport()` rather than left to be rediscovered: Kerberos
+  already HAS a realm, so give each trust realm a `krb5.realm` of its own and
+  dispatch a request on the realm name it carries. What stands in the way is
+  that `krb5.realm` is not runtime-settable — the principal database and its
+  long-term keys are built from it at require time — so that database has to
+  become per-realm and lazily built first.
+
+### An id is a path segment, so it is narrower than a name
+
+Lower-case letters, digits and hyphens, starting with a letter or a digit, at
+most 31 characters. It may not be `default`, and **it may not be the first
+segment of a path this service already serves** — that list is read off the LIVE
+ROUTER through a provider `app.js` installs, so a family added tomorrow protects
+itself. The refusal stands whatever `realms.pathSegment` is set to, precisely
+because that setting is runtime-settable: a realm created under a segment and
+legal there would otherwise become a shadow over the console the moment somebody
+cleared it, and the failure would arrive as "the console stopped existing".
+
+### Removing a realm takes its state with it
+
+Every store made here registers a purge and `remove()` calls them all. If removal
+only dropped the registry row, a realm re-created with the same id would inherit
+the last one's sessions and tokens — the single most surprising thing a
+re-created realm could do. Nothing is removed from the directory, because nothing
+there belongs to a realm.
+
+**A realm cannot remove ITSELF.** The response is a 303 to `/admin/realms`, which
+`app.js` is about to rewrite into the realm being deleted; the reader would be
+redirected into a prefix that stopped existing one instruction earlier.
+Everything else about the removal would have worked, which is what makes it worth
+refusing rather than special-casing.
+
+### The HTML rewrite in `app.js`, and its one honest limitation
+
+Every root-relative `href`, `action` and `src` in a `text/html` response is
+rewritten to carry the current realm's prefix. That is what makes the console's
+several hundred hand-written links, the login screen's form and the four autopost
+pages work inside a realm without one of them being edited — and a missed link
+would be one that silently LEAVES the realm rather than one that breaks, which is
+why it is done once at the choke point rather than at the call sites. It runs in
+a non-default realm only, so the default realm's bytes are not merely unchanged
+but untouched.
+
+**A URL built inside a SCRIPT is not markup and is not rewritten.** There is one
+such page — `/admin-api/docs`, whose explorer builds request URLs from the
+OpenAPI document's `path` members — and it is handled by being HANDED the prefix
+as `data-realm-prefix` rather than by having its markup rewritten. Without that,
+pressing "Try it" inside a realm would call the DEFAULT realm's API: the page
+would look right, the call would succeed, and it would have changed the wrong
+service. A fifth scripted page would need the same treatment and would not get it
+for free.
 
 ## `config.js` is the only place a setting is read
 
@@ -273,6 +447,28 @@ find module` naming a file the operator never mentioned.
    that inflated the authentication count would make this page's central number
    mean two things at once.
 
+   **AND THE PAYLOAD CARRIES A `federation` FIELD, WHICH IS A THIRD THING AGAIN
+   AND STILL NOT A NEW SLOT.** A federated sign-in — `../federation/federation_sp.js`
+   — puts the attributes a FOREIGN identity provider asserted onto the observer's
+   detail, already mapped to this directory's own names, and `ldap_server.js`
+   writes them onto the entry. It is not a fourth `event`, and that is rule 3e's
+   test rather than convenience: this IS an authentication, and filing it as
+   something else would take a federated sign-in off `/admin/users`, which is
+   precisely where somebody looks for one. It is not a sixth slot either —
+   `certificate` and `linkedTo` already established that a family with an extra
+   fact about the identity puts it on THIS payload, and this is the third. What
+   would justify a slot is a require that closes a cycle or moves a route, and
+   there is none: `federation.js` registers nothing.
+
+   **`recordAuthentication()` is NOT what a federated sign-in calls, and the
+   reason belongs here because it is about this funnel.** It calls
+   `authn.startSession()`, which records the authentication itself — so calling
+   both produced TWO records for one sign-in, `/admin/users` counted every
+   federated arrival twice, and the audit log carried a duplicate of each. That
+   is what `startSession()`'s sixth argument exists for. The rule to keep: **one
+   act is one row at this funnel**, and a caller that starts a session must not
+   also record the authentication that started it.
+
 3c. **`audit.js` is a library too, it sits BESIDE `admin_stats.js` rather than
    under it, and one dependency into it is inverted.** `admin_stats.js` answers
    "how much"; this answers "what, when, and to whom", as a list of discrete
@@ -339,6 +535,17 @@ find module` naming a file the operator never mentioned.
    on `audit.maxEvents` and `audit.protocolCalls` claims — see the config
    section below for why a captured `const` is the one thing `/admin/config`
    cannot reach.
+
+   **`logout.global` and `logout.selective` are ONE ROW PER ACT and not one per
+   thing ended**, which is this rule read from the other side. A global logout
+   ends sessions, revokes tokens, discards codes, drops directory connections
+   and stamps a Kerberos principal — and every session it ends already writes
+   its own `session.end` through `dropSession()`. A row per item would count one
+   sign-out twice at two layers. What those two actions add is the fact none of
+   the others can carry: that these were one act, asked for by one person, at
+   one moment, and how much of it could NOT be ended. They are in the `session`
+   category rather than a seventh, because a category per family would be six
+   categories for one act.
 
    **There is no clear operation and there must not be one.** An erase control
    on an unprotected console would make an audit log unable to answer the one
@@ -645,6 +852,79 @@ find module` naming a file the operator never mentioned.
    that client; that is the honest state of a service that authenticates nobody.
    They are never given to `audit.js`, whose no-credential rule is untouched.
 
+
+---
+
+3l. **`delegation.js` is a library like `audit.js`, it sits BESIDE
+   `admin_stats.js` too, and THERE IS NO FUNNEL FOR IT — which is the one thing
+   about it that breaks a pattern this repository otherwise keeps.**
+   `admin_stats.js` answers "how much", `audit.js` answers "what, when and to
+   whom", and this answers *who acted on whose behalf, through what, to reach
+   what* — one model over Kerberos S4U2Self, S4U2Proxy (classic and
+   resource-based) and a forwarded TGT, WS-Trust `OnBehalfOf` and `ActAs`, and
+   RFC 8693 token exchange in both its shapes.
+
+   It requires `helpers.js`, `config.js` and `admin_stats.js` — that last one
+   for `identityKeyOf()`'s normalisation only, so that `alice`, `alice@REALM`
+   and `urn:sts-mock:user:alice` are one person on a chain rather than three.
+   `admin_stats.js` requires nothing here, so there is no cycle and none of
+   rule 3e's slots is needed. Keep it that way: it is called from the KDC, from
+   WS-Trust and from the token endpoint, and anything it required all three
+   would require transitively.
+
+   **THE MISSING FUNNEL IS THE THING TO UNDERSTAND BEFORE CHANGING ANY OF IT.**
+   `signJwt()` is the single point every JWT passes and
+   `recordAuthentication()` is the single point every accepted credential
+   passes, so each of those is counted in one place and a new call site cannot
+   be forgotten. Delegation has no such point and cannot be given one: it
+   happens in three modules that share no code path, and the moment it becomes
+   visible is different in each — a padata in a TGS-REQ, an element in an RST,
+   a form field on a token request. So this file is called from several places
+   ON PURPOSE. What the shape buys instead is that all of them produce the same
+   row, and each caller is as close as possible to a funnel of its own:
+   `krb5_kdc.js` records ELEVEN refusal paths at ONE site, by carrying an
+   `intent` out of `resolveS4u()` through `refuseS4u()`.
+
+   **REFUSALS ARE RECORDED AND THAT IS MOST OF THE POINT.** A delegation that
+   succeeded is also an accepted credential, so it already has an
+   `authentication` row and a `/admin/users` row. A delegation that was REFUSED
+   has neither — nothing was accepted — so this is the only list it is in, and
+   it is the one somebody hunting a misconfiguration actually wants. The reason
+   on the row is the KDC's OWN `e-text`, the same sentence the client was sent,
+   rather than a second wording that could come to disagree with it.
+
+   **NOTHING HERE WRITES AN AUDIT ROW, deliberately.** A successful act would
+   get a second row for one act, which is the double-count rule 3c warns about;
+   a refused one writes none because nothing was accepted, and closing that gap
+   is what this store is for rather than a seventh audit category. Cite this
+   paragraph before adding an `audit()` call to it.
+
+   **`record()` CANNOT THROW.** The whole body is wrapped and a caller must
+   never guard it — the fourth place that rule applies (after `audit()`,
+   `signJwt()`'s recorder and the directory's user observer), and the first
+   where the thing it protects is a Kerberos ticket already half built.
+
+   **A ROW IS AN ACT, NOT A RELATIONSHIP**, and `chainKey` is what collapses
+   them: the mechanism and the three parties, with the time, the credentials
+   and — deliberately — the OUTCOME left out, so a chain refused nine times and
+   then fixed is ONE edge that changes colour rather than two that never meet.
+   `chainList()` is where the collapse lives, here rather than in `admin.js`,
+   because what counts as one chain is a statement about this store.
+
+   One thing it deliberately does NOT do: create an application entry for a
+   layer it names. `ou=applications` holds what this service was ASKED ABOUT,
+   and a delegation naming something nobody has otherwise mentioned — an RFC
+   8693 `audience`, typically — is an ordinary and interesting outcome. The
+   page resolves the name against that registry and reports which of the two it
+   found; writing the entry from here would be a fifth door onto it and would
+   make the page unable to report the difference.
+
+   **The CONFIGURED half of `/admin/delegation` is NOT in this file.** Who may
+   delegate to whom is `krb5_principals.js`'s `delegationPolicy()`, because
+   what those two attributes mean is a statement about the principal database
+   and that store is over there. A `common/` module reaching into `kerberos/`
+   would have been the layering inversion this directory's entry test exists to
+   prevent; `admin.js` requires both and renders them side by side.
 
 ---
 

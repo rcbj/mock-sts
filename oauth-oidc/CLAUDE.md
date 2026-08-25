@@ -502,3 +502,104 @@ about `dpop.js` is unchanged.
   mandatory; a request with no `DPoP` header is a Bearer request and is answered as
   one, so turning nonce mode on cannot break the Bearer clients this service also
   exists to exercise.
+
+---
+
+## RFC 8693 IS TWO MECHANISMS, AND THE TOKEN ENDPOINT RECORDS THEM AS TWO
+
+Section 1.1 is explicit that impersonation and delegation are different things,
+and `/admin/delegation` is where the difference is visible:
+
+* **no `actor_token` — IMPERSONATION.** What comes back is a token for the
+  subject with nothing on it about who exchanged it. The resource server cannot
+  tell, and neither can anybody reading the token later, which makes that page
+  the only place the fact will ever exist.
+* **an `actor_token` — DELEGATION (§4.1).** What comes back carries `act` naming
+  the actor, and `act` NESTS: a second hop appears underneath the first rather
+  than replacing it.
+
+The act is recorded through `../common/delegation.js` (rule 3l) AFTER `issue()`,
+so the row can name the token that came out. Two details are worth keeping if it
+is reworked. The `jti` is read back off the signed access token with
+`jsonFromB64u()` — the same reader the `actor_token` is decoded with twelve lines
+above — rather than by changing the return type of the one helper every grant
+here mints through. And the INTERMEDIARY of the chain is deliberately both an
+identity and an application: the client performing the exchange is the
+application, always, and the actor named in the `actor_token` is the identity,
+which only a delegation has. An impersonation therefore draws a chain whose
+middle is an application and nobody, which is exactly what happened.
+
+**Nothing authorizes either of them here**, and the row says so where a Kerberos
+row names an attribute. `may_act` is the claim a real deployment would use for
+it; this service neither issues nor reads one.
+
+---
+
+3n. **`frontchannel_logout.js` is a library (rule 3) and it exists because THREE
+   sign-outs have to fan out identically.** It registers no route, so its place
+   in the require order does not matter, and it requires `helpers.js`,
+   `config.js`, `app.js` and `applications.js` — none of which requires it back.
+
+   It holds four things: which clients a session signed into
+   (`noteClient()`, written on the session at `issueAuthorizationResponse()`, the
+   one point where both the client and the session are in scope), the
+   notification URLs (`notificationsFor()`), the CSP the iframes need
+   (`contentSecurityPolicyFor()`), and the block of HTML (`render()`).
+
+   **It is a file of its own rather than code in `oauth2.js` for one reason:**
+   `/oauth2/logout`, the protocol-independent `/logout` and the console all have
+   to render the SAME fan-out, and `logout/logout.js` reaching into `oauth2.js`
+   for it would be a require this file makes unnecessary — `oauth2.js` requires
+   THIS, so the other direction would be a cycle.
+
+   **`sid` REVERSED A DOCUMENTED DECISION AND THE REVERSAL IS THE INTERESTING
+   PART.** `admin_stats.js` used to say, in as many words, that no token this
+   service issues carries a session identifier and that inventing one to make a
+   console page easier would change what every client receives. That was right,
+   and the reasoning is kept: **a claim is added because a SPECIFICATION needs
+   it, not because something here would find it convenient.** Front-Channel
+   Logout section 3 is that specification — an RP holding two sessions in one
+   browser cannot tell which ended without `sid`. So the ID Token carries it when
+   it was issued ON a session, and `oauth2.frontchannelLogout` turns the claim,
+   the two metadata members and the fan-out off together, in one place. Three
+   switches would let somebody advertise a capability whose claim is off, which
+   is a discovery document that lies.
+
+   **THE IFRAMES ARE THE SIXTH CSP RELAXATION AND THE NARROWEST.** `frame-src`
+   falls back from `default-src 'none'`, so an iframe to another origin is
+   blocked — correct everywhere else here. The sign-out page relaxes it to THE
+   ORIGINS IT IS ACTUALLY LOADING, enumerated from the URIs, rather than to `*`.
+   It goes through `app.contentSecurityPolicy()` like every other relaxation, so
+   `frame-ancestors` and `base-uri` cannot be dropped by it. A URI this runtime
+   cannot parse is left OUT of the policy rather than widening it: the iframe
+   then does not load, which is the safe direction, and the row beside it still
+   shows the URL.
+
+   **EVERY URL IS PRINTED AS A LINK BESIDE ITS IFRAME**, because section 5 says
+   the provider cannot know whether a notification succeeded. A dead relying
+   party, a certificate the browser will not accept and a mistyped URI all look
+   exactly like success; the link is the only thing that turns "nothing
+   happened" into something a person can click. Same decision `wsfed.js` made
+   about its cleanup pings.
+
+   **`/oauth2/logout` CAN NOW ANSWER WITH A PAGE INSTEAD OF A REDIRECT**, and
+   only when there is a fan-out to perform: a 302 to `post_logout_redirect_uri`
+   abandons the document before any iframe loads. **Where no client on the
+   session registered a logout URI — every deployment that has not asked for
+   this — the redirect happens exactly as it always did.** The behaviour of an
+   existing caller must not turn on a feature it never opted into.
+
+   **BACK-CHANNEL LOGOUT IS A DIFFERENT SPECIFICATION AND IS NOT IMPLEMENTED.**
+   It is a signed Logout Token POSTed server-to-server, which needs this service
+   to reach the RP's network rather than the browser's. `backchannel_logout_supported`
+   stays `false`; advertising it because front-channel arrived would be the
+   overstatement that document exists not to make.
+
+   `outstandingCodesFor()` / `dropCode()` are exported from `oauth2.js` for the
+   same feature and are FUNCTIONS rather than the `authzCodes` Map, for the
+   reason `registeredClients` is no longer exported: a caller holding the Map
+   would be a second place that decides what a code is, and would miss
+   `redeemedCodes` beside it — so a signed-out code would still answer a REPEAT
+   of the token request with the tokens it already got, and a sign-out that hands
+   back a token set is not a sign-out.
+

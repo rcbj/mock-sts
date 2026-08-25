@@ -40,6 +40,10 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 // jsonwebtoken and the STS key arrived with presentedAccessToken() below: it
 // verifies an access token this service issued before believing its cnf. Still a
 // leaf — jsonwebtoken is an npm package and helpers.js is this module's only
@@ -109,14 +113,24 @@ const IAT_SKEW_SECONDS = 300;
 // real deployment this is a shared cache with an eviction policy; here it is a
 // Map of jti -> the second it was seen, pruned on use, which is all a mock needs
 // and is honest about being bounded by the same window as `iat`.
-const seenJtis = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const seenJtis = realms.map();
 
 // Server-supplied nonces (sections 8 and 9). OFF by default: the mechanism is a
 // second round trip on the first request of every session, so a deployment opts
 // in. `requireNonces()` is read per request rather than captured at require
 // time, so a test can turn it on and off without restarting the service.
 let nonceMode = false;
-const issuedNonces = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const issuedNonces = realms.map();
 const NONCE_TTL_SECONDS = 300;
 
 function setNonceMode(on) {

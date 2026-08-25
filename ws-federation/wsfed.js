@@ -50,7 +50,11 @@
 //    relying party unless told otherwise, and the RP libraries written against it
 //    read 1.1 first. A mock whose default was the rarer of the two would exercise
 //    the wrong half of those clients. Both are offered (see `tokenType` below and
-//    `fed:TokenTypesOffered` in the metadata), and saml11.js exists for this.
+//    `fed:TokenTypesOffered` in the metadata), and saml11.js exists for this —
+//    though SINCE 2026-08-24 IT IS NO LONGER ONLY FOR THIS: `saml/saml11_sso.js`
+//    calls the same builder for SAML 1.1's own browser profiles at /saml11. This
+//    profile is still the reason it was written, and it is no longer the only
+//    reason it is here.
 //
 // 2. **The RSTR wrapper uses the WS-Trust 2005/02 namespace by default**, as a
 //    single RequestSecurityTokenResponse rather than a Collection. That is what AD
@@ -888,11 +892,43 @@ app.post('/wsfed/login', function (req, res) {
 //
 // The pings are also listed visibly on the page. A silent `<img>` that failed would
 // leave a person with no way to see that the cleanup did not happen.
+// ---------------------------------------------------------------------------
+// THE CLEANUP REQUESTS ONE SESSION IS OWED, as data rather than as HTML.
+//
+// `session.wsfedRealms` is written when a sign-in response goes out and holds
+// realm -> wreply. This turns it into the list a sign-out has to ping, and it
+// is a function of its own for ONE reason: the protocol-independent `/logout`
+// at the root of this service has to send exactly these, and a second builder
+// over there would be a second answer to "where does a WS-Federation cleanup
+// go" — which is precisely the mistake the one-session-store rule exists to
+// prevent, one layer up.
+//
+// A realm whose wreply is empty is REPORTED with an empty url rather than
+// dropped: "this relying party was signed into and there is nowhere to tell it"
+// is the sentence a reader needs, and a filtered list says nothing at all.
+function cleanupTargetsFor(session) {
+  log.debug("Entering cleanupTargetsFor().");
+  const realms = (session && session.wsfedRealms) || {};
+  const out = Object.keys(realms).map(function (realm) {
+    const wreply = String(realms[realm] || '');
+    return {
+      realm: realm,
+      wreply: wreply,
+      url: wreply ? wreply + (wreply.indexOf('?') >= 0 ? '&' : '?') + 'wa=wsignoutcleanup1.0' : ''
+    };
+  });
+  log.debug("Leaving cleanupTargetsFor(). " + out.length + " relying part" +
+            (out.length === 1 ? 'y' : 'ies') + ".");
+  return out;
+}
+
 function signOut(req, res, params, cleanupOnly) {
   log.debug("Entering signOut(). cleanupOnly=" + !!cleanupOnly);
   const session = endSession(req, res);
-  const realms = (session && session.wsfedRealms) || {};
-  const names = Object.keys(realms);
+  const targets = cleanupTargetsFor(session);
+  const names = targets.map(function (t) { return t.realm; });
+  const realms = {};
+  targets.forEach(function (t) { realms[t.realm] = t.wreply; });
   const wreply = params.wreply ? String(params.wreply) : '';
   const cleanupUrl = function (url) {
     return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'wa=wsignoutcleanup1.0';
@@ -1465,5 +1501,11 @@ module.exports = {
   SAML2_TOKEN_TYPE: SAML2_TOKEN_TYPE,
   federationMetadata: federationMetadata,
   verifySignInResponse: verifySignInResponse,
-  verifyAssertionSignature: verifyAssertionSignature
+  verifyAssertionSignature: verifyAssertionSignature,
+  // The cleanup requests one session is owed. Read by ../logout/logout.js so
+  // that a global sign-out sends exactly what wsignout1.0 sends — see the block
+  // above cleanupTargetsFor(). That module requires this one in the ordinary
+  // direction: server.js loads this at 10 and that one last but one, so the
+  // require moves no route and closes no cycle.
+  cleanupTargetsFor: cleanupTargetsFor
 };

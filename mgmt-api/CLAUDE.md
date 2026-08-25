@@ -20,6 +20,16 @@ about that line had to change.
    views, so it must come after it. Nothing else about its position matters — it
    registers no wildcard and collides with no path.
 
+   **`/admin/delegation` is the second page here with no form on it and it is
+   the case that shows what the rule actually asks for.** It arrived with `GET
+   /admin-api/delegation` and nothing else, and that is rule 7 HOLDING rather
+   than being waived: everything that page shows is an observation (an act
+   happened or it did not) or somebody else's configuration (the Kerberos
+   principal database, which nothing in this service can set). There is no
+   control, so there is no operation to mirror. The audit log was the first such
+   page and its own paragraph below argues the same thing from the other
+   direction — that a clear button would be a control nobody should have.
+
    The rule that does matter is **a control added to `/admin` gets an operation
    on `/admin-api` in the same commit** — `/admin/users` grew its first form
    (create a person in the directory) and `POST /admin-api/users/:action` with
@@ -79,6 +89,35 @@ about that line had to change.
    on a mock, and the alternative — a second set of builders for the same data —
    is the thing this whole arrangement exists to prevent.
 
+
+### `/admin-api/federation` is where rule 7 pays MOST, and the honest sentence is sharper here
+
+`/admin/federation` arrived with `GET /admin-api/federation` and `POST
+/admin-api/federation/:action` with all seven of its actions, in the same change.
+Rule 7 as written is satisfied by that. What is worth arguing is why this
+resource matters more than the parity rule alone would suggest, and what it costs.
+
+**It is the only way the feature can be exercised automatically.** A federated
+sign-in cannot be driven without a configured relationship, and a relationship
+cannot be configured through a gated console by a test with no cookie jar. This
+API is not gated, so `POST /admin-api/federation/create` is to federation what
+`POST /admin-api/rbac/grant` is to the roles: not merely a mirror, but the door
+that works when the other one cannot be reached.
+
+**And the consequence is the sharpest form of the one this file already
+states.** Anybody who can reach this port can configure a federation partner —
+which means configuring a signing certificate this service will then BELIEVE, and
+therefore minting themselves a session as anybody. That is not a new hole: the
+same caller can already grant themselves both admin roles here and get a token
+for any username from `/oauth2/token`. But it is the most direct expression of
+it, and the operation's own description says so rather than leaving it to be
+worked out.
+
+**`fedClientSecret` is never returned by this API** — `(set — not returned)` or
+empty. That is deliberately NOT claimed as a security boundary, because an
+`ldapsearch` of `ou=federations` shows it, exactly as `GET /krb5/principals`
+prints every Kerberos password. What it avoids is this API being a SECOND way to
+read a credential that belongs to somebody else's service out of this process.
 
 ### The narrow door: `/admin-api/token-lifetimes`
 
@@ -171,3 +210,61 @@ it pays most.** `/admin/rbac` arrived with `GET /admin-api/rbac` and `POST
 /admin-api/rbac/:action` in the same change, and here the API half is not merely
 parity — it is the only door onto the roster that works when the console cannot
 be reached at all.
+
+---
+
+## `/admin-api/logout` — four operations, and one that differs from its console form
+
+The sign-out resource mirrors `/admin/logout` and calls the same two functions
+in `admin.js`, which call `logout/logout.js`. Rule 7 as usual: the API decides
+nothing the console does not.
+
+**One thing about it is worth stating because it is the only place three doors
+onto one behaviour deliberately DISAGREE.** `POST /logout` with an empty body is
+a **global** logout — that is the documented default and the point of the
+endpoint. `POST /admin-api/logout/end` with an empty `select` is **refused**. The
+absence is the same and the intent is opposite: an empty selection arriving at
+`end` is a caller that built a list and got nothing, where an empty body at
+`/logout` is a caller asking for everything. `global` is the operation that means
+everything, and it is named.
+
+**Two of the four are NON-SPEC and say so in their own summaries** —
+`restore-token` and `restore-kerberos`. RFC 7009 defines no un-revoke and a real
+KDC has no clear-the-instant; both exist for the reason
+`POST /admin-api/tokens/restore` does, which is that restarting this service to
+get back to a working credential turns a two-second test into a two-minute one.
+
+**What this API cannot do is in the reply rather than absent from it.** A
+front-channel logout notification is an iframe in the signed-out person's own
+browser and a WS-Federation cleanup is an image in it; neither is something this
+process performs. They come back in `notifications` and `cleanups` so a caller
+can load them itself, and `/logout` is the page where a browser does it without
+being asked.
+
+## This whole API is realm-scoped, and only five operations are about realms
+
+`/admin-api/config` is the default realm's configuration.
+`/realm/acme/admin-api/config` is `acme`'s, and a `set` posted there sets it on
+`acme` alone. That is not a special case anybody wrote here — it falls out of the
+same path-prefix middleware in `app.js` that makes `/oauth2/token` realm-scoped,
+so **every one of the ninety-odd operations already works per realm** and none of
+them was edited.
+
+The five under `/admin-api/realms` manage the REGISTRY, which is process-wide:
+there is one list of realms, so `GET /admin-api/realms` answers the same list
+whichever prefix it is called under. What differs is `current`, which names the
+realm the CALL arrived in — and `remove` refuses to remove that one, because the
+caller would be left talking to a prefix that had stopped existing.
+
+Rule 7 is unchanged and was the reason those five exist: `/admin/realms` is a
+console page with five actions, so it has five operations, driven through the
+SAME `admin.realmsAction()` the form posts to.
+
+**`/admin-api/docs` is the one page in this service that needed a change**, and
+the reason is worth keeping. `app.js` rewrites root-relative links in HTML to
+carry the realm prefix; the explorer builds its request URLs in JavaScript from
+the OpenAPI document's `path` members, and a script is not markup. So the prefix
+is handed to it as `data-realm-prefix` on the root element and it prepends it.
+Without that, pressing "Try it" inside a realm would call the DEFAULT realm's
+API — the page would look right, the call would succeed, and it would have
+changed the wrong service.

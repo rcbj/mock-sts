@@ -652,6 +652,29 @@ function register(def) {
       passwordMustChange: null
     }, def.pac || {}),
     kvno: 3,
+    // WHEN THIS PRINCIPAL LAST SIGNED OUT, as a Date, or null for never.
+    //
+    // It is the only thing a KDC can honestly do about a credential it has
+    // already handed out. A ticket-granting ticket is an encrypted blob in
+    // somebody's cache; there is no list of them here and there could not be
+    // one on a real KDC either. What a KDC DOES see is the next TGS-REQ that
+    // presents it — so a sign-out records an INSTANT, and handleTgsReq()
+    // refuses a ticket whose `authtime` is earlier than it with
+    // KDC_ERR_TGT_REVOKED (20), which is the error RFC 4120 defines for exactly
+    // this and which nothing here had a way to produce before.
+    //
+    // Three things it deliberately is not. It is NOT `revoked`, one field up:
+    // that is a disabled account and it refuses the AS exchange as well, where
+    // this leaves a fresh authentication working — signing out is not being
+    // locked out, and conflating them would mean a person could log out and
+    // never log back in. It does NOT reach a SERVICE TICKET already in a cache,
+    // because the service that accepts one never contacts the KDC; that is a
+    // fact about Kerberos rather than a gap here, and /logout says so on the
+    // row rather than implying a completeness it has not got. And it is CLEARED
+    // by the next successful AS exchange, in handleAsReq(), because the ticket
+    // that exchange mints is newer than the instant and leaving a stale one
+    // behind would refuse the TGS-REQ that immediately follows it.
+    signedOutAt: null,
     keys: new Map()
   };
   principals.set(keyOf(principal), principal);
@@ -662,6 +685,80 @@ DEFINITIONS.forEach(register);
 TRUSTED_DEFINITIONS.forEach(register);
 log.info('krb5: principal database for realm ' + REALM + ' — ' +
   Array.from(principals.keys()).join(', '));
+
+// ---------------------------------------------------------------------------
+// SIGNING OUT, WHICH IS A STATEMENT ABOUT TICKETS AND NOT ABOUT THE ACCOUNT.
+//
+// `signOut()` stamps the instant described on `signedOutAt` above;
+// `clearSignOut()` removes it, which is what a fresh AS exchange does and what
+// the console's undo does. `signedOut()` is the reader the KDC's TGS handler
+// calls, and it answers with the DATE rather than a boolean so that the refusal
+// can say when — "the ticket was issued at X and this principal signed out at
+// Y" is a sentence somebody can act on, and "revoked" on its own is not.
+//
+// It creates nothing. A name nobody has ever authenticated as has no principal
+// here, and stamping one into existence would put an account in the database
+// because somebody typed a name at a logout screen — the opposite of
+// findOrCreateUser()'s rule, which creates a CLIENT because an AS-REQ named
+// one. So a sign-out for an unknown principal is reported as having reached
+// nothing, and /logout prints that rather than a success it did not have.
+// ---------------------------------------------------------------------------
+function signOut(nameComponents, realm, at) {
+  log.debug("Entering signOut(). principal=" + (nameComponents || []).join('/'));
+  const principal = find(nameComponents, realm);
+  if (!principal) {
+    log.debug("Leaving signOut(). No such principal.");
+    return null;
+  }
+  principal.signedOutAt = at || new Date();
+  log.info('krb5: ' + principal.name.join('/') + '@' + principal.realm + ' signed out at ' +
+           principal.signedOutAt.toISOString() + '. A TGS-REQ presenting a ticket issued ' +
+           'before that is now refused KDC_ERR_TGT_REVOKED (20). A service ticket already ' +
+           'in a cache still works against the service that accepts it — nothing contacts ' +
+           'this KDC on that exchange.');
+  log.debug("Leaving signOut(). Stamped " + principal.signedOutAt.toISOString() + ".");
+  return principal;
+}
+
+function clearSignOut(nameComponents, realm) {
+  log.debug("Entering clearSignOut(). principal=" + (nameComponents || []).join('/'));
+  const principal = find(nameComponents, realm);
+  if (!principal || !principal.signedOutAt) {
+    log.debug("Leaving clearSignOut(). Nothing was stamped.");
+    return null;
+  }
+  const was = principal.signedOutAt;
+  principal.signedOutAt = null;
+  log.info('krb5: the sign-out instant on ' + principal.name.join('/') + '@' + principal.realm +
+           ' (' + was.toISOString() + ') is cleared; tickets issued before it are accepted again.');
+  log.debug("Leaving clearSignOut(). Cleared.");
+  return was;
+}
+
+// The instant, or null. Without entering/leaving logs: the TGS handler calls it
+// on every request it answers, and a pair of lines there would be most of the
+// Kerberos log on a busy run.
+function signedOutAt(nameComponents, realm) {
+  const principal = find(nameComponents, realm);
+  return (principal && principal.signedOutAt) || null;
+}
+
+// Every principal currently carrying one, for the console and for /logout's
+// inventory. Read off the database rather than kept in a second list beside it,
+// which is the one-store rule this service applies everywhere else.
+function signedOutPrincipals() {
+  log.debug("Entering signedOutPrincipals().");
+  const out = [];
+  principals.forEach(function (principal) {
+    if (principal.signedOutAt) {
+      out.push({ name: principal.name.slice(0), realm: principal.realm,
+                 principal: principal.name.join('/') + '@' + principal.realm,
+                 signedOutAt: principal.signedOutAt });
+    }
+  });
+  log.debug("Leaving signedOutPrincipals(). " + out.length + " principal(s).");
+  return out;
+}
 
 // `realm` defaults to this KDC's own, so every existing single-realm caller keeps
 // working unchanged. A caller that means "in the realm this ticket came from" has to
@@ -905,11 +1002,199 @@ function etypeInfo2For(principal) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// WHO MAY DELEGATE TO WHOM — the CONFIGURED half of /admin/delegation.
+//
+// The rest of that page is a log of acts that have happened. This is the
+// policy behind them, and it is here rather than in common/delegation.js or in
+// admin.js for the reason every store rule in this repository is where it is:
+// what these two attributes MEAN is a statement about the principal database,
+// and a second opinion about it in the renderer is the drift the console's own
+// text keeps warning about. That store is here; so is this.
+//
+// It answers the question a person arrives at that page with BEFORE they have
+// tried anything — *why would this be refused?* — and it can answer it because
+// the whole of the KDC's authorization decision rests on two attributes on two
+// opposite accounts:
+//
+//   * `msDS-AllowedToDelegateTo` on the FRONT END, listing the services it may
+//     reach as anybody. CLASSIC constrained delegation, and only a domain admin
+//     can set it.
+//   * `msDS-AllowedToActOnBehalfOfOtherIdentity` on the BACK END, listing who
+//     may act on its behalf. RESOURCE-BASED, and whoever controls that object
+//     can set it themselves — which is the entire security story of RBCD.
+//
+// Two things this deliberately does NOT do. It does not merge the two lists:
+// they are configured on opposite accounts and conflating them would hide the
+// only thing about RBCD worth knowing, which is the same reason register()
+// keeps them apart. And it does not report a pair as workable merely because an
+// attribute names it — `warning` is where the three ways a correctly configured
+// pair still fails are stated, and the most expensive of them (a front end with
+// no TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION, whose S4U2Self ticket is simply
+// not forwardable, so classic S4U2Proxy fails a step later complaining about
+// the evidence) is invisible everywhere else.
+//
+// Returns { pairs, accounts }. A pair is one (front end, target, mechanism); an
+// account is one principal carrying a flag that changes what delegation can do
+// to it or with it, whether or not any pair names it.
+// ---------------------------------------------------------------------------
+function delegationPolicy() {
+  log.debug('Entering delegationPolicy().');
+  const pairs = [];
+  const accounts = [];
+  const all = Array.from(principals.values());
+
+  // Does this KDC know the principal an attribute names? A misspelt SPN in
+  // either list is the ordinary configuration mistake and it fails at TGS time
+  // with an error about authorization rather than about spelling, so the table
+  // says so here instead. Both lists hold bare SPNs with no realm — which is
+  // what the KDC compares against — so the account's own realm is what to look
+  // them up in.
+  const knows = function (spn, realm) {
+    return !!find(String(spn || '').split('/'), realm);
+  };
+
+  all.forEach(function (principal) {
+    const name = principal.name.join('/');
+
+    // CLASSIC — the permission is on THIS account and names what it may reach.
+    (principal.allowedToDelegateTo || []).forEach(function (target) {
+      const targetPrincipal = find(String(target).split('/'), principal.realm);
+      const warnings = [];
+      if (!principal.trustedToAuthenticateForDelegation) {
+        warnings.push('This account is NOT trusted for protocol transition ' +
+          '(TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION), so the ticket it gets ' +
+          'back from S4U2Self is not FORWARDABLE — and classic constrained ' +
+          'delegation requires forwardable evidence. S4U2Self will succeed and ' +
+          'S4U2Proxy will then fail complaining about the evidence ticket, ' +
+          'which is two steps from the attribute that caused it. Resource-based ' +
+          'delegation would not have needed either flag.');
+      }
+      if (!targetPrincipal) {
+        warnings.push('This KDC has no principal called ' + target + ' in ' +
+          principal.realm + '. The attribute names a SERVICE and the SPN has to ' +
+          'match exactly; a ticket request for a name this KDC does not know is ' +
+          'refused before the authorization is ever consulted.');
+      }
+      pairs.push({
+        mechanism: 'classic',
+        // The delegation store's own type id, so the observed table and this
+        // one can be read against each other without a lookup written twice.
+        type: 'krb5-s4u2proxy-classic',
+        frontEnd: name + '@' + principal.realm,
+        target: target + '@' + principal.realm,
+        realm: principal.realm,
+        attribute: 'msDS-AllowedToDelegateTo',
+        // WHICH ACCOUNT the permission lives on. It is the whole difference
+        // between the two mechanisms and it is the column to read first.
+        setOn: name + '@' + principal.realm,
+        setOnRole: 'front end',
+        requires: 'a FORWARDABLE evidence ticket, which S4U2Self only returns ' +
+                  'to an account flagged TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION',
+        targetKnown: !!targetPrincipal,
+        warning: warnings.join(' '),
+        note: principal.description || ''
+      });
+    });
+
+    // RESOURCE-BASED — the permission is on THIS account and names who may act
+    // on its behalf, so the pair is built the other way round.
+    (principal.allowedToActOnBehalfOf || []).forEach(function (requester) {
+      const requesterPrincipal = find(String(requester).split('/'), principal.realm);
+      const warnings = [];
+      if (!requesterPrincipal) {
+        warnings.push('This KDC has no principal called ' + requester + ' in ' +
+          principal.realm + '. Whoever the attribute meant to authorize cannot ' +
+          'present a ticket here under that name.');
+      }
+      // The PA-PAC-OPTIONS requirement is NOT a warning and used to be pushed
+      // here unconditionally, which meant every resource-based pair reported
+      // something missing for ever and the field could never say "nothing is".
+      // It is a property of the mechanism, so it belongs in `requires` — where
+      // it already was — and a warning that fires on every row is a warning
+      // nobody reads by the third one.
+      pairs.push({
+        mechanism: 'rbcd',
+        type: 'krb5-s4u2proxy-rbcd',
+        frontEnd: requester + '@' + principal.realm,
+        target: name + '@' + principal.realm,
+        realm: principal.realm,
+        attribute: 'msDS-AllowedToActOnBehalfOfOtherIdentity',
+        setOn: name + '@' + principal.realm,
+        setOnRole: 'back end',
+        requires: 'PA-PAC-OPTIONS with the resource-based bit. It needs NO ' +
+                  'forwardable evidence and no flag on the front end, which is ' +
+                  'why it is the easier path',
+        targetKnown: knows(name, principal.realm),
+        warning: warnings.join(' '),
+        note: principal.description || ''
+      });
+    });
+
+    // The account-level flags. Reported whether or not a pair names the
+    // account, because two of the three are what STOP delegation rather than
+    // permit it, and an account that appears in no pair is precisely the one
+    // somebody is wondering about.
+    if (principal.notDelegated || principal.trustedToAuthenticateForDelegation ||
+        principal.okAsDelegate) {
+      accounts.push({
+        principal: name + '@' + principal.realm,
+        realm: principal.realm,
+        notDelegated: !!principal.notDelegated,
+        trustedToAuthenticateForDelegation:
+          !!principal.trustedToAuthenticateForDelegation,
+        okAsDelegate: !!principal.okAsDelegate,
+        autoCreated: !!principal.autoCreated,
+        description: principal.description || '',
+        // What each flag DOES, said once here rather than in the page: these
+        // are the three sentences people get wrong, and the last of them is the
+        // one that is not a control at all.
+        effects: [
+          principal.notDelegated
+            ? 'NOT_DELEGATED — "sensitive and cannot be delegated". The KDC ' +
+              'refuses this account a forwardable ticket at all, so no service ' +
+              'anywhere can forward its TGT. It is the one control that lives ' +
+              'on the account being PROTECTED rather than on any service, which ' +
+              'is what makes it work no matter which service the user visits.'
+            : '',
+          principal.trustedToAuthenticateForDelegation
+            ? 'TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION — protocol transition. ' +
+              'This account gets a FORWARDABLE ticket out of S4U2Self, which is ' +
+              'what classic constrained delegation then needs as evidence. ' +
+              'Without it S4U2Self still works and simply returns a ticket that ' +
+              'is not forwardable.'
+            : '',
+          principal.okAsDelegate
+            ? 'ok-as-delegate — ADVICE TO THE CLIENT and not a control. The ' +
+              'flag on a service ticket tells the client this service may be ' +
+              'trusted with forwarded credentials; a client is free to ignore ' +
+              'it, and this KDC enforces nothing by it.'
+            : ''
+        ].filter(Boolean)
+      });
+    }
+  });
+
+  // Stable order, so two readings of the page put the rows in the same places:
+  // by target, then by front end. Not by insertion, which is the order the
+  // definitions happen to be written in and would change under an edit that
+  // changed nothing else.
+  pairs.sort(function (a, b) {
+    return a.target.localeCompare(b.target) || a.frontEnd.localeCompare(b.frontEnd);
+  });
+  accounts.sort(function (a, b) { return a.principal.localeCompare(b.principal); });
+
+  log.debug('Leaving delegationPolicy(). ' + pairs.length + ' pair(s), ' +
+            accounts.length + ' account(s).');
+  return { pairs: pairs, accounts: accounts };
+}
+
 module.exports = {
   REALM: REALM,
   DOMAIN: DOMAIN,
   KDC_ETYPES: KDC_ETYPES,
   find: find,
+  delegationPolicy: delegationPolicy,
   findOrCreateUser: findOrCreateUser,
   findOrCreateService: findOrCreateService,
   USER_PASSWORD: USER_PASSWORD,
@@ -932,5 +1217,13 @@ module.exports = {
   domainSidFor: domainSidFor,
   realmForService: realmForService,
   UAC: UAC,
-  RID: RID
+  RID: RID,
+  // The sign-out instant. Four functions rather than an exported field, because
+  // this is a database and the callers are in three other directories: the KDC
+  // reads it on every TGS-REQ, /logout writes it, the console reports it. See
+  // the block above them.
+  signOut: signOut,
+  clearSignOut: clearSignOut,
+  signedOutAt: signedOutAt,
+  signedOutPrincipals: signedOutPrincipals
 };
