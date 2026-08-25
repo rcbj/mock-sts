@@ -106,6 +106,15 @@ left to the walk because the symptom is `Cannot find module
 '../common/delegation'` at load, which names a module rather than a missing COPY
 line.
 
+**`admin-ui/delegation_map.js` (2026-08-25, the delegation picture) adds NOTHING
+to this closure, and that is worth one sentence rather than a re-walk.** Only
+`admin-ui/admin.js` requires it, and that file is not copied — no in-process job
+loads a console page. The same change gave `common/delegation.js` a `graph()`
+function, which adds no new require either: it uses `realms`, `config` and
+`admin_stats`, all three of which that module already required before it. The
+new npm dependency (`@dagrejs/dagre`) is reached only from the uncopied file, so
+`tests/Dockerfile` needs no line for it.
+
 **Rerun the closure walk after the bump.** Seed it with every `sts/**/*.js`
 copied, follow each `require('./x')` and `require('../y/x')`, and require the
 result to be a subset of what is copied. The set moves on this repository's

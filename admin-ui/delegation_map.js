@@ -1,0 +1,777 @@
+'use strict';
+//
+// File: delegation_map.js
+//
+// ---------------------------------------------------------------------------
+// THE DELEGATION PICTURE. `common/delegation.js`'s graph, drawn.
+//
+// It is a LIBRARY, like `admin_rbac.js` next door and like `dpop.js`,
+// `admin_stats.js` and `audit.js` in common/: it registers no route, so its
+// position in the require order does not matter and it cannot be the reason a
+// route is missing. `admin.js` registers `/admin/delegation/map` and calls
+// `render()`; this file holds the geometry and none of the console's HTML.
+//
+// It requires `../common/helpers` (for `log` and `xmlEscape`) and `@dagrejs/dagre`,
+// and NOTHING ELSE IN THIS SERVICE — no config, no directory, no store. That is
+// deliberate and it is the whole reason this is a separate file: everything it
+// draws arrives as an argument, so the picture can be drawn of any graph the
+// caller can build, and a change to how the console decides what a box IS
+// cannot reach the code that decides where a box GOES.
+//
+// ---------------------------------------------------------------------------
+// WHY THERE IS A DEPENDENCY HERE AT ALL, WEIGHED THE WAY `scimmy` AND
+// `swagger-ui-dist` WERE WEIGHED IN scim/CLAUDE.md AND mgmt-api/CLAUDE.md.
+//
+// `@dagrejs/dagre` is 1.4 MB unpacked with ONE dependency (`@dagrejs/graphlib`,
+// 0.5 MB) and no transitive tail, no install script and no telemetry — nearer
+// `scimmy`'s 735 KB than `swagger-ui-dist`'s 11.7 MB, in a package.json that is
+// deliberately short and an image built where the registry may be the only
+// thing reachable.
+//
+// **WHAT IT BRINGS IS THE HALF THAT IS ACTUALLY HARD**, and it is not the
+// drawing. Laying a directed graph out in layers is the Sugiyama method and it
+// is four passes — break the cycles, assign a rank to every node, ORDER each
+// rank so that the lines cross as few times as possible, then assign
+// coordinates so the ranks line up and the long edges run straight. The third
+// of those is the one that decides whether a picture of eleven chains is
+// readable or is a ball of wool, and a hand-rolled version of it is the kind of
+// thing that looks right on the three-node example somebody tests it with. This
+// service already has three chains' worth of that example; a real one has
+// forty.
+//
+// **WHAT IT DOES NOT BRING IS THE DRAWING, AND THAT IS WHY IT IS THE RIGHT
+// LIBRARY.** dagre computes positions and edge routes and emits no markup at
+// all, so every shape below is this file's own — which is what the ask needed:
+// Graphviz would have laid it out just as well and would have drawn its own
+// boxes, and a STICK FIGURE is not one of its shapes. The alternative to a
+// layout library was not "draw it by hand", it was "invent a layout algorithm";
+// the alternative to a drawing library is one `<path>` per person, which is
+// forty lines and is in `personGlyph()` below.
+//
+// **AND IT KEEPS THE CSP RULE INTACT.** The root CLAUDE.md's second CSP rule
+// says a scripted page needs its argument made again from scratch, and the
+// console has never needed one. A client-side graph library — mermaid,
+// cytoscape, d3 — would have made this the FIFTH scripted page in the service
+// and the first one in the console, to draw a picture that does not move. The
+// SVG here is generated on the server and arrives as markup, so
+// `script-src 'none'` is untouched and `img-src` is not even reached: the
+// document is inline in the page rather than fetched.
+// ---------------------------------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+// THE SHAPES, AND THE ONE THAT NEEDED A DECISION.
+//
+//   * A PERSON is a stick figure. Anything with an entry under `ou=users`.
+//   * AN APPLICATION is a rectangle. Anything with an entry under
+//     `ou=applications`.
+//   * THIS SERVICE is a hexagon, and it carries the TRUST REALM, because a realm
+//     is a whole logical copy of this service and the picture of one realm is
+//     not the picture of another.
+//   * A PARTY THE DIRECTORY HAS NEVER HEARD OF is drawn in the shape its ROLE
+//     implies — an initial identity as a person, a target as an application —
+//     with a DASHED outline and a note saying so. That is the three-state rule
+//     `delegationPartyCell()` already follows in the table, kept rather than
+//     collapsed: an RFC 8693 `audience` nobody has otherwise mentioned is an
+//     ordinary and interesting thing to see, and a picture that drew it exactly
+//     like a registered application would be the one place in this console where
+//     that distinction was lost.
+//
+// **THE ONE THAT NEEDED A DECISION IS `both`, AND IT IS THE COMMONEST BOX ON THE
+// PICTURE.** `HTTP/frontend.example.com` has an entry under `ou=users` (it
+// authenticates, so the funnel files it with the people) AND an entry under
+// `ou=applications` (tickets are issued FOR it) — the middle tier of every
+// Kerberos chain is both, which is the fact `delegationPartyCell()` exists to
+// show and the fact a shape-per-kind picture has no room for. Drawing it as one
+// or the other would send half the readers to the wrong page and would quietly
+// assert that this service's own model has one slot where it has two. So it is a
+// RECTANGLE WITH A FIGURE INSIDE IT: the application's shape, with the person in
+// it, which is what the party is.
+// ---------------------------------------------------------------------------
+
+const { log, xmlEscape } = require('../common/helpers');
+const dagre = require('@dagrejs/dagre');
+
+// ---------------------------------------------------------------------------
+// THE PALETTE. The console's own, taken from `page()`'s stylesheet in admin.js
+// rather than chosen again here, so that a line in the picture and a word in the
+// table beside it mean the same thing by being the same colour.
+//
+// Two of them are load-bearing rather than decorative and both come off
+// `modeCell()`: an IMPERSONATION is amber (`.state-expired`) and a DELEGATION is
+// green (`.state-valid`), which is the judgement that file states at length —
+// impersonation is the louder of the two not because it is worse but because it
+// is the one whose consequence is invisible everywhere else. A reader who has
+// learnt that pairing from the table reads it unprompted here.
+// ---------------------------------------------------------------------------
+const INK = '#222';
+const INDIGO = '#12107c';
+const GREEN = '#0b6b4f';
+const AMBER = '#8a6d00';
+const RED = '#b00020';
+const GREY = '#8a8a99';
+const QUIET = '#666';
+const LINE = '#d5d5dd';
+const PANEL = '#fbfbfd';
+const PAPER = '#fff';
+const WASH = '#eceaf6';
+
+// Every stroke colour an edge can take needs an arrowhead of that colour,
+// because a marker carries its own fill and cannot inherit the path's. They are
+// declared once in <defs> and named by colour rather than by meaning, so that
+// changing what an edge MEANS does not leave a marker named after the old idea.
+const ARROW_COLOURS = [INDIGO, GREEN, AMBER, RED, GREY];
+
+function markerId(colour) {
+  return 'dm-arrow-' + colour.replace('#', '');
+}
+
+// ---------------------------------------------------------------------------
+// TEXT, WITHOUT A FONT.
+//
+// Nothing on the server can measure a string in a font the browser has not
+// chosen yet, and every box here has to be sized before dagre is asked where to
+// put it. So the width is ESTIMATED, per character, and the estimate is
+// deliberately generous: a box slightly too wide is a picture with a little more
+// air in it, and a box too narrow is a label sticking out of its own rectangle.
+//
+// The table is three buckets rather than a real font metric because that is all
+// the accuracy the decision needs — the label is capped at MAX_LABEL_CHARS and
+// wrapped, so the error cannot accumulate over more than about twenty
+// characters.
+// ---------------------------------------------------------------------------
+const NARROW = 'iljtfIr.,:;!|\'`[](){}';
+const WIDE = 'mwMW@%';
+
+function textWidth(text, size) {
+  let units = 0;
+  const value = String(text == null ? '' : text);
+  for (let i = 0; i < value.length; i++) {
+    const ch = value.charAt(i);
+    if (NARROW.indexOf(ch) >= 0) {
+      units += 0.36;
+    } else if (WIDE.indexOf(ch) >= 0) {
+      units += 0.95;
+    } else if (ch >= 'A' && ch <= 'Z') {
+      units += 0.73;
+    } else {
+      units += 0.58;
+    }
+  }
+  return units * size;
+}
+
+// How many characters of a label are drawn before it is cut. The whole value is
+// always in the <title> of the shape, so nothing is LOST by the cut — a hover
+// says the rest — and a picture whose boxes are as wide as a
+// `did:jwk:eyJrdHkiOi…` is a picture of one box.
+const MAX_LABEL_CHARS = 30;
+
+// WRAPPING AN IDENTIFIER, WHICH IS NOT WRAPPING A SENTENCE. There are no spaces
+// in `HTTP/frontend.example.com@EXAMPLE.COM`, so a word-wrap would put the whole
+// of it on one line and give up. It breaks AFTER a separator instead — the
+// characters an identifier is actually built out of — and falls back to a hard
+// cut in the middle of an unbroken run, which is what a base64 subject is.
+const BREAK_AFTER = '/@.-_:+';
+
+function wrapLabel(text, maxChars, maxLines) {
+  const value = String(text == null ? '' : text);
+  const lines = [];
+  let line = '';
+  for (let i = 0; i < value.length; i++) {
+    line += value.charAt(i);
+    const full = line.length >= maxChars;
+    const breakable = BREAK_AFTER.indexOf(value.charAt(i)) >= 0 ||
+                      value.charAt(i) === ' ';
+    if (full || (breakable && line.length >= maxChars - 6)) {
+      lines.push(line);
+      line = '';
+      if (lines.length === maxLines) {
+        break;
+      }
+    }
+  }
+  if (line && lines.length < maxLines) {
+    lines.push(line);
+  }
+  if (!lines.length) {
+    return [''];
+  }
+  // Everything that did not fit, marked on the last line rather than dropped
+  // silently. The <title> still carries the whole string.
+  const drawn = lines.join('').length;
+  if (drawn < value.length) {
+    const last = lines.length - 1;
+    lines[last] = lines[last].slice(0, Math.max(1, maxChars - 1)) + '…';
+  }
+  return lines;
+}
+
+function esc(v) {
+  return xmlEscape(v == null ? '' : String(v));
+}
+
+// ---------------------------------------------------------------------------
+// THE METRICS. Every number a box or a line is built out of, in one place, so
+// that "the picture is too cramped" is one edit rather than a hunt.
+// ---------------------------------------------------------------------------
+const LABEL_SIZE = 12;      // a box's own name
+const SUB_SIZE = 10;        // the line under it: what kind of thing this is
+const EDGE_SIZE = 10;       // a line's label
+const LINE_HEIGHT = 13;
+const FIGURE_W = 26;        // a stick figure's bounding box
+const FIGURE_H = 34;
+const BOX_PAD_X = 14;
+const BOX_PAD_Y = 8;
+const MIN_BOX_W = 88;
+const MAX_BOX_W = 260;
+const HEX_PAD_X = 22;
+
+// dagre's own knobs. `ranksep` is generous because an edge label sits BETWEEN
+// two ranks — dagre reserves a rank of its own for it — and a cramped one puts
+// the words of one line on top of the words of the next.
+const RANK_SEP = 78;
+const NODE_SEP = 26;
+const EDGE_SEP = 18;
+const MARGIN = 18;
+
+// ---------------------------------------------------------------------------
+// WHAT A BOX LOOKS LIKE, AND HOW BIG IT IS.
+//
+// One function answers both, because they are the same question asked twice and
+// two functions would be two chances for the drawing to be a shape the layout
+// did not reserve room for. `measure()` returns the size AND the wrapped lines,
+// and the drawing below takes both rather than re-wrapping.
+// ---------------------------------------------------------------------------
+function measure(node, look) {
+  const lines = wrapLabel(look.label, MAX_LABEL_CHARS, 2);
+  const subLines = look.sublabel ? wrapLabel(look.sublabel, MAX_LABEL_CHARS + 6, 1) : [];
+  let textW = 0;
+  lines.forEach(function (one) {
+    textW = Math.max(textW, textWidth(one, LABEL_SIZE));
+  });
+  subLines.forEach(function (one) {
+    textW = Math.max(textW, textWidth(one, SUB_SIZE));
+  });
+  const textH = lines.length * LINE_HEIGHT + (subLines.length ? LINE_HEIGHT - 2 : 0);
+
+  if (look.shape === 'person') {
+    // The figure sits above the name rather than beside it. A person's label is
+    // a username and is short; a figure to the left of it would make every
+    // person-box a wide rectangle in a picture where a rectangle already means
+    // something else.
+    return {
+      shape: 'person',
+      width: Math.min(MAX_BOX_W, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2)),
+      height: FIGURE_H + 6 + textH + BOX_PAD_Y,
+      lines: lines, subLines: subLines
+    };
+  }
+  if (look.shape === 'sts') {
+    return {
+      shape: 'sts',
+      width: Math.min(MAX_BOX_W + 40, Math.max(MIN_BOX_W + 40, textW + HEX_PAD_X * 2 + 26)),
+      height: Math.max(58, textH + BOX_PAD_Y * 2 + 8),
+      lines: lines, subLines: subLines
+    };
+  }
+  // `application` and `both`. The second is the first with a figure inside it,
+  // so it is the same rectangle with room made on the left.
+  const inset = look.shape === 'both' ? FIGURE_W + 8 : 0;
+  return {
+    shape: look.shape === 'both' ? 'both' : 'application',
+    width: Math.min(MAX_BOX_W, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2 + inset)),
+    height: Math.max(36, textH + BOX_PAD_Y * 2),
+    lines: lines, subLines: subLines
+  };
+}
+
+// A STICK FIGURE. Head, spine, arms, legs, drawn around (0,0) at its own top
+// left. `stroke-linecap:round` is what stops the limbs looking like a diagram of
+// a bridge.
+function personGlyph(x, y, colour, dashed, scale) {
+  const s = scale || 1;
+  const w = FIGURE_W * s;
+  const h = FIGURE_H * s;
+  const cx = x + w / 2;
+  const headR = 4.6 * s;
+  const headY = y + headR + 1;
+  const neck = headY + headR;
+  const hip = y + h * 0.62;
+  const foot = y + h - 1;
+  const arm = w / 2 - 1;
+  const dash = dashed ? ' stroke-dasharray="3 2"' : '';
+  return '<g fill="none" stroke="' + colour + '" stroke-width="' + (1.6 * s) +
+    '" stroke-linecap="round"' + dash + '>' +
+    '<circle cx="' + round(cx) + '" cy="' + round(headY) + '" r="' + round(headR) + '"/>' +
+    '<path d="M' + round(cx) + ' ' + round(neck) + 'V' + round(hip) +
+      'M' + round(cx - arm) + ' ' + round(neck + 4 * s) +
+      'H' + round(cx + arm) +
+      'M' + round(cx) + ' ' + round(hip) + 'L' + round(cx - arm) + ' ' + round(foot) +
+      'M' + round(cx) + ' ' + round(hip) + 'L' + round(cx + arm) + ' ' + round(foot) +
+    '"/>' +
+    '</g>';
+}
+
+// A HEXAGON, for this service. Flat-topped, which is the shape nothing else here
+// is: a rectangle is an application, a rounded rectangle would read as one, and
+// a circle beside a stick figure's head reads as a second person.
+function hexPath(x, y, w, h) {
+  const cut = Math.min(22, w / 4);
+  return 'M' + round(x + cut) + ' ' + round(y) +
+    'H' + round(x + w - cut) +
+    'L' + round(x + w) + ' ' + round(y + h / 2) +
+    'L' + round(x + w - cut) + ' ' + round(y + h) +
+    'H' + round(x + cut) +
+    'L' + round(x) + ' ' + round(y + h / 2) + 'Z';
+}
+
+function round(n) {
+  return Math.round(n * 10) / 10;
+}
+
+// ---------------------------------------------------------------------------
+// AN EDGE'S ROUTE. dagre hands back the points a line should pass through — one
+// per rank it crosses, including the invisible ranks it made for the labels —
+// and a polyline through them has a corner at every one.
+//
+// So they are smoothed: a curve through the MIDPOINTS of consecutive segments,
+// with each original point as the control. That is the standard trick and it has
+// one property worth the two lines it costs — the curve touches the first and
+// last points exactly, so a line still starts on the edge of the box it leaves
+// and ends on the edge of the box it enters, which is the one thing a reader
+// would notice if it were approximate.
+// ---------------------------------------------------------------------------
+function edgePath(points) {
+  if (!points || points.length < 2) {
+    return '';
+  }
+  if (points.length === 2) {
+    return 'M' + round(points[0].x) + ' ' + round(points[0].y) +
+           'L' + round(points[1].x) + ' ' + round(points[1].y);
+  }
+  let d = 'M' + round(points[0].x) + ' ' + round(points[0].y);
+  for (let i = 1; i < points.length - 1; i++) {
+    const midX = (points[i].x + points[i + 1].x) / 2;
+    const midY = (points[i].y + points[i + 1].y) / 2;
+    d += 'Q' + round(points[i].x) + ' ' + round(points[i].y) + ' ' +
+         round(midX) + ' ' + round(midY);
+  }
+  const last = points[points.length - 1];
+  d += 'L' + round(last.x) + ' ' + round(last.y);
+  return d;
+}
+
+// ---------------------------------------------------------------------------
+// WHAT COLOUR A LINE IS, AND WHY.
+//
+// Read in this order and the first match wins, which is itself the judgement:
+//
+//   1. NOTHING WAS EVER ISSUED ON IT — red. A chain that has only ever been
+//      refused is the row a person came to this page to find, and it is the one
+//      state that must survive being glanced at.
+//   2. IT CAME FROM THE ISSUER — grey, dashed. This is not a delegation
+//      relationship, it is "this service handed that party something", and
+//      drawing it in the same weight as the relationships would make the
+//      hexagon the busiest thing in the picture.
+//   3. IT IS A DELEGATION RELATIONSHIP — the MODE's colour, amber or green, the
+//      pairing modeCell() uses in the table.
+//   4. IT IS A TRUST RELATIONSHIP — indigo, the console's own colour. What this
+//      line says is what the credential was FOR, which is a fact about this
+//      service rather than about either party.
+// ---------------------------------------------------------------------------
+function edgeLook(edge) {
+  if (edge.acts && !edge.issued) {
+    return { colour: RED, dash: '5 3', weight: 1.6 };
+  }
+  if (edge.relation === 'issued') {
+    return { colour: GREY, dash: '4 3', weight: 1.2 };
+  }
+  if (edge.relation === 'acts-for') {
+    const colour = edge.mode === 'impersonation' ? AMBER
+                 : edge.mode === 'delegation' ? GREEN : INDIGO;
+    // A jumped role is drawn as a broken line WHATEVER the mode, because the
+    // thing being said is that part of this line is not known: an unconstrained
+    // delegation reaches its target through a service this KDC was never told
+    // the name of, and a solid line would assert a hop that nobody can name.
+    return { colour: colour, dash: (edge.skipped || []).length ? '7 4' : '', weight: 1.8 };
+  }
+  return { colour: INDIGO, dash: (edge.skipped || []).length ? '7 4' : '', weight: 1.6 };
+}
+
+// The words on a line. Up to three short ones — what kind of relationship, the
+// mechanism, and how it came out — because everything else is in the <title> and
+// in the tables under the picture. A fourth line was tried and it is what turns
+// a diagram into a page of text laid out badly.
+function edgeLabelLines(edge, labelOf) {
+  const lines = [];
+  if (edge.relation === 'issued') {
+    lines.push('issued to');
+    if (edge.protocols && edge.protocols.length) {
+      lines.push(edge.protocols.join(', '));
+    }
+  } else if (edge.relation === 'acts-for') {
+    lines.push('acts for');
+    if (edge.typeLabel) {
+      lines.push(shortType(edge.typeLabel));
+    }
+  } else {
+    lines.push(edge.subject
+      ? 'reaches as ' + trim(labelOf(edge.subject), 20) : 'reaches');
+    if (edge.typeLabel) {
+      lines.push(shortType(edge.typeLabel));
+    }
+  }
+  const counts = [];
+  if (edge.issued) counts.push(edge.issued + ' issued');
+  if (edge.refused) counts.push(edge.refused + ' refused');
+  if (counts.length) {
+    lines.push(counts.join(', '));
+  }
+  return lines.slice(0, 3);
+}
+
+// The mechanism's label, minus the parenthetical the table has room for. Every
+// one of the eight is a phrase; the picture wants the noun.
+function shortType(label) {
+  return trim(String(label).replace(/\s*\(.*\)\s*$/, '').replace(/\s+—.*$/, ''), 26);
+}
+
+function trim(text, max) {
+  const value = String(text == null ? '' : text);
+  return value.length > max ? value.slice(0, max - 1) + '…' : value;
+}
+
+// ---------------------------------------------------------------------------
+// WHAT THE CALLER SAYS ABOUT A BOX.
+//
+// `resolve(node)` is supplied by admin.js and answers the ONE question this file
+// deliberately cannot: what is this party, as far as the embedded directory is
+// concerned. It comes back as
+//
+//   { shape, label, sublabel, title, href, dashed }
+//
+// and the default below is what a caller that has no directory gets — the shape
+// the ROLE implies, dashed, because "we do not know" is a state and not a
+// failure. `spiffe_server.js` and the two SAML modules all pass a resolver of
+// their own to somebody; this is the same arrangement and the reason is the one
+// in the header: what a party IS belongs to the console, where the registry and
+// the directory reader are, and where a box GOES belongs here.
+// ---------------------------------------------------------------------------
+function defaultResolve(node) {
+  if (node.kind === 'sts') {
+    return { shape: 'sts', label: 'mock STS', sublabel: '', dashed: false };
+  }
+  const person = node.chiefRole === 'initial';
+  return {
+    shape: person ? 'person' : 'application',
+    label: node.id,
+    sublabel: node.chiefRole || '',
+    dashed: true
+  };
+}
+
+// ---------------------------------------------------------------------------
+// RENDER. graph -> { svg, width, height }.
+//
+//   graph     common/delegation.js's graph()
+//   options   resolve(node) as above; `links`, which wraps every box in an <a>
+//             to its page in this console; `id`, a prefix for every generated id
+//             in the document, because two pictures in one HTML page would
+//             otherwise share <defs> ids and the second one's arrowheads would
+//             be the first one's.
+//
+// IT CANNOT THROW. The whole body is wrapped and a failure comes back as a
+// picture SAYING it could not be drawn, for the reason `delegation.record()`
+// gives about the table it feeds: a drawing on a console page must not be able
+// to take the page down. Everything else on /admin/delegation/map — the tables,
+// the counts, the legend — is worth reading with no picture above it, and a
+// stack trace where the diagram should be is worth less than a sentence.
+// ---------------------------------------------------------------------------
+function render(graph, options) {
+  log.debug("Entering render().");
+  try {
+    const svg = renderUnguarded(graph || { nodes: [], edges: [] }, options || {});
+    log.debug("Leaving render(). " + svg.svg.length + " bytes of SVG, " +
+              svg.width + "x" + svg.height + ".");
+    return svg;
+  } catch (e) {
+    log.error('delegation map: the picture could not be drawn and the page was ' +
+              'left alone: ' + e.message);
+    return {
+      svg: '<p class="err">The picture could not be drawn: ' + esc(e.message) +
+           '. Everything below is unaffected — the tables are built from the ' +
+           'same graph and do not go through the layout.</p>',
+      width: 0, height: 0, nodes: 0, edges: 0, failed: e.message
+    };
+  }
+}
+
+function renderUnguarded(graph, options) {
+  const resolve = typeof options.resolve === 'function' ? options.resolve : defaultResolve;
+  // What a party is CALLED, for the one place a line names a party that is
+  // neither of its ends: a `reaches` edge says whose name the credential
+  // carries. The caller supplies it because it is the same question `resolve()`
+  // answers and the answer belongs to whoever knows the directory; with no
+  // resolver the identity is its own name, which is what `defaultResolve()`
+  // already does for a box.
+  const nameOf = typeof options.labelOf === 'function'
+    ? options.labelOf
+    : function (id) { return id; };
+  const prefix = String(options.id || 'dm');
+  const nodes = graph.nodes || [];
+  const edges = graph.edges || [];
+
+  // `multigraph` because two chains between the same pair of boxes are two
+  // lines: `alice -> frontend` by classic constrained delegation and the same
+  // pair by RBCD are two arrangements, and dagre without this would keep one.
+  // `compound` is off — there are no nested boxes here.
+  const g = new dagre.graphlib.Graph({ multigraph: true });
+  g.setGraph({
+    rankdir: 'LR', nodesep: NODE_SEP, edgesep: EDGE_SEP, ranksep: RANK_SEP,
+    marginx: MARGIN, marginy: MARGIN
+  });
+  g.setDefaultEdgeLabel(function () { return {}; });
+
+  const drawn = {};
+  nodes.forEach(function (node) {
+    const look = resolve(node) || defaultResolve(node);
+    const size = measure(node, look);
+    drawn[node.id] = { node: node, look: look, size: size };
+    g.setNode(node.id, { width: size.width, height: size.height });
+  });
+
+  const edgeLabels = {};
+  edges.forEach(function (edge, index) {
+    // An edge to or from a box that is not in the picture cannot be drawn and
+    // must not be silently dropped into dagre either — it would invent the
+    // missing node as a zero-sized one and the line would run to a point.
+    if (!drawn[edge.from] || !drawn[edge.to]) {
+      return;
+    }
+    const lines = edgeLabelLines(edge, nameOf);
+    edgeLabels[edge.id] = lines;
+    let width = 0;
+    lines.forEach(function (one) {
+      width = Math.max(width, textWidth(one, EDGE_SIZE));
+    });
+    g.setEdge(edge.from, edge.to, {
+      width: Math.ceil(width) + 10,
+      height: lines.length * (LINE_HEIGHT - 2) + 6,
+      labelpos: 'c',
+      // The issuer's lines are the ones a reader should be able to ignore, so
+      // they are given the least weight and dagre pulls the delegation
+      // relationships straight in preference to them.
+      weight: edge.relation === 'issued' ? 1 : 3,
+      // A minimum length of 1 everywhere: the picture's ranks are the three
+      // LAYERS of the model, and a longer minlen on any one of them would open a
+      // gap that says something the model does not.
+      minlen: 1
+    }, edge.id || ('e' + index));
+  });
+
+  dagre.layout(g);
+
+  const size = g.graph();
+  const width = Math.max(1, Math.ceil(size.width || 0));
+  const height = Math.max(1, Math.ceil(size.height || 0));
+
+  const defs = '<defs>' + ARROW_COLOURS.map(function (colour) {
+    return '<marker id="' + prefix + '-' + markerId(colour) + '" viewBox="0 0 10 10" ' +
+      'refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+      '<path d="M0 0L10 5L0 10z" fill="' + colour + '"/></marker>';
+  }).join('') + '</defs>';
+
+  // EDGES FIRST, so that a line passing near a box goes UNDER it rather than
+  // across its label. SVG has no z-index; document order is the whole of the
+  // stacking, which is the sort of thing that is obvious once and surprising
+  // every other time.
+  const edgeMarkup = edges.map(function (edge) {
+    if (!drawn[edge.from] || !drawn[edge.to]) {
+      return '';
+    }
+    const laid = g.edge(edge.from, edge.to, edge.id);
+    if (!laid) {
+      return '';
+    }
+    const look = edgeLook(edge);
+    const d = edgePath(laid.points);
+    if (!d) {
+      return '';
+    }
+    const title = edgeTitle(edge);
+    const lines = edgeLabels[edge.id] || [];
+    // dagre gives the label's CENTRE and the box it reserved for it. The first
+    // baseline is half the text's height above that centre plus most of a cap
+    // height back down — an SVG <text> hangs from its baseline, not from its
+    // top, and getting this wrong puts every edge label one line above its own
+    // background panel.
+    const labelStep = LINE_HEIGHT - 2;
+    const labelTop = (laid.y || 0) - ((lines.length - 1) * labelStep) / 2 + 3.5;
+    const label = lines.length
+      ? '<g><rect x="' + round((laid.x || 0) - (laid.width || 0) / 2) +
+        '" y="' + round((laid.y || 0) - (laid.height || 0) / 2) +
+        '" width="' + round(laid.width || 0) + '" height="' + round(laid.height || 0) +
+        '" rx="3" fill="' + PAPER + '" fill-opacity=".88"/>' +
+        lines.map(function (one, i) {
+          return '<text x="' + round(laid.x || 0) + '" y="' +
+            round(labelTop + i * labelStep) + '" text-anchor="middle" ' +
+            'font-size="' + EDGE_SIZE + '" fill="' +
+            (i === 0 ? look.colour : QUIET) + '"' +
+            (i === 0 ? ' font-weight="600"' : '') + '>' + esc(one) + '</text>';
+        }).join('') + '</g>'
+      : '';
+    return '<g><title>' + esc(title) + '</title>' +
+      '<path d="' + d + '" fill="none" stroke="' + look.colour + '" stroke-width="' +
+      look.weight + '"' + (look.dash ? ' stroke-dasharray="' + look.dash + '"' : '') +
+      ' marker-end="url(#' + prefix + '-' + markerId(look.colour) + ')"/>' +
+      label + '</g>';
+  }).join('');
+
+  const nodeMarkup = nodes.map(function (node) {
+    const at = g.node(node.id);
+    if (!at) {
+      return '';
+    }
+    return nodeMarkupFor(drawn[node.id], at, options);
+  }).join('');
+
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" ' +
+    'viewBox="0 0 ' + width + ' ' + height + '" width="' + width + '" height="' + height +
+    '" role="img" aria-label="' + esc(options.label || 'Delegation relationships') + '">' +
+    '<title>' + esc(options.label || 'Delegation relationships') + '</title>' +
+    defs +
+    '<g font-family="system-ui,-apple-system,Segoe UI,Arial,sans-serif">' +
+    edgeMarkup + nodeMarkup +
+    '</g></svg>';
+
+  return { svg: svg, width: width, height: height,
+           nodes: nodes.length, edges: edges.length };
+}
+
+// The sentence a line says on hover. It is the one place in the picture with
+// room for the whole of it, which is why the drawn label is allowed to be three
+// short lines.
+function edgeTitle(edge) {
+  const parts = [];
+  if (edge.relation === 'issued') {
+    parts.push('This service issued to this party.');
+    if (edge.protocols && edge.protocols.length) {
+      parts.push('Asked over: ' + edge.protocols.join(', ') + '.');
+    }
+  } else if (edge.relation === 'acts-for') {
+    parts.push('Acts on behalf of.');
+  } else {
+    parts.push('Reaches' + (edge.subject ? ' as ' + edge.subject : '') +
+               ' — what the credential is FOR.');
+  }
+  if (edge.typeLabel) {
+    parts.push(edge.protocol + ' — ' + edge.typeLabel +
+               (edge.spec ? ' (' + edge.spec + ')' : '') + '.');
+  }
+  if (edge.mode) {
+    parts.push(edge.mode === 'impersonation'
+      ? 'IMPERSONATION: what came out names the initial identity and nothing ' +
+        'else, so the far end cannot tell an intermediary was involved.'
+      : 'DELEGATION: what came out carries the chain, so the far end can see ' +
+        'who is really asking.');
+  }
+  if ((edge.skipped || []).length) {
+    parts.push('The ' + edge.skipped.join(' and ') + ' is NOT NAMED on these ' +
+               'acts, so this line jumps it.');
+  }
+  parts.push(edge.acts + ' act(s): ' + edge.issued + ' issued, ' +
+             edge.refused + ' refused.');
+  (edge.produced || []).forEach(function (one) {
+    parts.push('Produced ' + one.count + ' × ' + one.kind +
+               (one.identifiers.length ? ' (' + one.identifiers.join(', ') +
+                (one.moreIdentifiers ? ', +' + one.moreIdentifiers + ' more' : '') + ')'
+              : '') + '.');
+  });
+  if (edge.authorizedBy) {
+    parts.push('Authorized by: ' + edge.authorizedBy);
+  }
+  if (edge.reason) {
+    parts.push('Refused because: ' + edge.reason);
+  }
+  return parts.join('\n');
+}
+
+function nodeMarkupFor(entry, at, options) {
+  const look = entry.look;
+  const size = entry.size;
+  const node = entry.node;
+  const x = at.x - size.width / 2;
+  const y = at.y - size.height / 2;
+  const dashed = !!look.dashed;
+  const stroke = look.stroke || (dashed ? GREY : INDIGO);
+  const fill = look.fill || (dashed ? PAPER : PANEL);
+  const dash = dashed ? ' stroke-dasharray="4 3"' : '';
+
+  let shape = '';
+  let textX = at.x;
+  let textTop = 0;
+  let anchor = 'middle';
+
+  if (size.shape === 'person') {
+    shape = personGlyph(at.x - FIGURE_W / 2, y, stroke, dashed, 1);
+    textTop = y + FIGURE_H + 6 + LABEL_SIZE - 2;
+  } else if (size.shape === 'sts') {
+    shape = '<path d="' + hexPath(x, y, size.width, size.height) + '" fill="' + WASH +
+      '" stroke="' + INDIGO + '" stroke-width="1.8"/>';
+    textTop = at.y - ((size.lines.length + (size.subLines.length ? 1 : 0) - 1) *
+                      LINE_HEIGHT) / 2 + LABEL_SIZE / 2 - 1;
+  } else {
+    shape = '<rect x="' + round(x) + '" y="' + round(y) + '" width="' + round(size.width) +
+      '" height="' + round(size.height) + '" rx="5" fill="' + fill + '" stroke="' +
+      stroke + '" stroke-width="1.5"' + dash + '/>';
+    if (size.shape === 'both') {
+      // The person INSIDE the application's rectangle — see the header. Scaled
+      // to fit the box's height rather than the figure's own, so a one-line
+      // label and a two-line label do not get different-sized people.
+      const scale = Math.min(1, (size.height - 8) / FIGURE_H);
+      shape += personGlyph(x + 6, at.y - (FIGURE_H * scale) / 2, stroke, dashed, scale);
+      textX = x + 6 + FIGURE_W * scale + 6;
+      anchor = 'start';
+    }
+    textTop = at.y - ((size.lines.length + (size.subLines.length ? 1 : 0) - 1) *
+                      LINE_HEIGHT) / 2 + LABEL_SIZE / 2 - 1;
+  }
+
+  const texts = size.lines.map(function (one, i) {
+    return '<text x="' + round(textX) + '" y="' + round(textTop + i * LINE_HEIGHT) +
+      '" text-anchor="' + anchor + '" font-size="' + LABEL_SIZE + '" font-weight="600" ' +
+      'fill="' + (look.ink || INK) + '">' + esc(one) + '</text>';
+  }).join('') + size.subLines.map(function (one, i) {
+    return '<text x="' + round(textX) + '" y="' +
+      round(textTop + (size.lines.length + i) * LINE_HEIGHT - 1) +
+      '" text-anchor="' + anchor + '" font-size="' + SUB_SIZE + '" fill="' + QUIET +
+      '">' + esc(one) + '</text>';
+  }).join('');
+
+  const body = '<title>' + esc(look.title || node.id) + '</title>' + shape + texts;
+
+  // A LINK ONLY WHEN THE CALLER ASKED FOR ONE. The picture is served two ways —
+  // inline in the console page, where a box should go to that party's page, and
+  // as a standalone document at ?format=svg, where the href would be a
+  // root-relative path in a file somebody has saved. app.js rewrites root-relative
+  // links into the current realm on the way out of a text/html response ONLY, so
+  // a link in a standalone SVG would also be a link that quietly left the realm.
+  if (options.links && look.href) {
+    return '<a href="' + esc(look.href) + '">' + body + '</a>';
+  }
+  return '<g>' + body + '</g>';
+}
+
+module.exports = {
+  render: render,
+  // Exported for the legend on the page, so that the swatch beside "an
+  // application" and the box in the picture cannot come to be drawn from two
+  // different palettes. admin.js draws the key out of these rather than naming
+  // the colours a second time.
+  COLOURS: {
+    ink: INK, indigo: INDIGO, green: GREEN, amber: AMBER, red: RED,
+    grey: GREY, quiet: QUIET, line: LINE, panel: PANEL, paper: PAPER, wash: WASH
+  },
+  personGlyph: personGlyph,
+  hexPath: hexPath
+};
