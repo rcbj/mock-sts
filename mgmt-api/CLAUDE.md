@@ -260,6 +260,26 @@ Rule 7 is unchanged and was the reason those five exist: `/admin/realms` is a
 console page with five actions, so it has five operations, driven through the
 SAME `admin.realmsAction()` the form posts to.
 
+**AND THAT SHARED FUNCTION IS WHERE `createRealm` LOST ITS `overrides` FOR
+MONTHS.** The operation documents the field, gives it an example
+(`{"saml2.entityId": "urn:acme:idp"}`) and says it wins over the six seeded
+names; `realms.create()` validates and merges it properly. In between,
+`realmsAction()` built its argument out of `id`, `name` and `description` and
+dropped the fourth property, so a create carrying overrides answered 200 and
+produced a realm configured differently from the one that was asked for. Fixed
+2026-08-25.
+
+**Rule 7 is what made it invisible, and it is worth knowing which half of that
+rule does not hold.** Parity says every console action has an operation and both
+go through one function, which is what stops the two DOORS drifting — and it
+worked: neither door was more permissive than the other. What it cannot catch is
+a field the API accepts and the console's form does not HAVE, because there is
+then no second implementation to disagree with. `tests/admin_api.js` over there
+checks every documented schema property against a live reply, which is the check
+that would have caught this had it covered request bodies as well: a documented
+request property that changes nothing is the same class of defect as a
+documented response property that is never sent.
+
 **`/admin-api/docs` is the one page in this service that needed a change**, and
 the reason is worth keeping. `app.js` rewrites root-relative links in HTML to
 carry the realm prefix; the explorer builds its request URLs in JavaScript from
