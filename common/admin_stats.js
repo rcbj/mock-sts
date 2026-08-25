@@ -133,13 +133,22 @@ const calls = realms.map();       // "GET /path" -> the row below
 // page rather than as what it is.
 //
 // `realms.obj(factory)` is a plain object per realm, so `nums.callTotal++`
-// works exactly as the bindings it replaced did. `usersForgotten` is
-// DELIBERATELY not in here: the identity register mirrors the embedded
-// directory, which is shared by every realm, so its counter is too.
+// works exactly as the bindings it replaced did.
+//
+// **`usersForgotten` IS IN HERE AS OF 2026-08-25, AND IT DELIBERATELY WAS NOT
+// UNTIL THEN.** The argument for leaving it out was that the identity register
+// below mirrors the embedded directory, and the directory was shared by every
+// realm — so a per-realm counter would have described a per-realm list that did
+// not exist. **The directory became a SUBTREE PER REALM on 2026-08-25**
+// (`ldap/CLAUDE.md`), which retired the premise rather than the reasoning: the
+// register follows the directory, so both it and the counter describing it are
+// partitioned now. This is the shape to look for anywhere else something was
+// left process-wide "because the directory is shared" — that sentence was true
+// for one day.
 // ---------------------------------------------------------------------
 const nums = realms.obj(function () {
   return { callTotal: 0, callPathsDropped: 0, tokensForgotten: 0,
-           tokensWithoutJti: 0, artifactsForgotten: 0 };
+           tokensWithoutJti: 0, artifactsForgotten: 0, usersForgotten: 0 };
 });
 
 
@@ -309,8 +318,23 @@ setJwtRecorder(recordJwt);
 // revoke a token this registry never saw (one issued before a restart, say). It is
 // the set that is authoritative; the record's `revoked` flag is a convenience for
 // the page and is kept in step here.
+//
+// PER TRUST REALM since 2026-08-25, and it read "for the whole service" until
+// then. Two things were wrong with one set. The metrics page prints
+// `tokens.revoked` beside `tokens.held`, which comes from a per-realm map, so
+// one realm's revocation count appeared under every realm — the exact
+// disagreement the counters block near the top of this file exists to prevent.
+// And `POST /oauth2/revoke` under one realm could kill a jti issued by another,
+// which is a cross-realm WRITE in the one family whose realm support is
+// documented as `full`. Nothing legitimate crossed: a jti only ever appears in
+// the realm whose signing key minted it, so within a realm every read and write
+// here answers exactly as it did.
+//
+// A Set has no facade in `realms.js` — `map()`, `arr()` and `obj()` are the
+// three — so this is `keyed()`, the general case, and the reads below are
+// spelled `revokedJtis()` because of it.
 // ---------------------------------------------------------------------------
-const revokedJtis = new Set();
+const revokedJtis = realms.keyed(function () { return new Set(); });
 
 function revoke(jti, via) {
   log.debug("Entering revoke(). jti=" + jti);
@@ -318,8 +342,8 @@ function revoke(jti, via) {
     log.debug("Leaving revoke(). There was no jti to revoke.");
     return false;
   }
-  const first = !revokedJtis.has(jti);
-  revokedJtis.add(jti);
+  const first = !revokedJtis().has(jti);
+  revokedJtis().add(jti);
   const record = tokens.get(jti);
   if (record) {
     record.revoked = true;
@@ -327,7 +351,7 @@ function revoke(jti, via) {
     record.revokedVia = record.revokedVia || (via || 'unstated');
   }
   log.info('admin: the token with jti ' + jti + ' is revoked (' + (via || 'unstated') + '). ' +
-           revokedJtis.size + ' revoked in total.');
+           revokedJtis().size + ' revoked in total.');
   log.debug("Leaving revoke(). " + (first ? "It is newly revoked." : "It was already revoked."));
   return first;
 }
@@ -340,7 +364,7 @@ function revoke(jti, via) {
 // it NON-SPEC for exactly that reason.
 function restore(jti) {
   log.debug("Entering restore(). jti=" + jti);
-  const was = revokedJtis.delete(jti);
+  const was = revokedJtis().delete(jti);
   const record = tokens.get(jti);
   if (record) {
     record.revoked = false;
@@ -353,11 +377,11 @@ function restore(jti) {
 }
 
 function isRevoked(jti) {
-  return !!jti && revokedJtis.has(jti);
+  return !!jti && revokedJtis().has(jti);
 }
 
 function revokedCount() {
-  return revokedJtis.size;
+  return revokedJtis().size;
 }
 
 // ---------------------------------------------------------------------------
@@ -805,9 +829,22 @@ const SUBJECT_PREFIX = (function () {
   return sample.slice(0, sample.length - probe.length);
 })();
 
-const users = new Map();       // local name -> the record below
-
-let usersForgotten = 0;
+// PER TRUST REALM, since 2026-08-25 and for the reason the counters block above
+// gives: this register is the list of people a realm has SEEN, and the people a
+// realm HOLDS are its own subtree of the directory. While it was one Map every
+// realm's console listed every other realm's users — `/admin/users` under
+// `/realm/acme` showed somebody who had only ever signed in to the default
+// realm — and that realm's own directory reader then reported their entry as
+// missing, because in that realm it genuinely was. Two pages of one console
+// disagreeing, which is the failure this file's comments warn about twice.
+//
+// **THE CAP IS NOW PER REALM**, in the same one line, the way `tokens` and
+// `artifacts` already were: MAX_USERS identities in each. Deliberate, and the
+// opposite of the choice `ldap_server.js` makes for `ldap.maxEntries`, which
+// stays process-wide — there the cap protects ONE store every realm writes
+// into, and here each realm has a store of its own, so a shared cap would let a
+// busy realm evict a quiet realm's people.
+const users = realms.map();    // local name -> the record below
 
 // Does this identity begin `<attributetype>=`? That is the one shape identityOf()
 // below must not split at an '@'. Deliberately strict — a type is a letter
@@ -925,7 +962,7 @@ function userRecord(identity) {
     // load generator rather than a person, and the page says how many went.
     const oldest = users.keys().next().value;
     users.delete(oldest);
-    usersForgotten++;
+    nums.usersForgotten++;
   }
   record = {
     key: identity.key, name: identity.name,
@@ -1646,7 +1683,7 @@ function samlAttributes(id, context) {
 // a token is expired only once it is past `exp` PLUS the allowance, and not yet
 // valid only while it is before `nbf` MINUS it.
 function tokenStateOf(record, nowMs) {
-  if (record.revoked || (record.jti && revokedJtis.has(record.jti))) return 'revoked';
+  if (record.revoked || (record.jti && revokedJtis().has(record.jti))) return 'revoked';
   const skewMs = config.value('oauth2.clockSkewS') * 1000;
   if (record.exp && record.exp * 1000 + skewMs <= nowMs) return 'expired';
   if (record.nbf && record.nbf * 1000 - skewMs > nowMs) return 'not yet valid';
@@ -2078,13 +2115,13 @@ function snapshot() {
     calls: { total: nums.callTotal, paths: callRows.length, byStatusClass: statusTotals,
              pathsCollapsed: nums.callPathsDropped, rows: callRows },
     tokens: { held: tokens.size, forgotten: nums.tokensForgotten, cap: MAX_TOKENS,
-              revoked: revokedJtis.size, byKind: Array.from(byKind.values()) },
+              revoked: revokedJtis().size, byKind: Array.from(byKind.values()) },
     artifacts: { held: artifacts.length, forgotten: nums.artifactsForgotten, cap: MAX_ARTIFACTS,
                  byKind: Array.from(artifactKinds.values()) },
     // Counted, not listed: the whole list is what /admin/users is for, and repeating
     // it inside every metrics reply would make the two disagree the first time one
     // of them changed.
-    users: { known: knownUsers.length, cap: MAX_USERS, forgotten: usersForgotten,
+    users: { known: knownUsers.length, cap: MAX_USERS, forgotten: nums.usersForgotten,
              authenticatedHere: knownUsers.filter(function (r) { return r.authenticated; }).length,
              clients: knownUsers.filter(function (r) { return r.isClient; }).length,
              authentications: knownUsers.reduce(function (n, r) { return n + r.authentications; }, 0) },

@@ -164,6 +164,20 @@ line each that matters:
    a Map here. Putting the return URL in the parameter would be an open redirect
    operated by whoever can forge a RelayState, which is everybody.
 
+   **That Map is PER TRUST REALM since 2026-08-25 and was one Map before**, which
+   meant a handle minted while `acme` was ambient could be spent at the DEFAULT
+   realm's `/federation/acs/{id}` — a flow begun in one realm finishing in
+   another, on the one surface in this service where a missing check is an
+   authentication bypass rather than a fidelity bug. A relationship is an entry
+   in the realm's own `ou=federations` and is verified against the certificate
+   configured THERE, so the store had to follow the register. Nothing legitimate
+   crossed: a handle is minted and spent inside one flow, and every URL in that
+   flow carries its realm. The cap moved with it — MAX_CONTEXTS in flight per
+   realm rather than for the process — deliberately, because a shared cap would
+   let one realm's flood evict another realm's in-flight sign-ins, which is the
+   denial of service the cap exists to bound arriving through the door it was
+   meant to close.
+
 4. **The return is always a path on this service**, checked the way
    `beginAuthentication()` checks its own AND stored server-side. Both, because
    they fail differently: the check catches a caller's bug and the storage

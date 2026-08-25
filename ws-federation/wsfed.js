@@ -102,6 +102,9 @@ const { sessionOf, startSession, endSession } = require('../authn/authn');
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
 const applications = require('../common/applications');
+// For the two stores below only. `realms.js` requires config.js and nothing
+// else here, so it registers no route and cannot join a cycle — see rule 3m.
+const realms = require('../common/realms');
 
 // --- the vocabulary --------------------------------------------------------
 const WSFED_NS = 'http://docs.oasis-open.org/wsfed/federation/200706';
@@ -202,11 +205,28 @@ const RP_CONTEXT_TTL_MS = 30 * 60 * 1000;
 
 // The sign-in request being interrupted by the screen, exactly as pendingLogins
 // does for the authorization endpoint: sign-in id -> the parameters it arrived with.
-const pendingSignIns = new Map();
+//
+// PER TRUST REALM since 2026-08-25, and one shared Map here was a hole rather
+// than an untidiness. `POST /wsfed/login` looks a sign-in up by the id on the
+// form, so an id minted at `/realm/acme/wsfed` was found by the DEFAULT realm's
+// handler — which then called `startSession()` and issued the response with the
+// default realm's key and issuer for a request that began in `acme`. Verified
+// by hand before it was fixed: the cross-realm POST answered 303 rather than
+// "this sign-in form has expired". `realmSupport()` publishes this family as
+// `full` and says single sign-on "does not cross realms", so the claim and the
+// store now agree.
+const pendingSignIns = realms.map();
 
 // The `wctx` values the mock relying party has minted, so it can check the round
 // trip. Its own state and nobody else's — which is the whole point of wctx.
-const rpContexts = new Map();
+//
+// Per realm for a quieter reason than the store above, and it is worth stating
+// rather than inheriting: `/wsfed/rp` is reachable under every realm prefix, so
+// there is one mock relying party PER REALM, and a wctx minted by the one in
+// `acme` being recognised by the one in the default realm would make the check
+// this map exists for — did my own value come back? — answer yes across a
+// boundary the rest of the profile does not cross.
+const rpContexts = realms.map();
 
 // --- reading the request ---------------------------------------------------
 // 13.2.1 allows the sign-in request as a GET with a query string or as a form

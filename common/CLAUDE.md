@@ -229,17 +229,32 @@ reader derives from four directory files. The short version:
   pre-authorized codes, presentation transactions, SAML request state and
   artifacts, the claim selections, the verifier's request, the statistics and
   the audit log.
-* **What it does not separate at all is the DIRECTORY.** One `ou=users`, one
-  `ou=groups` and one `ou=applications` for the whole process, because LDAP
-  answers on a socket with no path to put a segment in. So OAuth client
-  registrations, SAML service provider entries, the SPIFFE registry and **the
-  two admin console roles** are shared — there is no per-realm administrator.
-  **The admin console's SIGN-ON follows those roles rather than the sessions**:
-  its gate is the one reader in this service that resolves the session cookie
-  across realms, so the realm switcher switches instead of asking for a second
-  sign-in. That is argued in `../authn/CLAUDE.md` beside `sessionAnywhere()`, and
-  it changes nothing for a protocol endpoint — `/oauth2/authorize` in the realm
-  switched to still sees no session, and still should.
+* **THE DIRECTORY IS SEPARATED TOO, AS A SUBTREE, AND THIS BULLET SAID THE
+  OPPOSITE UNTIL 2026-08-25.** Each realm owns `dc=<id>` beneath `ldap.baseDn`
+  with its own `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and
+  SPIFFE containers, so OAuth client registrations, SAML service provider
+  entries and the SPIFFE registry are a realm's own. The realm is in the DN
+  because the socket has no path to put a segment in; `../ldap/CLAUDE.md` argues
+  it. **The TWO ADMIN CONSOLE ROLES are the exception and are pinned to the
+  DEFAULT realm's `ou=groups`** — one roster for the process, on purpose, since
+  a per-realm roster would let anybody who can create a realm administer the
+  service. **The console's SIGN-ON follows the roster**: its gate is
+  `consoleSession()`, which accepts the DEFAULT realm's session and no other, so
+  the realm switcher switches without a second sign-in and a session minted in
+  `acme` opens nothing. That is argued in `../authn/CLAUDE.md`, and it changes
+  nothing for a protocol endpoint — `/oauth2/authorize` in the realm switched to
+  still sees no session, and still should.
+* **WHAT IS LEFT PROCESS-WIDE NEEDS AN ARGUMENT THAT IS NOT "THE DIRECTORY IS
+  SHARED".** That sentence justified two stores in `admin_stats.js` — the
+  identity register and the revocation set — and it was true for one day. Both
+  are `realms.map()`/`realms.keyed()` since 2026-08-25, and what they were doing
+  before is worth knowing because neither raised anything: every realm's
+  `/admin/users` listed every other realm's people, while the realm's own
+  directory reader reported each of those entries as missing (which, in that
+  realm, they were); and one realm's `tokens.revoked` appeared under every realm
+  beside a correctly partitioned `tokens.held`, with
+  `POST /realm/acme/oauth2/revoke` able to kill a jti the default realm issued.
+  `tests/realm_isolation.js` guards both directions and the purge.
 * **Kerberos, the two TLS listeners and SPIFFE's four sockets are shared**, for
   the same reason. Kerberos is the one with an obvious way forward, and it is
   written down in `realmSupport()` rather than left to be rediscovered: Kerberos

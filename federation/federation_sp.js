@@ -131,6 +131,9 @@ const authn = require('./../authn/authn');
 const federation = require('./federation');
 const fedMap = require('./federation_map');
 const fedHttp = require('./federation_http');
+// For the context store below only. `realms.js` requires config.js and nothing
+// else here, so it registers no route and cannot join a cycle — rule 3m.
+const realms = require('./../common/realms');
 const {
   log, logArtifact, STS, xmlEscape, firstByLocal, textByLocal, iso, baseUrlOf,
   jsonFromB64u, randomId, parseBody
@@ -161,7 +164,24 @@ const STATUS_SUCCESS = 'urn:oasis:names:tc:SAML:2.0:status:Success';
 // anybody who can reach `/federation/login/{id}` — which, unlike the rest of
 // this module, needs no configuration at all to reach.
 // ---------------------------------------------------------------------------
-const contexts = new Map();
+//
+// PER TRUST REALM since 2026-08-25. A relationship is an entry in the realm's
+// own `ou=federations` and `/federation/acs/{id}` verifies against the
+// certificate configured on it, so a context minted while `acme` was ambient
+// being spendable at the DEFAULT realm's assertion consumer service would let a
+// flow that began in one realm finish in another — on the one surface here
+// where a missing check is an authentication bypass rather than a fidelity bug.
+// Nothing legitimate crossed: a handle is minted and spent inside one flow, and
+// a flow carries its realm in every URL it uses.
+//
+// THE CAP IS NOW PER REALM, which is the one thing to weigh rather than assume:
+// MAX_CONTEXTS in flight in each realm rather than 500 for the process. That is
+// deliberate — the cap is here so that anybody who can reach
+// `/federation/login/{id}` cannot grow this map without limit, and a shared cap
+// would have let one realm's flood evict another realm's in-flight sign-ins,
+// which is the denial of service the cap exists to bound arriving through the
+// door it was meant to close.
+const contexts = realms.map();
 const MAX_CONTEXTS = 500;
 
 function contextTtlMs() {

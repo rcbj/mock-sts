@@ -121,9 +121,22 @@ own. LDAP answers on a socket with no path to put a segment in — a search arri
 carrying a base DN and nothing else — so a **name** is the only thing a client
 could ever use to say which realm it means.
 
-A subtree search from `dc=example,dc=com` still returns every realm's entries,
-because that is what a naming context *is*. What is isolated is the container
-each realm reads and writes: `ou=users,dc=example,dc=com` holds no `acme` person.
+**A subtree search is scoped to the realm whose base it started from.**
+`ldapsearch -b "dc=example,dc=com"` is the default realm's directory;
+`ldapsearch -b "dc=acme,dc=example,dc=com"` is acme's; an entry belonging to
+another realm is filtered out of a search based above it, and the number
+filtered is logged rather than dropped silently. The root DSE publishes one
+`namingContexts` value per realm, which is how a client discovers that the
+others are there.
+
+An operation that names **one DN** — an add, a modify, a delete, a compare, or a
+base-scope search of a single entry — is answered wherever that DN is. Spelling
+out `…,dc=acme,dc=example,dc=com` is how a client says which realm it means on a
+socket that has nowhere else to put one, so refusing it would make a realm
+unreachable rather than isolated.
+
+With no realms defined there is one naming context and one container, and every
+byte of every answer is what it was before realms existed.
 
 ### Not separated — the two admin console roles
 

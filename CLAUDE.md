@@ -307,8 +307,15 @@ reaches outside that file:
 2. **A store becomes per realm at its declaration and nowhere else** —
    `const sessions = realms.map()` in place of `new Map()`, and its hundred
    readers are unchanged and correct. About thirty-five stores were converted
-   this way; the ones deliberately NOT converted are the directory-backed ones,
-   because the directory is shared.
+   this way. **The ones left process-wide were left because the DIRECTORY was
+   shared, and that reason expired on 2026-08-25** when the directory became a
+   subtree per realm: `admin_stats.js`'s identity register and its revocation
+   set were converted on 2026-08-25 for exactly that reason, and until they
+   were, every realm's `/admin/users` listed every other realm's people beside a
+   directory reader that reported each of them missing. A store still declared
+   `new Map()` today needs an argument that does not rest on the directory —
+   `tests/realm_isolation.js` is the guard, and `common/CLAUDE.md` carries the
+   reasoning.
 3. **THE EMBEDDED DIRECTORY IS PER REALM TOO, AS A SUBTREE — and this paragraph
    said the opposite until 2026-08-25.** The default realm is `ldap.baseDn`
    itself (`dc=example,dc=com`) and every other realm is `dc=<id>` beneath it, so
@@ -318,9 +325,14 @@ reaches outside that file:
    realm's own. **The realm is in the DN because the socket has no path to put a
    segment in** — an `ldapsearch` arrives on 389 with a base DN and nothing
    else, so `-b "dc=acme,dc=example,dc=com"` is the only way a client could ever
-   name a realm, and it works. A subtree search from the naming context still
-   returns every realm's entries, because that is what a naming context IS; what
-   is isolated is the CONTAINER each realm reads and writes. `ldap/CLAUDE.md`
+   name a realm, and it works. **A SUBTREE SEARCH IS SCOPED TO THE REALM ITS
+   BASE NAMES** — `-b "dc=example,dc=com"` is the default realm's directory and
+   `-b "dc=acme,dc=example,dc=com"` is acme's — and the root DSE publishes one
+   `namingContexts` value per realm so a client can still find them. That
+   reverses the original decision, which was that a naming context IS the whole
+   tree: it left 389 as the one door through which a realm could read another
+   realm's entries while every other surface showed it only its own. An
+   operation that names ONE DN is still answered wherever that DN is. `ldap/CLAUDE.md`
    argues the shape, the choke point every enumerator goes through, and the
    carve-out the default realm needs because its base contains the others'.
 4. **THE TWO ADMIN CONSOLE ROLES ARE THE ONE THING DELIBERATELY NOT SEPARATED,

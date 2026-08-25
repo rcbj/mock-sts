@@ -77,12 +77,44 @@ Two rules that are not optional here:
   against four mutants — the derived-default fix reverted, `checkRealmOverride`
   dropping its `forRealm` argument, the `realmRuntime` marker deleted, and
   `create()` ignoring the overrides it was given — and each was caught by
-  between four and seven assertions.
+  between four and seven assertions. `realm_isolation.js` was checked
+  against two — the identity register put back to a plain `Map`, and one
+  shared revocation `Set` behind the same call shape — caught by five
+  assertions and by three. `realm_directory_lookups.js` was checked against
+  four — `readGroupEntry()`, `deleteGroupEntry()` and the console's
+  `groupsFor()` each put back to a bare `getEntry()`, and `inRealm()`
+  stripped of the default realm's carve-out — caught by two, three, one and
+  one. The two one-assertion mutants are why both DIRECTIONS are written
+  out: each is the only check in the file that could have seen its mutant.
 * **CLEAN UP THE PROCESS-WIDE STATE YOU TOUCH.** The realm table and
   `process.env` are shared by every test in the run and this service persists
   nothing, so a realm left behind changes what a later test resolves. Use the
   `withEnv()` / `withRealm()` shape in `config_realm_layer.js`: save, act,
   restore in a `finally`.
+
+## What is in here
+
+| File | What it guards |
+|---|---|
+| `config_realm_layer.js` | what a trust realm may and may not carry, at the writing end and at the reading end |
+| `realm_isolation.js` | that a realm's identity register and its revocation set are its own, in both directions, and that removing a realm takes them with it |
+| `realm_directory_lookups.js` | that a lookup BY DN answers about one realm — groups, people and applications — including that a refused cross-realm delete leaves the entry where it was |
+
+Both realm files bend the rule at the top of this file, and each says so in
+its own header rather than leaving a reader to catch it.
+`realm_directory_lookups.js` carries one gap worth knowing: the LDAP SOCKET
+half of the same fix — a subtree search is scoped to the realm its base
+names — needs a listener to test, so by this file's own rule it is not
+asserted here. It was verified by hand, and `ldap/CLAUDE.md` records what
+was checked.
+
+`realm_isolation.js` is the one closest to the line: the leak it guards IS
+observable over HTTP. It is here because the parent project's
+`sts/` gitlink is pinned at a commit from before this repository was
+reorganised — so a guard written over there today does not run against this
+code — and because the purge half of it cannot be seen from outside at all,
+where "purged" and "never existed" look identical. If the pin is ever bumped
+the first reason goes away and the second one does not.
 
 ## What it does not do
 

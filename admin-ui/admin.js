@@ -1313,6 +1313,65 @@ function realmRelativePath(req) {
   return here.slice(realms.currentPrefix().length) || '/admin';
 }
 
+// WHERE "REFRESH" POINTS: the page the reader is on, with the message
+// parameters taken back off.
+//
+// Root-relative and WITHOUT the realm prefix, which is the one thing here that
+// is easy to get wrong. app.js rewrites every `href="/…` on the way out to
+// carry the realm being read, so handing it `req.originalUrl` — which already
+// carries one — would produce /realm/acme/realm/acme/admin/tokens and a 404 a
+// long way from this function. realmRelativePath() is that same URL with the
+// prefix off, which is exactly what the rewrite expects to be given.
+//
+// `notice` and `error` come off because respondToAction() puts them there on
+// the redirect after a form POST: they describe something that has ALREADY
+// happened, and a Refresh that carried them would re-announce "12 tokens
+// revoked" over a page where nothing had been revoked this time. Everything
+// else survives — the filter, the page number, the search — because that is
+// what the reader is looking at, which is why this is a subtraction and not a
+// bare path.
+function refreshHref(req) {
+  log.debug("Entering refreshHref().");
+  const here = realmRelativePath(req);
+  const cut = here.indexOf('?');
+  if (cut < 0) {
+    log.debug("Leaving refreshHref(). No query string.");
+    return here;
+  }
+  const params = new URLSearchParams(here.slice(cut + 1));
+  params.delete('notice');
+  params.delete('error');
+  const query = params.toString();
+  log.debug("Leaving refreshHref(). " + (query ? "Kept " + query : "Kept nothing") + ".");
+  return query ? here.slice(0, cut) + '?' + query : here.slice(0, cut);
+}
+
+// THE REFRESH CONTROL, at the top of every page in this console.
+//
+// A LINK RATHER THAN A BUTTON, and this service's own CSP is the reason rather
+// than taste: `script-src 'none'` (see CLAUDE.md) means there is no
+// `location.reload()` to be had anywhere in here, and a <form method="get"> to
+// the same path would silently drop the query string it was submitted with
+// unless every parameter were re-emitted as a hidden field. An <a> to the
+// current URL fetches the page again either way, because respond() sends every
+// page `Cache-Control: no-store` — so this is a real refresh and not a
+// possibly-cached one.
+//
+// It is worth having at all because every page in this console describes LIVE
+// state held in memory — counts, sessions, tokens expiring while they are being
+// read, a directory something else is writing — so "is this still true?" is a
+// question a reader has on all of them, and until now the only answer was the
+// browser's own reload with a stale `?notice=` still on the URL.
+//
+// It is drawn in the QUIET form of a.btn on purpose. It is on every page beside
+// the heading, and a solid dark button in that position would read as the most
+// important thing on the page on all of them.
+function refreshLink(req) {
+  return '<a class="btn secondary" href="' + esc(refreshHref(req)) +
+    '" title="Load this page again. Everything in this console is live state ' +
+    'held in memory.">Refresh</a>';
+}
+
 function realmChooser(req) {
   log.debug("Entering realmChooser().");
   if (!realms.active()) {
@@ -1364,6 +1423,16 @@ function page(title, active, inner, up, gate, req) {
     '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:24px 28px;' +
     'box-shadow:0 6px 24px rgba(0,0,0,.08)}' +
     'h1{font-size:1.35em;margin:0 0 4px;color:#12107c}' +
+    // THE HEAD ROW — the title, and the refresh control pushed to the far end
+    // of it. `align-items:baseline` so a control that much smaller sits on the
+    // heading's baseline rather than being centred against a taller box, and
+    // `flex-wrap` so that at a narrow width it drops underneath the title
+    // instead of squeezing it to one word a line. The bottom margin is what
+    // `p.sub` used to contribute before the issuer line came off this shell;
+    // without it every page's breadcrumb trail sits up against its heading.
+    '.pagehead{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;' +
+    'justify-content:space-between;margin:0 0 14px}' +
+    '.pagehead h1{margin:0}' +
     'h2{font-size:1.05em;margin:1.8em 0 .5em;color:#12107c;border-bottom:1px solid #eee;padding-bottom:.2em}' +
     'h3{font-size:.92em;margin:1.2em 0 .4em}' +
     'p.sub{color:#666;font-size:.85em;margin:0 0 14px}' +
@@ -1530,6 +1599,11 @@ function page(title, active, inner, up, gate, req) {
     'border:1px solid #12107c;background:#12107c;color:#fff;font-size:.8em;' +
     'text-decoration:none}' +
     'a.btn:hover{background:#0d0b5e;color:#fff}' +
+    // The quiet form, matching button.secondary below, for a link that is on
+    // every page and is nobody's next action. Both rules out-specify the two
+    // above them, so the order they are written in here does not matter.
+    'a.btn.secondary{background:#fff;color:#12107c}' +
+    'a.btn.secondary:hover{background:#eef0fb;color:#12107c}' +
     // The protocol cards at the top of that page. Flex rather than grid for the
     // reason the shell is: what is wanted at a narrow width is "the row becomes
     // fewer columns", which flex-wrap does for nothing. `flex:1 1 15rem` lets
@@ -1596,10 +1670,19 @@ function page(title, active, inner, up, gate, req) {
     // it is absent in the ordinary case, which is precisely the case where the
     // corner was saying nothing useful at all.
     //
-    // NOTHING IS LOST. The issuer identifier is still on every page, under the
-    // heading, in the line that says which service this console is for — and it
-    // is in this line's tooltip, because somebody who had learnt to read it out
-    // of the corner should find it where they look rather than have to hunt.
+    // THE ISSUER IDENTIFIER IS NOT IN THIS SHELL AT ALL ANY MORE, and that is
+    // the second half of one decision rather than a later reversal of it. It
+    // came out of this corner on 2026-08-24 into the line under the heading,
+    // and off the shell entirely on 2026-08-25, for the reason above read once
+    // more: a name that ONE of sixteen protocol families uses, repeated at the
+    // top of every page in the console, reads as the service's identity on all
+    // of them and means something on the handful about WS-Trust.
+    //
+    // NOTHING IS LOST, and here is where each half of it went. It is on
+    // `/admin/sts-metadata`, the one page whose subject is what this service
+    // IS; it is on `/admin/config` under WS-Trust, which is where it is SET;
+    // and it is in this line's tooltip, because somebody who had learnt to read
+    // it off the shell should find it where they look rather than have to hunt.
     '<p class="brandsub" title="' +
       esc('This console is showing the trust realm "' + realms.current().name +
           '" (id: ' + realms.currentId() + '). Its WS-Trust issuer identifier ' +
@@ -1609,9 +1692,9 @@ function page(title, active, inner, up, gate, req) {
       '">Mock STS &middot; ' + esc(realms.current().name) + '</p>' +
     navBar(active, up, req) +
     '</aside><div class="main"><div class="card">' +
-    '<h1>' + esc(title) + '</h1>' +
-    '<p class="sub">Mock STS admin console — issuer <code>' +
-      esc(config.value('wstrust.issuer')) + '</code></p>' +
+    // THE HEAD ROW: the page's title, and the one control that is on every
+    // page of this console. See refreshLink() for why it is a link.
+    '<div class="pagehead"><h1>' + esc(title) + '</h1>' + refreshLink(req) + '</div>' +
     trailBar(active, up, title) + gateBanner(gate) + inner +
     '<div class="meta">' +
     '<div>Everything on these pages is held in memory and dies with the process, like the signing ' +
@@ -7233,7 +7316,16 @@ function usersListPage(req) {
         '<button>Create</button>' +
       '</div>' +
       '<p class="note">Puts an entry in the embedded LDAP directory at ' +
-      '<code>uid=&lt;name&gt;,' + esc('ou=users,' + config.value('ldap.baseDn')) + '</code>, with the invented person ' +
+      // THE REALM'S OWN CONTAINER, ASKED FOR RATHER THAN BUILT HERE. This read
+      // `ou=users,` + config.value('ldap.baseDn') until 2026-08-25, which is
+      // the NAMING CONTEXT and is the default realm's container only: under
+      // /realm/acme the page named a DN in a different realm than the one the
+      // button writes to, and named it on the very control whose whole subject
+      // is where the entry goes. `ldap_server.js` answers the question for the
+      // ambient realm, and the fallback is the old string for the build with no
+      // directory loaded, where the slot is empty and there is no realm to ask
+      // about anyway.
+      '<code>uid=&lt;name&gt;,' + esc(newUserContainer()) + '</code>, with the invented person ' +
       'behind that name written onto it, so an issued credential and an ' +
       '<code>ldapsearch</code> agree from the start. <strong>One entry per person:</strong> a ' +
       'name that is already here is refused, whichever protocol brought them and whatever ' +
@@ -7341,6 +7433,21 @@ function usersAction(body) {
 // One route, three answers, and the choice between them is here rather than in
 // the route so that /admin-api/users makes the same one. `known: false` is the
 // third and it is not a 404 — see the comment inside it.
+// WHERE A USER CREATED ON THIS PAGE LANDS, in the realm the page is being read
+// in. `directoryReader('')` is the same slot the drill-down uses, asked with no
+// name: it answers about the DIRECTORY rather than about a person, which is
+// what a note above an empty form has to do.
+function newUserContainer() {
+  log.debug("Entering newUserContainer().");
+  if (!directoryReader) {
+    log.debug("Leaving newUserContainer(). No directory is loaded.");
+    return 'ou=users,' + config.value('ldap.baseDn');
+  }
+  const info = directoryReader('');
+  log.debug("Leaving newUserContainer(). " + info.usersDn);
+  return info.usersDn;
+}
+
 function usersView(req) {
   log.debug("Entering usersView().");
   const wantedUser = String(req.query.user || '').trim();
