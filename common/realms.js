@@ -482,6 +482,41 @@ function update(id, changes) {
   return { ok: true, errors: [], realm: realm };
 }
 
+// ---------------------------------------------------------------------------
+// THE WRITING END OF THE `realms.*` RULE, AND IT WAS MISSING UNTIL 2026-08-25.
+//
+// `config.js`'s `realmFor()` answers null for any key starting `realms.`, so a
+// realm can never CARRY one of those settings: a realm that could switch realms
+// off, or move the prefix it was found under, would be doing it half way
+// through the request that found it. The comment above that function calls
+// itself "the second of two locks on one door" and says the writing end refuses
+// as well — **and the writing end did not**. `POST /admin-api/realms/set` with
+// `realms.pathSegment` answered `ok: true` and stored it on the realm, where
+// nothing would ever read it. The value was inert, so nothing MISBEHAVED; what
+// was wrong is worse than inert, because `GET /admin-api/realms` then listed
+// that key among the realm's settings — the API asserting that a realm carries
+// a prefix setting no reader will ever consult.
+//
+// So this is that lock, and every writing path into a realm's overrides goes
+// through it: `setOverride()` below and `checkOverrides()` — which is what
+// `create()` and `update()` validate a whole object with. One predicate rather
+// than three copies, for the reason `gateStateFor()` exists: the two that were
+// written separately disagreed within the hour.
+//
+// It matches by PREFIX rather than naming the two settings, so a third
+// `realms.*` setting is refused the day it is added rather than the day
+// somebody remembers this function.
+function checkRealmOverride(key, raw) {
+  if (String(key || '').indexOf('realms.') === 0) {
+    return '"' + key + '" cannot be set on one realm: it is what decides ' +
+      'whether realms exist and where they are found, so a realm carrying it ' +
+      'would be changing how it was reached half way through the request that ' +
+      'reached it. Set it on the service as a whole — /admin/config, or POST ' +
+      '/admin-api/config/set.';
+  }
+  return config.checkOverride(key, raw);
+}
+
 // One setting, set or cleared on one realm. Separate from update() because the
 // console's configuration page edits a section at a time and the management API
 // edits a key at a time, and neither wants to send the whole override object
@@ -493,7 +528,7 @@ function setOverride(id, key, raw) {
     log.debug("Leaving setOverride(). No such realm.");
     return { ok: false, errors: ['No realm called "' + id + '" is defined.'] };
   }
-  const problem = config.checkOverride(key, raw);
+  const problem = checkRealmOverride(key, raw);
   if (problem) {
     log.debug("Leaving setOverride(). Refused: " + problem);
     return { ok: false, errors: [problem] };
@@ -530,7 +565,12 @@ function clearOverride(id, key) {
 function checkOverrides(overrides) {
   const errors = [];
   Object.keys(overrides || {}).forEach(function (key) {
-    const problem = config.checkOverride(key, overrides[key]);
+    // checkRealmOverride() and not config.checkOverride(), so that the two
+    // `realms.*` settings are refused on a create and an update exactly as they
+    // are on a set. This was the door the `create` fix opened: until 2026-08-25
+    // `realmsAction()` dropped `overrides` on the floor, so nothing reached
+    // here from that direction and the missing refusal could not be provoked.
+    const problem = checkRealmOverride(key, overrides[key]);
     if (problem) {
       errors.push(problem);
     }

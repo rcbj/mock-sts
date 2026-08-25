@@ -12071,13 +12071,28 @@ function realmsAction(body) {
   const id = String((body && body.id) || '').trim();
 
   if (action === 'create') {
+    // `overrides` IS PASSED THROUGH, and until 2026-08-25 it was not. The
+    // management API documents the field, gives it an example
+    // (`{"saml2.entityId": "urn:acme:idp"}`) and says it wins over the six
+    // seeded names — and this function built its argument out of three
+    // properties and dropped the fourth, so a create carrying overrides
+    // answered 200 and made a realm configured differently from the one that
+    // was asked for. Nothing could have shown it: `realms.create()` validates
+    // and merges overrides properly, the console's own form has no such field,
+    // and a silently ignored parameter has no failure to point at.
+    //
+    // It is `undefined` rather than `{}` when nobody sent one, because
+    // `create()` distinguishes them: an empty object is still merged over the
+    // seeded names — harmlessly, but the intent is "the caller sent nothing".
     const result = realms.create({ id: id.toLowerCase(), name: body.name,
-                                   description: body.description });
+                                   description: body.description,
+                                   overrides: body.overrides });
     if (!result.ok) {
       log.debug("Leaving realmsAction(). create refused.");
       return result;
     }
-    log.debug("Leaving realmsAction(). create ok.");
+    log.debug("Leaving realmsAction(). create ok, " +
+              Object.keys(result.realm.overrides).length + " setting(s).");
     return { ok: true, realm: result.realm.id,
              message: 'The realm "' + result.realm.id + '" is defined. Every ' +
                       'HTTP endpoint this service has now answers under ' +

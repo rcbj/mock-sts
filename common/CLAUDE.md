@@ -167,6 +167,36 @@ request that found it, and a realm that could move its own prefix would change
 the prefix that had already been used to find it. They are refused at the writing
 end as well, but the reading end is the lock that cannot be got around.
 
+**THE WRITING-END LOCK WAS MISSING UNTIL 2026-08-25, AND THE SENTENCE ABOVE
+DESCRIBED IT ANYWAY** — which is the whole lesson. `realms.setOverride()` went
+straight to `config.checkOverride()`, which knows only whether a setting exists
+and is runtime-settable, so `POST /admin-api/realms/set` with
+`realms.pathSegment` answered `ok: true` and stored it on the realm. Nothing
+MISBEHAVED, because `realmFor()` at the reading end returns null for any
+`realms.` key and the value was never consulted — the second lock did its job
+alone, exactly as the sentence above claims it can. What was wrong is subtler
+and worse than a wrong value: `GET /admin-api/realms` lists a realm's overrides,
+so this API asserted that a realm carried a prefix setting no reader would ever
+look at. **A dead write is not harmless when something publishes what was
+written.**
+
+The lock is `checkRealmOverride()` in `realms.js`, and two things about it are
+deliberate. It matches by PREFIX rather than naming the two settings, so a third
+`realms.*` setting is refused the day it is added rather than the day somebody
+remembers this function. And **every writing path goes through it** —
+`setOverride()`, and `checkOverrides()`, which is what `create()` and `update()`
+validate a whole object with — because the two were written separately at first
+and that is exactly how one of them came to be missing.
+
+**One door still accepts those two keys and must**: `POST
+/realm/acme/admin-api/config/set` goes through `config.setOverride()`, where
+`realmFor()` answers null and the write lands PROCESS-WIDE. That is the
+documented behaviour rather than a hole — it is the same exemption read from
+the other side — and the reply names no realm, which is what tells the caller
+where it went. Do not "fix" that one to match: refusing it would leave
+`realms.enabled` unsettable from inside any realm, which is every request in a
+process where realms are switched on.
+
 ### A new realm is born with its own names for the things that are NAMES
 
 Six settings here are identifiers rather than behaviour — the SAML 2.0 entityID,
