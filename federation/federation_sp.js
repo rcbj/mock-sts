@@ -630,6 +630,7 @@ function completeSignIn(req, res, record, result) {
 }
 
 function samlFieldsFor(record) {
+  log.debug('Entering samlFieldsFor().');
   const fields = {};
   if (record.fedProtocol === 'saml2' || record.fedProtocol === 'saml11') {
     if (record.fedPeer) fields.samlEntityId = record.fedPeer;
@@ -641,6 +642,7 @@ function samlFieldsFor(record) {
   if (record.fedProtocol === 'oidc' || record.fedProtocol === 'oauth2') {
     if (record.fedClientId) fields.oauthClientId = record.fedClientId;
   }
+  log.debug('Leaving samlFieldsFor().');
   return fields;
 }
 
@@ -656,6 +658,7 @@ function bagTable(bag) {
 }
 
 function signedInPage(record, mapped, result, session) {
+  log.debug('Entering signedInPage().');
   const rows = mapped.mapped.map(function (one) {
     return '<tr><td><code>' + xmlEscape(one.incoming) + '</code></td><td><code>' +
       xmlEscape(one.ldap) + '</code></td><td>' +
@@ -667,6 +670,7 @@ function signedInPage(record, mapped, result, session) {
       one.values.map(function (v) { return xmlEscape(v); }).join('<br>') +
       '</td><td class="note">nothing maps this name, so it was NOT written</td></tr>';
   }).join('');
+  log.debug('Leaving signedInPage().');
   return '<h1>Signed in through ' + xmlEscape(record.fedName || record.fedId) + '</h1>' +
     '<p>This service is now signing you in as <code>' + xmlEscape(mapped.username) +
     '</code>. The session is <code>' + xmlEscape(session.id) + '</code>, and it is the ' +
@@ -783,10 +787,12 @@ function authnRequestXml(base, record) {
 // is leaving this service for somebody else's and a deliberate click is worth
 // having there. It also means this feature adds no CSP relaxation at all.
 function postBindingPage(action, fields, record) {
+  log.debug('Entering postBindingPage().');
   const inputs = Object.keys(fields).map(function (name) {
     return '<input type="hidden" name="' + xmlEscape(name) + '" value="' +
       xmlEscape(String(fields[name])) + '">';
   }).join('');
+  log.debug('Leaving postBindingPage().');
   return page('Continue to ' + (record.fedName || record.fedId),
     '<h1>Continue to ' + xmlEscape(record.fedName || record.fedId) + '</h1>' +
     '<p>This service is about to send you to <code>' + xmlEscape(record.fedSsoUrl) +

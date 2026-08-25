@@ -154,8 +154,10 @@ function rowFor(claimName) {
 // nothing: "you are asking for a claim this issuer is not currently minting" is a
 // statement about two configurations, and both of them live on this side.
 function carriedNow(claimName) {
+  log.debug("Entering carriedNow().");
   const row = rowFor(claimName);
   if (!row) {
+    log.debug("Leaving carriedNow().");
     return { known: false, carried: [], missing: [] };
   }
   const carried = [];
@@ -167,6 +169,7 @@ function carriedNow(claimName) {
       missing.push(attribute.ldap);
     }
   });
+  log.debug("Leaving carriedNow().");
   return { known: true, carried: carried, missing: missing };
 }
 
@@ -452,10 +455,13 @@ function formatOf(wanted) {
 // interesting thing about it.
 // ---------------------------------------------------------------------------
 function pathsFor(format, claimName) {
+  log.debug("Entering pathsFor().");
   if (format.claimsAt === 'top') {
+    log.debug("Leaving pathsFor().");
     return [[claimName]];
   }
   if (format.claimsAt !== 'ldp') {
+    log.debug("Leaving pathsFor().");
     return [['credentialSubject', claimName]];
   }
   const row = rowFor(claimName);
@@ -463,8 +469,10 @@ function pathsFor(format, claimName) {
     // Not in the catalogue, so there is nothing to translate it to. Asked for as
     // written, under credentialSubject: this is the "ask for a claim that is not
     // there" case, and the honest thing is to ask for exactly what was typed.
+    log.debug("Leaving pathsFor().");
     return [['credentialSubject', claimName]];
   }
+  log.debug("Leaving pathsFor().");
   return row.ldpTerms.map(function (term) { return ['credentialSubject', term]; });
 }
 

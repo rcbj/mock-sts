@@ -82,6 +82,59 @@ expired, because an observer that quietly ended sessions while reporting on them
 would be changing the thing it describes — the same rule `audit.js`'s actor
 resolver follows.
 
+## `sessionAnywhere()` — the one reader that crosses a realm boundary, and the ADMIN CONSOLE is its only caller
+
+The session store is `realms.map()`, so `sessionOf()` answers out of the ambient
+realm's partition and a session minted in `acme` does not satisfy the default
+realm's `/oauth2/authorize`. That is right, it is what `realmSupport()` promises,
+and it does not change.
+
+**What changed is that the console asks a different question, and it had to,
+because of a fact about the COOKIE rather than a change of mind about realms.**
+`startSession()` writes `sts_mock_session` at `Path=/` — one name, one path, for
+every protocol here, deliberately and for a reason that predates realms by
+months. So a browser holds exactly ONE session id for this whole origin whatever
+realm minted it, and the console's realm switcher (a link to the same page in
+another realm) was not merely landing on the sign-in screen: signing in there
+OVERWROTE the only cookie slot the browser has, so switching back landed there
+too. **One sign-in per click, forever, with nothing expired and nothing
+misconfigured** — the two realms were taking turns holding one cookie.
+
+`sessionAnywhere(req)` asks the ambient realm first, through `sessionOf()` so the
+common case is byte-for-byte what it was, and then every other realm's partition
+by name. It returns `{ session, realm, foreign }`, and it sweeps an expired
+session out of the realm that holds it exactly as `sessionOf()` does.
+
+**Three things make this the boundary already drawn rather than a hole in it, and
+all three have to stay true if anything here is reworked:**
+
+* **The authorization behind it was never per realm.** The console's gate decides
+  from Admin Read and Admin Write, which are groups in the ONE shared directory —
+  `rbac.rolesOf()` returns the same answer in every realm, and `common/CLAUDE.md`
+  says there is no per-realm administrator. A session refused for having been
+  minted next door would have been refused on a boundary the decision behind it
+  does not have.
+* **It grants nothing else.** `gateStateFor()` in `admin-ui/admin.js` is the only
+  caller, and the only thing it answers is "may this browser read this console".
+  No token is issued on the session it finds and no assertion names it. Every
+  protocol module still calls `sessionOf()` and still sees its own realm's
+  partition only.
+* **Ending it still ends it.** What comes back is the one object in whichever
+  realm's map holds it, so `/logout`, `/admin/logout` and an expiry sweep in the
+  owning realm all shut the console with it. There is nothing separate here to
+  end.
+
+**Do not give a second caller this function by analogy.** The test it passed is
+the one in the first bullet — that the decision it feeds is already realm-shared
+— and there is exactly one such decision in this service. A protocol endpoint
+reaching for it would be single sign-on across realms, which is the thing a realm
+exists to refuse.
+
+The console SAYS which realm holds the session when it is not the one being read,
+on the banner and beside the switcher. Showing it silently is how somebody comes
+to believe the realms share the rest of it as well, and the next thing they
+conclude is that `/oauth2/authorize` would have taken the same cookie.
+
 ---
 
 

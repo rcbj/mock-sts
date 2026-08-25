@@ -246,11 +246,14 @@ const TYPES = {
     },
     text: function (v) { return String(v); },
     check: function (raw, setting) {
+      log.debug("Entering check().");
       const s = String(raw).trim();
       if (!s) {
+        log.debug("Leaving check().");
         return 'must be a number';
       }
       if (!/^-?\d+$/.test(s)) {
+        log.debug("Leaving check().");
         return 'must be a whole number, got "' + raw + '"';
       }
       const n = parseInt(s, 10);
@@ -258,17 +261,21 @@ const TYPES = {
       const max = setting && setting.max;
       const step = setting && setting.step;
       if (typeof min === 'number' && n < min) {
+        log.debug("Leaving check().");
         return 'must be at least ' + min + ', got ' + n;
       }
       if (typeof max === 'number' && n > max) {
+        log.debug("Leaving check().");
         return 'must be at most ' + max + ', got ' + n;
       }
       if (typeof step === 'number' && step > 1 &&
           (n - (typeof min === 'number' ? min : 0)) % step !== 0) {
+        log.debug("Leaving check().");
         return 'must be a multiple of ' + step +
                (typeof min === 'number' && min % step !== 0 ? ' above ' + min : '') +
                ', got ' + n;
       }
+      log.debug("Leaving check().");
       return null;
     }
   },
@@ -310,20 +317,25 @@ const TYPES = {
   // typo survives to be discovered as a missing feature.
   bool: {
     parse: function (raw, setting) {
+      log.debug("Entering parse().");
       if (typeof raw === 'boolean') {
+        log.debug("Leaving parse().");
         return raw;
       }
       const text = String(raw).trim();
       if (/^(1|true|yes|on)$/i.test(text)) {
+        log.debug("Leaving parse().");
         return true;
       }
       if (/^(0|false|no|off)$/i.test(text)) {
+        log.debug("Leaving parse().");
         return false;
       }
       const fallback = !!(setting && setting.dflt);
       log.warn('config: "' + text + '" is not a true/false value' +
                (setting && setting.env ? ' for ' + setting.env : '') +
                '; using the default (' + fallback + ').');
+      log.debug("Leaving parse().");
       return fallback;
     },
     text: function (v) { return v ? 'true' : 'false'; },
@@ -2578,6 +2590,7 @@ function defaultOf(setting) {
 // computed separately from a `value` is the kind of pair that goes wrong when
 // somebody adds a level and updates one of them.
 function resolve(key) {
+  log.debug("Entering resolve().");
   const setting = settingFor(key);
   // The current trust realm, above everything — including the service-wide
   // runtime override, because a realm's value is the more specific statement of
@@ -2586,15 +2599,19 @@ function resolve(key) {
   // keys this layer deliberately cannot carry.
   const fromRealm = realmOverrideOf(key);
   if (fromRealm !== undefined) {
+    log.debug("Leaving resolve().");
     return { raw: fromRealm, source: 'realm' };
   }
   if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+    log.debug("Leaving resolve().");
     return { raw: overrides[key], source: 'override' };
   }
   if (setting.env && process.env[setting.env] !== undefined) {
+    log.debug("Leaving resolve().");
     return { raw: process.env[setting.env], source: 'env' };
   }
   if (setting.legacyEnv && process.env[setting.legacyEnv] !== undefined) {
+    log.debug("Leaving resolve().");
     return { raw: process.env[setting.legacyEnv], source: 'env-legacy' };
   }
   // The appconfig layer, read as its two files rather than as the union, so
@@ -2603,16 +2620,19 @@ function resolve(key) {
   const dotted = setting.path || setting.key;
   const fromFile = dig(operatorConfig, dotted);
   if (fromFile !== undefined) {
+    log.debug("Leaving resolve().");
     return { raw: fromFile, source: 'appconfig' };
   }
   const fromDefaultsFile = dig(defaults, dotted);
   if (fromDefaultsFile !== undefined) {
+    log.debug("Leaving resolve().");
     return { raw: fromDefaultsFile, source: 'defaults' };
   }
   // NOWHERE. For a `derived` setting this is the answer — its default is a
   // function of a neighbour and env/defaults.js deliberately carries no row for
   // it. For any other, requireComplete() has already stopped the process, so
   // this line is only reached in a module loaded on its own by a test.
+  log.debug("Leaving resolve().");
   return { raw: defaultOf(setting), source: 'default' };
 }
 
@@ -2687,16 +2707,20 @@ function applyLogLevel() {
 // Returns an error STRING or null, which is the shape the callers join into
 // their `errors` array.
 function checkOverride(key, raw) {
+  log.debug("Entering checkOverride().");
   const setting = byKey[key];
   if (!setting) {
+    log.debug("Leaving checkOverride().");
     return 'Unknown setting "' + key + '".';
   }
   if (!setting.runtime) {
+    log.debug("Leaving checkOverride().");
     return '"' + key + '" cannot be changed while this service is running: ' +
       setting.restartReason + '. Set it in the appconfig file or as ' +
       (setting.env || 'its environment variable') + ' and restart.';
   }
   const problem = TYPES[setting.type].check(raw, setting);
+  log.debug("Leaving checkOverride().");
   return problem ? '"' + key + '" ' + problem + '.' : null;
 }
 
@@ -2796,7 +2820,9 @@ function clearAllOverrides() {
 // and an API start disagreeing about what the service is configured with.
 // ---------------------------------------------------------------------------
 function describe(setting) {
+  log.debug("Entering describe().");
   const state = resolve(setting.key);
+  log.debug("Leaving describe().");
   return {
     key: setting.key,
     group: setting.group,

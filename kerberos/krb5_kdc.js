@@ -834,10 +834,12 @@ function refuseS4u(intent, code, options) {
 // Every refusal goes through here, so every one of them carries the KDC's own
 // clock (which is how a client measures skew) and names the principals involved.
 function errorReply(code, options) {
+  log.debug('Entering errorReply().');
   const opts = options || {};
   const stime = now();
   log.info('krb5: refusing with ' + msgs.describeError(code).name + ' (' + code + ')' +
     (opts.eText ? ' — ' + opts.eText : ''));
+  log.debug('Leaving errorReply().');
   return msgs.encKrbError({
     ctime: opts.ctime || null,
     cusec: opts.ctime ? 0 : null,
@@ -856,6 +858,7 @@ function errorReply(code, options) {
 // KDC_ERR_PREAUTH_REQUIRED, with the ETYPE-INFO2 that makes it useful rather than
 // merely negative.
 function preAuthRequiredReply(client, request) {
+  log.debug('Entering preAuthRequiredReply().');
   const entries = principals.etypeInfo2For(client);
   log.info('krb5: ' + client.name.join('/') + ' needs pre-authentication; sending ETYPE-INFO2 with ' +
     entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies') + ', salt ' +
@@ -864,6 +867,7 @@ function preAuthRequiredReply(client, request) {
       ? 'SENT (explicit 4096, the pre-2026-08 behaviour of this mock)'
       : 'OMITTED (as Active Directory does; the client must apply the RFC ' +
         '3962 default). Set KRB5_S2KPARAMS=send to advertise it explicitly.'));
+  log.debug('Leaving preAuthRequiredReply().');
   return errorReply(25, {
     crealm: request.reqBody.realm,
     cname: request.reqBody.cname,
@@ -885,6 +889,7 @@ function preAuthRequiredReply(client, request) {
 // integrity failure and report it as a wrong password, which is the single most
 // misleading thing a Kerberos implementation can do.
 async function checkEncTimestamp(client, etype, padata) {
+  log.debug('Entering checkEncTimestamp().');
   const profile = kcrypto.etypeById(etype);
   const key = await principals.longTermKey(client, etype);
   let encrypted;
@@ -892,6 +897,7 @@ async function checkEncTimestamp(client, etype, padata) {
     encrypted = msgs.readEncryptedData(asn1.readTlv(padata.value, 0));
   } catch (e) {
     log.warn('krb5: PA-ENC-TIMESTAMP does not decode as EncryptedData: ' + e.message);
+    log.debug('Leaving checkEncTimestamp().');
     return { code: 24, eText: 'PA-ENC-TIMESTAMP is not well formed' };
   }
   if (encrypted.etype !== etype) {
@@ -900,6 +906,7 @@ async function checkEncTimestamp(client, etype, padata) {
     // negotiation is inconsistent.
     log.warn('krb5: PA-ENC-TIMESTAMP is ' + encrypted.etypeName + ' but the request negotiated ' +
              profile.name);
+    log.debug('Leaving checkEncTimestamp().');
     return { code: 24, eText: 'PA-ENC-TIMESTAMP was encrypted with a different etype' };
   }
   let plaintext;
@@ -910,22 +917,26 @@ async function checkEncTimestamp(client, etype, padata) {
     // like, and a wrong key usage number. The KDC cannot tell them apart, which is
     // exactly why the debugger showing the salt matters.
     log.info('krb5: pre-authentication failed for ' + client.name.join('/') + ': ' + e.message);
+    log.debug('Leaving checkEncTimestamp().');
     return { code: 24, eText: 'PREAUTH_FAILED' };
   }
   let stamp;
   try {
     stamp = msgs.readPaEncTsEnc(plaintext);
   } catch (e) {
+    log.debug('Leaving checkEncTimestamp().');
     return { code: 24, eText: 'the decrypted PA-ENC-TS-ENC is not well formed' };
   }
   const skew = Math.abs(now().getTime() - stamp.patimestamp.getTime()) / 1000;
   if (skew > clockSkewSeconds()) {
     log.info('krb5: clock skew ' + Math.round(skew) + 's exceeds the ' + clockSkewSeconds() +
              's tolerance for ' + client.name.join('/'));
+    log.debug('Leaving checkEncTimestamp().');
     return { code: 37, eText: 'clock skew is ' + Math.round(skew) + ' seconds' };
   }
   log.info('krb5: pre-authentication succeeded for ' + client.name.join('/') +
            ' (' + profile.name + ', skew ' + Math.round(skew) + 's)');
+  log.debug('Leaving checkEncTimestamp().');
   return null;
 }
 
@@ -1958,6 +1969,7 @@ async function handleMessage(bytes) {
 // The listeners.
 // ---------------------------------------------------------------------------
 function startTcp(port) {
+  log.debug('Entering startTcp().');
   const server = net.createServer(function (socket) {
     let buffer = Buffer.alloc(0);
     socket.on('error', function (err) {
@@ -2007,10 +2019,12 @@ function startTcp(port) {
     // the request would print "listening on TCP 0".
     log.info('krb5: KDC listening on TCP ' + server.address().port + ' for realm ' + REALM);
   });
+  log.debug('Leaving startTcp().');
   return server;
 }
 
 function startUdp(port) {
+  log.debug('Entering startUdp().');
   const socket = dgram.createSocket('udp4');
   socket.on('error', function (err) {
     log.error('krb5: the UDP listener on port ' + port + ' failed: ' + err.message);
@@ -2035,6 +2049,7 @@ function startUdp(port) {
   socket.bind(port, '0.0.0.0', function () {
     log.info('krb5: KDC listening on UDP ' + socket.address().port + ' for realm ' + REALM);
   });
+  log.debug('Leaving startUdp().');
   return socket;
 }
 
@@ -2177,6 +2192,7 @@ app.get('/krb5/principals', function (req, res) {
 // So TCP binds first and UDP follows it onto whatever port it actually got.
 // `whenReady` resolves once both are up, for a caller that needs to know.
 function listen(port) {
+  log.debug('Entering listen().');
   const requested = (port === undefined || port === null) ? KDC_PORT : port;
   const tcp = startTcp(requested);
   const result = { tcp: tcp, udp: null, port: requested };
@@ -2192,6 +2208,7 @@ function listen(port) {
     tcp.once('listening', bindUdp);
     tcp.once('error', reject);
   });
+  log.debug('Leaving listen().');
   return result;
 }
 

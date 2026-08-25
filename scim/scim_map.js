@@ -849,6 +849,7 @@ function fromScimGroup(resource, existing) {
 // matcher (see toScimUser()) and this is where it stops being useful.
 // ---------------------------------------------------------------------------
 function prune(resource) {
+  log.debug("Entering prune().");
   const out = {};
   Object.keys(resource).forEach(function (key) {
     const value = resource[key];
@@ -869,6 +870,7 @@ function prune(resource) {
       out[key] = value;
     }
   });
+  log.debug("Leaving prune().");
   return out;
 }
 

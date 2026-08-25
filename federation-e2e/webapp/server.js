@@ -75,6 +75,7 @@
 // wrong lesson.
 // ===========================================================================
 
+const bunyan = require('bunyan');
 const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
@@ -100,10 +101,12 @@ const CLOCK_TOLERANCE_S = 60;
 const sessions = new Map();
 const pending = new Map();
 
-function log() {
-  const args = Array.prototype.slice.call(arguments);
-  console.log('[webapp] ' + args.join(' '));
-}
+// bunyan rather than console, the same as the two driver scripts and as every
+// test in the parent project's suite. The `name` field is what the '[webapp]'
+// prefix used to be, and it is a field rather than a string a reader has to
+// pick apart.
+const log = bunyan.createLogger({ name: 'webapp',
+                                  level: process.env.LOG_LEVEL || 'info' });
 
 // ---------------------------------------------------------------------------
 // DISCOVERY, fetched once and then held.
@@ -118,9 +121,13 @@ function log() {
 let discovery = null;
 
 async function discover() {
-  if (discovery) return discovery;
+  log.debug('Entering discover().');
+  if (discovery) {
+    log.debug('Leaving discover().');
+    return discovery;
+  }
   const url = ISSUER.replace(/\/+$/, '') + '/.well-known/openid-configuration';
-  log('fetching discovery from ' + url + ' (back channel)');
+  log.info('fetching discovery from ' + url + ' (back channel)');
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error('discovery at ' + url + ' answered ' + response.status);
@@ -132,7 +139,7 @@ async function discover() {
     if (BROWSER_BASE === ISSUER) return endpoint;
     const moved = endpoint.replace(ISSUER.replace(/\/+$/, ''),
                                    BROWSER_BASE.replace(/\/+$/, ''));
-    if (moved !== endpoint) log('front-channel rewrite: ' + endpoint + ' -> ' + moved);
+    if (moved !== endpoint) log.info('front-channel rewrite: ' + endpoint + ' -> ' + moved);
     return moved;
   };
   discovery = {
@@ -142,7 +149,8 @@ async function discover() {
     jwks_uri: document.jwks_uri,
     end_session_endpoint: rewrite(document.end_session_endpoint)
   };
-  log('provider issuer is ' + discovery.issuer);
+  log.info('provider issuer is ' + discovery.issuer);
+  log.debug('Leaving discover().');
   return discovery;
 }
 
@@ -161,6 +169,7 @@ async function jwks(uri) {
 }
 
 async function verifyIdToken(token, expected) {
+  log.debug('Entering verifyIdToken().');
   const parts = String(token).split('.');
   if (parts.length !== 3) throw new Error('the ID Token is not three segments');
   const header = b64uJson(parts[0]);
@@ -233,6 +242,7 @@ async function verifyIdToken(token, expected) {
     throw new Error('nonce is "' + payload.nonce + '", expected "' + expected.nonce +
                     '" — a replayed ID Token looks exactly like this');
   }
+  log.debug('Leaving verifyIdToken().');
   return payload;
 }
 
@@ -298,7 +308,9 @@ function redirect(res, location, cookie) {
 // The pages.
 // ---------------------------------------------------------------------------
 function homePage(res, session) {
+  log.debug('Entering homePage().');
   if (!session) {
+    log.debug('Leaving homePage().');
     return page(res, 200, APP_NAME,
       '<h1>' + esc(APP_NAME) + '</h1>' +
       '<p class="sub">A web application that knows nothing about federation.</p>' +
@@ -316,6 +328,7 @@ function homePage(res, session) {
     return '<tr><th><code>' + esc(name) + '</code></th><td><code>' +
       esc(typeof value === 'object' ? JSON.stringify(value) : value) + '</code></td></tr>';
   }).join('');
+  log.debug('Leaving homePage().');
   return page(res, 200, APP_NAME,
     '<h1>Hello, ' + esc(claims.name || claims.preferred_username || claims.sub) + '.</h1>' +
     '<p class="sub">Signed in through <code>' + esc(session.issuer) + '</code>.</p>' +
@@ -329,6 +342,7 @@ function homePage(res, session) {
 }
 
 async function login(req, res) {
+  log.debug('Entering login().');
   const meta = await discover();
   const verifier = crypto.randomBytes(32).toString('base64url');
   const state = crypto.randomBytes(16).toString('base64url');
@@ -349,14 +363,17 @@ async function login(req, res) {
   });
   const joiner = meta.authorization_endpoint.indexOf('?') === -1 ? '?' : '&';
   const url = meta.authorization_endpoint + joiner + params.toString();
-  log('sending the browser to ' + url.slice(0, 120) + '…');
+  log.info('sending the browser to ' + url.slice(0, 120) + '…');
   redirect(res, url);
+  log.debug('Leaving login().');
 }
 
 async function callback(req, res, url) {
+  log.debug('Entering callback().');
   const meta = await discover();
   const error = url.searchParams.get('error');
   if (error) {
+    log.debug('Leaving callback().');
     return page(res, 400, 'Sign-in failed',
       '<h1>The provider refused</h1><div class="err"><code>' + esc(error) + '</code>' +
       (url.searchParams.get('error_description')
@@ -369,6 +386,7 @@ async function callback(req, res, url) {
   const context = pending.get(state);
   pending.delete(state);
   if (!context || context.expires < Date.now()) {
+    log.debug('Leaving callback().');
     return page(res, 400, 'Sign-in failed',
       '<h1>That was not a sign-in this application started</h1>' +
       '<div class="err">The <code>state</code> is not one this application minted, or the ' +
@@ -377,6 +395,7 @@ async function callback(req, res, url) {
   }
   const code = url.searchParams.get('code');
   if (!code) {
+    log.debug('Leaving callback().');
     return page(res, 400, 'Sign-in failed',
       '<h1>No authorization code arrived</h1><div class="err">The provider redirected here ' +
       'with neither a code nor an error.</div><p><a href="/">Back</a></p>');
@@ -395,7 +414,7 @@ async function callback(req, res, url) {
   } else {
     body.set('client_id', CLIENT_ID);
   }
-  log('redeeming the code at ' + meta.token_endpoint + ' (back channel)');
+  log.info('redeeming the code at ' + meta.token_endpoint + ' (back channel)');
   const response = await fetch(meta.token_endpoint,
                                { method: 'POST', headers: headers, body: body.toString() });
   const text = await response.text();
@@ -408,12 +427,14 @@ async function callback(req, res, url) {
     tokens = null;
   }
   if (!response.ok || !tokens) {
+    log.debug('Leaving callback().');
     return page(res, 502, 'Sign-in failed',
       '<h1>The code could not be redeemed</h1><div class="err">The token endpoint answered ' +
       response.status + ': <code>' + esc(text.slice(0, 400)) + '</code></div>' +
       '<p><a href="/">Back</a></p>');
   }
   if (!tokens.id_token) {
+    log.debug('Leaving callback().');
     return page(res, 502, 'Sign-in failed',
       '<h1>No ID Token</h1><div class="err">The token response carried <code>' +
       esc(Object.keys(tokens).join(', ')) + '</code> and no <code>id_token</code>. That is an ' +
@@ -427,7 +448,8 @@ async function callback(req, res, url) {
       issuer: meta.issuer, clientId: CLIENT_ID, jwksUri: meta.jwks_uri, nonce: context.nonce
     });
   } catch (e) {
-    log('the ID Token was REFUSED: ' + e.message);
+    log.info('the ID Token was REFUSED: ' + e.message);
+    log.debug('Leaving callback().');
     return page(res, 401, 'Sign-in failed',
       '<h1>The ID Token did not verify</h1><div class="err">' + esc(e.message) + '</div>' +
       '<p class="note">This application checked the signature against the provider\'s JWKS, ' +
@@ -441,15 +463,16 @@ async function callback(req, res, url) {
     claims: claims, issuer: meta.issuer, at: Date.now(),
     accessToken: tokens.access_token || '', expires: Date.now() + SESSION_TTL_MS
   });
-  log('signed in as ' + (claims.preferred_username || claims.sub) +
+  log.info('signed in as ' + (claims.preferred_username || claims.sub) +
       ' (' + Object.keys(claims).length + ' claims)');
   redirect(res, '/', SESSION_COOKIE + '=' + id + '; Path=/; HttpOnly; SameSite=Lax');
+  log.debug('Leaving callback().');
 }
 
 const server = http.createServer(function (req, res) {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
   const path = url.pathname;
-  log(req.method + ' ' + path);
+  log.info(req.method + ' ' + path);
   Promise.resolve().then(function () {
     if (path === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -470,7 +493,7 @@ const server = http.createServer(function (req, res) {
     if (path === '/') return homePage(res, sessionOf(req));
     return page(res, 404, 'Not found', '<h1>Not found</h1><p><a href="/">Back</a></p>');
   }).catch(function (e) {
-    log('ERROR ' + (e && e.stack ? e.stack : e));
+    log.info('ERROR ' + (e && e.stack ? e.stack : e));
     page(res, 500, 'Error',
       '<h1>This application failed</h1><div class="err">' + esc(e.message) + '</div>' +
       '<p class="note">If this is a discovery failure, the identity service at <code>' +
@@ -479,9 +502,9 @@ const server = http.createServer(function (req, res) {
 });
 
 server.listen(PORT, '0.0.0.0', function () {
-  log(APP_NAME + ' listening on ' + PORT);
-  log('  provider (back channel) : ' + ISSUER);
-  log('  provider (browser)      : ' + BROWSER_BASE);
-  log('  client_id               : ' + CLIENT_ID);
-  log('  redirect_uri            : ' + REDIRECT_URI);
+  log.info(APP_NAME + ' listening on ' + PORT);
+  log.info('  provider (back channel) : ' + ISSUER);
+  log.info('  provider (browser)      : ' + BROWSER_BASE);
+  log.info('  client_id               : ' + CLIENT_ID);
+  log.info('  redirect_uri            : ' + REDIRECT_URI);
 });

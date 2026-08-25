@@ -2,10 +2,13 @@
   "name": "mock-webapp",
   "version": "1.0.0",
   "private": true,
-  "description": "A hello-world web application behind an OpenID Connect sign-in. No dependencies: node's own http, crypto and fetch are enough for a relying party, and a client built out of a library would prove less about the provider it is pointed at.",
+  "description": "A hello-world web application behind an OpenID Connect sign-in. No OIDC library: node's own http, crypto and fetch are enough for a relying party, and a client built out of a library would prove less about the provider it is pointed at. The one dependency is bunyan, which is a logger and sees no protocol.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "bunyan": "latest"
+  }
 }

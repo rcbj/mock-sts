@@ -143,6 +143,7 @@ const NARROW = 'iljtfIr.,:;!|\'`[](){}';
 const WIDE = 'mwMW@%';
 
 function textWidth(text, size) {
+  log.debug("Entering textWidth().");
   let units = 0;
   const value = String(text == null ? '' : text);
   for (let i = 0; i < value.length; i++) {
@@ -157,6 +158,7 @@ function textWidth(text, size) {
       units += 0.58;
     }
   }
+  log.debug("Leaving textWidth().");
   return units * size;
 }
 
@@ -174,6 +176,7 @@ const MAX_LABEL_CHARS = 30;
 const BREAK_AFTER = '/@.-_:+';
 
 function wrapLabel(text, maxChars, maxLines) {
+  log.debug("Entering wrapLabel().");
   const value = String(text == null ? '' : text);
   const lines = [];
   let line = '';
@@ -194,6 +197,7 @@ function wrapLabel(text, maxChars, maxLines) {
     lines.push(line);
   }
   if (!lines.length) {
+    log.debug("Leaving wrapLabel().");
     return [''];
   }
   // Everything that did not fit, marked on the last line rather than dropped
@@ -203,6 +207,7 @@ function wrapLabel(text, maxChars, maxLines) {
     const last = lines.length - 1;
     lines[last] = lines[last].slice(0, Math.max(1, maxChars - 1)) + '…';
   }
+  log.debug("Leaving wrapLabel().");
   return lines;
 }
 
@@ -243,6 +248,7 @@ const MARGIN = 18;
 // and the drawing below takes both rather than re-wrapping.
 // ---------------------------------------------------------------------------
 function measure(node, look) {
+  log.debug("Entering measure().");
   const lines = wrapLabel(look.label, MAX_LABEL_CHARS, 2);
   const subLines = look.sublabel ? wrapLabel(look.sublabel, MAX_LABEL_CHARS + 6, 1) : [];
   let textW = 0;
@@ -259,6 +265,7 @@ function measure(node, look) {
     // a username and is short; a figure to the left of it would make every
     // person-box a wide rectangle in a picture where a rectangle already means
     // something else.
+    log.debug("Leaving measure().");
     return {
       shape: 'person',
       width: Math.min(MAX_BOX_W, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2)),
@@ -267,6 +274,7 @@ function measure(node, look) {
     };
   }
   if (look.shape === 'sts') {
+    log.debug("Leaving measure().");
     return {
       shape: 'sts',
       width: Math.min(MAX_BOX_W + 40, Math.max(MIN_BOX_W + 40, textW + HEX_PAD_X * 2 + 26)),
@@ -277,6 +285,7 @@ function measure(node, look) {
   // `application` and `both`. The second is the first with a figure inside it,
   // so it is the same rectangle with room made on the left.
   const inset = look.shape === 'both' ? FIGURE_W + 8 : 0;
+  log.debug("Leaving measure().");
   return {
     shape: look.shape === 'both' ? 'both' : 'application',
     width: Math.min(MAX_BOX_W, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2 + inset)),
@@ -289,6 +298,7 @@ function measure(node, look) {
 // left. `stroke-linecap:round` is what stops the limbs looking like a diagram of
 // a bridge.
 function personGlyph(x, y, colour, dashed, scale) {
+  log.debug("Entering personGlyph().");
   const s = scale || 1;
   const w = FIGURE_W * s;
   const h = FIGURE_H * s;
@@ -300,6 +310,7 @@ function personGlyph(x, y, colour, dashed, scale) {
   const foot = y + h - 1;
   const arm = w / 2 - 1;
   const dash = dashed ? ' stroke-dasharray="3 2"' : '';
+  log.debug("Leaving personGlyph().");
   return '<g fill="none" stroke="' + colour + '" stroke-width="' + (1.6 * s) +
     '" stroke-linecap="round"' + dash + '>' +
     '<circle cx="' + round(cx) + '" cy="' + round(headY) + '" r="' + round(headR) + '"/>' +
@@ -342,10 +353,13 @@ function round(n) {
 // would notice if it were approximate.
 // ---------------------------------------------------------------------------
 function edgePath(points) {
+  log.debug("Entering edgePath().");
   if (!points || points.length < 2) {
+    log.debug("Leaving edgePath().");
     return '';
   }
   if (points.length === 2) {
+    log.debug("Leaving edgePath().");
     return 'M' + round(points[0].x) + ' ' + round(points[0].y) +
            'L' + round(points[1].x) + ' ' + round(points[1].y);
   }
@@ -358,6 +372,7 @@ function edgePath(points) {
   }
   const last = points[points.length - 1];
   d += 'L' + round(last.x) + ' ' + round(last.y);
+  log.debug("Leaving edgePath().");
   return d;
 }
 
@@ -380,10 +395,13 @@ function edgePath(points) {
 //      service rather than about either party.
 // ---------------------------------------------------------------------------
 function edgeLook(edge) {
+  log.debug("Entering edgeLook().");
   if (edge.acts && !edge.issued) {
+    log.debug("Leaving edgeLook().");
     return { colour: RED, dash: '5 3', weight: 1.6 };
   }
   if (edge.relation === 'issued') {
+    log.debug("Leaving edgeLook().");
     return { colour: GREY, dash: '4 3', weight: 1.2 };
   }
   if (edge.relation === 'acts-for') {
@@ -393,8 +411,10 @@ function edgeLook(edge) {
     // thing being said is that part of this line is not known: an unconstrained
     // delegation reaches its target through a service this KDC was never told
     // the name of, and a solid line would assert a hop that nobody can name.
+    log.debug("Leaving edgeLook().");
     return { colour: colour, dash: (edge.skipped || []).length ? '7 4' : '', weight: 1.8 };
   }
+  log.debug("Leaving edgeLook().");
   return { colour: INDIGO, dash: (edge.skipped || []).length ? '7 4' : '', weight: 1.6 };
 }
 
@@ -403,6 +423,7 @@ function edgeLook(edge) {
 // in the tables under the picture. A fourth line was tried and it is what turns
 // a diagram into a page of text laid out badly.
 function edgeLabelLines(edge, labelOf) {
+  log.debug("Entering edgeLabelLines().");
   const lines = [];
   if (edge.relation === 'issued') {
     lines.push('issued to');
@@ -427,6 +448,7 @@ function edgeLabelLines(edge, labelOf) {
   if (counts.length) {
     lines.push(counts.join(', '));
   }
+  log.debug("Leaving edgeLabelLines().");
   return lines.slice(0, 3);
 }
 
@@ -507,6 +529,7 @@ function render(graph, options) {
 }
 
 function renderUnguarded(graph, options) {
+  log.debug("Entering renderUnguarded().");
   const resolve = typeof options.resolve === 'function' ? options.resolve : defaultResolve;
   // What a party is CALLED, for the one place a line names a party that is
   // neither of its ends: a `reaches` edge says whose name the credential
@@ -644,6 +667,7 @@ function renderUnguarded(graph, options) {
     edgeMarkup + nodeMarkup +
     '</g></svg>';
 
+  log.debug("Leaving renderUnguarded().");
   return { svg: svg, width: width, height: height,
            nodes: nodes.length, edges: edges.length };
 }
@@ -652,6 +676,7 @@ function renderUnguarded(graph, options) {
 // room for the whole of it, which is why the drawn label is allowed to be three
 // short lines.
 function edgeTitle(edge) {
+  log.debug("Entering edgeTitle().");
   const parts = [];
   if (edge.relation === 'issued') {
     parts.push('This service issued to this party.');
@@ -693,10 +718,12 @@ function edgeTitle(edge) {
   if (edge.reason) {
     parts.push('Refused because: ' + edge.reason);
   }
+  log.debug("Leaving edgeTitle().");
   return parts.join('\n');
 }
 
 function nodeMarkupFor(entry, at, options) {
+  log.debug("Entering nodeMarkupFor().");
   const look = entry.look;
   const size = entry.size;
   const node = entry.node;
@@ -757,8 +784,10 @@ function nodeMarkupFor(entry, at, options) {
   // links into the current realm on the way out of a text/html response ONLY, so
   // a link in a standalone SVG would also be a link that quietly left the realm.
   if (options.links && look.href) {
+    log.debug("Leaving nodeMarkupFor().");
     return '<a href="' + esc(look.href) + '">' + body + '</a>';
   }
+  log.debug("Leaving nodeMarkupFor().");
   return '<g>' + body + '</g>';
 }
 

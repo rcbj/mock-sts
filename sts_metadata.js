@@ -1642,6 +1642,58 @@ const ENDPOINTS = [
           'untouched and the picture does not pan or zoom. ?format=json is the ' +
           'whole graph (also in the `graph` member of GET /admin-api/delegation) ' +
           'and ?format=svg is the document alone, with no links in it.' },
+  { path: '/admin/delegation/chain', group: 'Admin',
+    name: 'Delegation — one relationship',
+    // The same four specifications as the two pages above, and for the reason
+    // the map's entry gives: this is those acts drawn, narrowed to one chain,
+    // rather than a different subject. A shorter list would claim the
+    // drill-down covers less than the table it came from.
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693'],
+    what: 'NON-SPEC PAGE OVER FOUR SPECIFICATIONS, and a DRILL-DOWN of ' +
+          '/admin/delegation. ONE delegation relationship — one chain, which is ' +
+          'one (mechanism, initial identity, intermediary, target) — drawn on ' +
+          'its own with everything else in the service left out, which is the ' +
+          'answer to `what is this row, exactly` on a service whose whole ' +
+          'picture is forty boxes. Reached from a link on EVERY ROW of both ' +
+          'tables on /admin/delegation. ?chain= carries the chain key rather ' +
+          'than an index, because an index into a capped list moves when the ' +
+          'cap bites and a stale link would then describe a DIFFERENT ' +
+          'relationship instead of nothing. A chain whose acts have all been ' +
+          'dropped is NOT a 404: it says which of the two happened and offers ' +
+          'the way back. Beneath the picture: the parties, the up-to-two lines ' +
+          'a chain has, every credential issued on it (kind and identifier ' +
+          'only, never the credential), and every act with its time — the ' +
+          'picture has the times taken out, because four acts a second apart ' +
+          'between the same parties are one line. Same renderer, same shapes ' +
+          'and same server-side layout as the map: NO SCRIPT. ?format=json is ' +
+          'the chain, its acts and the graph; ?format=svg is the document ' +
+          'alone, with no links in it.' },
+  { path: '/admin/delegation/application', group: 'Admin',
+    name: 'Delegation — one application',
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693'],
+    what: 'NON-SPEC PAGE OVER FOUR SPECIFICATIONS, and a DRILL-DOWN of ' +
+          '/admin/delegation that asks the other question: not `what talks to ' +
+          'what` but WHAT HAS BEEN ISSUED BECAUSE OF THIS APPLICATION. Choose ' +
+          'one from the list every act has named — the chooser is on ' +
+          '/admin/delegation as well as here — and get every act it took part ' +
+          'in REGARDLESS OF THE ROLE IT PLAYED, the picture of every ' +
+          'relationship it is in, and every delegated credential that came out, ' +
+          'each with the role this application had in the act that produced it. ' +
+          'That is the point of the page: a middle tier is the INTERMEDIARY of ' +
+          'the chains it acts on and the TARGET of the ones that reach it, and ' +
+          'offering only the second — the easy half — would hide what was ' +
+          'issued THROUGH it, which is the interesting half of a delegation. ' +
+          'The list is built from the ACTS and not from ou=applications, so an ' +
+          'entry can be marked `not in the registry`: an RFC 8693 audience ' +
+          'nobody has otherwise mentioned is a real target this console would ' +
+          'otherwise have no name for. An application is keyed on its ' +
+          'IDENTIFIER, normalised, so two spellings are one application — and ' +
+          'not on a box in the picture, because an RFC 8693 intermediary\'s box ' +
+          'is the ACTOR while the application it acted through is the ' +
+          'client_id beside it. A bare page is the chooser rather than a 404. ' +
+          'No credential is ever shown, only its kind and identifier. ' +
+          '?format=json carries the application, its acts, the graph and the ' +
+          'role played per act; ?format=svg is the picture alone.' },
   { path: '/admin/audit', group: 'Admin', name: 'Audit log',
     // rfc4511 is linked because the directory operations are its and they are the
     // largest source of rows here. Nothing else: an audit log is not a protocol,
@@ -3361,16 +3413,23 @@ function esc(v) { return xmlEscape(v == null ? '' : String(v)); }
 // showing rather than hiding: "POST only" is the single most useful thing to know
 // about an endpoint you were about to click.
 function linkabilityOf(row) {
+  log.debug("Entering linkabilityOf().");
   var methods = row.methods || [];
   if (methods.indexOf('GET') === -1) {
+    log.debug("Leaving linkabilityOf().");
     return { linkable: false, reason: methods.length === 1 ? methods[0] + ' only'
                                                            : 'no GET (' + methods.join(', ') + ')' };
   }
   if (row.path.indexOf(':') !== -1) {
     var name = (/:([A-Za-z0-9_]+)/.exec(row.path) || [])[0] || 'a parameter';
+    log.debug("Leaving linkabilityOf().");
     return { linkable: false, reason: 'takes ' + name };
   }
-  if (row.path.indexOf('*') !== -1) return { linkable: false, reason: 'wildcard' };
+  if (row.path.indexOf('*') !== -1) {
+    log.debug("Leaving linkabilityOf().");
+    return { linkable: false, reason: 'wildcard' };
+  }
+  log.debug("Leaving linkabilityOf().");
   return { linkable: true, reason: '' };
 }
 

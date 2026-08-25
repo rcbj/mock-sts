@@ -281,9 +281,11 @@ function maxRecords() {
 // would make the page unable to report the difference.
 // ---------------------------------------------------------------------------
 function party(detail) {
+  log.debug("Entering party().");
   const info = detail || {};
   const presented = String(info.presented == null ? '' : info.presented).trim();
   const application = String(info.application == null ? '' : info.application).trim();
+  log.debug("Leaving party().");
   return {
     key: presented ? stats.identityKeyOf(presented) : '',
     presented: presented,
@@ -386,6 +388,7 @@ function record(detail) {
 }
 
 function recordUnguarded(info) {
+  log.debug("Entering recordUnguarded().");
   const type = String(info.type || '');
   log.debug("Entering recordUnguarded(). type=" + (type || '(none)') +
             ", outcome=" + (info.outcome || '(none)'));
@@ -442,6 +445,7 @@ function recordUnguarded(info) {
     (record.reason ? ' — ' + record.reason : ''));
   log.debug("Leaving recordUnguarded(). " + acts.length + " act(s) held, " +
             dropped + " dropped.");
+  log.debug("Leaving recordUnguarded().");
   return record;
 }
 
@@ -655,6 +659,7 @@ function presentParties(row) {
 const MAX_IDENTIFIERS_PER_KIND = 6;
 
 function foldCredentials(into, list) {
+  log.debug("Entering foldCredentials().");
   (list || []).forEach(function (one) {
     const kind = one.kind || '(unnamed)';
     let held = into[kind];
@@ -681,6 +686,7 @@ function foldCredentials(into, list) {
       held.notes.push(one.note);
     }
   });
+  log.debug("Leaving foldCredentials().");
 }
 
 function credentialList(folded) {
@@ -726,6 +732,7 @@ function graph(rows) {
   nodes.set(sts.id, sts);
 
   function nodeFor(id, party) {
+    log.debug("Entering nodeFor().");
     let node = nodes.get(id);
     if (!node) {
       node = {
@@ -757,10 +764,12 @@ function graph(rows) {
       if (party.application && !node.application) node.application = party.application;
       if (party.what && !node.what) node.what = party.what;
     }
+    log.debug("Leaving nodeFor().");
     return node;
   }
 
   function edgeFor(id, seed) {
+    log.debug("Entering edgeFor().");
     let edge = edges.get(id);
     if (!edge) {
       edge = Object.assign({
@@ -772,6 +781,7 @@ function graph(rows) {
       }, seed);
       edges.set(id, edge);
     }
+    log.debug("Leaving edgeFor().");
     return edge;
   }
 
@@ -952,6 +962,196 @@ function graph(rows) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// ONE CHAIN'S ACTS, for the page that draws a single relationship.
+//
+// `chainKey` is the identity of a chain and there is nothing else an act
+// carries that could name one: a positional index into `chainList()` would move
+// the moment the cap dropped an act, so a link somebody put in a ticket would
+// come back describing a different relationship rather than nothing — which is
+// the failure mode a stale link must never have.
+//
+// It is here rather than in the console for the reason `chainList()` gives:
+// what counts as one chain is a statement about the store, and a `filter()` in
+// a renderer would be a second opinion about it.
+// ---------------------------------------------------------------------------
+function actsOfChain(rows, chainKey) {
+  const wanted = String(chainKey == null ? '' : chainKey);
+  if (!wanted) {
+    return [];
+  }
+  return (rows || list()).filter(function (row) {
+    return row.chainKey === wanted;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// THE APPLICATIONS THAT APPEAR IN A DELEGATION, IN WHATEVER ROLE.
+//
+// **THE KEY IS THE APPLICATION IDENTIFIER AND DELIBERATELY NOT THE NODE ID.**
+// That distinction is the whole of why these three functions are here rather
+// than being a walk over `graph().nodes` in the console, and getting it wrong
+// loses exactly the case the question is about.
+//
+// `nodeIdOf()` answers what a party IS — its normalised identity where it
+// presented one, and its application identifier only where it presented
+// nothing. For a Kerberos front end those are the same string. For an RFC 8693
+// exchange they are not: the intermediary presented an actor whose `sub` is the
+// node's id, and the APPLICATION it acted through is the `client_id` beside it.
+// So a picker built on node ids would offer that client under the actor's name,
+// or not at all — and "show me everything delegated through this client" is the
+// question somebody actually arrives with.
+//
+// One identifier, normalised the way `nodeIdOf()` normalises an application, so
+// that `HTTP/backend` and `HTTP/backend@EXAMPLE.COM` are ONE application and not
+// two. **Two spellings of one identity is two people** is the rule the directory
+// follows at `dnRfc4514()`; this is that rule applied to the other kind of
+// party. Every spelling seen is kept beside the key, because the collapse is
+// something a reader has to be able to SEE rather than take on trust — the same
+// reason `party()` keeps `presented` next to `key`.
+//
+// An INITIAL identity is counted too, although no call site here names an
+// application for one today. The model allows it, and a role that is counted
+// only where it currently occurs is a page that would go quietly wrong the day
+// a fourth mechanism was recorded.
+// ---------------------------------------------------------------------------
+function applicationKeyOf(identifier) {
+  const raw = String(identifier == null ? '' : identifier).trim();
+  return raw ? stats.identityKeyOf(raw) : '';
+}
+
+// Which roles this application played in this ONE act, and it can genuinely be
+// two: an S4U2Self names the requester as the intermediary and as the target,
+// which is the case that makes this an array rather than a string.
+function applicationRolesIn(row, key) {
+  log.debug("Entering applicationRolesIn().");
+  const wanted = String(key == null ? '' : key);
+  const out = [];
+  if (!wanted) {
+    log.debug("Leaving applicationRolesIn().");
+    return out;
+  }
+  ROLE_IDS.forEach(function (role) {
+    const party = row[role];
+    if (party && applicationKeyOf(party.application) === wanted) {
+      out.push(role);
+    }
+  });
+  log.debug("Leaving applicationRolesIn().");
+  return out;
+}
+
+// Every act this application took part in, whatever role it played. The filter
+// is `applicationRolesIn()` rather than a comparison of its own, so the page
+// that says which role it played and the page that decides whether to show the
+// act cannot come to disagree.
+function actsForApplication(rows, key) {
+  const wanted = String(key == null ? '' : key);
+  if (!wanted) {
+    return [];
+  }
+  return (rows || list()).filter(function (row) {
+    return applicationRolesIn(row, wanted).length > 0;
+  });
+}
+
+// Every distinct application among these acts, with what it did. This is what
+// the chooser on /admin/delegation is built from, and the counts are the reason
+// it is a list rather than a bare set of names: "this client is in 40 acts as
+// the intermediary and 1 as a target" is what tells somebody which of thirty
+// applications to open first.
+//
+// `credentials` counts what was PRODUCED by the acts it took part in, not what
+// was produced FOR it. The distinction matters and the page says it: a token
+// produced by an act where this application was the intermediary was issued
+// THROUGH it, and one produced where it was the target was issued FOR it. Both
+// are "related to" it, which is the question being asked, and a count that
+// silently meant one of them would be the wrong answer half the time.
+function applicationList(rows) {
+  log.debug("Entering applicationList().");
+  const source = rows || list();
+  const byKey = new Map();
+  source.forEach(function (row) {
+    ROLE_IDS.forEach(function (role) {
+      const party = row[role];
+      const key = party ? applicationKeyOf(party.application) : '';
+      if (!key) {
+        return;
+      }
+      let entry = byKey.get(key);
+      if (!entry) {
+        entry = {
+          key: key,
+          // The first spelling seen, which — `source` being newest first — is
+          // the most recent one. It is what the chooser shows, and every other
+          // spelling is beside it.
+          identifier: party.application,
+          spellings: [],
+          roles: { initial: 0, intermediary: 0, target: 0 },
+          protocols: [],
+          chainKeys: [],
+          acts: 0, issued: 0, refused: 0, credentials: 0,
+          firstAt: 0, lastAt: 0,
+          // Set when this application is ALSO a party that presented a
+          // credential — the middle tier that is a person and an application at
+          // once. The console draws two links for it and this is what tells it
+          // to look.
+          identityKey: ''
+        };
+        byKey.set(key, entry);
+      }
+      if (entry.spellings.indexOf(party.application) < 0) {
+        entry.spellings.push(party.application);
+      }
+      if (!entry.identityKey && party.key) {
+        entry.identityKey = party.key;
+      }
+      entry.roles[role]++;
+      if (entry.chainKeys.indexOf(row.chainKey) < 0) {
+        entry.chainKeys.push(row.chainKey);
+      }
+      if (row.protocol && entry.protocols.indexOf(row.protocol) < 0) {
+        entry.protocols.push(row.protocol);
+      }
+    });
+    // The act's OWN counters are added once per application rather than once per
+    // role, or an S4U2Self — which names its requester twice — would report two
+    // acts where there was one, and the total under the chooser would not add up
+    // to the number of acts on the page above it.
+    const seen = {};
+    ROLE_IDS.forEach(function (role) {
+      const party = row[role];
+      const key = party ? applicationKeyOf(party.application) : '';
+      if (!key || seen[key]) {
+        return;
+      }
+      seen[key] = true;
+      const entry = byKey.get(key);
+      entry.acts++;
+      if (row.outcome === 'issued') {
+        entry.issued++;
+        entry.credentials += (row.produced || []).length;
+      } else {
+        entry.refused++;
+      }
+      entry.firstAt = entry.firstAt ? Math.min(entry.firstAt, row.at) : row.at;
+      entry.lastAt = Math.max(entry.lastAt, row.at);
+    });
+  });
+  const out = Array.from(byKey.values()).map(function (entry) {
+    entry.chains = entry.chainKeys.length;
+    delete entry.chainKeys;
+    return entry;
+  }).sort(function (a, b) {
+    // Busiest first, then by name, because the chooser is read top-down and the
+    // application somebody is looking for is usually the one everything went
+    // through.
+    return b.acts - a.acts || a.key.localeCompare(b.key);
+  });
+  log.debug("Leaving applicationList(). " + out.length + " application(s).");
+  return out;
+}
+
 module.exports = {
   MODES: MODES,
   MODE_IDS: MODE_IDS,
@@ -963,6 +1163,15 @@ module.exports = {
   record: record,
   list: list,
   chainList: chainList,
+  actsOfChain: actsOfChain,
+  // The three the application chooser and its page rest on. They are here
+  // rather than in admin.js because "which application is this, and what role
+  // did it play" is a statement about the store — see their header, and
+  // chainList()'s, which makes the same argument about a chain.
+  applicationKeyOf: applicationKeyOf,
+  applicationRolesIn: applicationRolesIn,
+  actsForApplication: actsForApplication,
+  applicationList: applicationList,
   graph: graph,
   summary: summary,
   maxRecords: maxRecords

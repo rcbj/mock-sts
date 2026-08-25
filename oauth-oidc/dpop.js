@@ -567,19 +567,24 @@ function forgetProofs() {
 // `resource` parameter, which names somebody else's server and does not end
 // there.
 function isOwnResourceAudience(value) {
+  log.debug('Entering isOwnResourceAudience().');
   const text = String(value || '');
   if (!text) {
+    log.debug('Leaving isOwnResourceAudience().');
     return false;
   }
   try {
     const path = new URL(text).pathname;
+    log.debug('Leaving isOwnResourceAudience().');
     return path === '/resource' || path.endsWith('/resource');
   } catch (e) {
     // Not a URL. RFC 8707 requires an absolute URI, and the default audience is
     // one — so an audience that does not parse was not minted by this service's
     // own default and is not this resource server.
+    log.debug('Leaving isOwnResourceAudience().');
     return false;
   }
+  log.debug('Leaving isOwnResourceAudience().');
 }
 
 function audienceRefusal(claims, verified) {

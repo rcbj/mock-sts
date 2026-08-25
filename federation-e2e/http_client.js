@@ -28,6 +28,13 @@
 // `jarFor()` is the only way in.
 // ===========================================================================
 
+const bunyan = require('bunyan');
+// The suite's convention, and this repository's: bunyan rather than console,
+// so that a run reads the same way as the parent project's tests/*.js and can
+// be filtered by level. `./node_modules/.bin/bunyan` prettifies it.
+const log = bunyan.createLogger({ name: 'http_client',
+                                  level: process.env.LOG_LEVEL || 'info' });
+
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
@@ -54,6 +61,7 @@ function cookieHeaderFor(url) {
 }
 
 function absorbCookies(url, setCookie) {
+  log.debug("Entering absorbCookies().");
   const jar = jarFor(url);
   (setCookie || []).forEach(function (line) {
     const first = String(line).split(';')[0];
@@ -68,6 +76,7 @@ function absorbCookies(url, setCookie) {
     if (value === '' || /max-age=0/i.test(line)) jar.delete(name);
     else jar.set(name, value);
   });
+  log.debug("Leaving absorbCookies().");
 }
 
 // One request, no redirect following. `body` may be a string or an object,
@@ -75,7 +84,9 @@ function absorbCookies(url, setCookie) {
 // application/x-www-form-urlencoded, and the two management APIs take JSON,
 // which is what `json` is for.
 function request(method, url, options) {
+  log.debug("Entering request().");
   const opts = options || {};
+  log.debug("Leaving request().");
   return new Promise(function (resolve, reject) {
     const parsed = new URL(url);
     const headers = Object.assign({ 'Accept': 'text/html,application/json' },
@@ -125,6 +136,7 @@ function request(method, url, options) {
 // every browser ever shipped. Both are followed as GET, which is what the
 // services here are written against.
 async function follow(method, url, options, trail, max) {
+  log.debug("Entering follow().");
   let response = await request(method, url, options);
   let hops = 0;
   const limit = max || 12;
@@ -135,6 +147,7 @@ async function follow(method, url, options, trail, max) {
     response = await request('GET', url, {});
   }
   if (trail) trail.push({ status: response.status, from: url, to: '' });
+  log.debug("Leaving follow().");
   return response;
 }
 
@@ -181,12 +194,16 @@ function resetJars() {
 // the gap between "the container is healthy" and "the published port is
 // forwarding".
 async function waitFor(url, seconds) {
+  log.debug("Entering waitFor().");
   const deadline = Date.now() + (seconds || 60) * 1000;
   let last = '';
   while (Date.now() < deadline) {
     try {
       const response = await request('GET', url, {});
-      if (response.status >= 200 && response.status < 500) return true;
+      if (response.status >= 200 && response.status < 500) {
+        log.debug("Leaving waitFor().");
+        return true;
+      }
       last = 'answered ' + response.status;
     } catch (e) {
       last = e.code || e.message;

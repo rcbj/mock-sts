@@ -1,14 +1,19 @@
 # The mock web application: a hello-world page behind an OpenID Connect sign-in.
 #
-# TWO LINES OF SUBSTANCE, because the application has NO DEPENDENCIES — there is
-# no npm install, no lockfile and no network access needed at build time. That is
-# a property of the application rather than of this file; see the header of
-# server.js for why a relying party built out of a library would prove less about
-# the provider it is pointed at.
+# THREE LINES OF SUBSTANCE. The application has NO OIDC LIBRARY — see the header
+# of server.js for why a relying party built out of one would prove less about
+# the provider it is pointed at — and it has exactly one dependency: bunyan,
+# because this repository logs through bunyan everywhere and a container whose
+# output is console.log is the one place a run cannot be filtered by level.
+#
+# That install is what the stack already pays for the two identity services (the
+# STS image runs `npm install` as well), so the build needs a registry either
+# way; it is only THIS image that used to be reachable without one.
 FROM node:22-alpine
 
 WORKDIR /app
 COPY package.json server.js ./
+RUN npm install --omit=dev
 
 # The port the application listens on INSIDE the container. The compose file
 # decides what it is published as, and OIDC_REDIRECT_URI has to name the

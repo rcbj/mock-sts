@@ -708,6 +708,7 @@ function bump(table, key) {
 // would otherwise be a provisioning client seeing a 500 because a counter was
 // unhappy, which is the same guarantee audit() gives and for the same reason.
 function recordScim(detail) {
+  log.debug("Entering recordScim().");
   try {
     const info = detail || {};
     const now = Date.now();
@@ -734,6 +735,7 @@ function recordScim(detail) {
     // counting silently would make this page quietly wrong.
     log.warn('scim: a request could not be counted: ' + e.message);
   }
+  log.debug("Leaving recordScim().");
 }
 
 // The counters, with the two vocabularies beside them so that a caller can draw
@@ -833,8 +835,12 @@ const DID_SHAPED = /^did:[a-z0-9]+:/i;
 // called for every token and artifact on every users page view, so a pair of lines
 // here would be most of the log.
 function identityOf(value) {
+  log.debug("Entering identityOf().");
   const text = String(value == null ? '' : value).trim();
-  if (!text) return { key: '', name: '', realm: '', form: '' };
+  if (!text) {
+    log.debug("Leaving identityOf().");
+    return { key: '', name: '', realm: '', form: '' };
+  }
   let rest = text;
   let realm = '';
   if (rest.indexOf(SUBJECT_PREFIX) === 0) rest = rest.slice(SUBJECT_PREFIX.length);
@@ -866,6 +872,7 @@ function identityOf(value) {
     realm = rest.slice(at + 1);
     rest = rest.slice(0, at);
   }
+  log.debug("Leaving identityOf().");
   return { key: rest, name: rest, realm: realm, form: text };
 }
 
@@ -905,8 +912,12 @@ function setUserObserver(fn) {
 }
 
 function userRecord(identity) {
+  log.debug("Entering userRecord().");
   let record = users.get(identity.key);
-  if (record) return record;
+  if (record) {
+    log.debug("Leaving userRecord().");
+    return record;
+  }
   if (users.size >= MAX_USERS) {
     // Map iterates in insertion order, so the first key is the least recently
     // FIRST SEEN — not the least recently active. Chosen because it needs no sweep
@@ -925,6 +936,7 @@ function userRecord(identity) {
     isClient: false
   };
   users.set(identity.key, record);
+  log.debug("Leaving userRecord().");
   return record;
 }
 
@@ -945,12 +957,14 @@ function userRecord(identity) {
 // on a missing field: a statistics call that could fail an authentication would be
 // the tail wagging the dog, the same rule signJwt()'s recorder follows.
 function recordAuthentication(detail) {
+  log.debug("Entering recordAuthentication().");
   const info = detail || {};
   log.debug("Entering recordAuthentication(). protocol=" + (info.protocol || '?') +
             ", presented=" + (info.presented || '?'));
   const identity = identityOf(info.presented);
   if (!identity.key) {
     log.debug("Leaving recordAuthentication(). There was no identity to record.");
+    log.debug("Leaving recordAuthentication().");
     return null;
   }
   const now = Date.now();
@@ -1120,6 +1134,7 @@ function recordAuthentication(detail) {
     }
   }
   log.debug("Leaving recordAuthentication(). " + users.size + " user(s) known.");
+  log.debug("Leaving recordAuthentication().");
   return record;
 }
 
@@ -1358,17 +1373,24 @@ function expandValue(value, context) {
 // SAML attribute values are never typed: the XML content model is text.
 // ---------------------------------------------------------------------------
 function typedValue(text) {
+  log.debug("Entering typedValue().");
   const trimmed = String(text == null ? '' : text).trim();
-  if (!/^[{\[]|^(true|false|null)$|^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(trimmed)) return text;
+  if (!/^[{\[]|^(true|false|null)$|^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(trimmed)) {
+    log.debug("Leaving typedValue().");
+    return text;
+  }
   try {
+    log.debug("Leaving typedValue().");
     return JSON.parse(trimmed);
   } catch (e) {
     // It looked like JSON and is not — a half-typed array, most likely. The raw
     // text is what the admin typed and is what the claim gets, rather than an
     // error at issuance time in a place nobody is watching.
     log.debug("A claim value looked like JSON and did not parse; it is used as text: " + trimmed);
+    log.debug("Leaving typedValue().");
     return text;
   }
+  log.debug("Leaving typedValue().");
 }
 
 // ---------------------------------------------------------------------------

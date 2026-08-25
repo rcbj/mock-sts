@@ -197,8 +197,10 @@ const delegation = require('../common/delegation');
 // a line somebody can find.
 // ---------------------------------------------------------------------------
 function issuerOf(base) {
+  log.debug("Entering issuerOf().");
   const pinned = config.value('oauth2.issuer');
   if (!pinned) {
+    log.debug("Leaving issuerOf().");
     return base;
   }
   if (config.value('global.https') && /^http:\/\//i.test(pinned)) {
@@ -208,8 +210,10 @@ function issuerOf(base) {
              'served as ' + upgraded + '. A client MUST reject a document ' +
              'whose issuer is not the identifier it fetched from, and the ' +
              'scheme is part of that identifier.');
+    log.debug("Leaving issuerOf().");
     return upgraded;
   }
+  log.debug("Leaving issuerOf().");
   return pinned;
 }
 
@@ -431,6 +435,7 @@ function capabilityFor(req, member) {
 // first segment: a profile id is one segment by construction (see ID_SHAPE), so
 // `/tenant1/extra/.well-known/...` selects `tenant1` rather than nothing.
 function profileFromPath(raw) {
+  log.debug("Entering profileFromPath().");
   const path = String(raw || '').replace(/^\/+|\/+$/g, '');
   const id = path ? path.split('/')[0] : authorizationServers.DEFAULT_ID;
   // FETCHING THE METADATA IS ACCESSING THE AUTHORIZATION SERVER, so a name that
@@ -441,6 +446,7 @@ function profileFromPath(raw) {
   if (id !== authorizationServers.DEFAULT_ID) {
     authorizationServers.ensure(id, { autoCreated: true, seen: true });
   }
+  log.debug("Leaving profileFromPath().");
   return id;
 }
 
@@ -1484,6 +1490,7 @@ function parseResourceIndicators(raw) {
 }
 
 function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
+  log.debug("Entering issueAuthorizationResponse().");
   // Everything minted below is this authorization server's, so the base it is
   // built from is this authorization server's.
   const amr = (authInfo && authInfo.amr) || null;
@@ -1503,6 +1510,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   const parsedDetails = parseAuthorizationDetails(query.authorization_details);
   if (parsedDetails.error) {
     log.debug("Leaving issueAuthorizationResponse(). " + parsedDetails.error);
+    log.debug("Leaving issueAuthorizationResponse().");
     return redirectBack(res, base, redirectUri, query.state,
       { error: 'invalid_authorization_details', error_description: parsedDetails.error },
       types.length > 1 || types.indexOf('code') < 0, query.response_mode);
@@ -1519,6 +1527,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   const parsedResources = parseResourceIndicators(query.resource);
   if (parsedResources.error) {
     log.debug("Leaving issueAuthorizationResponse(). " + parsedResources.error);
+    log.debug("Leaving issueAuthorizationResponse().");
     return redirectBack(res, base, redirectUri, query.state,
       { error: 'invalid_target', error_description: parsedResources.error },
       types.length > 1 || types.indexOf('code') < 0, query.response_mode);
@@ -1541,6 +1550,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   if (!transactionCheck.ok) {
     log.debug("Leaving issueAuthorizationResponse(). RFC 9700 mode refused a reused " +
               "transaction value (" + transactionCheck.requirement + ").");
+    log.debug("Leaving issueAuthorizationResponse().");
     return redirectBack(res, base, redirectUri, query.state,
       { error: transactionCheck.error, error_description: transactionCheck.description },
       types.length > 1 || types.indexOf('code') < 0, query.response_mode);
@@ -1661,6 +1671,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   logArtifact('Authorization response', 'as returned to the client', out);
   redirectBack(res, base, redirectUri, query.state, out,
     types.length > 1 || types.indexOf('code') < 0, query.response_mode);
+  log.debug("Leaving issueAuthorizationResponse().");
   log.debug("Leaving issueAuthorizationResponse().");
 }
 
@@ -1888,6 +1899,7 @@ function authorizeEndpoint(req, res) {
   }
 
   const fail = function (error, description) {
+    log.debug("Entering fail().");
     // RFC 9700 section 4.11.2: an authorization server must authenticate the
     // user BEFORE redirecting them. With nobody signed in, an error redirected
     // to a client's registered redirect_uri turns this endpoint into a hop an
@@ -1904,6 +1916,7 @@ function authorizeEndpoint(req, res) {
     if (!policy.redirect) {
       log.debug("Leaving the authorization endpoint. Showing " + error +
                 " rather than redirecting it (" + policy.requirement + ").");
+      log.debug("Leaving fail().");
       return sendRedirectInterstitial(res, {
         error: error, description: description, redirectUri: redirectUri,
         clientId: q.client_id, state: q.state, why: policy.why,
@@ -1922,6 +1935,7 @@ function authorizeEndpoint(req, res) {
     // section 4.3 is asking for it not to be.
     redirectBack(res, base, redirectUri, q.state, { error: error, error_description: description },
                  false, q.response_mode);
+    log.debug("Leaving fail().");
   };
   // RFC 6749 section 4.1.2.1, cited by section 4.11.2: an invalid combination
   // of client_id and redirect_uri must not be redirected. A missing client_id is

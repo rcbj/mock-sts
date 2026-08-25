@@ -176,6 +176,7 @@ function urlProblem(raw) {
 // under. `ok` is false and `why` is a sentence.
 // ---------------------------------------------------------------------------
 function fetchJson(record, attribute, options) {
+  log.debug('Entering fetchJson().');
   const opts = options || {};
   const id = (record && record.fedId) || '?';
   log.debug('Entering fetchJson(). id=' + id + ', attribute=' + attribute);
@@ -190,11 +191,13 @@ function fetchJson(record, attribute, options) {
               'the caller, not a misconfiguration — see the header of ' +
               'federation_http.js.');
     log.debug('Leaving fetchJson(). Not a diallable attribute.');
+    log.debug('Leaving fetchJson().');
     return Promise.resolve({ ok: false, status: 0, json: null, text: '', url: '',
                              why: 'this service will not follow a URL from "' + attribute + '"' });
   }
   if (!outboundAllowed()) {
     log.debug('Leaving fetchJson(). Outbound is off.');
+    log.debug('Leaving fetchJson().');
     return Promise.resolve({ ok: false, status: 0, json: null, text: '', url: '',
                              why: 'federation.outbound is off, so this service makes no ' +
                                   'back-channel request at all. SAML, SAML 1.1 and ' +
@@ -205,6 +208,7 @@ function fetchJson(record, attribute, options) {
   const problem = urlProblem(raw);
   if (problem) {
     log.debug('Leaving fetchJson(). ' + problem);
+    log.debug('Leaving fetchJson().');
     return Promise.resolve({ ok: false, status: 0, json: null, text: '', url: raw,
                              why: attribute + ' cannot be dialled: ' + problem });
   }
@@ -233,6 +237,7 @@ function fetchJson(record, attribute, options) {
       Buffer.from(String(opts.basic.user) + ':' + String(opts.basic.pass)).toString('base64');
   }
 
+  log.debug('Leaving fetchJson().');
   return new Promise(function (resolve) {
     const done = function (result) {
       log.debug('Leaving fetchJson(). ok=' + result.ok + ', status=' + result.status);

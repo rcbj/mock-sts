@@ -256,7 +256,9 @@ const REQUIREMENTS = [
     enforced: function () { return mainPortIsTls() ? 'deployment' : 'no'; },
     title: 'Do not send an authorization response over an unencrypted connection',
     note: function () {
+      log.debug("Entering response-over-tls.note().");
       if (mainPortIsTls()) {
+        log.debug("Leaving response-over-tls.note().");
         return 'The redirect TARGET must be https (see http-scheme-refused), and the connection ' +
                'the response goes out over is TLS: global.https is on, so the main port is an ' +
                'HTTPS listener serving the same self-signed certificate 8443, 9443 and LDAPS 636 ' +
@@ -264,6 +266,7 @@ const REQUIREMENTS = [
                'and could not be one: a request has already arrived by the time any code here ' +
                'runs, so this is settled by the socket rather than decided per request.';
       }
+      log.debug("Leaving response-over-tls.note().");
       return 'HALF ENFORCED, and the half that is not has been turned off deliberately: the ' +
              'redirect TARGET must be https (see http-scheme-refused), but global.https is off, ' +
              'so /oauth2/authorize is reachable over plain http and an authorization response ' +
@@ -280,7 +283,9 @@ const REQUIREMENTS = [
     title: 'Use TLS for OAuth communications, end to end',
     enforcedNote: true,
     note: function () {
+      log.debug("Entering tls-everywhere.note().");
       if (mainPortIsTls()) {
+        log.debug("Leaving tls-everywhere.note().");
         return 'global.https is on, so every endpoint here — the authorization endpoint, the ' +
                'token endpoint, both discovery documents, and the resource server at ' +
                '/oauth2/userinfo and the three credential endpoints — is on one TLS listener. ' +
@@ -288,6 +293,7 @@ const REQUIREMENTS = [
                'true of is a hop this service cannot see, which is the reverse-proxy case ' +
                'below.';
       }
+      log.debug("Leaving tls-everywhere.note().");
       return 'NOT ENFORCED: global.https is off, so this service answers OAuth over plain ' +
              'HTTP. That is the default because it is a mock reached from a browser on a ' +
              'laptop and a self-signed certificate regenerated every start is a real cost to ' +
@@ -462,7 +468,9 @@ const REQUIREMENTS = [
     enforced: function () { return mainPortIsTls() ? 'yes' : 'no'; },
     title: 'Offer certificate-bound access tokens (RFC 8705)',
     note: function () {
+      log.debug("Entering mtls-bound-tokens.note().");
       if (mainPortIsTls()) {
+        log.debug("Leaving mtls-bound-tokens.note().");
         return 'The main listener ASKS for a client certificate and never requires one, so a ' +
                'Token Request made with one is answered with a token carrying ' +
                'cnf["x5t#S256"] — the SHA-256 of the certificate\'s DER — and the four ' +
@@ -474,6 +482,7 @@ const REQUIREMENTS = [
                'for it. What is NOT here is section 2, mutual-TLS client AUTHENTICATION, where ' +
                'the certificate replaces the secret.';
       }
+      log.debug("Leaving mtls-bound-tokens.note().");
       return 'NOT AVAILABLE in this deployment, and it is a property of the listener rather ' +
              'than a decision: the token endpoint is on the main port, that port is plain HTTP ' +
              '(global.https is off), and there is no TLS handshake to read a client ' +
@@ -1178,15 +1187,19 @@ function isLoopbackHost(hostname) {
 // was not registered to be accepted.
 // ---------------------------------------------------------------------------
 function uriMatches(registered, presented) {
+  log.debug("Entering uriMatches().");
   if (registered === presented) {
+    log.debug("Leaving uriMatches().");
     return { ok: true, how: 'exact string match' };
   }
   if (!loopbackPortWildcard()) {
+    log.debug("Leaving uriMatches().");
     return { ok: false };
   }
   const a = parseUri(registered);
   const b = parseUri(presented);
   if (!a || !b) {
+    log.debug("Leaving uriMatches().");
     return { ok: false };
   }
   // Both ends must be loopback and must be the SAME loopback literal: a
@@ -1194,12 +1207,15 @@ function uriMatches(registered, presented) {
   // because those are different names even though they resolve alike, and
   // treating them as one is a pattern match wearing a different hat.
   if (!isLoopbackHost(a.hostname) || a.hostname.toLowerCase() !== b.hostname.toLowerCase()) {
+    log.debug("Leaving uriMatches().");
     return { ok: false };
   }
   if (a.protocol !== b.protocol || a.pathname !== b.pathname ||
       a.search !== b.search || a.hash !== b.hash) {
+    log.debug("Leaving uriMatches().");
     return { ok: false };
   }
+  log.debug("Leaving uriMatches().");
   return { ok: true, how: 'loopback match with a variable port (RFC 8252 section 7.3)' };
 }
 
@@ -2034,8 +2050,10 @@ function revokeRefreshOnLogout() {
 // proof. Logged at issuance so that "this server issued a bearer token" is a
 // fact somebody can find, rather than an absence they have to notice.
 function noteTokenBinding(opts) {
+  log.debug("Entering noteTokenBinding().");
   const info = opts || {};
   if (!enabled()) {
+    log.debug("Leaving noteTokenBinding().");
     return;
   }
   // Section 2.3's least-privilege observation, which is not a refusal for the
@@ -2053,6 +2071,7 @@ function noteTokenBinding(opts) {
              'lasts.');
   }
   if (info.jkt || info.certificateBound) {
+    log.debug("Leaving noteTokenBinding().");
     return;
   }
   log.info('RFC 9700 section 2.2: an access token was issued to client "' +
@@ -2062,6 +2081,7 @@ function noteTokenBinding(opts) {
            'certificate binding (advertised as tls_client_certificate_bound_access_tokens when ' +
            'the main port is TLS — make the connection with a client certificate). This is a ' +
            'SHOULD and is not refused.');
+  log.debug("Leaving noteTokenBinding().");
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,25 +2167,31 @@ function checkCodeReplay(opts) {
 // the person was authenticated first, which is exactly what the MUST asks for.
 // ---------------------------------------------------------------------------
 function redirectPolicyFor(opts) {
+  log.debug("Entering redirectPolicyFor().");
   const info = opts || {};
   log.debug("Entering redirectPolicyFor(). hasSession=" + !!info.hasSession);
   if (!enabled()) {
     log.debug("Leaving redirectPolicyFor(). RFC 9700 mode is off.");
+    log.debug("Leaving redirectPolicyFor().");
     return { redirect: true };
   }
   if (info.hasSession) {
     log.debug("Leaving redirectPolicyFor(). The person is authenticated, so the error goes back.");
+    log.debug("Leaving redirectPolicyFor().");
     return { redirect: true };
   }
   if (String(info.prompt || '').split(/\s+/).indexOf('none') >= 0) {
     log.debug("Leaving redirectPolicyFor(). prompt=none is the silent-authentication exception.");
+    log.debug("Leaving redirectPolicyFor().");
     return { redirect: true, why: 'silent authentication (prompt=none)' };
   }
   if (info.fromSignIn) {
     log.debug("Leaving redirectPolicyFor(). The person just declined at the sign-in screen.");
+    log.debug("Leaving redirectPolicyFor().");
     return { redirect: true, why: 'the person declined at the sign-in screen a moment ago' };
   }
   log.debug("Leaving redirectPolicyFor(). Nobody is authenticated; the error is shown, not sent.");
+  log.debug("Leaving redirectPolicyFor().");
   return {
     redirect: false, requirement: 'authenticate-before-redirect',
     why: 'RFC 9700 section 4.11.2: an authorization server MUST authenticate the user before ' +
@@ -2187,10 +2213,13 @@ function redirectPolicyFor(opts) {
 // where it can be, in `checkRedirectUri()` — a registered client is judged
 // against its own URIs and an unregistered one against the configured list.
 function checkClientIdPresent(clientId) {
+  log.debug("Entering checkClientIdPresent().");
   if (!enabled() || String(clientId || '').trim()) {
+    log.debug("Leaving checkClientIdPresent().");
     return { ok: true };
   }
   log.debug("Leaving checkClientIdPresent(). No client_id.");
+  log.debug("Leaving checkClientIdPresent().");
   return { ok: false, error: 'invalid_request', requirement: 'no-redirect-invalid-combination',
            description: 'RFC 9700 section 4.11.2, citing RFC 6749 section 4.1.2.1: an ' +
                         'authorization server must not automatically redirect the user agent ' +

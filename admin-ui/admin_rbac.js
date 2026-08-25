@@ -274,11 +274,13 @@ function rosterFor(roleId) {
 // decides what counts as a group.
 // ---------------------------------------------------------------------------
 function addClaimedMembers(out) {
+  log.debug("Entering addClaimedMembers().");
   if (!out.exists) {
     // Nothing claims a group that is not there — see the edge above. The
     // lookup would answer honestly anyway; skipping it says why.
     out.claimed = [];
     out.claimedCount = 0;
+    log.debug("Leaving addClaimedMembers().");
     return;
   }
   const claimed = directory.claimedMembersOf(out.dn) || [];
@@ -304,6 +306,7 @@ function addClaimedMembers(out) {
   out.memberCount = out.members.length;
   out.presentCount = out.members.filter(function (m) { return m.present; }).length;
   out.danglingCount = out.memberCount - out.presentCount;
+  log.debug("Leaving addClaimedMembers().");
 }
 
 // What to CALL a membership value on the screen and in a revoke button.
@@ -314,7 +317,9 @@ function addClaimedMembers(out) {
 // one has no entry to ask, so the RDN value is read off the DN — which is
 // exactly the name a grant to somebody who has never authenticated wrote.
 function usernameOfMember(member) {
+  log.debug("Entering usernameOfMember().");
   if (member.holds === 'uid') {
+    log.debug("Leaving usernameOfMember().");
     return member.value;
   }
   const rdn = String(member.dn || '').split(',')[0] || '';
@@ -323,6 +328,7 @@ function usernameOfMember(member) {
   // RFC 4514 escaping, undone: `cn=Smith\, John` is one RDN whose value has a
   // comma in it, and a name shown with the backslash still in is a name that
   // will not match when it is typed back.
+  log.debug("Leaving usernameOfMember().");
   return value.replace(/\\([,+"\\<>;=#]|20|22|23|2B|2C|3B|3C|3D|3E|5C)/g,
                        function (whole, what) {
                          if (what.length === 1) {
@@ -476,6 +482,7 @@ function memberValueFor(username) {
 // attributes, because the answer has to be the same one `rolesOf()` gives or a
 // grant would appear to work and change nothing.
 function memberIndex(entry, username, memberDn) {
+  log.debug("Entering memberIndex().");
   const normalized = directory.normalizeDn(memberDn);
   const wantedName = String(username).trim().toLowerCase();
   const hits = [];
@@ -498,15 +505,19 @@ function memberIndex(entry, username, memberDn) {
       hits.push(index);
     }
   });
+  log.debug("Leaving memberIndex().");
   return hits;
 }
 
 function nameProblem(username) {
+  log.debug("Entering nameProblem().");
   if (!username) {
+    log.debug("Leaving nameProblem().");
     return 'No name was given. Choose somebody from the list, or type the ' +
            'name they will authenticate under.';
   }
   if (!directory.nameUsableInDn(username)) {
+    log.debug("Leaving nameProblem().");
     return '"' + username + '" carries a character RFC 4514 reserves in a DN, ' +
            'so it cannot name an entry under ' + directory.usersDn + '. That ' +
            'is the same refusal creating a person gets, and for the same ' +
@@ -514,6 +525,7 @@ function nameProblem(username) {
            'PRESENTED — a certificate subject, a did: — rather than by being ' +
            'typed.';
   }
+  log.debug("Leaving nameProblem().");
   return '';
 }
 
@@ -732,20 +744,25 @@ const NO_DIRECTORY =
   'would leave this console reachable only while admin.openWhenEmpty is on.';
 
 function refusalText(written, dn) {
+  log.debug("Entering refusalText().");
   if (written.reason === 'notAGroup') {
+    log.debug("Leaving refusalText().");
     return 'There is already an entry at ' + dn + ' and it is not a group. ' +
            'Something wrote it — an ldapadd, a SCIM POST — and this console ' +
            'will not overwrite an entry it did not make. Delete it, or point ' +
            'the role at another cn on /admin/config.';
   }
   if (written.reason === 'noParent') {
+    log.debug("Leaving refusalText().");
     return 'There is no ' + written.parent + ' to put ' + dn + ' under. The ' +
            'groups container is created at startup, so something deleted it.';
   }
   if (written.reason === 'full') {
+    log.debug("Leaving refusalText().");
     return 'The directory holds its maximum number of entries (ldap.maxEntries), ' +
            'so the role group could not be created.';
   }
+  log.debug("Leaving refusalText().");
   return 'The directory refused to write ' + dn + ' (' + written.reason + ').';
 }
 

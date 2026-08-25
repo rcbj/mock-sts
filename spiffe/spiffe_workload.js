@@ -277,6 +277,7 @@ async function buildX509Response(caller) {
 // not there, and grpc-js reports a write to a dead stream as an unhandled
 // server error.
 function pushOnRotation(push, buildResponse, label) {
+  log.debug('Entering pushOnRotation().');
   const period = Math.max(30, Math.floor(config.value('spiffe.svidTtl') / 2));
   log.debug('pushOnRotation(): ' + label + ' will be re-sent every ' + period +
             ' second(s) while the client is there.');
@@ -300,6 +301,7 @@ function pushOnRotation(push, buildResponse, label) {
   // `unref` so a held-open stream cannot keep the process alive on its own.
   // Everything else in this service dies with the process and so should this.
   if (timer.unref) timer.unref();
+  log.debug('Leaving pushOnRotation().');
   return timer;
 }
 
@@ -546,24 +548,35 @@ function structFrom(value) {
 }
 
 function valueFrom(value) {
+  log.debug('Entering valueFrom().');
   if (value === null || value === undefined) {
     // NULL_VALUE is the zero of its enum, written by name because the loader
     // is configured with `enums: String`.
+    log.debug('Leaving valueFrom().');
     return { nullValue: 'NULL_VALUE' };
   }
-  if (typeof value === 'boolean') return { boolValue: value };
+  if (typeof value === 'boolean') {
+    log.debug('Leaving valueFrom().');
+    return { boolValue: value };
+  }
   if (typeof value === 'number') {
     // A non-finite number has no protobuf representation. It cannot arrive from
     // a verified JWT payload — JSON has no NaN — but a Struct that will not
     // serialise fails the whole call with a message about a field, so the
     // impossible case is answered rather than left to be discovered.
+    log.debug('Leaving valueFrom().');
     return Number.isFinite(value) ? { numberValue: value }
                                   : { stringValue: String(value) };
   }
-  if (typeof value === 'string') return { stringValue: value };
+  if (typeof value === 'string') {
+    log.debug('Leaving valueFrom().');
+    return { stringValue: value };
+  }
   if (Array.isArray(value)) {
+    log.debug('Leaving valueFrom().');
     return { listValue: { values: value.map(valueFrom) } };
   }
+  log.debug('Leaving valueFrom().');
   return { structValue: structFrom(value) };
 }
 

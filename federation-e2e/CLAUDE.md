@@ -15,7 +15,7 @@ what settled it.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The three containers, and the front-channel/back-channel argument. |
-| `webapp/` | The mock web application: a hello-world page behind an OIDC sign-in. **No dependencies.** |
+| `webapp/` | The mock web application: a hello-world page behind an OIDC sign-in. **No OIDC library**, and one dependency: bunyan. |
 | `config.js` | Where the three services are, in BOTH of the two addresses each one has. |
 | `configure.js` | Turns the two identity services into a federation, through `/admin-api`. Idempotent. |
 | `drive.js` | Stands in for a browser. Three cookie jars, one form, every hop asserted. |
@@ -222,6 +222,40 @@ resolves from inside one container and not from the host.
 Every listener each STS instance opens beyond its HTTP port is moved out of the
 way (`KRB5_KDC_PORT`, `LDAP_PORT`, the SPIFFE sockets), because a sibling stack
 on the same machine is usually already holding the defaults.
+
+The three ports it does need — 3000, 8081 and 8082 — are hard-coded in that
+script, but nothing else here is: `config.js` reads `FED_SP_BACK`,
+`FED_IDP_BACK`, `FED_SP_FRONT`, `FED_IDP_FRONT` and `FED_APP_FRONT`, so a run
+on other ports is a copy of `run-host.sh` with those five exported. That is how
+this test was run on 2026-08-25 while another stack held the defaults.
+
+### The output is bunyan, like everything else here
+
+**Every file here that says anything logs through bunyan, and none of them calls
+`console`** — that is `configure.js`, `drive.js`, `http_client.js` and
+`webapp/server.js`; `config.js` prints nothing and has no logger. It is the same
+shape as `tests/*.js` in the parent project, which is the suite this one would
+have joined if it did not need three containers. A run is therefore JSON lines,
+one per assertion, and `./node_modules/.bin/bunyan` prettifies it:
+
+```bash
+node drive.js | ../node_modules/.bin/bunyan     # ✓/✗ per line, coloured
+LOG_LEVEL=debug node drive.js                   # every Entering/Leaving as well
+```
+
+A failing assertion is logged at `error` and a passing one at `info`, so
+`LOG_LEVEL=error node drive.js` prints the failures and nothing else. The exit
+status is what `run.sh` and CI read, and it is unchanged: nothing parses this
+text.
+
+**The web application logs through bunyan too, and that is the one place it
+costs something**: its image now runs `npm install`, where it used to need no
+registry at build time. The stack already pays for that on the STS image, so
+what changed is a property of this one Dockerfile rather than of the stack —
+argued in the Dockerfile's own header. The application still has **no OIDC
+library**, which is the claim that was ever load-bearing: a relying party built
+out of one would prove less about the provider it is pointed at, and bunyan sees
+no protocol.
 
 ---
 

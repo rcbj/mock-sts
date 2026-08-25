@@ -332,18 +332,22 @@ function claimsFor(user, authnMethod, authnInstant) {
 // profile refuses to fake — and it would have satisfied a wauth demanding two
 // factors with a session that had one.
 function authnMethodsFor(session) {
+  log.debug("Entering authnMethodsFor().");
   const amr = session.amr || [];
   const hardwareKey = amr.indexOf('hwk') >= 0;
   const password = amr.indexOf('pwd') >= 0;
   const mfa = (hardwareKey && password) || session.acr === 'mfa';
   if (mfa) {
+    log.debug("Leaving authnMethodsFor().");
     return { saml11: AM_MULTIFACTOR, saml2: AM_MULTIFACTOR,
              multiFactor: true, hardwareKey: hardwareKey };
   }
   if (hardwareKey) {
+    log.debug("Leaving authnMethodsFor().");
     return { saml11: AM_HARDWARE_SAML11, saml2: AC_UNSPECIFIED_SAML2,
              multiFactor: false, hardwareKey: true };
   }
+  log.debug("Leaving authnMethodsFor().");
   return { saml11: AM_PASSWORD_SAML11, saml2: AC_PASSWORD_SAML2,
            multiFactor: false, hardwareKey: false };
 }

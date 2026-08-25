@@ -199,16 +199,20 @@ function currentPrefix() {
 // alike pass through untouched — an absolute one names a host, and this service
 // is not entitled to put its own realm into somebody else's URL.
 function href(path) {
+  log.debug("Entering href().");
   const prefix = currentPrefix();
   if (!prefix || typeof path !== 'string' || path.charAt(0) !== '/') {
+    log.debug("Leaving href().");
     return path;
   }
   // Already prefixed. A caller that built a URL out of baseUrlOf() and then
   // handed it here would otherwise get /realm/acme/realm/acme/oauth2/token,
   // and the symptom is a 404 a long way from the second call.
   if (path === prefix || path.indexOf(prefix + '/') === 0) {
+    log.debug("Leaving href().");
     return path;
   }
+  log.debug("Leaving href().");
   return prefix + path;
 }
 
@@ -225,13 +229,16 @@ function href(path) {
 // `GET /realms` is where somebody finds out what the realms actually are.
 // ---------------------------------------------------------------------------
 function matchPath(pathname) {
+  log.debug("Entering matchPath().");
   if (!active()) {
+    log.debug("Leaving matchPath().");
     return null;
   }
   const segment = pathSegment();
   let head = String(pathname || '');
   if (segment) {
     if (head.indexOf('/' + segment + '/') !== 0) {
+      log.debug("Leaving matchPath().");
       return null;
     }
     head = head.slice(segment.length + 1);
@@ -241,9 +248,11 @@ function matchPath(pathname) {
   const id = (slash < 0 ? head.slice(1) : head.slice(1, slash));
   const realm = realms.get(id);
   if (!realm) {
+    log.debug("Leaving matchPath().");
     return null;
   }
   const rest = slash < 0 ? '/' : head.slice(slash);
+  log.debug("Leaving matchPath().");
   return { realm: realm, rest: rest || '/' };
 }
 
@@ -306,6 +315,7 @@ function reserve(provider) {
 }
 
 function reserved() {
+  log.debug("Entering reserved().");
   let paths = [];
   try {
     paths = reservedProvider() || [];
@@ -316,16 +326,19 @@ function reserved() {
     // refusal being silent, which is what this line does.
     log.warn('realms: could not read the router to reserve realm ids: ' + e.message);
   }
+  log.debug("Leaving reserved().");
   return paths;
 }
 
 function validateId(id) {
+  log.debug("Entering validateId().");
   const errors = [];
   const value = String(id == null ? '' : id);
   if (!ID_PATTERN.test(value)) {
     errors.push('A realm id is lower-case letters, digits and hyphens, ' +
                 'starts with a letter or a digit and is at most 31 ' +
                 'characters. "' + value + '" is not.');
+    log.debug("Leaving validateId().");
     return errors;
   }
   if (value === DEFAULT_ID) {
@@ -340,6 +353,7 @@ function validateId(id) {
   if (realms.has(value)) {
     errors.push('A realm called "' + value + '" is already defined.');
   }
+  log.debug("Leaving validateId().");
   return errors;
 }
 
@@ -582,6 +596,7 @@ function remove(id) {
 // three copies of a WeakMap trick in three modules.
 // ---------------------------------------------------------------------------
 function keyed(factory) {
+  log.debug("Entering keyed().");
   const per = new Map();
   onRemove(function (id) { per.delete(id); });
   function forCurrent() {
@@ -598,12 +613,14 @@ function keyed(factory) {
     return per.get(id);
   };
   forCurrent.existing = function () { return per; };
+  log.debug("Leaving keyed().");
   return forCurrent;
 }
 
 // A Map, per realm. Every member of the Map interface is delegated, including
 // the iterator — `for (const [k, v] of store)` is a shape this codebase uses.
 function map() {
+  log.debug("Entering map().");
   const per = keyed(function () { return new Map(); });
   const facade = {
     // The realm's own Map, for the two callers that genuinely want the whole
@@ -621,6 +638,7 @@ function map() {
     get size() { return per().size; }
   };
   facade[Symbol.iterator] = function () { return per()[Symbol.iterator](); };
+  log.debug("Leaving map().");
   return facade;
 }
 
@@ -629,7 +647,9 @@ function map() {
 // would cover `rows[0]`, `rows.length = 0` or a spread. The proxy target is a
 // real array so that `Array.isArray()` — which several callers use — is true.
 function arr() {
+  log.debug("Entering arr().");
   const per = keyed(function () { return []; });
+  log.debug("Leaving arr().");
   return new Proxy([], {
     get: function (target, prop, receiver) {
       const real = per();
@@ -665,7 +685,9 @@ function arr() {
 // counter into the partition with the thing it counts — `nums.seq++` works
 // through the proxy exactly as it did through the binding.
 function obj(factory) {
+  log.debug("Entering obj().");
   const per = keyed(factory || function () { return {}; });
+  log.debug("Leaving obj().");
   return new Proxy({}, {
     get: function (target, prop) {
       const real = per();
@@ -740,7 +762,9 @@ function realmSupport() {
       note: 'Its own sessions and WebAuthn credentials, so signing in to one ' +
             'realm signs you in to that realm only. That is the point of a ' +
             'realm rather than a limitation of one. Who you may sign in AS is ' +
-            'shared, since this service checks no password anywhere.' },
+            'shared, since this service checks no password anywhere. The ' +
+            'admin console is the ONE reader that crosses this line, and the ' +
+            'row below says why.' },
     { family: 'SAML 2.0 / SAML 1.1', state: 'full', by: 'path',
       note: 'Its own entityID and providerID (seeded distinct when the realm ' +
             'is created), its own signing key, request state, artifacts and ' +
@@ -774,7 +798,13 @@ function realmSupport() {
             'READS and WRITES the realm it is reached in. The two ADMIN ROLES ' +
             'are not: they are groups in the shared directory, so somebody ' +
             'who holds Admin Write holds it in every realm. There is no ' +
-            'per-realm administrator.' },
+            'per-realm administrator — and the CONSOLE SIGN-ON follows that ' +
+            'rather than the sessions: its gate resolves the one session ' +
+            'cookie in whichever realm minted it, so the realm switcher ' +
+            'switches instead of asking you to sign in again. Nothing else ' +
+            'reads a session that way; in the realm you switched to, ' +
+            '/oauth2/authorize and the SAML and WS-Federation endpoints still ' +
+            'see none.' },
     { family: 'LDAP (389 / 636)', state: 'none', by: 'shared',
       note: 'ONE DIRECTORY FOR THE WHOLE PROCESS, and it is the sharing every ' +
             'other line here refers back to. Every realm sees the same ' +

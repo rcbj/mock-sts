@@ -428,6 +428,7 @@ async function accept(tokenBytes, opts) {
 // can talk to one can talk to the other.
 // ---------------------------------------------------------------------------
 function startTcp(port) {
+  log.debug('Entering startTcp().');
   const server = net.createServer(function (socket) {
     let buffer = Buffer.alloc(0);
     socket.on('error', function (err) {
@@ -478,6 +479,7 @@ function startTcp(port) {
     log.info('krb5-service: ' + SERVICE_PRINCIPAL.join('/') + ' listening on TCP ' +
       server.address().port + ' — present a GSS-wrapped AP-REQ');
   });
+  log.debug('Leaving startTcp().');
   return server;
 }
 
@@ -526,6 +528,7 @@ function listen(port) {
 // Record the last exchange for the HTTP view. Wrapped rather than inlined so the
 // acceptor itself stays free of presentation concerns.
 const acceptAndRecord = async function (bytes, opts) {
+  log.debug('Entering acceptAndRecord().');
   const result = await accept(bytes, opts);
   lastExchange = {
     at: new Date().toISOString(),
@@ -536,6 +539,7 @@ const acceptAndRecord = async function (bytes, opts) {
     gssFlags: result.gss ? result.gss.flagNames : null,
     checks: result.checks
   };
+  log.debug('Leaving acceptAndRecord().');
   return result;
 };
 

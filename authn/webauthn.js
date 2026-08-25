@@ -57,6 +57,7 @@ try {
 const MAX_DEPTH = 24;
 
 function cborRead(buf, offset, depth) {
+  log.debug('Entering cborRead().');
   if (depth > MAX_DEPTH) {
     throw new Error('CBOR nested deeper than ' + MAX_DEPTH + ' levels');
   }
@@ -90,19 +91,23 @@ function cborRead(buf, offset, depth) {
 
   switch (major) {
     case 0:
+      log.debug('Leaving cborRead().');
       return [value, cursor];
     case 1:
+      log.debug('Leaving cborRead().');
       return [-1 - value, cursor];
     case 2: {
       if (cursor + value > buf.length) {
         throw new Error('a CBOR byte string claims ' + value + ' bytes, past the end of the input');
       }
+      log.debug('Leaving cborRead().');
       return [buf.subarray(cursor, cursor + value), cursor + value];
     }
     case 3: {
       if (cursor + value > buf.length) {
         throw new Error('a CBOR text string claims ' + value + ' bytes, past the end of the input');
       }
+      log.debug('Leaving cborRead().');
       return [buf.toString('utf8', cursor, cursor + value), cursor + value];
     }
     case 4: {
@@ -111,6 +116,7 @@ function cborRead(buf, offset, depth) {
         const [item, next] = cborRead(buf, cursor, depth + 1);
         arr.push(item); cursor = next;
       }
+      log.debug('Leaving cborRead().');
       return [arr, cursor];
     }
     case 5: {
@@ -123,16 +129,27 @@ function cborRead(buf, offset, depth) {
         }
         map.set(k, v); cursor = afterValue;
       }
+      log.debug('Leaving cborRead().');
       return [map, cursor];
     }
     case 7:
-      if (info === 20) return [false, cursor];
-      if (info === 21) return [true, cursor];
-      if (info === 22) return [null, cursor];
+      if (info === 20) {
+        log.debug('Leaving cborRead().');
+        return [false, cursor];
+      }
+      if (info === 21) {
+        log.debug('Leaving cborRead().');
+        return [true, cursor];
+      }
+      if (info === 22) {
+        log.debug('Leaving cborRead().');
+        return [null, cursor];
+      }
       throw new Error('CBOR simple value ' + info + ' is not decoded here');
     default:
       throw new Error('CBOR major type ' + major + ' is not decoded here');
   }
+  log.debug('Leaving cborRead().');
 }
 
 function cborDecodeFirst(buf, offset) {
@@ -241,7 +258,9 @@ function sha256(buf) {
 // Every check by name, in order, so a caller can report WHICH one failed. A
 // single boolean is what makes people blame the authenticator.
 function collect() {
+  log.debug('Entering collect().');
   const checks = [];
+  log.debug('Leaving collect().');
   return {
     checks: checks,
     add: function (name, ok, detail) {

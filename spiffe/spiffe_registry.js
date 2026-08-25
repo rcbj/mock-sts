@@ -384,6 +384,7 @@ function selectorText(selector) {
 // present on the workload. See the header for why it is neither equality nor
 // intersection.
 function selectorsMatch(entrySelectors, workloadSelectors) {
+  log.debug('Entering selectorsMatch().');
   const have = {};
   (workloadSelectors || []).forEach(function (s) {
     const text = selectorText(s);
@@ -393,10 +394,17 @@ function selectorsMatch(entrySelectors, workloadSelectors) {
   // An entry with NO selectors matches everything, which is SPIRE's behaviour
   // and is worth stating: it is how a catch-all entry is written, and it is
   // also the shape of an entry somebody created and forgot to finish.
-  if (!wanted.length) return true;
-  for (let i = 0; i < wanted.length; i++) {
-    if (!have[wanted[i]]) return false;
+  if (!wanted.length) {
+    log.debug('Leaving selectorsMatch().');
+    return true;
   }
+  for (let i = 0; i < wanted.length; i++) {
+    if (!have[wanted[i]]) {
+      log.debug('Leaving selectorsMatch().');
+      return false;
+    }
+  }
+  log.debug('Leaving selectorsMatch().');
   return true;
 }
 
@@ -412,7 +420,11 @@ function selectorsMatch(entrySelectors, workloadSelectors) {
 // where the entry lives) and the write speaks only in attributes.
 // ---------------------------------------------------------------------------
 function recordFromEntry(entry) {
-  if (!entry) return null;
+  log.debug('Entering recordFromEntry().');
+  if (!entry) {
+    log.debug('Leaving recordFromEntry().');
+    return null;
+  }
   const a = entry.attributes || {};
   const record = {
     id: firstValue(a, 'spiffeEntryId') || firstValue(a, 'cn'),
@@ -445,10 +457,12 @@ function recordFromEntry(entry) {
   // nothing having to sweep.
   record.expired = record.expiresAt > 0 &&
                    record.expiresAt < Math.floor(Date.now() / 1000);
+  log.debug('Leaving recordFromEntry().');
   return record;
 }
 
 function attributesFromRecord(record, existing) {
+  log.debug('Entering attributesFromRecord().');
   const now = generalizedTime();
   const previous = existing || {};
   const attributes = {
@@ -483,6 +497,7 @@ function attributesFromRecord(record, existing) {
   if (record.storeSvid) attributes.spiffestoresvid = ['TRUE'];
   if (record.expiresAt) attributes.spiffeentryexpiresat = [String(record.expiresAt)];
   if (record.lastSvidAt) attributes.spiffelastsvidat = [record.lastSvidAt];
+  log.debug('Leaving attributesFromRecord().');
   return attributes;
 }
 
@@ -792,8 +807,13 @@ function allAgents() {
 }
 
 function agentFromEntry(entry) {
-  if (!entry) return null;
+  log.debug('Entering agentFromEntry().');
+  if (!entry) {
+    log.debug('Leaving agentFromEntry().');
+    return null;
+  }
   const a = entry.attributes || {};
+  log.debug('Leaving agentFromEntry().');
   return {
     id: firstValue(a, 'spiffeAgentId'),
     dn: entry.dn,

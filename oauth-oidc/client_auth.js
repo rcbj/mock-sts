@@ -121,6 +121,7 @@ const MAX_ASSERTIONS = 1000;
 const seenAssertions = realms.map();   // jti -> forget-at
 
 function forgetStaleAssertions() {
+  log.debug("Entering forgetStaleAssertions().");
   const now = Date.now();
   seenAssertions.forEach(function (forgetAt, jti) {
     if (forgetAt < now) {
@@ -134,6 +135,7 @@ function forgetStaleAssertions() {
     }
     seenAssertions.delete(oldest.value);
   }
+  log.debug("Leaving forgetStaleAssertions().");
 }
 
 function clockSkewSeconds() {
@@ -356,6 +358,7 @@ function verifyAssertion(opts) {
 // its own and the two never matching.
 // ---------------------------------------------------------------------------
 function subjectRfc4514(cert) {
+  log.debug("Entering subjectRfc4514().");
   // node hands back a subject object; the RDNs are ordered leaf-first when read
   // in reverse of the object's insertion order, which is how the TLS report
   // builds the same string.
@@ -367,6 +370,7 @@ function subjectRfc4514(cert) {
       parts.push(type + '=' + String(value).replace(/([,+="<>;\\\\])/g, '\\\\$1'));
     });
   });
+  log.debug("Leaving subjectRfc4514().");
   return parts.reverse().join(',');
 }
 
@@ -440,6 +444,7 @@ function verifyCertificate(opts) {
 // "does what arrived prove this client", which is protocol.
 // ---------------------------------------------------------------------------
 function verify(opts) {
+  log.debug("Entering verify().");
   const info = opts || {};
   const method = String(info.method || '');
   log.debug("Entering verify(). method=" + method + ", client=" + info.clientId);
@@ -447,6 +452,7 @@ function verify(opts) {
   if (method === 'client_secret_basic' || method === 'client_secret_post') {
     if (!info.presentedSecret) {
       log.debug("Leaving verify(). No secret was presented.");
+      log.debug("Leaving verify().");
       return { ok: false, description: 'no client_secret was presented. Send it by ' +
                                        (method === 'client_secret_post'
                                          ? 'client_secret_post (a client_secret form parameter).'
@@ -454,22 +460,26 @@ function verify(opts) {
     }
     if (!secretsMatch(info.presentedSecret, info.clientSecret)) {
       log.debug("Leaving verify(). The secret did not match.");
+      log.debug("Leaving verify().");
       return { ok: false, description: 'the client_secret presented is not the one on this ' +
                                        'client\'s entry in the application registry.' };
     }
     log.debug("Leaving verify(). The secret matched.");
+    log.debug("Leaving verify().");
     return { ok: true, method: method };
   }
 
   if (method === 'client_secret_jwt' || method === 'private_key_jwt') {
     if (!info.assertion) {
       log.debug("Leaving verify(). No assertion was presented.");
+      log.debug("Leaving verify().");
       return { ok: false, description: 'this client authenticates with ' + method + ', so the ' +
                                        'request must carry client_assertion and ' +
                                        'client_assertion_type=' + ASSERTION_TYPE + '.' };
     }
     if (String(info.assertionType || '') !== ASSERTION_TYPE) {
       log.debug("Leaving verify(). The assertion type is wrong.");
+      log.debug("Leaving verify().");
       return { ok: false, description: 'client_assertion_type must be "' + ASSERTION_TYPE +
                                        '" (RFC 7523 section 2.2). This request says "' +
                                        (info.assertionType || '') + '".' };
@@ -481,9 +491,11 @@ function verify(opts) {
     });
     if (!checked.ok) {
       log.debug("Leaving verify(). The assertion was refused.");
+      log.debug("Leaving verify().");
       return checked;
     }
     log.debug("Leaving verify(). The assertion verified.");
+    log.debug("Leaving verify().");
     return { ok: true, method: method, alg: checked.alg, jti: checked.jti };
   }
 
@@ -494,9 +506,11 @@ function verify(opts) {
     });
     if (!checked.ok) {
       log.debug("Leaving verify(). The certificate was refused.");
+      log.debug("Leaving verify().");
       return checked;
     }
     log.debug("Leaving verify(). The certificate matched.");
+    log.debug("Leaving verify().");
     return { ok: true, method: method, subject: checked.subject };
   }
 
@@ -505,6 +519,7 @@ function verify(opts) {
   // ACCEPTED, so a client author came away believing an assertion had been
   // checked when nothing had looked at it.
   log.debug("Leaving verify(). Unknown method.");
+  log.debug("Leaving verify().");
   return { ok: false,
            description: 'this client\'s entry says token_endpoint_auth_method="' + method +
                         '", which this server cannot verify. The ' + METHODS.length +

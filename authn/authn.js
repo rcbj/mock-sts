@@ -206,6 +206,108 @@ function sessionOf(req) {
   return session;
 }
 
+// ---------------------------------------------------------------------------
+// THE SAME COOKIE, LOOKED UP IN EVERY REALM. FOR THE ADMIN CONSOLE, AND FOR
+// NOTHING ELSE IN THIS SERVICE.
+//
+// `sessions` is per realm and `sessionOf()` reads the ambient realm's
+// partition, which is right for every protocol here: signing in to `acme` must
+// not satisfy the default realm's `/oauth2/authorize`, and realmSupport() says
+// so out loud. The console is the one caller that needs the opposite answer,
+// and it needs it because of a fact about the COOKIE rather than a change of
+// mind about realms.
+//
+// THERE IS ONE COOKIE. `startSession()` writes `sts_mock_session` at `Path=/`,
+// deliberately and for a reason that has nothing to do with realms — every
+// protocol here shares one session, so the name, path and SameSite have to
+// agree exactly. A browser therefore holds exactly ONE session id for this
+// whole origin, whatever realm it was minted in. Switching realm on the
+// console's own switcher was consequently not "no session in this realm", it
+// was a LOOP: the gate found nothing, sent the reader to `/authn/login` in the
+// realm they had just switched to, and that sign-in OVERWROTE the one cookie
+// there is — so switching back found nothing either, forever, one sign-in per
+// click. Nothing expired and nothing was misconfigured; the two realms were
+// taking turns holding the only cookie slot the browser has.
+//
+// So the console resolves its reader by asking every realm's partition for the
+// id it was handed, and the answer is not a weakening of the boundary — it is
+// the boundary already drawn where it actually is:
+//
+//   * WHO MAY USE THE CONSOLE IS ALREADY SHARED. The two roles are groups in
+//     the embedded directory, which is ONE directory for the process, so
+//     `rbac.rolesOf()` returns the same answer in every realm. A session that
+//     was refused here for being minted next door would have been refused on a
+//     realm boundary that the authorization decision behind it does not have.
+//   * IT GRANTS NOTHING ELSE. This function is called from `gateStateFor()` in
+//     admin.js and from nowhere else, and the thing it answers is "may this
+//     browser read this console". No token is issued on the session it finds,
+//     no assertion names it, and `/oauth2/authorize` still calls `sessionOf()`
+//     and still sees only its own realm's.
+//   * ENDING IT STILL ENDS IT. The session is the one object in whichever
+//     realm's map holds it — so /logout, /admin/logout and an expiry sweep in
+//     the realm that owns it all shut the console too, because there is nothing
+//     here to end separately.
+//
+// It sweeps an expired session out of the realm that holds it, exactly as
+// `sessionOf()` does, rather than leaving one for a page that happens to be
+// read in the owning realm to clear later.
+//
+// The realm is returned alongside the session because the console SAYS which
+// realm the reader's session belongs to when it is not the one being read. A
+// reader who signed in to `acme` and is now looking at the default realm's
+// tokens is in a state that is easy to misread, and the alternative — showing
+// it silently — is how somebody comes to believe the two realms share
+// everything else as well.
+// ---------------------------------------------------------------------------
+function sessionAnywhere(req) {
+  log.debug("Entering sessionAnywhere().");
+  // The ambient realm first, through the ordinary reader, so that the common
+  // case is byte-for-byte what it always was — including the sweep.
+  const here = sessionOf(req);
+  if (here) {
+    log.debug("Leaving sessionAnywhere(). It belongs to the realm being read.");
+    return { session: here, realm: realms.current(), foreign: false };
+  }
+  const id = cookiesOf(req)[SESSION_COOKIE];
+  if (!id) {
+    log.debug("Leaving sessionAnywhere(). No session cookie.");
+    return null;
+  }
+  // With no realm defined there is one partition and sessionOf() has already
+  // read it. Checked rather than merely harmless: it is what keeps "a service
+  // with no realms behaves exactly as it did" a property of one predicate.
+  if (!realms.active()) {
+    log.debug("Leaving sessionAnywhere(). No realms are defined.");
+    return null;
+  }
+  const readingIn = realms.currentId();
+  const every = realms.list();
+  for (let i = 0; i < every.length; i++) {
+    const realm = every[i];
+    if (realm.id === readingIn) {
+      continue;
+    }
+    // That realm's own Map. `realmMap(id)` is the facade's door for exactly
+    // this — a caller that wants a named partition rather than the ambient one.
+    const store = sessions.realmMap(realm.id);
+    const session = store.get(id);
+    if (!session) {
+      continue;
+    }
+    if (session.expires < Date.now()) {
+      store.delete(id);
+      log.debug("sessionAnywhere(): the session in realm " + realm.id +
+                " had expired and was discarded.");
+      continue;
+    }
+    log.debug("Leaving sessionAnywhere(). Signed in as " + session.user.username +
+              " on a session held by the realm " + realm.id + ".");
+    return { session: session, realm: realm, foreign: true };
+  }
+  log.debug("Leaving sessionAnywhere(). No realm holds the session the cookie names.");
+  return null;
+}
+
 // --- starting and ending a session -----------------------------------------
 // Both are functions rather than four lines repeated at each call site, and the
 // reason is WS-Federation. `wsfed.js` signs a user in at its own login screen and
@@ -1232,6 +1334,12 @@ module.exports = {
   sessions: sessions,
   cookiesOf: cookiesOf,
   sessionOf: sessionOf,
+  // The console's reader, and the ONE caller it has. It answers the same
+  // question across every realm's partition because there is only ever one
+  // session cookie in the browser; the header above it argues why that is the
+  // boundary already drawn rather than a hole in this one. Every protocol
+  // module keeps calling sessionOf() and keeps seeing its own realm only.
+  sessionAnywhere: sessionAnywhere,
   startSession: startSession,
   endSession: endSession,
   // The three the protocol-independent logout needs, and the reason each is

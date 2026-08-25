@@ -335,9 +335,16 @@ function toProto(value) {
 }
 
 function fromProto(message) {
-  if (!message) return '';
+  log.debug('Entering fromProto().');
+  if (!message) {
+    log.debug('Leaving fromProto().');
+    return '';
+  }
   const domain = String(message.trust_domain || '').trim();
-  if (!domain) return '';
+  if (!domain) {
+    log.debug('Leaving fromProto().');
+    return '';
+  }
   // A caller that put the whole identifier in trust_domain is a real and common
   // mistake, and one this service should NAME rather than silently repair: the
   // result of repairing it is that their code works here and against nothing
@@ -349,6 +356,7 @@ function fromProto(message) {
     : domain;
   const path = String(message.path || '');
   const parsed = parse(PREFIX + bare + (path && path.charAt(0) !== '/' ? '/' + path : path));
+  log.debug('Leaving fromProto().');
   return parsed.ok ? parsed.id : '';
 }
 

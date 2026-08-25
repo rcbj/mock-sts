@@ -3216,8 +3216,11 @@ const ROUTES = [
                  'an attribute for a Kerberos one.\n\nBesides the paged acts ' +
                  'the reply carries `chains` — the distinct (mechanism, ' +
                  'initial, intermediary, target) tuples among what MATCHED, ' +
-                 'one per edge of the picture — and `policy`, which is who may ' +
-                 'delegate to whom before anybody has tried.\n\nWALK IT BY ' +
+                 'one per edge of the picture — `applications`, every ' +
+                 'application an act named in WHATEVER ROLE it played (the ' +
+                 'console draws one of them in full at ' +
+                 '/admin/delegation/application) — and `policy`, which is who ' +
+                 'may delegate to whom before anybody has tried.\n\nWALK IT BY ' +
                  '`seq`: monotonic and never reused, including across a drop.',
     mirrors: 'GET /admin/delegation',
     parameters: [

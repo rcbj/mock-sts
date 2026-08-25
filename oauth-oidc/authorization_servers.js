@@ -248,17 +248,21 @@ const profiles = realms.map();   // id -> { id, label, description, overrides, r
 const ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$/;
 
 function idProblem(id) {
+  log.debug("Entering idProblem().");
   const text = String(id || '').trim();
   if (!text) {
+    log.debug("Leaving idProblem().");
     return 'An id is required: it is the path component that selects this profile — ' +
            '/.well-known/oauth-authorization-server/<id>.';
   }
   if (!ID_SHAPE.test(text)) {
+    log.debug("Leaving idProblem().");
     return '"' + text + '" cannot be a profile id. It has to be a single URL path segment: ' +
            '1 to 64 characters of letters, digits, dot, dash, underscore or tilde, starting ' +
            'with a letter or a digit. A profile whose id had to be escaped to appear in a URL ' +
            'would be one nobody could find again.';
   }
+  log.debug("Leaving idProblem().");
   return null;
 }
 
@@ -293,11 +297,13 @@ function blank(id) {
 const MAX_PROFILES = 200;
 
 function ensure(id, options) {
+  log.debug("Entering ensure().");
   const opts = options || {};
   const key = String(id || '').trim();
   log.debug("Entering ensure(). id=" + key);
   if (!key || idProblem(key)) {
     log.debug("Leaving ensure(). Not a usable id.");
+    log.debug("Leaving ensure().");
     return null;
   }
   let profile = profiles.get(key);
@@ -309,6 +315,7 @@ function ensure(id, options) {
                ' profiles are held (the id comes off a URL path, so any caller can invent ' +
                'one). It is still served, with the defaults.');
       log.debug("Leaving ensure(). The registry is full.");
+      log.debug("Leaving ensure().");
       return null;
     }
     profile = blank(key);
@@ -324,6 +331,7 @@ function ensure(id, options) {
     profile.seenAt = Date.now();
   }
   log.debug("Leaving ensure(). seen=" + profile.seen);
+  log.debug("Leaving ensure().");
   return profile;
 }
 
@@ -391,9 +399,11 @@ function apply(metadata, id) {
 // having removed the member would be enforcing something it never said.
 // ---------------------------------------------------------------------------
 function capabilitiesOf(id, defaults) {
+  log.debug("Entering capabilitiesOf().");
   const merged = Object.assign({}, defaults || {});
   const profile = get(id);
   if (!profile) {
+    log.debug("Leaving capabilitiesOf().");
     return merged;
   }
   Object.keys(profile.overrides).forEach(function (member) {
@@ -402,6 +412,7 @@ function capabilitiesOf(id, defaults) {
   profile.removed.forEach(function (member) {
     delete merged[member];
   });
+  log.debug("Leaving capabilitiesOf().");
   return merged;
 }
 
@@ -489,21 +500,25 @@ function driftOf(id, truth) {
 // way without knowing what a profile is.
 // ---------------------------------------------------------------------------
 function create(detail) {
+  log.debug("Entering create().");
   const info = detail || {};
   const id = String(info.id || '').trim();
   log.debug("Entering create(). id=" + id);
   const problem = idProblem(id);
   if (problem) {
     log.debug("Leaving create(). " + problem);
+    log.debug("Leaving create().");
     return { ok: false, errors: [problem] };
   }
   if (has(id)) {
     log.debug("Leaving create(). It exists already.");
+    log.debug("Leaving create().");
     return { ok: false, errors: ['There is already an authorization server profile called "' +
                                  id + '". Change it rather than creating it again.'] };
   }
   const profile = ensure(id, {});
   if (!profile) {
+    log.debug("Leaving create().");
     return { ok: false, errors: ['This service is holding its maximum of ' + MAX_PROFILES +
                                  ' authorization servers. Delete one first.'] };
   }
@@ -514,6 +529,7 @@ function create(detail) {
            ' profile(s). It is served at /.well-known/oauth-authorization-server/' + id +
            ' and /' + id + '/.well-known/openid-configuration.');
   log.debug("Leaving create(). Created.");
+  log.debug("Leaving create().");
   return { ok: true, profile: view(id) };
 }
 
@@ -625,10 +641,13 @@ function remove(id) {
 }
 
 function view(id) {
+  log.debug("Entering view().");
   const profile = get(id);
   if (!profile) {
+    log.debug("Leaving view().");
     return null;
   }
+  log.debug("Leaving view().");
   return {
     id: profile.id,
     label: profile.label,

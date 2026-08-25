@@ -102,8 +102,12 @@ function enabled() {
 // directory's user observer follow.
 // ---------------------------------------------------------------------------
 function noteClient(session, clientId) {
+  log.debug("Entering noteClient().");
   try {
-    if (!session || !clientId) return;
+    if (!session || !clientId) {
+      log.debug("Leaving noteClient().");
+      return;
+    }
     session.oidcClients = session.oidcClients || {};
     const known = session.oidcClients[clientId];
     session.oidcClients[clientId] = {
@@ -114,6 +118,7 @@ function noteClient(session, clientId) {
   } catch (e) {
     log.warn('front-channel logout: could not record the client on the session: ' + e.message);
   }
+  log.debug("Leaving noteClient().");
 }
 
 // Every client this session signed into, in the order they were first seen.

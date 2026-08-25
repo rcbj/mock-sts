@@ -30,6 +30,13 @@
 // sts-sp`, and the person it names has never had a credential checked there.
 // ===========================================================================
 
+const bunyan = require('bunyan');
+// The suite's convention, and this repository's: bunyan rather than console,
+// so that a run reads the same way as the parent project's tests/*.js and can
+// be filtered by level. `./node_modules/.bin/bunyan` prettifies it.
+const log = bunyan.createLogger({ name: 'drive',
+                                  level: process.env.LOG_LEVEL || 'info' });
+
 const cfg = require('./config');
 const client = require('./http_client');
 
@@ -39,13 +46,13 @@ const failures = [];
 
 function ok(what, detail) {
   passed++;
-  console.log('  ✓ ' + what + (detail ? '  — ' + detail : ''));
+  log.info('✓ ' + what + (detail ? '  — ' + detail : ''));
 }
 
 function bad(what, detail) {
   failed++;
   failures.push(what + (detail ? ': ' + detail : ''));
-  console.log('  ✗ ' + what + (detail ? '  — ' + detail : ''));
+  log.error('✗ ' + what + (detail ? '  — ' + detail : ''));
 }
 
 function check(condition, what, detail) {
@@ -54,15 +61,13 @@ function check(condition, what, detail) {
 }
 
 function heading(text) {
-  console.log('');
-  console.log(text);
-  console.log('-'.repeat(text.length));
+  log.info('=== ' + text + ' ' + '='.repeat(Math.max(0, 62 - text.length)));
 }
 
 function showTrail(trail) {
   trail.forEach(function (hop) {
     const to = hop.to ? '→ ' + hop.to : '(the page)';
-    console.log('      ' + hop.status + ' ' + shorten(hop.from) + '  ' + shorten(to));
+    log.info('      ' + hop.status + ' ' + shorten(hop.from) + '  ' + shorten(to));
   });
 }
 
@@ -97,9 +102,10 @@ async function json(url) {
 }
 
 async function main() {
-  console.log('Federation end to end: ' + cfg.APP_FRONT + ' → ' + cfg.SP_FRONT +
+  log.debug('Entering main().');
+  log.info('Federation end to end: ' + cfg.APP_FRONT + ' → ' + cfg.SP_FRONT +
               ' → ' + cfg.IDP_FRONT);
-  console.log('Signing in as "' + cfg.FED_USERNAME + '". No password is checked anywhere in ' +
+  log.info('Signing in as "' + cfg.FED_USERNAME + '". No password is checked anywhere in ' +
               'this stack.');
 
   await client.waitFor(cfg.APP_FRONT + '/healthz', 90);
@@ -358,21 +364,21 @@ async function main() {
         after.authentications + ' before, ' + afterForged.authentications + ' after');
 
   // -----------------------------------------------------------------------
-  console.log('');
-  console.log('='.repeat(64));
-  console.log(passed + ' passed, ' + failed + ' failed');
+  log.info('='.repeat(64));
+  log.info(passed + ' passed, ' + failed + ' failed');
   if (failed) {
-    console.log('');
-    failures.forEach(function (f) { console.log('  FAILED: ' + f); });
+    failures.forEach(function (f) {
+      log.error('FAILED: ' + f);
+    });
   }
-  console.log('='.repeat(64));
+  log.info('='.repeat(64));
+  log.debug('Leaving main().');
   return failed === 0;
 }
 
 main().then(function (allPassed) {
   process.exit(allPassed ? 0 : 1);
 }).catch(function (e) {
-  console.error('');
-  console.error('DRIVER FAILED: ' + (e && e.stack ? e.stack : e));
+  log.error('DRIVER FAILED: ' + (e && e.stack ? e.stack : e));
   process.exit(1);
 });

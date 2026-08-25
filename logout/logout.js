@@ -262,6 +262,7 @@ const FAMILIES = [
           'tokens it already holds are a separate row, because a notified ' +
           'relying party that kept a live refresh token is not signed out.',
     collect: function (ctx) {
+      log.debug("Entering oidc-rp.collect().");
       const rows = [];
       ctx.sessions.forEach(function (session) {
         frontchannel.notificationsFor(session, ctx.issuer).forEach(function (note) {
@@ -278,13 +279,16 @@ const FAMILIES = [
           }));
         });
       });
+      log.debug("Leaving oidc-rp.collect().");
       return rows;
     },
     terminate: function (r, ctx) {
+      log.debug("Entering oidc-rp.terminate().");
       const parts = String(r.handle).split('|');
       const session = authn.sessionById(parts[0]);
       const clientId = parts.slice(1).join('|');
       if (!session) {
+        log.debug("Leaving oidc-rp.terminate().");
         return { ok: false, message: 'the session that relying party was signed into on has ' +
                                      'already ended, which signed it out too' };
       }
@@ -295,6 +299,7 @@ const FAMILIES = [
       })[0];
       if (note) ctx.notifications.push(note);
       if (session.oidcClients) delete session.oidcClients[clientId];
+      log.debug("Leaving oidc-rp.terminate().");
       return { ok: true,
                message: clientId + ' was forgotten on session ' + session.id +
                         (note && note.url ? ' and notified at ' + note.uri
@@ -312,6 +317,7 @@ const FAMILIES = [
           'URL printed beside it so a failed ping can be seen rather than ' +
           'guessed at.',
     collect: function (ctx) {
+      log.debug("Entering wsfed-rp.collect().");
       const rows = [];
       ctx.sessions.forEach(function (session) {
         wsfed.cleanupTargetsFor(session).forEach(function (target) {
@@ -324,13 +330,16 @@ const FAMILIES = [
           }));
         });
       });
+      log.debug("Leaving wsfed-rp.collect().");
       return rows;
     },
     terminate: function (r, ctx) {
+      log.debug("Entering wsfed-rp.terminate().");
       const parts = String(r.handle).split('|');
       const session = authn.sessionById(parts[0]);
       const realm = parts.slice(1).join('|');
       if (!session) {
+        log.debug("Leaving wsfed-rp.terminate().");
         return { ok: false, message: 'the session that realm was signed into on has already ' +
                                      'ended, which took its cleanup list with it' };
       }
@@ -339,6 +348,7 @@ const FAMILIES = [
       })[0];
       if (target) ctx.cleanups.push(target);
       if (session.wsfedRealms) delete session.wsfedRealms[realm];
+      log.debug("Leaving wsfed-rp.terminate().");
       return { ok: true,
                message: realm + ' was forgotten on session ' + session.id +
                         (target && target.url ? ' and a cleanup request was sent'
@@ -358,6 +368,7 @@ const FAMILIES = [
           'service provider ANSWERS. Firing those into hidden frames would ' +
           'claim a federation-wide logout this service cannot observe.',
     collect: function (ctx) {
+      log.debug("Entering saml2-sp.collect().");
       const rows = [];
       ctx.sessions.forEach(function (session) {
         saml2Sso.logoutTargetsFor(session).forEach(function (target) {
@@ -370,13 +381,16 @@ const FAMILIES = [
           }));
         });
       });
+      log.debug("Leaving saml2-sp.collect().");
       return rows;
     },
     terminate: function (r, ctx) {
+      log.debug("Entering saml2-sp.terminate().");
       const parts = String(r.handle).split('|');
       const session = authn.sessionById(parts[0]);
       const entityId = parts.slice(1).join('|');
       if (!session) {
+        log.debug("Leaving saml2-sp.terminate().");
         return { ok: false, message: 'the session that service provider was signed into on has ' +
                                      'already ended, which took its logout list with it' };
       }
@@ -385,6 +399,7 @@ const FAMILIES = [
       })[0];
       if (target) ctx.logoutRequests.push(target);
       if (session.saml2ServiceProviders) delete session.saml2ServiceProviders[entityId];
+      log.debug("Leaving saml2-sp.terminate().");
       return { ok: true,
                message: entityId + ' was forgotten on session ' + session.id +
                         (target && target.url
@@ -407,8 +422,13 @@ const FAMILIES = [
           'forgotten to its cap cannot be listed and is the reason a global ' +
           'logout is not a promise about tokens issued long ago.',
     collect: function (ctx) {
+      log.debug("Entering token.collect().");
       const detail = stats.userDetail(ctx.key);
-      if (!detail) return [];
+      if (!detail) {
+        log.debug("Leaving token.collect().");
+        return [];
+      }
+      log.debug("Leaving token.collect().");
       return detail.tokens.filter(function (record) {
         // Only what can still be presented AND can still be acted on. A
         // revoked one is already ended, an expired one ended itself, and one
@@ -463,6 +483,7 @@ const FAMILIES = [
       });
     },
     terminate: function (r, ctx) {
+      log.debug("Entering code.terminate().");
       // The handle is re-resolved against the CURRENT codes rather than trusted
       // from the form: five minutes may have passed, and a handle that no
       // longer names anything must end nothing rather than something else.
@@ -470,10 +491,12 @@ const FAMILIES = [
         return handleFor(code.code) === r.handle;
       })[0];
       if (!match) {
+        log.debug("Leaving code.terminate().");
         return { ok: false, message: 'that authorization code has already been redeemed or has ' +
                                      'expired, so there is nothing left to end' };
       }
       oauth2.dropCode(match.code);
+      log.debug("Leaving code.terminate().");
       return { ok: true, message: 'an authorization code for ' + (match.clientId || 'no client') +
                                   ' was discarded and can no longer be redeemed' };
     } },
@@ -489,6 +512,7 @@ const FAMILIES = [
           'sense an authorization code is, and it is shown by a handle for the ' +
           'same reason.',
     collect: function (ctx) {
+      log.debug("Entering vci-code.collect().");
       const rows = [];
       const at = Date.now();
       vcOffers.preAuthorizedCodes.forEach(function (record, code) {
@@ -504,9 +528,11 @@ const FAMILIES = [
           secret: code
         }));
       });
+      log.debug("Leaving vci-code.collect().");
       return rows;
     },
     terminate: function (r, ctx) {
+      log.debug("Entering vci-code.terminate().");
       let found = '';
       vcOffers.preAuthorizedCodes.forEach(function (record, code) {
         const username = (record.user && record.user.username) || '';
@@ -514,10 +540,12 @@ const FAMILIES = [
         if (handleFor(code) === r.handle) found = code;
       });
       if (!found) {
+        log.debug("Leaving vci-code.terminate().");
         return { ok: false, message: 'that pre-authorized code has already been redeemed or has ' +
                                      'expired, so there is nothing left to end' };
       }
       vcOffers.preAuthorizedCodes.delete(found);
+      log.debug("Leaving vci-code.terminate().");
       return { ok: true, message: 'a pre-authorized code was discarded; the Credential Offer it ' +
                                   'came from can no longer be redeemed' };
     } },
@@ -536,9 +564,11 @@ const FAMILIES = [
           '(section 4.4.1) would be the polite form and node-ldapjs has no way ' +
           'to send one — it is a submodule this repository uses unmodified.',
     collect: function (ctx) {
+      log.debug("Entering ldap.collect().");
       if (!config.value('logout.ldapDisconnect')) {
         // Still listed, and said to be untouched. A family that vanished when
         // its setting was off would make a global logout look complete.
+        log.debug("Leaving ldap.collect().");
         return ldapServer.boundConnections().filter(function (c) {
           return c.key && c.key === ctx.key;
         }).map(function (c) {
@@ -550,6 +580,7 @@ const FAMILIES = [
           });
         });
       }
+      log.debug("Leaving ldap.collect().");
       return ldapServer.boundConnections().filter(function (c) {
         return c.key && c.key === ctx.key;
       }).map(function (c) {
@@ -595,7 +626,11 @@ const FAMILIES = [
           'about Kerberos rather than a gap here. A fresh AS-REQ succeeds and ' +
           'clears the instant, because signing out is not being locked out.',
     collect: function (ctx) {
-      if (!ctx.key) return [];
+      log.debug("Entering krb5.collect().");
+      if (!ctx.key) {
+        log.debug("Leaving krb5.collect().");
+        return [];
+      }
       const realm = krb5Principals.REALM;
       const already = krb5Principals.signedOutAt([ctx.key], realm);
       const principal = krb5Principals.find([ctx.key], realm);
@@ -606,6 +641,7 @@ const FAMILIES = [
         // was no Kerberos to reach. Stamping one into existence would put an
         // account in the database because somebody typed a name at a logout
         // screen.
+        log.debug("Leaving krb5.collect().");
         return [row('krb5', 'ticket-granting tickets', ctx.key + '@' + realm, {
           label: ctx.key + '@' + realm,
           terminable: false,
@@ -615,6 +651,7 @@ const FAMILIES = [
         })];
       }
       if (!config.value('logout.kerberosSignOut')) {
+        log.debug("Leaving krb5.collect().");
         return [row('krb5', 'ticket-granting tickets', ctx.key + '@' + realm, {
           label: ctx.key + '@' + realm,
           terminable: false,
@@ -624,6 +661,7 @@ const FAMILIES = [
                'older tickets refused.'
         })];
       }
+      log.debug("Leaving krb5.collect().");
       return [row('krb5', 'ticket-granting tickets', ctx.key + '@' + realm, {
         label: ctx.key + '@' + realm,
         startedAt: already ? already.getTime() : 0,
@@ -634,12 +672,15 @@ const FAMILIES = [
       })];
     },
     terminate: function (r, ctx) {
+      log.debug("Entering krb5.terminate().");
       const realm = krb5Principals.REALM;
       const principal = krb5Principals.signOut([ctx.key], realm);
       if (!principal) {
+        log.debug("Leaving krb5.terminate().");
         return { ok: false, message: 'this KDC has no principal named ' + ctx.key + '@' + realm +
                                      ', so there was nothing to sign out' };
       }
+      log.debug("Leaving krb5.terminate().");
       return { ok: true,
                message: principal.name.join('/') + '@' + principal.realm + ' signed out at ' +
                         principal.signedOutAt.toISOString() + '; a TGS-REQ presenting an older ' +
@@ -664,8 +705,13 @@ const FAMILIES = [
           'key; an X509-SVID verifies against a bundle. They are here so that ' +
           'a global logout says what it did NOT reach.',
     collect: function (ctx) {
+      log.debug("Entering issued.collect().");
       const detail = stats.userDetail(ctx.key);
-      if (!detail) return [];
+      if (!detail) {
+        log.debug("Leaving issued.collect().");
+        return [];
+      }
+      log.debug("Leaving issued.collect().");
       return detail.artifacts.filter(function (record) {
         return record.state !== 'expired';
       }).map(function (record) {
@@ -783,6 +829,7 @@ function inventoryFor(key, issuer) {
 // Every row, flattened, WITH its secret — the internal form, for terminate().
 // Not exported: `inventoryFor()` is what anything outside this module reads.
 function allRows(ctx) {
+  log.debug("Entering allRows().");
   const rows = [];
   FAMILIES.forEach(function (family) {
     try {
@@ -795,6 +842,7 @@ function allRows(ctx) {
                e.message);
     }
   });
+  log.debug("Leaving allRows().");
   return rows;
 }
 
@@ -987,15 +1035,18 @@ function whenText(ms) {
 // somebody to work out why it is disabled, and the sentence in the row already
 // says.
 function familyTable(family) {
+  log.debug("Entering familyTable().");
   const head = '<h2>' + xmlEscape(family.label) + '</h2>' +
     '<div class="spec">' + xmlEscape(family.protocol) + ' — ' + xmlEscape(family.spec) + '</div>' +
     '<div class="what">' + xmlEscape(family.what) + '</div>';
   if (family.failure) {
+    log.debug("Leaving familyTable().");
     return head + '<div class="err">This could not be read: ' + xmlEscape(family.failure) +
            '. Everything else on this page is unaffected, and a global logout still ' +
            'tries this family again.</div>';
   }
   if (!family.rows.length) {
+    log.debug("Leaving familyTable().");
     return head + '<p class="sub">Nothing live here.</p>';
   }
   const body = family.rows.map(function (r) {
@@ -1010,6 +1061,7 @@ function familyTable(family) {
       '<td class="sub">' + xmlEscape(whenText(r.startedAt)) + '</td>' +
       '<td class="sub">' + xmlEscape(whenText(r.expiresAt)) + '</td></tr>';
   }).join('');
+  log.debug("Leaving familyTable().");
   return head +
     '<table><thead><tr><th>End</th><th>What</th><th>Kind</th><th>Since</th><th>Until</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table>' +
@@ -1204,17 +1256,20 @@ function wantsJson(req) {
 }
 
 function refusedNamedUser(req, res, asked) {
+  log.debug("Entering refusedNamedUser().");
   const message = 'logout.anyUser is off on this instance, so /logout acts only on the session ' +
                   'you are holding. It was asked about "' + asked + '".';
   if (wantsJson(req)) {
     res.status(403).type('application/json').set('Cache-Control', 'no-store')
        .send(JSON.stringify({ error: 'forbidden', error_description: message }, null, 2));
+    log.debug("Leaving refusedNamedUser().");
     return;
   }
   send(res, page('Sign out', '<h1>Sign out</h1><div class="err">' + xmlEscape(message) +
                  '</div><p class="sub">Sign in as that person at <code>/authn/login</code> — ' +
                  'no password is checked — or use <code>/admin/logout</code>, which is the ' +
                  'operator\'s door and is behind the console\'s two roles.</p>'), 403);
+  log.debug("Leaving refusedNamedUser().");
 }
 
 // The issuer identifier a front-channel notification's `iss` carries. This

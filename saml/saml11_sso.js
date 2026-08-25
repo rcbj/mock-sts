@@ -835,18 +835,21 @@ function buildAssertionFor(ctx) {
 // Oldest out first when the cache is full — a Map iterates in insertion order,
 // which makes this three lines rather than a data structure.
 function rememberAssertion(xml) {
+  log.debug("Entering rememberAssertion().");
   const m = /\bAssertionID="([^"]+)"/.exec(xml);
   if (!m) {
     // Nothing to key on. It cannot happen with an assertion this service built,
     // and if it ever does the reference lookup simply misses rather than this
     // throwing inside a sign-in.
     log.debug("rememberAssertion(): no AssertionID, so it is not cached.");
+    log.debug("Leaving rememberAssertion().");
     return '';
   }
   assertionsById.set(m[1], xml);
   while (assertionsById.size > ASSERTION_CACHE_MAX) {
     assertionsById.delete(assertionsById.keys().next().value);
   }
+  log.debug("Leaving rememberAssertion().");
   return m[1];
 }
 
@@ -1040,6 +1043,7 @@ function deliver(res, opts) {
 // that with a 405 would be a worse mock than reading it.
 // ---------------------------------------------------------------------------
 function localityOf(req) {
+  log.debug("Entering localityOf().");
   // `req.ip` carries the proxy's address when one is in front and
   // `global.trustProxy` is off, which is the ordinary state here. It is written
   // into the assertion as what THIS SERVICE SAW, which is the only honest thing
@@ -1047,11 +1051,13 @@ function localityOf(req) {
   // otherwise.
   const address = String(req.ip || (req.connection && req.connection.remoteAddress) || '');
   if (!address) {
+    log.debug("Leaving localityOf().");
     return null;
   }
   // ::ffff:127.0.0.1 is how node reports an IPv4 client on a dual-stack socket.
   // Written as the IPv4 address a person would recognise, because a
   // SubjectLocality nobody can match against their own logs is decoration.
+  log.debug("Leaving localityOf().");
   return { ipAddress: address.replace(/^::ffff:/, '') };
 }
 
@@ -1340,6 +1346,7 @@ function respond(req, res) {
   logArtifact('SAML 1.1 Request', 'as received over SOAP', raw);
 
   const answer = function (status, message, assertion, inResponseTo, recipient) {
+    log.debug("Entering answer().");
     const response = buildResponse({
       status: status, statusMessage: message, assertion: assertion || '',
       inResponseTo: inResponseTo, recipient: recipient
@@ -1351,6 +1358,7 @@ function respond(req, res) {
     // client throw a transport error where it should be reading a status code.
     res.status(200).type('text/xml; charset=utf-8').set('Cache-Control', 'no-store')
        .send(envelope);
+    log.debug("Leaving answer().");
   };
 
   let doc = null;

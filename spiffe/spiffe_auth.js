@@ -283,6 +283,7 @@ const ASSERTED_SELECTOR_KEY = 'x-sts-mock-workload-selector';
 // the fallback below defaults to TCP for anything it does not recognise.
 // ---------------------------------------------------------------------------
 function transportOf(call) {
+  log.debug('Entering transportOf().');
   let context = null;
   try {
     context = call && typeof call.getAuthContext === 'function'
@@ -293,7 +294,10 @@ function transportOf(call) {
     log.debug('transportOf(): the auth context was not readable (' + e.message +
               '), so the peer address decides.');
   }
-  if (context && context.transportSecurityType === 'ssl') return 'tcp';
+  if (context && context.transportSecurityType === 'ssl') {
+    log.debug('Leaving transportOf().');
+    return 'tcp';
+  }
   let peer = '';
   try {
     peer = call && typeof call.getPeer === 'function' ? String(call.getPeer()) : '';
@@ -301,7 +305,11 @@ function transportOf(call) {
     // Same case as above, and the same answer: assume the less trusting one.
     log.debug('transportOf(): the peer was not readable (' + e.message + ').');
   }
-  if (!peer || peer === 'unknown' || peer.indexOf('unix:') === 0) return 'uds';
+  if (!peer || peer === 'unknown' || peer.indexOf('unix:') === 0) {
+    log.debug('Leaving transportOf().');
+    return 'uds';
+  }
+  log.debug('Leaving transportOf().');
   return 'tcp';
 }
 
@@ -408,6 +416,7 @@ function spiffeIdFromCertificate(certificate) {
 // would be reporting a check that did not happen.
 // ---------------------------------------------------------------------------
 function authorityCertificates() {
+  log.debug('Entering authorityCertificates().');
   const out = [];
   const state = ca.state();
   (state.x509Authorities || []).forEach(function (authority) {
@@ -440,6 +449,7 @@ function authorityCertificates() {
       });
     });
   });
+  log.debug('Leaving authorityCertificates().');
   return out;
 }
 
@@ -826,8 +836,12 @@ function recordCaller(caller) {
 // selector is passed through verbatim while an observed one is not.
 // ---------------------------------------------------------------------------
 function assertedSelectorsOf(call) {
+  log.debug('Entering assertedSelectorsOf().');
   const out = [];
-  if (!acceptAssertedSelectors()) return out;
+  if (!acceptAssertedSelectors()) {
+    log.debug('Leaving assertedSelectorsOf().');
+    return out;
+  }
   let values = [];
   try {
     values = (call && call.metadata && call.metadata.get(ASSERTED_SELECTOR_KEY)) || [];
@@ -835,6 +849,7 @@ function assertedSelectorsOf(call) {
     // A call whose metadata is gone. Nothing to read and nothing to report.
     log.debug('assertedSelectorsOf(): the metadata was not readable (' +
               e.message + ').');
+    log.debug('Leaving assertedSelectorsOf().');
     return out;
   }
   values.forEach(function (value) {
@@ -850,6 +865,7 @@ function assertedSelectorsOf(call) {
       }
     });
   });
+  log.debug('Leaving assertedSelectorsOf().');
   return out;
 }
 

@@ -541,6 +541,7 @@ function authorizationScheme(req) {
 // conforming client unable to proceed with no error to point at.
 // ---------------------------------------------------------------------------
 function capturingResponse() {
+  log.debug("Entering capturingResponse().");
   const captured = { status: 0, headers: {}, body: '' };
   const res = {
     set: function (name, value) { captured.headers[name] = value; return res; },
@@ -551,6 +552,7 @@ function capturingResponse() {
     json: function (body) { captured.body = JSON.stringify(body); return res; },
     end: function (body) { captured.body = String(body === undefined ? '' : body); return res; }
   };
+  log.debug("Leaving capturingResponse().");
   return { res: res, captured: captured };
 }
 
@@ -1665,6 +1667,7 @@ function recordAuthentication(decision, row) {
 // unknown sub-attribute throws. It is added during serialisation with the rest.
 // ---------------------------------------------------------------------------
 function schemeDocument(row, base) {
+  log.debug("Entering schemeDocument().");
   const out = {
     type: row.type,
     name: row.name,
@@ -1680,6 +1683,7 @@ function schemeDocument(row, base) {
   if (base) {
     out.documentationUri = base + '/scim';
   }
+  log.debug("Leaving schemeDocument().");
   return out;
 }
 
