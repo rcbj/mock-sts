@@ -919,6 +919,42 @@ find module` naming a file the operator never mentioned.
    found; writing the entry from here would be a fifth door onto it and would
    make the page unable to report the difference.
 
+   **`graph()` IS THE PICTURE'S MODEL AND IT IS NOT `chainList()` WITH BOXES.**
+   `/admin/delegation/map` draws it and `../admin-ui/delegation_map.js` lays it
+   out; this file says what the nodes and edges ARE, for the reason every other
+   view function is here — what counts as one party is a statement about this
+   store. It walks the ACTS rather than that function's answer, deliberately: a
+   chain has three parties and therefore up to TWO edges, the boxes are SHARED
+   between chains (which is the whole reason to draw one), and it needs the two
+   things `chainList()` drops on purpose — the CREDENTIALS, since the picture is
+   asked to say what was issued, and the spread of one identity across roles.
+   Reading them back off a chain would have meant putting them into a chain and
+   making that shape a worse answer to the question it does answer.
+
+   Four judgements are in it and each is argued at length above the function. A
+   NODE IS AN IDENTITY rather than a role, so a party that is the target of one
+   chain and the intermediary of the next is ONE box with a line in and a line
+   out. AN ABSENT PARTY IS NOT A BOX and the edge jumps it, carrying `skipped` —
+   a shared "(nobody named)" node would make every unconstrained delegation in
+   the process appear to converge on a party they have in common. A SELF-EDGE IS
+   A FACT ABOUT THE BOX (`selfTarget`) and not a loop on it, because S4U2Self is
+   a ticket to yourself and an arrow leaving a box and coming back draws nothing.
+   And THE ISSUER IS IN THE PICTURE and is not a party: one node carrying the
+   TRUST REALM, with an edge to whoever ASKED — the intermediary where a chain
+   has one, the initial identity where it does not.
+
+   **`nodeIdOf()` is `chainKeyOf()`'s expression with the APPLICATION normalised
+   too**, and that difference is not an oversight in either. A party carries
+   `key` — `identityKeyOf()`'s answer — only when something was PRESENTED, so a
+   target names an application and its identifier arrives exactly as the protocol
+   spelled it. On an S4U2Self that is one principal twice, and unnormalised the
+   picture drew the requester and the service it asked for a ticket to ITSELF as
+   two boxes with a line between them. **Two spellings of one identity is two
+   people** — the rule `dnRfc4514()` and `userFor()` follow one layer down. The
+   TABLE is deliberately left alone: it shows both spellings side by side, where
+   seeing them is the point, and changing `chainKey` would change what
+   `/admin-api/delegation` calls a chain.
+
    **The CONFIGURED half of `/admin/delegation` is NOT in this file.** Who may
    delegate to whom is `krb5_principals.js`'s `delegationPolicy()`, because
    what those two attributes mean is a statement about the principal database

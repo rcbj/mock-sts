@@ -1,11 +1,12 @@
 # admin-ui/
 
-The admin console at `/admin`. Two files now:
+The admin console at `/admin`. Three files now:
 
 | File | What it is |
 |---|---|
 | `admin.js` | Every page, every form, the shell they are drawn in, and the GATE in front of all of them. The largest file in the repository, because every page's HTML and every page's JSON view are built in the same function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives. |
 | `admin_rbac.js` | **Who may use it.** Two roles, held as two ordinary groups in the embedded directory. A library (rule 3): it registers nothing. |
+| `delegation_map.js` | **The delegation picture**, at `/admin/delegation/map`. Layout with `@dagrejs/dagre`, every shape its own SVG. A library (rule 3): it registers nothing, requires nothing in this service but `helpers.js`, and is HANDED what each box is. |
 
 **It IS protected now, and it holds nothing on disk.** It is also the one surface
 that can CHANGE what the protocol endpoints do, which is why it is the one that
@@ -429,6 +430,88 @@ Four things about it are decisions rather than defaults:
 
 ---
 
+## `/admin/delegation/map` IS THE FIRST DRAWING IN THIS SERVICE
+
+The same acts as a diagram. It is a **DRILL-DOWN of `/admin/delegation`** — no
+`NAV` row, `active` is the delegation page's path, `up` is `upTo('/admin/delegation', 'The picture', …)` — so the trail reads
+`Admin console › Delegation › The picture` and the way back carries the filter
+the reader came in with. Rule 7a's test is what decided it: a parameter that
+merely FILTERS a list is not a drill-down, and this is not a filter, it is a
+second VIEW of the same list. A nineteenth sidebar tab would have shown nothing
+the tab above it does not already hold.
+
+Six things about it are decisions rather than defaults.
+
+* **THE MODEL IS IN `../common/delegation.js` AND THE DRAWING IS IN
+  `delegation_map.js`, AND NEITHER KNOWS WHAT THE OTHER KNOWS.** `graph()` says
+  what the nodes and edges ARE — it walks the acts rather than `chainList()`'s
+  answer, because a chain has the credentials taken out of it on purpose and a
+  picture asked to say what was issued needs them. `render()` says where a box
+  GOES and what it looks like, and it is **handed a `resolve(node)`** rather than
+  reaching for the directory itself. That split is the whole reason there are two
+  files: what a party IS belongs to this console, where `directoryReader` and
+  `applications` are, and it is the one question a layout engine has no business
+  answering. `admin.js` is still the only place that knows both.
+
+* **IT IS `delegationView()`'s GRAPH, NOT A SECOND CALL.** That function builds
+  it beside `chainList()` and puts it in `json.graph`, so this page, the
+  delegation page's `?format=json` and `GET /admin-api/delegation` are all
+  describing one graph. Three calls with three ideas about which acts to pass
+  would have been three answers that each looked right alone — which is the
+  reason `delegationView()` exists at all.
+
+* **THE PICTURE IS OF `filtered`, THE TABLE IS OF `shown`.** Paging a diagram
+  draws the boxes that happen to be on page 2 and the lines that happen to join
+  them, which is a picture of the pagination. The page says so where the count
+  is printed, because the two numbers otherwise look like a bug.
+
+* **NO SCRIPT, AND THAT IS THE ROOT `CLAUDE.md`'s SECOND CSP RULE HOLDING RATHER
+  THAN BEING WAIVED.** A client-side graph library — mermaid, cytoscape, d3 —
+  would have made this the fifth scripted page in the service and the first in
+  the console, to draw a picture that does not move. The SVG is generated on the
+  server and arrives inline as markup, so `script-src 'none'` is untouched and
+  `img-src` is not even reached. What it costs is pan and zoom; the filter and
+  `?format=svg` are the answers to that, and both are said on the page.
+
+* **`?format=svg` IS THE DOCUMENT ALONE AND IT CARRIES NO LINKS.** `app.js`
+  rewrites root-relative `href`s into the current realm on the way out of a
+  `text/html` response ONLY — which is exactly why the inline copy's anchors work
+  inside a realm with nothing threaded through them, and exactly why a link in an
+  `image/svg+xml` body would be one that silently leaves the realm. In a saved
+  file it would be a link to somebody else's machine. That format gets the gate's
+  302 rather than a 401, which is the gate's own rule (it looks for JSON to
+  decide) and is right here: the link is clicked in a browser.
+
+* **THE DEPENDENCY WAS WEIGHED, in `delegation_map.js`'s own header, the way
+  `scimmy` and `swagger-ui-dist` were.** `@dagrejs/dagre` is 1.4 MB unpacked with
+  one dependency and no install script, and what it brings is the half that is
+  actually hard: ranking, and ORDERING each rank so the lines cross as few times
+  as possible. It brings no markup at all, which is why it is the right library
+  rather than Graphviz — a stick figure is not one of Graphviz's shapes, and the
+  alternative to a layout library was not *draw it by hand*, it was *invent a
+  layout algorithm*.
+
+**The one thing in the drawing that needed a judgement is the `both` shape.**
+`HTTP/frontend.example.com` is a person AND an application, which is the fact
+`delegationPartyCell()` draws two links for and the fact a shape-per-kind picture
+has no room for. It is a rectangle with a figure inside it — the application's
+shape, with the person in it — because choosing one of the two would send half
+the readers to the wrong page. The picture can only put a shape inside ONE
+anchor, so the party table under it draws the cell and offers both.
+
+**And one thing in the MODEL needed a judgement, which is where a box's identity
+comes from.** `nodeIdOf()` in `delegation.js` normalises the application
+identifier as well as the presented one, which `chainKeyOf()` does not do and does
+not need to: a party carries `key` only when something was PRESENTED, so an
+S4U2Self names `HTTP/frontend@REALM` normalised as the intermediary and raw as
+the target, and unnormalised the picture drew the requester and the service it
+asked for a ticket to ITSELF as two boxes with a line between them. Two spellings
+of one identity is two people — the rule `dnRfc4514()` and `userFor()` already
+follow, one layer up. The TABLE is deliberately left alone, since it shows both
+spellings in two columns where seeing them is the point.
+
+---
+
 ## `/admin/federation` IS THE ONE PAGE HERE THAT CONFIGURES A REFUSAL
 
 Every other page in this console either REPORTS what happened or WIDENS what this
@@ -584,6 +667,19 @@ told apart by a segment at the front of the path (`common/CLAUDE.md` argues the
 whole design). Four consequences for this file, and the third is the one that
 would cost an afternoon:
 
+* **THE SIDEBAR'S SECOND LINE NAMES THE REALM, and it used to name the WS-Trust
+  issuer.** `wstrust.issuer` was never the name of this service — it is what ONE
+  of sixteen families puts in an `<Issuer>` element — and in the corner of a
+  console the other fifteen never mention it read as this service's identity.
+  It is `Mock STS · <realm name>` now, which is true of the whole page and is
+  the fact a reader most needs before they act, since `/admin/config` writes the
+  realm it is read in. It is deliberately NOT the switcher said twice: the
+  switcher appears only when a realm has been DEFINED, which is exactly the
+  ordinary case where that corner was saying nothing useful. **Nothing was
+  lost** — the issuer is still under the heading on every page, and it is in
+  this line's tooltip so that somebody who had learnt to read it out of the
+  corner finds it where they look.
+
 * **`page()` draws a realm switcher above the nav**, on every page — but only
   when a realm has actually been defined. A permanent "default" would be a
   control that only ever says the same thing, and this console had no such
@@ -611,3 +707,14 @@ would cost an afternoon:
 `/admin/realms` is the page for all of it, and it keeps nothing of its own: the
 registry is `common/realms.js`'s and a realm's settings go through the same
 `config.setOverride()` every other page uses.
+
+**ITS OFF-BANNER TOLD A LIE FOR TWO STATES AND NOW TELLS THE TRUTH FOR EACH.**
+`realms.active()` is `realms.size > 0 && config.value('realms.enabled')`, and the
+banner was drawn on `!active()` while SAYING "`realms.enabled` is false". On the
+ordinary service — the flag on, no realm yet defined — that is a console
+asserting something untrue about a setting the reader can go and look at, and it
+sent people to `/admin/config` to turn on a thing already on. The two causes are
+told apart now, and the second is a NOTE rather than a warning: "the flag is on
+and nothing has been defined" is this service's normal state, not a fault. **The
+lesson generalises past this page**: a predicate that is false for two reasons
+must not be rendered as a message that names one of them.

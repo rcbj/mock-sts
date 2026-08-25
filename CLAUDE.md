@@ -34,7 +34,7 @@ files did not change; the paths did.
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
-| `admin-ui/` | The console at `/admin`, and the two roles that decide who may use it. |
+| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, and the one DRAWING in this service — `/admin/delegation/map`, laid out on the server. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
 | `federation-e2e/` | **THE ONLY TEST IN THIS REPOSITORY, AND THE ONLY KIND THERE WILL BE.** Three containers — two identity services and one web application that has never heard of federation — and one sign-in driven across all three. `./run.sh`, or `./run-host.sh` with no docker at all. A PROTOCOL test goes in the parent project's suite instead; see *Tests* below for the argument. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
@@ -488,6 +488,20 @@ identity provider returning a document containing a form that submits itself).
 Two specifications arrived at the same shape independently; this one would be
 here if SAML 2.0 had never been written. Same shape, same real submit button, no
 wider.
+
+**THE DELEGATION PICTURE IS THE OBVIOUS SEVENTH CANDIDATE AND IT IS NOT ONE.**
+`/admin/delegation/map` draws a graph, and every graph library a person would
+reach for — mermaid, cytoscape, d3 — runs in the browser and would have made it
+the first scripted page in the CONSOLE. It is generated on the SERVER instead:
+`@dagrejs/dagre` computes the layout, `admin-ui/delegation_map.js` emits the
+shapes, and the SVG arrives inline in the page as ordinary markup. So
+`script-src 'none'` is untouched and `img-src` is not even reached. What that
+costs is pan and zoom, which the page says out loud rather than leaving somebody
+to wonder why dragging does nothing; the filter narrows a busy picture and
+`?format=svg` hands over the document for something that does zoom. The rule this
+follows is the one the six above establish read backwards: the argument for a
+script has to be that the page CANNOT work without one, and a diagram that does
+not move can.
 
 ---
 

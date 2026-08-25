@@ -9,6 +9,7 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "@digitalbazaar/bbs-signatures": "^3.1.0",
     "@grpc/grpc-js": "^1.14.4",
     "@grpc/proto-loader": "^0.8.1",

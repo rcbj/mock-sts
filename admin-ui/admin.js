@@ -250,6 +250,13 @@ const oauth2 = require('../oauth-oidc/oauth2');
 // holds the acts and this file renders them at /admin/delegation, the same
 // split audit.js has.
 const delegation = require('../common/delegation');
+// THE PICTURE OF THAT REGISTER, at /admin/delegation/map. A library like
+// `./admin_rbac.js` — it registers no route, requires only helpers.js and
+// @dagrejs/dagre, and knows nothing about this console: it is HANDED a resolver
+// that says what each box is, because what a party IS belongs here (the registry
+// and the directory reader are here) and where a box GOES belongs there. Its own
+// header weighs the dependency and argues why the layout is not hand-rolled.
+const delegationMap = require('./delegation_map');
 // The CONFIGURED half of that page: which Kerberos principals may delegate to
 // which, out of the two attributes that decide it. It is read from the module
 // that OWNS the principal database, for the reason every store rule here is
@@ -624,6 +631,12 @@ const LIST_PARAMS = {
   // typed. `user` is deliberately NOT here — it is the drill-down's own leaf,
   // not the list's filter, and carrying it in the section crumb would make the
   // way back point at the page the reader is already on.
+  // The delegation table's five filters and its paging. `/admin/delegation/map`
+  // is the drill-down that spends them, and it carries the filters onward
+  // through a form of its own — the picture and the table are filtered by one
+  // control, so a reader who narrowed the table and then drew it gets the
+  // picture of what they were looking at.
+  '/admin/delegation': ['type', 'mode', 'outcome', 'protocol', 'q', 'per', 'page'],
   '/admin/logout': ['family', 'per', 'page'],
   '/admin/realms': ['per', 'page'],
   '/admin/federation': ['q', 'role', 'per', 'page']
@@ -1195,7 +1208,30 @@ function page(title, active, inner, up, gate, req) {
     // The count and the specification links. Smallest thing on the card,
     // because it is the one part a reader scans rather than reads.
     '.proto .c{font-size:.72em;color:#8a8a99;margin-top:5px}' +
-    // The narrow case. One breakpoint and no more: below it the sidebar stops
+    // ---------------------------------------------------------------------
+    // /admin/delegation/map's OWN CLASSES, here for the reason the service
+    // metadata page's are: page() emits the console's ONLY <style>, and a
+    // second one inside <body> is markup no validator accepts.
+    // ---------------------------------------------------------------------
+    // THE FRAME ROUND THE DIAGRAM, AND `overflow:auto` IS THE WHOLE OF IT. An
+    // SVG is generated at its natural size and a busy one is wider than the
+    // card; without this the picture either widens the page past the viewport
+    // (the failure `min-width:0` on `.main` exists to prevent, arriving by
+    // another door) or is squeezed to fit and becomes unreadable. It scrolls
+    // inside its own box instead, and the filter above it is how a reader makes
+    // it small enough not to need to.
+    '.diagram{overflow:auto;max-width:100%;border:1px solid #e2e2ea;' +
+    'border-radius:8px;background:#fff;padding:12px;margin:.6em 0 .4em}' +
+    // `max-width:none` states that the picture is not to be scaled to the box,
+    // because a diagram scaled down is one whose labels have stopped being
+    // legible while still looking as though they should be.
+    '.diagram svg{display:block;max-width:none}' +
+    // The key. A table like every other, with the shape column sized to the
+    // swatches rather than to its heading.
+    'table.key td.art{width:5.5rem;text-align:center;vertical-align:middle;' +
+    'background:#fff}' +
+    'table.key td.art svg{vertical-align:middle}' +
+        // The narrow case. One breakpoint and no more: below it the sidebar stops
     // being sticky and sits above the page as an ordinary block, which is what
     // flex-wrap has already done to it by then — the rule only undoes the
     // stickiness, which on a full-width block would pin the whole nav to the
@@ -1207,7 +1243,35 @@ function page(title, active, inner, up, gate, req) {
     '</style></head><body><div class="shell">' +
     '<aside class="side">' +
     '<p class="brand">Mock STS admin</p>' +
-    '<p class="brandsub">' + esc(config.value('wstrust.issuer')) + '</p>' +
+    // WHAT THIS SERVICE IS AND WHICH REALM YOU ARE IN, rather than the WS-Trust
+    // issuer identifier that used to be here.
+    //
+    // That identifier is `wstrust.issuer`, and it was never the name of this
+    // service — it is what ONE of the sixteen protocol families puts in an
+    // <Issuer> element. In the corner of a console whose other fifteen families
+    // never mention it, it read as the service's identity and is not; and it is
+    // the one line on the page that is drawn before the reader knows what the
+    // page is about, so it should say something true of the whole of it.
+    //
+    // THE REALM IS THE THING WORTH SAYING THERE. Every page in this console
+    // shows exactly one realm, `/admin/config` WRITES the one it is read in, and
+    // a realm is a whole logical copy of this service — so "which one am I
+    // looking at" is the question a reader most needs answered before they act.
+    // The switcher below says it too, but only when a realm has been DEFINED:
+    // it is absent in the ordinary case, which is precisely the case where the
+    // corner was saying nothing useful at all.
+    //
+    // NOTHING IS LOST. The issuer identifier is still on every page, under the
+    // heading, in the line that says which service this console is for — and it
+    // is in this line's tooltip, because somebody who had learnt to read it out
+    // of the corner should find it where they look rather than have to hunt.
+    '<p class="brandsub" title="' +
+      esc('This console is showing the trust realm "' + realms.current().name +
+          '" (id: ' + realms.currentId() + '). Its WS-Trust issuer identifier ' +
+          'is ' + config.value('wstrust.issuer') + ', which is what that ' +
+          'protocol puts in an <Issuer> element and is not the name of this ' +
+          'service.') +
+      '">Mock STS &middot; ' + esc(realms.current().name) + '</p>' +
     realmBar(req) +
     navBar(active, up) +
     '</aside><div class="main"><div class="card">' +
@@ -3098,7 +3162,10 @@ function logoutRowHtml(row, canWrite, back) {
     : (row.terminable ? '<span class="state-none">—</span>'
                       : '<span class="state-none" title="' + esc(row.why) + '">cannot</span>');
   return '<tr><td>' + esc(row.family) + '</td>' +
-    '<td><code>' + esc(shortened(row.label, 44)) + '</code><br><span class="sub">' +
+    // shortened() emits its OWN <code title=…> wrapper — the title is how the
+    // full value stays recoverable — so it must NOT be escaped or wrapped again:
+    // esc() around it prints the tags, which is what this cell did.
+    '<td>' + shortened(row.label, 44) + '<br><span class="sub">' +
     esc(row.detail) + '</span>' +
     (row.terminable ? '' : '<br><span class="sub">' + esc(row.why) + '</span>') + '</td>' +
     '<td>' + esc(row.kind) + '</td>' +
@@ -3665,7 +3732,9 @@ function credentialCell(list, label) {
   return '<div><span class="state-none">' + label + '</span><br>' +
     list.map(function (one) {
       return '<code>' + esc(one.kind) + '</code>' +
-        (one.identifier ? ' <code>' + esc(shortened(one.identifier, 10)) + '</code>' : '') +
+        // NOT esc()'d and not wrapped: shortened() returns the <code> element
+        // with the whole value in its title. Escaping it printed the markup.
+        (one.identifier ? ' ' + shortened(one.identifier, 10) : '') +
         (one.note ? '<br><span class="state-none">' + esc(one.note) + '</span>' : '');
     }).join('<br>') + '</div>';
 }
@@ -3829,6 +3898,14 @@ function delegationView(query) {
   // filtered to one person wants that person's chains, and a count that ignored
   // the filter would disagree with the table under it.
   const chains = delegation.chainList(filtered);
+  // THE PICTURE'S MODEL, BUILT HERE AND NOT IN THE ROUTE THAT DRAWS IT, for the
+  // reason the whole of this function exists: /admin/delegation/map, this page's
+  // ?format=json and GET /admin-api/delegation must all be describing the same
+  // graph, and three calls to delegation.graph() with three ideas about which
+  // acts to pass it would be three answers that each looked right alone. Of the
+  // matched acts rather than the paged ones — a diagram of one page of a list is
+  // a diagram of the pagination.
+  const graph = delegation.graph(filtered);
   const policy = krb5Principals.delegationPolicy();
   log.debug("Leaving delegationView(). " + shown.length + " act(s) of " +
             filtered.length + ", " + chains.length + " chain(s).");
@@ -3836,7 +3913,7 @@ function delegationView(query) {
     wantedType: wantedType, wantedMode: wantedMode, wantedOutcome: wantedOutcome,
     wantedProtocol: wantedProtocol, wantedText: wantedText,
     all: all, filtered: filtered, paging: paging, shown: shown,
-    summary: summary, chains: chains, policy: policy,
+    summary: summary, chains: chains, graph: graph, policy: policy,
     json: {
       held: summary.held,
       // Everything ever recorded and everything dropped, both, because `held`
@@ -3870,6 +3947,14 @@ function delegationView(query) {
       // from and is already the more useful answer for a caller asking "what
       // talks to what".
       chains: chains,
+      // THE PICTURE, as a graph. The nodes and edges /admin/delegation/map
+      // draws, with the credentials folded onto each edge and the list of what
+      // was issued — so a test can assert what that page shows without parsing
+      // an SVG, which is the only way a drawing can be kept honest from outside.
+      // It is a strictly different shape from `chains` and not a second copy of
+      // it: a chain has three parties and therefore up to TWO edges, and the
+      // boxes are SHARED between chains, which is the whole reason to draw one.
+      graph: graph,
       // The configured policy: who MAY delegate to whom, and the account flags
       // that decide what delegation can do to somebody. Kerberos only, because
       // it is the only family here that polices this at all.
@@ -3997,6 +4082,29 @@ app.get('/admin/delegation', function (req, res) {
     'OWN words, the same sentence the client was sent, rather than a second ' +
     'wording that could come to disagree with it.</p>' +
 
+    // THE WAY TO THE PICTURE, ABOVE THE TABLE RATHER THAN UNDER IT. The chains
+    // table lower down is what the diagram is drawn from and the obvious place
+    // to put this link is beside it — which is most of a page below the fold on
+    // a busy day. A reader who wants the shape of things wants it before they
+    // have read four hundred rows, so the offer is here and is repeated where
+    // the chains are.
+    //
+    // It carries the CURRENT FILTER AND NOT THE PAGE: the picture has no paging
+    // (see that route's header) and a `page` in its query would be a parameter
+    // that does nothing.
+    '<p class="note"><a class="btn" href="' +
+      esc('/admin/delegation/map' + queryWith({ type: view.wantedType,
+        mode: view.wantedMode, outcome: view.wantedOutcome,
+        protocol: view.wantedProtocol, q: view.wantedText }, {})) +
+      '">See this as a picture &rarr;</a> ' +
+    '<strong>The same acts drawn as a diagram</strong> — a stick figure per ' +
+    'person, a rectangle per application, a hexagon for this service in this ' +
+    'trust realm, and a line per relationship: who acts for whom, and what each ' +
+    'credential was FOR. ' + (filtering
+      ? 'It opens with the filter you have set here.'
+      : 'Filter first if this list is long — the picture is drawn from ' +
+        'everything that matches, not from one page.') + '</p>' +
+
     '<h2>What happened</h2>' +
     // No `page` input in this form, deliberately: changing a filter or the page
     // size returns to page 1. Carrying the old page number over would land
@@ -4060,8 +4168,10 @@ app.get('/admin/delegation', function (req, res) {
     '<h2>The chains</h2>' +
     '<p class="note">The same acts with the time and the credentials taken out: ' +
     'one row per distinct <em>(mechanism, initial, intermediary, target)</em>. ' +
-    'This is what the picture will be drawn from — one edge per row — and it is ' +
-    'already the more useful answer to <em>what talks to what</em>. The outcome ' +
+    '<a href="/admin/delegation/map">This is what the picture is drawn from</a> ' +
+    '— one edge per row, and up to TWO lines per row, because a chain has three ' +
+    'parties. It is already the more useful answer to <em>what talks to what</em>. ' +
+    'The outcome ' +
     'is deliberately NOT part of a chain\'s identity, so a chain refused nine ' +
     'times and then fixed is one row that changes rather than two that do not ' +
     'meet.</p>' +
@@ -4169,6 +4279,710 @@ app.get('/admin/delegation', function (req, res) {
 
   respond(req, res, view.json, 'Delegation', '/admin/delegation', inner);
   log.debug("Leaving the admin delegation page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/delegation/map — THE SAME ACTS, AS A PICTURE.
+//
+// A DRILL-DOWN OF /admin/delegation AND NOT A SECTION OF ITS OWN. It has no NAV
+// row, it passes `up`, and its active tab is the delegation page's — which is
+// what makes the trail read `Admin console › Delegation › The picture` and what
+// makes the way back carry the filter the reader came in with. The test rule 7a
+// states is the one that decided it: a parameter that merely FILTERS a list is
+// not a drill-down, and this is not a filter — it is a second VIEW of the list,
+// which is exactly what a drill-down is. Putting it in the sidebar was considered
+// and would have been a nineteenth tab that shows nothing the tab above it does
+// not already hold.
+//
+// **IT IS THE SAME VIEW FUNCTION.** `delegationView(req.query)` builds it, so
+// every filter on the table filters the picture, and the two can never come to
+// disagree about which acts they are describing. There is one deliberate
+// difference and it is the whole reason to state it: **the picture is drawn from
+// `view.filtered` and the table is drawn from `view.shown`** — paging a picture
+// would draw the boxes that happen to be on page 2 and the lines that happen to
+// join them, which is a diagram of the pagination rather than of the service.
+// The page says so where the count is printed.
+//
+// **THERE IS NO FORM AND THEREFORE NO NEW OPERATION ON /admin-api** — rule 7,
+// satisfied the same way `/admin/delegation` itself satisfies it. What this page
+// shows is reachable without a browser at `?format=json`, and the same graph is
+// on `GET /admin-api/delegation` in the `graph` member, because a picture a test
+// cannot assert against is a picture that can go wrong quietly.
+//
+// **AND `?format=svg` ANSWERS THE DOCUMENT ALONE.** It is the one shape this
+// console has that is worth saving — a diagram is a thing people put in a
+// ticket — and it is not a fourth response format bolted on: `respond()` still
+// answers HTML and JSON, and this route answers SVG before calling it. The
+// standalone document carries NO LINKS, deliberately: `app.js` rewrites
+// root-relative hrefs into the current realm on the way out of a `text/html`
+// response only, so a link inside an `image/svg+xml` body would be a link that
+// silently leaves the realm — and in a saved file it would be a link to
+// somebody's own machine.
+//
+// **`?format=svg` GETS THE 302 AND NOT THE 401, and that is the gate's rule
+// rather than an oversight here.** The guard answers a program with a status and
+// a body and a BROWSER with the sign-in screen, and it decides which by looking
+// for JSON — `?format=json`, a JSON content-type, a JSON-only `Accept`. Nothing
+// else is a program as far as it is concerned, and this format in particular is
+// reached by clicking a link on this page, so a browser that has been signed out
+// should meet the screen and come back to the document. A caller that wants the
+// picture without a session wants `?format=json` and the graph, which is the
+// shape a test can assert against anyway.
+// ---------------------------------------------------------------------------
+
+// WHAT A BOX IS, WHICH IS THE ONE QUESTION `delegation_map.js` DELIBERATELY
+// CANNOT ANSWER. It is handed this function and asks it once per node.
+//
+// The three states are `delegationPartyCell()`'s three states, and they are the
+// same three on purpose: a name this console can resolve, a name it could file
+// somebody under and never has, and a name for something the registry has never
+// seen. What the picture does with them is what a picture can do and a table
+// cannot — the first two get a SHAPE and the third gets a DASHED one — and the
+// row under the diagram still draws the cell, so nothing that was linkable in
+// the table stops being linkable here.
+//
+// **THE LABEL IS THE CN WHERE THERE IS ONE.** A directory entry's `cn` and an
+// application entry's `appName` are what somebody CALLED this thing, and the
+// identifier is what a protocol spelled it as; on a diagram the first is worth
+// more than the second, and the second is one line below it and in the tooltip.
+// Where there is no entry there is no cn, and the identifier is all there is.
+function delegationNodeLook(node, known) {
+  if (node.kind === 'sts') {
+    // The one box that is not a party. It carries the REALM because a realm is a
+    // whole logical copy of this service — two realms' pictures are two
+    // different services' pictures — and it says `default` rather than nothing
+    // in the realm that has no prefix, since a hexagon labelled only `mock STS`
+    // would be silent about the one thing this box is here to say.
+    return {
+      shape: 'sts',
+      label: 'mock STS',
+      sublabel: 'realm: ' + (node.realm ? node.realm.name : 'Default') +
+                (node.realm && !node.realm.isDefault ? ' (' + node.realm.id + ')' : ''),
+      title: 'THIS SERVICE, in the trust realm ' +
+        (node.realm ? node.realm.name + ' (' + node.realm.id + ')' : 'default') +
+        '.\nIssuer: ' + (node.issuer || '(unset)') +
+        '\nEvery line in this picture exists because this service issued or ' +
+        'refused a credential: ' + node.issued + ' issued, ' + node.refused +
+        ' refused.\nThe dashed lines leaving it go to whoever ASKED — the ' +
+        'intermediary where a chain has one, the initial identity where it ' +
+        'does not.',
+      href: '/admin/realms',
+      dashed: false
+    };
+  }
+
+  // The directory's own answer about a PERSON. `directoryReader` is a slot and
+  // is empty in a build with no `ldap_server.js`, which is a state this console
+  // reports everywhere else rather than guessing through — so with no directory
+  // every party falls back to the role's shape, dashed, and the page says why.
+  let entry = null;
+  if (directoryReader && node.key) {
+    const info = directoryReader(node.key);
+    entry = info && info.found ? info.entry : null;
+  }
+  // The registry's answer about an APPLICATION. Looked up by the identifier the
+  // ACT carried rather than by the node's id: the id is normalised (see
+  // `nodeIdOf()` in delegation.js) and `ou=applications` is keyed by what a
+  // caller actually presented.
+  const application = node.application ? applications.get(node.application) : null;
+
+  const isPerson = !!entry;
+  const isApplication = !!application;
+  const shape = isPerson && isApplication ? 'both'
+              : isApplication ? 'application'
+              : isPerson ? 'person'
+              // Nothing is known. The ROLE decides, which is the ROLES table
+              // read as a drawing: an initial identity is a person, a target is
+              // an application, and an intermediary is drawn as an application
+              // because that is what a front-end service is.
+              : node.chiefRole === 'initial' ? 'person' : 'application';
+
+  const cn = entry ? firstAttributeValue(entry, 'cn') : '';
+  const appName = application ? (application.name || application.dnLabel) : '';
+  const label = cn || appName || node.id;
+
+  const parts = [];
+  if (isPerson) parts.push('person');
+  if (isApplication) parts.push('application');
+  // WHICH STORE HAS NOT HEARD OF IT, and the two are different sentences. A
+  // target drawn as a rectangle is missing from `ou=applications` — the REGISTRY
+  // — and an initial identity drawn as a figure is missing from `ou=users` — the
+  // DIRECTORY. One word for both would send half the readers to the wrong page
+  // to look for it, which is the mistake `delegationPartyCell()` avoids by
+  // drawing up to two links rather than one.
+  const missing = shape === 'person' ? 'not in the directory' : 'not in the registry';
+  const sublabel = parts.length ? parts.join(' + ')
+                 : (node.chiefRole ? node.chiefRole + ', ' + missing : missing);
+
+  // Where the box goes when it is clicked. ONE link, where the table draws up to
+  // two — an SVG shape can be inside one anchor and the party table under the
+  // picture carries both, which is where a reader who wants the other one looks.
+  // The person's page wins when this console has SEEN them authenticate, because
+  // that page answers the question a delegation raises (what else was issued in
+  // their name); the application page otherwise.
+  let href = '';
+  if (node.key && known[node.key]) {
+    href = '/admin/users' + queryWith({ user: node.key }, {});
+  } else if (isApplication) {
+    href = '/admin/applications' + queryWith({ application: node.application }, {});
+  }
+
+  const title = [
+    label === node.id ? node.id : label + ' — ' + node.id,
+    node.presented && node.presented !== node.id
+      ? 'presented as ' + node.presented : '',
+    node.application && node.application !== node.id
+      ? 'named as an application: ' + node.application : '',
+    entry ? 'In the directory at ' + entry.dn + '.'
+          : (node.key ? 'No entry under ou=users names this.' : ''),
+    application ? 'In the applications registry' +
+      (application.dn ? ' at ' + application.dn : '') + '.'
+      : (node.application ? 'NOT in the applications registry — the registry ' +
+         'holds what this service has been ASKED ABOUT, and a delegation naming ' +
+         'something nobody has otherwise mentioned is ordinary for an RFC 8693 ' +
+         'audience.' : ''),
+    'Roles: initial ' + node.roles.initial + ', intermediary ' +
+      node.roles.intermediary + ', target ' + node.roles.target + '.',
+    node.selfTarget
+      ? 'Some act named this party as BOTH the intermediary and the target — a ' +
+        'ticket to ITSELF, which is what S4U2Self is. There is no line for it ' +
+        'because an arrow leaving a box and coming back is a drawing of nothing.'
+      : '',
+    node.protocols.length ? 'Seen over: ' + node.protocols.join(', ') + '.' : '',
+    node.what || ''
+  ].filter(Boolean).join('\n');
+
+  return { shape: shape, label: label, sublabel: sublabel, title: title,
+           href: href, dashed: !isPerson && !isApplication };
+}
+
+// One attribute off an entry the directory reader handed back, canonically
+// spelled or not. `objectFor()` returns them canonically spelled and a caller
+// asking for `cn` should not have to know that.
+function firstAttributeValue(entry, name) {
+  if (!entry || !entry.attributes) {
+    return '';
+  }
+  const wanted = String(name).toLowerCase();
+  const key = Object.keys(entry.attributes).filter(function (one) {
+    return String(one).toLowerCase() === wanted;
+  })[0];
+  const values = key ? entry.attributes[key] : null;
+  return (values && values.length) ? String(values[0]) : '';
+}
+
+// THE KEY. Drawn out of `delegation_map.js`'s own glyph functions and its own
+// palette rather than out of a second set of shapes written for the legend,
+// because a legend that is drawn separately is a legend that will eventually
+// describe a picture this service no longer draws.
+function delegationMapKey() {
+  const swatch = function (inner, width) {
+    return '<svg width="' + width + '" height="40" viewBox="0 0 ' + width +
+      ' 40" aria-hidden="true">' + inner + '</svg>';
+  };
+  const C = delegationMap.COLOURS;
+  const line = function (colour, dash) {
+    return '<path d="M4 20H50" stroke="' + colour + '" stroke-width="1.8" fill="none"' +
+      (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>' +
+      '<path d="M50 15L58 20L50 25z" fill="' + colour + '"/>';
+  };
+  const items = [
+    { art: swatch(delegationMap.personGlyph(9, 3, C.indigo, false, 1), 44),
+      what: '<strong>A person.</strong> Something with an entry under ' +
+            '<code>ou=users</code> — anybody this service has authenticated, in ' +
+            'any of the sixteen families.' },
+    { art: swatch('<rect x="3" y="9" width="56" height="22" rx="5" fill="' + C.panel +
+                  '" stroke="' + C.indigo + '" stroke-width="1.5"/>', 64),
+      what: '<strong>An application.</strong> Something with an entry under ' +
+            '<code>ou=applications</code> — an OAuth client, a service provider, ' +
+            'a Kerberos service, a WS-Trust relying party.' },
+    { art: swatch('<rect x="3" y="4" width="56" height="32" rx="5" fill="' + C.panel +
+                  '" stroke="' + C.indigo + '" stroke-width="1.5"/>' +
+                  delegationMap.personGlyph(7, 3, C.indigo, false, 0.85), 64),
+      what: '<strong>Both, which the middle tier usually is.</strong> ' +
+            '<code>HTTP/frontend.example.com</code> authenticates (so the funnel ' +
+            'files it with the people) AND has tickets issued FOR it (so the ' +
+            'registry has it). Two entries, one party.' },
+    { art: swatch('<path d="' + delegationMap.hexPath(3, 6, 58, 28) + '" fill="' +
+                  C.wash + '" stroke="' + C.indigo + '" stroke-width="1.8"/>', 64),
+      what: '<strong>This service, in one trust realm.</strong> Every line here ' +
+            'exists because it issued or refused a credential. The realm is on ' +
+            'the box because a realm is a whole logical copy of this service.' },
+    { art: swatch(delegationMap.personGlyph(9, 3, C.grey, true, 1), 44),
+      what: '<strong>A dashed outline is something neither store knows.</strong> ' +
+            'It is drawn in the shape its ROLE implies and is not an error: an ' +
+            'RFC 8693 <code>audience</code> nobody has otherwise mentioned is ' +
+            'exactly this.' },
+    { art: swatch(line(C.amber, ''), 64),
+      what: '<strong>acts for &mdash; an IMPERSONATION.</strong> What came out ' +
+            'names the initial identity and nothing else, so nothing at the far ' +
+            'end can tell an intermediary was involved. Amber because this ' +
+            'picture is the only place that fact will ever exist.' },
+    { art: swatch(line(C.green, ''), 64),
+      what: '<strong>acts for &mdash; a DELEGATION.</strong> What came out ' +
+            'CARRIES the chain: an <code>act</code> claim, a composite ' +
+            '<code>ActAs</code>, <code>S4U_DELEGATION_INFO</code> in the PAC.' },
+    { art: swatch(line(C.indigo, ''), 64),
+      what: '<strong>reaches &mdash; the TRUST relationship.</strong> What the ' +
+            'credential is FOR: the back-end service, the <code>AppliesTo</code>, ' +
+            'the audience or resource. The label says whose name it carries.' },
+    { art: swatch(line(C.indigo, '7 4'), 64),
+      what: '<strong>A broken line jumps a party nobody named.</strong> A ' +
+            'forwarded ticket-granting ticket has no intermediary and cannot ' +
+            'have one — the client gives it to whichever service it chooses and ' +
+            'this KDC is never told which.' },
+    { art: swatch(line(C.red, '5 3'), 64),
+      what: '<strong>Red is a chain nothing was ever issued on.</strong> The ' +
+            'tooltip carries the KDC\'s own words for why, which is the same ' +
+            'sentence the client was sent.' },
+    { art: swatch(line(C.grey, '4 3'), 64),
+      what: '<strong>Grey and dashed, from the hexagon: this service ISSUED to ' +
+            'that party.</strong> It goes to whoever ASKED — the intermediary ' +
+            'where a chain has one, the initial identity where it does not.' }
+  ];
+  return '<table class="key"><tr><th>Shape</th><th>What it means</th></tr>' +
+    items.map(function (one) {
+      return '<tr><td class="art">' + one.art + '</td><td>' + one.what + '</td></tr>';
+    }).join('') + '</table>';
+}
+
+// One node, as a row of the party index under the picture. The party cell is
+// `delegationPartyCell()`'s, so a box that links to one page in the diagram
+// still offers BOTH links here — see the note in delegationNodeLook().
+function delegationNodeRow(node, known, look) {
+  if (node.kind === 'sts') {
+    return '';
+  }
+  const party = { key: node.key, presented: node.presented,
+                  application: node.application, what: node.what };
+  const roles = [];
+  if (node.roles.initial) roles.push(node.roles.initial + ' × initial identity');
+  if (node.roles.intermediary) roles.push(node.roles.intermediary + ' × intermediary');
+  if (node.roles.target) roles.push(node.roles.target + ' × target');
+  return '<tr>' +
+    '<td>' + esc(look.label) + '</td>' +
+    '<td>' + (look.shape === 'both'
+                ? 'person <strong>and</strong> application'
+                : look.shape === 'person' ? 'person'
+                : look.shape === 'application' ? 'application' : look.shape) +
+      (look.dashed
+        ? '<br><span class="state-none" title="Neither ou=users nor ' +
+          'ou=applications holds an entry for this. The shape is the one its ' +
+          'role implies.">drawn from its role &mdash; neither store knows it</span>'
+        : '') + '</td>' +
+    '<td class="who">' + delegationPartyCell(party, known) + '</td>' +
+    '<td>' + (roles.join('<br>') || '<span class="state-none">&mdash;</span>') +
+      (node.selfTarget
+        ? '<br><span class="state-expired" title="S4U2Self is a request for a ' +
+          'ticket to yourself, so the intermediary and the target are one party. ' +
+          'There is no line for it in the picture because an arrow leaving a box ' +
+          'and coming back is a drawing of nothing.">also its own target</span>'
+        : '') + '</td>' +
+    '<td class="num">' + esc(node.acts) + ' — ' +
+      '<span class="state-valid">' + esc(node.issued) + ' issued</span>, ' +
+      (node.refused
+        ? '<span class="state-revoked">' + esc(node.refused) + ' refused</span>'
+        : '<span class="state-none">0 refused</span>') + '</td>' +
+    '<td>' + (node.protocols.map(esc).join('<br>') ||
+              '<span class="state-none">&mdash;</span>') + '</td>' +
+    '</tr>';
+}
+
+// One edge, as a row of the relationship index. The columns are the picture read
+// as a sentence — who, to whom, meaning what, over what, how it came out — so
+// that everything the diagram says in colour is also said in words. A picture
+// nobody can read as text is one nobody can quote in a bug report.
+function delegationEdgeRow(edge, lookOf) {
+  const relation = edge.relation === 'issued'
+    ? '<span class="state-none" title="This service handed that party a ' +
+      'credential. It goes to whoever ASKED.">issued to</span>'
+    : edge.relation === 'acts-for'
+      ? '<strong>acts for</strong>'
+      : '<strong>reaches</strong>' +
+        (edge.subject ? '<br><span class="state-none">as ' + esc(edge.subject) +
+                        '</span>' : '');
+  return '<tr>' +
+    '<td class="who">' + esc(lookOf(edge.from)) + '</td>' +
+    '<td class="who">' + esc(lookOf(edge.to)) + '</td>' +
+    '<td>' + relation +
+      ((edge.skipped || []).length
+        ? '<br><span class="state-expired" title="Nobody named this party on ' +
+          'these acts, so the line jumps it. A forwarded ticket-granting ticket ' +
+          'has no intermediary and cannot have one.">jumps the ' +
+          esc(edge.skipped.join(' and ')) + '</span>'
+        : '') + '</td>' +
+    '<td>' + (edge.typeLabel
+                ? '<code>' + esc(edge.type) + '</code><br>' +
+                  '<span class="state-none">' + esc(edge.typeLabel) + '</span><br>' +
+                  '<span class="state-none">' + esc(edge.protocol) +
+                  (edge.spec ? ' &middot; ' + esc(edge.spec) : '') + '</span>'
+                : '<span class="state-none">' +
+                  esc((edge.protocols || []).join(', ') || '&mdash;') + '</span>') +
+    '</td>' +
+    '<td>' + modeCell(edge.mode) + '</td>' +
+    '<td class="num">' + esc(edge.acts) + ' — ' +
+      '<span class="state-valid">' + esc(edge.issued) + ' issued</span>, ' +
+      (edge.refused
+        ? '<span class="state-revoked">' + esc(edge.refused) + ' refused</span>'
+        : '<span class="state-none">0 refused</span>') + '</td>' +
+    '<td class="who">' + (edge.produced.length
+      ? edge.produced.map(function (one) {
+          return '<code>' + esc(one.kind) + '</code> × ' + esc(one.count) +
+            (one.identifiers.length
+              ? '<br>' + one.identifiers.map(function (id) {
+                  // shortened() brings its own <code title=…> — see the note
+                  // in credentialCell().
+                  return shortened(id, 10);
+                }).join(' ') +
+                (one.moreIdentifiers ? ' <span class="state-none">+' +
+                  esc(one.moreIdentifiers) + ' more</span>' : '')
+              : '');
+        }).join('<br>')
+      : '<span class="state-none">&mdash;</span>') + '</td>' +
+    // WHY, AND THE UNPOLICED FAMILIES ARE COLLAPSED. This is the delegation
+    // page's own rule about its *Also requires* column read again: a sentence
+    // that is a property of the MECHANISM and identical on every row of its kind
+    // is not a column, it is a paragraph. `authorizedBy` on a WS-Trust or an RFC
+    // 8693 row is exactly that — *nothing checks this, and here is the
+    // paragraph* — repeated down the table it squeezed the four columns that DO
+    // differ per row into shreds, which is the failure that took that page from
+    // twelve columns to ten.
+    //
+    // So a REFUSAL prints in full, because it is specific to the act and is most
+    // of what this page is for; a POLICED grant prints its attribute, because
+    // that is short and names an account; and an unpoliced grant becomes three
+    // words with the paragraph in the tooltip. Nothing is lost — the line's own
+    // tooltip in the picture carries the same text.
+    '<td>' + (edge.reason
+              ? esc(edge.reason)
+              : edge.relation === 'issued'
+                ? '<span class="state-none">&mdash;</span>'
+                : edge.policed
+                  ? (edge.authorizedBy ? esc(edge.authorizedBy)
+                                       : '<span class="state-none">&mdash;</span>')
+                  : '<span class="state-expired" title="' +
+                    esc(edge.authorizedBy || 'Nothing in this service decides ' +
+                        'who may perform this act.') +
+                    '">nothing checks this</span>') +
+    '</td>' +
+    '</tr>';
+}
+
+app.get('/admin/delegation/map', function (req, res) {
+  log.debug("Entering the admin delegation map page.");
+  const view = delegationView(req.query);
+  const known = knownUserKeys();
+  // THE PICTURE IS OF EVERYTHING THAT MATCHED, not of the page that is showing —
+  // see the header. It is `delegationView()`'s graph rather than a second call
+  // to `delegation.graph()`, so this page and `GET /admin-api/delegation` cannot
+  // come to disagree about what is in it.
+  const graph = view.graph;
+
+  const looks = {};
+  graph.nodes.forEach(function (node) {
+    looks[node.id] = delegationNodeLook(node, known);
+  });
+  const labelOf = function (id) {
+    return looks[id] ? looks[id].label : id;
+  };
+
+  const drawn = delegationMap.render(graph, {
+    resolve: function (node) { return looks[node.id]; },
+    // A `reaches` line says WHOSE name the credential carries, and that party is
+    // neither end of it — so the renderer has no `resolve()` answer for it and
+    // would otherwise print the raw identity beside two boxes labelled with
+    // their cn. One name per party, wherever it appears.
+    labelOf: labelOf,
+    links: true,
+    id: 'delmap',
+    label: 'Delegation relationships in this service, as a diagram'
+  });
+
+  if (String(req.query.format || '') === 'svg') {
+    // The document alone, for saving or embedding. No links (see the header) and
+    // `no-store` like every other page here, because it describes live state.
+    const bare = delegationMap.render(graph, {
+      resolve: function (node) { return looks[node.id]; },
+      labelOf: labelOf,
+      links: false, id: 'delmap',
+      label: 'Delegation relationships in this service, as a diagram'
+    });
+    res.set('Cache-Control', 'no-store')
+       .type('image/svg+xml')
+       .send(bare.svg);
+    log.debug("Leaving the admin delegation map page. Answered SVG.");
+    return;
+  }
+
+  const filterParams = { type: view.wantedType, mode: view.wantedMode,
+                         outcome: view.wantedOutcome,
+                         protocol: view.wantedProtocol, q: view.wantedText,
+                         per: req.query.per ? view.paging.perPage : '' };
+  const up = upTo('/admin/delegation', 'The picture',
+                  listViewOf('/admin/delegation', req.query));
+
+  const filtering = view.wantedType || view.wantedMode || view.wantedOutcome ||
+                    view.wantedProtocol || view.wantedText;
+
+  // The filter, exactly the table's, so that narrowing the picture and narrowing
+  // the table are one control rather than two that could take different values.
+  // It is a GET form and carries no `page`: this page has none, and a page
+  // number carried into a view with no paging is a parameter that does nothing
+  // and comes back with the reader on the next hop.
+  const protocolsInOrder = [];
+  delegation.TYPES.forEach(function (entry) {
+    if (protocolsInOrder.indexOf(entry.protocol) < 0) {
+      protocolsInOrder.push(entry.protocol);
+    }
+  });
+  const typeOptions = '<option value=""' + (view.wantedType ? '' : ' selected') +
+    '>any mechanism</option>' +
+    protocolsInOrder.map(function (protocol) {
+      return '<optgroup label="' + esc(protocol) + '">' +
+        delegation.TYPES.filter(function (entry) {
+          return entry.protocol === protocol;
+        }).map(function (entry) {
+          return '<option value="' + esc(entry.type) + '"' +
+                 (entry.type === view.wantedType ? ' selected' : '') + '>' +
+                 esc(entry.label) + ' (' + (view.summary.byType[entry.type] || 0) +
+                 ')</option>';
+        }).join('') + '</optgroup>';
+    }).join('');
+  const modeOptions = ['<option value=""' + (view.wantedMode ? '' : ' selected') +
+                       '>either kind</option>']
+    .concat(delegation.MODES.map(function (entry) {
+      return '<option value="' + esc(entry.mode) + '"' +
+             (entry.mode === view.wantedMode ? ' selected' : '') + '>' +
+             esc(entry.label) + ' (' + (view.summary.byMode[entry.mode] || 0) +
+             ')</option>';
+    })).join('');
+  const outcomeOptions = ['<option value=""' + (view.wantedOutcome ? '' : ' selected') +
+                          '>any outcome</option>']
+    .concat(delegation.OUTCOMES.map(function (name) {
+      return '<option value="' + esc(name) + '"' +
+             (name === view.wantedOutcome ? ' selected' : '') + '>' + esc(name) +
+             ' (' + (view.summary.byOutcome[name] || 0) + ')</option>';
+    })).join('');
+
+  const parties = graph.nodes.filter(function (node) {
+    return node.kind !== 'sts';
+  });
+
+  const inner = messagesOf(req) +
+    // THE WAY BACK, AT THE TOP, ABOVE EVERYTHING. The trail under the nav already
+    // offers it and this is deliberately a second one: the trail is a strip of
+    // small grey text a reader learns to look at, and somebody who followed a
+    // link into a diagram is looking at the diagram. It carries the filter, so
+    // "back" means the table they came from and not the top of an unfiltered one.
+    '<p class="note"><a class="btn" href="' + esc(up.href) + '">&larr; Back to ' +
+    'the delegation table</a></p>' +
+
+    '<div class="tiles">' +
+      tile(parties.length, 'parties') +
+      tile(graph.edges.filter(function (e) { return e.relation !== 'issued'; }).length,
+           'relationships') +
+      tile(graph.chains, 'distinct chains') +
+      tile(graph.acts, 'acts drawn') +
+      tile(view.summary.byMode.impersonation || 0, 'impersonations') +
+      tile(graph.tokens.length, 'credentials issued') +
+    '</div>' +
+
+    '<p class="note"><strong>The same acts as ' +
+    '<a href="' + esc(up.href) + '">the table</a>, with the time taken out and ' +
+    'the parties shared.</strong> A party that is the intermediary of six chains ' +
+    'is ONE box here with six lines leaving it, which is the thing a table of ' +
+    'rows cannot show and the reason to draw this at all. Every box and every ' +
+    'line carries the whole story in its tooltip; the two tables under the ' +
+    'picture say the same things in words, because a diagram nobody can quote is ' +
+    'a diagram nobody can put in a bug report.</p>' +
+
+    '<p class="note"><strong>It is drawn from everything that MATCHED the filter ' +
+    'and not from one page of it.</strong> ' + view.filtered.length + ' act(s) ' +
+    'match' + (view.all.length !== view.filtered.length
+      ? ' of ' + view.all.length + ' held' : '') +
+    ', and all of them are in the picture — paging a diagram would draw the boxes ' +
+    'that happen to be on page 2 and the lines that happen to join them, which is ' +
+    'a picture of the pagination.</p>' +
+
+    '<form method="get" action="/admin/delegation/map"><div class="formrow">' +
+      '<label for="type">Mechanism</label><select id="type" name="type">' +
+        typeOptions + '</select>' +
+      '<label for="mode">Kind</label><select id="mode" name="mode">' +
+        modeOptions + '</select>' +
+      '<label for="outcome">Outcome</label><select id="outcome" name="outcome">' +
+        outcomeOptions + '</select>' +
+    '</div><div class="formrow">' +
+      '<label for="q">Text</label>' +
+      '<input type="text" id="q" name="q" size="40" value="' + esc(view.wantedText) +
+        '" placeholder="a person, an SPN, a client_id, an attribute">' +
+      '<button class="secondary">Redraw</button>' +
+      (filtering ? ' <a href="/admin/delegation/map">clear</a>' : '') +
+    '</div></form>' +
+    '<p class="note">The same filter the table has, so narrowing one narrows the ' +
+    'other. <strong>Filtering to one person is how a busy picture is read</strong> ' +
+    '— the text box searches every party of the chain and both explanations at ' +
+    'once.</p>' +
+
+    (graph.acts
+      ? '<div class="diagram">' + drawn.svg + '</div>' +
+        '<p class="note">' + drawn.width + '&times;' + drawn.height + ' — ' +
+        '<a href="' + esc('/admin/delegation/map' +
+          queryWith(filterParams, { format: 'svg' })) + '">the document on its ' +
+        'own</a> (SVG, no links in it &mdash; see below), or ' +
+        '<a href="' + esc('/admin/delegation/map' +
+          queryWith(filterParams, { format: 'json' })) + '">the graph as JSON</a>.' +
+        (drawn.failed ? ' <span class="state-revoked">The layout failed: ' +
+          esc(drawn.failed) + '</span>' : '') + '</p>'
+      : '<p class="note"><strong>Nothing has delegated anything yet' +
+        (filtering ? ' that matches this filter' : '') + ', so there is nothing ' +
+        'to draw.</strong> Three things put a box on this page: a Kerberos ' +
+        'S4U2Self, S4U2Proxy or forwarded-TGT request at the KDC; a WS-Trust ' +
+        '<code>RequestSecurityToken</code> carrying ' +
+        '<code>&lt;wst:OnBehalfOf&gt;</code> or <code>&lt;wst14:ActAs&gt;</code>; ' +
+        'and an RFC 8693 token exchange at <code>/oauth2/token</code>. A REFUSED ' +
+        'attempt counts and is drawn in red.</p>') +
+
+    '<h2>The key</h2>' +
+    '<p class="note">The shapes are drawn by the same functions the picture uses, ' +
+    'so a legend cannot come to describe a diagram this service no longer draws.</p>' +
+    delegationMapKey() +
+
+    '<h2>The parties</h2>' +
+    '<p class="note">Every box, with both of its links where it has two. The ' +
+    'picture can only put a shape inside ONE anchor, so a party that is a person ' +
+    'AND an application links to the users page there and to both here.' +
+    (directoryReader ? '' :
+      ' <strong>No LDAP directory is loaded in this process</strong>, so nothing ' +
+      'here can be resolved to a person and every box is drawn from its role. ' +
+      'That is a build without <code>ldap_server.js</code> and not a failure.') +
+    '</p>' +
+    '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
+    '<th>Roles it played</th><th>Acts</th><th>Protocols</th></tr>' +
+    (parties.map(function (node) {
+      return delegationNodeRow(node, known, looks[node.id]);
+    }).join('') || '<tr><td colspan="6">No parties yet.</td></tr>') + '</table>' +
+
+    '<h2>The relationships</h2>' +
+    '<p class="note">Every line, as a sentence. <strong>The two kinds are ' +
+    'different claims and the picture colours them differently</strong>: ' +
+    '<em>acts for</em> is the DELEGATION relationship — who is acting on whose ' +
+    'behalf — and <em>reaches</em> is the TRUST relationship, what the credential ' +
+    'is FOR, which is the question <em>what is this token\'s audience</em> asked ' +
+    'as a picture. The grey lines from the hexagon are neither: they are this ' +
+    'service handing a credential to whoever asked for one.</p>' +
+    '<p class="note"><strong>The last column collapses one sentence and it is ' +
+    'the same collapse the delegation table makes.</strong> Kerberos is the only ' +
+    'family here that polices delegation at all, so a Kerberos row names an ' +
+    'ATTRIBUTE and an account — short, and different on every row — while every ' +
+    'WS-Trust and RFC 8693 row carries the identical paragraph saying that ' +
+    'nothing checked it. Repeated down a table that paragraph is the column, so ' +
+    'it is <em>nothing checks this</em> with the wording in the tooltip. ' +
+    '<strong>A REFUSAL is never collapsed</strong> and prints in full: it is the ' +
+    'KDC\'s own words, the same sentence the client was sent, and it is specific ' +
+    'to the act rather than to the mechanism.</p>' +
+    '<table><tr><th>From</th><th>To</th><th>Relationship</th><th>Mechanism</th>' +
+    '<th>Kind</th><th>Acts</th><th>What came out</th>' +
+    '<th>Authorized by / why not</th></tr>' +
+    (graph.edges.map(function (edge) {
+      return delegationEdgeRow(edge, labelOf);
+    }).join('') || '<tr><td colspan="8">No relationships yet.</td></tr>') +
+    '</table>' +
+
+    '<h2>What was issued</h2>' +
+    '<p class="note"><strong>Every credential that came out of an act in this ' +
+    'picture</strong>, newest first — a Kerberos service ticket, a SAML ' +
+    'assertion, an access token — with the chain it came out of. <strong>NO ' +
+    'CREDENTIAL IS EVER HERE, only its kind and its identifier</strong>, which is ' +
+    'the rule the audit log follows and which applies here for one more reason: a ' +
+    'delegation act is precisely the request that carries two credentials at ' +
+    'once. A Kerberos ticket genuinely has no identifier to quote, which this ' +
+    'says rather than leaving a blank column to be read as a bug.</p>' +
+    '<p class="note">A REFUSED act produced nothing by definition, so it is not ' +
+    'in this list — which is why ' + graph.tokens.length + ' credential(s) sit ' +
+    'under ' + graph.acts + ' act(s) and the two numbers do not have to agree.</p>' +
+    '<table><tr><th class="num">#</th><th>When</th><th>Credential</th>' +
+    '<th>Subject</th><th>Actor</th><th>Target</th><th>Mechanism</th></tr>' +
+    (graph.tokens.map(function (token) {
+      return '<tr>' +
+        '<td class="num">' + esc(token.seq) + '</td>' +
+        '<td>' + esc(whenText(token.at)) + '</td>' +
+        '<td class="who"><code>' + esc(token.kind) + '</code>' +
+          (token.identifier
+            ? '<br>' + shortened(token.identifier, 14)
+            : '<br><span class="state-none" title="A Kerberos ticket has no ' +
+              'identifier this service could quote — there is no jti and no ' +
+              'AssertionID in one.">no identifier</span>') +
+          (token.note ? '<br><span class="state-none">' + esc(token.note) +
+                        '</span>' : '') + '</td>' +
+        '<td class="who">' + esc(labelOf(token.subject) ||
+          '<span class="state-none">&mdash;</span>') + '</td>' +
+        '<td class="who">' + (token.actor ? esc(labelOf(token.actor))
+          : '<span class="state-none" title="A forwarded ticket-granting ticket ' +
+            'has no intermediary this KDC was told about.">&mdash;</span>') + '</td>' +
+        '<td class="who">' + (token.target ? esc(labelOf(token.target))
+          : '<span class="state-none">&mdash;</span>') + '</td>' +
+        '<td><code>' + esc(token.type) + '</code><br>' +
+          '<span class="state-none">' + esc(token.protocol) + '</span></td>' +
+        '</tr>';
+    }).join('') || '<tr><td colspan="7">Nothing has been issued through a ' +
+      'delegation yet. A REFUSED act produces nothing, so a page of red lines ' +
+      'and an empty table here is a consistent state rather than a broken ' +
+      'one.</td></tr>') + '</table>' +
+    (graph.tokensLeftOff
+      ? '<p class="note"><strong>' + graph.tokensLeftOff + ' more credential(s) ' +
+        'are not listed.</strong> This list holds at most ' + graph.maxTokenRows +
+        ' and keeps the newest; every one of them is still COUNTED on its line in ' +
+        'the picture and in the relationship table, so what is lost is the ' +
+        'individual identifiers of the oldest. Filter to narrow it.</p>'
+      : '') +
+
+    '<h2>What this picture cannot say</h2>' +
+    '<p class="note"><strong>An IMPERSONATION is invisible everywhere else, and ' +
+    'that is why the amber lines matter.</strong> Under a delegation the ' +
+    'credential carries the chain, so a resource server can read the actor off ' +
+    'the token afterwards. Under an impersonation nothing does: no reading of the ' +
+    'token, at the far end or in a log, can recover the fact that a middle tier ' +
+    'was involved. This diagram and the table behind it are the only places that ' +
+    'fact will ever exist.</p>' +
+    '<p class="note"><strong>A line is a RELATIONSHIP and not a request.</strong> ' +
+    'Four acts a second apart between the same three parties are one line with ' +
+    '<em>4 issued</em> on it; the outcome is deliberately not part of a chain\'s ' +
+    'identity, so a chain refused nine times and then fixed is one line that ' +
+    'changes colour rather than two that never meet. ' +
+    '<a href="' + esc(up.href) + '">The table</a> is where the individual acts ' +
+    'are, in order, with their times.</p>' +
+    '<p class="note"><strong>Who MAY delegate to whom is not on this page</strong>, ' +
+    'because it is CONFIGURATION rather than history and it is Kerberos-only — ' +
+    'Kerberos is the one family here that polices delegation at all. It is the ' +
+    'second half of <a href="' + esc(up.href) + '">the delegation page</a>, and ' +
+    'the asymmetry between the two is worth reading there: the same picture, ' +
+    'policed at one end and not at the other.</p>' +
+    '<p class="note"><strong>This page runs no script and neither does anything ' +
+    'else in this console.</strong> The diagram is generated on the server and ' +
+    'arrives as markup, which is why it does not pan, zoom or drag — and why ' +
+    'nothing here relaxes <code>script-src \'none\'</code>. Use the filter to ' +
+    'narrow a busy picture, or take the document and open it in something that ' +
+    'does zoom.</p>' +
+    '<p class="note"><code>?format=json</code> carries the whole graph — the ' +
+    'nodes, the edges, the credentials folded onto each edge, and the token list ' +
+    '— and it is also in the <code>graph</code> member of ' +
+    '<code>GET /admin-api/delegation</code>, so a test can assert what this page ' +
+    'draws without parsing an SVG. <code>?format=svg</code> is the document ' +
+    'alone.</p>';
+
+  respond(req, res, Object.assign({}, graph, {
+    // The filter that produced it, so a caller polling this endpoint can tell a
+    // picture of everything from a picture of one person.
+    filter: view.json.filter,
+    matched: view.filtered.length,
+    held: view.summary.held,
+    // The rendered size, which is the one fact about the DRAWING rather than the
+    // graph that a caller might reasonably want — an empty picture and a picture
+    // that failed to lay out are otherwise indistinguishable in JSON.
+    drawing: { width: drawn.width, height: drawn.height,
+               failed: drawn.failed || null }
+  }), 'Delegation — the picture', '/admin/delegation', inner, up);
+  log.debug("Leaving the admin delegation map page.");
 });
 
 // ---------------------------------------------------------------------------
@@ -9785,14 +10599,41 @@ function realmsListPage(req) {
     'prefix is that realm; everything under no prefix is the default one.</p>' +
     REALMS_CAVEAT +
 
+    // `realms.active()` IS FALSE FOR TWO DIFFERENT REASONS AND THIS USED TO NAME
+    // ONLY ONE OF THEM. It is `realms.size > 0 && config.value('realms.enabled')`,
+    // and the banner here said "`realms.enabled` is false" whenever it came back
+    // false — which on a service with the setting ON and no realm yet defined is
+    // a page asserting something untrue about a setting a reader can go and look
+    // at. That is the worst shape a console message can take: it sent somebody
+    // to Configuration to turn on a thing that was already on.
+    //
+    // So the two states are told apart, and the second is not a warning at all.
+    // "The flag is on and nothing has been defined" is the ORDINARY state of
+    // this service — the contract `common/realms.js` states is that a service
+    // with no realms defined behaves exactly as it did before realms existed —
+    // so it is a note saying what to do next, not a yellow box saying something
+    // is wrong.
     (realms.active()
       ? ''
-      : '<div class="warn"><strong>Trust realms are switched off.</strong> ' +
-        '<code>realms.enabled</code> is false, so every prefix below answers 404 ' +
-        'and this whole service is the default realm. The definitions are ' +
-        'untouched — that is what this setting is for: it lets a realm be ruled ' +
-        'out as the cause of something without anything being deleted. Turn it ' +
-        'back on from <a href="/admin/config">Configuration</a>.</div>') +
+      : !config.value('realms.enabled')
+        ? '<div class="warn"><strong>Trust realms are switched off.</strong> ' +
+          '<code>realms.enabled</code> is false, so every prefix below answers 404 ' +
+          'and this whole service is the default realm. The definitions are ' +
+          'untouched — that is what this setting is for: it lets a realm be ruled ' +
+          'out as the cause of something without anything being deleted. Turn it ' +
+          'back on from <a href="/admin/config">Configuration</a>.</div>'
+        : '<p class="note"><strong>Trust realms are switched ON and none has been ' +
+          'defined, which is this service\'s ordinary state rather than something ' +
+          'to fix.</strong> <code>realms.enabled</code> is <code>true</code>; the ' +
+          'feature does nothing until a realm exists, because the built-in ' +
+          '<code>default</code> realm has an empty prefix and IS this service. ' +
+          'That is a property rather than a coincidence — a service with no realm ' +
+          'defined behaves exactly as it did before realms existed, which is what ' +
+          'keeps every client, container and test that predates them working ' +
+          'unchanged. <strong>Define one below</strong> and its prefix starts ' +
+          'answering immediately: a switcher appears on every page of this ' +
+          'console, and <code>GET /realms</code> starts reporting ' +
+          '<code>active: true</code>.</p>') +
 
     '<h2>The realms</h2>' +
     '<table><tr><th>Id</th><th>Name</th><th>Path prefix</th><th>Signing key</th>' +
@@ -12357,7 +13198,7 @@ function federationListPage(req) {
       '<td class="num">' + row.authentications + '</td>' +
       '<td class="num">' + row.users + '</td>' +
       '<td>' + (row.lastError
-        ? '<span class="bad">' + esc(shortened(row.lastError, 60)) + '</span>'
+        ? '<span class="bad">' + shortened(row.lastError, 60) + '</span>'
         : '<span class="sub">none recorded</span>') + '</td></tr>';
   }).join('');
 

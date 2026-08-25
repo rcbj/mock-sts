@@ -1605,6 +1605,43 @@ const ENDPOINTS = [
           'mechanism, kind, outcome, protocol and free text; paged; ' +
           '?format=json carries the acts, the distinct CHAINS among them (one ' +
           'per edge of the picture) and the policy.' },
+  { path: '/admin/delegation/map', group: 'Admin', name: 'Delegation — the picture',
+    // The same four specifications as the page above it, and for the same
+    // reason: this is that page's acts drawn rather than a different subject.
+    // A shorter list here would say that the diagram covers less than the table
+    // it is drawn from, which is exactly backwards — the picture is what makes
+    // the four readable against each other.
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693'],
+    what: 'NON-SPEC PAGE OVER FOUR SPECIFICATIONS, and a DRILL-DOWN of ' +
+          '/admin/delegation rather than a section of its own. The same acts as ' +
+          'a DIAGRAM, generated on the server as SVG: a STICK FIGURE for every ' +
+          'party with an entry under ou=users, a RECTANGLE for every one with an ' +
+          'entry under ou=applications, a rectangle WITH A FIGURE IN IT for the ' +
+          'middle tier that is routinely both, and a HEXAGON for this service ' +
+          'carrying the TRUST REALM the picture is of. Two kinds of line and ' +
+          'they are different claims: `acts for` is the DELEGATION relationship, ' +
+          'coloured by mode (amber for an impersonation, green for a delegation, ' +
+          'the pairing the table uses), and `reaches` is the TRUST relationship ' +
+          '— what the credential was FOR, which is `what is this token\'s ' +
+          'audience` asked as a picture. A dashed grey line from the hexagon is ' +
+          'this service having ISSUED to whoever asked. A BROKEN line jumps a ' +
+          'party nobody named, which is what a forwarded ticket-granting ticket ' +
+          'is: no intermediary, and none possible. RED is a chain nothing was ' +
+          'ever issued on, and a party the directory has never heard of is ' +
+          'drawn DASHED in the shape its role implies rather than as a ' +
+          'registered one. A party that reached ITSELF (S4U2Self) is marked on ' +
+          'the box rather than drawn as a loop. Beneath the picture, the same ' +
+          'thing in words: every party with both of its links, every ' +
+          'relationship as a row, and EVERY CREDENTIAL THAT CAME OUT — kind and ' +
+          'identifier only, never the credential, and a Kerberos ticket has no ' +
+          'identifier to quote. It takes the delegation page\'s five filters ' +
+          'and is drawn from EVERYTHING THAT MATCHED rather than from one page ' +
+          'of it, because paging a diagram draws the pagination. NO SCRIPT — ' +
+          'the layout is computed on the server with @dagrejs/dagre and the ' +
+          'shapes are this repository\'s own, so script-src \'none\' is ' +
+          'untouched and the picture does not pan or zoom. ?format=json is the ' +
+          'whole graph (also in the `graph` member of GET /admin-api/delegation) ' +
+          'and ?format=svg is the document alone, with no links in it.' },
   { path: '/admin/audit', group: 'Admin', name: 'Audit log',
     // rfc4511 is linked because the directory operations are its and they are the
     // largest source of rows here. Nothing else: an audit log is not a protocol,
