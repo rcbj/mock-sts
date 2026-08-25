@@ -31,6 +31,14 @@ const cors = require('cors');
 const bcp = require('../oauth-oidc/oauth2_bcp');
 const bodyParser = require('body-parser');
 const { log, headersOf, bodyOf } = require('./helpers');
+// TRUST REALMS. Required here rather than anywhere else because the realm has
+// to be established BEFORE any other middleware runs — the call log records the
+// realm's statistics, the audit log records the realm's rows, and the CORS
+// decision asks oauth2_bcp.js which path is an authorization endpoint, which is
+// a question with a different answer in each realm. It requires config.js and
+// nothing else here, so it cannot join a cycle; helpers.js above has already
+// pulled it in anyway.
+const realms = require('./realms');
 // The service's own record of what it has done. Required HERE, and the position is
 // load-bearing twice over: the call log below is where the per-endpoint statistics
 // are collected, so this is a real dependency — and because every protocol module
@@ -51,6 +59,156 @@ const stats = require('./admin_stats');
 const audit = require('./audit');
 // --- express app -----------------------------------------------------------
 const app = express();
+
+// ---------------------------------------------------------------------------
+// THE TRUST REALM. FIRST OF ALL, AND NOTHING MAY BE REGISTERED ABOVE IT.
+//
+// A trust realm is a whole logical copy of this service, reached on the same
+// sockets and told apart by a segment at the front of the path — see
+// realms.js, which argues the whole design. This middleware is the only place
+// in this service that knows that, and what it does is three things:
+//
+//   1. STRIPS THE PREFIX. `/realm/acme/oauth2/token` becomes `/oauth2/token`
+//      before the router ever sees it, so every one of this service's forty
+//      route registrations matches unchanged. That is the trick the whole
+//      feature rests on: no protocol module has a realm-aware path, because no
+//      protocol module has a realm-aware anything.
+//
+//   2. ENTERS THE REALM, for the request and for everything it awaits. Every
+//      `config.value()` below this line answers the realm's value, every store
+//      declared with realms.map() reads the realm's partition, and every
+//      signature is made with the realm's key. Ambient rather than threaded —
+//      realms.js says why, at length, and the short version is that the
+//      alternative is several hundred call sites that each silently work when
+//      the argument is dropped.
+//
+//   3. PUTS THE PREFIX BACK ON THE WAY OUT, in the two places a path leaves
+//      this service without going through baseUrlOf(): a redirect target and a
+//      root-relative link in an HTML page. See below — each is argued where it
+//      is done.
+//
+// **ALL THREE ARE NO-OPS IN THE DEFAULT REALM**, which is the contract realms.js
+// opens with: `currentPrefix()` is the empty string there, `matchPath()` answers
+// null when no realm is defined, and the two wrappers below return before
+// touching anything. A service with no realms defined does not merely behave as
+// it did — it runs the same code it did, with two comparisons added.
+// ---------------------------------------------------------------------------
+app.use(function (req, res, next) {
+  const match = realms.matchPath(String(req.url || '').split('?')[0]);
+
+  // Not in a realm — including a path that opens with the realm SEGMENT and an
+  // id nobody defined. That case deliberately falls through to Express's own
+  // 404 rather than being refused here: `Cannot GET /realm/nope/oauth2/token`
+  // is how the parent project's tests/sts_metadata.js tells an unrouted path
+  // from an endpoint legitimately answering 404, and a friendlier refusal for
+  // unknown realms would break that distinction for every path under the
+  // segment. `GET /realms` is where somebody finds out what the realms are.
+  if (!match) {
+    next();
+    return;
+  }
+
+  const query = String(req.url || '').slice(String(req.url || '').split('?')[0].length);
+  // `req.originalUrl` is left ALONE and that is deliberate twice over: the call
+  // log and the audit log record what was asked for rather than what the router
+  // was shown, and Express's 404 body — the one the test above reads — is built
+  // from it, so an unrouted path inside a realm still names the realm.
+  req.url = match.rest + query;
+  req.realm = match.realm;
+
+  // ---------------------------------------------------------------------
+  // A REDIRECT TARGET. `res.redirect('/authn/login?...')` is how six modules
+  // here send a browser to the sign-in screen, and the string is written the
+  // way the route is registered — without a realm, because no route here has
+  // one. Left alone it would send somebody signing in to realm `acme` to the
+  // DEFAULT realm's login screen, they would sign in there, and the flow would
+  // come back to a realm that had never heard of them. The symptom is an
+  // authorization request that loops.
+  //
+  // Only a ROOT-RELATIVE target is touched. An absolute one names a host —
+  // a client's redirect_uri, a wallet — and this service is not entitled to
+  // put its own realm segment into somebody else's URL. `res.location()` is
+  // wrapped as well as `res.redirect()` because the latter calls the former,
+  // and because three places here set a Location header without redirecting.
+  // ---------------------------------------------------------------------
+  const location = res.location;
+  res.location = function (url) {
+    return location.call(res, realms.href(url));
+  };
+
+  // ---------------------------------------------------------------------
+  // A ROOT-RELATIVE LINK IN AN HTML PAGE.
+  //
+  // The console draws several hundred hrefs, every one of them written as the
+  // path the route is registered at. The login screen posts to /authn/login.
+  // The four autopost pages load /oauth2/autopost.js and its siblings. None of
+  // them can know about a realm, and threading one through every one of them
+  // is the several-hundred-call-sites problem this whole design exists to
+  // avoid — with the extra property that a missed one is a link that silently
+  // leaves the realm rather than a link that breaks.
+  //
+  // So it is done ONCE, here, on the way out. Three attributes and nothing
+  // else — href, action and src — and only where the value starts with a
+  // single `/`, which is what makes `//cdn.example` and `https://…` and every
+  // relative path untouched. It runs on `text/html` responses only, so no JSON
+  // body, no XML assertion, no JWT and no script is rewritten; and it runs in
+  // a non-default realm only, so the default realm's bytes are not merely
+  // unchanged but untouched.
+  //
+  // THE HONEST LIMITATION, said here rather than discovered later: a URL this
+  // service builds inside a SCRIPT or a JSON island in an HTML page is not
+  // rewritten. There is one such page — /admin-api/docs, whose explorer builds
+  // request URLs in JavaScript — and it is handled in mgmt-api/admin_api_explorer.js
+  // by being given the prefix as a value rather than by having its markup
+  // rewritten. A fifth scripted page would need the same treatment and would
+  // not get it for free.
+  // ---------------------------------------------------------------------
+  const send = res.send;
+  res.send = function (body) {
+    const type = String(res.get('Content-Type') || '');
+    if (typeof body === 'string' && /html/i.test(type)) {
+      arguments[0] = withRealmLinks(body, realms.currentPrefix());
+    }
+    return send.apply(res, arguments);
+  };
+
+  realms.run(match.realm, next);
+});
+
+// The rewrite itself. A function rather than an inline regex so that the ONE
+// pattern that decides what a link is has one home and one test: `="/` and not
+// `="//`, which is a protocol-relative URL to another host.
+function withRealmLinks(html, prefix) {
+  if (!prefix) {
+    return html;
+  }
+  return html.replace(/\b(href|action|src)="\/(?!\/)/g, '$1="' + prefix + '/');
+}
+
+// WHICH REALM IDS ARE ALREADY SPOKEN FOR — the first path segment of every
+// route registered against this app. Installed as a FUNCTION because this file
+// is loaded before a single route exists (it has to be: middleware applies only
+// to routes added after it), so the answer is only complete at the moment a
+// realm is being created, which is when this is called. See realms.js's
+// reserve().
+realms.reserve(function () {
+  const router = app._router || app.router;
+  const stack = (router && router.stack) || [];
+  const seen = {};
+  stack.forEach(function (layer) {
+    const path = layer.route && layer.route.path;
+    if (!path) {
+      return;
+    }
+    (Array.isArray(path) ? path : [path]).forEach(function (one) {
+      const first = String(one).split('/')[1];
+      if (first && /^[a-z0-9-]+$/i.test(first)) {
+        seen[first.toLowerCase()] = true;
+      }
+    });
+  });
+  return Object.keys(seen);
+});
 
 // Chrome Private Network Access: when a PUBLIC page calls a LOCAL (loopback)
 // server — which is exactly the live-site test setup, an HTTPS page on
@@ -284,7 +442,21 @@ app.use(function (req, res, next) {
     return end.apply(res, arguments);
   };
 
-  res.on('finish', function () {
+  // ---------------------------------------------------------------------
+  // THE REALM IS RE-ENTERED HERE, EXPLICITLY, AND IT IS NOT BELT AND BRACES.
+  //
+  // Everything below runs from a `finish` event, and an EventEmitter's
+  // listeners run in the async context of whatever EMITTED the event — not the
+  // one they were added in. The realm middleware's AsyncLocalStorage therefore
+  // may or may not still be entered by the time this fires, depending on
+  // whether the response was flushed synchronously or from a socket write
+  // callback. The statistics and the audit row would then land in whichever
+  // realm the process happened to be in, which under load is a different one.
+  //
+  // `req.realm` is what the middleware recorded on the request, and re-entering
+  // it here makes the answer the same every time rather than usually right.
+  // ---------------------------------------------------------------------
+  res.on('finish', realms.bind(req.realm, function () {
     // Counted here rather than at the top of the middleware because the two things
     // worth counting — the status code and how long it took — do not exist until
     // the response has gone out. `req.route` is set by Express when it dispatches
@@ -327,7 +499,7 @@ app.use(function (req, res, next) {
                             body: responseBody } },
               'Response: ' + res.statusCode + ' ' + req.method + ' ' + req.originalUrl +
               ' in ' + (Date.now() - started) + 'ms');
-  });
+  }));
   next();
 });
 
@@ -344,3 +516,6 @@ module.exports = app;
 // relaxes, where the next reader will find both.
 module.exports.contentSecurityPolicy = contentSecurityPolicy;
 module.exports.CONTENT_SECURITY_POLICY = CONTENT_SECURITY_POLICY;
+// For the one page that builds URLs in a script and therefore cannot have its
+// markup rewritten. See the comment on res.send above.
+module.exports.withRealmLinks = withRealmLinks;

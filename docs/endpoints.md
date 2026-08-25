@@ -84,6 +84,8 @@ them can drift from what the service does:
 | `GET /admin-api/docs` | The same, in a small explorer that also shows the `curl` line |
 | `GET /spiffe` | The trust domain, the four sockets, and all 42 SPIRE methods with a reason for each of the six that are unimplemented |
 | `GET /ldap` | The directory's state, both listeners separately, and the fact that it is schemaless |
+| `GET /federation` | Every configured federation relationship in both directions, and the URL to give each partner |
+| `GET /ldap/federations` | The federation register as the directory holds it, with its schema — and the one container here where an `ldapmodify` is a security change |
 | `GET /tls` | Both TLS listeners, and what a verified client certificate does and does not mean |
 | `GET /scim` | The SCIM authentication schemes that are switched on |
 | `GET /krb5/principals` | The principal database, passwords included, for the reason that page gives |

@@ -56,6 +56,12 @@ var config = {
     // GET /oauth2/rfc9700 lists what it does and does not enforce.
     rfc9700: false,
 
+    // OpenID Connect Front-Channel Logout 1.0: the two discovery members,
+    // the `sid` claim on an ID Token issued on a browser session, and the
+    // iframe fan-out every sign-out renders. ON, and turning it off restores
+    // the tokens and the metadata this service issued before it existed.
+    frontchannelLogout: true,
+
     // What the mode compares redirect_uri against, by exact string match, for
     // any client that did not register its own. Empty, so the mode refuses
     // every authorization request until this is filled in; the refusal says so.
@@ -288,6 +294,31 @@ var config = {
   audit: {
     maxEvents: 5000,
     protocolCalls: true
+  },
+
+  // --- Logout --------------------------------------------------------------
+  //
+  // `GET|POST /logout` — the protocol-independent sign-out. Three of these are
+  // REFUSALS the feature introduced, and every refusal in this service is
+  // switchable for the reason RFC 9700 mode's are: a client is exercised by
+  // both answers.
+  logout: {
+    // Whether ?username= may name somebody other than the caller. It grants
+    // nothing that was not already true — no password is checked at any
+    // sign-in screen here — and what it buys is a headless test.
+    anyUser: true,
+    // Whether a logout stamps a sign-out instant on the Kerberos principal,
+    // after which a TGS-REQ carrying an older ticket is refused
+    // KDC_ERR_TGT_REVOKED (20). It does NOT reach a service ticket already in
+    // a cache: accepting one never contacts the KDC.
+    kerberosSignOut: true,
+    // Whether it closes directory connections bound as that person. RFC 4511
+    // section 4.2 makes the bind the authorization state of a CONNECTION, so
+    // closing it is the only sign-out LDAP has.
+    ldapDisconnect: true,
+    // How many live items one inventory draws. The cap is on what is LISTED,
+    // never on what a termination reaches.
+    maxRows: 500
   },
 
   // --- SPIFFE / SPIRE ------------------------------------------------------

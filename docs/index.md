@@ -49,7 +49,10 @@ what to do when 389 or 88 will not bind.
 | RFC 9700, the Security BCP, as an optional MODE | `GET /oauth2/rfc9700` |
 | WS-Trust 1.0 – 1.4 | `/wstrust` |
 | WS-Federation 1.2, passive requestor, with a mock relying party | `/wsfed`, `/wsfed/rp` |
-| SAML 2.0 and SAML 1.1 assertions | inside the two above — there is no Web SSO profile |
+| SAML 2.0 Web Browser SSO — a full identity provider, all three bindings | `/saml2`, `/saml2/metadata/{sp}`, `/saml2/sp` |
+| SAML 1.1 browser profiles — Browser/POST and Browser/Artifact, and an attribute authority | `/saml11`, `/saml11/metadata/{rp}`, `/saml11/rp` |
+| SAML 2.0 and SAML 1.1 assertions | inside all four above |
+| **Federation** — this service as either end of a relationship with a foreign identity service, in five of those protocols | `/federation`, `/admin/federation` |
 | WebAuthn Level 3, the relying party's half | the login screen |
 | Kerberos v5 — a KDC, a protected service, and MS-KKDCP | TCP/UDP 88, `/KdcProxy` |
 | SPNEGO (RFC 4559/4178) | `/spnego` |
@@ -61,7 +64,7 @@ what to do when 389 or 88 will not bind.
 | OpenID4VP 1.0 — a Verifier | `/oid4vp/verifier` |
 | W3C DID Core with DIF domain linkage | `/.well-known/did.json` |
 
-## The three things to know before you rely on it
+## The four things to know before you rely on it
 
 **Nothing persists.** Every store is a Map in this process. The signing key is
 regenerated on every start — deliberately, so that a client cannot cache a key it
@@ -83,10 +86,23 @@ grant themselves both roles through it. The console can revoke tokens, add
 claims to every future token and assertion, and create people in the directory.
 Do not put this on a public address.
 
+**Federation is the one feature that refuses by default, and that is deliberate.**
+Everywhere else this service accepts what it is given. It cannot do that where it
+CONSUMES somebody else's assertions: `/federation/acs/{id}` receives an
+unauthenticated HTTP request claiming to be a person, and the session it would
+produce is the same one every other protocol here reads — so "accept anything"
+would be an authentication bypass for the whole process rather than a permissive
+mock. A relationship must be configured, is created disabled, and refuses an
+assertion that does not verify against the certificate configured on it. **Past
+that gate everything is as permissive as the rest**: any username in a verified
+assertion is accepted. See [what is not checked](what-is-not-checked.md).
+
 ## Pages
 
 - [Getting started](getting-started.md) — running it, the ports, the container
 - [Configuration](configuration.md) — every setting, and which can change at runtime
 - [Endpoints](endpoints.md) — how to find out, rather than a list that goes stale
-- [What is not checked](what-is-not-checked.md) — the permissive posture, and the three exceptions
+- [Trust realms](trust-realms.md) — several logical identity services in one process, told apart by a path segment: what each one separates, and what every realm shares
+- [Signing out](signing-out.md) — `/logout`: one list of everything you are still signed into, across every family, and what cannot be ended
+- [What is not checked](what-is-not-checked.md) — the permissive posture, its three exceptions, and the one feature that inverts it
 - [Repository layout](layout.md) — where the code is, for contributors

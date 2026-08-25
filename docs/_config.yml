@@ -35,6 +35,8 @@ header_pages:
   - getting-started.md
   - configuration.md
   - endpoints.md
+  - trust-realms.md
+  - signing-out.md
   - what-is-not-checked.md
   - layout.md
   - parent-project-migration.md

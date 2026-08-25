@@ -107,6 +107,10 @@
 
 const { log } = require('../common/helpers');
 
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 // The profile a request selects when its URL carries no path component. Named
 // rather than empty-stringed because it is a value people type into a form and
 // read on a page, and "" is not a thing anybody can type.
@@ -231,7 +235,12 @@ const GROUPS = MEMBERS.reduce(function (out, row) {
 // The store. In memory, gone on restart, exactly like the custom claim sets and
 // the verifier's request — see the header for why this is not in the directory.
 // ---------------------------------------------------------------------------
-const profiles = new Map();   // id -> { id, label, description, overrides, removed, at }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const profiles = realms.map();   // id -> { id, label, description, overrides, removed, at }
 
 // An id has to survive being a URL path segment and being typed into a form.
 // Refused by NAME rather than sanitised, because a profile silently renamed

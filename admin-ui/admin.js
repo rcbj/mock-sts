@@ -79,14 +79,38 @@
 // ---------------------------------------------------------------------------
 
 const app = require('../common/app');
-const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode } = require('../common/helpers');
+const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode,
+        // ONE named realm's signing key, for /admin/realms — which lists every
+        // realm's `kid` and is therefore the one page here that needs a key
+        // belonging to a realm other than the one it is being read in.
+        stsKeysFor } = require('../common/helpers');
 const config = require('../common/config');
+// TRUST REALMS: the registry behind /admin/realms, and the switcher this shell
+// draws on every page. It requires config.js and nothing else here, registers
+// no route, and is already loaded by helpers.js — so its position is not a
+// position at all.
+const realms = require('../common/realms');
 const stats = require('../common/admin_stats');
 // The browser sign-on sessions, from the authentication service that creates
-// them — shared between the OAuth 2.0 / OIDC flow and WS-Federation. Read-only
-// here: the console reports them and never ends one, because /oauth2/logout and
-// wsignout1.0 already do that and doing it from a third place would mean three
-// ways of getting the cleanup wrong.
+// them — shared between the OAuth 2.0 / OIDC flow, WS-Federation and SAML 2.0.
+//
+// **THIS FILE STILL READS THEM AND NEVER ENDS ONE, AND THE REASON CHANGED ON
+// 2026-08-24.** It used to be that ending a session from a third place would be
+// a third way to get the cleanup wrong: /oauth2/logout and wsignout1.0 each had
+// a fan-out written into it, and a console button would have been a third copy
+// that quietly notified nobody.
+//
+// That is no longer the argument, because the fan-outs are now FUNCTIONS rather
+// than copies — `wsfed.cleanupTargetsFor()`, `saml2_sso.logoutTargetsFor()` and
+// `frontchannel_logout.js`, each owned by the module whose protocol it belongs
+// to — and `authn.js`'s `dropSession()` is the single place a session actually
+// stops existing. So /admin/logout DOES end sessions, and it ends them through
+// exactly those functions.
+//
+// What is still true is the line this file holds to: this map is READ here and
+// written nowhere here. The console's page calls `logout.js`, which calls
+// `authn.js`. A `sessions.delete()` in this file would be the fourth way, and
+// the one that skipped the RFC 9700 refresh revocation and the audit row.
 //
 // THREE MORE THINGS COME FROM THAT MODULE NOW, and they are the whole of how
 // this console is protected: `sessionOf()` reads the cookie, `beginAuthentication()`
@@ -156,9 +180,45 @@ const auditLog = require('../common/audit');
 // Nothing is cached on either side: every read here is a directory read, which
 // is what lets this page show an ldapmodify that happened a second ago.
 const applications = require('../common/applications');
+// The SAML 2.0 Web Browser SSO profile, for the slug rule, the per-application
+// entityID and the endpoint URLs — so that /admin/saml2 names the same
+// addresses the metadata document publishes rather than rebuilding them here.
+// A page that computed its own would be the console and the endpoints
+// disagreeing about a URL, which is the failure a service provider meets as a
+// 404 that looks like this service being down.
+//
+// **A PLAIN REQUIRE IN THE ORDINARY DIRECTION, AND NOT A SIXTH SLOT.** Rule
+// 3e's test is whether a require would close a cycle or move a route, and this
+// one does neither: `server.js` requires `saml/saml2_sso.js` at position 10a
+// and this file at 18, so that module's routes are already in the router by the
+// time this line runs, and it requires nothing from here.
+const saml2 = require('../saml/saml2_sso');
+// The SAML 1.1 browser profiles, for the same reason and on the same terms: this
+// page must name the endpoints and the providerID that module names, because a
+// console that derived a URL of its own would be a console telling somebody to
+// configure a path nothing serves. It is required at position 10b in server.js
+// and this file at 18, so this is a plain require in the ordinary direction —
+// not a sixth inverted slot, and rule 3e's test is why.
+const saml11 = require('../saml/saml11_sso');
 // The authorization server profiles — what each discovery document publishes.
 // A library that registers no route, so requiring it here moves nothing.
 const authorizationServers = require('../oauth-oidc/authorization_servers');
+// The federation REGISTER, and only the register. It is a library that
+// registers no route, so requiring it here moves nothing and closes no cycle —
+// rule 3e's test again, and it passes both ways round: that module requires
+// only config.js, helpers.js and audit.js.
+//
+// **`federation/federation_sp.js` is deliberately NOT required here**, and it
+// is the same line drawn around `spiffe_server.js` twenty lines down: that
+// module registers /federation and its four endpoints, and `server.js`
+// requires it at position 10c — BEFORE this file — so a require from here
+// would be harmless today and would silently become the reason a route moved
+// the day somebody reorders the two. What this page needs from it is the shape
+// the URLs to configure at the partner, and those come from `federation.PATHS`
+// — one copy of the strings, in the library both sides may reach, so this page
+// and that router cannot come to name different paths. See that constant's
+// header, where the failure it prevents is spelt out.
+const federation = require('../federation/federation');
 // The two SPIFFE LIBRARIES, and only those two. `spiffe_ca.js` holds the trust
 // domain's authorities and `spiffe_registry.js` the registration entries and
 // agents; both register nothing, so requiring them here moves no route and
@@ -185,6 +245,40 @@ const spiffeIdLib = require('../spiffe/spiffe_id');
 // profile's overrides against. oauth2.js is required before admin.js in
 // server.js (rule 5), so this is a plain require in the ordinary direction.
 const oauth2 = require('../oauth-oidc/oauth2');
+// WHO ACTED ON WHOSE BEHALF. A library like the four above — it registers no
+// route — so requiring it here neither moves a route nor closes a cycle. It
+// holds the acts and this file renders them at /admin/delegation, the same
+// split audit.js has.
+const delegation = require('../common/delegation');
+// The CONFIGURED half of that page: which Kerberos principals may delegate to
+// which, out of the two attributes that decide it. It is read from the module
+// that OWNS the principal database, for the reason every store rule here is
+// where it is — what those two attributes mean is a statement about that store,
+// and this file renders and decides nothing.
+//
+// A plain require in the ordinary direction, and both tests that would force a
+// slot pass: `krb5_principals.js` registers no route (the KDC's own `/KdcProxy`
+// and `/krb5/principals` are in `krb5_kdc.js`), and server.js requires the
+// Kerberos modules BEFORE this one, so nothing here can be the reason a route
+// moved. It is the same argument the two SPIFFE libraries above are required
+// under.
+const krb5Principals = require('../kerberos/krb5_principals');
+// THE PROTOCOL-INDEPENDENT LOGOUT IS NOT REQUIRED HERE, AND THAT IS RULE 3e's
+// TEST ANSWERING YES FOR THE SIXTH TIME. It is reached through a SLOT below —
+// setLogoutReader(), which `../logout/logout.js` fills at its own require time,
+// exactly as ldap_server.js, spiffe_server.js and scim.js fill the five above
+// it.
+//
+// A plain require would close a cycle AND move routes, which is both halves of
+// the test at once: that module requires `ldap_server.js` (for the bound
+// connections that are the LDAP session), and `ldap_server.js` requires THIS
+// file to fill those five slots — so `admin.js -> logout.js -> ldap_server.js
+// -> admin.js` hands ldap_server.js a half-initialised console whose
+// `setDirectoryReader` is undefined, and the symptom arrives as something that
+// is not a function. It would also drag every `/ldap` route into the router
+// ahead of the console's own, which is rule 6 read backwards.
+//
+// See the slot itself, further down, beside the other five.
 
 // How many rows of a list a page will draw. A cap is needed — 5,000 token rows is
 // a page no browser enjoys — and what it hid is always stated underneath, because a
@@ -371,9 +465,17 @@ const SECTIONS = [
           { path: '/admin/claims', label: 'Custom claims' }
         ] },
       { title: 'SAML',
-        what: 'What this service puts into an assertion — 2.0 and 1.1 alike, ' +
-              'which is what WS-Trust and WS-Federation carry.',
+        what: 'BOTH identity providers — SAML 2.0\'s Web Browser SSO profile ' +
+              'and SAML 1.1\'s two browser profiles, each with its relying ' +
+              'parties and the metadata each one is configured from — and what ' +
+              'this service puts into an assertion, 2.0 and 1.1 alike, which ' +
+              'is also what WS-Trust and WS-Federation carry. The two profiles ' +
+              'are separate pages because they are separate implementations: ' +
+              'SAML 1.1 has no request message and no Single Logout, so half ' +
+              'of what the 2.0 page reports has no spelling over there.',
         items: [
+          { path: '/admin/saml2', label: 'SAML 2.0 identity provider' },
+          { path: '/admin/saml11', label: 'SAML 1.1 identity provider' },
           { path: '/admin/saml-attributes', label: 'Custom SAML attributes' }
         ] },
       { title: 'Verifiable Credentials',
@@ -391,7 +493,18 @@ const SECTIONS = [
           { path: '/admin/spiffe/entries', label: 'Registration entries' },
           { path: '/admin/spiffe/agents', label: 'Agents' }
         ] },
-      { path: '/admin/scim', label: 'SCIM' }
+      { path: '/admin/scim', label: 'SCIM' },
+      // UNGROUPED, beside SCIM, and the placement needed the same argument the
+      // delegation page needed. Federation spans FIVE protocol families, so
+      // under any one of the groups above it would mean choosing which four
+      // fifths of the answer to hide — which is exactly what put
+      // /admin/delegation in Monitoring. It does not go there, though: that
+      // page is an OBSERVATION and this one is CONFIGURATION, and it is the
+      // only page in this console that configures something a protocol
+      // endpoint will REFUSE on. A section of its own was considered and
+      // fails this console's own test for one — the heading would name
+      // nothing the page under it does not.
+      { path: '/admin/federation', label: 'Federation' }
     ] },
   { title: 'Directory',
     what: 'The embedded LDAP directory, and the identities this service has ' +
@@ -408,11 +521,32 @@ const SECTIONS = [
     items: [
       { path: '/admin/metrics', label: 'Metrics' },
       { path: '/admin/tokens', label: 'Tokens' },
+      // Beside the tokens it points at rather than under Protocols, and that
+      // was the decision: delegation is the one feature here that is
+      // deliberately NOT a protocol family — six of its eight mechanisms come
+      // from three different families and the whole value is reading them
+      // against each other in one table. Under Protocols it would have had to
+      // be filed under one of the three.
+      { path: '/admin/delegation', label: 'Delegation' },
+      // Beside the tokens page rather than under Protocols, and for the same
+      // reason delegation is: signing somebody out is deliberately NOT a
+      // protocol family. It reaches nine stores across six families and the
+      // whole value is doing all of them at once, so filing it under one would
+      // be filing it under the wrong one. It is an ACTION page in a section
+      // whose heading says "what this service has done" — which /admin/tokens
+      // already is, since revoking is a control and that page has four of them.
+      { path: '/admin/logout', label: 'Sign-out' },
       { path: '/admin/audit', label: 'Audit log' }
     ] },
   { title: 'Server configuration',
     what: 'What this service is set up with, and who may change it.',
     items: [
+      // FIRST in this section, above Configuration, and the order is an
+      // argument rather than a preference: every page in this console shows one
+      // realm, and Configuration in particular WRITES to the realm it is being
+      // read in. Somebody who does not yet know that realms exist should meet
+      // the page that says so before the page that acts on it.
+      { path: '/admin/realms', label: 'Trust realms' },
       { path: '/admin/config', label: 'Configuration' },
       { path: '/admin/rbac', label: 'Admin roles' },
       { path: '/admin/sts-metadata', label: 'Service metadata' }
@@ -479,10 +613,20 @@ const LIST_PARAMS = {
   '/admin/users': ['q', 'protocol', 'per', 'page'],
   '/admin/groups': ['q', 'per', 'page'],
   '/admin/applications': ['q', 'kind', 'per', 'page'],
+  '/admin/saml2': ['q', 'per', 'page'],
+  '/admin/saml11': ['q', 'per', 'page'],
   '/admin/authorization-servers': ['per', 'page'],
   '/admin/spiffe/entries': ['q', 'origin', 'per', 'page'],
   '/admin/spiffe/agents': ['q', 'per', 'page'],
-  '/admin/rbac': ['q', 'role', 'per', 'page']
+  '/admin/rbac': ['q', 'role', 'per', 'page'],
+  // `family` rather than `q`: this page's filter is a family and there are ten
+  // of them, so it is chosen by clicking a row of the summary table rather than
+  // typed. `user` is deliberately NOT here — it is the drill-down's own leaf,
+  // not the list's filter, and carrying it in the section crumb would make the
+  // way back point at the page the reader is already on.
+  '/admin/logout': ['family', 'per', 'page'],
+  '/admin/realms': ['per', 'page'],
+  '/admin/federation': ['q', 'role', 'per', 'page']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -795,13 +939,72 @@ function gateBanner(gate) {
       : 'This is a READ-ONLY view: the forms are drawn so that you can see what ' +
         'they do, and posting one is refused. ' + esc(info.writeGroup) + ' is the role that ' +
         'changes that.') +
-    ' <a href="/admin/rbac">Who holds what</a>. Ending this session is ' +
-    '<a href="/oauth2/logout">/oauth2/logout</a>\'s job and not this console\'s — it is one ' +
-    'sign-on session shared with WS-Federation, and a third way to end one is a third way to ' +
-    'get the cleanup wrong.</div>';
+    ' <a href="/admin/rbac">Who holds what</a>. Ending this session: ' +
+    '<a href="/logout">/logout</a> signs you out of everything this service holds — every ' +
+    'protocol at once — and <a href="/oauth2/logout">/oauth2/logout</a> is OIDC\'s own ' +
+    'RP-initiated one. <a href="/admin/logout">/admin/logout</a> is the operator\'s view of ' +
+    'the same lists, for somebody else.</div>';
 }
 
-function page(title, active, inner, up, gate) {
+// ---------------------------------------------------------------------------
+// THE REALM SWITCHER, on every page of this console.
+//
+// A trust realm is a whole logical copy of this service (common/realms.js), and
+// every page here shows exactly one of them — the one whose prefix the request
+// arrived under. That is not something a reader can see from the content: an
+// empty tokens table looks the same in a realm that has issued nothing as it
+// does in a service that has issued nothing, and /admin/config in a realm both
+// reads and WRITES that realm. So the realm is named on every page rather than
+// on the page about realms.
+//
+// It draws NOTHING AT ALL when no realm is defined. This console had no such
+// control before realms existed and a service that is not using them should not
+// grow one — the row would be a permanent "default", which is a control that
+// only ever says the same thing.
+//
+// **THE LINKS ARE ABSOLUTE, and that is required rather than tidy.** app.js
+// rewrites every root-relative href in an HTML response to carry the current
+// realm's prefix, which is what makes the console's several hundred hand-written
+// links work inside a realm without one of them being edited — and it is exactly
+// wrong for this control, whose whole job is to LEAVE the current realm. An
+// absolute URL names a host, so the rewriter passes it through untouched.
+//
+// It switches to the SAME PAGE in the other realm, carrying the query string, so
+// that comparing two realms' token lists is one click rather than a re-navigation.
+// ---------------------------------------------------------------------------
+function realmBar(req) {
+  log.debug("Entering realmBar().");
+  if (!realms.active()) {
+    log.debug("Leaving realmBar(). No realms are defined.");
+    return '';
+  }
+  // The base URL with the CURRENT realm's prefix taken back off, so that every
+  // link below is built from the root. baseUrlOf() adds the ambient prefix by
+  // design — this is one of the two callers in this service that does not want
+  // it, and it says so here rather than working around it elsewhere.
+  const withRealm = baseUrlOf(req);
+  const root = withRealm.slice(0, withRealm.length - realms.currentPrefix().length);
+  // Where the reader is, INSIDE the realm — req.url has already had the prefix
+  // stripped by the time any route sees it, which is the whole trick, and is
+  // also what makes this the path to re-enter in the other realm.
+  const here = String(req.originalUrl || '/admin');
+  const path = here.slice(realms.currentPrefix().length) || '/admin';
+  const currentId = realms.currentId();
+  const links = realms.list().map(function (realm) {
+    const label = esc(realm.name) + ' <span class="rid">' + esc(realm.id) + '</span>';
+    if (realm.id === currentId) {
+      return '<span class="here">' + label + '</span>';
+    }
+    return '<a href="' + esc(root + realms.prefixOf(realm) + path) + '">' + label + '</a>';
+  }).join('');
+  log.debug("Leaving realmBar(). " + realms.count() + " realm(s).");
+  return '<div class="realms"><p class="realmhead">Trust realm</p>' + links +
+         '<p class="realmnote">Every page in this console shows this realm, ' +
+         'and <a href="/admin/config">Configuration</a> writes to it. ' +
+         '<a href="/admin/realms">What a realm is</a>.</p></div>';
+}
+
+function page(title, active, inner, up, gate, req) {
   log.debug("Entering page(). title=" + title + ", up=" + (up ? up.href : "none"));
   const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
@@ -823,6 +1026,25 @@ function page(title, active, inner, up, gate) {
     // minimum width is its content's, and one long DN widens the page rather
     // than scrolling inside its own cell.
     '.main{flex:1 1 32rem;min-width:0}' +
+    // THE REALM SWITCHER. Above the nav rather than inside it, because it does
+    // not select a page — it selects which service the pages are about, and a
+    // control that looked like a nav item would read as a fifth section.
+    '.realms{background:#fff;border:1px solid #d5d5dd;border-radius:10px;' +
+    'padding:10px 12px 8px;margin:0 0 12px;font-size:.85em;' +
+    'box-shadow:0 6px 24px rgba(0,0,0,.06)}' +
+    '.realmhead{margin:0 0 5px;font-size:.7em;text-transform:uppercase;' +
+    'letter-spacing:.06em;color:#8a8a99;font-weight:700}' +
+    '.realms a,.realms .here{display:block;padding:3px 6px;border-radius:5px;' +
+    'text-decoration:none;line-height:1.3}' +
+    '.realms a{color:#12107c}.realms a:hover{background:#f0f0f7}' +
+    '.realms .here{font-weight:700;color:#222;background:#eceaf6}' +
+    // The id beside the name. It is what appears in the URL, so it is the half
+    // a reader needs when they are checking a path — quieter than the name,
+    // because the name is what they chose the realm by.
+    '.realms .rid{color:#8a8a99;font-weight:400;font-size:.85em;margin-left:.4em;' +
+    'font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
+    '.realms .here .rid{color:#666}' +
+    '.realmnote{margin:6px 0 0;font-size:.72em;color:#777;line-height:1.4}' +
     '.brand{font-size:.82em;font-weight:700;color:#12107c;margin:0 0 2px;letter-spacing:.02em}' +
     '.brandsub{font-size:.72em;color:#666;margin:0 0 14px}' +
     '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:24px 28px;' +
@@ -986,6 +1208,7 @@ function page(title, active, inner, up, gate) {
     '<aside class="side">' +
     '<p class="brand">Mock STS admin</p>' +
     '<p class="brandsub">' + esc(config.value('wstrust.issuer')) + '</p>' +
+    realmBar(req) +
     navBar(active, up) +
     '</aside><div class="main"><div class="card">' +
     '<h1>' + esc(title) + '</h1>' +
@@ -1024,7 +1247,7 @@ function respond(req, res, json, title, active, html, up) {
     log.debug("Leaving respond(). Answered JSON.");
     return;
   }
-  res.status(200).type('text/html').send(page(title, active, html, up, gateStateFor(req)));
+  res.status(200).type('text/html').send(page(title, active, html, up, gateStateFor(req), req));
   log.debug("Leaving respond(). Answered HTML.");
 }
 
@@ -1180,7 +1403,7 @@ function refuse(req, res, status, code, title, message, detail) {
   const inner = '<div class="err"><strong>' + esc(title) + '</strong> ' + esc(message) + '</div>' +
     (detail.html || '');
   res.status(status).type('text/html')
-     .send(page(title, '', inner, null, gateStateFor(req)));
+     .send(page(title, '', inner, null, gateStateFor(req), req));
   log.debug("Leaving refuse(). Answered HTML.");
 }
 
@@ -1883,10 +2106,16 @@ app.get('/admin', function (req, res) {
     'ticket because the service it names can decrypt it; nothing about this service is asked in ' +
     'either case. A button claiming to revoke one would change a number here and nothing at all ' +
     'out there, which is why those rows carry a dash and the reason for it.</li>' +
-    '<li><strong>It does not end a sign-on session.</strong> <code>/oauth2/logout</code> and ' +
-    'WS-Federation\'s <code>wsignout1.0</code> already do, and the second of those has to fan a ' +
-    'cleanup request out to every relying party the session signed into. A third way to end one ' +
-    'would be a third place to get that wrong.</li>' +
+    '<li><strong>It DOES end a sign-on session now, and it used to say it did not.</strong> ' +
+    'The old reason was a good one: <code>/oauth2/logout</code> and ' +
+    'WS-Federation\'s <code>wsignout1.0</code> each had a fan-out written into it, so a third ' +
+    'button here would have been a third copy that quietly notified nobody. What changed on ' +
+    '2026-08-24 is that those fan-outs became FUNCTIONS owned by the protocol module they ' +
+    'belong to, and one function in <code>authn.js</code> is the only place a session actually ' +
+    'stops existing. <a href="/admin/logout">/admin/logout</a> calls them; so does ' +
+    '<a href="/logout">/logout</a>, which is the same act without a console role. What this ' +
+    'console still cannot do is DELIVER the notifications — a front-channel logout is an ' +
+    'iframe in the signed-out person\'s own browser, and this is not that browser.</li>' +
     '<li><strong>It does not keep the tokens themselves</strong>, only their claims. A page listing ' +
     'a thousand live bearer credentials in a form a browser will render is a page that leaks them, ' +
     'and the <code>jti</code> is all any button here needs.</li>' +
@@ -2785,6 +3014,343 @@ function auditRow(row, known) {
     '</tr>';
 }
 
+// ---------------------------------------------------------------------------
+// GET /admin/logout — WHAT ONE IDENTITY IS STILL SIGNED INTO, ANYWHERE, AND
+// THE CONTROLS THAT END IT.
+//
+// The operator's half of `/logout`. The two are one behaviour — both call
+// `logout.js`'s `inventoryFor()` and `terminate()` and neither decides anything
+// the other does not — and they differ in exactly three ways, each of which is
+// why this page exists rather than a link to the other:
+//
+//   * IT NAMES SOMEBODY ELSE. `/logout` defaults to whoever is holding the
+//     cookie; this page always asks about a `user`, because an operator is
+//     looking AT a person rather than being one.
+//   * IT IS BEHIND THE CONSOLE'S TWO ROLES. Reading it needs Admin Read and the
+//     form needs Admin Write, through the one gate at the top of this file.
+//     `/logout` is behind neither, because signing yourself out must not
+//     require a role.
+//   * IT HAS AN UNDO, and `/logout` deliberately has not. A revoked token can
+//     be restored and a Kerberos sign-out instant can be cleared — NON-SPEC in
+//     both cases, and labelled so, for the reason /admin/tokens gives about its
+//     own restore button: no authorization server could offer it, and having to
+//     restart this service to get back to a working ticket turns a two-second
+//     test into a two-minute one.
+//
+// THE PAGE PAGES AND THE OTHER ONE DOES NOT, which is the standing convention
+// here rather than an inconsistency: a console list page gets paging and a
+// management API resource beside it in the same change. `/logout` groups by
+// family because a person reads it once; this filters and pages because an
+// operator looking at a load generator's identity may have five hundred rows.
+// ---------------------------------------------------------------------------
+
+// Answered as an empty inventory rather than null when the slot is unfilled, so
+// the page renders its own explanation instead of every caller guarding. Same
+// shape spiffeListeners() uses one screen up.
+function logoutInventoryFor(key) {
+  log.debug("Entering logoutInventoryFor(). key=" + key);
+  if (!logoutReader) {
+    log.debug("Leaving logoutInventoryFor(). No logout reader is installed.");
+    return null;
+  }
+  const inventory = logoutReader.inventoryFor(key, '');
+  log.debug("Leaving logoutInventoryFor(). " + inventory.total + " row(s).");
+  return inventory;
+}
+
+// The families, for the summary table and for the filter. Read off the slot so
+// that a family added to logout.js appears here with no edit — the reason the
+// prose lives over there and not in this file.
+function logoutFamilies() {
+  return logoutReader ? logoutReader.FAMILIES : [];
+}
+
+function logoutNoReaderNote() {
+  return '<div class="err"><strong>The logout module is not loaded in this process.</strong> ' +
+    'That is a require-order fault rather than a configuration one: <code>logout/logout.js</code> ' +
+    'fills this console\'s slot at its own require time, and <code>server.js</code> requires it ' +
+    'second to last. Nothing else on this console is affected.</div>';
+}
+
+// One row of the flattened table. The family is a COLUMN here where /logout
+// makes it a heading, because this table is filtered and paged across families
+// and a heading that appeared and vanished with the filter would be worse than
+// a column that is always there.
+// The opaque `back` field every form on this page carries, so that ending one
+// item does not cost the reader their place in the list. Three other pages here
+// build the same input as a local `const`; this is a function because six forms
+// on this one page need it and a sixth hand-written copy is the one that would
+// forget. It is REBUILT by listViewFromBack() on the way in and never echoed —
+// the guarantee that keeps a hand-written `back` from reaching anything but
+// another page of this same list.
+function logoutBackField(back) {
+  return '<input type="hidden" name="back" value="' + esc(back) + '">';
+}
+
+function logoutRowHtml(row, canWrite, back) {
+  const button = row.terminable && canWrite
+    ? '<form method="post" action="/admin/logout" style="display:inline">' +
+      '<input type="hidden" name="action" value="end">' +
+      '<input type="hidden" name="user" value="' + esc(row.user) + '">' +
+      '<input type="hidden" name="select" value="' + esc(row.id) + '">' +
+      logoutBackField(back) +
+      '<button type="submit">End</button></form>'
+    : (row.terminable ? '<span class="state-none">—</span>'
+                      : '<span class="state-none" title="' + esc(row.why) + '">cannot</span>');
+  return '<tr><td>' + esc(row.family) + '</td>' +
+    '<td><code>' + esc(shortened(row.label, 44)) + '</code><br><span class="sub">' +
+    esc(row.detail) + '</span>' +
+    (row.terminable ? '' : '<br><span class="sub">' + esc(row.why) + '</span>') + '</td>' +
+    '<td>' + esc(row.kind) + '</td>' +
+    '<td class="sub">' + esc(whenText(row.startedAt)) + '</td>' +
+    '<td class="sub">' + esc(whenText(row.expiresAt)) + '</td>' +
+    '<td>' + button + '</td></tr>';
+}
+
+// The action behind every control on this page, and behind
+// POST /admin-api/logout/{action}. Four of them, and the two NON-SPEC ones are
+// labelled as such wherever they appear — see the header.
+function logoutAction(body) {
+  log.debug("Entering logoutAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const user = String(body.user || body.username || '').trim();
+  if (!logoutReader) {
+    log.debug("Leaving logoutAction(). No logout reader is installed.");
+    return { ok: false, errors: ['The logout module is not loaded in this process, so there is ' +
+                                 'nothing to end. See /admin/logout, which says why.'] };
+  }
+  if (!user) {
+    log.debug("Leaving logoutAction(). No user was named.");
+    return { ok: false, errors: ['Name the identity to act on in `user`. This page always acts ' +
+                                 'on somebody by name — it is the operator\'s door, and ' +
+                                 '/logout is the one that defaults to whoever is signed in.'] };
+  }
+  const key = stats.identityKeyOf(user);
+
+  if (action === 'global') {
+    const result = logoutReader.terminate(key, [], {
+      actor: user, channel: 'console', by: 'the admin console at /admin/logout'
+    });
+    log.debug("Leaving logoutAction(). A global logout ended " + result.terminated.length + ".");
+    return { ok: true, result: result, message: result.message +
+             ' The relying parties that had to be NOTIFIED cannot be reached from here: a ' +
+             'front-channel notification is an iframe in the signed-out person\'s browser, ' +
+             'and this console is not that browser. /logout is where those load.' };
+  }
+
+  if (action === 'end') {
+    const raw = body.select === undefined ? [] : body.select;
+    const selection = (Array.isArray(raw) ? raw : [raw]).filter(Boolean).map(String);
+    if (!selection.length) {
+      // Deliberately NOT treated as a global logout here, which is the one
+      // place this console departs from /logout's default. A form posting an
+      // empty selection is a reader who ticked nothing and pressed a button; a
+      // POST to /logout with an empty body is a caller who asked for
+      // everything. Same absence, opposite intent, and the difference is which
+      // door it arrived at.
+      log.debug("Leaving logoutAction(). Nothing was selected.");
+      return { ok: false, errors: ['Nothing was selected. Use the global logout button to end ' +
+                                   'everything — this action ends only what it is given, so ' +
+                                   'that an empty form cannot sign somebody out of everything ' +
+                                   'by accident.'] };
+    }
+    const result = logoutReader.terminate(key, selection, {
+      actor: user, channel: 'console', by: 'the admin console at /admin/logout'
+    });
+    log.debug("Leaving logoutAction(). Ended " + result.terminated.length + ".");
+    return { ok: true, result: result, message: result.message };
+  }
+
+  if (action === 'restore-token') {
+    // NON-SPEC, and it is /admin/tokens' restore reached from here rather than a
+    // second one: stats.restore() is the same function against the same set.
+    const jti = jtiFrom(String(body.jti || body.target || ''));
+    if (!jti) {
+      return { ok: false, errors: ['Name the token to restore in `jti`.'] };
+    }
+    const was = stats.restore(jti);
+    return { ok: true, message: 'NON-SPEC: the token with jti ' + jti +
+             (was ? ' is no longer revoked.' : ' was not revoked, so nothing changed.') +
+             ' No authorization server could offer this — RFC 7009 has no such operation and a ' +
+             'resource server may already have cached the refusal.' };
+  }
+
+  if (action === 'restore-kerberos') {
+    // NON-SPEC in the same sense and for the same reason: it is what makes a
+    // sign-out something a person can experiment with rather than restart out of.
+    const was = krb5Principals.clearSignOut([key], krb5Principals.REALM);
+    return { ok: true, message: 'NON-SPEC: the sign-out instant on ' + key + '@' +
+             krb5Principals.REALM +
+             (was ? ' (' + was.toISOString() + ') is cleared, so tickets issued before it are ' +
+                    'accepted again.'
+                  : ' was not set, so nothing changed.') +
+             ' A real KDC has no such operation; a fresh AS-REQ is the supported way back and ' +
+             'clears it too.' };
+  }
+
+  log.debug("Leaving logoutAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". There are four: global, end, ' +
+                               'restore-token, restore-kerberos.'] };
+}
+
+// One route, two answers, and the choice is here rather than in the route so
+// that /admin-api/logout makes the same one — the rule every view in this file
+// follows.
+function logoutView(req) {
+  log.debug("Entering logoutView().");
+  const wantedUser = String(req.query.user || '').trim();
+  const gate = gateStateFor(req);
+  const params = pageParamsOf(req.query);
+  const back = queryWith(params, {});
+  const families = logoutFamilies();
+
+  if (!wantedUser) {
+    // No name is not an error and not a 404: this page is a lookup, and the
+    // list of everybody is /admin/users' job rather than a second copy here.
+    const inner = messagesOf(req) +
+      (logoutReader ? '' : logoutNoReaderNote()) +
+      '<p class="note">Name an identity to see everything this service is still holding for ' +
+      'them — every browser sign-on session, every token it can still revoke, every ' +
+      'outstanding code, every directory connection bound as them, and the Kerberos ' +
+      'sign-out instant — and to end any of it.</p>' +
+      '<form method="get" action="/admin/logout">' +
+      '<label>Identity <input name="user" value="" placeholder="alice"></label> ' +
+      '<button type="submit">Look</button></form>' +
+      '<h2>What a logout reaches</h2>' +
+      '<table><thead><tr><th>Family</th><th>Protocol</th><th>Can it be ended?</th>' +
+      '<th>What it is</th></tr></thead><tbody>' +
+      families.map(function (family) {
+        return '<tr><td>' + esc(family.label) + '</td><td>' + esc(family.protocol) + '</td>' +
+          '<td>' + (family.terminable ? 'yes' : '<span class="state-none">no</span>') + '</td>' +
+          '<td class="sub">' + esc(family.what) + '<br><em>' + esc(family.spec) + '</em></td></tr>';
+      }).join('') + '</tbody></table>' +
+      '<p class="note">The families that cannot be ended are listed on purpose. Nothing ' +
+      'consults this service when a SAML assertion, a Kerberos service ticket or an X509-SVID ' +
+      'is presented, so there is no revocation any issuer could perform — and a page that hid ' +
+      'them would make a global logout look complete when it is not.</p>' +
+      '<p class="note">A person signing THEMSELVES out uses <code>/logout</code>, which needs ' +
+      'no console role and is where the front-channel notifications actually load: those are ' +
+      'iframes in the signed-out person\'s own browser, and this console is not that browser.</p>';
+    log.debug("Leaving logoutView(). The lookup form.");
+    return { json: { user: '', known: false, families: families }, inner: inner,
+             title: 'Sign-out' };
+  }
+
+  const key = stats.identityKeyOf(wantedUser);
+  const inventory = logoutInventoryFor(key);
+  if (!inventory) {
+    log.debug("Leaving logoutView(). No logout reader.");
+    return { json: { user: wantedUser, known: false, error: 'no logout reader is installed' },
+             inner: messagesOf(req) + logoutNoReaderNote(), title: 'Sign-out',
+             up: upTo('/admin/logout', wantedUser, listViewOf('/admin/logout', req.query)) };
+  }
+
+  // Flattened, because this table filters and pages ACROSS families — see the
+  // header. The family's own prose stays on the summary above it.
+  const all = [];
+  inventory.families.forEach(function (family) {
+    family.rows.forEach(function (r) {
+      all.push(Object.assign({ user: wantedUser, familyLabel: family.label }, r));
+    });
+  });
+  const wantedFamily = String(req.query.family || '').trim();
+  const filtered = wantedFamily
+    ? all.filter(function (r) { return r.family === wantedFamily; }) : all;
+  const pg = pagedRows(req.query, filtered, { name: 'page', noun: 'live items' });
+  const canWrite = gate.write;
+
+  const summary = '<table><thead><tr><th>Family</th><th>Live</th><th>Endable</th>' +
+    '<th>Protocol</th></tr></thead><tbody>' +
+    inventory.families.map(function (family) {
+      return '<tr><td><a href="' +
+        esc('/admin/logout' + queryWith(params, { user: wantedUser, family: family.id,
+                                                  page: '' })) + '">' +
+        esc(family.label) + '</a></td>' +
+        '<td>' + family.held + (family.notListed ? ' (' + family.notListed + ' not listed)' : '') +
+        '</td>' +
+        '<td>' + (family.terminable ? 'yes' : '<span class="state-none">no</span>') + '</td>' +
+        '<td class="sub">' + esc(family.protocol) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+
+  const inner = messagesOf(req) +
+    '<p class="note"><strong>' + inventory.total + '</strong> live item(s) for <code>' +
+    esc(wantedUser) + '</code>, in ' +
+    inventory.families.filter(function (f) { return f.held; }).length + ' family/families. ' +
+    'Filed under the key <code>' + esc(key) + '</code>, which is what folds <code>' +
+    esc(wantedUser) + '</code>, <code>' + esc(wantedUser) + '@' +
+    esc(krb5Principals.REALM) + '</code> and a <code>urn:</code> subject into one person.</p>' +
+    summary +
+    (canWrite
+      ? '<form method="post" action="/admin/logout">' +
+        '<input type="hidden" name="action" value="global">' +
+        '<input type="hidden" name="user" value="' + esc(wantedUser) + '">' +
+        logoutBackField(back) +
+        '<p><button type="submit">Global logout — end everything above</button> ' +
+        '<span class="sub">Everything endable, in every family, in one act. What cannot be ' +
+        'ended is reported rather than skipped silently.</span></p></form>'
+      : '<p class="note">Ending anything needs the Admin Write role.</p>') +
+    '<h2>Live items' + (wantedFamily ? ' — ' + esc(wantedFamily) : '') + '</h2>' +
+    perPageForm('/admin/logout', 'family', wantedFamily, pg.paging.perPage,
+                'Filter by family, and choose how many rows a page holds.',
+                { user: wantedUser }) +
+    (pg.shown.length
+      ? '<table><thead><tr><th>Family</th><th>What</th><th>Kind</th><th>Since</th>' +
+        '<th>Until</th><th>End</th></tr></thead><tbody>' +
+        pg.shown.map(function (r) { return logoutRowHtml(r, canWrite, back); }).join('') +
+        '</tbody></table>' + pageNav('/admin/logout', params, pg.paging)
+      : '<p class="note">Nothing live' + (wantedFamily ? ' in that family' : '') + '.</p>') +
+    (canWrite
+      ? '<h2>Undo — both NON-SPEC</h2>' +
+        '<p class="note">Neither of these is an operation any real deployment could offer, and ' +
+        'they are here for the reason /admin/tokens\' restore button is: having to restart this ' +
+        'service to get back to a working credential turns a two-second test into a ' +
+        'two-minute one.</p>' +
+        '<form method="post" action="/admin/logout">' +
+        '<input type="hidden" name="action" value="restore-kerberos">' +
+        '<input type="hidden" name="user" value="' + esc(wantedUser) + '">' +
+        logoutBackField(back) +
+        '<p><button type="submit">Clear the Kerberos sign-out instant</button> ' +
+        '<span class="sub">Tickets issued before it are accepted again. A fresh AS-REQ does ' +
+        'this too, and is the supported way back.</span></p></form>' +
+        '<form method="post" action="/admin/logout">' +
+        '<input type="hidden" name="action" value="restore-token">' +
+        '<input type="hidden" name="user" value="' + esc(wantedUser) + '">' +
+        logoutBackField(back) +
+        '<p><label>Restore a token by jti <input name="jti" placeholder="jti"></label> ' +
+        '<button type="submit">Restore</button> ' +
+        '<span class="sub">RFC 7009 has no such operation: a resource server may already have ' +
+        'cached the refusal.</span></p></form>'
+      : '');
+
+  log.debug("Leaving logoutView(). " + inventory.total + " live item(s).");
+  return {
+    json: Object.assign({ user: wantedUser, known: true, canWrite: canWrite },
+                        inventory, { rows: pg.shown, paging: pagingJson(pg.paging) }),
+    inner: inner,
+    title: 'Sign-out — ' + wantedUser,
+    up: upTo('/admin/logout', wantedUser, listViewOf('/admin/logout', req.query))
+  };
+}
+
+app.get('/admin/logout', function (req, res) {
+  log.debug("Entering the admin sign-out page.");
+  const view = logoutView(req);
+  respond(req, res, view.json, view.title, '/admin/logout', view.inner, view.up);
+  log.debug("Leaving the admin sign-out page.");
+});
+
+app.post('/admin/logout', function (req, res) {
+  log.debug("Entering the admin sign-out action endpoint.");
+  const body = parseBody(req);
+  const result = logoutAction(body);
+  // Back to the same person's page carrying whatever filter and page the form
+  // came from — the rule every form on this console follows.
+  const back = '/admin/logout' +
+    queryWith(listViewFromBack('/admin/logout', body.back), { user: String(body.user || '') });
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin sign-out action endpoint.");
+});
+
 app.get('/admin/audit', function (req, res) {
   log.debug("Entering the admin audit page.");
   const view = auditView(req.query);
@@ -3001,6 +3567,611 @@ app.get('/admin/audit', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/delegation — WHO ACTED ON WHOSE BEHALF, THROUGH WHAT, TO REACH WHAT.
+//
+// TWO TABLES, and the split between them is the point of the page rather than a
+// layout choice:
+//
+//   * WHAT HAPPENED — one row per delegation ACT, from common/delegation.js.
+//     Every mechanism in three protocol families, in one vocabulary, refusals
+//     included.
+//   * WHO MAY DELEGATE TO WHOM — the CONFIGURED policy, from
+//     krb5_principals.js. It answers *why would this be refused* before anybody
+//     has tried, and it is Kerberos-only because Kerberos is the only family
+//     here that polices delegation at all. That absence is stated on the page
+//     rather than left to be inferred from an empty column.
+//
+// **IT IS DELIBERATELY NOT A PROTOCOL PAGE**, which is why it is in Monitoring
+// beside the tokens it points at and not under Protocols beside SAML and SCIM.
+// A reader arriving here has a chain in their head — *alice hit the portal, the
+// portal called the API* — and wants to know which hop invented which identity.
+// Filing that under one of the three families would mean choosing which two
+// thirds of the answer to hide.
+//
+// **NO FORM, AND THAT IS A DECISION.** Everything on this page is an
+// observation: an act happened or it did not, and a policy row is somewhere
+// else's configuration. There is nothing here to change, so rule 7 is satisfied
+// by `GET /admin-api/delegation` alone — the same shape /admin/audit has, and
+// for a related reason. A control that let somebody TYPE a chain would put
+// invented rows in a table whose whole worth is that its rows are what actually
+// happened.
+// ---------------------------------------------------------------------------
+
+// One party of a chain — up to two links, because a party can be a person AND an
+// application and routinely is.
+//
+// `HTTP/frontend.example.com` has an entry under ou=users (it authenticates, so
+// the funnel files it with the people) and an entry under ou=applications (a
+// ticket was issued FOR it, so applications.js recorded it). A cell that showed
+// one of them would send half the readers to the wrong page.
+//
+// Both links follow the three-state rule /admin/groups uses for a member: a name
+// this console knows, a name it could file somebody under and never has, and no
+// name at all. An application NOT in the registry is the ordinary case for an
+// RFC 8693 `audience` and is worth seeing rather than hiding — the registry
+// holds what this service was ASKED ABOUT, and a delegation naming something
+// nobody has otherwise mentioned is exactly the row to notice.
+function delegationPartyCell(party, known) {
+  const parts = [];
+  if (party.key) {
+    parts.push(usersPageCell(party.key, known));
+    if (party.presented && party.presented !== party.key) {
+      parts.push('<code>' + esc(party.presented) + '</code>');
+    }
+  } else if (party.presented) {
+    parts.push('<code>' + esc(party.presented) + '</code>');
+  }
+  if (party.application) {
+    const registered = !!applications.get(party.application);
+    parts.push(registered
+      ? '<a href="' + esc('/admin/applications' +
+          queryWith({ application: party.application }, {})) + '" title="This ' +
+        'application is in the registry (ou=applications).">' +
+        esc(party.application) + '</a>'
+      : '<span class="state-none" title="No entry under ou=applications names ' +
+        'this. The registry holds what this service has been ASKED ABOUT — a ' +
+        'client_id presented, an AppliesTo a token was issued for, an SPN a ' +
+        'ticket was cut for — and this delegation named something nobody has ' +
+        'otherwise mentioned. That is ordinary for an RFC 8693 audience and is ' +
+        'worth seeing rather than hiding.">' + esc(party.application) +
+        ' <em>(not in the registry)</em></span>');
+  }
+  if (!parts.length) {
+    return '<span class="state-none" title="Nothing here names this party, and ' +
+      'on some mechanisms nothing can: a forwarded ticket-granting ticket is ' +
+      'handed to whichever service the client chooses, and this KDC is never ' +
+      'told which.">&mdash;</span>';
+  }
+  return parts.join('<br>');
+}
+
+// What a delegation CONSUMED or PRODUCED, as one cell. `key=value` pairs rather
+// than JSON for the reason the audit log's detail cell gives — the column is
+// narrow and a reader is scanning for one fact — and `?format=json` carries the
+// objects for anything that is not a person.
+function credentialCell(list, label) {
+  if (!list || !list.length) {
+    // NOTHING rather than a dash, because the two directions share one cell now:
+    // a dash under the arrow for a direction that genuinely has no credential
+    // reads as a value that failed to load, where an absent line reads as what
+    // it is. The empty cell — no credential either way — is the one case that
+    // still needs a mark, and it gets one from the caller having drawn neither.
+    return '';
+  }
+  // A DIV rather than a run of spans, because the cell holds BOTH directions
+  // now and everything in them is inline: without a block the "out" label
+  // continued the last note of the "in" list on the same line, which read as one
+  // sentence made of two.
+  return '<div><span class="state-none">' + label + '</span><br>' +
+    list.map(function (one) {
+      return '<code>' + esc(one.kind) + '</code>' +
+        (one.identifier ? ' <code>' + esc(shortened(one.identifier, 10)) + '</code>' : '') +
+        (one.note ? '<br><span class="state-none">' + esc(one.note) + '</span>' : '');
+    }).join('<br>') + '</div>';
+}
+
+// Impersonation is drawn as the LOUDER of the two, which is a judgement worth
+// stating rather than leaving in a colour. It is not "worse" — both are ordinary
+// and both are configured on purpose — but it is the one whose consequence is
+// invisible everywhere else: nothing in the credential records that a middle
+// tier was involved, so this table is the only place it will ever be seen. A
+// delegation carries its own chain and can be read off the token later.
+function modeCell(mode) {
+  if (mode === 'impersonation') {
+    return '<span class="state-expired" title="What came out names the initial ' +
+      'identity and nothing else. The far end cannot tell an intermediary was ' +
+      'involved, and neither can anybody reading the credential afterwards — ' +
+      'which is why the issuer is the only place this is ever visible.">' +
+      'impersonation</span>';
+  }
+  if (mode === 'delegation') {
+    return '<span class="state-valid" title="What came out CARRIES the chain: ' +
+      'an `act` claim, a composite ActAs, or S4U_DELEGATION_INFO in the PAC. ' +
+      'The far end can see who is really asking.">delegation</span>';
+  }
+  return '<span class="state-none">&mdash;</span>';
+}
+
+function delegationOutcomeCell(row) {
+  if (row.outcome === 'issued') {
+    return '<span class="state-valid">issued</span>';
+  }
+  return '<span class="state-revoked" title="This service refused the ' +
+    'delegation. The reason is the KDC\'s own words — the same text the client ' +
+    'was sent — rather than a second wording written for this page.">refused</span>';
+}
+
+// TEN COLUMNS RATHER THAN TWELVE, and the two that were merged were merged
+// because the table became unreadable rather than merely wide. `.who` breaks a
+// long identifier anywhere (or one DN would widen the whole page), so every
+// extra column costs the ones beside it: `HTTP/frontend.example.com@EXAMPLE.COM`
+// wrapped over five lines at twelve and reads at ten.
+//
+// The protocol went into the mechanism cell because the mechanism id already
+// carries it — every one of them begins `krb5-`, `wstrust-` or `oauth-` — so the
+// column was saying a second time what the cell beside it said first. The two
+// credential columns became one because a row usually has one of each and the
+// arrows say which: what went IN, what came OUT.
+function delegationRow(row, known) {
+  return '<tr>' +
+    '<td class="num">' + esc(row.seq) + '</td>' +
+    '<td>' + esc(whenText(row.at)) + '</td>' +
+    '<td><code>' + esc(row.type) + '</code><br>' +
+      '<span class="state-none">' + esc(row.typeLabel) + '</span><br>' +
+      '<span class="state-none">' + esc(row.protocol) +
+      (row.spec ? ' &middot; ' + esc(row.spec) : '') + '</span></td>' +
+    '<td>' + modeCell(row.mode) + '</td>' +
+    '<td>' + delegationOutcomeCell(row) + '</td>' +
+    '<td class="who">' + delegationPartyCell(row.initial, known) + '</td>' +
+    '<td class="who">' + delegationPartyCell(row.intermediary, known) + '</td>' +
+    '<td class="who">' + delegationPartyCell(row.target, known) + '</td>' +
+    '<td>' + (row.outcome === 'refused'
+              ? esc(row.reason)
+              : (row.authorizedBy ? esc(row.authorizedBy)
+                                  : '<span class="state-none">&mdash;</span>')) +
+      (row.note ? '<br><span class="state-none">' + esc(row.note) + '</span>' : '') +
+    '</td>' +
+    '<td class="who">' + credentialCell(row.consumed, '&rarr; in') +
+      credentialCell(row.produced, '&larr; out') + '</td>' +
+    '</tr>';
+}
+
+// One configured pair. `setOn` is the column to read first and is why the two
+// mechanisms are in ONE table rather than two: the messages are identical, the
+// KDC options are identical, and the whole difference is which of the two
+// accounts carries the permission. Two tables would have let a reader learn one
+// of them without ever meeting that fact.
+// FIVE COLUMNS, and `requires` is not one of them although the JSON carries it
+// per pair. It is a property of the MECHANISM rather than of the pair — every
+// classic row has the same sentence and every resource-based row has the other
+// — so as a column it was the same two paragraphs repeated down the table,
+// squeezing the three columns that DO differ per row into unreadable shreds.
+// It is said once above the table instead. The API keeps it on every pair,
+// because a caller reading one pair should not have to know that.
+function policyPairRow(pair) {
+  return '<tr>' +
+    '<td><code>' + esc(pair.mechanism) + '</code><br><span class="state-none">' +
+      esc(pair.type) + '</span></td>' +
+    '<td class="who"><code>' + esc(pair.frontEnd) + '</code></td>' +
+    '<td class="who"><code>' + esc(pair.target) + '</code>' +
+      (pair.targetKnown ? ''
+        : '<br><span class="state-revoked">no such principal here</span>') +
+    '</td>' +
+    '<td class="who"><code>' + esc(pair.attribute) + '</code><br>' +
+      '<span class="state-none">on the ' + esc(pair.setOnRole) + ', <code>' +
+      esc(pair.setOn) + '</code></span></td>' +
+    '<td>' + (pair.warning
+              ? '<span class="state-expired">' + esc(pair.warning) + '</span>'
+              : '<span class="state-valid">nothing else is missing</span>') +
+    '</td>' +
+    '</tr>';
+}
+
+function policyAccountRow(account) {
+  const flags = [];
+  if (account.notDelegated) flags.push('NOT_DELEGATED');
+  if (account.trustedToAuthenticateForDelegation) {
+    flags.push('TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION');
+  }
+  if (account.okAsDelegate) flags.push('ok-as-delegate');
+  return '<tr>' +
+    '<td class="who"><code>' + esc(account.principal) + '</code></td>' +
+    '<td>' + flags.map(function (f) {
+      return '<code>' + esc(f) + '</code>';
+    }).join('<br>') + '</td>' +
+    '<td>' + account.effects.map(function (e) {
+      return esc(e);
+    }).join('<br><br>') + '</td>' +
+    '</tr>';
+}
+
+// The whole view, filtered and paged, for the page AND for
+// GET /admin-api/delegation. One function for the reason the block above
+// consoleJson() gives: the filtering and the paging are work both need, and two
+// copies of it would be two answers that each looked right alone.
+function delegationView(query) {
+  log.debug("Entering delegationView().");
+  const wantedType = String(query.type || '');
+  const wantedMode = String(query.mode || '');
+  const wantedOutcome = String(query.outcome || '');
+  const wantedProtocol = String(query.protocol || '');
+  const wantedText = String(query.q || '');
+  const all = delegation.list();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (wantedType && row.type !== wantedType) return false;
+    if (wantedMode && row.mode !== wantedMode) return false;
+    if (wantedOutcome && row.outcome !== wantedOutcome) return false;
+    if (wantedProtocol && row.protocol !== wantedProtocol) return false;
+    // One free-text box over every party of the chain and both explanations,
+    // because the question a reader arrives with names ONE of them — a person,
+    // an SPN, an attribute — and does not know which column it will be in. A
+    // box that silently searched one column while the reader assumed six is
+    // worse than no box.
+    if (needle) {
+      const hay = [row.initial.key, row.initial.presented, row.initial.application,
+                   row.intermediary.key, row.intermediary.presented,
+                   row.intermediary.application,
+                   row.target.key, row.target.presented, row.target.application,
+                   row.authorizedBy, row.reason, row.note]
+                    .join(' ').toLowerCase();
+      if (hay.indexOf(needle) < 0) return false;
+    }
+    return true;
+  });
+  // Filter first, then page — the same order the tokens and audit pages use and
+  // for the same reason: paging a list and then filtering it gives a page 2
+  // whose length depends on what page 1 happened to hold.
+  const paging = pagingOf(query, filtered.length, { noun: 'acts' });
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const summary = delegation.summary();
+  // The chains of what MATCHED rather than of everything held: a reader who has
+  // filtered to one person wants that person's chains, and a count that ignored
+  // the filter would disagree with the table under it.
+  const chains = delegation.chainList(filtered);
+  const policy = krb5Principals.delegationPolicy();
+  log.debug("Leaving delegationView(). " + shown.length + " act(s) of " +
+            filtered.length + ", " + chains.length + " chain(s).");
+  return {
+    wantedType: wantedType, wantedMode: wantedMode, wantedOutcome: wantedOutcome,
+    wantedProtocol: wantedProtocol, wantedText: wantedText,
+    all: all, filtered: filtered, paging: paging, shown: shown,
+    summary: summary, chains: chains, policy: policy,
+    json: {
+      held: summary.held,
+      // Everything ever recorded and everything dropped, both, because `held`
+      // alone reads as "this is all there was" the moment the cap has bitten.
+      recorded: summary.recorded, dropped: summary.dropped,
+      maxRecords: summary.maxRecords,
+      matched: filtered.length, shown: shown.length,
+      // The lowest and highest sequence numbers still held. A caller polling
+      // this endpoint uses them rather than a timestamp, for the reason
+      // /admin-api/audit gives: `seq` is monotonic and never reused, so
+      // "everything after 41" is exact.
+      oldestSeq: summary.oldestSeq, newestSeq: summary.newestSeq,
+      byType: summary.byType, byMode: summary.byMode,
+      byOutcome: summary.byOutcome, byProtocol: summary.byProtocol,
+      filter: { type: wantedType || null, mode: wantedMode || null,
+                outcome: wantedOutcome || null, protocol: wantedProtocol || null,
+                q: wantedText || null },
+      // The clamped values, not what was asked for: `?page=999` on a two-page
+      // list reports page 2, which is the page whose rows are in the reply.
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      // The vocabulary, off the store rather than out of a list here: what the
+      // `type`, `mode` and `outcome` filters take, and what each of them means.
+      // A mechanism cannot be recordable and unfilterable, nor offered and
+      // never occur.
+      types: delegation.TYPES, modes: delegation.MODES,
+      outcomes: delegation.OUTCOMES, roles: delegation.ROLES,
+      acts: shown,
+      // The DISTINCT chains among what matched — one entry per (type, initial,
+      // intermediary, target) — which is what the visualisation will be drawn
+      // from and is already the more useful answer for a caller asking "what
+      // talks to what".
+      chains: chains,
+      // The configured policy: who MAY delegate to whom, and the account flags
+      // that decide what delegation can do to somebody. Kerberos only, because
+      // it is the only family here that polices this at all.
+      policy: policy
+    }
+  };
+}
+
+app.get('/admin/delegation', function (req, res) {
+  log.debug("Entering the admin delegation page.");
+  const view = delegationView(req.query);
+  const paging = view.paging;
+  const summary = view.summary;
+  const policy = view.policy;
+  const known = knownUserKeys();
+  // What every paging link carries with it. The page number is not in here —
+  // pageNav() supplies that per link — for the reason the tokens page gives: a
+  // "next" that dropped the filter would be page 2 of a different list.
+  const filterParams = { type: view.wantedType, mode: view.wantedMode,
+                         outcome: view.wantedOutcome,
+                         protocol: view.wantedProtocol, q: view.wantedText,
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/delegation', filterParams, paging);
+
+  const rows = view.shown.map(function (row) {
+    return delegationRow(row, known);
+  }).join('');
+
+  // Grouped by protocol and built from the SAME table the filter offers, so the
+  // two cannot come to disagree about which mechanism belongs to which family.
+  const protocolsInOrder = [];
+  delegation.TYPES.forEach(function (entry) {
+    if (protocolsInOrder.indexOf(entry.protocol) < 0) {
+      protocolsInOrder.push(entry.protocol);
+    }
+  });
+  const typeOptions = '<option value=""' + (view.wantedType ? '' : ' selected') +
+    '>any mechanism</option>' +
+    protocolsInOrder.map(function (protocol) {
+      return '<optgroup label="' + esc(protocol) + '">' +
+        delegation.TYPES.filter(function (entry) {
+          return entry.protocol === protocol;
+        }).map(function (entry) {
+          return '<option value="' + esc(entry.type) + '"' +
+                 (entry.type === view.wantedType ? ' selected' : '') + '>' +
+                 esc(entry.label) + ' (' + (summary.byType[entry.type] || 0) +
+                 ')</option>';
+        }).join('') + '</optgroup>';
+    }).join('');
+
+  const modeOptions = ['<option value=""' + (view.wantedMode ? '' : ' selected') +
+                       '>either kind</option>']
+    .concat(delegation.MODES.map(function (entry) {
+      return '<option value="' + esc(entry.mode) + '"' +
+             (entry.mode === view.wantedMode ? ' selected' : '') + '>' +
+             esc(entry.label) + ' (' + (summary.byMode[entry.mode] || 0) + ')</option>';
+    })).join('');
+
+  const outcomeOptions = ['<option value=""' + (view.wantedOutcome ? '' : ' selected') +
+                          '>any outcome</option>']
+    .concat(delegation.OUTCOMES.map(function (name) {
+      return '<option value="' + esc(name) + '"' +
+             (name === view.wantedOutcome ? ' selected' : '') + '>' + esc(name) +
+             ' (' + (summary.byOutcome[name] || 0) + ')</option>';
+    })).join('');
+
+  const perOptions = perPageOptions(paging.perPage);
+
+  const filtering = view.wantedType || view.wantedMode || view.wantedOutcome ||
+                    view.wantedProtocol || view.wantedText;
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+      tile(summary.held, 'acts held') +
+      tile(view.chains.length, 'distinct chains') +
+      tile(summary.byMode.impersonation || 0, 'impersonations') +
+      tile(summary.byMode.delegation || 0, 'delegations') +
+      tile(summary.byOutcome.refused || 0, 'refused') +
+      tile(policy.pairs.length, 'configured pairs') +
+    '</div>' +
+
+    '<p class="note"><strong>Who acted on whose behalf, through what, to reach ' +
+    'what.</strong> Three of the protocol families here can delegate and each ' +
+    'calls it something different — Kerberos has S4U2Self, two flavours of ' +
+    'S4U2Proxy and a forwarded ticket-granting ticket; WS-Trust has ' +
+    '<code>OnBehalfOf</code> and <code>ActAs</code>; OAuth 2.0 Token Exchange ' +
+    'has impersonation and delegation. This page records all eight against one ' +
+    'model, because the question people arrive with is protocol-independent: ' +
+    '<em>alice never touched the back end, so why is there a ticket to it in ' +
+    'her name, and who asked for it?</em></p>' +
+
+    '<p class="note"><strong>The three columns in the middle are the layers of ' +
+    'the architecture</strong>, and the names are this page\'s own rather than ' +
+    'any protocol\'s — a Kerberos front end, a WS-Trust requester and an OAuth ' +
+    'client doing an exchange are the same position in the same picture:</p>' +
+    '<ul>' + delegation.ROLES.map(function (entry) {
+      return '<li><strong>' + esc(entry.label) + '</strong> — ' + esc(entry.what) +
+             '</li>';
+    }).join('') + '</ul>' +
+    '<p class="note">A party can be a <em>person</em>, an <em>application</em>, ' +
+    'or both, and the middle one routinely is both: ' +
+    '<code>HTTP/frontend.example.com</code> has an entry under ' +
+    '<code>ou=users</code> (it authenticates, so this service files it with the ' +
+    'people) and an entry under <code>ou=applications</code> (tickets are issued ' +
+    'FOR it). Each cell links to whichever of the two exist. An application ' +
+    'marked <em>not in the registry</em> is not an error — the registry holds ' +
+    'what this service has been ASKED ABOUT, and an RFC 8693 <code>audience</code> ' +
+    'nobody has otherwise mentioned is exactly that.</p>' +
+
+    '<p class="note"><strong>Impersonation and delegation are the axis worth ' +
+    'filtering on</strong>, and they are not a matter of degree. Under a ' +
+    'delegation the credential CARRIES the chain — an <code>act</code> claim, a ' +
+    'composite <code>ActAs</code>, <code>S4U_DELEGATION_INFO</code> in the PAC — ' +
+    'so the far end can see who is really asking and can decide differently ' +
+    'because of it. Under an impersonation nothing does, which means <strong>this ' +
+    'page is the only place it will ever be visible</strong>: no reading of the ' +
+    'token afterwards, at the resource server or in a log, can recover the fact ' +
+    'that a middle tier was involved.</p>' +
+
+    '<p class="note"><strong>Refusals are recorded and are most of what this ' +
+    'page is for.</strong> A delegation that worked tells you the plumbing is ' +
+    'connected. A delegation that was refused names the two accounts, the two ' +
+    'attributes and which of them was missing, at the moment the KDC decided — ' +
+    'and the text in the <em>Authorized by / why not</em> column is the KDC\'s ' +
+    'OWN words, the same sentence the client was sent, rather than a second ' +
+    'wording that could come to disagree with it.</p>' +
+
+    '<h2>What happened</h2>' +
+    // No `page` input in this form, deliberately: changing a filter or the page
+    // size returns to page 1. Carrying the old page number over would land
+    // somebody on page 6 of a two-page result and the clamp in pagingOf() would
+    // then move them again, which reads as the form ignoring them.
+    '<form method="get" action="/admin/delegation"><div class="formrow">' +
+      '<label for="type">Mechanism</label><select id="type" name="type">' +
+        typeOptions + '</select>' +
+      '<label for="mode">Kind</label><select id="mode" name="mode">' +
+        modeOptions + '</select>' +
+      '<label for="outcome">Outcome</label><select id="outcome" name="outcome">' +
+        outcomeOptions + '</select>' +
+      '<label for="per">Per page</label><select id="per" name="per">' + perOptions +
+        '</select>' +
+    '</div><div class="formrow">' +
+      '<label for="q">Text</label>' +
+      '<input type="text" id="q" name="q" size="40" value="' + esc(view.wantedText) +
+        '" placeholder="a person, an SPN, a client_id, an attribute">' +
+      '<button class="secondary">Filter</button>' +
+      (filtering ? ' <a href="/admin/delegation">clear</a>' : '') +
+    '</div></form>' +
+    '<p class="note">The text box searches every party of the chain and both ' +
+    'explanations at once, because the fact somebody arrives with names one of ' +
+    'them and they do not know which column it will be in.</p>' +
+    nav +
+    '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
+    '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
+    '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
+    '<th>Credentials</th></tr>' +
+    (rows || '<tr><td colspan="10">' +
+      (view.all.length
+        ? 'Nothing matches this filter.'
+        : 'Nothing has delegated anything yet. Three things put a row here: a ' +
+          'Kerberos S4U2Self, S4U2Proxy or forwarded-TGT request at the KDC; a ' +
+          'WS-Trust <code>RequestSecurityToken</code> carrying ' +
+          '<code>&lt;wst:OnBehalfOf&gt;</code> or <code>&lt;wst14:ActAs&gt;</code>; ' +
+          'and an RFC 8693 token exchange at <code>/oauth2/token</code>. A ' +
+          'REFUSED attempt counts — the delegation page in the debugger will ' +
+          'produce one on purpose.') +
+      '</td></tr>') + '</table>' +
+    nav +
+
+    '<p class="note">' + view.filtered.length + ' act(s) match' +
+    (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
+                        ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
+    '; ' + summary.held + ' held of ' + summary.recorded + ' recorded since this ' +
+    'process started' +
+    (summary.dropped
+      ? ', and <strong>' + summary.dropped + ' dropped</strong> — this page holds ' +
+        'at most ' + summary.maxRecords + ' acts and discards the oldest first. ' +
+        'Raise <code>delegation.maxRecords</code> on ' +
+        '<a href="/admin/config">the configuration page</a> if that is losing ' +
+        'something you need.'
+      : '. The cap is ' + summary.maxRecords + ' acts and nothing has been ' +
+        'dropped yet.') +
+    ' The <strong>#</strong> column is a sequence number and is monotonic and ' +
+    'never reused, including across a drop, so <code>?format=json</code>\'s ' +
+    '<code>oldestSeq</code> and <code>newestSeq</code> let a caller poll this ' +
+    'without guessing what it missed.</p>' +
+
+    '<h2>The chains</h2>' +
+    '<p class="note">The same acts with the time and the credentials taken out: ' +
+    'one row per distinct <em>(mechanism, initial, intermediary, target)</em>. ' +
+    'This is what the picture will be drawn from — one edge per row — and it is ' +
+    'already the more useful answer to <em>what talks to what</em>. The outcome ' +
+    'is deliberately NOT part of a chain\'s identity, so a chain refused nine ' +
+    'times and then fixed is one row that changes rather than two that do not ' +
+    'meet.</p>' +
+    '<table><tr><th>Mechanism</th><th>Kind</th><th>Initial identity</th>' +
+    '<th>Intermediary</th><th>Target</th><th>Acts</th><th>Last seen</th></tr>' +
+    (view.chains.map(function (chain) {
+      return '<tr>' +
+        '<td><code>' + esc(chain.type) + '</code></td>' +
+        '<td>' + modeCell(chain.mode) + '</td>' +
+        '<td class="who">' + delegationPartyCell(chain.initial, known) + '</td>' +
+        '<td class="who">' + delegationPartyCell(chain.intermediary, known) + '</td>' +
+        '<td class="who">' + delegationPartyCell(chain.target, known) + '</td>' +
+        '<td class="num">' + esc(chain.acts) + ' — ' +
+          '<span class="state-valid">' + esc(chain.issued) + ' issued</span>, ' +
+          (chain.refused
+            ? '<span class="state-revoked">' + esc(chain.refused) + ' refused</span>'
+            : '<span class="state-none">0 refused</span>') + '</td>' +
+        '<td>' + esc(whenText(chain.lastAt)) + '</td>' +
+        '</tr>';
+    }).join('') || '<tr><td colspan="7">No chains yet.</td></tr>') + '</table>' +
+
+    '<h2>Who may delegate to whom</h2>' +
+    '<p class="note"><strong>This half is CONFIGURATION rather than history, and ' +
+    'it is Kerberos only.</strong> That is not an omission: Kerberos is the one ' +
+    'family here that polices delegation at all. WS-Trust puts no authorization ' +
+    'on <code>OnBehalfOf</code> or <code>ActAs</code> and this service adds none; ' +
+    'RFC 8693 leaves the policy to the authorization server and this one has ' +
+    'none, so any client may exchange any token for a token about anybody. Both ' +
+    'of those are stated on every row they produce above, in the same column ' +
+    'that names an attribute for a Kerberos row — <strong>the asymmetry is the ' +
+    'most useful thing on this page</strong>: the same picture, policed at one ' +
+    'end and not at the other.</p>' +
+    '<p class="note">The whole of the KDC\'s decision rests on two attributes on ' +
+    'two OPPOSITE accounts, which is why they are in one table with a column ' +
+    'saying which account carries the permission. Same messages, same KDC ' +
+    'options, opposite direction of trust — and the second one turns <em>I can ' +
+    'write to this computer object</em> into <em>I can reach this service as ' +
+    'anybody</em>.</p>' +
+    '<p class="note">Each mechanism needs one thing BEYOND the attribute, and ' +
+    'it is the same thing on every row of that kind, so it is here rather than ' +
+    'in a column: <strong>classic</strong> needs a FORWARDABLE evidence ' +
+    'ticket, which S4U2Self returns only to an account flagged ' +
+    '<code>TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION</code>; ' +
+    '<strong>resource-based</strong> needs <code>PA-PAC-OPTIONS</code> ' +
+    '(padata type 167) carrying the resource-based bit, and [MS-SFU] requires ' +
+    'a KDC to answer <code>KDC_ERR_BADOPTION</code> without it — an error that ' +
+    'says nothing about padata. Resource-based needs no forwardable evidence ' +
+    'and no flag on the front end at all, which is why it is the easier ' +
+    'path.</p>' +
+    '<table><tr><th>Mechanism</th><th>Front end (who acts)</th>' +
+    '<th>Target (what is reached)</th><th>Attribute, and where it lives</th>' +
+    '<th>Anything missing?</th></tr>' +
+    (policy.pairs.map(policyPairRow).join('') ||
+      '<tr><td colspan="5">No principal here is configured for constrained ' +
+      'delegation of either kind.</td></tr>') + '</table>' +
+
+    '<h3>Account flags</h3>' +
+    '<p class="note">Two of these three STOP delegation rather than permit it, ' +
+    'and the third is not a control at all. An account appears here whether or ' +
+    'not any pair above names it, because an account named in no pair is ' +
+    'precisely the one somebody is wondering about.</p>' +
+    '<table><tr><th>Principal</th><th>Flags</th><th>What each one does</th></tr>' +
+    (policy.accounts.map(policyAccountRow).join('') ||
+      '<tr><td colspan="3">No principal here carries one of these flags.</td></tr>') +
+    '</table>' +
+
+    '<h3>The mechanisms</h3>' +
+    '<p class="note">Read off the same table this page records against, so a ' +
+    'mechanism cannot be recordable and undocumented, nor described here and ' +
+    'never occur.</p>' +
+    '<ul>' + delegation.TYPES.map(function (entry) {
+      return '<li><strong>' + esc(entry.label) + '</strong> (<code>' +
+        esc(entry.type) + '</code>, ' + esc(entry.protocol) + ', ' +
+        esc(entry.spec) + ' — ' + (summary.byType[entry.type] || 0) + ' recorded) ' +
+        '— ' + esc(entry.what) +
+        (entry.policed
+          ? ' <strong>This service decides who may do it.</strong>'
+          : ' <strong>Nothing here checks who may do it.</strong>') +
+        '</li>';
+    }).join('') + '</ul>' +
+
+    '<p class="note"><strong>It is in memory and dies with the process</strong>, ' +
+    'like the counters, the audit log, the sessions and the signing key. It also ' +
+    'has no clear button and no way to add a row by hand, which is a decision ' +
+    'rather than an omission: every row here is something that actually ' +
+    'happened, and a table mixing those with typed-in ones would be worth much ' +
+    'less than either. Restarting the service is how you get an empty one.</p>' +
+
+    '<p class="note"><strong>A delegation that SUCCEEDED also appears on ' +
+    '<a href="/admin/audit">the audit log</a></strong> as an ordinary ' +
+    '<code>authentication</code> row, and on <a href="/admin/users">the users ' +
+    'page</a> as a credential accepted for the initial identity — which is right: ' +
+    'this service did accept one. A delegation that was REFUSED appears in ' +
+    'NEITHER, because nothing was accepted, and that gap is the reason this page ' +
+    'keeps its own list rather than a filter over one of theirs.</p>' +
+
+    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at ' +
+    'most ' + MAX_ROWS + ' rows a page) and both work with ' +
+    '<code>?format=json</code>, whose reply carries <code>page</code>, ' +
+    '<code>pages</code> and <code>matched</code> so a test can walk the whole ' +
+    'list without guessing where it ends — along with <code>chains</code> and ' +
+    'the configured <code>policy</code>, which have no paging because neither ' +
+    'can be longer than the list they are derived from. The same data is at ' +
+    '<code>GET /admin-api/delegation</code> with the same parameters.</p>';
+
+  respond(req, res, view.json, 'Delegation', '/admin/delegation', inner);
+  log.debug("Leaving the admin delegation page.");
+});
+
+// ---------------------------------------------------------------------------
 // GET /admin/users — who this service has authenticated, and one of them in full.
 //
 // One route and two pages: without `?user=` it is the list, with it the drill-down.
@@ -3175,6 +4346,43 @@ function spiffeListeners() {
   const read = spiffeReader ? spiffeReader() : null;
   return read || { workload: [], api: [],
                    bundlePath: config.value('spiffe.bundlePath') };
+}
+
+// ---------------------------------------------------------------------------
+// AND THE SIXTH, WHICH IS THE PROTOCOL-INDEPENDENT LOGOUT.
+//
+// Same direction and both halves of rule 3e's test at once — see the note
+// beside the requires at the top of this file. `logout.js` requires
+// `ldap_server.js`, which requires THIS module, so a require in the obvious
+// direction closes a cycle; and it would drag every `/ldap` route into the
+// router ahead of the console's own.
+//
+// It holds THREE things and they are one object, validated when it is
+// installed: `FAMILIES` (the prose about what a logout reaches, so this page
+// does not carry a second copy that goes stale the day a family is added),
+// `inventoryFor` (what is live for one identity) and `terminate` (ending it).
+// One object rather than three slots for the reason the directory writer's note
+// gives one screen up: a module that filled a combined slot with only the
+// readers would silently disable the action with nothing reporting it, so the
+// object is checked whole and refused whole.
+let logoutReader = null;
+
+function setLogoutReader(reader) {
+  const complete = reader && typeof reader.inventoryFor === 'function' &&
+                   typeof reader.terminate === 'function' && Array.isArray(reader.FAMILIES);
+  if (!complete) {
+    // A warning and not a throw, for the reason admin_rbac.js's install has:
+    // a console that will not start is worse than a console with one page that
+    // says why it cannot answer.
+    log.warn('admin: a logout reader was offered that does not carry ' +
+             'inventoryFor(), terminate() and FAMILIES. It is refused whole — a partial one ' +
+             'would leave /admin/logout listing what is live and unable to end any of it, ' +
+             'which is the worst of the two halves.');
+    return;
+  }
+  logoutReader = reader;
+  log.debug("A logout reader was installed; /admin/logout will now list and end " +
+            "live sessions across every protocol family.");
 }
 
 let scimReader = null;
@@ -5550,6 +6758,859 @@ app.post('/admin/authorization-servers', function (req, res) {
   log.debug("Leaving the admin authorization servers action endpoint.");
 });
 
+// ---------------------------------------------------------------------------
+// GET /admin/saml2, POST /admin/saml2 — THE SAML 2.0 IDENTITY PROVIDER.
+//
+// This page exists for ONE question that nothing else here can answer: WHICH
+// METADATA DOCUMENT DO I CONFIGURE THIS SERVICE PROVIDER FROM? The profile
+// publishes a document PER APPLICATION — a distinct identity provider entityID
+// and its own SSO, SLO and artifact endpoints, the way Okta and Ping do it — so
+// "the metadata URL" is not one URL, and somebody who has just been handed an
+// entityID has no way to derive the slug in its path by hand.
+//
+// **IT HOLDS NOTHING.** Every row on it comes out of the applications registry,
+// which is the embedded directory, and both of its writes go through
+// `applications.updateApplication()` — the same function `/admin/applications`
+// posts to and the same one an `ldapmodify` reaches. That is the one-store rule
+// this console follows everywhere it has been tempted otherwise: a page keeping
+// its own copy of a service provider's logout address would be a second answer
+// to "where does the LogoutResponse go" that the profile could not see.
+//
+// **WHY IT IS NOT JUST A FILTER ON /admin/applications**, which was the obvious
+// objection and is worth answering rather than leaving: that page reports what
+// an application IS and what it has DONE, in the vocabulary of eight protocols
+// at once. What a person configuring a service provider needs is four URLs, one
+// entityID, and the two settings that decide whether the assertion they are
+// about to receive is signed — none of which is a fact about the application at
+// all. Three of them are facts about THIS SERVICE. So the drill-down here links
+// to that page for the entry and does not reproduce it.
+// ---------------------------------------------------------------------------
+const SAML2_SP_KIND = 'saml2-service-provider';
+
+// Every application this profile has answered for. Read off the registry rather
+// than kept, so a service provider created by an `ldapadd` appears here with no
+// help from this file.
+function saml2ServiceProviders() {
+  log.debug("Entering saml2ServiceProviders().");
+  const rows = applications.list().filter(function (row) {
+    return row.kinds.indexOf(SAML2_SP_KIND) >= 0;
+  });
+  log.debug("Leaving saml2ServiceProviders(). " + rows.length + " service provider(s).");
+  return rows;
+}
+
+// One service provider's four URLs and its entityID, from the profile's own
+// functions. Never rebuilt here — see the require at the top of this file.
+function saml2Facts(base, identifier) {
+  const where = saml2.endpointsFor(base, identifier);
+  return {
+    identifier: identifier,
+    slug: saml2.slugOf(identifier),
+    idpEntityId: saml2.idpEntityIdFor(identifier),
+    metadataUrl: where.metadata,
+    ssoUrl: where.sso,
+    sloUrl: where.slo,
+    arsUrl: where.ars
+  };
+}
+
+// The settings that decide what a service provider receives. They are on this
+// page as READINGS with a link to the one form that changes them, and not as a
+// second form: `/admin/config` owns every setting in this service, and a second
+// door onto one of them is exactly what /admin/scim's header refuses. The
+// difference from /admin/token-lifetimes — which IS a second door, and argued
+// for it — is that these are set once when a service provider is integrated,
+// not turned up and down inside a session to watch something happen.
+const SAML2_SETTINGS = ['saml2.entityId', 'saml2.perApplicationEntityId',
+                        'saml2.assertionLifetimeMin', 'saml2.signAssertion',
+                        'saml2.signResponse', 'saml2.nameIdFormat',
+                        'saml2.artifactTtlS', 'saml2.autocreateApplications',
+                        'saml2.defaultSingleLogoutService'];
+
+function saml2SettingRows() {
+  return SAML2_SETTINGS.map(function (key) {
+    // `describe()` takes the SETTING and not its key — `configSettingFor()` is
+    // the lookup this file already uses everywhere else it reads one, and
+    // passing the key straight in throws rather than answering.
+    const described = config.describe(configSettingFor(key));
+    return '<tr><td><code>' + esc(key) + '</code></td>' +
+      '<td>' + esc(String(config.value(key))) + '</td>' +
+      '<td>' + esc(described.label || '') + '</td></tr>';
+  }).join('');
+}
+
+function saml2ListPage(req) {
+  log.debug("Entering saml2ListPage().");
+  const base = baseUrlOf(req);
+  const all = saml2ServiceProviders();
+  const needle = String(req.query.q || '').trim().toLowerCase();
+  const filtered = needle
+    ? all.filter(function (row) {
+        return row.identifier.toLowerCase().indexOf(needle) >= 0 ||
+               String(row.name).toLowerCase().indexOf(needle) >= 0;
+      })
+    : all;
+  const paged = pagedRows(req.query, filtered, { noun: 'service providers' });
+  const paging = paged.paging;
+  const filterParams = { q: String(req.query.q || '') || '',
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/saml2', filterParams, paging);
+  const listView = listViewOf('/admin/saml2', req.query);
+
+  const rows = paged.shown.map(function (row) {
+    const facts = saml2Facts(base, row.identifier);
+    const href = '/admin/saml2' + queryWith(listView, { sp: row.identifier });
+    const acs = row.fields.samlAssertionConsumerService;
+    const slo = row.fields.samlSingleLogoutService;
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.identifier) + '</code></a>' +
+      '<div class="sub">its identity provider: <code>' + esc(facts.idpEntityId) + '</code></div>' +
+      '</td>' +
+      '<td><a href="' + esc(facts.metadataUrl) + '">metadata</a></td>' +
+      '<td>' + (acs ? codeList(Array.isArray(acs) ? acs : [acs]) : '<span class="sub">none seen</span>') +
+      '</td>' +
+      '<td>' + (slo ? codeList(Array.isArray(slo) ? slo : [slo])
+                    : '<span class="sub">not declared &mdash; guessed</span>') + '</td>' +
+      '<td>' + esc(String(row.authentications)) + '</td>' +
+      '<td>' + esc(row.lastSeen ? row.lastSeen.replace('T', ' ').slice(0, 19) : '') + '</td></tr>';
+  }).join('');
+
+  const inner = '<h1>SAML 2.0 identity provider</h1>' +
+    '<p class="sub">The Web Browser SSO profile, all three bindings, and Single Logout. This ' +
+    'page holds nothing: every row is an entry in <code>ou=applications</code>.</p>' +
+    '<p class="note"><strong>Every service provider gets its own metadata document.</strong> The ' +
+    'identity provider names itself differently to each one and publishes endpoints scoped to it, ' +
+    'which is what Okta and Ping do. <strong>And it is minted for anything asked for</strong> — a ' +
+    'service provider does not have to appear here before it can be pointed at this service, ' +
+    'because asking for its metadata is what creates it. The unscoped document at ' +
+    '<a href="/saml2/metadata">/saml2/metadata</a> works too and names one identity provider for ' +
+    'everybody.</p>' +
+    '<p class="sub"><a href="/saml2">what the profile is</a> &middot; ' +
+    '<a href="/saml2/sp">the mock service provider</a> &middot; ' +
+    '<a href="/admin/saml-attributes">what goes into an assertion</a> &middot; ' +
+    '<a href="/admin/applications?kind=' + SAML2_SP_KIND + '">these entries on the applications ' +
+    'page</a></p>' +
+    '<form method="get" action="/admin/saml2"><div class="formrow">' +
+    '<label for="q">Search</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(String(req.query.q || '')) + '" ' +
+    'placeholder="an entityID or a name">' +
+    (req.query.per ? '<input type="hidden" name="per" value="' + esc(paging.perPage) + '">' : '') +
+    '<button class="secondary">Filter</button>' +
+    (String(req.query.q || '') ? ' <a href="/admin/saml2">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    (rows
+      ? '<table><thead><tr><th>Service provider (entityID)</th><th>Its metadata</th>' +
+        '<th>Assertion consumer service</th><th>Single logout service</th>' +
+        '<th>Responses</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
+      : '<p>No service provider has used this profile yet' +
+        (needle ? ' under that filter' : '') + '. Start one at ' +
+        '<a href="/saml2/sp">the mock service provider</a>, or register an entityID below.</p>') +
+    '<h2>Register a service provider</h2>' +
+    '<p class="sub">Optional, and it changes nothing about whether a request is accepted — an ' +
+    'entityID is accepted whether or not it is here. What it buys is a metadata document to hand ' +
+    'somebody before they have sent anything.</p>' +
+    '<form method="post" action="/admin/saml2"><div class="formrow">' +
+    '<input type="hidden" name="action" value="register">' +
+    '<label for="new_sp">entityID</label>' +
+    '<input type="text" id="new_sp" name="sp" placeholder="https://sp.example.com/saml">' +
+    '<button>Register</button>' +
+    '<span class="note">The same thing a request or a metadata fetch would do.</span>' +
+    '</div></form>' +
+    '<h2>What every assertion this profile issues is governed by</h2>' +
+    '<table><thead><tr><th>Setting</th><th>Value</th><th>What it is</th></tr></thead><tbody>' +
+    saml2SettingRows() + '</tbody></table>' +
+    '<p class="sub">Readings, not a form: <a href="/admin/config">the configuration page</a> owns ' +
+    'every setting here, and a second door onto one of them is what this console refuses ' +
+    'elsewhere. <a href="/admin/saml-attributes">Custom SAML attributes</a> is the page that ' +
+    'changes what an assertion CONTAINS, and its SAML 2.0 set reaches this profile through the ' +
+    'same assertion builder that serves WS-Trust and WS-Federation.</p>' +
+    perPageForm('/admin/saml2', 'q', String(req.query.q || ''), paging.perPage, '', {});
+
+  log.debug("Leaving saml2ListPage(). " + paged.shown.length + " row(s) of " +
+            filtered.length + ".");
+  return {
+    inner: inner,
+    json: {
+      serviceProviders: paged.shown.map(function (row) {
+        return Object.assign(saml2Facts(base, row.identifier), {
+          name: row.name, authentications: row.authentications, sessions: row.sessions,
+          users: row.users, firstSeen: row.firstSeen, lastSeen: row.lastSeen,
+          assertionConsumerServices: valuesFor(row.fields.samlAssertionConsumerService),
+          singleLogoutServices: valuesFor(row.fields.samlSingleLogoutService),
+          nameIdFormats: valuesFor(row.fields.samlNameIdFormat),
+          responseBindings: valuesFor(row.fields.samlResponseBinding),
+          lastRequestSigned: row.fields.samlAuthnRequestSigned === 'TRUE'
+        });
+      }),
+      paging: paging,
+      unscopedMetadata: saml2Facts(base, '').metadataUrl,
+      settings: SAML2_SETTINGS.reduce(function (out, key) {
+        out[key] = config.value(key);
+        return out;
+      }, {}),
+      // Two numbers about the PROFILE rather than about any one service
+      // provider, and both are the kind of thing that is invisible until it is
+      // wrong: artifacts waiting to be resolved, and AuthnRequests held while a
+      // browser is at the sign-in screen. A count that never falls is a leak.
+      artifactsAwaitingResolution: saml2.artifactCount(),
+      requestsHeldForSignIn: saml2.pendingRequestCount()
+    }
+  };
+}
+
+// An attribute's values as a plain array whatever the schema's `kind` is. The
+// registry hands back a string for a single-valued attribute and an array for a
+// multi-valued one, and a JSON reply that varied between the two shapes would be
+// one a caller has to test the type of.
+function valuesFor(value) {
+  if (value === undefined || value === null || value === '') {
+    return [];
+  }
+  return Array.isArray(value) ? value.slice(0) : [String(value)];
+}
+
+function saml2DetailPage(req, identifier) {
+  log.debug("Entering saml2DetailPage(). sp=" + identifier);
+  const base = baseUrlOf(req);
+  const facts = saml2Facts(base, identifier);
+  const row = applications.get(identifier);
+  const listView = listViewOf('/admin/saml2', req.query);
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listView, {})) + '">';
+  const fields = (row && row.fields) || {};
+  const acs = valuesFor(fields.samlAssertionConsumerService);
+  const slo = valuesFor(fields.samlSingleLogoutService);
+
+  const endpointRows = [
+    ['entityID of the identity provider', facts.idpEntityId,
+     config.value('saml2.perApplicationEntityId')
+       ? 'Unique to this service provider. saml2.perApplicationEntityId turns that off, and then ' +
+         'every document names the same identity provider.'
+       : 'The same for every service provider, because saml2.perApplicationEntityId is off. The ' +
+         'ENDPOINTS below are still this service provider\'s own.'],
+    ['Metadata', facts.metadataUrl, 'Signed, and served no-store because the signing key is ' +
+     'regenerated on every start. This is the URL to configure the service provider from.'],
+    ['Single Sign-On', facts.ssoUrl, 'HTTP Redirect and HTTP POST both. Which binding the ' +
+     'RESPONSE comes back on is the AuthnRequest\'s own ProtocolBinding.'],
+    ['Single Logout', facts.sloUrl, 'A LogoutRequest arriving from this service provider, and a ' +
+     'bare GET to start one from here.'],
+    ['Artifact Resolution', facts.arsUrl, 'SOAP over HTTP, and a back channel: the browser never ' +
+     'touches it. An artifact resolves exactly once.']
+  ].map(function (r) {
+    return '<tr><td>' + esc(r[0]) + '</td><td><code>' + esc(r[1]) + '</code></td>' +
+      '<td class="sub">' + esc(r[2]) + '</td></tr>';
+  }).join('');
+
+  const inner = '<h1><code>' + esc(identifier) + '</code></h1>' +
+    '<p class="sub">A SAML 2.0 service provider. Its entry is ' +
+    (row ? '<a href="/admin/applications?application=' + encodeURIComponent(identifier) +
+           '">in the applications registry</a>'
+         : 'NOT in the registry yet — this page is showing what it WOULD be given') + '.</p>' +
+    '<h2>The endpoints it is configured from</h2>' +
+    '<table><thead><tr><th>What</th><th>Where</th><th></th></tr></thead><tbody>' +
+    endpointRows + '</tbody></table>' +
+    '<p class="sub">The path segment is <code>' + esc(facts.slug) + '</code>' +
+    (facts.slug === identifier ? '' :
+      ', which is a digest of the entityID because the entityID is not safe in a URL path ' +
+      'segment. The percent-encoded entityID works in the same place') + '.</p>' +
+    '<h2>What this service has recorded</h2>' +
+    '<table><tbody>' +
+    '<tr><td>Assertion consumer services seen</td><td>' +
+      (acs.length ? codeList(acs) : '<span class="sub">none</span>') + '</td></tr>' +
+    '<tr><td>NameID formats asked for</td><td>' +
+      (valuesFor(fields.samlNameIdFormat).length
+        ? codeList(valuesFor(fields.samlNameIdFormat))
+        : '<span class="sub">none — it has never named one, so it gets saml2.nameIdFormat</span>') +
+      '</td></tr>' +
+    '<tr><td>Response bindings asked for</td><td>' +
+      (valuesFor(fields.samlResponseBinding).length
+        ? codeList(valuesFor(fields.samlResponseBinding)) : '<span class="sub">none</span>') +
+      '</td></tr>' +
+    '<tr><td>Its last AuthnRequest was signed</td><td>' +
+      (fields.samlAuthnRequestSigned === 'TRUE' ? 'yes' :
+        (fields.samlAuthnRequestSigned === 'FALSE' ? 'no' : '<span class="sub">unknown</span>')) +
+      ' <span class="sub">&mdash; RECORDED AND NOT CHECKED. This service verifies no request ' +
+      'signature, which is the same posture it takes to every credential; the certificate below ' +
+      'is what a verification would read.</span></td></tr>' +
+    '<tr><td>Responses issued to it</td><td>' + esc(String((row && row.authentications) || 0)) +
+      '</td></tr>' +
+    '</tbody></table>' +
+    '<h2>Where its LogoutResponse goes</h2>' +
+    '<p class="note">A <code>&lt;samlp:LogoutRequest&gt;</code> carries no return address — only ' +
+    'SP metadata does, and this service does not consume SP metadata. So with nothing declared ' +
+    'here the profile falls back to <code>saml2.defaultSingleLogoutService</code> and then to the ' +
+    'assertion consumer service URL this service provider last used, <strong>which is a guess and ' +
+    'is logged as one</strong>. Declaring it removes the guess.</p>' +
+    (slo.length
+      ? '<table><thead><tr><th>Declared</th><th></th></tr></thead><tbody>' +
+        slo.map(function (one) {
+          return '<tr><td><code>' + esc(one) + '</code></td><td>' +
+            '<form method="post" action="/admin/saml2">' + carryBack +
+            '<input type="hidden" name="action" value="remove-logout-service">' +
+            '<input type="hidden" name="sp" value="' + esc(identifier) + '">' +
+            '<input type="hidden" name="value" value="' + esc(one) + '">' +
+            '<button class="secondary">Remove</button></form></td></tr>';
+        }).join('') + '</tbody></table>'
+      : '<p>Nothing is declared, so the fallback above applies' +
+        (acs.length ? ' — and it would guess <code>' + esc(acs[acs.length - 1]) + '</code>' : '') +
+        '.</p>') +
+    '<form method="post" action="/admin/saml2">' + carryBack + '<div class="formrow">' +
+    '<input type="hidden" name="action" value="set-logout-service">' +
+    '<input type="hidden" name="sp" value="' + esc(identifier) + '">' +
+    '<label for="slo">Add one</label>' +
+    '<input type="text" id="slo" name="value" placeholder="https://sp.example.com/saml/slo">' +
+    '<button>Add</button>' +
+    '<span class="note">Writes <code>samlSingleLogoutService</code> on the entry. An ' +
+    '<code>ldapmodify</code> of the same attribute does exactly this.</span>' +
+    '</div></form>' +
+    '<h2>Its signing certificate</h2>' +
+    '<p class="sub">Taken off the <code>ds:KeyInfo</code> of a signed AuthnRequest when one ' +
+    'carries it, and settable here. It is public key material, so unlike a client secret it is ' +
+    'worth nothing to whoever reads this directory — and nothing reads it today, because no ' +
+    'request signature is verified. It is here so that a verification has somewhere to read from ' +
+    'the day one is wanted.</p>' +
+    (fields.samlSigningCertificate
+      ? '<pre>' + esc(String(fields.samlSigningCertificate).replace(/(.{72})/g, '$1\n')) + '</pre>'
+      : '<p>None recorded.</p>') +
+    '<form method="post" action="/admin/saml2">' + carryBack + '<div class="formrow">' +
+    '<input type="hidden" name="action" value="set-signing-certificate">' +
+    '<input type="hidden" name="sp" value="' + esc(identifier) + '">' +
+    '<label for="cert">Set it</label>' +
+    '<input type="text" id="cert" name="value" placeholder="base64 DER, no PEM header">' +
+    '<button>Set</button>' +
+    '<span class="note">Empty clears it.</span>' +
+    '</div></form>' +
+    '<p class="sub"><a href="' + esc(facts.metadataUrl) + '">its metadata</a> &middot; ' +
+    '<a href="/saml2">the profile</a>' +
+    (row ? ' &middot; <a href="/admin/applications?application=' +
+           encodeURIComponent(identifier) + '">its registry entry, with every attribute</a>' : '') +
+    '</p>';
+
+  log.debug("Leaving saml2DetailPage().");
+  return {
+    inner: inner,
+    json: Object.assign({ found: !!row }, facts, {
+      name: (row && row.name) || '',
+      authentications: (row && row.authentications) || 0,
+      assertionConsumerServices: acs,
+      singleLogoutServices: slo,
+      nameIdFormats: valuesFor(fields.samlNameIdFormat),
+      responseBindings: valuesFor(fields.samlResponseBinding),
+      lastRequestSigned: fields.samlAuthnRequestSigned === 'TRUE',
+      signingCertificate: fields.samlSigningCertificate || ''
+    })
+  };
+}
+
+// The four writes. Every one of them goes through the applications registry —
+// see the header — so this function decides nothing except which attribute and
+// which mode, and the registry refuses an attribute that is derived rather than
+// declared without being asked twice.
+function saml2Action(body) {
+  log.debug("Entering saml2Action(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const identifier = String(body.sp || body.serviceProvider || '').trim();
+  if (!identifier) {
+    log.debug("Leaving saml2Action(). No service provider named.");
+    return { ok: false, errors: ['Name the service provider by its entityID, in `sp`.'] };
+  }
+
+  if (action === 'register') {
+    const result = applications.createApplication({
+      identifier: identifier, kind: SAML2_SP_KIND, protocol: 'SAML 2.0',
+      note: 'registered as a SAML 2.0 service provider from the admin console',
+      fields: { samlEntityId: identifier }
+    });
+    log.debug("Leaving saml2Action(). register " + (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return { ok: true, application: result.application,
+             message: 'Registered. Its identity provider metadata is at /saml2/metadata/' +
+                      encodeURIComponent(saml2.slugOf(identifier)) + ', and it would have been ' +
+                      'created by the first AuthnRequest or metadata fetch anyway — registering ' +
+                      'it early is what gives you a document to hand somebody now.' };
+  }
+  if (action === 'set-logout-service' || action === 'remove-logout-service') {
+    const result = applications.updateApplication(identifier, {
+      attribute: 'samlSingleLogoutService',
+      mode: action === 'set-logout-service' ? 'add' : 'remove',
+      value: String(body.value || '')
+    });
+    log.debug("Leaving saml2Action(). " + action + " " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  if (action === 'set-signing-certificate') {
+    const result = applications.updateApplication(identifier, {
+      attribute: 'samlSigningCertificate', mode: 'set',
+      // Whitespace and any PEM armour stripped, because what the schema holds is
+      // base64 DER — which is what a ds:X509Certificate carries and what the
+      // metadata publishes. A PEM pasted in here would be stored as something no
+      // reader of that attribute expects, and nothing would say so until the day
+      // something tried to use it.
+      value: String(body.value || '').replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')
+    });
+    log.debug("Leaving saml2Action(). set-signing-certificate " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+  log.debug("Leaving saml2Action(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The four are: register, ' +
+                               'set-logout-service, remove-logout-service, ' +
+                               'set-signing-certificate.'] };
+}
+
+function saml2View(req) {
+  log.debug("Entering saml2View().");
+  const wanted = String(req.query.sp || '').trim();
+  if (wanted) {
+    const detail = saml2DetailPage(req, wanted);
+    log.debug("Leaving saml2View(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'SAML 2.0 service provider ' + wanted,
+             up: upTo('/admin/saml2', wanted, listViewOf('/admin/saml2', req.query)) };
+  }
+  const list = saml2ListPage(req);
+  log.debug("Leaving saml2View(). The list.");
+  return { json: list.json, inner: list.inner, title: 'SAML 2.0 identity provider' };
+}
+
+app.get('/admin/saml2', function (req, res) {
+  log.debug("Entering the admin SAML 2.0 page.");
+  const view = saml2View(req);
+  respond(req, res, view.json, view.title, '/admin/saml2', view.inner, view.up);
+  log.debug("Leaving the admin SAML 2.0 page.");
+});
+
+app.post('/admin/saml2', function (req, res) {
+  log.debug("Entering the admin SAML 2.0 action endpoint.");
+  const body = parseBody(req);
+  const result = saml2Action(body);
+  const identifier = String(body.sp || body.serviceProvider || '').trim();
+  // The list state the form carried, REBUILT rather than echoed — see
+  // listViewFromBack(), and the note in admin-ui/CLAUDE.md about a new form on a
+  // drill-down needing `carryBack` in it.
+  const listView = listViewFromBack('/admin/saml2', body.back);
+  const back = identifier && result.ok !== false
+    ? '/admin/saml2' + queryWith(listView, { sp: identifier })
+    : '/admin/saml2' + queryWith(listView, {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin SAML 2.0 action endpoint.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/saml11, POST /admin/saml11 — THE SAML 1.1 IDENTITY PROVIDER.
+//
+// The same question /admin/saml2 exists for — WHICH METADATA DOCUMENT DO I
+// CONFIGURE THIS RELYING PARTY FROM — and a second question that page never has
+// to answer: **WHAT IS THIS RELYING PARTY CALLED?** SAML 1.1 has no request
+// message, so nothing in the protocol makes a relying party identify itself. The
+// profile takes the name from Shibboleth's `providerId` parameter, from the path
+// segment, or it GUESSES from the origin of the TARGET. A guessed audience is
+// the one thing on this page that is not a fact, and it is marked as such,
+// because an assertion whose audience is `https://app.example.com` when the
+// relying party expected `urn:example:app` fails inside a signature check with
+// nothing saying why.
+//
+// **IT IS A SEPARATE PAGE FROM /admin/saml2 AND THAT IS NOT SYMMETRY FOR ITS OWN
+// SAKE**, which was the obvious objection: half of what that page reports has no
+// spelling here. There is no Single Logout in SAML 1.1, so there is no logout
+// return address to declare and no `saml11.defaultSingleLogoutService` to fall
+// back to. There is no request, so there is no request signature to record and
+// no signing certificate to hold. What this page has instead is the artifact
+// profile's own state and an attribute authority the 2.0 profile does not offer.
+// One page with two modes would have been a page whose every row needed a
+// footnote.
+//
+// **IT HOLDS NOTHING**, like every page in this console: every row comes out of
+// the applications registry, which is the embedded directory, and its one write
+// goes through `applications.createApplication()` — the same function
+// /admin/applications posts to and the same one an `ldapadd` reaches.
+// ---------------------------------------------------------------------------
+const SAML11_RP_KIND = saml11.RP_KIND;
+
+// Every application this profile has answered for. Read off the registry rather
+// than kept, so a relying party created by an `ldapadd` appears here with no
+// help from this file.
+//
+// **THE KIND IS SHARED WITH WS-FEDERATION AND THAT IS DELIBERATE.**
+// `saml11-relying-party` is what a WS-Federation relying party handed a 1.1
+// assertion has always been recorded as, and a relying party that takes the same
+// assertion through the passive requestor profile and through Browser/POST is
+// ONE application with one audience. Giving the browser profiles a kind of their
+// own would have split one entry into two, which is the defect this repository
+// calls two spellings of one DN. The consequence to know when reading this list:
+// a row here may have arrived through /wsfed and never touched /saml11, which is
+// why the profiles column says what it has actually used.
+function saml11RelyingParties() {
+  log.debug("Entering saml11RelyingParties().");
+  const rows = applications.list().filter(function (row) {
+    return row.kinds.indexOf(SAML11_RP_KIND) >= 0;
+  });
+  log.debug("Leaving saml11RelyingParties(). " + rows.length + " relying party/parties.");
+  return rows;
+}
+
+// One relying party's three URLs and its providerID, from the profile's own
+// functions. Never rebuilt here — see the require at the top of this file.
+function saml11Facts(base, identifier) {
+  const where = saml11.endpointsFor(base, identifier);
+  return {
+    identifier: identifier,
+    slug: saml11.slugOf(identifier),
+    idpProviderId: saml11.providerIdFor(identifier),
+    metadataUrl: where.metadata,
+    ssoUrl: where.sso,
+    responderUrl: where.responder
+  };
+}
+
+// Which of the two browser profiles a recorded binding value names, in words. The
+// registry holds the profile URI, which is what the metadata publishes and what
+// a person reading a table does not want to compare character by character.
+function saml11ProfileLabel(value) {
+  if (value === saml11.PROFILE_POST) {
+    return 'Browser/POST';
+  }
+  if (value === saml11.PROFILE_ARTIFACT) {
+    return 'Browser/Artifact';
+  }
+  return value;
+}
+
+// The settings that decide what a relying party receives. READINGS with a link
+// to the one form that changes them, and not a second form: /admin/config owns
+// every setting in this service, which is the rule /admin/saml2 states at length
+// and this page follows rather than restating.
+const SAML11_SETTINGS = ['saml11.providerId', 'saml11.perApplicationProviderId',
+                         'saml11.assertionLifetimeMin', 'saml11.signAssertion',
+                         'saml11.signResponse', 'saml11.nameIdFormat',
+                         'saml11.defaultProfile', 'saml11.artifactTtlS',
+                         'saml11.autocreateApplications'];
+
+function saml11SettingRows() {
+  return SAML11_SETTINGS.map(function (key) {
+    // `describe()` takes the SETTING and not its key — the same trap
+    // saml2SettingRows() records.
+    const described = config.describe(configSettingFor(key));
+    return '<tr><td><code>' + esc(key) + '</code></td>' +
+      '<td>' + esc(String(config.value(key))) + '</td>' +
+      '<td>' + esc(described.label || '') + '</td></tr>';
+  }).join('');
+}
+
+function saml11ListPage(req) {
+  log.debug("Entering saml11ListPage().");
+  const base = baseUrlOf(req);
+  const all = saml11RelyingParties();
+  const needle = String(req.query.q || '').trim().toLowerCase();
+  const filtered = needle
+    ? all.filter(function (row) {
+        return row.identifier.toLowerCase().indexOf(needle) >= 0 ||
+               String(row.name).toLowerCase().indexOf(needle) >= 0;
+      })
+    : all;
+  const paged = pagedRows(req.query, filtered, { noun: 'relying parties' });
+  const paging = paged.paging;
+  const filterParams = { q: String(req.query.q || '') || '',
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNav('/admin/saml11', filterParams, paging);
+  const listView = listViewOf('/admin/saml11', req.query);
+
+  const rows = paged.shown.map(function (row) {
+    const facts = saml11Facts(base, row.identifier);
+    const href = '/admin/saml11' + queryWith(listView, { rp: row.identifier });
+    const acs = row.fields.samlAssertionConsumerService;
+    const profiles = valuesFor(row.fields.samlResponseBinding)
+      .filter(function (v) {
+        return v === saml11.PROFILE_POST || v === saml11.PROFILE_ARTIFACT;
+      })
+      .map(saml11ProfileLabel);
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.identifier) + '</code></a>' +
+      '<div class="sub">its identity provider: <code>' + esc(facts.idpProviderId) + '</code></div>' +
+      '</td>' +
+      '<td><a href="' + esc(facts.metadataUrl) + '">metadata</a></td>' +
+      '<td>' + (acs ? codeList(Array.isArray(acs) ? acs : [acs])
+                    : '<span class="sub">none seen</span>') + '</td>' +
+      '<td>' + (profiles.length ? esc(profiles.join(', '))
+                                : '<span class="sub">none &mdash; it has only ever been handed a ' +
+                                  '1.1 assertion through another door</span>') + '</td>' +
+      '<td>' + esc(String(row.authentications)) + '</td>' +
+      '<td>' + esc(row.lastSeen ? row.lastSeen.replace('T', ' ').slice(0, 19) : '') + '</td></tr>';
+  }).join('');
+
+  const inner = '<h1>SAML 1.1 identity provider</h1>' +
+    '<p class="sub">Both browser profiles, and the SAML responder behind one of them. This page ' +
+    'holds nothing: every row is an entry in <code>ou=applications</code>.</p>' +
+    '<p class="note"><strong>SAML 1.1 has no request message</strong>, which is where most of ' +
+    'the differences from <a href="/admin/saml2">the SAML 2.0 page</a> come from. A relying ' +
+    'party cannot identify itself in the protocol, so it is named by Shibboleth\'s ' +
+    '<code>providerId</code> parameter, by the path segment of a scoped endpoint, or it is ' +
+    'GUESSED from the origin of the <code>TARGET</code>. There is also no Single Logout to ' +
+    'configure &mdash; it arrived with SAML 2.0 &mdash; and no request signature to record.</p>' +
+    '<p class="note"><strong>Every relying party gets its own metadata document</strong>, minted ' +
+    'for anything asked for, exactly as the 2.0 profile does. It is a SAML 2.0 metadata document ' +
+    'describing a SAML 1.1 identity provider, which is what every relying party actually ' +
+    'consumes: SAML 1.1 never had a metadata specification. The unscoped document at ' +
+    '<a href="/saml11/metadata">/saml11/metadata</a> works too and names one identity provider ' +
+    'for everybody.</p>' +
+    '<p class="sub"><a href="/saml11">what the profile is</a> &middot; ' +
+    '<a href="/saml11/rp">the mock relying party</a> &middot; ' +
+    '<a href="/admin/saml-attributes">what goes into an assertion</a> &middot; ' +
+    '<a href="/admin/applications?kind=' + SAML11_RP_KIND + '">these entries on the applications ' +
+    'page</a></p>' +
+    '<form method="get" action="/admin/saml11"><div class="formrow">' +
+    '<label for="q">Search</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(String(req.query.q || '')) + '" ' +
+    'placeholder="an identifier or a name">' +
+    (req.query.per ? '<input type="hidden" name="per" value="' + esc(paging.perPage) + '">' : '') +
+    '<button class="secondary">Filter</button>' +
+    (String(req.query.q || '') ? ' <a href="/admin/saml11">clear</a>' : '') +
+    '</div></form>' +
+    nav +
+    (rows
+      ? '<table><thead><tr><th>Relying party</th><th>Its metadata</th>' +
+        '<th>Assertion consumer (shire)</th><th>Profiles used</th>' +
+        '<th>Assertions</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
+      : '<p>No relying party has taken a SAML 1.1 assertion yet' +
+        (needle ? ' under that filter' : '') + '. Start one at ' +
+        '<a href="/saml11/rp">the mock relying party</a>, or register an identifier below.</p>') +
+    '<h2>Register a relying party</h2>' +
+    '<p class="sub">Optional, and it changes nothing about whether a flow is accepted &mdash; any ' +
+    'identifier is accepted whether or not it is here. What it buys is a metadata document to ' +
+    'hand somebody before they have sent anything, and a name to use in ' +
+    '<code>providerId</code> so that nothing has to be guessed.</p>' +
+    '<form method="post" action="/admin/saml11"><div class="formrow">' +
+    '<input type="hidden" name="action" value="register">' +
+    '<label for="new_rp">Identifier</label>' +
+    '<input type="text" id="new_rp" name="rp" placeholder="urn:example:app">' +
+    '<button>Register</button>' +
+    '<span class="note">The same thing a flow or a metadata fetch would do.</span>' +
+    '</div></form>' +
+    '<h2>What every assertion this profile issues is governed by</h2>' +
+    '<table><thead><tr><th>Setting</th><th>Value</th><th>What it is</th></tr></thead><tbody>' +
+    saml11SettingRows() + '</tbody></table>' +
+    '<p class="sub">Readings, not a form: <a href="/admin/config">the configuration page</a> owns ' +
+    'every setting here. <a href="/admin/saml-attributes">Custom SAML attributes</a> is the page ' +
+    'that changes what an assertion CONTAINS, and its SAML 1.1 set reaches this profile through ' +
+    'the same assertion builder that serves WS-Trust and WS-Federation.</p>' +
+    perPageForm('/admin/saml11', 'q', String(req.query.q || ''), paging.perPage, '', {});
+
+  log.debug("Leaving saml11ListPage(). " + paged.shown.length + " row(s) of " +
+            filtered.length + ".");
+  return {
+    inner: inner,
+    json: {
+      relyingParties: paged.shown.map(function (row) {
+        return Object.assign(saml11Facts(base, row.identifier), {
+          name: row.name, authentications: row.authentications, sessions: row.sessions,
+          users: row.users, firstSeen: row.firstSeen, lastSeen: row.lastSeen,
+          assertionConsumerServices: valuesFor(row.fields.samlAssertionConsumerService),
+          nameIdFormats: valuesFor(row.fields.samlNameIdFormat),
+          profiles: valuesFor(row.fields.samlResponseBinding).filter(function (v) {
+            return v === saml11.PROFILE_POST || v === saml11.PROFILE_ARTIFACT;
+          })
+        });
+      }),
+      paging: paging,
+      unscopedMetadata: saml11Facts(base, '').metadataUrl,
+      settings: SAML11_SETTINGS.reduce(function (out, key) {
+        out[key] = config.value(key);
+        return out;
+      }, {}),
+      // Three numbers about the PROFILE rather than about any one relying party,
+      // and all three are the kind of thing that is invisible until it is wrong:
+      // artifacts minted and not yet resolved, assertions held for an
+      // AssertionIDReference, and flows held while a browser is at the sign-in
+      // screen. A count that never falls is a leak; the middle one is CAPPED
+      // rather than swept, so it is the one that should sit at its ceiling.
+      artifactsAwaitingResolution: saml11.artifactCount(),
+      assertionsHeldByReference: saml11.cachedAssertionCount(),
+      flowsHeldForSignIn: saml11.pendingFlowCount()
+    }
+  };
+}
+
+function saml11DetailPage(req, identifier) {
+  log.debug("Entering saml11DetailPage(). rp=" + identifier);
+  const base = baseUrlOf(req);
+  const facts = saml11Facts(base, identifier);
+  const row = applications.get(identifier);
+  const fields = (row && row.fields) || {};
+  const acs = valuesFor(fields.samlAssertionConsumerService);
+  const profiles = valuesFor(fields.samlResponseBinding).filter(function (v) {
+    return v === saml11.PROFILE_POST || v === saml11.PROFILE_ARTIFACT;
+  });
+
+  const endpointRows = [
+    ['providerID of the identity provider', facts.idpProviderId,
+     config.value('saml11.perApplicationProviderId')
+       ? 'Unique to this relying party. saml11.perApplicationProviderId turns that off, and then ' +
+         'every document names the same identity provider — and every artifact carries the same ' +
+         'SourceID, because that is a hash of this value.'
+       : 'The same for every relying party, because saml11.perApplicationProviderId is off. The ' +
+         'ENDPOINTS below are still this relying party\'s own.'],
+    ['Metadata', facts.metadataUrl,
+     'Signed, and served no-store because the signing key is regenerated on every start. This is ' +
+     'the URL to configure the relying party from. It carries an IDPSSODescriptor for the browser ' +
+     'profiles AND an AttributeAuthorityDescriptor for the responder, because a Shibboleth ' +
+     'service provider looks for its attribute authority in the second.'],
+    ['Inter-site transfer', facts.ssoUrl,
+     'Where a browser is sent to be signed in. SAML 1.1\'s name for what SAML 2.0 calls the ' +
+     'Single Sign-On service. Send TARGET, and shire for where the assertion goes.'],
+    ['SAML responder', facts.responderUrl,
+     'SOAP over HTTP POST, and a back channel: the browser never touches it. It resolves ' +
+     'artifacts (once each), returns assertions by AssertionID, and answers AttributeQuery and ' +
+     'AuthenticationQuery — which is SAML 1.1\'s attribute authority.']
+  ].map(function (r) {
+    return '<tr><td>' + esc(r[0]) + '</td><td><code>' + esc(r[1]) + '</code></td>' +
+      '<td class="sub">' + esc(r[2]) + '</td></tr>';
+  }).join('');
+
+  // A relying party whose identifier looks like a bare origin is very likely one
+  // this service GUESSED, and saying so here is the whole reason the guess is
+  // survivable. It is a heuristic and is worded as one: somebody may perfectly
+  // well have registered `https://app.example.com` on purpose.
+  const looksGuessed = /^https?:\/\/[^/]+$/i.test(identifier);
+
+  const inner = '<h1><code>' + esc(identifier) + '</code></h1>' +
+    '<p class="sub">A SAML 1.1 relying party. Its entry is ' +
+    (row ? '<a href="/admin/applications?application=' + encodeURIComponent(identifier) +
+           '">in the applications registry</a>'
+         : 'NOT in the registry yet — this page is showing what it WOULD be given') + '.</p>' +
+    (looksGuessed
+      ? '<p class="note"><strong>This identifier is a bare origin, which is what this service ' +
+        'writes down when nobody told it the relying party\'s name.</strong> SAML 1.1 has no ' +
+        'request message, so a flow that sent no <code>providerId</code> and used no scoped ' +
+        'endpoint leaves the audience to be guessed from the origin of the TARGET. The assertion ' +
+        'is issued to THIS string, so a relying party expecting a different audience refuses it ' +
+        'inside a signature check with nothing saying why. Send <code>providerId</code>, or use ' +
+        'the scoped endpoint above, to make it exact.</p>'
+      : '') +
+    '<h2>The endpoints it is configured from</h2>' +
+    '<table><thead><tr><th>What</th><th>Where</th><th></th></tr></thead><tbody>' +
+    endpointRows + '</tbody></table>' +
+    '<p class="sub">The path segment is <code>' + esc(facts.slug) + '</code>' +
+    (facts.slug === identifier ? '' :
+      ', which is a digest of the identifier because the identifier is not safe in a URL path ' +
+      'segment. The percent-encoded identifier works in the same place') +
+    '. It is THE SAME SLUG <a href="/admin/saml2">the SAML 2.0 profile</a> uses for this ' +
+    'application, deliberately: one application has one handle, or the console would show one ' +
+    'entry as two.</p>' +
+    '<h2>What this service has recorded</h2>' +
+    '<table><tbody>' +
+    '<tr><td>Assertion consumers seen</td><td>' +
+      (acs.length ? codeList(acs) : '<span class="sub">none</span>') +
+      ' <span class="sub">&mdash; the <code>shire</code> parameter. Not checked against any ' +
+      'registration, like every other return URL here.</span></td></tr>' +
+    '<tr><td>Browser profiles used</td><td>' +
+      (profiles.length ? esc(profiles.map(saml11ProfileLabel).join(', '))
+                       : '<span class="sub">none &mdash; it has only ever been handed a 1.1 ' +
+                         'assertion through WS-Federation or WS-Trust</span>') + '</td></tr>' +
+    '<tr><td>NameIdentifier formats asked for</td><td>' +
+      (valuesFor(fields.samlNameIdFormat).length
+        ? codeList(valuesFor(fields.samlNameIdFormat))
+        : '<span class="sub">none &mdash; and in this protocol that is the ordinary case, ' +
+          'because there is no NameIDPolicy to ask in. It gets saml11.nameIdFormat unless the ' +
+          'non-spec <code>format</code> parameter says otherwise.</span>') + '</td></tr>' +
+    '<tr><td>Assertions issued to it</td><td>' + esc(String((row && row.authentications) || 0)) +
+      '</td></tr>' +
+    '</tbody></table>' +
+    '<h2>What is NOT here, and why</h2>' +
+    '<p class="sub">The SAML 2.0 page has three rows this one does not, and none of them is ' +
+    'missing work. <strong>No logout return address</strong>: SAML 1.1 has no Single Logout, so ' +
+    'there is nothing to send anywhere. <strong>No request signature and no signing ' +
+    'certificate</strong>: there is no request, so there is nothing for a relying party to sign. ' +
+    '<strong>No response binding</strong>: which of the two browser profiles is used is chosen ' +
+    'HERE, by <code>saml11.defaultProfile</code> or the non-spec <code>profile</code> parameter, ' +
+    'because nothing in SAML 1.1 lets a relying party ask.</p>' +
+    '<p class="sub"><a href="/saml11/rp">The mock relying party</a> will run either profile ' +
+    'against this service and show every check.</p>';
+
+  log.debug("Leaving saml11DetailPage().");
+  return {
+    inner: inner,
+    json: Object.assign(facts, {
+      registered: !!row,
+      identifierLooksGuessed: looksGuessed,
+      name: row ? row.name : '',
+      authentications: row ? row.authentications : 0,
+      assertionConsumerServices: acs,
+      nameIdFormats: valuesFor(fields.samlNameIdFormat),
+      profiles: profiles
+    })
+  };
+}
+
+// ONE action, where /admin/saml2 has four, and the three it does not have are
+// the three SAML 1.1 has no protocol for: a logout service to declare, a request
+// signature to record, and a signing certificate to hold it in.
+function saml11Action(body) {
+  log.debug("Entering saml11Action(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const identifier = String(body.rp || body.relyingParty || '').trim();
+  if (!identifier) {
+    log.debug("Leaving saml11Action(). No relying party named.");
+    return { ok: false, errors: ['Name the relying party by its identifier, in `rp`.'] };
+  }
+
+  if (action === 'register') {
+    const result = applications.createApplication({
+      identifier: identifier, kind: SAML11_RP_KIND, protocol: 'SAML 1.1',
+      note: 'registered as a SAML 1.1 relying party from the admin console',
+      fields: { samlEntityId: identifier }
+    });
+    log.debug("Leaving saml11Action(). register " + (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) {
+      return result;
+    }
+    return { ok: true, application: result.application,
+             message: 'Registered. Its identity provider metadata is at /saml11/metadata/' +
+                      encodeURIComponent(saml11.slugOf(identifier)) + ', and it would have been ' +
+                      'created by the first flow or metadata fetch anyway — registering it early ' +
+                      'is what gives you a document to hand somebody now, and a name to put in ' +
+                      'providerId so that nothing has to be guessed.' };
+  }
+  log.debug("Leaving saml11Action(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". There is one: register.'] };
+}
+
+function saml11View(req) {
+  log.debug("Entering saml11View().");
+  const wanted = String(req.query.rp || '').trim();
+  if (wanted) {
+    const detail = saml11DetailPage(req, wanted);
+    log.debug("Leaving saml11View(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'SAML 1.1 relying party ' + wanted,
+             up: upTo('/admin/saml11', wanted, listViewOf('/admin/saml11', req.query)) };
+  }
+  const list = saml11ListPage(req);
+  log.debug("Leaving saml11View(). The list.");
+  return { json: list.json, inner: list.inner, title: 'SAML 1.1 identity provider' };
+}
+
+app.get('/admin/saml11', function (req, res) {
+  log.debug("Entering the admin SAML 1.1 page.");
+  const view = saml11View(req);
+  respond(req, res, view.json, view.title, '/admin/saml11', view.inner, view.up);
+  log.debug("Leaving the admin SAML 1.1 page.");
+});
+
+app.post('/admin/saml11', function (req, res) {
+  log.debug("Entering the admin SAML 1.1 action endpoint.");
+  const body = parseBody(req);
+  const result = saml11Action(body);
+  const identifier = String(body.rp || body.relyingParty || '').trim();
+  // The list state the form carried, REBUILT rather than echoed — see
+  // listViewFromBack(), and the note in admin-ui/CLAUDE.md about a new form on a
+  // drill-down needing `carryBack` in it.
+  const listView = listViewFromBack('/admin/saml11', body.back);
+  const back = identifier && result.ok !== false
+    ? '/admin/saml11' + queryWith(listView, { rp: identifier })
+    : '/admin/saml11' + queryWith(listView, {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin SAML 1.1 action endpoint.");
+});
+
 app.get('/admin/groups', function (req, res) {
   log.debug("Entering the admin groups page.");
   const view = groupsView(req);
@@ -7541,6 +9602,489 @@ app.get('/admin/vc-verifier-config', function (req, res) {
   log.debug("Leaving the admin verifier-request page.");
 });
 
+
+
+// ---------------------------------------------------------------------------
+// /admin/realms — SEVERAL LOGICAL COPIES OF THIS SERVICE, IN ONE PROCESS.
+//
+// A TRUST REALM is a whole mock identity service: its own configuration, its
+// own signing key, its own sessions, authorization codes, tokens, offers,
+// service providers, statistics and audit log — answering on the SAME sockets
+// as every other and told apart by a segment at the front of the path.
+//
+//   http://host:8081/oauth2/token                the default realm
+//   http://host:8081/realm/acme/oauth2/token     the realm `acme`
+//
+// WHAT THIS PAGE IS FOR, and it is not "somewhere to keep a list". Two things
+// nothing else here can tell you:
+//
+//   * WHAT A REALM'S ENDPOINTS ACTUALLY ARE. The prefix segment is a setting,
+//     the ids are whatever somebody typed, and a client being pointed at a
+//     realm has no way to derive either. Every row here carries the realm's
+//     base URL, and the drill-down carries the four URLs a client asks for
+//     first.
+//   * WHICH FAMILIES ARE REALM-AWARE AND WHICH ARE NOT, WHICH IS NOT A TIDY
+//     ANSWER. What a realm separates completely is what it ISSUES and what it
+//     is holding while it issues it. What it does not separate at all is the
+//     embedded DIRECTORY — one ou=users, one ou=groups and one ou=applications
+//     for the whole process, because LDAP answers on a socket with no path to
+//     put a realm segment in. So OAuth client registrations, SAML service
+//     provider entries, the SPIFFE registry and the two admin roles are shared,
+//     and so are Kerberos, the two TLS listeners and SPIFFE's four sockets.
+//     Saying so is the whole reason the table at the foot of this page exists:
+//     a person who assumed a realm was a boundary everywhere would find out
+//     from an `ldapsearch`.
+//
+// **IT KEEPS NOTHING OF ITS OWN.** The registry is common/realms.js's, the
+// per-realm settings are config.js's — set through the same
+// `config.setOverride()` that /admin/config, /admin/token-lifetimes and
+// POST /admin-api/config/set call, against the realm's own override map — and
+// the signing key is helpers.js's. That is the one-store rule this console
+// follows everywhere: a page holding its own copy of what a realm sets would be
+// a second answer to "what is this realm configured with" that the protocol
+// endpoints could not see.
+//
+// **THE DEFAULT REALM IS NOT A ROW SOMEBODY CREATED** and cannot be removed,
+// renamed or re-prefixed. Every URL this service published before realms
+// existed is a URL in it, so an operator who could delete it could delete the
+// service.
+// ---------------------------------------------------------------------------
+const REALMS_CAVEAT =
+  '<p class="note"><strong>A realm separates what this service ISSUES, not who it knows.</strong> ' +
+  'Each realm has its own signing key, so a token minted in one does not verify against ' +
+  'another\'s JWKS — that is the point of a realm rather than a side effect. What every realm ' +
+  'SHARES is the embedded directory: one <code>ou=users</code>, one <code>ou=groups</code> and ' +
+  'one <code>ou=applications</code> for the whole process, because LDAP answers on a socket with ' +
+  'no path to put a realm segment in. So the same person can sign in to two realms and be one ' +
+  'entry, a client registered once can be used in both, and <strong>the two admin roles are ' +
+  'held once</strong> — there is no per-realm administrator. The table at the foot of this page ' +
+  'is the whole list of what is separated how.</p>' +
+  '<p class="note"><strong>Nothing here is persisted.</strong> Realms are held in memory like ' +
+  'everything else in this service and die with the process, along with the keys they signed ' +
+  'with. Define them from <code>POST /admin-api/realms</code> in whatever starts your stack if ' +
+  'you want them back.</p>';
+
+// The base URL of this service WITHOUT any realm prefix. Every URL this page
+// prints is built from it, because a page read inside `acme` still has to be
+// able to name `default`'s endpoints — and baseUrlOf() adds the ambient prefix
+// by design.
+function realmRootUrl(req) {
+  const withRealm = baseUrlOf(req);
+  return withRealm.slice(0, withRealm.length - realms.currentPrefix().length);
+}
+
+// What a realm sets, as rows. `config.describe()` is not used here and the
+// reason is worth a line: describing a setting means RESOLVING it, and resolving
+// it answers for the realm that is ambient rather than for the realm being
+// listed. So the raw value the realm carries is shown, beside what that setting
+// is called — which is what a person checking a realm's configuration is
+// actually reading.
+function realmSettingRows(realm) {
+  log.debug("Entering realmSettingRows(). realm=" + realm.id);
+  const rows = Object.keys(realm.overrides).sort().map(function (key) {
+    const setting = configSettingFor(key);
+    return { key: key, value: String(realm.overrides[key]),
+             label: setting ? setting.label : key,
+             group: setting ? setting.group : '' };
+  });
+  log.debug("Leaving realmSettingRows(). " + rows.length + " setting(s).");
+  return rows;
+}
+
+// One realm as JSON. The same shape the list and the drill-down both answer
+// with, and the same shape GET /admin-api/realms answers with, so that a test
+// reading one has read all three.
+function realmJson(req, realm) {
+  const prefix = realms.prefixOf(realm);
+  const base = realmRootUrl(req) + prefix;
+  return {
+    id: realm.id,
+    name: realm.name,
+    description: realm.description,
+    builtin: !!realm.builtin,
+    pathPrefix: prefix,
+    baseUrl: base,
+    // The kid of the realm's signing key. It is the one fact on this page that
+    // PROVES the realms are separate rather than asserting it — two realms
+    // showing one kid would be two names for one authorization server.
+    //
+    // Reading it MINTS it for a realm that has not signed anything yet, which is
+    // a 2048-bit RSA generation and about a tenth of a second. That is accepted
+    // deliberately: a console page that could not show a realm's key identifier
+    // until something had used the realm would be showing a blank for exactly
+    // the realm somebody had just created and was checking.
+    kid: stsKeysFor.of(realm.id).kid,
+    settings: realmSettingRows(realm),
+    // The four a client asks for first, in this realm.
+    endpoints: {
+      openidConfiguration: base + '/.well-known/openid-configuration',
+      authorizationServerMetadata: base + '/.well-known/oauth-authorization-server',
+      jwks: base + '/oauth2/jwks',
+      samlMetadata: base + '/saml2/metadata'
+    }
+  };
+}
+
+function realmsJson(req) {
+  log.debug("Entering realmsJson().");
+  const out = {
+    // The SETTING, and whether any prefix is actually answering. They differ in
+    // the one case that matters — the feature on with no realm defined — and a
+    // single flag reported that as "off". See GET /realms, which answers the
+    // same pair.
+    enabled: config.value('realms.enabled'),
+    active: realms.active(),
+    pathSegment: realms.pathSegment(),
+    current: realms.currentId(),
+    // The ids a realm may not be called, read off the live router. It is here
+    // rather than only in the refusal because somebody choosing a name wants to
+    // know before they type it, not after.
+    reserved: realms.reserved().sort(),
+    realms: realms.list().map(function (realm) { return realmJson(req, realm); }),
+    support: realms.realmSupport()
+  };
+  log.debug("Leaving realmsJson(). " + out.realms.length + " realm(s).");
+  return out;
+}
+
+function realmSupportTable() {
+  const rows = realms.realmSupport().map(function (row) {
+    const state = row.state === 'full'
+      ? '<span class="m">by path</span>'
+      : (row.state === 'partial'
+          ? '<span class="eff" title="Realm-aware, but not by path">' + esc(row.by) + '</span>'
+          : '<span class="none">shared</span>');
+    return '<tr><td>' + esc(row.family) + '</td><td>' + state + '</td><td>' +
+           esc(row.note) + '</td></tr>';
+  }).join('');
+  return '<table><tr><th>Family</th><th>Separated</th><th>What that means</th></tr>' +
+         rows + '</table>';
+}
+
+function realmsListPage(req) {
+  log.debug("Entering realmsListPage().");
+  const json = realmsJson(req);
+  const listView = listViewOf('/admin/realms', req.query);
+  const paged = pagedRows(req.query, json.realms, { path: '/admin/realms' });
+  const pg = paged.paging;
+  const rows = paged.shown.map(function (row) {
+    const href = '/admin/realms' + queryWith(listView, { realm: row.id });
+    return '<tr><td><a href="' + esc(href) + '"><code>' + esc(row.id) + '</code></a>' +
+      (row.builtin ? ' <span class="why">built in</span>' : '') +
+      '</td><td>' + esc(row.name) + '</td>' +
+      '<td><code>' + esc(row.pathPrefix || '/') + '</code></td>' +
+      '<td><code>' + esc(row.kid) + '</code></td>' +
+      '<td class="num">' + row.settings.length + '</td></tr>';
+  }).join('');
+
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listView, {})) + '">';
+
+  const inner =
+    '<p class="sub">' + realms.count() + ' realm(s). Everything under a realm\'s ' +
+    'prefix is that realm; everything under no prefix is the default one.</p>' +
+    REALMS_CAVEAT +
+
+    (realms.active()
+      ? ''
+      : '<div class="warn"><strong>Trust realms are switched off.</strong> ' +
+        '<code>realms.enabled</code> is false, so every prefix below answers 404 ' +
+        'and this whole service is the default realm. The definitions are ' +
+        'untouched — that is what this setting is for: it lets a realm be ruled ' +
+        'out as the cause of something without anything being deleted. Turn it ' +
+        'back on from <a href="/admin/config">Configuration</a>.</div>') +
+
+    '<h2>The realms</h2>' +
+    '<table><tr><th>Id</th><th>Name</th><th>Path prefix</th><th>Signing key</th>' +
+    '<th class="num">Settings</th></tr>' + rows + '</table>' +
+    pageNav('/admin/realms', pageParamsOf(req.query), pg) +
+    perPageForm('/admin/realms', 'per', req.query.per, pg.perPage, '', listView) +
+
+    '<h2>Define a realm</h2>' +
+    '<p class="note">The id becomes a path segment, so it is lower-case letters, ' +
+    'digits and hyphens. It may not be <code>default</code> and it may not be the ' +
+    'first segment of a path this service already serves — ' +
+    (json.reserved.length ? codeList(json.reserved.slice(0, 12)) +
+      (json.reserved.length > 12 ? ' and ' + (json.reserved.length - 12) + ' more' : '')
+      : 'nothing is registered yet') +
+    ' — whatever <code>realms.pathSegment</code> is set to, precisely so that ' +
+    'clearing that setting cannot turn an existing realm into a shadow over the ' +
+    'console or the authorization server.</p>' +
+    '<form method="post" action="/admin/realms">' + carryBack +
+    '<input type="hidden" name="action" value="create">' +
+    '<div class="formrow"><label for="rid">Id</label>' +
+    '<input type="text" id="rid" name="id" size="16" placeholder="acme" required>' +
+    '<label for="rname">Name</label>' +
+    '<input type="text" id="rname" name="name" size="22" placeholder="Acme Corporation">' +
+    '<label for="rdesc">Description</label>' +
+    '<input type="text" id="rdesc" name="description" size="40">' +
+    '<button type="submit">Define it</button></div></form>' +
+
+    '<h2>What is separated, and what is shared</h2>' +
+    '<p class="lead">A realm separates what this service ISSUES and everything ' +
+    'it is holding while it issues it — keys, sessions, codes, tokens, offers, ' +
+    'artifacts, statistics and the audit log. It does not separate the ' +
+    'embedded directory, and four families answer on sockets with no path in ' +
+    'them at all. This table is the whole list, and <code>GET /realms</code> ' +
+    'answers the same thing to a client that cannot read a console.</p>' +
+    realmSupportTable();
+
+  log.debug("Leaving realmsListPage().");
+  return { json: json, inner: inner };
+}
+
+function realmDetailPage(req, wanted) {
+  log.debug("Entering realmDetailPage(). realm=" + wanted);
+  const realm = realms.get(wanted);
+  if (!realm) {
+    log.debug("Leaving realmDetailPage(). No such realm.");
+    return { json: { error: 'no_such_realm', realm: wanted },
+             inner: '<div class="err">No realm called <code>' + esc(wanted) +
+                    '</code> is defined. <a href="/admin/realms">The list</a> ' +
+                    'is what there is.</div>' };
+  }
+  const json = realmJson(req, realm);
+  const listView = listViewOf('/admin/realms', req.query);
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listView, {})) + '">';
+  const inRealm = realms.currentId() === realm.id;
+
+  const settingRows = json.settings.length
+    ? json.settings.map(function (row) {
+        return '<tr><td><code>' + esc(row.key) + '</code></td>' +
+               '<td>' + esc(row.label) + '</td>' +
+               '<td><code>' + esc(row.value) + '</code></td>' +
+               '<td><form method="post" action="/admin/realms" class="inline">' +
+               carryBack + '<input type="hidden" name="action" value="unset">' +
+               '<input type="hidden" name="id" value="' + esc(realm.id) + '">' +
+               '<input type="hidden" name="key" value="' + esc(row.key) + '">' +
+               '<button type="submit" class="secondary">Unset</button>' +
+               '</form></td></tr>';
+      }).join('')
+    : '<tr><td colspan="4" class="none">Nothing. This realm is configured ' +
+      'exactly as the process is — which is a realm that differs only in its ' +
+      'key, its sessions and what it has issued.</td></tr>';
+
+  const endpointRows = Object.keys(json.endpoints).map(function (name) {
+    return '<tr><td>' + esc(name) + '</td><td class="who"><a href="' +
+           esc(json.endpoints[name]) + '"><code>' + esc(json.endpoints[name]) +
+           '</code></a></td></tr>';
+  }).join('');
+
+  const inner =
+    '<p class="sub">' + esc(realm.name) +
+    (realm.builtin ? ' — the built-in realm' : '') + '</p>' +
+    (realm.description ? '<p class="lead">' + esc(realm.description) + '</p>' : '') +
+
+    (inRealm
+      ? '<div class="ok">You are reading this console <strong>inside</strong> ' +
+        'this realm. <a href="/admin/config">Configuration</a> writes here.</div>'
+      : '<div class="warn">You are reading this console in the <strong>' +
+        esc(realms.current().name) + '</strong> realm. The switcher on the left ' +
+        'moves to this one; until then <a href="/admin/config">Configuration</a> ' +
+        'writes to the realm you are in, not to this one.</div>') +
+
+    '<h2>Where it answers</h2>' +
+    '<p class="note">Path prefix <code>' + esc(json.pathPrefix || '(none — this is ' +
+    'the default realm)') + '</code>. Every HTTP endpoint this service has is ' +
+    'under it, unchanged: what is <code>/oauth2/token</code> in the default realm ' +
+    'is <code>' + esc(json.pathPrefix) + '/oauth2/token</code> here.</p>' +
+    '<table><tr><th>Document</th><th>URL</th></tr>' + endpointRows + '</table>' +
+    '<p class="note">The signing key is <code>' + esc(json.kid) + '</code>, ' +
+    'generated for this realm and held only in memory. A token minted here does ' +
+    'not verify against any other realm\'s JWKS, which is what makes two realms ' +
+    'two authorization servers rather than one served twice.</p>' +
+
+    '<h2>What this realm sets</h2>' +
+    '<p class="note">Every setting in <a href="/admin/config">this service\'s ' +
+    'table</a> can be set per realm, above whatever the process as a whole is ' +
+    'configured with and below nothing. The two exceptions are ' +
+    '<code>realms.enabled</code> and <code>realms.pathSegment</code>: a realm ' +
+    'that could switch realms off, or move the prefix it was found under, would ' +
+    'be doing it half way through the request that found it.</p>' +
+    '<table><tr><th>Key</th><th>Setting</th><th>Value</th><th></th></tr>' +
+    settingRows + '</table>' +
+    '<form method="post" action="/admin/realms">' + carryBack +
+    '<input type="hidden" name="action" value="set">' +
+    '<input type="hidden" name="id" value="' + esc(realm.id) + '">' +
+    '<div class="formrow"><label for="skey">Key</label>' +
+    '<input type="text" id="skey" name="key" size="30" placeholder="saml2.entityId" required>' +
+    '<label for="sval">Value</label>' +
+    '<input type="text" id="sval" name="value" size="30">' +
+    '<button type="submit">Set it here</button></div></form>' +
+
+    '<h2>Name and description</h2>' +
+    '<form method="post" action="/admin/realms">' + carryBack +
+    '<input type="hidden" name="action" value="update">' +
+    '<input type="hidden" name="id" value="' + esc(realm.id) + '">' +
+    '<div class="formrow"><label for="uname">Name</label>' +
+    '<input type="text" id="uname" name="name" size="22" value="' + esc(realm.name) + '">' +
+    '<label for="udesc">Description</label>' +
+    '<input type="text" id="udesc" name="description" size="46" value="' +
+    esc(realm.description) + '">' +
+    '<button type="submit">Save</button></div></form>' +
+
+    (realm.builtin
+      ? '<h2>It cannot be removed</h2>' +
+        '<p class="note">Every URL this service published before trust realms ' +
+        'existed is a URL in this realm, so removing it would remove the ' +
+        'service. There is deliberately no button.</p>'
+      : '<h2>Remove it</h2>' +
+        '<p class="note"><strong>Everything it holds goes with it</strong> — its ' +
+        'sessions, its authorization codes, its tokens, its offers, its service ' +
+        'providers, its statistics, its audit log and its signing key. That is ' +
+        'deliberate rather than thorough: a realm re-created with the same id ' +
+        'inheriting the last one\'s sessions would be the single most surprising ' +
+        'thing a re-created realm could do. Nothing is removed from the shared ' +
+        'directory, because nothing there belongs to a realm.</p>' +
+        '<form method="post" action="/admin/realms">' + carryBack +
+        '<input type="hidden" name="action" value="remove">' +
+        '<input type="hidden" name="id" value="' + esc(realm.id) + '">' +
+        '<button type="submit" class="danger">Remove ' + esc(realm.id) + '</button></form>');
+
+  log.debug("Leaving realmDetailPage().");
+  return { json: json, inner: inner };
+}
+
+// The four writes. One function, the way every other page here has one, so that
+// the console form and POST /admin-api/realms cannot come to disagree about what
+// "remove" means.
+function realmsAction(body) {
+  log.debug("Entering realmsAction(). action=" + (body && body.action));
+  const action = String((body && body.action) || '').trim();
+  const id = String((body && body.id) || '').trim();
+
+  if (action === 'create') {
+    const result = realms.create({ id: id.toLowerCase(), name: body.name,
+                                   description: body.description });
+    if (!result.ok) {
+      log.debug("Leaving realmsAction(). create refused.");
+      return result;
+    }
+    log.debug("Leaving realmsAction(). create ok.");
+    return { ok: true, realm: result.realm.id,
+             message: 'The realm "' + result.realm.id + '" is defined. Every ' +
+                      'HTTP endpoint this service has now answers under ' +
+                      realms.prefixOf(result.realm) + '/ as well, with its own ' +
+                      'signing key and nothing issued yet.' };
+  }
+
+  if (action === 'update') {
+    const result = realms.update(id, { name: body.name, description: body.description });
+    if (!result.ok) {
+      log.debug("Leaving realmsAction(). update refused.");
+      return result;
+    }
+    log.debug("Leaving realmsAction(). update ok.");
+    return { ok: true, realm: id, message: 'Saved.' };
+  }
+
+  if (action === 'set') {
+    const key = String(body.key || '').trim();
+    const result = realms.setOverride(id, key, body.value);
+    if (!result.ok) {
+      log.debug("Leaving realmsAction(). set refused.");
+      return result;
+    }
+    log.debug("Leaving realmsAction(). set ok.");
+    return { ok: true, realm: id, key: key,
+             message: key + ' is set on the "' + id + '" realm. It applies to ' +
+                      'the next request that arrives under that realm\'s prefix, ' +
+                      'and to nothing else.' };
+  }
+
+  if (action === 'unset') {
+    const key = String(body.key || '').trim();
+    const result = realms.clearOverride(id, key);
+    if (!result.ok) {
+      log.debug("Leaving realmsAction(). unset refused.");
+      return result;
+    }
+    log.debug("Leaving realmsAction(). unset ok.");
+    return { ok: true, realm: id, key: key,
+             message: key + ' is no longer set on the "' + id + '" realm; it ' +
+                      'comes from whatever this service as a whole is ' +
+                      'configured with.' };
+  }
+
+  if (action === 'remove') {
+    // ------------------------------------------------------------------
+    // A REALM MAY NOT REMOVE ITSELF, and this is the one refusal here that is
+    // about the request rather than about the realm.
+    //
+    // The response to this POST is a 303 back to /admin/realms — a path that
+    // app.js is about to rewrite into the realm that is being deleted, because
+    // that is the realm the request arrived in. The reader would be redirected
+    // into a prefix that had stopped existing one instruction earlier and would
+    // meet `Cannot GET`. Everything else about the removal would have worked,
+    // which is what makes it worth refusing rather than fixing: the fix is to
+    // do it from another realm, and that is a sentence rather than a special
+    // case in the redirect.
+    // ------------------------------------------------------------------
+    if (id && id === realms.currentId()) {
+      log.debug("Leaving realmsAction(). A realm may not remove itself.");
+      return { ok: false, errors: ['This request arrived inside the "' + id +
+        '" realm, so removing it would leave the caller on a path that no ' +
+        'longer exists — the console would be redirected into a prefix that ' +
+        'had stopped existing one instruction earlier. Do it from another ' +
+        'realm: the switcher at the top of the console sidebar, or the same ' +
+        'call under a different prefix.'] };
+    }
+    const result = realms.remove(id);
+    if (!result.ok) {
+      log.debug("Leaving realmsAction(). remove refused.");
+      return result;
+    }
+    log.debug("Leaving realmsAction(). remove ok.");
+    return { ok: true, realm: id,
+             message: 'The realm "' + id + '" is gone, with its sessions, its ' +
+                      'tokens, its statistics, its audit log and its signing ' +
+                      'key. Nothing was removed from the shared directory.' };
+  }
+
+  log.debug("Leaving realmsAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The five are: ' +
+    'create, update, set, unset, remove.'] };
+}
+
+function realmsView(req) {
+  log.debug("Entering realmsView().");
+  const wanted = String(req.query.realm || '').trim();
+  if (wanted) {
+    const detail = realmDetailPage(req, wanted);
+    log.debug("Leaving realmsView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'Trust realm ' + wanted,
+             up: upTo('/admin/realms', wanted, listViewOf('/admin/realms', req.query)) };
+  }
+  const list = realmsListPage(req);
+  log.debug("Leaving realmsView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Trust realms' };
+}
+
+app.get('/admin/realms', function (req, res) {
+  log.debug("Entering the admin trust realms page.");
+  const view = realmsView(req);
+  respond(req, res, view.json, view.title, '/admin/realms', view.inner, view.up);
+  log.debug("Leaving the admin trust realms page.");
+});
+
+app.post('/admin/realms', function (req, res) {
+  log.debug("Entering the admin trust realms action endpoint.");
+  const body = parseBody(req);
+  const result = realmsAction(body);
+  const listView = listViewFromBack('/admin/realms', body.back);
+  const id = String(body.id || '').trim();
+  // Back to the realm that was acted on, EXCEPT after a removal — there is
+  // nothing to drill into any more, and a 303 to a drill-down for a realm that
+  // has just gone would answer with this page's own "no such realm" message,
+  // which reads as a failure after an action that succeeded.
+  const back = (id && result.ok !== false && String(body.action) !== 'remove')
+    ? '/admin/realms' + queryWith(listView, { realm: id })
+    : '/admin/realms' + queryWith(listView, {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin trust realms action endpoint.");
+});
 
 // ---------------------------------------------------------------------------
 // /admin/config — every setting this service has, in one page.
@@ -9698,6 +12242,588 @@ app.post('/admin/spiffe/agents', function (req, res) {
 });
 
 
+// ---------------------------------------------------------------------------
+// GET /admin/federation, POST /admin/federation
+//
+// THE ONE PAGE IN THIS CONSOLE THAT CONFIGURES A REFUSAL.
+//
+// Every other page here either reports what happened or widens what this
+// service will accept. This one is the opposite in both directions, and the
+// page says so at the top rather than leaving it to be discovered: a
+// relationship is created DISABLED, an assertion is refused unless it verifies
+// against the certificate configured on it, and a relationship that is enabled
+// but half-configured refuses rather than half-working.
+//
+// It reads and writes ONE store — `ou=federations`, through
+// `federation/federation.js` — and holds nothing of its own, like every other
+// page in this file. What it deliberately does NOT hold is anything the
+// applications registry already holds: an identity-provider-side relationship
+// NAMES an application and stops, so its entityID, its redirect URIs and its
+// certificate stay on `/admin/applications` where every protocol module reads
+// them.
+// ---------------------------------------------------------------------------
+const FEDERATION_CAVEAT =
+  '<p class="note"><strong>This is the one feature here that has to be configured before it ' +
+  'will do anything, and the one page in this console that configures a REFUSAL.</strong> ' +
+  'Everywhere else this service accepts what it is given — any username, any client_id, any ' +
+  'entityID, any LDAP bind. It cannot do that at an assertion consumer service: what arrives ' +
+  'there is an unauthenticated HTTP request claiming to be a person, and the session it would ' +
+  'produce is the same one <code>/oauth2/authorize</code>, <code>/wsfed</code>, ' +
+  '<code>/saml2</code> and this console all read. A permissive version of it would not be a ' +
+  'permissive mock; it would be an authentication bypass for every protocol in this ' +
+  'process.</p>' +
+  '<p class="note"><strong>The gate is on the SIGNER, not on the subject.</strong> Once a ' +
+  'relationship is configured and enabled, everything downstream is as permissive as the rest ' +
+  'of this service: any username in the assertion is accepted, any attribute is mapped, ' +
+  'nothing about the person is checked, and a directory entry is created for them.</p>';
+
+const FEDERATION_LINKS =
+  '<p class="sub"><a href="' + federation.PATHS.base + '">the federation index</a> &middot; ' +
+  '<a href="/admin/applications">the applications registry</a> &middot; ' +
+  '<a href="/admin/users">who has signed in</a> &middot; ' +
+  '<a href="/ldap/federations">the register as the directory sees it</a></p>';
+
+// One row's summary, shared by the list and the JSON. It is a function rather
+// than being built inline twice because the READINESS is computed here — the
+// page prints it and the API answers it, and two computations of "is this
+// partner usable" would be two answers to the question the whole page is about.
+function federationRow(record) {
+  const readiness = federation.readinessOf(record);
+  return {
+    id: record.fedId,
+    name: record.fedName || record.fedId,
+    role: record.fedRole,
+    roleLabel: (federation.roleRow(record.fedRole) || {}).short || record.fedRole,
+    protocol: record.fedProtocol,
+    protocolLabel: (federation.protocolRow(record.fedProtocol) || {}).label || record.fedProtocol,
+    peer: record.fedPeer || '',
+    application: record.fedApplication || '',
+    enabled: federation.isEnabled(record),
+    ready: readiness.ready,
+    missing: readiness.missing,
+    usable: federation.isEnabled(record) && readiness.ready,
+    releases: (record.fedRelease || []).slice(0),
+    mappings: (record.fedAttributeMap || []).slice(0),
+    authentications: parseInt(record.fedAuthentications, 10) || 0,
+    users: parseInt(record.fedUsers, 10) || 0,
+    lastUser: record.fedLastUser || '',
+    lastSeen: record.fedLastSeen || '',
+    lastError: record.fedLastError || '',
+    lastErrorAt: record.fedLastErrorAt || '',
+    dn: record.dn || ''
+  };
+}
+
+// THE STATE CELL, and it is the most important thing on the page. Four states
+// and each is a different instruction to the reader, which is why they are four
+// sentences rather than a boolean and a tooltip.
+function federationStateCell(row) {
+  if (row.usable) return '<td class="ok">ready</td>';
+  if (!row.enabled) {
+    return '<td class="off">disabled' +
+      (row.ready ? '' : ' <span class="sub">and not configured</span>') + '</td>';
+  }
+  return '<td class="bad">ENABLED, not configured<span class="sub">' +
+    esc(row.missing.join(', ')) + ' still to set. It refuses rather than half-working.' +
+    '</span></td>';
+}
+
+function federationListPage(req) {
+  log.debug("Entering federationListPage().");
+  const all = federation.list().map(federationRow);
+  const wantedText = String(req.query.q || '').trim().toLowerCase();
+  const wantedRole = String(req.query.role || '').trim();
+  const filtered = all.filter(function (row) {
+    if (wantedRole && row.role !== wantedRole) return false;
+    if (!wantedText) return true;
+    return (row.id + ' ' + row.name + ' ' + row.peer + ' ' + row.application)
+      .toLowerCase().indexOf(wantedText) >= 0;
+  });
+  const paging = pagingOf(req.query, filtered.length, {});
+  const paged = pagedRows(req.query, filtered, {});
+  const nav = pageNav('/admin/federation', pageParamsOf(req.query), paging);
+
+  const rows = paged.shown.map(function (row) {
+    return '<tr><td><a href="/admin/federation' +
+      esc(queryWith(listViewOf('/admin/federation', req.query), { relationship: row.id })) +
+      '">' + esc(row.id) + '</a>' +
+      (row.name !== row.id ? '<span class="sub">' + esc(row.name) + '</span>' : '') + '</td>' +
+      '<td>' + esc(row.roleLabel) + '</td>' +
+      '<td>' + esc(row.protocolLabel) + '</td>' +
+      '<td class="who">' + esc(row.peer || row.application || '') +
+      (!row.peer && !row.application ? '<span class="sub">nothing named yet</span>' : '') +
+      '</td>' +
+      federationStateCell(row) +
+      '<td class="num">' + row.authentications + '</td>' +
+      '<td class="num">' + row.users + '</td>' +
+      '<td>' + (row.lastError
+        ? '<span class="bad">' + esc(shortened(row.lastError, 60)) + '</span>'
+        : '<span class="sub">none recorded</span>') + '</td></tr>';
+  }).join('');
+
+  const roleOptions = ['<option value="">any role</option>'].concat(
+    federation.ROLES.map(function (one) {
+      const n = all.filter(function (r) { return r.role === one.role; }).length;
+      return '<option value="' + esc(one.role) + '"' +
+        (one.role === wantedRole ? ' selected' : '') + '>' + esc(one.short) +
+        ' (' + n + ')</option>';
+    })).join('');
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(all.length, 'Relationships') +
+    tile(all.filter(function (r) { return r.usable; }).length, 'Ready') +
+    tile(all.filter(function (r) { return r.enabled && !r.ready; }).length,
+         'Enabled, not configured') +
+    tile(all.reduce(function (n, r) { return n + r.authentications; }, 0),
+         'Federated sign-ins') +
+    '</div>' +
+    FEDERATION_CAVEAT +
+    '<form method="get" action="/admin/federation"><div class="formrow">' +
+    '<label for="q">Relationship</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(String(req.query.q || '')) +
+    '" size="24" placeholder="id, name, partner or application">' +
+    '<label for="role">Role</label><select id="role" name="role">' + roleOptions + '</select>' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' + perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    ((wantedText || wantedRole) ? ' <a href="/admin/federation">clear</a>' : '') +
+    '</div></form>' + nav +
+    '<table><tr><th>Relationship</th><th>This service is</th><th>Protocol</th>' +
+    '<th>Partner</th><th>State</th><th class="num">Sign-ins</th><th class="num">People</th>' +
+    '<th>Last refusal</th></tr>' +
+    (rows || '<tr><td colspan="8">No federation relationship ' +
+      ((wantedText || wantedRole) ? 'matches. The filter above may be hiding some.'
+        : 'is configured. Nothing federated happens until one is — and then not until it ' +
+          'is enabled, which is a second, deliberate act.') + '</td></tr>') +
+    '</table>' + nav +
+    federationCreateForm() +
+    '<h2>The two directions</h2>' +
+    '<table><tr><th>This service is</th><th>What it means</th></tr>' +
+    federation.ROLES.map(function (one) {
+      return '<tr><td>' + esc(one.short) + '</td><td>' + esc(one.what) + '</td></tr>';
+    }).join('') + '</table>' +
+    '<p class="note"><strong>One relationship is one DIRECTION.</strong> A partner this ' +
+    'service both consumes from and asserts to is two relationships with two ids, because ' +
+    'everything that configures one differs by direction — the endpoints are theirs or ours, ' +
+    'the certificate is theirs or ours, the attribute mapping runs inbound or the release ' +
+    'list runs outbound.</p>' +
+    '<h2>The five protocols</h2>' +
+    '<table><tr><th>Protocol</th><th>What happens</th><th>Specification</th></tr>' +
+    federation.PROTOCOLS.map(function (one) {
+      return '<tr><td>' + esc(one.label) + '</td><td>' + esc(one.what) + '</td>' +
+        '<td class="sub">' + esc(one.spec) + '</td></tr>';
+    }).join('') + '</table>' +
+    FEDERATION_LINKS;
+
+  log.debug("Leaving federationListPage(). " + paged.shown.length + " row(s) of " +
+            filtered.length + " matched.");
+  return {
+    inner: inner,
+    json: {
+      relationshipCount: all.length, matched: filtered.length, shown: paged.shown.length,
+      ready: all.filter(function (r) { return r.usable; }).length,
+      filter: { q: String(req.query.q || '') || null, role: wantedRole || null },
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      container: federation.containerDn(), max: federation.maxRelationships(),
+      roles: federation.ROLES, protocols: federation.PROTOCOLS,
+      paths: federation.PATHS,
+      relationships: paged.shown
+    }
+  };
+}
+
+function federationCreateForm() {
+  return '<h2>Add a relationship</h2>' +
+    '<p class="note">It is created <strong>disabled</strong>, whatever is filled in here, ' +
+    'and nothing about it does anything until it is enabled on its own page. That is not ' +
+    'caution for its own sake: a partner that half-exists and silently accepts assertions is ' +
+    'the failure this whole register is arranged to prevent, and enabling is the second, ' +
+    'deliberate act that says the configuration is finished.</p>' +
+    '<form method="post" action="/admin/federation"><div class="formrow">' +
+    '<input type="hidden" name="action" value="create">' +
+    '<label for="fedid">Id</label>' +
+    '<input type="text" id="fedid" name="id" size="16" required placeholder="partner-a">' +
+    '<label for="fedrole">This service is</label>' +
+    '<select id="fedrole" name="role">' +
+    federation.ROLES.map(function (one) {
+      return '<option value="' + esc(one.role) + '">' + esc(one.short) + '</option>';
+    }).join('') + '</select>' +
+    '<label for="fedprotocol">Protocol</label>' +
+    '<select id="fedprotocol" name="protocol">' +
+    federation.PROTOCOLS.map(function (one) {
+      return '<option value="' + esc(one.protocol) + '">' + esc(one.label) + '</option>';
+    }).join('') + '</select>' +
+    '<label for="fedname">Name</label>' +
+    '<input type="text" id="fedname" name="name" size="16" placeholder="optional">' +
+    '<label for="fedpeer">Partner</label>' +
+    '<input type="text" id="fedpeer" name="peer" size="26" ' +
+    'placeholder="their entityID, issuer or realm">' +
+    '<button type="submit">Add</button>' +
+    '</div></form>' +
+    '<p class="note">The <strong>id</strong> is the key, the RDN and a URL segment, so it has ' +
+    'to start with a letter or a digit and hold only letters, digits, dot, dash and ' +
+    'underscore. <strong>Partner</strong> is their own identifier in whatever their protocol ' +
+    'calls it, and on a service-provider-side relationship it is CHECKED: an assertion whose ' +
+    'issuer is not that string is refused, even when the signature verifies.</p>';
+}
+
+// The drill-down. It is the page that actually does the work, because a
+// relationship is configured field by field and the fields differ by role and
+// by protocol — which is why the form is BUILT from the schema rather than
+// typed out: `fieldsForRole()` is the same call the action validates against,
+// so this page cannot offer a field the action would refuse.
+function federationDetailPage(req, id) {
+  log.debug("Entering federationDetailPage(). id=" + id);
+  const carryBack = '<input type="hidden" name="back" value="' +
+    esc(queryWith(listViewOf('/admin/federation', req.query), {})) + '">';
+  const record = federation.get(id);
+  if (!record) {
+    log.debug("Leaving federationDetailPage(). No such relationship.");
+    return {
+      inner: messagesOf(req) +
+        '<p class="warn">There is no federation relationship called <code>' + esc(id) +
+        '</code>. Unlike almost everything else in this console, one does not appear because ' +
+        'somebody used it: this register is configured and nothing creates an entry in it by ' +
+        'turning up.</p>' + FEDERATION_LINKS,
+      json: { found: false, id: id }
+    };
+  }
+  const row = federationRow(record);
+  const base = 'http://' + String(req.get('host') || ('localhost:' + config.value('global.port')));
+  const acs = base + federation.PATHS.acs + '/' + encodeURIComponent(row.id);
+  const login = federation.PATHS.login + '/' + encodeURIComponent(row.id);
+  const metadata = base + federation.PATHS.metadata + '/' + encodeURIComponent(row.id);
+
+  const setFields = federation.fieldsForRole(row.role, 'set').filter(function (field) {
+    // The four booleans get their own two-button control below, because a text
+    // box a person types TRUE into is a text box a person types "true", "yes"
+    // and "1" into — and one of those is how a relationship stays disabled
+    // while the page says it is on.
+    return ['fedEnabled', 'fedAutocreateUsers', 'fedSignRequest',
+            'fedAllowUnsolicited'].indexOf(field.name) === -1;
+  });
+  const multiFields = federation.fieldsForRole(row.role, 'multi');
+
+  const fieldRows = setFields.map(function (field) {
+    const value = record[field.name] || '';
+    return '<tr><td><code>' + esc(field.name) + '</code></td>' +
+      '<td><form method="post" action="/admin/federation"><div class="formrow">' + carryBack +
+      '<input type="hidden" name="action" value="set">' +
+      '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
+      '<input type="hidden" name="field" value="' + esc(field.name) + '">' +
+      '<input type="text" name="value" size="42" value="' +
+      esc(field.sensitive && value ? '' : value) + '"' +
+      (field.sensitive ? ' placeholder="set — not shown"' : '') + '>' +
+      '<button type="submit">Set</button></div></form></td>' +
+      '<td class="sub">' + esc(field.what) +
+      (field.sensitive
+        ? ' <strong>Never printed on this page or in the audit log</strong>, though an ' +
+          'ldapsearch of this directory will show it — see the note at the foot.'
+        : '') + '</td></tr>';
+  }).join('');
+
+  const switches = ['fedEnabled'].concat(
+    row.role === 'service-provider'
+      ? ['fedAutocreateUsers', 'fedAllowUnsolicited', 'fedSignRequest']
+      : []).map(function (name) {
+    const field = federation.SCHEMA.attributes.filter(function (f) { return f.name === name; })[0];
+    if (!field) return '';
+    const dflt = name === 'fedAutocreateUsers';
+    const on = federation.boolOf(record[name], dflt);
+    return '<tr><td><code>' + esc(name) + '</code></td>' +
+      '<td class="' + (on ? 'ok' : 'off') + '">' + (on ? 'TRUE' : 'FALSE') + '</td>' +
+      '<td><form method="post" action="/admin/federation"><div class="formrow">' + carryBack +
+      '<input type="hidden" name="action" value="set">' +
+      '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
+      '<input type="hidden" name="field" value="' + esc(name) + '">' +
+      '<input type="hidden" name="value" value="' + (on ? 'FALSE' : 'TRUE') + '">' +
+      '<button type="submit"' + (name === 'fedEnabled' && !on && !row.ready ? ' class="danger"' : '') +
+      '>' + (on ? 'Turn off' : 'Turn on') + '</button></div></form></td>' +
+      '<td class="sub">' + esc(field.what) + '</td></tr>';
+  }).join('');
+
+  const multiSections = multiFields.map(function (field) {
+    const values = record[field.name] || [];
+    return '<h3><code>' + esc(field.name) + '</code></h3>' +
+      '<p class="note">' + esc(field.what) + '</p>' +
+      (values.length
+        ? '<table><tr><th>Value</th><th></th></tr>' + values.map(function (value) {
+            return '<tr><td class="who"><code>' + esc(value) + '</code></td>' +
+              '<td><form method="post" action="/admin/federation"><div class="formrow">' +
+              carryBack +
+              '<input type="hidden" name="action" value="remove-value">' +
+              '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
+              '<input type="hidden" name="field" value="' + esc(field.name) + '">' +
+              '<input type="hidden" name="value" value="' + esc(value) + '">' +
+              '<button type="submit">Remove</button></div></form></td></tr>';
+          }).join('') + '</table>'
+        : '<p class="sub">None' +
+          (field.name === 'fedRelease'
+            ? ' — <strong>and that means no release policy rather than release nothing</strong>. ' +
+              'This partner receives exactly what /admin/claims and /admin/saml-attributes ' +
+              'would give anybody. Adding the first name here starts filtering.'
+            : '') + '.</p>') +
+      '<form method="post" action="/admin/federation"><div class="formrow">' + carryBack +
+      '<input type="hidden" name="action" value="add-value">' +
+      '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
+      '<input type="hidden" name="field" value="' + esc(field.name) + '">' +
+      '<input type="text" name="value" size="40" placeholder="' +
+      (field.name === 'fedAttributeMap' ? 'incoming name=ldapAttribute'
+        : (field.name === 'fedRelease' ? 'a claim or attribute name' : 'a value')) + '">' +
+      '<button type="submit">Add</button></div></form>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(row.authentications, 'Federated sign-ins') +
+    tile(row.users, 'Distinct people') +
+    tile(row.usable ? 'ready' : (row.enabled ? 'NOT READY' : 'disabled'), 'State') +
+    '</div>' +
+    (row.lastError
+      ? '<p class="warn"><strong>The last attempt was refused.</strong> ' + esc(row.lastError) +
+        (row.lastErrorAt ? ' <span class="sub">at ' + esc(row.lastErrorAt) + '</span>' : '') +
+        ' A success clears this, so it standing here means nothing has worked since.</p>'
+      : '') +
+    (row.enabled && !row.ready
+      ? '<p class="warn"><strong>Enabled and not configured.</strong> ' +
+        esc(row.missing.join(', ')) + ' still to set. Every endpoint for this relationship ' +
+        'refuses in this state rather than half-working — a federated sign-in that got half ' +
+        'way and produced a session would be the worst possible outcome.</p>'
+      : '') +
+    '<table><tr><th>What</th><th>Value</th></tr>' +
+    '<tr><td>This service is</td><td>' + esc(row.roleLabel) + '</td></tr>' +
+    '<tr><td>Protocol</td><td>' + esc(row.protocolLabel) + '</td></tr>' +
+    '<tr><td>Partner</td><td class="who"><code>' + esc(row.peer || '(none named)') +
+      '</code></td></tr>' +
+    (row.role === 'identity-provider'
+      ? '<tr><td>Application</td><td class="who">' +
+        (row.application
+          ? '<a href="/admin/applications?application=' + encodeURIComponent(row.application) +
+            '"><code>' + esc(row.application) + '</code></a>'
+          : '<span class="sub">none named — this relationship configures nothing until one ' +
+            'is</span>') + '</td></tr>'
+      : '') +
+    '<tr><td>Last used</td><td>' + esc(row.lastSeen || '(never)') +
+      (row.lastUser ? ' <span class="sub">by ' + esc(row.lastUser) + '</span>' : '') +
+      '</td></tr>' +
+    '<tr><td>Directory entry</td><td class="who"><code>' + esc(row.dn) + '</code></td></tr>' +
+    '</table>' +
+    (row.role === 'service-provider'
+      ? '<h2>What to configure at the partner</h2>' +
+        '<p class="note">These are the URLs to give whoever runs the identity provider. The ' +
+        'assertion consumer service is the one that matters: a partner sending its answer ' +
+        'anywhere else produces a 404 in a browser AFTER a successful sign-in somewhere ' +
+        'else, which is the least diagnosable failure this feature has.</p>' +
+        '<table><tr><th>What they need</th><th>Value</th></tr>' +
+        '<tr><td>Assertion consumer service / <code>wreply</code> / ' +
+          '<code>redirect_uri</code></td><td class="who"><code>' + esc(acs) +
+          '</code></td></tr>' +
+        '<tr><td>Our entityID / <code>wtrealm</code></td><td class="who"><code>' + esc(acs) +
+          '</code><span class="sub">the same string, deliberately: one name for this ' +
+          'service per partner, so a partner keying its trust store off an entityID gets ' +
+          'one that is only ours-with-them</span></td></tr>' +
+        ((row.protocol === 'saml2' || row.protocol === 'saml11')
+          ? '<tr><td>Our SAML metadata</td><td class="who"><a href="' +
+            esc(federation.PATHS.metadata + '/' + encodeURIComponent(row.id)) + '"><code>' +
+            esc(metadata) + '</code></a><span class="sub">unsigned, deliberately — a ' +
+            'signature over it made by the very key it publishes proves nothing they did ' +
+            'not already have to trust</span></td></tr>'
+          : '') +
+        '</table>' +
+        '<p><a class="btn" href="' + esc(login) + '">Start a federated sign-in through this ' +
+        'partner</a> ' + (row.usable ? '' : '<span class="sub">— it will refuse until this ' +
+        'relationship is enabled and configured</span>') + '</p>'
+      : '<h2>What this relationship does</h2>' +
+        '<p class="note">Every protocol endpoint here already issues to anybody that asks, ' +
+        'so this relationship changes nothing about whether the partner is answered. What it ' +
+        'adds is two things: the partner is marked as a FEDERATION PARTNER rather than a test ' +
+        'client, and <code>fedRelease</code> below decides which attributes are released to ' +
+        'it.</p>' +
+        '<p class="note"><strong>The release list can only remove, and only from what ' +
+        '<a href="/admin/claims">custom claims</a>, <a href="/admin/saml-attributes">custom ' +
+        'SAML attributes</a> and the groups claim would add.</strong> It cannot touch ' +
+        '<code>sub</code>, <code>iss</code>, <code>exp</code>, a NameID or anything else the ' +
+        'protocol puts in an artifact itself — those are what make the artifact verifiable, ' +
+        'and a release list that could drop <code>iss</code> would produce tokens that fail ' +
+        'to verify with nothing pointing back at this page.</p>') +
+    '<h2>Settings</h2>' +
+    '<table><tr><th>Field</th><th>Value</th><th>What it is</th></tr>' + fieldRows + '</table>' +
+    '<h2>Switches</h2>' +
+    '<table><tr><th>Field</th><th>Now</th><th></th><th>What it is</th></tr>' + switches +
+    '</table>' +
+    '<h2>Lists</h2>' + multiSections +
+    '<h2>Delete</h2>' +
+    '<form method="post" action="/admin/federation"><div class="formrow">' + carryBack +
+    '<input type="hidden" name="action" value="delete">' +
+    '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
+    '<button type="submit" class="danger">Delete this relationship</button>' +
+    '<span class="sub">The entry goes and takes its ' + row.authentications +
+    ' recorded sign-in(s) with it. The PEOPLE it authenticated keep their entries under ' +
+    '<code>ou=users</code> — nothing is ever deleted from there — and any session they hold ' +
+    'is unaffected until it expires or is ended.</span>' +
+    '</div></form>' +
+    '<p class="note"><strong>Everything on this page is an attribute on one directory ' +
+    'entry</strong>, so an <code>ldapmodify</code> of <code>' + esc(row.dn) + '</code> does ' +
+    'exactly what these forms do — two doors onto one register, not two registers. That cuts ' +
+    'both ways: <code>fedClientSecret</code> is this service\'s own credential AT the ' +
+    'partner, held in the clear, in a directory where every bind succeeds. It is never shown ' +
+    'here and never written to the audit log, and anybody who can read this directory can ' +
+    'authenticate as this service at that partner. A deployment federating with something ' +
+    'real should know that.</p>' +
+    FEDERATION_CAVEAT +
+    '<p class="sub"><a href="' +
+    esc('/admin/federation' + queryWith(listViewOf('/admin/federation', req.query), {})) +
+    '">back to the list</a></p>' + FEDERATION_LINKS;
+
+  log.debug("Leaving federationDetailPage(). " + row.id + ".");
+  return {
+    inner: inner,
+    json: Object.assign({ found: true }, row, {
+      endpoints: { assertionConsumerService: acs, login: login,
+                   metadata: (row.protocol === 'saml2' || row.protocol === 'saml11')
+                     ? metadata : null },
+      // The whole record, MINUS the one sensitive field. `fedClientSecret` is
+      // replaced by a boolean saying whether one is set — which is the fact a
+      // caller actually needs ("is this configured?") without the API being a
+      // second way to read a credential out of this process. An ldapsearch is
+      // still that way, deliberately and loudly.
+      fields: (function () {
+        const out = {};
+        federation.SCHEMA.attributes.forEach(function (field) {
+          if (field.sensitive) {
+            out[field.name] = record[field.name] ? '(set — not returned)' : '';
+            return;
+          }
+          out[field.name] = record[field.name];
+        });
+        return out;
+      })(),
+      editable: federation.fieldsForRole(row.role)
+    })
+  };
+}
+
+// ---------------------------------------------------------------------------
+// THE ACTION FUNCTION. `/admin-api/federation/:action` calls exactly this, with
+// `action` off the URL instead of out of a hidden input — rule 7, and it is
+// what makes "every console control has an API operation" a property of the
+// code rather than a promise in a comment.
+//
+// It decides NOTHING itself. Every branch calls `federation.js`, which owns the
+// schema, the modes and the refusals — the same division `applicationsAction()`
+// keeps with `applications.js`. A validation written here would be a second
+// opinion about what a relationship may hold, and the one an `ldapmodify` never
+// saw.
+// ---------------------------------------------------------------------------
+function federationAction(body) {
+  log.debug("Entering federationAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const id = String(body.id || body.relationship || '').trim();
+
+  if (action === 'create') {
+    const result = federation.create({
+      fedId: id,
+      fedRole: String(body.role || ''),
+      fedProtocol: String(body.protocol || ''),
+      fedName: String(body.name || ''),
+      fedPeer: String(body.peer || ''),
+      fedApplication: String(body.application || '')
+    });
+    log.debug("Leaving federationAction(). create " + (result.ok ? 'ok' : 'refused') + ".");
+    if (!result.ok) return result;
+    return Object.assign({}, result, {
+      message: 'Registered, and DISABLED. Set what it needs — ' +
+        (result.readiness.missing.length
+          ? result.readiness.missing.join(', ')
+          : 'nothing is missing') +
+        ' — and then enable it. A relationship does nothing at all until both are done.'
+    });
+  }
+
+  if (!id) {
+    log.debug("Leaving federationAction(). No relationship named.");
+    return { ok: false, errors: ['Name the relationship by its id, in `id`.'] };
+  }
+
+  if (action === 'set' || action === 'add-value' || action === 'remove-value') {
+    const result = federation.update(id, {
+      field: String(body.field || ''),
+      value: String(body.value == null ? '' : body.value),
+      mode: action === 'remove-value' ? 'remove' : 'add'
+    });
+    log.debug("Leaving federationAction(). " + action + " " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'enable' || action === 'disable') {
+    const result = federation.update(id, {
+      field: 'fedEnabled', value: action === 'enable' ? 'TRUE' : 'FALSE'
+    });
+    log.debug("Leaving federationAction(). " + action + " " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'delete') {
+    const result = federation.remove(id);
+    log.debug("Leaving federationAction(). delete " + (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  log.debug("Leaving federationAction(). Unknown action.");
+  return { ok: false,
+           errors: ['Unknown action "' + action + '". The seven are: create, set, ' +
+                    'add-value, remove-value, enable, disable, delete.'] };
+}
+
+function federationView(req) {
+  log.debug("Entering federationView().");
+  const wanted = String(req.query.relationship || '').trim();
+  if (wanted) {
+    const detail = federationDetailPage(req, wanted);
+    log.debug("Leaving federationView(). The drill-down.");
+    return { json: detail.json, inner: detail.inner,
+             title: 'Federation relationship ' + wanted,
+             up: upTo('/admin/federation', wanted,
+                      listViewOf('/admin/federation', req.query)) };
+  }
+  const list = federationListPage(req);
+  log.debug("Leaving federationView(). The list.");
+  return { json: list.json, inner: list.inner, title: 'Federation' };
+}
+
+app.get('/admin/federation', function (req, res) {
+  log.debug("Entering the admin federation page.");
+  const view = federationView(req);
+  respond(req, res, view.json, view.title, '/admin/federation', view.inner, view.up);
+  log.debug("Leaving the admin federation page. " + view.title + ".");
+});
+
+app.post('/admin/federation', function (req, res) {
+  log.debug("Entering the admin federation action endpoint.");
+  const body = parseBody(req);
+  const result = federationAction(body);
+  const id = String(body.id || body.relationship || '').trim();
+  // The list state the form carried, REBUILT rather than echoed — see
+  // listViewFromBack(), and the note in admin-ui/CLAUDE.md about a new form on
+  // a drill-down needing `carryBack` in it. Every form on the drill-down above
+  // has it.
+  const listView = listViewFromBack('/admin/federation', body.back);
+  // A DELETE goes back to the LIST and everything else stays on the
+  // drill-down, which is the one place this differs from the SAML 2.0 page's
+  // handler: landing on the detail page of something that no longer exists
+  // would answer with "there is no relationship called…", which reads as the
+  // delete having failed.
+  const back = (id && result.ok !== false && String(body.action || '') !== 'delete')
+    ? '/admin/federation' + queryWith(listView, { relationship: id })
+    : '/admin/federation' + queryWith(listView, {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin federation action endpoint.");
+});
+
 module.exports = {
   // THE SHELL, for the one module outside this file that draws a console page:
   // `../sts_metadata.js`, which builds `/admin/sts-metadata` from the live
@@ -9717,7 +12843,17 @@ module.exports = {
   setScimReader: setScimReader,
   setGroupReader: setGroupReader,
   setDirectoryWriter: setDirectoryWriter,
+  // Filled by logout/logout.js at ITS require time — the sixth slot, and rule
+  // 3e's test answers yes for the same two reasons at once. See the block above
+  // setLogoutReader().
+  setLogoutReader: setLogoutReader,
   usersAction: usersAction,
+  // The sign-out page's view and its four actions, for admin_api.js. Rule 7:
+  // the API calls exactly these, so an action added to that switch is most of
+  // adding it there — and the refusal sentence that names the four is what the
+  // parent project's tests/admin_api.js reads to check the parity.
+  logoutView: logoutView,
+  logoutAction: logoutAction,
   jtiFrom: jtiFrom,
   // The four action functions. admin_api.js calls exactly these — it decides
   // nothing about a revocation or a claim that this console does not — which is
@@ -9728,6 +12864,12 @@ module.exports = {
   vcAction: vcAction,
   vpConfigAction: vpConfigAction,
   configAction: configAction,
+  // The trust realm registry's five writes and its whole view, for
+  // mgmt-api/admin_api.js. Rule 7 — every page of this console and every action
+  // of its handlers has an operation on /admin-api, driven through the SAME
+  // function, so that a realm created over the API and a realm created on the
+  // form cannot come to mean two different things.
+  realmsAction: realmsAction,
   // The token-lifetimes page's own action. It writes through config.js like
   // configAction does — see the header above it for why it is a page of its own
   // and not four more rows on /admin/config — and it is exported separately
@@ -9746,6 +12888,11 @@ module.exports = {
   // are work both the page and the API need, and two copies of it would be two
   // answers that each looked right alone.
   auditView: auditView,
+  // The delegation page's view, and the whole function for the same reason the
+  // audit log's is: the filtering, the paging and the collapse to chains are
+  // work both the page and the API need. It is the second read-only resource
+  // here — rule 7 asks for an operation per CONTROL, and this page has none.
+  delegationView: delegationView,
   usersView: usersView,
   groupsView: groupsView,
   applicationsView: applicationsView,
@@ -9761,12 +12908,27 @@ module.exports = {
   spiffeAgentsAction: spiffeAgentsAction,
   authorizationServersView: authorizationServersView,
   authorizationServersAction: asAction,
+  // The SAML 2.0 identity provider page and its four writes. Rule 7 again: the
+  // API calls exactly these, so an action added to that switch is most of
+  // adding it to /admin-api.
+  saml2View: saml2View,
+  saml2Action: saml2Action,
+  saml11View: saml11View,
+  saml11Action: saml11Action,
   // The roles page and its two writes. Rule 7 again — and this one is the page
   // most in need of the API half rather than least: the management API is not
   // gated, so `POST /admin-api/rbac/grant` is the only door onto the roster that
   // still works when nobody holds a role and `admin.openWhenEmpty` is off.
   rbacView: rbacView,
   rbacAction: rbacAction,
+  // The federation register's page and its seven writes. Rule 7 again: the API
+  // calls exactly these, so an action added to that switch is most of adding it
+  // to /admin-api. This one matters more than most — the management API is not
+  // gated, so `POST /admin-api/federation/create` is how a test configures a
+  // partner with no browser at all, which is the only way the feature can be
+  // exercised automatically.
+  federationView: federationView,
+  federationAction: federationAction,
   // The gate's answer for one request, so admin_api.js's own /rbac view can say
   // WHO IS ASKING without a second reading of the cookie that could disagree
   // with this one.
@@ -9788,6 +12950,12 @@ module.exports = {
   vpConfigJson: vpConfigJson,
   scimJson: scimJson,
   configJson: configJson,
+  // It takes the REQUEST, unlike most of the views here, and for a reason worth
+  // the line: every URL it prints is built from the one the call arrived on —
+  // that is what makes a realm's base URL correct through a published port, on
+  // a compose network and behind a proxy alike, and a snapshot built without a
+  // request could only ever name localhost.
+  realmsJson: realmsJson,
   tokenLifetimesJson: tokenLifetimesJson,
   // A body field that may appear more than once. Exported because the
   // management API takes the same two spellings of a list (`attribute` and

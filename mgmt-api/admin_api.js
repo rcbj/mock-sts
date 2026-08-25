@@ -99,6 +99,10 @@ const rbac = require('../admin-ui/admin_rbac');
 const stats = require('../common/admin_stats');
 const spec = require('./admin_api_spec');
 const docs = require('./admin_api_docs');
+// The trust realm this call arrived in — for the explorer, which is the one
+// page in this service that builds its URLs in a script and therefore cannot
+// have its markup rewritten. See docs.page().
+const realms = require('../common/realms');
 const VERSION = require('../package.json').version;
 
 const BASE = '/admin-api';
@@ -517,7 +521,7 @@ const ROUTES = [
       // `'unsafe-inline'` is not needed — see the note in admin_api_docs.js.
       res.setHeader('Content-Security-Policy', docs.CONTENT_SECURITY_POLICY);
       res.status(200).type('text/html').set('Cache-Control', 'no-store')
-         .send(docs.page(baseUrlOf(req), BASE, VERSION));
+         .send(docs.page(baseUrlOf(req), BASE, VERSION, realms.currentPrefix()));
       log.debug("Leaving the API explorer page.");
     } },
 
@@ -699,6 +703,171 @@ const ROUTES = [
           additionalProperties: false
         },
         responseDescription: 'The entry as created, in `entry`, with its `dn`.' }
+    ] },
+
+  { method: 'GET', path: BASE + '/logout', tag: 'Sign-out',
+    operationId: 'getLiveSessions',
+    summary: 'Everything this service is still holding for one identity, ' +
+             'across every protocol family',
+    description: 'The protocol-independent view of a person\'s live state. ' +
+                 'Without `user` it is the FAMILY LIST — what a logout can ' +
+                 'reach, what it cannot, and why — which is the same prose ' +
+                 '/logout and /admin/logout print, read off one table in ' +
+                 '`logout/logout.js` rather than copied here.\n\nWith `user` ' +
+                 'it is that identity: every browser sign-on session, every ' +
+                 'relying party, realm and service provider signed into on ' +
+                 'one, every token still revocable, every outstanding ' +
+                 'authorization and pre-authorized code, every directory ' +
+                 'connection bound as them, and the Kerberos sign-out ' +
+                 'instant.\n\n**The rows that CANNOT be ended are in the ' +
+                 'reply on purpose** and carry `terminable: false` with a ' +
+                 '`why`. A SAML assertion already issued, a Kerberos service ' +
+                 'ticket already in a cache and an X509-SVID already minted ' +
+                 'cannot be recalled by this service or by a real one — ' +
+                 'nothing consults the issuer when they are presented — and a ' +
+                 'reply that omitted them would make a global logout look ' +
+                 'complete when it is not.\n\nThe identity is a QUERY ' +
+                 'PARAMETER and not a path segment for the reason ' +
+                 '/admin-api/users gives: the identities here contain the ' +
+                 'characters a path is made of.',
+    mirrors: 'GET /admin/logout',
+    parameters: [
+      { name: 'user', in: 'query', required: false, schema: { type: 'string' },
+        description: 'The identity to look at, as typed. It is normalised the ' +
+                     'way every other door here normalises one, so `alice`, ' +
+                     '`alice@REALM` and a `urn:` subject are one answer.' },
+      { name: 'family', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Only rows of this family. The `families` member of the ' +
+                     'reply says which values there are; it is read off the ' +
+                     'same table the endpoint acts on, so a family that ' +
+                     'cannot occur is never offered.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The family list, or one identity\'s live state.',
+    responseSchema: { $ref: '#/components/schemas/LogoutInventory' },
+    handler: function (req, res) {
+      log.debug("Entering the management API sign-out endpoint.");
+      sendJson(res, 200, admin.logoutView(req).json);
+      log.debug("Leaving the management API sign-out endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/logout/:action', tag: 'Sign-out',
+    mirrors: 'POST /admin/logout',
+    handler: function (req, res) {
+      log.debug("Entering the management API sign-out action endpoint.");
+      const body = parseBody(req);
+      const result = admin.logoutAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API sign-out action endpoint.");
+    },
+    actions: [
+      { action: 'global', operationId: 'globalLogout',
+        summary: 'End everything this service holds for one identity',
+        description: 'The default a person gets from `POST /logout` with an ' +
+                     'empty body, driven by name. Every browser sign-on ' +
+                     'session, every relying party, realm and service ' +
+                     'provider on one, every revocable token, every ' +
+                     'outstanding code, every directory connection bound as ' +
+                     'them, and a Kerberos sign-out instant after which a ' +
+                     'TGS-REQ carrying an older ticket is refused ' +
+                     'KDC_ERR_TGT_REVOKED (20).\n\n**What it cannot do is ' +
+                     'reported rather than skipped.** The reply\'s `skipped` ' +
+                     'array names every live thing that survived and says ' +
+                     'why.\n\n**What it cannot do FROM HERE is different and ' +
+                     'is also in the reply.** A front-channel logout ' +
+                     'notification is an iframe in the signed-out person\'s ' +
+                     'own browser and a WS-Federation cleanup is an image in ' +
+                     'it; neither is something this process performs. They ' +
+                     'come back in `notifications` and `cleanups` so a caller ' +
+                     'can load them, and `/logout` is the page where a ' +
+                     'browser does it by itself.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            user: { type: 'string',
+                    description: 'The identity to sign out, as typed. ' +
+                                 'Normalised the way the GET normalises one.' }
+          },
+          required: ['user'],
+          examples: [{ user: 'alice' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The act, in `result`: `terminated`, `skipped`, ' +
+                             '`unknown`, and the three fan-outs a browser has ' +
+                             'to perform.' },
+      { action: 'end', operationId: 'endLiveSessions',
+        summary: 'End named items and nothing else',
+        description: 'The selective half. `select` carries row ids from the ' +
+                     'GET — `session:<id>`, `token:<jti>`, ' +
+                     '`wsfed-rp:<session>|<realm>`, and so on.\n\n**An empty ' +
+                     '`select` is REFUSED here and is a global logout at ' +
+                     '`POST /logout`**, which is the one place the two doors ' +
+                     'differ and is deliberate: an empty selection arriving ' +
+                     'at this operation is a caller that built a list and got ' +
+                     'nothing, where an empty body at /logout is a caller ' +
+                     'asking for everything. Same absence, opposite intent.\n' +
+                     '\nIds are re-resolved against what is live NOW rather ' +
+                     'than trusted, so an id that has since been redeemed or ' +
+                     'expired ends nothing and is answered in `unknown` or ' +
+                     '`skipped` rather than ending something else.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            user: { type: 'string', description: 'The identity to act on.' },
+            select: { type: 'array', items: { type: 'string' },
+                      description: 'Row ids from `GET /admin-api/logout?user=`.' }
+          },
+          required: ['user', 'select'],
+          examples: [{ user: 'alice', select: ['session:8Qk3', 'token:abc'] }],
+          additionalProperties: false
+        },
+        responseDescription: 'The act, in `result`.' },
+      { action: 'restore-token', operationId: 'restoreLoggedOutToken',
+        summary: 'NON-SPEC: un-revoke a token a logout revoked',
+        description: '**No authorization server could offer this.** RFC 7009 ' +
+                     'defines no such operation and a real deployment could ' +
+                     'not have one, because a resource server may already ' +
+                     'have cached the refusal. It is here for the reason ' +
+                     '`POST /admin-api/tokens/restore` is — it is the same ' +
+                     'function against the same revocation set — and that ' +
+                     'reason is that restarting this service to get back to a ' +
+                     'working token turns a two-second test into a ' +
+                     'two-minute one.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            user: { type: 'string', description: 'The identity, for the audit row.' },
+            jti: { type: 'string', description: 'The token to restore.' }
+          },
+          required: ['user', 'jti'],
+          examples: [{ user: 'alice', jti: 'A-Rz5JpfK0j7V9azTcqmCw' }],
+          additionalProperties: false
+        },
+        responseDescription: 'Whether it had been revoked.' },
+      { action: 'restore-kerberos', operationId: 'clearKerberosSignOut',
+        summary: 'NON-SPEC: clear the Kerberos sign-out instant',
+        description: 'Removes the instant a logout stamped on the principal, ' +
+                     'so a ticket-granting ticket authenticated before it is ' +
+                     'accepted again.\n\n**A real KDC has no such ' +
+                     'operation**, and it does not need one: a fresh AS-REQ ' +
+                     'is the supported way back and clears the instant ' +
+                     'itself. This exists so a test can put a signed-out ' +
+                     'ticket back into service without re-running the AS ' +
+                     'exchange.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            user: { type: 'string',
+                    description: 'The identity whose principal to clear.' }
+          },
+          required: ['user'],
+          examples: [{ user: 'alice' }],
+          additionalProperties: false
+        },
+        responseDescription: 'Whether an instant had been set.' }
     ] },
 
   { method: 'GET', path: BASE + '/groups', tag: 'Groups',
@@ -1054,6 +1223,237 @@ const ROUTES = [
                        additionalProperties: false },
         responseDescription: 'How many were revoked, in `revoked`.' }
     ] },
+
+  // ---------------------------------------------------------------------
+  // TRUST REALMS — several logical copies of this service in one process.
+  //
+  // TWO THINGS ABOUT THESE OPERATIONS ARE UNUSUAL AND BOTH ARE THE POINT.
+  //
+  // First, THIS WHOLE API IS ITSELF REALM-SCOPED. `/admin-api/config` is the
+  // default realm's configuration; `/realm/acme/admin-api/config` is `acme`'s,
+  // and a `set` posted there sets it on `acme` alone. That is not a special
+  // case anybody wrote here — it falls out of the same path-prefix middleware
+  // that makes /oauth2/token realm-scoped, and it means every one of the
+  // ninety-odd operations below already works per realm. These five are only
+  // the ones that manage the REGISTRY.
+  //
+  // Second, THE REGISTRY ITSELF IS NOT REALM-SCOPED, and it could not sensibly
+  // be: there is one list of realms in this process, so `GET /admin-api/realms`
+  // answers the same list whichever prefix it is called under. What differs is
+  // `current`, which names the realm the CALL arrived in — and `remove` refuses
+  // to remove that one, for the reason the console gives.
+  //
+  // A realm is held in memory like everything else here and dies with the
+  // process. A stack that wants realms back after a restart creates them from
+  // these operations, which is why `create` is worth having rather than a
+  // config file entry: the thing that starts the stack already speaks this API.
+  // ---------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/realms', tag: 'Trust realms',
+    operationId: 'getRealms',
+    summary: 'Every trust realm, its endpoints and what it sets',
+    description: 'A TRUST REALM is a whole logical copy of this service: its ' +
+                 'own configuration, its own signing key, and its own ' +
+                 'sessions, authorization codes, tokens, credential offers, ' +
+                 'service providers, statistics and audit log — answering on ' +
+                 'the same sockets as every other realm and told apart by a ' +
+                 'segment at the front of the path.\n\n' +
+                 'The DEFAULT realm has no prefix, cannot be removed and ' +
+                 'cannot be renamed: every URL this service published before ' +
+                 'realms existed is a URL in it. A process with no realms ' +
+                 'defined behaves exactly as it did before this feature ' +
+                 'existed, which is a property of one predicate rather than a ' +
+                 'claim.\n\n' +
+                 'Each row carries the realm\'s `pathPrefix`, its `baseUrl`, ' +
+                 'the `kid` of its signing key — two realms showing one kid ' +
+                 'would be two names for one authorization server — the ' +
+                 'settings it sets, and the four discovery documents a client ' +
+                 'asks for first.\n\n' +
+                 '`support` is the part answered nowhere else: WHICH ' +
+                 'protocol families a realm actually separates, which is not ' +
+                 'a tidy answer. A realm separates what this service ISSUES ' +
+                 'and everything it holds while issuing it — keys, sessions, ' +
+                 'codes, tokens, offers, artifacts, statistics and the audit ' +
+                 'log. It does NOT separate the embedded directory: LDAP ' +
+                 'answers on a socket with no path to put a segment in, so ' +
+                 'there is one set of people, groups and applications for the ' +
+                 'whole process — which means OAuth client registrations, ' +
+                 'SAML service provider entries, the SPIFFE registry and the ' +
+                 'two admin console roles are shared. Kerberos, the two TLS ' +
+                 'listeners and SPIFFE\'s four sockets are shared for the ' +
+                 'same reason.\n\n' +
+                 '`reserved` is the list of ids a realm may not be called, ' +
+                 'read off the live router: they are the first segments of ' +
+                 'paths this service already serves, and the refusal stands ' +
+                 'whatever `realms.pathSegment` is set to precisely so that ' +
+                 'clearing that setting cannot turn an existing realm into a ' +
+                 'shadow over the console or the authorization server.',
+    mirrors: 'GET /admin/realms',
+    responseDescription: 'The realms, and the support table.',
+    handler: function (req, res) {
+      log.debug("Entering the management API trust realms endpoint.");
+      sendJson(res, 200, admin.realmsJson(req));
+      log.debug("Leaving the management API trust realms endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/realms/:action', tag: 'Trust realms',
+    mirrors: 'POST /admin/realms',
+    handler: function (req, res) {
+      log.debug("Entering the management API trust realms action endpoint.");
+      const body = parseBody(req);
+      const result = admin.realmsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API trust realms action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createRealm',
+        summary: 'Define a trust realm',
+        description: 'Every HTTP endpoint this service has begins answering ' +
+                     'under the new realm\'s prefix immediately, with a ' +
+                     'signing key of its own and nothing issued yet.\n\n' +
+                     'The `id` becomes a PATH SEGMENT, so it is lower-case ' +
+                     'letters, digits and hyphens, starts with a letter or a ' +
+                     'digit, and is at most 31 characters. It may not be ' +
+                     '`default`, and it may not be the first segment of a ' +
+                     'path this service already serves — `GET ' +
+                     '/admin-api/realms` lists those in `reserved`.\n\n' +
+                     'SIX SETTINGS ARE SEEDED ON A NEW REALM and they are ' +
+                     'the six that are NAMES rather than behaviour: the SAML ' +
+                     '2.0 entityID, the SAML 1.1 providerID, the ' +
+                     'WS-Federation entityID, the WS-Trust issuer, the SAML ' +
+                     'assertion issuer and the OpenID4VP verifier client id. ' +
+                     'Each is the process\'s value with the realm id ' +
+                     'appended, because two realms carrying one entityID is ' +
+                     'not a configuration choice — it is two identity ' +
+                     'providers claiming one name, which a service provider ' +
+                     'is entitled to refuse. They are ORDINARY settings on ' +
+                     'the realm: pass `overrides` to choose your own, or ' +
+                     'unset them afterwards to go back to sharing the ' +
+                     'process\'s name, which is a case worth being able to ' +
+                     'build on a mock.\n\n' +
+                     'The OAuth issuer is deliberately NOT seeded: it ' +
+                     'defaults to naming the base URL a request arrived on, ' +
+                     'and that already carries the realm prefix.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string',
+                  description: 'Lower-case letters, digits and hyphens. It ' +
+                               'is the path segment.' },
+            name: { type: 'string',
+                    description: 'What a person calls it. Free text; defaults ' +
+                                 'to the id.' },
+            description: { type: 'string' },
+            overrides: { type: 'object',
+                         description: 'Settings to set on the realm, named by ' +
+                                      'the dot paths GET /admin-api/config ' +
+                                      'lists. They win over the six seeded ' +
+                                      'names. `realms.enabled` and ' +
+                                      '`realms.pathSegment` are refused: a ' +
+                                      'realm that could switch realms off, or ' +
+                                      'move the prefix it was found under, ' +
+                                      'would be doing it half way through the ' +
+                                      'request that found it.' }
+          },
+          required: ['id'],
+          examples: [{ id: 'acme', name: 'Acme Corporation',
+                       overrides: { 'saml2.entityId': 'urn:acme:idp' } }],
+          additionalProperties: false
+        },
+        responseDescription: 'The realm id, in `realm`.' },
+
+      { action: 'update', operationId: 'updateRealm',
+        summary: 'Rename a realm, or describe it',
+        description: 'The `id` cannot be changed, because it is the path ' +
+                     'segment every client was given. Define a new realm and ' +
+                     'remove this one if that is what is wanted — and note ' +
+                     'that the new one gets a new signing key, which is the ' +
+                     'honest consequence of it being a different realm.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string' }, name: { type: 'string' },
+                        description: { type: 'string' } },
+          required: ['id'],
+          examples: [{ id: 'acme', name: 'Acme Corporation (staging)' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The realm id, in `realm`.' },
+
+      { action: 'set', operationId: 'setRealmSetting',
+        summary: 'Set one setting on one realm',
+        description: 'The value applies to the next request that arrives ' +
+                     'under that realm\'s prefix and to nothing else — above ' +
+                     'whatever the process as a whole is configured with, and ' +
+                     'below nothing.\n\n' +
+                     'This is the same store `POST /realm/<id>/admin-api/' +
+                     'config/set` writes to, and either is fine; the ' +
+                     'difference is only which realm you have to be in to ' +
+                     'make the call. A setting whose `editable` is false is ' +
+                     'refused with the reason, exactly as it is on the ' +
+                     'service-wide resource, and `realms.enabled` and ' +
+                     '`realms.pathSegment` are refused outright.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string' }, key: { type: 'string' },
+                        value: {} },
+          required: ['id', 'key', 'value'],
+          examples: [{ id: 'acme', key: 'saml2.entityId',
+                       value: 'urn:acme:idp' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The realm and the key, in `realm` and `key`.' },
+
+      { action: 'unset', operationId: 'unsetRealmSetting',
+        summary: 'Drop one setting from one realm',
+        description: 'The realm falls back to whatever this service as a ' +
+                     'whole is configured with — which may itself be a ' +
+                     'runtime override, and is left alone. A key the realm ' +
+                     'does not set is refused rather than treated as already ' +
+                     'done, because the two are different facts and a caller ' +
+                     'that misspelt a key would otherwise be told it ' +
+                     'succeeded.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string' }, key: { type: 'string' } },
+          required: ['id', 'key'],
+          examples: [{ id: 'acme', key: 'saml2.entityId' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The realm and the key, in `realm` and `key`.' },
+
+      { action: 'remove', operationId: 'removeRealm',
+        summary: 'Remove a realm, and everything it holds',
+        description: 'EVERYTHING IT ACCUMULATED GOES WITH IT: its sessions, ' +
+                     'its authorization codes, its tokens, its refresh ' +
+                     'families, its credential offers, its service ' +
+                     'providers, its statistics, its audit log and its ' +
+                     'signing key. That is deliberate rather than thorough — ' +
+                     'a realm re-created with the same id inheriting the last ' +
+                     'one\'s sessions and tokens would be the single most ' +
+                     'surprising thing a re-created realm could do.\n\n' +
+                     'NOTHING IS REMOVED FROM THE DIRECTORY, because nothing ' +
+                     'there belongs to a realm: `ou=users`, `ou=groups` and ' +
+                     '`ou=applications` are shared by every realm in this ' +
+                     'process.\n\n' +
+                     'A realm cannot remove ITSELF — a call to ' +
+                     '`/realm/acme/admin-api/realms/remove` naming `acme` is ' +
+                     'refused. Everything about the removal would work; what ' +
+                     'would not is the caller, which would be talking to a ' +
+                     'prefix that had stopped existing. Call it from another ' +
+                     'realm, or from the default one.\n\n' +
+                     'The DEFAULT realm cannot be removed at all.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          required: ['id'],
+          examples: [{ id: 'acme' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The realm id, in `realm`.' } ] },
 
   { method: 'GET', path: BASE + '/config', tag: 'Configuration',
     operationId: 'getConfig',
@@ -1704,6 +2104,541 @@ const ROUTES = [
   // schema is a published contract about what an entry carries. This has no
   // schema on purpose: publishing something a client did not expect is half the
   // point of a mock.
+  // ---------------------------------------------------------------------
+  // THE SAML 2.0 IDENTITY PROVIDER.
+  //
+  // The resource a caller needs before it can drive the Web Browser SSO
+  // profile at all, and the reason is the feature itself: the metadata is PER
+  // SERVICE PROVIDER, so "the metadata URL" is not a constant a test can
+  // hard-code — it is a per-entityID fact this reply carries. A test that
+  // guessed the slug rule would be a second implementation of it.
+  // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // FEDERATION. Rule 7, and it pays here more than anywhere except /rbac:
+  // this API is NOT gated, so these operations are how a TEST configures a
+  // federation partner with no browser and no cookie jar — which is the only
+  // way the feature can be exercised automatically at all.
+  //
+  // The consequence is the same one mgmt-api/CLAUDE.md states for /rbac and it
+  // is worth restating here because what is at stake is different: anybody who
+  // can reach this port can configure a federation partner, which means
+  // configuring a signing certificate this service will then believe. That is
+  // not a new hole — the same caller can already grant themselves both admin
+  // roles and mint a token for any username — but it is the sharpest form of
+  // it, and the honest sentence is better than the omission.
+  // ---------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/federation', tag: 'Federation',
+    operationId: 'getFederationRelationships',
+    summary: 'Every federation relationship, in either direction',
+    description: 'This service can be EITHER END of a federation ' +
+                 'relationship, in five protocols: SAML 2.0, SAML 1.1, ' +
+                 'WS-Federation 1.2, OpenID Connect and OAuth 2.0.\n\n' +
+                 '**This is the one feature here that has to be configured ' +
+                 'before it will do anything.** Everywhere else this service ' +
+                 'accepts what it is given — any username, any client_id, any ' +
+                 'entityID, any LDAP bind. It cannot do that at an assertion ' +
+                 'consumer service: what arrives there is an unauthenticated ' +
+                 'HTTP request claiming to be a person, and the session it ' +
+                 'produces is the same one `/oauth2/authorize`, `/wsfed`, ' +
+                 '`/saml2` and the admin console all read. So a relationship ' +
+                 'is created DISABLED, and an assertion is refused unless it ' +
+                 'verifies against the certificate configured on it.\n\n' +
+                 '**The gate is on the SIGNER, not on the subject.** Once a ' +
+                 'relationship is enabled and configured, everything ' +
+                 'downstream is as permissive as the rest of this service: ' +
+                 'any username in the assertion is accepted, any attribute is ' +
+                 'mapped, and a directory entry is created for the person.\n\n' +
+                 '`?relationship=<id>` returns one of them, with everything it ' +
+                 'holds and the URLs to configure at the partner. It answers ' +
+                 '200 with `found: false` for an id that is not registered.\n\n' +
+                 'This resource holds nothing: every row is an entry under ' +
+                 '`ou=federations`, the same one an `ldapsearch` reads.',
+    mirrors: 'GET /admin/federation',
+    parameters: [
+      { name: 'relationship', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One relationship, by its id.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Filter the list by id, name, partner or application.' },
+      { name: 'role', in: 'query', required: false,
+        schema: { type: 'string',
+                  enum: ['service-provider', 'identity-provider'] },
+        description: 'Only the relationships in which this service takes that ' +
+                     'role. `service-provider` is the direction that CONSUMES ' +
+                     'somebody else\'s assertions.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The relationships with the paging that found them, ' +
+                         'or one of them with its endpoints, its fields and ' +
+                         'what has crossed it.',
+    responseSchema: { $ref: '#/components/schemas/FederationRelationshipList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API federation endpoint.");
+      sendJson(res, 200, admin.federationView(req).json);
+      log.debug("Leaving the management API federation endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/federation/:action',
+    tag: 'Federation',
+    mirrors: 'POST /admin/federation',
+    handler: function (req, res) {
+      log.debug("Entering the management API federation action endpoint.");
+      const body = parseBody(req);
+      const result = admin.federationAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API federation action endpoint.");
+    },
+    actions: [
+      { action: 'create', operationId: 'createFederationRelationship',
+        summary: 'Register a federation relationship',
+        description: 'It is created **DISABLED**, whatever this request says, ' +
+                     'and nothing about it does anything until `enable` is ' +
+                     'called. That is the one place this operation overrides ' +
+                     'its input, and it is deliberate: a partner that ' +
+                     'half-exists and silently accepts assertions is the ' +
+                     'failure this whole register is arranged to prevent, so ' +
+                     'enabling is a second act that says the configuration is ' +
+                     'finished.\n\n' +
+                     '**ONE RELATIONSHIP IS ONE DIRECTION.** A partner this ' +
+                     'service both consumes from and asserts to is two ' +
+                     'relationships with two ids, because everything that ' +
+                     'configures one differs by direction.\n\n' +
+                     'The reply carries `readiness.missing` — the fields this ' +
+                     'protocol and role still need — so a caller can go ' +
+                     'straight on to `set` for each of them without knowing ' +
+                     'the schema in advance.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string',
+                  description: 'The key, the RDN and a URL segment. It has to ' +
+                               'start with a letter or a digit and hold only ' +
+                               'letters, digits, dot, dash and underscore, up ' +
+                               'to 63 characters.' },
+            role: { type: 'string',
+                    enum: ['service-provider', 'identity-provider'],
+                    description: 'Which end THIS SERVICE is. ' +
+                                 '`service-provider` means a foreign identity ' +
+                                 'provider authenticates the person and this ' +
+                                 'service consumes what it issues.' },
+            protocol: { type: 'string',
+                        enum: ['saml2', 'saml11', 'wsfed', 'oidc', 'oauth2'],
+                        description: 'The protocol the relationship runs in.' },
+            name: { type: 'string',
+                    description: 'What to call the partner on a page. The id ' +
+                                 'is the name when this is omitted.' },
+            peer: { type: 'string',
+                    description: 'The partner\'s own identifier — a SAML ' +
+                                 'entityID, an OpenID Connect issuer, a ' +
+                                 'WS-Federation wtrealm. On a ' +
+                                 'service-provider-side relationship it is ' +
+                                 'CHECKED: an assertion whose issuer is not ' +
+                                 'this string is refused even when the ' +
+                                 'signature verifies.' },
+            application: { type: 'string',
+                           description: 'On an identity-provider-side ' +
+                                        'relationship only: the identifier of ' +
+                                        'the partner\'s entry in ' +
+                                        '`ou=applications`. Its entityID, ' +
+                                        'redirect URIs and certificate stay ' +
+                                        'THERE, where every protocol module ' +
+                                        'reads them — this register holds a ' +
+                                        'pointer and not a copy.' }
+          },
+          required: ['id', 'role', 'protocol'],
+          examples: [{ id: 'partner-a', role: 'service-provider',
+                       protocol: 'saml2', name: 'Partner A',
+                       peer: 'https://idp.partner.example/saml' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship as created, and what it still ' +
+                             'needs before it can be enabled usefully.' },
+
+      { action: 'set', operationId: 'setFederationField',
+        summary: 'Set one single-valued field on a relationship',
+        description: 'The field must be one of this relationship\'s — a field ' +
+                     'belonging to the other ROLE is refused by name rather ' +
+                     'than written and ignored, and so is one that records ' +
+                     'what HAPPENED (the counters, the last error).\n\n' +
+                     '`fedId`, `fedRole` and `fedProtocol` are refused too, ' +
+                     'and that is a third category rather than an oversight: ' +
+                     'they are the relationship\'s identity, and changing one ' +
+                     'would leave a SAML relationship carrying a token ' +
+                     'endpoint. Delete it and make another — there is no ' +
+                     'state to lose but the counters.\n\n' +
+                     '`GET /admin-api/federation?relationship=<id>` returns ' +
+                     '`editable`, which is exactly the list this operation ' +
+                     'accepts, so a caller need not guess.\n\n' +
+                     'The reply always carries `readiness`, so setting the ' +
+                     'last missing field tells you it was the last one.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'The relationship.' },
+            field: { type: 'string',
+                     description: 'The attribute name, e.g. `fedSsoUrl`, ' +
+                                  '`fedSigningCertificate`, `fedClientId`.' },
+            value: { type: 'string',
+                     description: 'The new value. An empty string clears it. ' +
+                                  '`fedSigningCertificate` is normalised — ' +
+                                  'PEM armour and whitespace are stripped, ' +
+                                  'because what the schema holds is the ' +
+                                  'base64 DER a ds:X509Certificate carries.' }
+          },
+          required: ['id', 'field', 'value'],
+          examples: [{ id: 'partner-a', field: 'fedSsoUrl',
+                       value: 'https://idp.partner.example/sso' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship as it now stands, and whether ' +
+                             'it is ready.' },
+
+      { action: 'add-value', operationId: 'addFederationValue',
+        summary: 'Add a value to a multi-valued field',
+        description: 'Two fields take values: `fedAttributeMap` on a ' +
+                     'service-provider-side relationship, and `fedRelease` on ' +
+                     'an identity-provider-side one.\n\n' +
+                     '**`fedAttributeMap`** is written `<incoming ' +
+                     'name>=<LDAP attribute>` and is split at the FIRST equals ' +
+                     'sign — which matters, because an incoming name can be a ' +
+                     'URL and a URL can hold one. It is only needed for a ' +
+                     'partner\'s own inventions: the ordinary OpenID Connect ' +
+                     'claims, the SAML `urn:oid:` names and the AD FS claim ' +
+                     'URIs are mapped already.\n\n' +
+                     '**`fedRelease`** names an attribute or claim released to ' +
+                     'that partner, and it can only REMOVE — from what ' +
+                     '/admin/claims, /admin/saml-attributes and the groups ' +
+                     'claim would add, and from nothing else. It cannot touch ' +
+                     '`sub`, `iss`, `exp` or a NameID. **NO VALUES MEANS NO ' +
+                     'POLICY, not release nothing**: adding the first value ' +
+                     'here is what starts the filtering.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'The relationship.' },
+            field: { type: 'string',
+                     enum: ['fedAttributeMap', 'fedRelease', 'description'],
+                     description: 'Which list.' },
+            value: { type: 'string', description: 'The value to add.' }
+          },
+          required: ['id', 'field', 'value'],
+          examples: [{ id: 'partner-a', field: 'fedAttributeMap',
+                       value: 'http://partner.example/claims/dept=departmentNumber' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship with the value added.' },
+
+      { action: 'remove-value', operationId: 'removeFederationValue',
+        summary: 'Remove one value from a multi-valued field',
+        description: 'Refused if that value is not there, rather than ' +
+                     'succeeding silently: a caller removing a mapping it ' +
+                     'thinks exists wants to hear that it does not.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'The relationship.' },
+            field: { type: 'string',
+                     enum: ['fedAttributeMap', 'fedRelease', 'description'],
+                     description: 'Which list.' },
+            value: { type: 'string',
+                     description: 'The value to remove, exactly as it stands.' }
+          },
+          required: ['id', 'field', 'value'],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship with the value gone.' },
+
+      { action: 'enable', operationId: 'enableFederationRelationship',
+        summary: 'Turn a relationship on',
+        description: 'The second, deliberate act. **It is allowed on a ' +
+                     'relationship that is not fully configured**, and that ' +
+                     'is not a gap: a half-configured partner is a state ' +
+                     'somebody is passing through, and refusing to save it ' +
+                     'would mean configuring everything in one request with ' +
+                     'no way back. What happens in that state is that every ' +
+                     'endpoint for the relationship REFUSES and says which ' +
+                     'fields are missing — it never half-works — and the reply ' +
+                     'to this operation says so too.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'The relationship.' } },
+          required: ['id'],
+          examples: [{ id: 'partner-a' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship, and whether it is now usable.' },
+
+      { action: 'disable', operationId: 'disableFederationRelationship',
+        summary: 'Turn a relationship off',
+        description: 'A response arriving for a disabled relationship is ' +
+                     'refused without being looked at, which is what disabling ' +
+                     'is for. Nothing else is lost: the configuration, the ' +
+                     'counters and the mappings all stay, and the people it ' +
+                     'authenticated keep their directory entries and their ' +
+                     'sessions.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'The relationship.' } },
+          required: ['id'],
+          additionalProperties: false
+        },
+        responseDescription: 'The relationship, now disabled.' },
+
+      { action: 'delete', operationId: 'deleteFederationRelationship',
+        summary: 'Delete a relationship',
+        description: 'The entry goes and takes its recorded sign-ins with ' +
+                     'it. **The PEOPLE it authenticated keep their entries ' +
+                     'under `ou=users`** — nothing is ever deleted from there ' +
+                     '— and any session they hold is unaffected until it ' +
+                     'expires or is ended, which is what `POST ' +
+                     '/admin-api/logout` is for.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'The relationship.' } },
+          required: ['id'],
+          additionalProperties: false
+        },
+        responseDescription: 'Confirmation, and what was deliberately left ' +
+                             'behind.' }
+    ] },
+
+  { method: 'GET', path: BASE + '/saml2', tag: 'SAML 2.0',
+    operationId: 'getSaml2ServiceProviders',
+    summary: 'Every SAML 2.0 service provider, and the endpoints each is configured from',
+    description: 'A full SAML 2.0 identity provider: HTTP Redirect and HTTP ' +
+                 'POST for the AuthnRequest, and HTTP POST, HTTP Redirect or ' +
+                 'HTTP Artifact for the Response, with a SOAP artifact ' +
+                 'resolution service behind the third.\n\n**Every service ' +
+                 'provider gets its own identity provider metadata** — a ' +
+                 'distinct entityID and its own endpoints — and **a document ' +
+                 'is minted for any entityID asked for**, so nothing has to be ' +
+                 'provisioned before a service provider can be pointed at this ' +
+                 'service. That is why `metadataUrl` is on every row rather ' +
+                 'than being one constant.\n\nThis resource holds nothing: ' +
+                 'every row is an entry in `ou=applications`, the same one ' +
+                 '`GET /admin-api/applications` reports.\n\n`?sp=<entityID>` ' +
+                 'returns one of them, with what has been recorded about it — ' +
+                 'and answers 200 with `found: false` for an entityID that is ' +
+                 'not registered, whose metadata is still served and whose ' +
+                 'AuthnRequest would still be answered.',
+    mirrors: 'GET /admin/saml2',
+    parameters: [
+      { name: 'sp', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One service provider, by its entityID.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The service providers with the paging that found ' +
+                         'them, or one of them with its endpoints and its record.',
+    responseSchema: { $ref: '#/components/schemas/Saml2ServiceProviderList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML 2.0 endpoint.");
+      sendJson(res, 200, admin.saml2View(req).json);
+      log.debug("Leaving the management API SAML 2.0 endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/saml2/:action',
+    tag: 'SAML 2.0',
+    mirrors: 'POST /admin/saml2',
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML 2.0 action endpoint.");
+      const body = parseBody(req);
+      const result = admin.saml2Action(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SAML 2.0 action endpoint.");
+    },
+    actions: [
+      { action: 'register', operationId: 'registerSaml2ServiceProvider',
+        summary: 'Register a service provider by entityID',
+        description: 'OPTIONAL, and it changes nothing about whether a request ' +
+                     'is accepted: this identity provider accepts any ' +
+                     'entityID, and the first AuthnRequest or metadata fetch ' +
+                     'creates the entry anyway. What registering early buys is ' +
+                     'a metadata document to hand somebody before they have ' +
+                     'sent anything.\n\nIt is refused for an entityID that is ' +
+                     'already in the registry — an identifier names ONE ' +
+                     'application here whatever protocol brought it, so the ' +
+                     'answer to "it is already there" is to change what it ' +
+                     'holds rather than to create it twice.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            sp: { type: 'string', description: 'The service provider\'s entityID.' }
+          },
+          required: ['sp'],
+          examples: [{ sp: 'https://sp.example.com/saml' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application entry, and where its metadata is served.' },
+
+      { action: 'set-logout-service', operationId: 'addSaml2LogoutService',
+        summary: 'Declare where this service provider\'s LogoutResponse goes',
+        description: 'A `<samlp:LogoutRequest>` CARRIES NO RETURN ADDRESS — ' +
+                     'only SP metadata does, and this service does not consume ' +
+                     'SP metadata. With nothing declared the profile falls ' +
+                     'back to `saml2.defaultSingleLogoutService` and then to ' +
+                     'the assertion consumer service URL that service provider ' +
+                     'last used, WHICH IS A GUESS and is logged as one. This ' +
+                     'is how to remove the guess.\n\nIt writes ' +
+                     '`samlSingleLogoutService` on the application entry, so ' +
+                     'an `ldapmodify` of the same attribute does exactly this ' +
+                     '— two doors onto one value, not two stores.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            sp: { type: 'string', description: 'The service provider\'s entityID.' },
+            value: { type: 'string', description: 'An absolute URL.' }
+          },
+          required: ['sp', 'value'],
+          examples: [{ sp: 'https://sp.example.com/saml',
+                       value: 'https://sp.example.com/saml/slo' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application entry as it now stands.' },
+
+      { action: 'remove-logout-service', operationId: 'removeSaml2LogoutService',
+        summary: 'Take a logout return address off a service provider',
+        description: 'The attribute holds a LIST, so values are removed by ' +
+                     'name rather than the list being replaced. Removing the ' +
+                     'last one puts the fallback back.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            sp: { type: 'string' },
+            value: { type: 'string', description: 'The exact value to remove.' }
+          },
+          required: ['sp', 'value'],
+          examples: [{ sp: 'https://sp.example.com/saml',
+                       value: 'https://sp.example.com/saml/slo' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application entry as it now stands.' },
+
+      { action: 'set-signing-certificate', operationId: 'setSaml2SigningCertificate',
+        summary: 'Record the certificate this service provider signs with',
+        description: 'Base64 DER — PEM armour and whitespace are stripped, ' +
+                     'because what the attribute holds is what a ' +
+                     '`ds:X509Certificate` carries, and a PEM stored there ' +
+                     'would be something no reader of it expects with nothing ' +
+                     'to say so until the day one tried to use it.\n\n**IT IS ' +
+                     'NOT CHECKED AGAINST ANYTHING.** This service records ' +
+                     'whether an AuthnRequest was signed and verifies no ' +
+                     'signature, which is the same posture it takes to every ' +
+                     'credential — see `saml/CLAUDE.md`. This is the material ' +
+                     'a verification would read the day one is wanted, and it ' +
+                     'is public key material, so unlike a client secret it is ' +
+                     'worth nothing to whoever reads this directory. An empty ' +
+                     'value clears it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            sp: { type: 'string' },
+            value: { type: 'string', description: 'Base64 DER, or a PEM to be stripped.' }
+          },
+          required: ['sp'],
+          examples: [{ sp: 'https://sp.example.com/saml', value: 'MIIC...' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application entry as it now stands.' }
+    ] },
+
+  { method: 'GET', path: BASE + '/saml11', tag: 'SAML 1.1',
+    operationId: 'getSaml11RelyingParties',
+    summary: 'Every SAML 1.1 relying party, and the endpoints each is configured from',
+    description: 'A full SAML 1.1 identity provider: both browser profiles — ' +
+                 'Browser/POST and Browser/Artifact — and the SAML responder ' +
+                 'behind the second, which also answers AttributeQuery and ' +
+                 'AuthenticationQuery and is therefore this service\'s ' +
+                 'attribute authority.\n\n**IT IS NOT AN OLDER SPELLING OF ' +
+                 '`GET /admin-api/saml2`.** SAML 1.1 has no request message, ' +
+                 'so a relying party cannot identify itself in the protocol: ' +
+                 '`identifier` comes from Shibboleth\'s `providerId` ' +
+                 'parameter, from a scoped endpoint\'s path segment, or it is ' +
+                 'GUESSED from the origin of the TARGET. It has no Single ' +
+                 'Logout, so there is no logout service to declare, and no ' +
+                 'request signature to record. It has an attribute authority, ' +
+                 'which the 2.0 profile does not.\n\n**Every relying party ' +
+                 'gets its own metadata document** and one is minted for any ' +
+                 'identifier asked for, so nothing has to be provisioned ' +
+                 'before a relying party can be pointed at this service.\n\n' +
+                 'This resource holds nothing: every row is an entry in ' +
+                 '`ou=applications`, the same one `GET /admin-api/applications` ' +
+                 'reports — and the KIND is shared with WS-Federation, because ' +
+                 'a relying party handed the same assertion through the ' +
+                 'passive requestor profile is the same application. ' +
+                 '`profiles` says which of the two browser profiles it has ' +
+                 'actually used, and an empty list means it has only ever been ' +
+                 'handed a 1.1 assertion through another door.\n\n' +
+                 '`?rp=<identifier>` returns one of them, with what has been ' +
+                 'recorded about it — and answers 200 with `found: false` for ' +
+                 'an identifier that is not registered, whose metadata is ' +
+                 'still served and whose flow would still be answered.',
+    mirrors: 'GET /admin/saml11',
+    parameters: [
+      { name: 'rp', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One relying party, by its identifier.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The relying parties with the paging that found ' +
+                         'them, or one of them with its endpoints and its record.',
+    responseSchema: { $ref: '#/components/schemas/Saml11RelyingPartyList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML 1.1 endpoint.");
+      sendJson(res, 200, admin.saml11View(req).json);
+      log.debug("Leaving the management API SAML 1.1 endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/saml11/:action',
+    tag: 'SAML 1.1',
+    mirrors: 'POST /admin/saml11',
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML 1.1 action endpoint.");
+      const body = parseBody(req);
+      const result = admin.saml11Action(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SAML 1.1 action endpoint.");
+    },
+    actions: [
+      { action: 'register', operationId: 'registerSaml11RelyingParty',
+        summary: 'Register a relying party by identifier',
+        description: 'OPTIONAL, and it changes nothing about whether a flow is ' +
+                     'accepted: this identity provider accepts any identifier, ' +
+                     'and the first flow or metadata fetch creates the entry ' +
+                     'anyway.\n\nIt buys two things here rather than the one ' +
+                     'it buys on the SAML 2.0 side. A metadata document to ' +
+                     'hand somebody before they have sent anything — and **a ' +
+                     'NAME to put in `providerId`**, which matters more in ' +
+                     'this protocol than in any other here: with no name sent, ' +
+                     'the audience of the assertion is guessed from the origin ' +
+                     'of the TARGET, and a relying party expecting a different ' +
+                     'audience refuses the assertion inside a signature check ' +
+                     'with nothing saying why.\n\nIt is refused for an ' +
+                     'identifier already in the registry — an identifier names ' +
+                     'ONE application here whatever protocol brought it, and a ' +
+                     'WS-Federation relying party taking 1.1 assertions is ' +
+                     'already one of these.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            rp: { type: 'string', description: 'The relying party\'s identifier.' }
+          },
+          required: ['rp'],
+          examples: [{ rp: 'urn:example:app' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application entry, and where its metadata is served.' }
+    ] },
+
   { method: 'GET', path: BASE + '/authorization-servers', tag: 'Authorization servers',
     operationId: 'getAuthorizationServers',
     summary: 'Every authorization server profile, and what its document says',
@@ -2242,6 +3177,90 @@ const ROUTES = [
       log.debug("Entering the management API audit endpoint.");
       sendJson(res, 200, admin.auditView(req.query).json);
       log.debug("Leaving the management API audit endpoint.");
+    } },
+
+  // Delegation. THE SECOND READ-ONLY RESOURCE HERE, and for a related reason to
+  // the audit log's: it mirrors a console page with no form on it. Everything
+  // that page shows is an observation — an act happened or it did not, and the
+  // policy half is the KERBEROS principal database's configuration, which is
+  // not settable from anywhere in this service. There is nothing to change, so
+  // there is nothing to document as changeable, and rule 7 is satisfied by this
+  // GET alone.
+  { method: 'GET', path: BASE + '/delegation', tag: 'Delegation',
+    operationId: 'getDelegation',
+    summary: 'Who acted on whose behalf, through what, to reach what',
+    description: 'Every delegation this service has performed or REFUSED, in ' +
+                 'one model across three protocol families, plus the ' +
+                 'configured policy that decides the Kerberos ones.\n\n' +
+                 'Eight mechanisms: Kerberos S4U2Self, S4U2Proxy (classic and ' +
+                 'resource-based) and a forwarded ticket-granting ticket; ' +
+                 'WS-Trust `OnBehalfOf` and `ActAs`; RFC 8693 token exchange ' +
+                 'in both its shapes. They are recorded against ONE model ' +
+                 'because the question is protocol-independent: which hop ' +
+                 'invented which identity.\n\n**The axis worth filtering on is ' +
+                 '`mode`.** Under a `delegation` the credential CARRIES the ' +
+                 'chain — an `act` claim, a composite `ActAs`, ' +
+                 '`S4U_DELEGATION_INFO` in the PAC — so the far end can see ' +
+                 'who is really asking. Under an `impersonation` nothing does, ' +
+                 'which means this endpoint is the ONLY place that fact is ' +
+                 'ever visible: no reading of the token afterwards can recover ' +
+                 'it.\n\n**Refusals are here and are most of the value.** A ' +
+                 'refused act carries `reason` — the KDC\'s own words, the ' +
+                 'same sentence the client was sent — naming the two accounts ' +
+                 'and the two attributes and which was missing. A refused ' +
+                 'delegation appears in NO other resource here: nothing was ' +
+                 'accepted, so /admin-api/audit and /admin-api/users have ' +
+                 'nothing to say about it.\n\n**Nothing checks who may ' +
+                 'delegate except the KDC.** WS-Trust and token exchange are ' +
+                 'unpoliced here, and each act says so in the field that names ' +
+                 'an attribute for a Kerberos one.\n\nBesides the paged acts ' +
+                 'the reply carries `chains` — the distinct (mechanism, ' +
+                 'initial, intermediary, target) tuples among what MATCHED, ' +
+                 'one per edge of the picture — and `policy`, which is who may ' +
+                 'delegate to whom before anybody has tried.\n\nWALK IT BY ' +
+                 '`seq`: monotonic and never reused, including across a drop.',
+    mirrors: 'GET /admin/delegation',
+    parameters: [
+      { name: 'type', in: 'query', required: false,
+        schema: { type: 'string',
+                  enum: ['krb5-s4u2self', 'krb5-s4u2proxy-classic',
+                         'krb5-s4u2proxy-rbcd', 'krb5-forwarded',
+                         'wstrust-onbehalfof', 'wstrust-actas',
+                         'oauth-impersonation', 'oauth-delegation'] },
+        description: 'One mechanism. The reply\'s `types` member describes ' +
+                     'each of them, with the specification it comes from and ' +
+                     'whether this service polices it.' },
+      { name: 'mode', in: 'query', required: false,
+        schema: { type: 'string', enum: ['impersonation', 'delegation'] },
+        description: 'The protocol-independent axis: whether what came out ' +
+                     'carries the chain. ANDed with `type`, so a mode that ' +
+                     'does not match the mechanism matches nothing.' },
+      { name: 'outcome', in: 'query', required: false,
+        schema: { type: 'string', enum: ['issued', 'refused'] },
+        description: 'Two rather than the audit log\'s three: a delegation is ' +
+                     'DECIDED rather than performed, so there is no third ' +
+                     'answer between issuing the credential and refusing to.' },
+      { name: 'protocol', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'The family, spelled as /admin-api/users spells it — ' +
+                     '`Kerberos v5`, `WS-Trust`, `OAuth 2.0`. Free text ' +
+                     'rather than an enum, for the reason the audit log\'s ' +
+                     '`protocol` is.' },
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of ANY party of the chain (normalised name, ' +
+                     'presented form or application) or of either ' +
+                     'explanation, case-insensitive. One box over six fields, ' +
+                     'because the fact a caller has names one of them and not ' +
+                     'which column it is in.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The matching acts, the distinct chains among them, ' +
+                         'the configured Kerberos policy, and the vocabulary ' +
+                         'the filters take.',
+    responseSchema: { $ref: '#/components/schemas/DelegationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API delegation endpoint.");
+      sendJson(res, 200, admin.delegationView(req.query).json);
+      log.debug("Leaving the management API delegation endpoint.");
     } },
 
   // -------------------------------------------------------------------------

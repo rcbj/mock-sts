@@ -56,10 +56,27 @@
 // dependency and free of the import cycles this service's module split exists
 // to avoid: oauth2.js, wsfed.js and admin.js require THIS.
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const app = require('../common/app');
 const { log, logArtifact, baseUrlOf, nowSec, randomId, xmlEscape, parseBody,
         oauthError, userFor } = require('../common/helpers');
 const stats = require('../common/admin_stats');
+// The federation register, for the buttons at the foot of the sign-in screen.
+// A plain require in the ordinary direction and it passes rule 3e's test both
+// ways round: that module registers no route, so nothing about requiring it
+// from here can move one, and it requires only config.js, helpers.js and
+// audit.js — none of which requires this file — so there is no cycle to close.
+//
+// It is THIS module that requires the register rather than the other way about,
+// and that is the arrangement rather than an accident: `federation_sp.js`
+// requires THIS file (it has no sign-in screen of its own and calls
+// startSession() directly, which is the same dependency saml2_sso.js has), so a
+// require back from here to that module would be a cycle. The register in the
+// middle is what both halves can safely reach.
+const federation = require('./../federation/federation');
 // For one thing only: whether the main port is an HTTPS listener, which decides
 // the Secure attribute on the session cookie below.
 const config = require('../common/config');
@@ -92,11 +109,21 @@ const SESSION_TTL_MS = 60 * 60 * 1000;
 // started again.
 const AUTHN_TTL_MS = 10 * 60 * 1000;
 
-const sessions = new Map();         // session id -> the signed-in user
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const sessions = realms.map();         // session id -> the signed-in user
 
 // The requests waiting at the login screen: what to do with the person once
 // they have signed in, and what to tell them they are signing in FOR.
-const pending = new Map();          // authn id -> { returnTo, details, ... }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const pending = realms.map();          // authn id -> { returnTo, details, ... }
 
 // WebAuthn, IN EITHER OF ITS TWO ROLES. The verifier is ./webauthn — written
 // from the specification and sharing no code with the debugger's own decoder,
@@ -128,9 +155,19 @@ const pending = new Map();          // authn id -> { returnTo, details, ... }
 // because answering "two factors" with one would be exactly the lie wauth and
 // acr_values exist to prevent.
 const webauthnVerifier = require('./webauthn');
-const webauthnCredentials = new Map();  // username -> { credentialId, publicKeyJwk, signCount }
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const webauthnCredentials = realms.map();  // username -> { credentialId, publicKeyJwk, signCount }
 // mfa id -> { authn, username, challenge, passwordless, expires }
-const pendingMfa = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const pendingMfa = realms.map();
 const MFA_TTL_MS = 5 * 60 * 1000;
 
 // --- the browser session -----------------------------------------------------
@@ -218,8 +255,35 @@ function methodPhraseFor(amr) {
   return 'sign-in screen (password)';
 }
 
-function startSession(res, username, amr, acr, via) {
+// ---------------------------------------------------------------------------
+// `detail` — THE SIXTH ARGUMENT, AND WHY IT EXISTS RATHER THAN A SECOND
+// recordAuthentication() CALL AT THE CALLER.
+//
+// This function is the single funnel for "somebody now holds a session here",
+// and it has always recorded the authentication ITSELF — the comment two lines
+// into the body says so, and it is what makes a WS-Federation sign-in appear on
+// /admin/users without that module knowing the console exists.
+//
+// FEDERATION BROKE THAT ASSUMPTION IN TWO PLACES AT ONCE and the fix had to be
+// here rather than there. A federated sign-in has facts this function cannot
+// derive:
+//
+//   * `methodPhraseFor()` reads `amr` and answers "sign-in screen (password)"
+//     for anything it does not recognise, which is exactly wrong for somebody
+//     who never saw this screen at all;
+//   * the mapped attributes a foreign identity provider asserted have to ride
+//     the funnel to the directory, and there is no other way in.
+//
+// The obvious alternative — the caller calling `stats.recordAuthentication()`
+// and then this — was written first and is what this parameter replaced: it
+// produced TWO authentication records for one sign-in, so /admin/users counted
+// every federated arrival twice and the audit log carried a duplicate of every
+// one of them. A caller passing nothing behaves exactly as every existing
+// caller did.
+// ---------------------------------------------------------------------------
+function startSession(res, username, amr, acr, via, detail) {
   log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
+  const extra = detail || {};
   const sessionId = randomId(24);
   const session = {
     // The id is on the session as well as being the map key, because everything that
@@ -246,12 +310,12 @@ function startSession(res, username, amr, acr, via) {
                         (config.value('global.https') ? '; Secure' : ''));
   // One of the two places a person is authenticated by typing a name at a screen —
   // this one covers both, since WS-Federation signs in through here.
-  stats.recordAuthentication({
+  stats.recordAuthentication(Object.assign({
     presented: username, protocol: via || 'OAuth 2.0 / OIDC',
     method: methodPhraseFor(amr),
     sub: session.user.sub, amr: amr, acr: acr, sessionId: sessionId,
     note: 'No password was checked; the name typed is the identity.'
-  });
+  }, extra, { sessionId: sessionId }));
   // The session itself, as its own audit event. It is deliberately separate
   // from the authentication recorded on the line above: the two are one act at
   // this screen and are NOT one act everywhere — a Kerberos AS-REQ and a
@@ -273,8 +337,12 @@ function startSession(res, username, amr, acr, via) {
     protocol: via || 'OAuth 2.0 / OIDC',
     channel: 'http',
     target: sessionId,
-    summary: username + ' was signed in at the ' + (via || 'OAuth 2.0 / OIDC') +
-             ' screen; session ' + sessionId + ' was created',
+    // "at the … screen" is wrong for a caller that had no screen, so the
+    // phrasing follows the caller where it says so. Federation is the one such
+    // caller today: the person signed in somewhere else entirely.
+    summary: extra.summary ||
+             (username + ' was signed in at the ' + (via || 'OAuth 2.0 / OIDC') +
+              ' screen; session ' + sessionId + ' was created'),
     detail: {
       sessionId: sessionId,
       sub: session.user.sub,
@@ -282,20 +350,42 @@ function startSession(res, username, amr, acr, via) {
       acr: acr || '',
       authTime: session.authTime,
       expiresAt: new Date(session.expires).toISOString(),
-      note: 'No password was checked; the name typed is the identity.'
+      // The caller's own sentence where it has one. A federated sign-in's
+      // "No password was checked" is true and useless — nothing was typed
+      // here at all — and the row is the only place that distinction will
+      // ever be recorded.
+      note: extra.note || 'No password was checked; the name typed is the identity.'
     }
   });
   log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
   return session;
 }
 
-// Ends the session the request carries, and returns it — the caller needs what it
-// was, not merely that it is gone: WS-Federation's sign-out has to send a cleanup
-// request to each relying party the session signed into, and that list lives on
-// the session object it is about to discard.
-function endSession(req, res) {
-  log.debug("Entering endSession().");
-  const id = cookiesOf(req)[SESSION_COOKIE];
+// ---------------------------------------------------------------------------
+// ENDING A SESSION, IN THE TWO SHAPES CALLERS NEED, AND ONE BODY UNDER BOTH.
+//
+// `endSession(req, res)` is the browser's: it reads the cookie, drops what it
+// names, and clears the cookie. `endSessionById(id, via)` is the one the
+// PROTOCOL-INDEPENDENT logout needs — /logout ends sessions that are not the
+// caller's own, and /admin/logout ends somebody else's entirely, neither of
+// which has a cookie to read.
+//
+// They share `dropSession()` and MUST keep sharing it. What that function does
+// besides the delete is the whole reason: the RFC 9700 section 2.2.2 refresh
+// revocation and the `session.end` audit row. A second copy of either would be
+// a sign-out that revoked nothing on one path, or two audit rows that came to
+// disagree about what a sign-out is — which is exactly the argument that put
+// this code here rather than in /oauth2/logout and wsignout1.0 separately.
+// ---------------------------------------------------------------------------
+
+// The one place a session actually stops existing. `via` names the door, and it
+// goes on the audit row: "the sign-out endpoint", "a global logout", "the admin
+// console". Returns the session as it was — the caller needs what it WAS, not
+// merely that it is gone, because the lists of relying parties and service
+// providers a federated sign-out has to fan out to live on the object being
+// discarded.
+function dropSession(id, via, cookiePresented) {
+  log.debug("Entering dropSession(). id=" + (id || '(none)'));
   const session = id ? sessions.get(id) : null;
   if (id) sessions.delete(id);
   // RFC 9700 section 2.2.2: an authorization server MAY revoke refresh tokens
@@ -304,16 +394,18 @@ function endSession(req, res) {
   // revocation set /oauth2/revoke and the console write to, so introspection
   // reports them inactive immediately.
   //
-  // HERE and not at the two protocols' own sign-out endpoints, because this
-  // function is the single place both of them end a session: /oauth2/logout and
-  // WS-Federation's wsignout1.0 are two words for one act, and a revocation at
-  // each would be two that could come to disagree.
+  // HERE and not at any sign-out endpoint, because this function is the single
+  // place all of them end a session: /oauth2/logout, WS-Federation's
+  // wsignout1.0, SAML 2.0 Single Logout and /logout are four words for one act,
+  // and a revocation at each would be four that could come to disagree.
   //
   // Only the REFRESH tokens. An access token issued on this session expires in
   // an hour and revoking it would take away the evidence of what the session
   // did; the refresh token is the thirty-day credential a sign-out is supposed
   // to be about, and leaving it live is what made signing out mean nothing to
-  // the back channel.
+  // the back channel. A GLOBAL logout revokes the access tokens too — but it
+  // does that itself, as a separate stated act, rather than by widening this
+  // one: the two are different promises and only one of them is the BCP's.
   if (id && bcp.revokeRefreshOnLogout()) {
     const revoked = stats.revokeWhere(function (record) {
       return record.sessionId === id && String(record.typ || '') === 'Refresh';
@@ -324,16 +416,10 @@ function endSession(req, res) {
                'leaves a thirty-day credential in the client\'s hands.');
     }
   }
-  // The same attributes the cookie was SET with, Secure included: a browser
-  // matches an expiry against the cookie it holds, and one that disagrees about
-  // Secure can leave the original in place — a sign-out that reports success
-  // and ends nothing.
-  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0' +
-                        (config.value('global.https') ? '; Secure' : ''));
-  // The sign-out, recorded here because this is the one place both of them
-  // reach: /oauth2/logout and WS-Federation's wsignout1.0 are two protocols'
-  // words for ending the one session this service holds, and a row per caller
-  // would be two rows that could come to disagree about what a sign-out is.
+  // The sign-out, recorded here because this is the one place every door
+  // reaches: they are four protocols' words for ending the one session this
+  // service holds, and a row per caller would be four rows that could come to
+  // disagree about what a sign-out is.
   //
   // A logout with NOTHING TO END is recorded too, as `refused`. That is not
   // pedantry: a relying party looping on wsignout1.0 against a session that
@@ -351,17 +437,87 @@ function endSession(req, res) {
       : 'a sign-out was asked for and there was no session to end',
     detail: {
       sessionId: session ? session.id : '',
-      cookiePresented: id ? 'yes' : 'no',
-      // Whether the cookie named a session this service still had. A `yes`
-      // here with no session means it had already expired or already been
-      // signed out, which are the two ordinary ways this row is a refusal.
+      // How the session was named. A cookie is the browser's own sign-out; an
+      // id is /logout or the console ending a session that is not the caller's,
+      // and telling the two apart is the difference between "they signed out"
+      // and "somebody signed them out".
+      cookiePresented: cookiePresented ? 'yes' : 'no',
+      namedBy: cookiePresented ? 'the session cookie' : 'its identifier',
+      via: via || 'a sign-out endpoint',
+      // Whether the name reached a session this service still had. A `yes` on
+      // cookiePresented with no session means it had already expired or already
+      // been signed out, which are the two ordinary ways this row is a refusal.
       sessionFound: session ? 'yes' : 'no',
       amr: session ? (session.amr || []).join(', ') : '',
       acr: session ? (session.acr || '') : ''
     }
   });
+  log.debug("Leaving dropSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
+                                                 : 'There was no session to drop.'));
+  return session || null;
+}
+
+// Every session this service holds for one person, newest first. The comparison
+// is on the USERNAME as typed, because that is what the session records and what
+// /logout was asked about; admin_stats.js's identityKeyOf() normalisation is
+// applied by the CALLER where it wants `alice` and `alice@REALM` to be one
+// person, so that this function cannot quietly fold two names together for a
+// caller that meant one.
+function sessionsOf(username) {
+  log.debug("Entering sessionsOf(). username=" + username);
+  const wanted = String(username || '');
+  const out = [];
+  sessions.forEach(function (session) {
+    if (((session.user && session.user.username) || '') === wanted) out.push(session);
+  });
+  out.sort(function (a, b) { return (b.authTime || 0) - (a.authTime || 0); });
+  log.debug("Leaving sessionsOf(). " + out.length + " session(s).");
+  return out;
+}
+
+// One session by its id, without the cookie and without expiring it. Used by
+// /logout to draw a row for a session that is not the caller's; `sessionOf()`
+// stays the function that reads the cookie and sweeps what it finds expired.
+function sessionById(id) {
+  return sessions.get(String(id || '')) || null;
+}
+
+// End one session named by its id. The protocol-independent logout's door, and
+// the console's. It does NOT touch the caller's cookie: the session being ended
+// is usually not the one the caller is holding, and clearing the cookie of a
+// browser that is signed in as somebody else would sign the operator out
+// instead of the person they asked about.
+function endSessionById(id, via) {
+  log.debug("Entering endSessionById(). id=" + id);
+  const session = dropSession(String(id || ''), via, false);
+  log.debug("Leaving endSessionById(). " + (session ? 'Ended.' : 'There was no such session.'));
+  return session;
+}
+
+// Clear the session cookie on this response, whatever the session it named. It
+// is the second half of a browser sign-out and it is EXPORTED because /logout
+// can end the caller's own session by id — through the list, like any other row
+// — and would otherwise leave the browser holding a cookie naming a session
+// this service no longer has. Same attributes it was SET with, Secure included:
+// a browser matches an expiry against the cookie it holds, and one that
+// disagrees about Secure can leave the original in place — a sign-out that
+// reports success and ends nothing.
+function clearSessionCookie(res) {
+  res.set('Set-Cookie', SESSION_COOKIE + '=; Path=/; Max-Age=0' +
+                        (config.value('global.https') ? '; Secure' : ''));
+}
+
+// Ends the session the request carries, and returns it — the caller needs what it
+// was, not merely that it is gone: WS-Federation's sign-out has to send a cleanup
+// request to each relying party the session signed into, and that list lives on
+// the session object it is about to discard.
+function endSession(req, res) {
+  log.debug("Entering endSession().");
+  const id = cookiesOf(req)[SESSION_COOKIE];
+  const session = dropSession(id, 'the sign-out endpoint for this browser', !!id);
+  clearSessionCookie(res);
   log.debug("Leaving endSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
-                                               : 'There was no session to drop.'));
+                                                : 'There was no session to drop.'));
   return session || null;
 }
 
@@ -479,6 +635,49 @@ function pendingFor(id) {
 // Keycloak-shaped vocabulary, the same statement that no password is checked.
 // What changed is where it lives, what it posts to, and that its footer rows
 // are supplied rather than read off an authorization request.
+// The partner buttons, or nothing at all. Nothing at all is the ordinary state
+// — a service with no federation configured must have a sign-in screen byte for
+// byte the one it always had, which is why this returns an empty string rather
+// than an empty section with a heading.
+function federatedOptionsHtml(record) {
+  log.debug("Entering federatedOptionsHtml().");
+  if (!config.value('federation.loginButtons')) {
+    log.debug("Leaving federatedOptionsHtml(). federation.loginButtons is off.");
+    return '';
+  }
+  let options = [];
+  try {
+    options = federation.signInOptions();
+  } catch (e) {
+    // Swallowed with a reason: the sign-in screen is the last thing in this
+    // service that may fail to draw. A federation register that throws costs
+    // the buttons, never the password field underneath them.
+    log.error('authn: the federation register threw while building the sign-in ' +
+              'screen and was ignored; the screen itself is unaffected: ' + e.message);
+    log.debug("Leaving federatedOptionsHtml(). It threw.");
+    return '';
+  }
+  if (!options.length) {
+    log.debug("Leaving federatedOptionsHtml(). No usable partner is configured.");
+    return '';
+  }
+  // The whole original request rides along, so that whatever brought the person
+  // here resumes once the partner has answered. It is `record.returnTo`, which
+  // beginAuthentication() has already checked is a path on this service.
+  const back = encodeURIComponent(record.returnTo);
+  const html = '<div class="fed"><p>Or sign in with a federated identity provider. ' +
+    'No password is typed here and none is checked there either as far as this service ' +
+    'can tell — what it checks is the partner\'s signature.</p>' +
+    options.map(function (one) {
+      return '<a class="fedbtn" href="/federation/login/' + encodeURIComponent(one.id) +
+        '?returnTo=' + back + '">' + xmlEscape(one.label) +
+        '<span>' + xmlEscape(one.protocolLabel) +
+        (one.peer ? ' · ' + xmlEscape(one.peer) : '') + '</span></a>';
+    }).join('') + '</div>';
+  log.debug("Leaving federatedOptionsHtml(). " + options.length + " partner(s) offered.");
+  return html;
+}
+
 function loginPage(base, record, error) {
   log.debug("Entering loginPage(). protocol=" + record.protocol +
             (error ? ", showing an error" : ""));
@@ -496,7 +695,8 @@ function loginPage(base, record, error) {
     '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
     'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
     'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}code{font-family:ui-monospace,' +
-    'SFMono-Regular,Menlo,monospace}</style></head><body><div class="card">' +
+    'SFMono-Regular,Menlo,monospace}.fed{margin-top:18px;padding-top:14px;border-top:1px solid #eee}.fed p{font-size:.78em;color:#666;margin:0 0 8px}a.fedbtn{display:block;text-align:center;padding:9px 12px;margin:6px 0;border-radius:5px;border:1px solid #12107c;color:#12107c;background:#fff;text-decoration:none;font-size:.9em}a.fedbtn span{display:block;font-size:.75em;color:#777}'
+    + '</style></head><body><div class="card">' +
     '<h1>Sign in</h1>' +
     '<p class="sub">Mock authentication service at <code>' + xmlEscape(base) + '</code></p>' +
     (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
@@ -525,7 +725,30 @@ function loginPage(base, record, error) {
     (record.forceMfa ? ' — not available: this request demands two factors' : '') + '</label>' +
     '<div class="row"><button type="submit" id="kc-login" name="action" value="login">Sign In</button>' +
     '<button type="submit" id="kc-cancel" name="action" value="cancel" class="secondary">Cancel</button></div>' +
-    '</form><div class="meta">' +
+    '</form>' +
+    // ---------------------------------------------------------------------
+    // AND THE FEDERATION PARTNERS, if any are configured and usable.
+    //
+    // THIS IS WHY THE BUTTONS ARE HERE RATHER THAN ONLY ON /federation: a
+    // person arriving at this screen is in the middle of SOMETHING — an OAuth
+    // 2.0 authorization request, a WS-Federation sign-in, a SAML AuthnRequest,
+    // the admin console — and `record.returnTo` is that something, whole. Handing
+    // it to the federated flow is what lets a foreign identity provider satisfy
+    // any protocol this service speaks, without a single one of them being told
+    // that federation exists.
+    //
+    // ONLY USABLE ONES ARE OFFERED. `signInOptions()` filters to relationships
+    // that are enabled AND fully configured, because a button leading to a
+    // refusal is worse than no button — the person has already left this screen
+    // by the time they find out.
+    //
+    // They are LINKS rather than buttons in the form, and that is not
+    // cosmetic: a form control would post to this screen's own handler, which
+    // signs somebody in on a typed name. These have to leave for somewhere
+    // else entirely, and a GET is what leaving looks like.
+    // ---------------------------------------------------------------------
+    federatedOptionsHtml(record) +
+    '<div class="meta">' +
     '<div>No password is checked. The username you enter is the identity the issued tokens describe.</div>' +
     '<div>Passwordless: the password field is not read at all, and the security key becomes the ' +
     'only factor — a key is enrolled for this username on first use, so the first person to claim ' +
@@ -1011,5 +1234,16 @@ module.exports = {
   sessionOf: sessionOf,
   startSession: startSession,
   endSession: endSession,
+  // The three the protocol-independent logout needs, and the reason each is
+  // here rather than reimplemented over there: /logout ends sessions it was not
+  // handed a cookie for, so it names them by id — and every one of them still
+  // has to go through dropSession(), which is where the RFC 9700 refresh
+  // revocation and the one `session.end` audit row live. A second delete
+  // somewhere else would be a sign-out that revoked nothing and logged nothing,
+  // and it would look exactly like this one from the outside.
+  sessionsOf: sessionsOf,
+  sessionById: sessionById,
+  endSessionById: endSessionById,
+  clearSessionCookie: clearSessionCookie,
   beginAuthentication: beginAuthentication
 };

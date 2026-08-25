@@ -69,6 +69,10 @@
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('./realms');
 const config = require('./config');
 
 // ---------------------------------------------------------------------------
@@ -175,6 +179,24 @@ const ACTIONS = [
     label: 'A sign-on session was created' },
   { action: 'session.end', category: 'session',
     label: 'A sign-on session was ended' },
+
+  // THE TWO THE PROTOCOL-INDEPENDENT LOGOUT WRITES, and they are `session`
+  // rather than a seventh category because that is what they are ABOUT — even
+  // though a global logout also revokes tokens, discards codes, drops directory
+  // connections and stamps a Kerberos principal. A category per family would be
+  // six categories for one act.
+  //
+  // They are ONE ROW PER ACT and not one per thing ended, which is rule 3c's
+  // no-double-counting read the other way: every session ended writes its own
+  // `session.end` through dropSession(), so a row per item here would count the
+  // same sign-out twice at two layers. What these add is the fact none of those
+  // rows can carry — that they were one act, asked for by one person, at one
+  // moment — and the counts of what could NOT be ended, which is the half of a
+  // global logout nothing else records anywhere.
+  { action: 'logout.global', category: 'session',
+    label: 'Everything held for one identity was ended, across every protocol' },
+  { action: 'logout.selective', category: 'session',
+    label: 'Named sessions or credentials were ended for one identity' },
 
   // The four the request that started this feature named, plus the two that
   // fall out of the same operations on something that is not a person. The
@@ -335,11 +357,25 @@ const OUTCOMES = ['success', 'refused', 'error'];
 // have read up to 4,102" and mean it, where a row index would silently mean a
 // different event as soon as anything was dropped.
 // ---------------------------------------------------------------------------
-const events = [];
+// PER TRUST REALM. `realms.arr()` is a array that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain array it replaced. See common/realms.js.
+const events = realms.arr();
 
-let seq = 0;
+// ---------------------------------------------------------------------
+// PER TRUST REALM, like the ring above it. A sequence number shared between
+// realms would make one realm's rows non-contiguous — which is the one thing
+// `seq` promises not to be — and a `recorded` counting every realm's events
+// beside a list holding one realm's would misreport whether the cap has bitten.
+// `realms.obj(factory)` is a plain object per realm, so `nums.seq++` works
+// exactly as the bindings it replaced did.
+// ---------------------------------------------------------------------
+const nums = realms.obj(function () {
+  return { seq: 0, recorded: 0 };
+});
 
-let recorded = 0;
 
 let dropped = 0;
 
@@ -445,10 +481,10 @@ function record(event) {
   const action = String(info.action || 'protocol.call');
   const category = CATEGORY_OF_ACTION[action] || String(info.category || 'protocol');
   const now = Date.now();
-  seq++;
-  recorded++;
+  nums.seq++;
+  nums.recorded++;
   const row = {
-    seq: seq,
+    seq: nums.seq,
     at: now,
     category: category,
     action: action,
@@ -749,7 +785,7 @@ function summary() {
     held: events.length,
     // Everything ever recorded, which is the number that says whether the cap
     // has bitten. `held` alone would read as "this is all there was".
-    recorded: recorded,
+    recorded: nums.recorded,
     dropped: dropped,
     maxEvents: maxEvents(),
     protocolCalls: protocolCallsRecorded(),

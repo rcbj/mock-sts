@@ -90,7 +90,9 @@
 const fs = require('fs');
 const path = require('path');
 const app = require('../common/app');
-const { log, xmlEscape } = require('../common/helpers');
+const { log, xmlEscape, baseUrlOf } = require('../common/helpers');
+// The trust realm registry, for GET /realms below.
+const realms = require('../common/realms');
 // For ONE sentence: whether the console asks the reader to sign in. It is a
 // runtime setting (`/admin/config` and the management API can turn it off
 // while the process runs), so it is read per request rather than captured
@@ -223,6 +225,73 @@ app.get('/', function (req, res) {
   log.debug('Entering the front page endpoint.');
   res.type('html').send(homePage());
   log.debug('Leaving the front page endpoint.');
+});
+
+// ---------------------------------------------------------------------------
+// GET /realms — THE TRUST REALM DIRECTORY, AND IT IS DELIBERATELY UNGATED.
+//
+// A trust realm is a whole logical copy of this service reached under a path
+// prefix (see common/realms.js), and a client that has been told to use one has
+// no way to find out what the prefix is — the prefix segment is configurable
+// and the realm ids are whatever an operator defined. So this answers it, in
+// JSON, to anybody who can reach this port.
+//
+// It is on the FRONT DOOR module rather than in the console because of who
+// needs it: the console already knows, and the thing that does not is the
+// client being pointed at a realm. Gating it would make the one document that
+// says where the endpoints are the one document a client cannot fetch, which is
+// the shape of every RFC 8414 discovery document here and for the same reason.
+//
+// WHAT IT DOES NOT CARRY: a realm's overrides. Those are the realm's
+// configuration — what it is set up to do differently — and that is the console
+// and the management API's business rather than a discovery document's. What is
+// here is the id, the name, the description an operator wrote and the base URL,
+// which is everything needed to construct a URL in that realm and nothing else.
+// ---------------------------------------------------------------------------
+app.get('/realms', function (req, res) {
+  log.debug('Entering the realm directory endpoint.');
+  // The base URL WITHOUT the current realm's prefix, so that a request that
+  // arrived inside realm `acme` still lists every realm from the root rather
+  // than listing them all as though they hung under `acme`. baseUrlOf() adds
+  // the ambient prefix by design — this is the one caller that does not want
+  // it, and it says so here rather than working around it elsewhere.
+  const root = baseUrlOf(req).slice(0, baseUrlOf(req).length -
+                                       realms.currentPrefix().length);
+  const body = {
+    // What the segment in front of a realm id currently is, because a client
+    // that wants to build a URL for a realm it has NOT been told about — a new
+    // one, in a test — needs the rule and not just the answers.
+    pathSegment: realms.pathSegment(),
+    // TWO FLAGS RATHER THAN ONE, because they answer different questions and a
+    // single `enabled` was ambiguous in exactly the case that matters. `enabled`
+    // is the `realms.enabled` SETTING — whether an operator has switched the
+    // feature off. `active` is whether any prefix actually answers, which is
+    // false when the setting is on and nobody has defined a realm. A client
+    // told "enabled: false" when the truth was "nobody has defined one yet"
+    // would look for the wrong problem.
+    enabled: config.value('realms.enabled'),
+    active: realms.active(),
+    current: realms.currentId(),
+    realms: realms.list().map(function (realm) {
+      return {
+        id: realm.id,
+        name: realm.name,
+        description: realm.description,
+        builtin: !!realm.builtin,
+        pathPrefix: realms.prefixOf(realm),
+        baseUrl: root + realms.prefixOf(realm)
+      };
+    }),
+    // Which protocol families are realm-aware and by what discriminator. It is
+    // here rather than only on the console page because the honest answer for
+    // four of the sixteen families is "not by path", and a client driving
+    // Kerberos or LDAP against a realm needs to be told that by the service
+    // rather than by a README it did not read.
+    support: realms.realmSupport()
+  };
+  res.set('Cache-Control', 'no-store').type('application/json')
+     .send(JSON.stringify(body, null, 2));
+  log.debug('Leaving the realm directory endpoint. ' + body.realms.length + ' realm(s).');
 });
 
 app.get(LOGO_ROUTE, function (req, res) {

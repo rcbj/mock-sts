@@ -63,6 +63,8 @@
 // ---------------------------------------------------------------------------
 
 const { log } = require('../common/helpers');
+// TRUST REALMS: the verifier's request below is per realm.
+const realms = require('../common/realms');
 const config = require('../common/config');
 const { VC_ATTRIBUTES, isSelected } = require('./vc_claims');
 const { VCI_VCT, VCI_JWT_TYPES, VCI_CONFIG_ID, VCI_DID_CONFIG_ID, VCI_JWT_CONFIG_ID,
@@ -274,30 +276,37 @@ function defaultRequested() {
     .filter(function (name) { return name !== ''; });
 }
 
-let requested = defaultRequested();
+// PER TRUST REALM, both of them. What a verifier asks a wallet to present, and
+// in which credential format, is a decision a realm makes for itself — and the
+// verifier client id is already realm-distinct (realms.js seeds it), so a
+// shared request would be one verifier's question asked under several names.
+// `realms.obj(factory)` is a plain object per realm, so the reads and the
+// reassignments below work exactly as the two bindings they replaced did.
+const state = realms.obj(function () {
+  return { requested: defaultRequested(), format: 'dc+sd-jwt' };
+});
 
 // The default credential format: what /oid4vp/start asks for when the link it was
 // reached by does not name one. The bar door's three format buttons DO name one,
 // so they are unaffected by this — which is deliberate, since a page offering
 // "present an SD-JWT VC" that asked for something else would be lying in the one
 // place a reader is most likely to trust it.
-let defaultFormat = 'dc+sd-jwt';
 
 function requestedClaims() {
-  return requested.slice();
+  return state.requested.slice();
 }
 
 // The requested claims with what the page needs to describe each: the catalogue
 // row where there is one, and the fact that there is not where there is not.
 function requestedRows() {
-  return requested.map(function (name) {
+  return state.requested.map(function (name) {
     const row = rowFor(name);
     return { claim: name, inCatalogue: !!row, label: row ? row.label : '', row: row };
   });
 }
 
 function isRequested(claimName) {
-  return requested.indexOf(String(claimName || '')) >= 0;
+  return state.requested.indexOf(String(claimName || '')) >= 0;
 }
 
 // Install a whole selection at once. Returns the errors rather than throwing,
@@ -345,14 +354,14 @@ function setRequested(names) {
     .filter(function (row) { return seen.has(row.claim); })
     .map(function (row) { return row.claim; });
   const extras = wanted.filter(function (name) { return !rowFor(name); });
-  const before = requested;
-  requested = inCatalogue.concat(extras);
-  const added = requested.filter(function (name) { return before.indexOf(name) < 0; });
-  const removed = before.filter(function (name) { return requested.indexOf(name) < 0; });
-  log.info('oid4vp: the Verifier now asks for ' + (requested.join(', ') || '(no claims at all)') +
+  const before = state.requested;
+  state.requested = inCatalogue.concat(extras);
+  const added = state.requested.filter(function (name) { return before.indexOf(name) < 0; });
+  const removed = before.filter(function (name) { return state.requested.indexOf(name) < 0; });
+  log.info('oid4vp: the Verifier now asks for ' + (state.requested.join(', ') || '(no claims at all)') +
            '. Added: ' + (added.join(', ') || 'nothing') + '. Removed: ' +
            (removed.join(', ') || 'nothing') + '.');
-  log.debug("Leaving setRequested(). " + requested.length + " claim(s) requested.");
+  log.debug("Leaving setRequested(). " + state.requested.length + " claim(s) requested.");
   return { ok: true, requested: requestedClaims(), added: added, removed: removed };
 }
 
@@ -367,7 +376,7 @@ function addRequested(name) {
     log.debug("Leaving addRequested(). Already asked for.");
     return { ok: false, errors: ['This Verifier already asks for "' + wanted + '".'] };
   }
-  const result = setRequested(requested.concat([wanted]));
+  const result = setRequested(state.requested.concat([wanted]));
   log.debug("Leaving addRequested(). ok=" + result.ok);
   return result;
 }
@@ -379,7 +388,7 @@ function removeRequested(name) {
     log.debug("Leaving removeRequested(). Not in the list.");
     return { ok: false, errors: ['This Verifier does not ask for "' + wanted + '".'] };
   }
-  const result = setRequested(requested.filter(function (claim) { return claim !== wanted; }));
+  const result = setRequested(state.requested.filter(function (claim) { return claim !== wanted; }));
   log.debug("Leaving removeRequested(). ok=" + result.ok);
   return result;
 }
@@ -392,7 +401,7 @@ function resetRequested() {
 }
 
 function defaultFormatId() {
-  return defaultFormat;
+  return state.format;
 }
 
 function setDefaultFormat(id) {
@@ -403,7 +412,7 @@ function setDefaultFormat(id) {
     return { ok: false, errors: ['There is no credential format called "' + id + '". The three ' +
                                  'are: ' + FORMAT_IDS.join(', ') + '.'] };
   }
-  defaultFormat = format.id;
+  state.format = format.id;
   log.info('oid4vp: a request that does not name a format now asks for ' + format.id + '.');
   log.debug("Leaving setDefaultFormat(). format=" + format.id);
   return { ok: true, format: format.id };
@@ -415,7 +424,7 @@ function setDefaultFormat(id) {
 // in three places and the fallback is now configuration rather than a constant.
 function formatOf(wanted) {
   const format = formatById(wanted);
-  return format ? format.id : defaultFormat;
+  return format ? format.id : state.format;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,14 +514,14 @@ function dcqlPathsFor(formatId, claimName) {
 
 function dcqlClaims(formatId) {
   log.debug("Entering dcqlClaims(). format=" + formatId);
-  const format = formatById(formatId) || formatById(defaultFormat);
+  const format = formatById(formatId) || formatById(state.format);
   const out = [];
-  requested.forEach(function (claimName) {
+  state.requested.forEach(function (claimName) {
     pathsFor(format, claimName).forEach(function (path) {
       out.push({ path: path });
     });
   });
-  log.debug("Leaving dcqlClaims(). " + out.length + " path(s) for " + requested.length + " claim(s).");
+  log.debug("Leaving dcqlClaims(). " + out.length + " path(s) for " + state.requested.length + " claim(s).");
   return out;
 }
 
@@ -521,7 +530,7 @@ function dcqlClaims(formatId) {
 // asked for as written (see pathsFor), because that is the negative somebody
 // configured on purpose.
 function ldpOmitted() {
-  return requested.filter(function (claimName) {
+  return state.requested.filter(function (claimName) {
     const row = rowFor(claimName);
     return !!row && row.ldpTerms.length === 0;
   });

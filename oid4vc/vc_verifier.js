@@ -57,6 +57,10 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
 const qrcode = require('qrcode');
 const app = require('../common/app');
@@ -112,10 +116,20 @@ const VP_DCQL_ID = vpConfig.DCQL_ID;
 
 // state -> { id, nonce, state, responseMode, clientId, requestObject, dcql,
 //            expires, verdict }
-const vpTransactions = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const vpTransactions = realms.map();
 
 // id -> state, so a Request Object fetched by reference can find its transaction.
-const vpRequests = new Map();
+// PER TRUST REALM. `realms.map()` is a Map that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain Map it replaced. See common/realms.js.
+const vpRequests = realms.map();
 
 function sweepVpTransactions() {
   const now = Date.now();

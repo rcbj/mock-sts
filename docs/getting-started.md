@@ -126,6 +126,13 @@ Open it in a browser and sign in — any username, since this service checks no
 password — or read the same service through `/admin-api`, which is not gated.
 `ADMIN_AUTH_REQUIRED=false` turns the gate off entirely.
 
+A protocol you can drive end to end in a browser with nothing else installed is
+**SAML 2.0**: open `localhost:8081/saml2/sp`, pick one of the three bindings, sign
+in with any username, and the mock service provider verifies the response it gets
+back check by check. `localhost:8081/saml2/metadata` is the identity provider
+metadata; `localhost:8081/saml2/metadata/anything-you-like` is a document of its
+own for a service provider by that name, minted on the spot.
+
 `/admin/sts-metadata` is the sharper of the two. It reads the endpoint list off the
 live Express router, so it answers only once every protocol module has registered
 its routes — a module that loaded but registered nothing shows up there and not

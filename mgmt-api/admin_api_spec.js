@@ -663,6 +663,114 @@ const SCHEMAS = {
         })
     }),
 
+  // ---------------------------------------------------------------------
+  // THE SIGN-OUT INVENTORY.
+  //
+  // One shape for both answers `GET /admin-api/logout` gives — the family list
+  // when no `user` was named, and one identity's live state when one was —
+  // because the two differ by which members are present rather than in kind,
+  // which is the same arrangement UserList/UserDetail has one screen down.
+  //
+  // `terminable: false` rows are the members most likely to be mistaken for a
+  // defect, so the description says what they are where a generated client's
+  // documentation will show it.
+  // ---------------------------------------------------------------------
+  LogoutRow: openObject(
+    'One live thing: a session, a credential, a relying party, a directory ' +
+    'connection, or an artifact that cannot be ended at all.',
+    {
+      id: { type: 'string',
+            description: 'What `POST /admin-api/logout/end` takes in ' +
+                         '`select`. It is `<family>:<handle>`, and for a row ' +
+                         'whose natural key is a CREDENTIAL — an ' +
+                         'authorization code, a pre-authorized code — the ' +
+                         'handle is a hash of it and never the value: a code ' +
+                         'in a reply is a code in a log.' },
+      family: { type: 'string', description: 'Which family it belongs to.' },
+      kind: { type: 'string',
+              description: 'What it is, in that family\'s own vocabulary.' },
+      label: { type: 'string', description: 'The thing itself, for a person.' },
+      detail: { type: 'string',
+                description: 'Who issued it, to whom, and what rides on it.' },
+      startedAt: { type: 'integer',
+                   description: 'Epoch ms, or 0 where the family cannot say.' },
+      expiresAt: { type: 'integer',
+                   description: 'Epoch ms, or 0 for "no expiry was stated" — ' +
+                                'which is the honest answer for several of ' +
+                                'these rather than an expiry of now.' },
+      terminable: { type: 'boolean',
+                    description: 'FALSE means nothing can end it — not this ' +
+                                 'service and not a real one. Nothing ' +
+                                 'consults the issuer when a SAML assertion, ' +
+                                 'a Kerberos service ticket or an X509-SVID ' +
+                                 'is presented, so there is no revocation to ' +
+                                 'perform. `why` says so in a sentence.' },
+      why: { type: 'string',
+             description: 'When `terminable` is false, the reason. Empty ' +
+                          'otherwise.' },
+      sessionId: { type: 'string',
+                   description: 'The browser sign-on session it hangs off, ' +
+                                'where there is one. Empty is a fact about ' +
+                                'the row — the direct grants have no session ' +
+                                '— rather than a gap.' }
+    }),
+
+  LogoutFamily: openObject(
+    'One family of live things, and the prose saying what a logout does and ' +
+    'does not reach in it.',
+    {
+      id: { type: 'string' },
+      label: { type: 'string' },
+      protocol: { type: 'string' },
+      spec: { type: 'string',
+              description: 'The document this family\'s behaviour comes ' +
+                           'from, or a sentence saying there is none to ' +
+                           'cite — which is the answer for everything that ' +
+                           'cannot be recalled.' },
+      what: { type: 'string' },
+      terminable: { type: 'boolean' },
+      held: { type: 'integer', description: 'How many are live.' },
+      notListed: { type: 'integer',
+                   description: 'How many were held back by `logout.maxRows`. ' +
+                                'The cap is on what is LISTED and never on ' +
+                                'what a termination reaches: a global logout ' +
+                                'still ends every one of them.' },
+      failure: { type: 'string',
+                 description: 'Set when this family could not be read. The ' +
+                              'rest of the reply is unaffected — a family ' +
+                              'that cannot answer is reported rather than ' +
+                              'taking the whole inventory down.' },
+      rows: { type: 'array', items: { $ref: '#/components/schemas/LogoutRow' } }
+    }),
+
+  LogoutInventory: openObject(
+    'What this service is still holding for one identity, across every ' +
+    'protocol family — or, with no `user`, the list of families a logout ' +
+    'reaches.',
+    Object.assign({
+      user: { type: 'string', description: 'The name that was asked about.' },
+      known: { type: 'boolean',
+               description: 'FALSE with no `user` means this is the family ' +
+                            'list rather than an identity.' },
+      key: { type: 'string',
+             description: 'The normalised identity key everything is filed ' +
+                          'under — what folds `alice`, `alice@REALM` and a ' +
+                          '`urn:` subject into one answer.' },
+      sessions: { type: 'integer', description: 'Browser sign-on sessions held.' },
+      total: { type: 'integer', description: 'Live items in every family.' },
+      listed: { type: 'integer' },
+      notListed: { type: 'integer' },
+      maxRows: { type: 'integer', description: 'The `logout.maxRows` cap.' },
+      canWrite: { type: 'boolean',
+                  description: 'Whether the caller holds Admin Write. Always ' +
+                               'true through this API, which is not gated.' },
+      families: { type: 'array',
+                  items: { $ref: '#/components/schemas/LogoutFamily' } },
+      rows: { type: 'array', items: { $ref: '#/components/schemas/LogoutRow' },
+              description: 'The same rows flattened, filtered and paged — ' +
+                           'which is what the console table shows.' }
+    }, PAGING_PROPERTIES)),
+
   UserList: openObject(
     'Every identity this service knows, filtered and paged.',
     Object.assign({
@@ -728,6 +836,201 @@ const SCHEMAS = {
                      'that one is an object whose `found` is false.'
       }
     }),
+
+  Saml2ServiceProviderList: openObject(
+    'The SAML 2.0 identity provider: every service provider this profile has ' +
+    'answered for, and the four endpoint URLs each of them is configured ' +
+    'from. THE METADATA IS PER SERVICE PROVIDER — a distinct identity ' +
+    'provider entityID and its own SSO, SLO and artifact endpoints, the way ' +
+    'Okta and Ping do it — which is why a URL here is a per-row fact rather ' +
+    'than one constant. With ?sp= the reply is ONE of them instead.\n\n' +
+    'It holds nothing: every row is an entry in `ou=applications`, and the ' +
+    'writes below are the same `updateApplication()` an `ldapmodify` reaches.',
+    Object.assign({
+      serviceProviders: {
+        type: 'array',
+        description: 'One page of them. Each carries `identifier` (the ' +
+                     'entityID), `slug` (its URL path segment), ' +
+                     '`idpEntityId`, `metadataUrl`, `ssoUrl`, `sloUrl`, ' +
+                     '`arsUrl`, the counters, and what has been recorded ' +
+                     'about it.',
+        items: openObject(
+          'One service provider, its endpoints and what has been seen of it.', {})
+      },
+      unscopedMetadata: {
+        type: 'string',
+        description: 'The document at /saml2/metadata, which names ONE ' +
+                     'identity provider for everybody and works for a service ' +
+                     'provider that does not want a document of its own.'
+      },
+      settings: openObject(
+        'The nine saml2.* settings, as read. They are reported and not ' +
+        'settable here: POST /admin-api/config/set owns every setting in this ' +
+        'service, and a second door onto one of them is what this API refuses ' +
+        'except where the narrow door buys a refusal the wide one cannot.', {}),
+      artifactsAwaitingResolution: {
+        type: 'integer',
+        description: 'How many artifacts are minted and not yet resolved. An ' +
+                     'artifact is ONE-SHOT and expires (saml2.artifactTtlS), ' +
+                     'so this rises and falls; a number that only ever rises ' +
+                     'is a leak.'
+      },
+      requestsHeldForSignIn: {
+        type: 'integer',
+        description: 'AuthnRequests held while a browser is at the sign-in ' +
+                     'screen, or held for the one hop that turns a ' +
+                     'POST-binding request into a GET so the SameSite=Lax ' +
+                     'session cookie is visible. Same reading as above.'
+      },
+      found: {
+        type: 'boolean',
+        description: 'On the ?sp= reply only. FALSE for an entityID that is ' +
+                     'not in the registry — whose metadata document is still ' +
+                     'served, and whose AuthnRequest would still be answered, ' +
+                     'because this profile accepts any entityID.'
+      }
+    }, PAGING_PROPERTIES)),
+
+  FederationRelationshipList: openObject(
+    'THE FEDERATION REGISTER: every relationship this service has been ' +
+    'configured with, in either direction and in any of five protocols. With ' +
+    '?relationship= the reply is ONE of them instead, with everything it holds ' +
+    'and the URLs to configure at the partner.\n\n' +
+    '**This is the one resource in this API whose contents are a security ' +
+    'decision rather than a record.** Everywhere else this service accepts ' +
+    'what it is given; it cannot do that at an assertion consumer service, ' +
+    'because what arrives there is an unauthenticated request claiming to be a ' +
+    'person and the session it produces is the one every protocol in this ' +
+    'process reads. So a relationship is created DISABLED and an assertion is ' +
+    'refused unless it verifies against the certificate configured on it.\n\n' +
+    'It holds nothing of its own: every row is an entry under ' +
+    '`ou=federations`, so an `ldapmodify` there is exactly what these ' +
+    'operations do.\n\n' +
+    '`fedClientSecret` is NEVER returned by this API — it is reported as `(set ' +
+    '— not returned)` or empty. That is not a security boundary and is not ' +
+    'claimed as one: an `ldapsearch` of this directory shows it, deliberately ' +
+    'and loudly, exactly as `GET /krb5/principals` prints every Kerberos ' +
+    'password. What it avoids is this API being a SECOND way to read a ' +
+    'credential that belongs to somebody else\'s service out of this process.',
+    Object.assign({
+      relationships: {
+        type: 'array',
+        description: 'One page of them. Each carries `id`, `role`, ' +
+                     '`protocol`, `peer`, `enabled`, `ready`, `missing` (the ' +
+                     'fields still to configure), `usable` (enabled AND ' +
+                     'ready — the only state in which anything happens), the ' +
+                     'counters and `lastError`.',
+        items: openObject(
+          'One relationship, its state and what has crossed it.', {})
+      },
+      roles: {
+        type: 'array',
+        description: 'The two directions, each with what it means. Named for ' +
+                     'what THIS SERVICE does rather than for what the partner ' +
+                     'does, because every log line and every page here is ' +
+                     'written from this service\'s point of view.',
+        items: openObject('One role.', {})
+      },
+      protocols: {
+        type: 'array',
+        description: 'The five, each with what happens in it, the ' +
+                     'specification it cites, and `needs` — the fields a ' +
+                     'service-provider-side relationship of that protocol ' +
+                     'must carry before it can work. That list is what ' +
+                     '`missing` is computed from, so a caller can check its ' +
+                     'own configuration against the same rule the endpoint ' +
+                     'applies.',
+        items: openObject('One protocol.', {})
+      },
+      paths: openObject(
+        'The four federation paths, so a caller builds the URL to configure ' +
+        'at the partner from the same strings the router serves rather than ' +
+        'from a copy that can drift.', {}),
+      ready: {
+        type: 'integer',
+        description: 'How many are enabled AND fully configured. A count ' +
+                     'below `relationshipCount` is the ordinary state, since a ' +
+                     'relationship is created disabled.'
+      },
+      found: {
+        type: 'boolean',
+        description: 'On the ?relationship= reply only. FALSE for an id that ' +
+                     'is not registered — and unlike almost everything else in ' +
+                     'this API, one does not appear because somebody used it: ' +
+                     'this register is configured, and nothing creates an ' +
+                     'entry in it by turning up.'
+      }
+    }, PAGING_PROPERTIES)),
+
+  Saml11RelyingPartyList: openObject(
+    'The SAML 1.1 identity provider: every relying party this profile has ' +
+    'answered for, and the three endpoint URLs each of them is configured ' +
+    'from. THE METADATA IS PER RELYING PARTY, exactly as the SAML 2.0 ' +
+    'profile\'s is, and it is a SAML 2.0 metadata document describing a SAML ' +
+    '1.1 identity provider — SAML 1.1 never had a metadata specification, and ' +
+    'what every relying party consumes is an EntityDescriptor whose ' +
+    'protocolSupportEnumeration is the 1.1 protocol.\n\n**THERE IS NO ' +
+    'REQUEST MESSAGE IN SAML 1.1**, which is where this resource differs from ' +
+    '`GET /admin-api/saml2` rather than merely being older: a relying party ' +
+    'cannot identify itself in the protocol, so `identifier` may be something ' +
+    'this service GUESSED from the origin of a TARGET — `identifierLooksGuessed` ' +
+    'says so on the ?rp= reply. There is also no logout service to declare ' +
+    'and no request signature to record, because the protocol has neither.\n\n' +
+    'It holds nothing: every row is an entry in `ou=applications`, and the ' +
+    'kind is shared with WS-Federation, so a row here may never have touched ' +
+    '/saml11 — `profiles` says which of the two browser profiles it has ' +
+    'actually used. With ?rp= the reply is ONE of them instead.',
+    Object.assign({
+      relyingParties: {
+        type: 'array',
+        description: 'One page of them. Each carries `identifier`, `slug` ' +
+                     '(its URL path segment, THE SAME ONE the SAML 2.0 ' +
+                     'profile uses for that application), `idpProviderId`, ' +
+                     '`metadataUrl`, `ssoUrl`, `responderUrl`, the counters, ' +
+                     'and what has been recorded about it.',
+        items: openObject(
+          'One relying party, its endpoints and what has been seen of it.', {})
+      },
+      unscopedMetadata: {
+        type: 'string',
+        description: 'The document at /saml11/metadata, which names ONE ' +
+                     'identity provider for everybody and works for a relying ' +
+                     'party that does not want a document of its own.'
+      },
+      settings: openObject(
+        'The nine saml11.* settings, as read. Reported and not settable here: ' +
+        'POST /admin-api/config/set owns every setting in this service.', {}),
+      artifactsAwaitingResolution: {
+        type: 'integer',
+        description: 'How many type 0x0001 artifacts are minted and not yet ' +
+                     'resolved. An artifact is ONE-SHOT and expires ' +
+                     '(saml11.artifactTtlS), so this rises and falls; a number ' +
+                     'that only ever rises is a leak.'
+      },
+      assertionsHeldByReference: {
+        type: 'integer',
+        description: 'Assertions kept so that a <samlp:AssertionIDReference> ' +
+                     'can ask for one again. Unlike the artifacts above it is ' +
+                     'CAPPED rather than swept — a reference is not a ' +
+                     'credential, so it is not one-shot — which means this ' +
+                     'number sitting at its ceiling is the healthy state and ' +
+                     'not a leak.'
+      },
+      flowsHeldForSignIn: {
+        type: 'integer',
+        description: 'Flows held while a browser is at the sign-in screen. ' +
+                     'There is no second reason here: a SAML 1.1 flow arrives ' +
+                     'as a top-level GET, so it needs none of the POST-to-GET ' +
+                     'hop the SAML 2.0 profile holds requests for.'
+      },
+      found: {
+        type: 'boolean',
+        description: 'On the ?rp= reply only. FALSE for an identifier that is ' +
+                     'not in the registry — whose metadata document is still ' +
+                     'served, and whose flow would still be answered, because ' +
+                     'this profile accepts any identifier.'
+      }
+    }, PAGING_PROPERTIES)),
 
   AuthorizationServerList: openObject(
     'Every authorization server profile this process publishes a discovery ' +
@@ -1446,6 +1749,339 @@ const SCHEMAS = {
             'rather than dropped so that the failure tables agree.', {})
         })
     }),
+
+  // ---------------------------------------------------------------------------
+  // DELEGATION. Written out rather than left open for the reason AuditEvent is:
+  // a caller filtering, alerting on or DRAWING this list needs a name for every
+  // field, and the picture is the point of it.
+  // ---------------------------------------------------------------------------
+  DelegationParty: openObject(
+    'One layer of the architecture. Each of the three roles uses this shape ' +
+    'and each can be an identity, an application, or BOTH — which is the fact ' +
+    'that makes the model protocol-independent rather than a Kerberos model ' +
+    'the other two are squeezed into.',
+    {
+      key: {
+        type: 'string',
+        description: 'The NORMALISED local name, so a party here and a row on ' +
+                     '/admin-api/users name the same person — `alice`, ' +
+                     '`urn:sts-mock:user:alice` and `alice@STS.MOCK` are one ' +
+                     'identity. Empty where this layer is an application ' +
+                     'rather than a person, or where nothing named it.'
+      },
+      presented: {
+        type: 'string',
+        description: 'The identity exactly as it arrived, when that differs ' +
+                     'from `key` — a Kerberos principal, a NameID, a `sub`. ' +
+                     'Both are carried because the collapse from one to the ' +
+                     'other is something a reader has to be able to see.'
+      },
+      application: {
+        type: 'string',
+        description: 'The application this layer IS — a client_id, an ' +
+                     'AppliesTo, an SPN, an audience. NOT a promise that an ' +
+                     'entry exists under ou=applications: that registry holds ' +
+                     'what this service has been ASKED ABOUT, and a ' +
+                     'delegation naming something nobody has otherwise ' +
+                     'mentioned is an ordinary and interesting outcome. Look ' +
+                     'it up on /admin-api/applications to find out which.'
+      },
+      what: { type: 'string',
+              description: 'What this party is in THIS act, in the ' +
+                           'protocol\'s own words.' }
+    }),
+
+  DelegationCredential: openObject(
+    'One credential presented or produced. NO CREDENTIAL IS EVER CARRIED — ' +
+    'only what kind it was and its identifier, which is the rule the audit ' +
+    'log follows and applies here twice over: a delegation is precisely the ' +
+    'request that carries two credentials at once.',
+    {
+      kind: { type: 'string',
+              description: '`subject_token`, `actor_token`, `access_token`, ' +
+                           '`Kerberos evidence ticket`, `SAML 2.0 assertion`, ' +
+                           '`PA-FOR-USER`, and so on.' },
+      identifier: {
+        type: 'string',
+        description: 'A `jti` or an AssertionID. EMPTY for a Kerberos ticket, ' +
+                     'which genuinely has none in the protocol, and for the ' +
+                     'WS-Trust JWT, which is signed directly rather than ' +
+                     'through this service\'s JWT funnel and so carries no ' +
+                     '`jti` and is in no register. `note` says which.'
+      },
+      note: { type: 'string',
+              description: 'What is worth knowing about this credential — ' +
+                           'whether it verified, whether it was forwardable.' }
+    }),
+
+  DelegationAct: openObject(
+    'ONE ACT: a single exchange at a single moment in which somebody acted on ' +
+    'somebody else\'s behalf. Not a relationship — the same three parties ' +
+    'appearing eleven times is eleven acts, and `chainKey` is what collapses ' +
+    'them.',
+    {
+      seq: {
+        type: 'integer',
+        description: 'Monotonic and NEVER REUSED, including across a drop. ' +
+                     'The stable name for an act and the thing to walk this ' +
+                     'list by.'
+      },
+      at: { type: 'integer', description: 'Milliseconds since the epoch.' },
+      protocol: { type: 'string',
+                  description: 'The family, spelled as /admin-api/users ' +
+                               'spells it.' },
+      type: { type: 'string',
+              description: 'The mechanism, as its specification names it. The ' +
+                           'list\'s `types` member describes each one.' },
+      typeLabel: { type: 'string', description: 'That mechanism in words.' },
+      mode: {
+        type: 'string',
+        enum: ['impersonation', 'delegation'],
+        description: 'THE AXIS WORTH READING FIRST. `delegation` means the ' +
+                     'credential carries the chain and the far end can see ' +
+                     'who is really asking. `impersonation` means nothing ' +
+                     'does — so this record is the only place the fact will ' +
+                     'ever exist.'
+      },
+      spec: { type: 'string',
+              description: 'Where the mechanism is defined.' },
+      policed: {
+        type: 'boolean',
+        description: 'Whether THIS SERVICE decided who may perform the act. ' +
+                     'True for the three Kerberos S4U mechanisms and false ' +
+                     'for everything else, which is a real asymmetry rather ' +
+                     'than an omission — see `authorizedBy`.'
+      },
+      outcome: { type: 'string', enum: ['issued', 'refused'] },
+      initial: { $ref: '#/components/schemas/DelegationParty' },
+      intermediary: { $ref: '#/components/schemas/DelegationParty' },
+      target: { $ref: '#/components/schemas/DelegationParty' },
+      chainKey: {
+        type: 'string',
+        description: 'The identity of the CHAIN rather than of the act: the ' +
+                     'mechanism and the three parties, with the time, the ' +
+                     'credentials and the OUTCOME left out. Acts sharing one ' +
+                     'are one edge of the picture — and the outcome is out of ' +
+                     'it deliberately, so a chain refused nine times and then ' +
+                     'fixed is one edge that changes rather than two that ' +
+                     'never meet.'
+      },
+      authorizedBy: {
+        type: 'string',
+        description: 'What PERMITTED it: the attribute AND the account it is ' +
+                     'on, in the KDC\'s own words. For the unpoliced ' +
+                     'mechanisms it says so and says why — that sentence is ' +
+                     'the point rather than a placeholder.'
+      },
+      reason: {
+        type: 'string',
+        description: 'Why it was REFUSED — the `e-text` of the error the ' +
+                     'client was sent, not a second wording that could come ' +
+                     'to disagree with it. Empty on an issued act.'
+      },
+      consumed: { type: 'array',
+                  items: { $ref: '#/components/schemas/DelegationCredential' } },
+      produced: { type: 'array',
+                  items: { $ref: '#/components/schemas/DelegationCredential' } },
+      sessionId: {
+        type: 'string',
+        description: 'The browser sign-on session, where there was one. ' +
+                     'USUALLY EMPTY, and that is a fact about delegation ' +
+                     'rather than a gap in the recording: a service asking on ' +
+                     'somebody\'s behalf has no browser anywhere in it.'
+      },
+      note: { type: 'string', description: 'One sentence of context.' }
+    }),
+
+  DelegationChain: openObject(
+    'One DISTINCT chain among the acts that matched — one edge of the ' +
+    'picture. This is the more useful answer to "what talks to what".',
+    {
+      chainKey: { type: 'string' },
+      protocol: { type: 'string' },
+      type: { type: 'string' },
+      typeLabel: { type: 'string' },
+      mode: { type: 'string', enum: ['impersonation', 'delegation'] },
+      initial: { $ref: '#/components/schemas/DelegationParty' },
+      intermediary: { $ref: '#/components/schemas/DelegationParty' },
+      target: { $ref: '#/components/schemas/DelegationParty' },
+      acts: { type: 'integer', description: 'How many acts are on this edge.' },
+      issued: { type: 'integer' },
+      refused: { type: 'integer' },
+      firstAt: { type: 'integer' },
+      lastAt: { type: 'integer' },
+      authorizedBy: { type: 'string',
+                      description: 'From the MOST RECENT act on the chain, so ' +
+                                   'an edge that was fixed says how it works ' +
+                                   'now rather than why it used to fail.' },
+      reason: { type: 'string', description: 'Likewise, for a refusal.' }
+    }),
+
+  DelegationPolicy: openObject(
+    'WHO MAY DELEGATE TO WHOM, before anybody has tried. KERBEROS ONLY, and ' +
+    'that is not an omission: Kerberos is the only family here that polices ' +
+    'delegation at all. WS-Trust puts no authorization on OnBehalfOf or ' +
+    'ActAs, and RFC 8693 leaves the policy to the authorization server, which ' +
+    'this one does not have.',
+    {
+      pairs: {
+        type: 'array',
+        description: 'One per (front end, target, mechanism). The two ' +
+                     'mechanisms are in ONE list because the messages and the ' +
+                     'KDC options are identical and the whole difference is ' +
+                     'which of the two accounts carries the permission — ' +
+                     'which is `setOn`.',
+        items: openObject('One configured pair.', {
+          mechanism: { type: 'string', enum: ['classic', 'rbcd'] },
+          type: { type: 'string',
+                  description: 'The same mechanism id an ACT carries, so the ' +
+                               'two halves of this resource can be read ' +
+                               'against each other without a second lookup ' +
+                               'table.' },
+          frontEnd: { type: 'string', description: 'Who may act.' },
+          target: { type: 'string', description: 'What may be reached.' },
+          realm: { type: 'string' },
+          attribute: { type: 'string',
+                       description: '`msDS-AllowedToDelegateTo` or ' +
+                                    '`msDS-AllowedToActOnBehalfOfOtherIdentity`.' },
+          setOn: {
+            type: 'string',
+            description: 'THE ACCOUNT THE PERMISSION LIVES ON, and the field ' +
+                         'to read first. Classic puts it on the front end, ' +
+                         'where only a domain admin can set it; resource-based ' +
+                         'puts it on the back end, where whoever controls that ' +
+                         'object can set it themselves. That is the entire ' +
+                         'security story of RBCD.'
+          },
+          setOnRole: { type: 'string', enum: ['front end', 'back end'] },
+          requires: { type: 'string',
+                      description: 'What ELSE the mechanism needs beyond the ' +
+                                   'attribute.' },
+          targetKnown: { type: 'boolean',
+                         description: 'Whether this KDC has a principal by ' +
+                                      'that name. A misspelt SPN fails at TGS ' +
+                                      'time with an error about ' +
+                                      'authorization rather than spelling.' },
+          warning: {
+            type: 'string',
+            description: 'Why this pair may still fail although the attribute ' +
+                         'names it. The expensive one: a front end with no ' +
+                         'TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION gets a ' +
+                         'non-forwardable ticket out of S4U2Self, so classic ' +
+                         'S4U2Proxy then fails complaining about the evidence ' +
+                         '— two steps from the attribute that caused it.'
+          },
+          note: { type: 'string' }
+        })
+      },
+      accounts: {
+        type: 'array',
+        description: 'Principals carrying a flag that changes what delegation ' +
+                     'can do to them or with them. Two of the three STOP ' +
+                     'delegation rather than permit it, and one is not a ' +
+                     'control at all. Listed whether or not a pair names ' +
+                     'them.',
+        items: openObject('One account.', {
+          principal: { type: 'string' },
+          realm: { type: 'string' },
+          notDelegated: { type: 'boolean' },
+          trustedToAuthenticateForDelegation: { type: 'boolean' },
+          okAsDelegate: {
+            type: 'boolean',
+            description: 'ADVICE TO THE CLIENT and not a control: it tells a ' +
+                         'client this service may be trusted with forwarded ' +
+                         'credentials, a client is free to ignore it, and ' +
+                         'this KDC enforces nothing by it.'
+          },
+          autoCreated: { type: 'boolean' },
+          description: { type: 'string' },
+          effects: { type: 'array', items: { type: 'string' },
+                     description: 'What each flag actually does.' }
+        })
+      }
+    }),
+
+  DelegationList: openObject(
+    'Who acted on whose behalf, newest first, filtered and paged — plus the ' +
+    'distinct chains among the match and the configured policy behind the ' +
+    'Kerberos ones.\n\nWalk it with `seq` rather than with `page`: acts are ' +
+    'still being recorded while you page.',
+    Object.assign({
+      held: { type: 'integer', description: 'Acts currently held.' },
+      recorded: {
+        type: 'integer',
+        description: 'Acts recorded since this process started. Greater than ' +
+                     '`held` once the cap has bitten — `held` alone would ' +
+                     'read as "this is all there ever was".'
+      },
+      dropped: { type: 'integer',
+                 description: 'Acts discarded to stay under the cap, oldest ' +
+                              'first.' },
+      maxRecords: { type: 'integer',
+                    description: 'The cap: `delegation.maxRecords`, ' +
+                                 'changeable at runtime through ' +
+                                 'POST /admin-api/config/set.' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      oldestSeq: { type: 'integer' },
+      newestSeq: { type: 'integer' },
+      byType: openObject('How many held acts used each mechanism. EVERY ' +
+                         'mechanism appears, including the ones at zero, ' +
+                         'because "does this server do RBCD" is otherwise ' +
+                         'answered by omission.', {}),
+      byMode: openObject('How many were impersonations and how many carried ' +
+                         'the chain.', {}),
+      byOutcome: openObject('How many were issued and how many refused.', {}),
+      byProtocol: openObject('How many came from each family. Only families ' +
+                             'that have delegated appear.', {}),
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      types: {
+        type: 'array',
+        description: 'The eight mechanisms with the specification each comes ' +
+                     'from, what it is, and whether this service polices it — ' +
+                     'what the `type` filter takes. Read off the same table ' +
+                     'the store records against, so a mechanism cannot occur ' +
+                     'and be unfilterable nor be offered and never occur.',
+        items: openObject('One mechanism.', {
+          type: { type: 'string' }, protocol: { type: 'string' },
+          mode: { type: 'string' }, label: { type: 'string' },
+          spec: { type: 'string' }, policed: { type: 'boolean' },
+          what: { type: 'string' }
+        })
+      },
+      modes: {
+        type: 'array',
+        description: 'The two kinds and what each means.',
+        items: openObject('One kind.', {
+          mode: { type: 'string' }, label: { type: 'string' },
+          what: { type: 'string' }
+        })
+      },
+      outcomes: { type: 'array', items: { type: 'string' } },
+      roles: {
+        type: 'array',
+        description: 'The three layers of the architecture, in the order a ' +
+                     'request moves through them. The names are this ' +
+                     'service\'s own and deliberately not any protocol\'s: ' +
+                     'a Kerberos front end, a WS-Trust requester and an OAuth ' +
+                     'client doing an exchange are the same position in the ' +
+                     'same picture.',
+        items: openObject('One layer.', {
+          role: { type: 'string' }, label: { type: 'string' },
+          what: { type: 'string' }
+        })
+      },
+      acts: { type: 'array',
+              items: { $ref: '#/components/schemas/DelegationAct' } },
+      chains: {
+        type: 'array',
+        description: 'The distinct chains among what MATCHED — one per edge ' +
+                     'of the picture. Not paged: it cannot be longer than the ' +
+                     'list it is derived from.',
+        items: { $ref: '#/components/schemas/DelegationChain' }
+      },
+      policy: { $ref: '#/components/schemas/DelegationPolicy' }
+    }, PAGING_PROPERTIES)),
 
   AuditEvent: openObject(
     'One thing that happened, with the facts of it and no credential of any ' +

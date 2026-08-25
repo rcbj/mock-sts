@@ -141,9 +141,26 @@ const BANNER =
   'and change what the next one contains. Fine on a laptop or a compose ' +
   'network; not fine on a public address.</div>';
 
-function page(baseUrl, base, version) {
-  log.debug("Entering page(). base=" + base);
-  const specUrl = xmlEscape(base + '/openapi.json');
+// ---------------------------------------------------------------------------
+// `realmPrefix` IS THE ONE THING THIS PAGE NEEDS THAT NO OTHER PAGE HERE DOES.
+//
+// app.js rewrites every root-relative href, action and src in an HTML response
+// to carry the current trust realm's prefix, which is what makes this whole
+// service's markup realm-correct without a line of it being edited. It cannot
+// help THIS page: the explorer builds its request URLs in JavaScript, from the
+// `path` members of the OpenAPI document, and a script is not markup.
+//
+// So the prefix is handed over as a value on the root element and the explorer
+// prepends it. Without this, pressing "Try it" inside /realm/acme/admin-api/docs
+// would call the DEFAULT realm's API — the page would look right, the call
+// would succeed, and it would have changed the wrong service. That is exactly
+// the failure the rewrite exists to prevent everywhere else, so it is worth the
+// extra parameter rather than a note saying not to.
+// ---------------------------------------------------------------------------
+function page(baseUrl, base, version, realmPrefix) {
+  log.debug("Entering page(). base=" + base + ", realm prefix=" +
+            (realmPrefix || "(none)"));
+  const specUrl = xmlEscape((realmPrefix || '') + base + '/openapi.json');
   const html = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>mock STS management API</title><style>' + STYLE + '</style>' +
@@ -154,7 +171,8 @@ function page(baseUrl, base, version) {
     // nobody has read yet when they press Try it.
     BANNER +
     '<div id="app" data-spec="' + specUrl + '" data-version="' +
-    xmlEscape(version) + '">' +
+    xmlEscape(version) + '" data-realm-prefix="' +
+    xmlEscape(realmPrefix || '') + '">' +
     '<h1>mock STS management API</h1>' +
     '<p class="lede">Reading <code>' + specUrl + '</code>&hellip;</p>' +
     '</div>' +

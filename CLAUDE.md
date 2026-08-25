@@ -18,14 +18,16 @@ files did not change; the paths did.
 
 | Directory | What is in it |
 |---|---|
-| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `admin_stats.js`, `audit.js`, `applications.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
 | `home/` | The front door: `GET /` and the one image on it. |
+| `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
 | `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles. |
 | `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. |
-| `saml/` | The two assertion builders. No Web SSO profile. |
+| `saml/` | The two assertion builders, and A BROWSER-FACING IDENTITY PROVIDER FOR EACH: SAML 2.0's Web Browser SSO profile (all three bindings, Single Logout, metadata per service provider) and SAML 1.1's two browser profiles (Browser/POST, Browser/Artifact, a SOAP responder that is also an attribute authority, metadata per relying party). **They are separate implementations, not one with a version flag** — SAML 1.1 has no request message, no Single Logout, and a different spelling for almost every shared element; `saml/CLAUDE.md` has the table. |
 | `ws-trust/` | WS-Trust 1.0–1.4. |
 | `ws-federation/` | WS-Federation 1.2, the passive requestor profile, and the mock relying party. |
+| `federation/` | **Federation relationships, in either direction, in five protocols.** The register (`ou=federations` IS the store), the attribute mapping, the four endpoints — and the ONLY OUTBOUND REQUEST in this repository, in a module of its own that will not take a URL from anywhere but a relationship entry. |
 | `kerberos/` | The KDC, the acceptor, SPNEGO, and the seven codec modules they rest on. |
 | `ldap/` | The embedded directory. Also the STORE for people, groups, applications and the SPIFFE registry. |
 | `scim/` | `/scim/v2`, its authentication, and its attribute mapping. |
@@ -55,7 +57,16 @@ site; this file and the directory files are the maintainer-facing half.
 A mock identity service that speaks sixteen protocol families — Kerberos v5 (a KDC on
 raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service and the same
 acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
-1.0–1.4, SAML 2.0 and SAML 1.1, WS-Federation 1.2 (the passive requestor profile),
+1.0–1.4, **SAML 2.0** (assertions, and the Web Browser SSO profile over all three
+bindings with Single Logout and per-service-provider metadata) and **SAML 1.1**
+(assertions, and BOTH browser profiles — Browser/POST and Browser/Artifact —
+with a SOAP responder behind the second that is also an attribute authority,
+answering AttributeQuery and AuthenticationQuery),
+WS-Federation 1.2 (the passive requestor profile),
+**FEDERATION** (this service as EITHER END of a relationship with a foreign
+identity service, in five of those protocols — consuming somebody else's
+assertions as a service provider, or asserting to a foreign service provider
+with a per-partner attribute release policy),
 OAuth 2.0 / OIDC (a full authorization server), WebAuthn Level 3 (the relying party's
 half, on the login screen), DPoP, OpenID4VCI 1.0, OpenID4VP 1.0, W3C DID Core with
 DIF domain linkage, and **LDAP v3** (RFC 4511 — an embedded directory on raw TCP 389 and,
@@ -72,8 +83,9 @@ FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
 *clients*: it checks no password, validates no access token and **attests no
 workload**.
 
-**THREE surfaces are the exception to that sentence and all of them are worth
-knowing before reading further.** The SCIM endpoints REQUIRE a credential, in any
+**FOUR surfaces are the exception to that sentence and all of them are worth
+knowing before reading further — and the fourth is a different KIND of exception
+from the other three.** The SCIM endpoints REQUIRE a credential, in any
 of the
 six schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read`
 or `scim:write`; they create and DELETE accounts, which is why. The **SPIRE
@@ -93,6 +105,22 @@ each can be turned off (`scim.authRequired`, `spiffe.authRequired`,
 `admin.authRequired`). See `scim/CLAUDE.md`, `spiffe/CLAUDE.md` and
 `admin-ui/CLAUDE.md`.
 
+**THE FOURTH IS FEDERATION, AND IT IS NOT A TURNSTILE.** Those three refuse a
+caller in order to make a client exercise a refusal; each could be made
+permissive tomorrow and the only thing lost would be an error path.
+`/federation/acs/{id}` cannot, because **there is no permissive answer
+available**: "accept any SAML Response" means letting anybody who can reach this
+port POST a document naming themselves as anybody and get a browser sign-on
+session for it — and that session is the SAME one `/oauth2/authorize`,
+`/wsfed`, `/saml2/sso`, `/saml11/sso` and `/admin` all read. So federation is
+the one feature here that must be CONFIGURED before it does anything: a
+relationship is created disabled, and an assertion is refused unless it verifies
+against the certificate configured on it. **The gate is on the SIGNER, not on
+the subject** — past it, any username in a verified assertion is accepted and an
+entry is created for them, exactly as permissively as everywhere else.
+`federation/CLAUDE.md` argues all of it, and it is the file to read before
+"fixing" a refusal in that directory.
+
 **`/admin-api` is NOT gated and that is deliberate** — it is what a test drives,
 and it is the way back in when nobody holds a role. Which means anybody who can
 reach this port can grant themselves both roles through it; see
@@ -103,10 +131,35 @@ authenticates nobody because its specification says it MUST NOT — a workload h
 no root of trust until that call gives it one. What it lacks there is
 ATTESTATION, not authentication.
 
-**There is no SAML 2.0 Web SSO profile** — no SingleSignOnService, no AuthnRequest, no
-Response. That is now the gap beside WS-Trust and WS-Federation, and it is deliberate;
-see README.md rather than inferring from the absence that it was overlooked. It is also
-why the federation metadata publishes no IDPSSODescriptor.
+**THERE IS A SAML 2.0 WEB BROWSER SSO PROFILE SINCE 2026-08-24**, and this
+paragraph used to say the opposite at some length — so if a document here still
+reads as though the gap beside WS-Trust and WS-Federation is open, that document
+is the one that is wrong. `/saml2` is a full identity provider: the Single
+Sign-On service over HTTP Redirect and HTTP POST, the Response over HTTP POST,
+HTTP Redirect or HTTP Artifact, a SOAP Artifact Resolution Service behind the
+third, Single Logout, and **signed metadata PER SERVICE PROVIDER, minted for any
+entityID asked for**. It accepts any entityID and creates the application entry
+on first sight. What it still does not do — encrypt an assertion, verify a
+request signature, consume SP metadata, or answer an AttributeQuery — is listed
+in `saml/CLAUDE.md` rather than implied.
+
+**AND SINCE THE SAME DAY THERE IS A SAML 1.1 ONE AT `/saml11`**, which is a
+SEPARATE IMPLEMENTATION rather than a mode of the above — the single most
+important thing to know before reading either. SAML 1.1 has **no request
+message**: the browser profiles are identity-provider-initiated, a flow begins
+when a browser arrives carrying a `TARGET`, and the relying party cannot identify
+itself in the protocol at all. From that one fact follow no `ForceAuthn`, no
+`IsPassive`, no `RequestedAuthnContext`, no error response (a failure is a PAGE,
+because there is nothing to answer), and an audience that is taken from
+Shibboleth's `providerId`, from the path segment, or GUESSED from the TARGET's
+origin. It has **no Single Logout** — that arrived with SAML 2.0 — and it has
+something 2.0 does not: a SOAP responder answering all four SAML 1.1 request
+types, which makes it an **attribute authority**. `saml/CLAUDE.md` carries the
+table of the six differences.
+
+**The WS-FEDERATION metadata still publishes no IDPSSODescriptor**, which is now
+a fact about that document rather than about this service: the IDPSSODescriptors
+are at `/saml2/metadata` and `/saml11/metadata`.
 
 Extracted from the [OAuth2/OIDC Debugger](https://idptools.com). The tests that cover
 this service still live in that project (see *Tests* below), which is the single most
@@ -192,6 +245,16 @@ what each module is for is that directory's `CLAUDE.md`.
    resolver is the one to check a new proposal against: it was added only after
    showing it failed that test BOTH ways round.
 
+   **`admin.js`'s SIXTH slot is `setLogoutReader()`, filled by
+   `logout/logout.js`, and it is the second one that passed that test both ways
+   round.** That module requires `ldap/ldap_server.js` for the bound
+   connections that ARE the LDAP session, and `ldap_server.js` requires
+   `admin.js` — so a require in the obvious direction closes a cycle AND drags
+   every `/ldap` route into the router ahead of the console's own. It carries
+   ONE object, validated whole when it is installed, because a partial one
+   would leave `/admin/logout` listing what is live and unable to end any of
+   it. See `logout/CLAUDE.md` and `admin-ui/CLAUDE.md`.
+
    **`setUserObserver()` NOW CARRIES THREE KINDS OF EVENT AND IS STILL ONE
    SLOT**, which is the same rule read the other way: `ldap_server.js` is
    offered an `event` of `authentication`, `issuance` (an X509-SVID was minted
@@ -204,6 +267,57 @@ what each module is for is that directory's `CLAUDE.md`.
 
 ---
 
+---
+
+## Trust realms: several logical copies of this service in one process
+
+Since 2026-08-24 this service can run as more than one logical identity
+service at once. A **trust realm** has its own configuration, its own signing
+key, its own sessions, authorization codes, tokens, offers, artifacts,
+statistics and audit log, answers on the SAME sockets as every other, and is
+told apart by a segment at the front of the path:
+
+```
+http://host:8081/oauth2/token                the DEFAULT realm
+http://host:8081/realm/acme/oauth2/token     the realm `acme`
+```
+
+`/admin/realms` defines them, `POST /admin-api/realms/create` does it without a
+browser, and `GET /realms` is the ungated directory a client discovers them
+from. The console carries a realm switcher on every page and shows ONE realm at
+a time — including `/admin/config`, which reads AND WRITES the realm it is
+reached in.
+
+**THE DEFAULT REALM HAS AN EMPTY PREFIX, AND A SERVICE WITH NO REALMS DEFINED
+BEHAVES EXACTLY AS IT DID.** That is a property of one predicate in
+`common/realms.js` rather than a claim spread over twenty files, and it is the
+first thing to check if something here ever seems to have changed for a caller
+that has never heard of realms.
+
+**The whole design is argued in `common/CLAUDE.md`** and is not summarised here.
+The three things worth knowing before touching anything, because each of them
+reaches outside that file:
+
+1. **The realm is AMBIENT**, in an `AsyncLocalStorage` that `app.js`'s FIRST
+   middleware enters. That middleware also strips the prefix before the router
+   sees the URL, which is why no route registration in this service carries a
+   realm and no protocol module was edited. Nothing may be registered above it.
+2. **A store becomes per realm at its declaration and nowhere else** —
+   `const sessions = realms.map()` in place of `new Map()`, and its hundred
+   readers are unchanged and correct. About thirty-five stores were converted
+   this way; the ones deliberately NOT converted are the directory-backed ones,
+   because the directory is shared.
+3. **What a realm separates is what this service ISSUES.** It does not separate
+   the embedded directory — one `ou=users`, one `ou=groups`, one
+   `ou=applications` for the whole process — so OAuth client registrations, SAML
+   service provider entries, the SPIFFE registry and **the two admin console
+   roles** are shared. Kerberos, the two TLS listeners and SPIFFE's four sockets
+   are shared too, because a socket has no path to put a segment in.
+   `realmSupport()` in `common/realms.js` is the index, and both `/admin/realms`
+   and `GET /realms` render it so that the answer is something the service says
+   rather than something a reader works out.
+
+
 ## The require order in `server.js` IS the route order
 
 Because of rule 1. Every constraint below is a DEPENDENCY, not a preference, and
@@ -215,6 +329,7 @@ require can see at a glance whether they are about to break one.
 |---|---|---|---|
 | 1 | `common/config_file` | First of all. Every reader of `CONFIG_FILE` is below it. | `common/CLAUDE.md` |
 | 2 | `common/app` | Before every protocol module — they register against it, and middleware only applies to routes added after it. Requiring it is also what installs the JWT recorder (rule 3e). | `common/CLAUDE.md` |
+| 2a | `common/realms` | Loaded BY `app` and by `helpers`, so it has no line of its own in `server.js` — but it is above every setting read and every store in this service, because requiring it is what fills `config.js`'s realm slot (rule 3m) and what installs the reserved-id provider. | `common/CLAUDE.md` |
 | 3–4 | `common/helpers`, `common/config` | `config.js` is below `helpers.js` and requires nothing here. | `common/CLAUDE.md` |
 | 5 | `common/claim_attributes` | Ahead of everything that ISSUES, because requiring it fills `setAttributeResolver()`. An empty slot means tokens without their configured attributes. | `common/CLAUDE.md` |
 | 6 | `common/group_claims` | Same reason, for `setGroupResolver()`. | `common/CLAUDE.md` |
@@ -222,7 +337,10 @@ require can see at a glance whether they are about to break one.
 | 7 | `ws-trust/wstrust` | No constraint. | `ws-trust/CLAUDE.md` |
 | 8 | `authn/authn` | Before `oauth-oidc/oauth2` — it owns the session that module reads, and fills `audit.js`'s `setActorResolver()`. | `authn/CLAUDE.md` |
 | 9 | `oauth-oidc/oauth2` | Before `ws-federation/wsfed` and before `admin-ui/admin`. | `oauth-oidc/CLAUDE.md` |
-| 10 | `ws-federation/wsfed` | **After `oauth2`** — rule 4. Single sign-on across the two protocols. | `ws-federation/CLAUDE.md` |
+| 10 | `ws-federation/wsfed` | **After `oauth2`** — rule 4. Single sign-on across the two protocols. |
+| 10a | `saml/saml2_sso` | **After `authn`**, and a stronger dependency than WS-Federation's: it has NO sign-in screen of its own and reaches that service's through `beginAuthentication()`. No constraint against `wsfed` either way. | `saml/CLAUDE.md` | `ws-federation/CLAUDE.md` |
+| 10b | `saml/saml11_sso` | **After `authn`** for the same reason as 10a, and **after `saml2_sso`** — it takes `slugOf()` from it, because one application must have one handle across both profiles. It needs no POST-to-GET hop: a SAML 1.1 flow arrives as a top-level GET. | `saml/CLAUDE.md` |
+| 10c | `federation/federation_sp` | **After `authn`**, and stronger than 10a and 10b: it has no sign-in screen AND does not go through `beginAuthentication()` either — a federated sign-in calls `startSession()` directly, because the person authenticated somewhere else. No constraint against the four profiles above it in either direction; what joins the two halves is the SESSION. Only this module is required — the other three in that directory are libraries. | `federation/CLAUDE.md` |
 | 11–14 | `oid4vc/*` | `vc_offers` before `vc_issuer`; both read `vc_configs`, which is why that module exists (rule 2). | `oid4vc/CLAUDE.md` |
 | 15–16 | `kerberos/krb5_kdc`, `krb5_service` | Their listeners start from `listen()`, not here. | `kerberos/CLAUDE.md` |
 | 17 | `kerberos/spnego` | **After `krb5_service`** — it calls that module's `accept()` and adds no check of its own. | `kerberos/CLAUDE.md` |
@@ -232,6 +350,7 @@ require can see at a glance whether they are about to break one.
 | 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills five slots at require time. | `ldap/CLAUDE.md` |
 | 22 | `scim/scim` | **After `ldap/ldap_server`** — a plain require, and rule 3e's test is why. | `scim/CLAUDE.md` |
 | 23 | `spiffe/spiffe_server` | **After `ldap/ldap_server` and `tls/tls_server`.** Its registry's store is the directory. | `spiffe/CLAUDE.md` |
+| 23a | `logout/logout` | **Second to last.** It READS NINE MODULES — the session store, the token registry, the codes, the offers, the directory's connections, the principal database — so it must come after every one of them. Nine plain requires and no slot; the one exception is `admin.js`, which it fills. | `logout/CLAUDE.md` |
 | 24 | `sts_metadata` | **Last, for everybody.** It reads the router to list what everything else registered. | this file, below |
 
 ### Where the numbered rules live now
@@ -251,6 +370,14 @@ in every file, including the ones in the source comments. This is the index.
 | 3e | The inverted hooks, and the test for adding one | this file |
 | 3f, 3h, 3i, 3j | `oauth2_bcp.js`, `mtls.js`, `client_auth.js`, `authorization_servers.js` | `oauth-oidc/CLAUDE.md` |
 | 3g | `applications.js` | `common/CLAUDE.md` |
+| 4a | `saml2_sso.js` after `authn.js`, and why it has no screen | `saml/CLAUDE.md` |
+| 4b | `federation_sp.js` after `authn.js`, and why it needs no screen at all | `federation/CLAUDE.md` |
+| 4b | `saml11_sso.js` after `authn.js` and after `saml2_sso.js`, and why the two profiles are separate implementations | `saml/CLAUDE.md` |
+| 3l | `delegation.js`, and why it has no funnel | `common/CLAUDE.md` |
+| 3o | `federation.js`, why four modules may require it, and why `PATHS` is not beside the routes | `federation/CLAUDE.md` |
+| 3m | `realms.js`, the realm slot in `config.js`, and why the realm is ambient | `common/CLAUDE.md` |
+| 3m | `logout/logout.js` holds no state, and the reading order is not the ending order | `logout/CLAUDE.md` |
+| 3n | `frontchannel_logout.js` | `oauth-oidc/CLAUDE.md` |
 | 3k | SPIFFE's six modules | `spiffe/CLAUDE.md` |
 | 4 | `wsfed.js` after `oauth2.js` | `ws-federation/CLAUDE.md` |
 | 5 | `admin.js` after `oauth2.js` | `admin-ui/CLAUDE.md` |
@@ -333,6 +460,33 @@ same argument made again — do not add one by analogy.
 The fourth scripted page is `/admin-api/docs` — see `mgmt-api/CLAUDE.md`,
 where the same argument is made a fourth time and the dependency it replaced
 is weighed.
+
+**FEDERATION ADDS NONE, AND IT IS THE ONE PLACE THE ARGUMENT CAME OUT THE OTHER
+WAY.** `federation_sp.js`'s outbound SAML HTTP-POST binding is the obvious sixth
+candidate — everywhere else in this service that binding auto-submits. It is a
+REAL FORM WITH A REAL BUTTON there, deliberately: those pages auto-submit
+because the person has already decided and a click would be ceremony, and this
+one is a person LEAVING THIS SERVICE for a foreign identity provider, which is
+exactly the moment a deliberate click is worth having. So the whole feature
+relaxes no CSP anywhere.
+
+The fifth is `/saml2/autopost.js`, and the argument is made a fifth time in
+`saml/saml2_sso.js` above `AUTOPOST_SCRIPT`: the SAML 2.0 HTTP POST binding IS a
+self-submitting form (saml-bindings-2.0-os section 3.5), which is what keeps a
+response of several kilobytes of signed XML out of a URL, a log and a Referer
+header — so there is no version of that binding without a script. Same shape,
+same real submit button, no wider.
+
+The sixth is `/saml11/autopost.js`, and this is the case that shows why the rule
+asks for the argument to be MADE rather than cited — the fifth is the page next
+door, and "the same as that one" would have been the whole justification. It is
+made a sixth time in `saml/saml11_sso.js` above its own `AUTOPOST_SCRIPT`, and it
+stands alone: SAML 1.1's Browser/POST profile IS a self-submitting form in its
+own older specification (saml-bindings-1.1 section 4.1.2, which describes the
+identity provider returning a document containing a form that submits itself).
+Two specifications arrived at the same shape independently; this one would be
+here if SAML 2.0 had never been written. Same shape, same real submit button, no
+wider.
 
 ---
 
@@ -477,6 +631,51 @@ rather than importing the wallet's, and for the same reason: if both ends came
 from one implementation, a shared misunderstanding passes and interoperates with
 nobody.
 
+**SAML 2.0 Web Browser SSO HAS ONE, IN THE PARENT PROJECT, AND IT IS THE FIRST
+THING HERE THAT WAS COVERED ON THE DAY IT LANDED.** `tests/saml_sso.js` and
+`tests/saml_logout.js` take `SAML_IDP=keycloak|sts` and drive BOTH identity
+providers through the same assertions — the arrangement `tests/wsfed_sso.js`
+already had, and the one that catches a mock being quietly more permissive than
+the real thing. Four jobs run against this service: SSO over each of the three
+bindings, and Single Logout. `./local-run-tests.sh --saml-only=sts` is the fast
+loop and needs no Keycloak at all.
+
+Two things about that pairing are worth knowing before changing either half.
+**Nothing is provisioned for the `sts` side** — any entityID is accepted, the
+metadata is minted on the ask, and the application entry is created by the first
+valid AuthnRequest — which is why there is no `configureX` step for it anywhere
+in those launchers. And **the metadata URL carries a DIGEST** of the service
+provider's entityID, because the document is published per service provider; the
+launchers compute that segment with `sha256sum` rather than guessing it, and a
+change to `slugOf()` in `saml/saml2_sso.js` breaks three shell scripts that
+nothing here can see.
+
+`tests/saml_encrypted_sso.js` is deliberately NOT paired: this profile encrypts
+no assertion, so an `sts` half could only ever fail or skip.
+
+**FEDERATION HAS NO TEST IN EITHER REPOSITORY, AND IT IS THE SURFACE WHERE THAT
+COSTS MOST** — because it is the only one here whose bugs are SECURITY bugs
+rather than fidelity bugs. Everywhere else a missing check makes this service
+more permissive than it says it is, which is what it is for; at
+`/federation/acs/{id}` a missing check is an authentication bypass for every
+protocol in the process. And a happy path proves almost nothing: an assertion
+that verifies against the key it was signed with is not evidence that anything
+would have been REFUSED. The full list is in `federation/CLAUDE.md` and it is
+almost entirely negatives — an assertion signed by nobody, by a different key,
+naming a different issuer, with the signature over a different element, or
+carrying its OWN `ds:KeyInfo` certificate (the one a naive implementation
+accepts); a `RelayState` never minted, expired or replayed; an ID Token with
+`alg: none`, with HS256 against an RSA key, with an unknown `kid`, or with the
+wrong `aud`, `iss` or `nonce`; every refusal in `federation_http.js`; and a
+relationship disabled, and half-configured. Beside those, the directory
+assertions only a test can make: that a partner's `mail` OVERWRITES an invented
+one and never the other way round, that `uid` is never written from an
+assertion, and that a release list filters the custom claims while leaving the
+protocol's own untouched. **Write the partner side rather than importing this
+one**, for `tests/sts_dpop.js`'s reason — and here a shared misunderstanding
+about which element a signature covers would not merely interoperate with
+nobody, it would BE the hole.
+
 **WS-Federation has no test in either repository.** The mock relying party at
 `/wsfed/rp` makes it look covered — it verifies a sign-in response check by check —
 but a person has to click it and read the page. What a test would add is the
@@ -496,6 +695,9 @@ argument in two places is an argument that will disagree with itself.
 | It does not | Where the argument is |
 |---|---|
 | Enforce anything by default — `oauth2.rfc9700` is the one mode, off unless set | `oauth-oidc/CLAUDE.md` |
+| Federate with anybody it was not CONFIGURED to federate with — the one place this service refuses by default, and the one refusal that is not a mode | `federation/CLAUDE.md` |
+| Decrypt an assertion a federation partner encrypted, consume a federated SIGN-OUT, or re-check a federated person after the session exists | `federation/CLAUDE.md` |
+| Dial any URL that did not come off a federation relationship entry — `jwks_uri` on an application entry and WS-Federation's `wreqptr` are still never followed | `federation/CLAUDE.md`, `oauth-oidc/CLAUDE.md` |
 | Check any end user's password, in any protocol | `authn/CLAUDE.md` |
 | Check any credential except a registered client's secret, in RFC 9700 mode only | `oauth-oidc/CLAUDE.md` |
 | Refuse any LDAP bind — any DN, any password, anonymous, on 389 and 636 alike | `ldap/CLAUDE.md` |
@@ -509,9 +711,15 @@ argument in two places is an argument that will disagree with itself.
 | Attest a workload or a node | `spiffe/CLAUDE.md` |
 | Revoke a SPIFFE credential — the directory now records who may still be ISSUED one, which is a different claim | `spiffe/CLAUDE.md`, `ldap/CLAUDE.md` |
 | Let a group grant anything — bar the TWO that grant the admin console and nothing else | `admin-ui/CLAUDE.md`, `common/CLAUDE.md` |
+| Decide who may delegate to whom, in two of the three families that can — the KDC polices S4U, WS-Trust and RFC 8693 police nothing | `common/CLAUDE.md`, `kerberos/CLAUDE.md` |
+| Give a trust realm its own directory, Kerberos KDC, TLS listeners or SPIFFE authority — a realm separates what this service ISSUES, and the four socket families have no path to put a realm segment in | `common/CLAUDE.md` |
+| Give a trust realm its own administrator — the two console roles are groups in the shared directory | `common/CLAUDE.md`, `admin-ui/CLAUDE.md` |
 | Persist anything at all | `admin-ui/CLAUDE.md` |
+| Recall anything it has already ISSUED — a SAML assertion, a Kerberos service ticket, an X509-SVID. `/logout` lists them anyway, with the reason | `logout/CLAUDE.md` |
+| Perform back-channel logout. Front-channel IS implemented; the metadata says which | `oauth-oidc/CLAUDE.md` |
 | Fake WS-Federation's `wauth`, or dereference `wreqptr` | `ws-federation/CLAUDE.md` |
-| Publish a SAML 2.0 Web SSO profile | `saml/CLAUDE.md` |
+| Verify a SAML AuthnRequest's signature, or consume SP metadata — both recorded, neither checked | `saml/CLAUDE.md` |
+| Encrypt an assertion in the Web SSO profile — WS-Trust's `?encrypt=1` still does | `saml/CLAUDE.md` |
 
 THREE exceptions to the whole of that list, and each is worth knowing before
 reading further. **The SCIM endpoints REQUIRE a credential** — in any of the six

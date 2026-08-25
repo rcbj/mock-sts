@@ -87,6 +87,10 @@
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
+// TRUST REALMS: the stores below are partitioned by realm. It requires
+// config.js and nothing else here, so it cannot join a cycle and it registers
+// no route, so its position is not a position at all.
+const realms = require('./realms');
 // The counters and the four claim sets. This is the module whose slot is filled
 // at the bottom of this file, and the dependency runs in this direction only.
 const stats = require('./admin_stats');
@@ -124,7 +128,12 @@ const SET_IDS = stats.CLAIM_SET_IDS;
 // memory like every other piece of configuration in this service — the signing
 // key is regenerated on every start, so a selection that outlived it would
 // describe tokens nothing can verify.
-const selections = {};
+// PER TRUST REALM. `realms.obj()` is a object that holds a separate one for each
+// realm and hands out the ambient realm's — so every reader below is
+// unchanged and every one of them is now realm-correct. In the default realm,
+// and in a service with no realms defined, there is exactly one partition and
+// this behaves as the plain object it replaced. See common/realms.js.
+const selections = realms.obj();
 SET_IDS.forEach(function (id) {
   selections[id] = new Set();
 });

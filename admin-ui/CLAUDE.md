@@ -18,6 +18,51 @@ grew a gate.
    sets would each look correct alone and never see each other, and a token revoked
    from the console would keep introspecting as active with no error to point at.
 
+   **THE CONSOLE ENDS SESSIONS NOW, AND THIS FILE STILL WRITES TO NEITHER
+   STORE.** `/admin/logout` arrived on 2026-08-24 and reversed a non-goal this
+   console documented in four places: *it does not end a sign-on session,
+   because `/oauth2/logout` and `wsignout1.0` already do and the second has a
+   cleanup to fan out; a third way to end one would be a third way to get that
+   wrong.* That argument was correct while each sign-out had a fan-out written
+   INTO it. It stopped being correct when the fan-outs became functions owned by
+   the protocol module each belongs to — `wsfed.cleanupTargetsFor()`,
+   `saml2_sso.logoutTargetsFor()`, `oauth-oidc/frontchannel_logout.js` — and
+   `authn.js`'s `dropSession()` became the single place a session stops
+   existing.
+
+   So the rule that survives is the one that was doing the work all along: this
+   file READS the session map and writes it nowhere. `/admin/logout` calls
+   `logout/logout.js`, which calls `authn.js`. A `sessions.delete()` here would
+   be the fourth way, and the one that skipped the RFC 9700 refresh revocation
+   and the audit row.
+
+   **What this console genuinely cannot do is DELIVER the notifications.** A
+   front-channel logout is an iframe in the signed-out person's own browser and
+   a WS-Federation cleanup is an image in it. `/logout` is that browser;
+   `/admin/logout` is an operator looking at somebody else, so it reports what
+   would be sent and does not pretend to send it.
+
+8c. **`setLogoutReader()` IS THE SIXTH SLOT AND IT IS THE SECOND THAT FAILED
+   RULE 3e'S TEST BOTH WAYS ROUND.** `logout/logout.js` requires
+   `ldap_server.js` — for the bound connections that ARE the LDAP session — and
+   `ldap_server.js` requires THIS file, so a require in the obvious direction
+   closes a cycle AND drags every `/ldap` route into the router ahead of the
+   console's own.
+
+   It carries ONE object — `FAMILIES`, `inventoryFor`, `terminate` — and
+   `setLogoutReader()` validates it whole and refuses it whole, for the reason
+   the directory WRITER's slot gives: a module that filled a combined slot with
+   only the readers would leave `/admin/logout` listing what is live and unable
+   to end any of it, which is the worse of the two halves. It warns rather than
+   throwing, like `admin_rbac.js`'s install: a console that will not start is
+   worse than one page that says why it cannot answer.
+
+   **`FAMILIES` is the PROSE and this file must not carry a second copy.** What
+   a logout reaches, what it cannot, and the specification each family cites are
+   written once in `logout/logout.js` and rendered here — the same division
+   `/admin/groups` keeps with `ldap_server.js` and `/admin/delegation` keeps with
+   `delegation.js`. A family added over there appears on this page with no edit.
+
 
 It also reads the SESSION store, which `../authn/authn.js` owns.
 
@@ -53,16 +98,19 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    `items` is either a page (`path` + `label`) or a GROUP (`title` + `what` +
    `items`), and `isNavGroup()` is the single predicate that decides which.
    There are four groups, all under Protocols — **OAuth2 / OIDC** (authorization
-   servers, token lifetimes, custom claims), **SAML** (custom SAML attributes),
-   **Verifiable Credentials** (credential claims, verifier request) and
-   **SPIFFE** (SPIFFE, registration entries, agents) — with SCIM left ungrouped
-   beside them. **SAML holds ONE page and is the exception to the rule that
-   makes SCIM ungrouped** ("a group of one is a heading buying nothing"): the
-   heading names a protocol family this service speaks in two versions and two
-   profiles, and the page under it configures one aspect of that family, where
-   SCIM's one page IS the whole of SCIM here. The test for the next group of one
-   is that question and not this precedent — does the heading name more than the
-   page under it does? Three rules, each the section rule one
+   servers, token lifetimes, custom claims), **SAML** (SAML 2.0 identity
+   provider, custom SAML attributes), **Verifiable Credentials** (credential
+   claims, verifier request) and **SPIFFE** (SPIFFE, registration entries,
+   agents) — with SCIM left ungrouped beside them. **SAML USED TO BE THE
+   EXCEPTION HERE and no longer is**: it held ONE page, and the argument for
+   keeping the heading anyway was that it names a protocol family this service
+   speaks in two versions and two profiles while the page under it configured
+   one aspect of that family — where SCIM's one page IS the whole of SCIM here.
+   The SAML 2.0 Web Browser SSO profile arrived on 2026-08-24 and put a second
+   page under it, so the group now earns its heading the ordinary way. **Keep
+   the argument rather than the precedent**: the test for the next group of one
+   is still "does the heading name more than the page under it does?", and this
+   group having outgrown the question is not an answer to it. Three rules, each the section rule one
    level down: a group **is not a crumb** and has no page, so `trailBar()` is
    untouched by grouping and must stay that way; `NAV` is still **derived**, now
    through `sectionPages()`, which flattens a group's pages into the section
@@ -284,6 +332,10 @@ owns the store, and reimplementing any of it here is how the console and an
   the feature off. An appconfig value is the last word; a default nobody reaches
   is not a default, and a test that opts out when its subject is disabled is how
   a setting stays wrong for as long as that one did.
+  **`/admin/delegation` is the newest page and it is the one that reads several
+  of these stores at once** — the delegation register, the applications registry,
+  the users page's identity keys and the Kerberos principal database — without
+  keeping a fact of its own. See the section below it.
   Its `/admin/groups` page is the one page here that reports the DIRECTORY rather
   than what this service has issued, and the difference between the two lists is
   the thing to keep straight: the directory holds an entry for whoever somebody
@@ -320,6 +372,110 @@ owns the store, and reimplementing any of it here is how the console and an
 
 
 ---
+
+## `/admin/delegation` IS THE ONE PAGE HERE THAT IS DELIBERATELY NOT A PROTOCOL PAGE
+
+Who acted on whose behalf, through what, to reach what — eight mechanisms across
+three protocol families in ONE table. It is in **Monitoring**, beside the tokens
+it points at, and the placement is the argument: a reader arriving here has a
+chain in their head (*alice hit the portal, the portal called the API*) and wants
+to know which hop invented which identity. Under Protocols it would have had to
+be filed under one of the three families, which would mean choosing which two
+thirds of the answer to hide.
+
+**TWO TABLES FROM TWO STORES, and the split is the point of the page.** What
+HAPPENED comes from `../common/delegation.js` (rule 3l). Who MAY DELEGATE TO WHOM
+comes from `../kerberos/krb5_principals.js`'s `delegationPolicy()`, required
+directly — a plain require in the ordinary direction, and both tests that would
+force a slot pass: that module registers no route (the KDC's own are in
+`krb5_kdc.js`) and `server.js` loads the Kerberos modules before this one, so
+nothing here can be the reason a route moved. It is the same argument the two
+SPIFFE libraries are required under. **The policy is interpreted THERE and
+rendered here**, because what those two attributes mean is a statement about the
+principal database — this module renders and decides nothing, as everywhere else.
+
+Four things about it are decisions rather than defaults:
+
+* **There is NO FORM, so rule 7 is satisfied by `GET /admin-api/delegation`
+  alone** — the second read-only resource over there, and the audit log's own
+  argument one step along. Everything on this page is an observation or somebody
+  else's configuration. A control that let a person TYPE a chain would put
+  invented rows in a table whose entire worth is that its rows are what actually
+  happened, and the table would then need a column saying which were which.
+* **The policy half is KERBEROS ONLY and the page says so loudly.** That is not
+  a gap being papered over: Kerberos is the only family here that polices
+  delegation at all, and each WS-Trust and RFC 8693 act says so in the same
+  column that names an attribute for a Kerberos one. **That asymmetry is the
+  most useful thing on the page** — the same picture, policed at one end and not
+  at the other — so do not "tidy" the unpoliced rows into an em dash.
+* **Ten columns, not twelve**, and the two that were merged were merged because
+  the table became unreadable rather than merely wide. `td.who` breaks a long
+  identifier anywhere (or one DN widens the page), so every extra column costs
+  the ones beside it: `HTTP/frontend.example.com@EXAMPLE.COM` wrapped over five
+  lines at twelve. The protocol went into the mechanism cell because every
+  mechanism id already begins `krb5-`, `wstrust-` or `oauth-`; the two credential
+  columns became one with arrows saying which direction. The policy table lost
+  its *Also requires* column for a different reason — that sentence is a property
+  of the MECHANISM, identical on every row of its kind, so it is said once above
+  the table and kept per-pair in the JSON.
+* **A party can be a person AND an application**, and `delegationPartyCell()`
+  draws up to two links for that reason. `HTTP/frontend.example.com` has an entry
+  under `ou=users` (it authenticates, so the funnel files it with the people) and
+  one under `ou=applications` (tickets are issued FOR it). A cell that showed one
+  of them would send half the readers to the wrong page. An application NOT in
+  the registry is marked rather than hidden — the registry holds what this
+  service was ASKED ABOUT, and an RFC 8693 `audience` nobody mentioned otherwise
+  is exactly that.
+
+---
+
+## `/admin/federation` IS THE ONE PAGE HERE THAT CONFIGURES A REFUSAL
+
+Every other page in this console either REPORTS what happened or WIDENS what this
+service will accept. This one is the opposite in both directions, and the page
+says so at the top rather than leaving it to be found: a relationship is created
+DISABLED, an assertion is refused unless it verifies against the certificate
+configured on it, and an enabled-but-half-configured relationship refuses rather
+than half-working. `../federation/CLAUDE.md` argues why that inversion is
+necessary rather than cautious.
+
+Three things about it are decisions rather than defaults.
+
+* **IT IS IN PROTOCOLS, UNGROUPED, BESIDE SCIM**, and the placement needed the
+  same argument `/admin/delegation` needed. Federation spans FIVE protocol
+  families, so under any of the four groups it would mean choosing which four
+  fifths of the answer to hide — which is exactly what kept delegation out of
+  them. It does not go where delegation went either: **that page is an
+  OBSERVATION and this one is CONFIGURATION.** A section of its own was
+  considered and fails this console's own test for one (the heading would name
+  nothing the page under it does not).
+
+* **THE FORM IS BUILT FROM THE SCHEMA, through `federation.fieldsForRole()` —
+  the same call the action validates against.** That is what stops the page
+  offering a field the action would refuse, and it matters here more than
+  anywhere else in this file because the fields differ by ROLE and by PROTOCOL:
+  a service-provider-side relationship has a token endpoint and an
+  identity-provider-side one has a release list, and neither has the other's.
+  A hand-written form would have had to encode that twice.
+
+  **The four booleans get a two-button control rather than a text box**, and
+  that is not cosmetic: a text box somebody types `TRUE` into is one somebody
+  types `true`, `yes` and `1` into, and one of those is how a relationship stays
+  disabled while the page says it is on. `federation.js` normalises them anyway
+  — two defences, because the console is not the only door.
+
+* **IT RENDERS AND DECIDES NOTHING**, like every other page here. Every branch
+  of `federationAction()` calls `federation.js`. A validation written in this
+  file would be a second opinion about what a relationship may hold, and the one
+  an `ldapmodify` never saw.
+
+**One field is never printed.** `fedClientSecret` is this service's own
+credential AT the partner — a real secret at a real foreign service, which is a
+stronger statement than `oauthClientSecret` can make about a secret this service
+minted for a mock client. It is not shown here and never reaches the audit log,
+and the page says out loud that an `ldapsearch` shows it anyway. That is not a
+security boundary and must not be presented as one; it is this console not being
+a second way to read somebody else's credential out of the process.
 
 ## 8. THE GATE, AND WHY THE OLD SENTENCE IS QUALIFIED RATHER THAN DELETED
 
@@ -420,3 +576,38 @@ these two groups grant **this console and nothing else** — no token's scopes
 change, no assertion gains an attribute, no Kerberos PAC is affected, no protocol
 endpoint reads them, and `groups.claim` carries `admin-write` into an access token
 exactly as it carries any other group, where still nothing reads it.
+
+## Every page here shows ONE trust realm
+
+Since 2026-08-24 this service can run several logical copies of itself at once,
+told apart by a segment at the front of the path (`common/CLAUDE.md` argues the
+whole design). Four consequences for this file, and the third is the one that
+would cost an afternoon:
+
+* **`page()` draws a realm switcher above the nav**, on every page — but only
+  when a realm has actually been defined. A permanent "default" would be a
+  control that only ever says the same thing, and this console had no such
+  control before realms existed.
+* **The switcher's links are ABSOLUTE URLs and must stay that way.** `app.js`
+  rewrites every root-relative `href`, `action` and `src` in an HTML response to
+  carry the current realm's prefix, which is what makes this file's several
+  hundred hand-written links work inside a realm without one of them being
+  edited. That rewrite is exactly wrong for the one control whose job is to
+  LEAVE the current realm, and an absolute URL is what passes through it.
+* **`/admin/config` WRITES the realm it is read in.** `config.setOverride()`
+  lands on the ambient realm — see rule 3m — so the Save button on this console
+  changes one realm, and `/admin/token-lifetimes` and every other page that
+  writes a setting does the same without knowing it. That is why the switcher
+  says so on every page: a form that read one realm and wrote another is the
+  surprise this arrangement exists to avoid, and the only way a reader can tell
+  which realm they are in is if it is named where they are looking.
+* **THE TWO ROLES ARE NOT PER REALM.** They are groups in the embedded
+  directory, which is shared by every realm in the process, so somebody who
+  holds Admin Write holds it everywhere. `/admin/rbac` reached under a realm
+  prefix is the same roster as the one reached without. Rule 8 is unchanged and
+  there is deliberately no per-realm administrator; if there is ever to be one,
+  it is a per-realm container in the directory rather than a second store here.
+
+`/admin/realms` is the page for all of it, and it keeps nothing of its own: the
+registry is `common/realms.js`'s and a realm's settings go through the same
+`config.setOverride()` every other page uses.

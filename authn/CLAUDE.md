@@ -16,12 +16,71 @@ is made at the password screen, and it owns no session of its own. Splitting the
 would put the two halves of one ceremony in two places and leave the pending
 record crossing a directory boundary for no gain.
 
-**It OWNS THE SESSION.** `ws-federation/wsfed.js` and `admin-ui/admin.js` take it
-from here through the exported `startSession` / `sessionOf` / `endSession`, and
-`oauth-oidc/oauth2.js` reads the session and never writes one. Do not give any
-other module a session store to "decouple" it: two stores would each look correct
-alone and never see each other, and the symptom is a sign-on that silently is not
-single.
+**It OWNS THE SESSION.** `ws-federation/wsfed.js`, `saml/saml2_sso.js` and
+`admin-ui/admin.js` take it from here through the exported `startSession` /
+`sessionOf` / `endSession`, and `oauth-oidc/oauth2.js` reads the session and
+never writes one. Do not give any other module a session store to "decouple" it:
+two stores would each look correct alone and never see each other, and the
+symptom is a sign-on that silently is not single.
+
+**`startSession()` TOOK A SIXTH ARGUMENT FOR FEDERATION, AND IT REPLACED A
+DOUBLE-COUNT RATHER THAN ADDING A FEATURE.** This function has always recorded
+the authentication ITSELF — that is what makes a WS-Federation sign-in appear on
+`/admin/users` without `wsfed.js` knowing the console exists. `../federation/`
+broke that assumption in two places at once: `methodPhraseFor()` answers "sign-in
+screen (password)" for an `amr` it does not recognise, which is exactly wrong for
+somebody who never saw this screen at all, and the attributes a foreign identity
+provider asserted have to ride the identity funnel to the directory with no other
+way in. The obvious alternative — the caller calling
+`stats.recordAuthentication()` and then this — was written first and produced TWO
+authentication records for one sign-in, so `/admin/users` counted every federated
+arrival twice and the audit log carried a duplicate of each. **A caller passing
+nothing behaves exactly as every existing caller did**, which is the property to
+keep if this is ever reworked.
+
+**IT REQUIRES `../federation/federation.js`, AND THAT DIRECTION IS THE
+ARRANGEMENT RATHER THAN AN ACCIDENT.** The sign-in screen offers a button per
+usable federation partner (`federation.loginButtons`), because a person standing
+at this screen is in the middle of SOMETHING — an authorization request, a
+`wsignin1.0`, an `AuthnRequest`, the console — and `record.returnTo` is that
+something, whole. Handing it to the federated flow is what lets a foreign
+identity provider satisfy any protocol this service speaks.
+
+The require goes to the REGISTER and never to `federation_sp.js`: that module
+requires THIS file — it has no sign-in screen of its own and calls
+`startSession()` directly — so a require back would close a cycle. The register
+in the middle is what both halves can safely reach, and it registers no route, so
+nothing about requiring it can move one. The call is wrapped: **the sign-in
+screen is the last thing in this service that may fail to draw**, so a register
+that throws costs the buttons and never the password field underneath them.
+
+**FOUR DOORS END A SESSION AND `dropSession()` IS THE ONLY PLACE ONE STOPS
+EXISTING.** `/oauth2/logout`, WS-Federation's `wsignout1.0`, SAML 2.0's
+`/saml2/slo` and the protocol-independent `/logout` are four protocols' words
+for one act. Two functions sit over that one body and the split is what the
+callers need rather than a refactor:
+
+* `endSession(req, res)` reads the cookie and clears it — the browser's own
+  sign-out.
+* `endSessionById(id, via)` names a session the caller has no cookie for, which
+  is every session `/logout` and `/admin/logout` end that is not their own.
+  `clearSessionCookie(res)` is exported beside it so that a caller ending its
+  OWN session through the list can still drop the cookie.
+
+**What `dropSession()` does BESIDES the delete is the whole reason it exists**:
+the RFC 9700 section 2.2.2 refresh revocation, and the single `session.end`
+audit row. A `sessions.delete()` anywhere else would be a sign-out that revoked
+nothing and logged nothing, and from the outside it would look identical. That
+is also why both functions RETURN the session as it was: the federated lists a
+sign-out has to fan out to — `wsfedRealms`, `saml2ServiceProviders`,
+`oidcClients` — live on the object being discarded.
+
+`sessionsOf(username)` and `sessionById(id)` are the readers `/logout` needs to
+draw a row for a session that is not the caller's. Neither expires anything:
+`sessionOf()` stays the one that reads the cookie and sweeps what it finds
+expired, because an observer that quietly ended sessions while reporting on them
+would be changing the thing it describes — the same rule `audit.js`'s actor
+resolver follows.
 
 ---
 

@@ -68,6 +68,8 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// TRUST REALMS: the claim selection below is per realm.
+const realms = require('../common/realms');
 const { log } = require('../common/helpers');
 // For ONE function: identityKeyOf(), which turns every spelling of a person into
 // the one local name this service files them under. It is the same normalisation
@@ -240,7 +242,17 @@ function ldpTermFor(row) {
 const DEFAULT_SELECTION = VC_ATTRIBUTES.filter(function (row) { return row.byDefault; })
                                        .map(function (row) { return row.ldap; });
 
-let selection = new Set(DEFAULT_SELECTION.map(function (name) { return name.toLowerCase(); }));
+// PER TRUST REALM. Which attributes an issued credential asserts is a decision
+// a realm makes for itself — two realms issuing the same credential type with
+// different claims is exactly the case somebody defines a second realm to
+// build. `realms.obj(factory)` is a plain object per realm, so
+// `state.selection` reads and `state.selection = wanted` writes work exactly as
+// the binding this replaced did, and each realm's default is the same default.
+const state = realms.obj(function () {
+  return { selection: new Set(DEFAULT_SELECTION.map(function (name) {
+    return name.toLowerCase();
+  })) };
+});
 
 // The selected rows, in CATALOGUE order rather than in the order they were
 // chosen. The order reaches the credential (it is the order of the Disclosures
@@ -249,12 +261,12 @@ let selection = new Set(DEFAULT_SELECTION.map(function (name) { return name.toLo
 // credential to anything diffing them.
 function selectedRows() {
   return VC_ATTRIBUTES.filter(function (row) {
-    return selection.has(row.ldap.toLowerCase());
+    return state.selection.has(row.ldap.toLowerCase());
   });
 }
 
 function isSelected(ldapName) {
-  return selection.has(String(ldapName || '').toLowerCase());
+  return state.selection.has(String(ldapName || '').toLowerCase());
 }
 
 function selectedNames() {
@@ -288,7 +300,7 @@ function setSelection(names) {
     log.debug("Leaving setSelection(). " + errors.length + " error(s); nothing changed.");
     return { ok: false, errors: errors };
   }
-  const before = selection;
+  const before = state.selection;
   const added = [];
   const removed = [];
   wanted.forEach(function (key) {
@@ -297,7 +309,7 @@ function setSelection(names) {
   before.forEach(function (key) {
     if (!wanted.has(key)) removed.push(BY_LDAP.get(key).ldap);
   });
-  selection = wanted;
+  state.selection = wanted;
   log.info('vc: the credential claim set is now ' + (selectedNames().join(', ') || '(empty)') +
            '. Added: ' + (added.join(', ') || 'nothing') + '. Removed: ' +
            (removed.join(', ') || 'nothing') + '.');

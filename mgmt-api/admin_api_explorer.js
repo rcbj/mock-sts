@@ -36,6 +36,14 @@
 
   var root = document.getElementById('app');
   var SPEC_URL = root.getAttribute('data-spec');
+  // The trust realm this page is being read in, as a path prefix — empty in the
+  // default realm, '/realm/acme' in a realm called acme. Every request this
+  // explorer makes is prefixed with it, because the paths in the OpenAPI
+  // document are the paths the routes are REGISTERED at and no route in this
+  // service carries a realm. Without it, Try it inside a realm would call the
+  // default realm's API: the call would succeed and it would have changed the
+  // wrong service. See the comment on page() in admin_api_docs.js.
+  var REALM_PREFIX = root.getAttribute('data-realm-prefix') || '';
 
   // --- small DOM helpers ----------------------------------------------------
   function el(tag, className, text) {
@@ -161,7 +169,7 @@
       }
       query.push(encodeURIComponent(name) + '=' + encodeURIComponent(value));
     });
-    return row.path + (query.length ? '?' + query.join('&') : '');
+    return REALM_PREFIX + row.path + (query.length ? '?' + query.join('&') : '');
   }
 
   function renderResult(into, status, ms, text) {
@@ -283,7 +291,7 @@
     var specLink = add(meta, el('a', '', 'OpenAPI document'));
     specLink.setAttribute('href', SPEC_URL);
     var consoleLink = add(meta, el('a', '', 'the console this mirrors'));
-    consoleLink.setAttribute('href', '/admin');
+    consoleLink.setAttribute('href', REALM_PREFIX + '/admin');
 
     prose(header, spec.info.description, 'lede');
 

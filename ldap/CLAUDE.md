@@ -339,6 +339,86 @@ ldapjs implements none, and this repository does not patch that submodule.
 
 ---
 
+## `ou=federations` IS THE SIXTH CONTAINER, AND THE ONLY ONE WHERE AN `ldapmodify` IS A SECURITY CHANGE
+
+The applications container's arrangement made a third time — this file owns
+WHERE an entry lives, how it is created and what the cap is, and
+`../federation/federation.js` owns what an entry IS — and it is a deliberate copy
+rather than a coincidence. Its `setDirectory()` slot is filled here at require
+time, in the ordinary direction, for exactly the reason `applications.js`'s and
+`spiffe_registry.js`'s are.
+
+**It is a container of its own rather than a corner of `ou=applications`**, and
+that needed an argument. An application entry is something this service was ASKED
+ABOUT. Half these entries are FOREIGN IDENTITY PROVIDERS, which ask this service
+for nothing at all — they authenticate people TO it. Filing them among the
+parties that consume what this service issues would make the one question
+`ou=applications` exists to answer unanswerable. (The partner is ALSO recorded
+over there, once, as a `federation-identity-provider` — that record is the party,
+and this one is the arrangement with it.)
+
+**The DN is the id, with no digest case.** An application entry may be
+`cn=app-<12 hex>` because its identifier is whatever a protocol presented and can
+be any length; a relationship id is CONFIGURED, so `federation.js` simply
+requires it to be RDN-safe and short and refuses one that is not. That is the
+difference between a register that is written down and one that is observed.
+There is still a walk by `fedId` for one case — an entry somebody renamed with an
+`ldapmodrdn` — because the alternative is a register that loses a relationship
+because somebody tidied a DN.
+
+**And the sentence that is true of no other container here: an `ldapmodify` of
+one of these entries is a SECURITY change.** Everywhere else in this directory an
+edit changes what this service HANDS OUT. `fedSigningCertificate` decides whose
+assertions it will BELIEVE, and `fedEnabled` turns a partner on. Every bind to
+this directory succeeds, so this container is exactly as protected as the rest of
+it, which is to say not at all — that is the honest state of a mock, it is said
+out loud on `GET /ldap/federations`, and it is part of why federation refuses by
+default rather than accepting.
+
+`fedClientSecret` is on these entries in the clear, and it is a stronger claim
+than `oauthClientSecret` one container over: that one is a secret this service
+MINTED for a mock client and can mint again, and this one is this service's own
+credential at a REAL foreign service. Same decision, same reason
+(`/krb5/principals` prints the Kerberos passwords), worth restating because the
+consequence is different.
+
+## THE FIVE FEDERATION ATTRIBUTES ON A PERSON'S ENTRY
+
+`applyFederatedAttributes()` runs on an entry created because somebody signed in
+SOMEWHERE ELSE — the only path here of that shape — and it breaks the rule its
+neighbour follows, on purpose.
+
+**`applyVcAttributes()` fills only what is ABSENT. This one ASSIGNS, and the
+partner's values win.** The two have to differ: that one writes an INVENTED
+persona and this one writes what a real identity provider actually asserted. If
+it merged, `alice@example.invalid` — invented the first time anybody named alice
+turned up — would beat the address her employer's identity provider just sent,
+permanently, with nothing on any page saying why. If it accumulated, an entry
+would carry one `mail` value per sign-in.
+
+**Only what the partner sent is touched.** An attribute on the entry that is not
+in this assertion is left alone: a partner that stopped releasing `title` has not
+said the person has no title, and deleting on the strength of an omission loses
+data on somebody else's configuration change.
+
+**It never writes `uid`.** That is what `namePlan()` put in the RDN, and a
+partner sending a different one would leave an entry whose DN and whose `uid`
+name two different people — which every lookup here that finds somebody by name
+goes through one or the other of.
+
+**`federationAttribute` is the useful one and has no analogue anywhere else in
+this directory.** A federated `mail` and an invented `mail` are ordinary
+attributes and look identical; this lists which of the entry's attributes came
+off a foreign assertion. Nothing reads it. It is there because "is this address
+real or did you make it up" is exactly the question a federated directory entry
+raises, and without this there is no way to answer it.
+
+`fedAutocreateUsers` on the relationship is checked in `autoCreateUser()` beside
+`ldap.autocreateUsers`, and it is the one place a federated sign-in is treated
+differently from any other kind: a federation partner is the one source of
+identities whose VOLUME this service does not control, and off gives a session
+and no entry.
+
 ## A WRITE MUST CALL `touchDirectory()`
 
 `groupsOfUser()` is called ONCE PER TOKEN — every access token, every ID Token
@@ -413,3 +493,46 @@ because they are facts about the package root rather than about this module.
   directory would get this from the schema subsystem this mock does not have),
   and one is deliberately NOT: deleting a user leaves its DN in every group that lists
   it, because referential integrity is a directory feature and not a protocol rule.
+
+---
+
+## The connection IS the session, so a logout closes it
+
+RFC 4511 section 4.2: a Bind establishes the authorization state of a
+CONNECTION, and it lasts until the next Bind or an Unbind. There is no ticket,
+no cookie and no token — so **closing the connection is the only sign-out LDAP
+has**, and it is what the protocol-independent `/logout` calls through
+`boundConnections()` and `dropConnectionsFor(key)`.
+
+**This file keeps its own connection list and has to.** ldapjs's `Server`
+exposes `connections`, which is node's deprecated `net.Server` **count** — a
+number — and nothing that enumerates the sockets or the DNs bound on them. The
+submodule is used unmodified, so the list is kept here, on the underlying
+net/tls server's own `connection` / `secureConnection` event, which fires for
+every socket ldapjs then sets up.
+
+Three things about it:
+
+* **It is a Set of the SOCKETS and nothing else.** The bound DN is read off
+  `socket.ldap.bindDN` at the moment somebody asks and never copied — ldapjs
+  owns that value and re-binding on one connection changes it. A copy would be a
+  second store of one fact, and the one that goes stale exactly when it matters.
+* **Removal is on `close`**, which node emits however a socket ended, so nothing
+  is swept and a client that vanished leaves no row claiming to be signed in.
+* **`destroy()` and not `end()`.** `end()` sends a FIN and waits, and a client
+  mid-search can keep a half-closed connection alive as long as it likes — a
+  logout that reported success and left the session up. An **Unsolicited Notice
+  of Disconnection** (section 4.4.1) would be the polite form and node-ldapjs has
+  no way to send one; `/logout` says so on the row rather than leaving it as a
+  difference somebody discovers.
+
+The identity a connection is filed under is `consoleKeyFor(dn, getEntry(dn))` —
+the same derivation the groups page links with, with the entry passed so that
+its own `uid` wins over the DN's RDN. **A row on `/logout` and a row on
+`/admin/users` must name one person**, which is the same one-entry-per-person
+rule this directory keeps at every other door.
+
+`logout.ldapDisconnect` turns it off, and the connections are then LISTED as
+untouched rather than hidden — a family that vanished when its setting was off
+would make a global logout look complete.
+

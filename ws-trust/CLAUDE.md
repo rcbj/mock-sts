@@ -18,6 +18,38 @@ twice — two calls would count two authentications for one act.
 
 ---
 
+## `OnBehalfOf` and `ActAs` are TWO mechanisms now, not one with two spellings
+
+`delegatedSubject()` used to collapse them with a `||`, and for everything that
+reads it that was right — the token issued is identical either way, because this
+service polices nothing. It is wrong for `/admin/delegation`, where the
+difference is the whole point:
+
+* **`wst:OnBehalfOf`** (1.3 §9.2) asks for a token ABOUT somebody. The relying
+  party is handed an ordinary sign-in and cannot tell a middle tier was involved.
+  IMPERSONATION.
+* **`wst14:ActAs`** (1.4 §9.3) is composite by definition: the token is about
+  the named subject AND says the requester is acting. DELEGATION.
+
+So that function returns which element it found, `authenticate()` carries it out
+on a `delegation` member (with the REQUESTER, who is the intermediary of the
+chain and is the one party `subject` deliberately does not name), and
+`handleRst()` records the act — there rather than in `authenticate()`, because
+that is the first line at which the token exists and the only place that knows
+the `AppliesTo`, which is the TARGET of the chain. A request carrying BOTH
+elements is attributed to `OnBehalfOf`, the order the `||` always had, and the
+row says so rather than choosing silently.
+
+**Neither is authorized by anything here, and the row says that too**, in the
+same field where a Kerberos row names an attribute on an account. Do not tidy
+that sentence into an em dash: the asymmetry between a policed family and an
+unpoliced one is the most useful thing on that page. What this service does NOT
+do is put the composite fact into an `ActAs` token — nothing in the assertion
+says a middle tier acted — and the row states that as a gap in the mock rather
+than in the profile.
+
+---
+
 ## Two rules about where a credential is read, and both were learnt the hard way
 
 **"The observer is installed" is not the same claim as "this protocol calls the

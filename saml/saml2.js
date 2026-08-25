@@ -93,7 +93,58 @@ function attributeValuesOf(a) {
 //   attributes            [{ name, nameFormat, value }] replacing the default two.
 //                         A WS-Federation relying party keys off the claim URIs
 //                         from the Microsoft claim namespaces, not off `name`.
-
+//
+// FIVE MORE ARRIVED WITH THE WEB BROWSER SSO PROFILE (saml2_sso.js), and every
+// one of them is a MUST in saml-profiles-2.0-os section 4.1.4.2 that WS-Trust
+// and WS-Federation genuinely do not need. That is why they are options here
+// rather than a second builder: the element order, the namespace and the
+// signature location are what a service provider's parser is strict about, and
+// there is one place they are decided.
+//
+//   nameIdFormat          the NameID's Format. The two older callers want
+//                         `unspecified` — nothing consumes it — and a service
+//                         provider that asked for a format in NameIDPolicy is
+//                         entitled to see the one it asked for.
+//   nameIdValue           the NameID's text, when it is not the subject. A
+//                         transient or persistent format needs an opaque value,
+//                         and the subject is still what the attributes say.
+//   subjectConfirmation   { recipient, inResponseTo, notOnOrAfter } becoming a
+//                         <SubjectConfirmationData>. THE PROFILE REQUIRES IT:
+//                         section 4.1.4.2 says the bearer assertion MUST carry a
+//                         Recipient matching the assertion consumer service URL
+//                         and an InResponseTo matching the request. A service
+//                         provider that checks either — most do — refuses an
+//                         assertion without them, and the refusal reads as a
+//                         signature problem to anybody who has not met it before.
+//   sessionIndex          the AuthnStatement's SessionIndex. It defaults to the
+//                         assertion's own ID, which is what the two older callers
+//                         got and is fine while nothing logs out; Single Logout
+//                         is the feature that makes it matter, because the
+//                         LogoutRequest names the session by this value.
+//   authnInstant          when the person actually authenticated, which is the
+//                         SESSION's authTime and not now. Defaulted to now, as
+//                         it always was.
+//
+// AND TWO MORE, which are about the DOCUMENT rather than about its contents:
+//
+//   issuer                who signed it. It defaults to `saml.issuer`, which is
+//                         what the two older callers get and is the shared
+//                         value WS-Trust and WS-Federation both want. The Web
+//                         SSO profile has to override it because that profile
+//                         publishes an entityID PER SERVICE PROVIDER, and a
+//                         service provider checks the assertion's Issuer
+//                         against the entityID in the metadata it was
+//                         configured from — an assertion issued by a name that
+//                         is not in that document is refused, and the refusal
+//                         reads as a trust-store problem.
+//   sign                  false to return the assertion unsigned. Default true,
+//                         which is what every existing caller gets. It is a
+//                         supported state and not a failure: a service provider
+//                         that accepts an unsigned assertion has a hole in it,
+//                         and this is how somebody finds that out. The RECORD
+//                         says `signed: false` either way, so the console
+//                         reports what actually went out rather than what was
+//                         intended.
 function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   log.debug("Entering buildSamlAssertion().");
   opts = opts || {};
@@ -105,9 +156,13 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
     : '';
   const authnContextClassRef = opts.authnContextClassRef ||
     'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport';
+  // Who signed it. Read once, because it appears in the Issuer element and in
+  // the default `issuedBy` attribute, and two reads of a runtime-changeable
+  // setting inside one document can disagree with each other.
+  const issuer = opts.issuer || config.value('saml.issuer');
   const attributes = (opts.attributes && opts.attributes.length) ? opts.attributes : [
     { name: 'name', value: subject },
-    { name: 'issuedBy', value: config.value('saml.issuer') }
+    { name: 'issuedBy', value: issuer }
   ];
   // Whatever the admin console was told to add, APPENDED to the above rather than
   // replacing it — and appended in both branches, so a WS-Federation sign-in
@@ -131,15 +186,39 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
       (a.nameFormat ? ' NameFormat="' + xmlEscape(a.nameFormat) + '"' : '') + '>' +
       attributeValuesOf(a) + '</saml:Attribute>';
   }).join('');
+  // The NameID, and the one thing to know about the default: `unspecified` is
+  // what this service said for years and nothing consumed it, so it stays the
+  // default rather than becoming what a Web SSO service provider asked for.
+  // A caller that was asked for a format passes it.
+  const nameIdFormat = opts.nameIdFormat ||
+    'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified';
+  const nameIdValue = opts.nameIdValue == null ? subject : opts.nameIdValue;
+  // <SubjectConfirmationData>, which the Web Browser SSO profile requires and
+  // the other two callers have no request to answer. Built as an EMPTY-ELEMENT
+  // SubjectConfirmation when there is nothing to say, exactly as before, because
+  // that is what every existing caller's output has been and a self-closing
+  // element is not the same document as one with an empty child.
+  const scd = opts.subjectConfirmation;
+  const confirmation = scd
+    ? '<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">' +
+        '<saml:SubjectConfirmationData' +
+        (scd.notOnOrAfter ? ' NotOnOrAfter="' + xmlEscape(scd.notOnOrAfter) + '"' : '') +
+        (scd.recipient ? ' Recipient="' + xmlEscape(scd.recipient) + '"' : '') +
+        (scd.inResponseTo ? ' InResponseTo="' + xmlEscape(scd.inResponseTo) + '"' : '') +
+        '/></saml:SubjectConfirmation>'
+    : '<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"/>';
+  const sessionIndex = opts.sessionIndex || id;
+  const authnInstant = opts.authnInstant || now;
   const xml =
     '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"' +
       ' ID="' + id + '" Version="2.0" IssueInstant="' + now + '">' +
-      '<saml:Issuer>' + xmlEscape(config.value('saml.issuer')) + '</saml:Issuer>' +
-      '<saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified">' +
-        xmlEscape(subject) + '</saml:NameID>' +
-      '<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"/></saml:Subject>' +
+      '<saml:Issuer>' + xmlEscape(issuer) + '</saml:Issuer>' +
+      '<saml:Subject><saml:NameID Format="' + xmlEscape(nameIdFormat) + '">' +
+        xmlEscape(nameIdValue) + '</saml:NameID>' +
+      confirmation + '</saml:Subject>' +
       '<saml:Conditions NotBefore="' + now + '" NotOnOrAfter="' + exp + '">' + audienceEl + '</saml:Conditions>' +
-      '<saml:AuthnStatement AuthnInstant="' + now + '" SessionIndex="' + id + '">' +
+      '<saml:AuthnStatement AuthnInstant="' + xmlEscape(authnInstant) + '" SessionIndex="' +
+        xmlEscape(sessionIndex) + '">' +
       '<saml:AuthnContext><saml:AuthnContextClassRef>' +
         xmlEscape(authnContextClassRef) +
       '</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>' +
@@ -152,6 +231,15 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   // are still valid without re-parsing anything.
   const record = stats.recordAssertion('2.0', { id: id, subject: subject, audience: audience,
                                                 expiresAt: Date.parse(exp) || 0 });
+  // `sign: false` is a state, not a failure — see the option's note above — so
+  // the record is corrected here for the same reason it is corrected in the
+  // catch below: the console shows whether an assertion was signed, and an
+  // unsigned one is the single most useful thing that column can say.
+  if (opts.sign === false) {
+    record.signed = false;
+    log.debug("Leaving buildSamlAssertion(). Unsigned, because the caller asked for that.");
+    return xml;
+  }
   try {
     log.debug("Leaving buildSamlAssertion().");
     return signAssertion(xml);

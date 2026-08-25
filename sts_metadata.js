@@ -232,6 +232,23 @@ const SPECS = [
     coverage: 'full for the etypes offered: aes128/256-cts-hmac-sha1-96 (17, 18), ' +
               'aes128/256-cts-hmac-sha256/384 (19, 20) and arcfour-hmac-md5 (23). DES is ' +
               'decode-only and not offered. The same codec runs in the browser.' },
+  { id: 'ms-sfu', name: '[MS-SFU] Kerberos Protocol Extensions: ' +
+                       'Service for User and Constrained Delegation',
+    where: 'Microsoft Open Specifications',
+    url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/',
+    coverage: 'partial: S4U2Self (PA-FOR-USER with the section 2.2.1 ' +
+              'S4UByteArray checksum, HMAC-MD5 at key usage 17) and S4U2Proxy ' +
+              '(cname-in-addl-tkt with the evidence ticket), authorized BOTH ' +
+              'ways — msDS-AllowedToDelegateTo on the front end and ' +
+              'msDS-AllowedToActOnBehalfOfOtherIdentity on the back end, with ' +
+              'the asymmetries between them enforced: classic needs ' +
+              'forwardable evidence and resource-based needs PA-PAC-OPTIONS ' +
+              'with the resource-based bit, refused with KDC_ERR_BADOPTION ' +
+              'without it. S4U_DELEGATION_INFO is written into the PAC. NOT ' +
+              'implemented: the U2U variants, and no attempt is made to model ' +
+              'a real domain\'s ACL on either attribute — the two lists are ' +
+              'configuration in krb5_principals.js and are published at ' +
+              '/admin/delegation.' },
   { id: 'ms-pac', name: '[MS-PAC] Privilege Attribute Certificate',
     where: 'Microsoft Open Specifications',
     url: 'https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-pac/',
@@ -492,17 +509,78 @@ const SPECS = [
     where: 'OASIS saml-core-2.0-os',
     url: 'https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf',
     coverage: 'partial: issues signed Assertions (AuthnStatement, AttributeStatement, ' +
-              'SubjectConfirmation, Conditions), carried by WS-Trust and by WS-Federation. There is ' +
-              'no SAML 2.0 WEB SSO profile — no SingleSignOnService, no AuthnRequest, no Response — ' +
-              'so the federation metadata deliberately publishes no IDPSSODescriptor. The browser ' +
-              'SSO profile this service does have is WS-Federation\'s.' },
+              'SubjectConfirmation with the bearer SubjectConfirmationData the Web SSO profile ' +
+              'requires, Conditions), carried by WS-Trust, by WS-Federation, and since 2026-08-24 ' +
+              'in a <samlp:Response> of its own — THERE IS A WEB BROWSER SSO PROFILE NOW, at ' +
+              '/saml2, and the three rows below cover its bindings, profiles and metadata. What ' +
+              'is still absent: no assertion is encrypted, no AuthnRequest signature is verified, ' +
+              'and no <samlp:AttributeQuery> is answered. The WS-FEDERATION metadata still ' +
+              'publishes no IDPSSODescriptor, which is now a fact about that document rather than ' +
+              'about this service — the SAML 2.0 metadata at /saml2/metadata is where the ' +
+              'IDPSSODescriptor is.' },
+  { id: 'saml2-bindings', name: 'SAML 2.0 Bindings',
+    where: 'OASIS saml-bindings-2.0-os',
+    url: 'https://docs.oasis-open.org/security/saml/v2.0/saml-bindings-2.0-os.pdf',
+    coverage: 'partial: HTTP Redirect (section 3.4) with the DEFLATE encoding and the detached ' +
+              'query-string signature of 3.4.4.1, HTTP POST (3.5), HTTP Artifact (3.6) with the ' +
+              'type 0x0004 artifact and the one-shot rule of 3.6.4.1, and SOAP over HTTP (3.2.3) ' +
+              'for the artifact resolution back channel. NOT here: PAOS (3.3), which is refused ' +
+              'by name rather than quietly answered over POST, and the URI binding (3.7). A ' +
+              'request signature is recorded and never verified.' },
+  { id: 'saml2-profiles', name: 'SAML 2.0 Profiles',
+    where: 'OASIS saml-profiles-2.0-os',
+    url: 'https://docs.oasis-open.org/security/saml/v2.0/saml-profiles-2.0-os.pdf',
+    coverage: 'partial: the Web Browser SSO profile (section 4.1) service-provider-initiated, over ' +
+              'all three bindings, with the bearer SubjectConfirmationData 4.1.4.2 requires; and ' +
+              'Single Logout (4.4), both directions, WITHOUT front-channel fan-out — an ' +
+              'identity-provider-initiated logout NAMES the other service providers and builds a ' +
+              'LogoutRequest for each rather than firing them into frames it cannot observe. NOT ' +
+              'here: identity-provider-initiated SSO with an unsolicited Response, the ECP ' +
+              'profile (4.2), Name Identifier Management (4.5), and the Assertion Query and ' +
+              'Request profile (6). No assertion is encrypted.' },
+  { id: 'saml2-metadata', name: 'SAML 2.0 Metadata',
+    where: 'OASIS saml-metadata-2.0-os',
+    url: 'https://docs.oasis-open.org/security/saml/v2.0/saml-metadata-2.0-os.pdf',
+    coverage: 'partial: a signed EntityDescriptor holding one IDPSSODescriptor, and ONE PER ' +
+              'SERVICE PROVIDER — a distinct entityID and its own endpoints, which is what Okta ' +
+              'and Ping publish. It is minted for any entityID asked for. This service PUBLISHES ' +
+              'metadata and does not CONSUME it: there is no SPSSODescriptor ingest, which is why ' +
+              'a service provider\'s logout return address has to be declared and why an ' +
+              'assertion consumer service URL is taken from the request rather than looked up.' },
   { id: 'saml11', name: 'SAML 1.1 Core',
     where: 'OASIS oasis-sstc-saml-core-1.1',
     url: 'https://www.oasis-open.org/committees/download.php/3406/oasis-sstc-saml-core-1.1.pdf',
     coverage: 'partial: issues signed Assertions with an AuthenticationStatement and an ' +
               'AttributeStatement, which is the DEFAULT token of the WS-Federation profile here ' +
-              'because it is what AD FS issues. No SAML 1.1 request/response protocol and no ' +
-              'browser artifact profile — the assertion only ever travels in a wresult.' },
+              'because it is what AD FS issues. THIS NOTE USED TO SAY there was no SAML 1.1 ' +
+              'request/response protocol and no browser artifact profile, and that the assertion ' +
+              'only ever travelled in a wresult; since 2026-08-24 /saml11 is a browser-facing ' +
+              'identity provider and /saml11/responder answers a <samlp:Request> in all four of ' +
+              'its shapes. What is still absent: the fifth request type, ' +
+              'AuthorizationDecisionQuery, which is refused by name because this service makes no ' +
+              'authorization decisions; and there is no SAML 1.1 Single Logout to implement, ' +
+              'because the protocol has none.' },
+  { id: 'saml11-bindings', name: 'SAML 1.1 Bindings and Profiles',
+    where: 'OASIS oasis-sstc-saml-bindings-1.1',
+    url: 'https://www.oasis-open.org/committees/download.php/3405/oasis-sstc-saml-bindings-1.1.pdf',
+    coverage: 'partial: the SOAP binding (section 3.1) for the SAML responder, and the type ' +
+              '0x0001 artifact of 3.2.2 — FORTY-TWO bytes, where a SAML 2.0 artifact is 44: 2.0 ' +
+              'added a two-byte EndpointIndex that 1.1 has no field for, so a relying party ' +
+              'assuming the newer layout reads the SourceID two bytes late. An artifact resolves ' +
+              'EXACTLY ONCE (3.2.3): resolving destroys it, and the second attempt is refused ' +
+              'with a status naming the reason.' },
+  { id: 'saml11-profiles', name: 'SAML 1.1 Profiles',
+    where: 'OASIS oasis-sstc-saml-profile-1.1',
+    url: 'https://www.oasis-open.org/committees/download.php/3404/oasis-sstc-saml-profile-1.1.pdf',
+    coverage: 'partial: BOTH browser profiles — Browser/Artifact (section 4.1) and Browser/POST ' +
+              '(4.2) — each with the confirmation method its section requires, which are ' +
+              'different values and are not interchangeable. THERE IS NO REQUEST MESSAGE IN SAML ' +
+              '1.1, so both are identity-provider-initiated: a flow starts when a browser arrives ' +
+              'carrying a TARGET, the relying party never identifies itself in the protocol, and ' +
+              'a failure is a PAGE rather than a Response because there is nothing to answer. ' +
+              'Shibboleth\'s non-standard AuthnRequest profile ' +
+              '(urn:mace:shibboleth:1.0:profiles:AuthnRequest) is accepted and advertised, ' +
+              'because it is what every real SAML 1.1 service provider sends.' },
   { id: 'ws-federation', name: 'WS-Federation 1.2',
     where: 'OASIS wsfed',
     url: 'https://docs.oasis-open.org/wsfed/federation/v1.2/os/ws-federation-1.2-spec-os.html',
@@ -708,6 +786,27 @@ const SPECS = [
     coverage: 'partial: id_token with nonce, at_hash and c_hash, the three authentication flows, and ' +
               'the section 5.3 UserInfo endpoint — which is the one place a scope changes what comes ' +
               'back, since the id_token carries every claim whatever was asked for. No request object.' },
+  { id: 'oidc-fclogout', name: 'OpenID Connect Front-Channel Logout 1.0',
+    where: 'OpenID Foundation',
+    url: 'https://openid.net/specs/openid-connect-frontchannel-1_0.html',
+    coverage: 'full for the provider\'s side of a specification that is mostly ' +
+              'the relying party\'s: the two discovery members, the two ' +
+              'per-client registration members, the `sid` claim on an ID Token ' +
+              'issued on a browser session, and the sign-out page loading each ' +
+              'registered frontchannel_logout_uri in a hidden iframe with iss ' +
+              'and sid where the client asked for them. Three sign-outs render ' +
+              'it — /oauth2/logout, /logout and the OIDC half of a global ' +
+              'logout — through one function, so they cannot notify different ' +
+              'sets. What the specification says CANNOT be known is not ' +
+              'pretended to here either: section 5 states the provider cannot ' +
+              'tell whether a notification succeeded, so every URL is printed ' +
+              'as a link beside its iframe rather than reported as sent. ' +
+              'oauth2.frontchannelLogout turns all of it off, including the ' +
+              'claim and the advertisement, which is the only honest way to ' +
+              'switch it — a document advertising a capability whose claim is ' +
+              'off would be a document that lies. BACK-CHANNEL logout is a ' +
+              'different specification and is NOT implemented; the metadata ' +
+              'says so.' },
   { id: 'oidc-discovery', name: 'OpenID Connect Discovery 1.0',
     where: 'OpenID Foundation', url: 'https://openid.net/specs/openid-connect-discovery-1_0.html',
     coverage: 'partial: the provider configuration document with every REQUIRED member of section 3, ' +
@@ -867,6 +966,25 @@ const ENDPOINTS = [
           'schemaless and these ~30 attribute names are this service\'s own inventions: ' +
           'no registered LDAP schema has a SPIFFE ID or a selector on it. Add ' +
           '?format=json.' },
+  { path: '/ldap/federations', group: 'LDAP',
+    name: 'The federation register, and its schema',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519'],
+    what: 'THE APPLICATION REGISTRY\'S TWIN, and the one container in this ' +
+          'directory where AN LDAPMODIFY IS A SECURITY CHANGE. Every other ' +
+          'edit here changes what this service HANDS OUT; ' +
+          'fedSigningCertificate decides whose assertions it will BELIEVE and ' +
+          'fedEnabled turns a partner on. It is a container of its own rather ' +
+          'than a corner of ou=applications because half its entries are ' +
+          'foreign identity providers, which ask this service for nothing at ' +
+          'all — filing a party that authenticates people TO this service ' +
+          'among the parties that consume what it issues would make the one ' +
+          'question that container answers unanswerable. It publishes the ' +
+          'schema for the same reason /ldap/applications does, plus a column ' +
+          'that page has no need of: which DIRECTION each attribute is for. ' +
+          'fedClientSecret is in the clear here, and it is this service\'s ' +
+          'own credential at somebody else\'s — a stronger statement than ' +
+          'anything else in this directory, made for the reason ' +
+          '/krb5/principals prints the Kerberos passwords.' },
   { path: '/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591'],
     what: 'EVERY APPLICATION THIS SERVICE HAS BEEN ASKED ABOUT — an OAuth client, an OpenID ' +
@@ -1119,6 +1237,24 @@ const ENDPOINTS = [
           'resized and reduced to 31 kB, read from disk once at startup. If ' +
           'it could not be read this answers 404 in its own words rather ' +
           'than Express\'s, and the front page is drawn without it.' },
+  { path: '/realms', group: 'Service', name: 'The trust realm directory',
+    specs: [],
+    what: 'NON-SPEC, and deliberately UNGATED. Every trust realm this process ' +
+          'is running — a trust realm being a whole logical copy of this ' +
+          'service, reached under a segment at the front of the path and ' +
+          'holding its own configuration, signing key, sessions and tokens. ' +
+          'It carries each realm\'s id, name, base URL and path prefix, the ' +
+          'prefix SEGMENT itself (which is a setting, so a client cannot ' +
+          'guess it), and which protocol families a realm actually ' +
+          'separates. The last of those is the part nothing else answers: a ' +
+          'realm separates what this service ISSUES and not the embedded ' +
+          'DIRECTORY, and four families answer on sockets with nowhere to ' +
+          'put a path segment at all — so somebody who assumed a realm was a ' +
+          'boundary everywhere would find out from an ldapsearch. A client being pointed at a realm cannot construct a ' +
+          'single URL without this, which is why it is not behind the ' +
+          'console\'s gate — the same argument every discovery document ' +
+          'here rests on.' },
+
   { path: '/healthcheck', group: 'Service', name: 'Health check',
     specs: [], what: 'Liveness only. Answers 200 with a JSON message; used by the compose healthcheck.' },
   { path: '/docs', group: 'Service', name: 'Service documentation',
@@ -1224,15 +1360,27 @@ const ENDPOINTS = [
     specs: [],
     what: 'NON-SPEC. What the console is, what it can change about this service, and what it ' +
           'deliberately cannot (it does not revoke assertions, tickets or credentials, because ' +
-          'nothing consults this service about those; it does not end a sign-on session, because ' +
-          'wsignout1.0 has cleanup to fan out and a third way to end one is a third way to get it ' +
-          'wrong). PROTECTED, and it is the only HTML surface here that is: with ' +
+          'nothing consults this service about those). It DOES end a sign-on session since ' +
+          '2026-08-24, at /admin/logout, and this row used to say the opposite: the old ' +
+          'argument was that wsignout1.0 has a cleanup to fan out and a third way to end a ' +
+          'session would be a third way to get that wrong, which stopped being true when the ' +
+          'fan-outs became functions owned by their own protocol modules. PROTECTED, and it is ' +
+          'the only HTML surface here that is: with ' +
           'admin.authRequired on (the default) every page needs a sign-on session from ' +
           '/authn/login and one of two roles held as directory groups — see /admin/rbac. That ' +
           'is a turnstile and not a lock, exactly as SCIM\'s is: no password is checked ' +
           'anywhere in this service, so the username typed at that screen is the whole of the ' +
           'claim, and /admin-api is NOT gated at all. Turning the setting off restores the ' +
           'completely open console this used to be.' },
+  { path: '/admin/logout', group: 'Admin', name: 'Sign-out',
+    specs: [],
+    what: 'NON-SPEC. The operator\'s view of /logout: the same live-session lists for a person ' +
+          'NAMED rather than for whoever is holding the cookie, filtered by family and paged, ' +
+          'with a global logout button and per-row controls. It also carries the two UNDOs ' +
+          '/logout has not — restoring a revoked token and clearing a Kerberos sign-out ' +
+          'instant, both labelled NON-SPEC because no real deployment could offer either. What ' +
+          'it cannot do is deliver the front-channel notifications: those are iframes in the ' +
+          'signed-out person\'s own browser. Add ?format=json.' },
   { path: '/admin/metrics', group: 'Admin', name: 'Metrics',
     specs: [],
     what: 'NON-SPEC. Every endpoint call by matched route and status class, every token by typ ' +
@@ -1414,6 +1562,49 @@ const ENDPOINTS = [
           'can undo a revocation, and it is here so that getting back to a working token does not ' +
           'mean restarting the service. OID4VCI credentials are counted on /admin/metrics and are ' +
           'not in this table.' },
+  { path: '/admin/delegation', group: 'Admin', name: 'Delegation',
+    // Four specifications because this page is the one place all four are read
+    // against each other: [MS-SFU] for the three Kerberos S4U mechanisms,
+    // rfc4120 for the forwarded ticket-granting ticket, ws-trust for
+    // OnBehalfOf and ActAs, and rfc8693 for token exchange in both its shapes.
+    // Nothing else here cites all four, which is the point of the page.
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693'],
+    what: 'NON-SPEC PAGE OVER FOUR SPECIFICATIONS. Who acted on whose behalf, ' +
+          'through what, to reach what — every delegation this service has ' +
+          'performed or REFUSED, in ONE model across three protocol families. ' +
+          'Eight mechanisms: Kerberos S4U2Self, S4U2Proxy classic and ' +
+          'resource-based, and a forwarded TGT; WS-Trust OnBehalfOf and ' +
+          'ActAs; RFC 8693 token exchange as impersonation and as delegation. ' +
+          'Each act names the three LAYERS — the initial identity, the ' +
+          'intermediary acting on their behalf, and the target being reached ' +
+          '— and a layer can be a person, an application (ou=applications), ' +
+          'or both, which the Kerberos front end always is. THE AXIS THAT ' +
+          'MATTERS IS IMPERSONATION VERSUS DELEGATION: a delegation carries ' +
+          'the chain in the credential (an `act` claim, a composite ActAs, ' +
+          'S4U_DELEGATION_INFO in the PAC) and an impersonation carries ' +
+          'nothing, so for those acts THIS PAGE IS THE ONLY PLACE THE FACT ' +
+          'EXISTS — no reading of the token at the resource server can ' +
+          'recover it. REFUSALS ARE RECORDED and are most of the value: they ' +
+          'carry the KDC\'s own e-text naming both accounts, both attributes ' +
+          'and which was missing, and they appear in NO other list here, ' +
+          'because nothing was accepted so no authentication was recorded. A ' +
+          'SECOND TABLE is CONFIGURATION rather than history — who MAY ' +
+          'delegate to whom, out of msDS-AllowedToDelegateTo on the front end ' +
+          'and msDS-AllowedToActOnBehalfOfOtherIdentity on the back end, with ' +
+          'the flags that stop delegation (NOT_DELEGATED) or enable protocol ' +
+          'transition (TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION) beside them. ' +
+          'It is KERBEROS ONLY because Kerberos is the only family here that ' +
+          'polices delegation at all: WS-Trust puts no authorization on ' +
+          'either element and this service adds none, and RFC 8693 leaves the ' +
+          'policy to the authorization server, which this one has not got — ' +
+          'so any client may exchange any token for a token about anybody. ' +
+          'Every act says which of the two it was. NO CREDENTIAL IS EVER ON A ' +
+          'ROW, only its kind and identifier; a Kerberos ticket genuinely has ' +
+          'none. In memory, capped by delegation.maxRecords, gone on restart, ' +
+          'with no clear control and no way to add a row by hand. Filtered by ' +
+          'mechanism, kind, outcome, protocol and free text; paged; ' +
+          '?format=json carries the acts, the distinct CHAINS among them (one ' +
+          'per edge of the picture) and the policy.' },
   { path: '/admin/audit', group: 'Admin', name: 'Audit log',
     // rfc4511 is linked because the directory operations are its and they are the
     // largest source of rows here. Nothing else: an audit log is not a protocol,
@@ -1455,6 +1646,45 @@ const ENDPOINTS = [
           'the page). Values may carry ${username}-style placeholders. Add ?format=json; POST the ' +
           'same JSON to set a set. The two SAML sets moved to /admin/saml-attributes on ' +
           '2026-08-24; the store behind both pages is one store.' },
+  { path: '/admin/saml2', group: 'Admin', name: 'SAML 2.0 identity provider',
+    specs: ['saml2', 'saml2-metadata', 'saml2-profiles'],
+    effect: 'writes to the LDAP directory, and answers the one question nothing else here can',
+    what: 'NON-SPEC. WHICH METADATA DOCUMENT DO I CONFIGURE THIS SERVICE ' +
+          'PROVIDER FROM — which is not one URL, because the metadata is per ' +
+          'application, and the slug in its path is a digest nobody derives by ' +
+          'hand. It holds nothing: every row is an entry in ou=applications, ' +
+          'and both its writes go through the same updateApplication() ' +
+          '/admin/applications posts to. The saml2.* settings are READINGS ' +
+          'here with a link to /admin/config, not a second form onto them.' },
+  { path: '/admin/federation', group: 'Admin', name: 'Federation relationships',
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    effect: 'writes to the LDAP directory, and CONFIGURES A REFUSAL — the only ' +
+            'page in this console that does',
+    what: 'NON-SPEC. WHICH FOREIGN IDENTITY SERVICES THIS ONE WILL BELIEVE, ' +
+          'and what it releases to the ones it asserts to. Every other page in ' +
+          'this console reports what happened or widens what this service will ' +
+          'accept; this one is the opposite in both directions, because an ' +
+          'assertion consumer service cannot be permissive without being an ' +
+          'authentication bypass for every protocol in this process. A ' +
+          'relationship is created DISABLED, and one that is enabled and ' +
+          'half-configured refuses rather than half-working. It holds nothing: ' +
+          'every row is an entry under ou=federations, and every form is one ' +
+          'ldapmodify of it. The one field it will not show is ' +
+          'fedClientSecret — this service\'s own credential AT the partner, ' +
+          'which an ldapsearch still prints, deliberately and loudly.' },
+  { path: '/admin/saml11', group: 'Admin', name: 'SAML 1.1 identity provider',
+    specs: ['saml11', 'saml11-profiles', 'saml2-metadata'],
+    effect: 'writes to the LDAP directory, and answers a question the SAML 2.0 page never has to',
+    what: 'NON-SPEC. The same "which metadata document do I configure this ' +
+          'from" the SAML 2.0 page answers, plus one that is peculiar to this ' +
+          'protocol: WHAT IS THIS RELYING PARTY CALLED. SAML 1.1 has no ' +
+          'request message, so nothing makes a relying party identify itself, ' +
+          'and an identifier here may be one this service GUESSED from the ' +
+          'origin of a TARGET — which the page says out loud, because a ' +
+          'guessed audience fails inside a signature check with nothing ' +
+          'explaining why. It holds nothing: every row is an entry in ' +
+          'ou=applications. It has ONE action where /admin/saml2 has four, and ' +
+          'the three it lacks are three things SAML 1.1 has no protocol for.' },
   { path: '/admin/saml-attributes', group: 'Admin', name: 'Custom SAML attributes',
     specs: ['saml2', 'saml11'],
     effect: 'changes what every FUTURE SAML assertion contains',
@@ -1484,6 +1714,33 @@ const ENDPOINTS = [
           'so one username is one invented person across restarts — and an attribute already there ' +
           'is never overwritten. Add ?format=json; POST {"action":"select","attributes":[...]} for ' +
           'the same thing without a browser.' },
+
+  { path: '/admin/realms', group: 'Admin', name: 'Trust realms',
+    specs: [],
+    effect: 'defines and removes whole logical copies of this service, each ' +
+            'with its own signing key — and removing one destroys everything ' +
+            'it held',
+    what: 'NON-SPEC. Several logical copies of this service in one process, ' +
+          'each reached under a path prefix and each with its own ' +
+          'configuration, signing key, sessions, authorization codes, ' +
+          'tokens, offers, service providers, statistics and audit log. The ' +
+          'DEFAULT realm has no prefix and cannot be removed or renamed: ' +
+          'every URL this service published before realms existed is a URL ' +
+          'in it, which is what makes a service with no realms defined ' +
+          'behave exactly as it did. Two things here are answered nowhere ' +
+          'else — what a realm\'s endpoints actually are (the prefix segment ' +
+          'is a setting and the ids are whatever somebody typed) and WHICH ' +
+          'FAMILIES ARE SEPARATED BY IT. The embedded directory is SHARED — ' +
+          'one set of people, groups and applications for every realm, since ' +
+          'LDAP answers on a socket with no path in it — so OAuth client ' +
+          'registrations, SAML service provider entries and the two admin ' +
+          'roles are shared, as are Kerberos, the two TLS listeners and ' +
+          'SPIFFE\'s four sockets. What a realm separates is what this ' +
+          'service ISSUES about them, and everything it holds while doing it. ' +
+          'It keeps no store of its own: the registry is common/realms.js\'s ' +
+          'and a realm\'s settings go through the same config.setOverride() ' +
+          '/admin/config calls. Add ?format=json; POST {"action":"create", ' +
+          '"id":"acme"} for the same thing without a browser.' },
 
   { path: '/admin/config', group: 'Admin', name: 'Configuration',
     specs: [],
@@ -1560,6 +1817,19 @@ const ENDPOINTS = [
     what: 'NON-SPEC. What the API is and every operation in it, each naming the ' +
           '/admin control it mirrors. Nothing here changes anything. NOT ' +
           'PROTECTED — nothing in this service checks a credential.' },
+  { path: '/admin-api/logout', group: 'Management API', name: 'Live sessions, and ending them',
+    specs: ['openapi'],
+    what: 'What this service is still holding for one identity across every protocol family, ' +
+          'and the four operations that act on it — global, end, restore-token and ' +
+          'restore-kerberos. It mirrors /admin/logout and calls the same two functions, so the ' +
+          'console and this API cannot come to disagree about what a live session is. The rows ' +
+          'that CANNOT be ended are in the reply with a `why`, which is the member most likely ' +
+          'to be mistaken for a defect and is the honest half of the answer.' },
+  { path: '/admin-api/logout/:action', group: 'Management API',
+    name: 'Live sessions: end them',
+    specs: ['openapi'],
+    what: 'The four actions above, each named in the path the way every other action resource ' +
+          'here names its own.' },
   { path: '/admin-api/openapi.json', group: 'Management API',
     name: 'OpenAPI document', specs: ['openapi'],
     what: 'NON-SPEC. The OpenAPI 3.1 document for the management API, BUILT ' +
@@ -1763,6 +2033,25 @@ const ENDPOINTS = [
     what: 'ban, unban and delete. The ban is ENFORCED at AttestAgent, which is what ' +
           'keeps it from being a lie; delete is forgetting rather than revoking, since ' +
           'the agent reappears the moment it attests again.' },
+  { path: '/admin-api/delegation', group: 'Management API',
+    name: 'Delegation',
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693'],
+    what: 'NON-SPEC. Every delegation this service has performed or REFUSED, ' +
+          'as JSON: eight mechanisms across Kerberos, WS-Trust and OAuth 2.0 ' +
+          'Token Exchange in one model, each naming the initial identity, the ' +
+          'intermediary acting for them and the target reached. Filtered by ' +
+          'type, mode, outcome, protocol and free text and paged with ?page= ' +
+          'and ?per=. Read `mode` first: an `impersonation` leaves nothing in ' +
+          'the credential to say a middle tier was involved, so this is the ' +
+          'only place that fact will ever be. A refused act carries the ' +
+          'KDC\'s own reason and appears in no other resource here. Besides ' +
+          'the paged acts the reply carries `chains` — the distinct ' +
+          '(mechanism, initial, intermediary, target) tuples among what ' +
+          'matched, one per edge — and `policy`, who may delegate to whom ' +
+          'before anybody has tried. WALK IT BY `seq`. READ ONLY, one of the ' +
+          'two resources here that is: everything on it is an observation or ' +
+          'somebody else\'s configuration, so there is nothing to change. ' +
+          'Mirrors GET /admin/delegation.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +
@@ -1774,11 +2063,35 @@ const ENDPOINTS = [
           'names the attributes it changed and never their values. WALK IT BY ' +
           '`seq` rather than by page: it is monotonic and never reused, so ' +
           '"everything after 4102" is exact where page 2 taken a second after ' +
-          'page 1 can repeat a row that shifted onto it. READ ONLY, and the ' +
-          'only resource here that is: there is no clear operation, because ' +
+          'page 1 can repeat a row that shifted onto it. READ ONLY — one of ' +
+          'the two resources here that is, the other being ' +
+          '/admin-api/delegation. There is no clear operation, because ' +
           'an erase control on an unprotected API would make an audit log ' +
           'unable to answer the one question it exists for. Mirrors GET ' +
           '/admin/audit.' },
+  { path: '/admin-api/realms', group: 'Management API', name: 'Trust realms',
+    specs: [],
+    what: 'NON-SPEC. Every trust realm this process is running, each with its ' +
+          'path prefix, its base URL, the kid of its own signing key, what it ' +
+          'sets and the four discovery documents a client asks for first — ' +
+          'plus which protocol families a realm actually separates and ' +
+          'which are shared with every other realm. Mirrors ' +
+          'GET /admin/realms. NOTE that this whole API is itself realm-scoped ' +
+          'by the same prefix: /realm/acme/admin-api/config is that realm\'s ' +
+          'configuration, so these two operations are only the ones that ' +
+          'manage the REGISTRY.' },
+  { path: '/admin-api/realms/:action', group: 'Management API',
+    name: 'Trust realm actions',
+    effect: 'defines and removes whole logical copies of this service, each ' +
+            'with its own signing key — and removing one destroys its ' +
+            'sessions, tokens, statistics and audit log',
+    specs: [],
+    what: 'NON-SPEC. Five URLs behind one pattern: create, update, set, ' +
+          'unset, remove. Mirrors POST /admin/realms. A realm cannot remove ' +
+          'ITSELF — the caller would be left on a prefix that had stopped ' +
+          'existing — and the default realm cannot be removed at all, since ' +
+          'every URL this service published before realms existed is a URL ' +
+          'in it.' },
   { path: '/admin-api/config', group: 'Management API', name: 'Configuration',
     specs: [],
     what: 'NON-SPEC. Every setting, its effective value, and the source of ' +
@@ -1836,6 +2149,76 @@ const ENDPOINTS = [
           'saml11 is refused here and named: that door is ' +
           '/admin-api/saml-attributes. Nothing already issued changes. Mirrors ' +
           'POST /admin/claims.' },
+  { path: '/admin-api/federation', group: 'Management API',
+    name: 'Federation relationships',
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    what: 'NON-SPEC. Every federation relationship in both directions, with ' +
+          'the fields each still needs before it can work — read off the same ' +
+          'per-protocol rule the endpoint applies, so a caller can check its ' +
+          'own configuration without reimplementing it. Mirrors GET ' +
+          '/admin/federation. fedClientSecret is never returned; that is not a ' +
+          'security boundary and is not claimed as one, since an ldapsearch ' +
+          'shows it — it is this API not being a second way to read a ' +
+          'credential belonging to somebody else\'s service out of this ' +
+          'process.' },
+  { path: '/admin-api/federation/:action', group: 'Management API',
+    name: 'Configure a federation relationship',
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    effect: 'the same seven writes the console\'s forms make, and this API is ' +
+            'NOT GATED',
+    what: 'NON-SPEC. create, set, add-value, remove-value, enable, disable, ' +
+          'delete — calling admin.js\'s federationAction(), which is the same ' +
+          'function the console posts to. **It is how a test configures a ' +
+          'federation partner with no browser at all**, which is the only way ' +
+          'this feature can be exercised automatically. The honest ' +
+          'consequence, stated rather than buried: anybody who can reach this ' +
+          'port can configure a signing certificate this service will then ' +
+          'believe. That is not a new hole — the same caller can already grant ' +
+          'itself both admin roles and mint a token for any username — but it ' +
+          'is the sharpest form of it.' },
+  { path: '/admin-api/saml2', group: 'Management API',
+    name: 'SAML 2.0 identity provider',
+    specs: ['saml2', 'saml2-metadata', 'saml2-profiles'],
+    what: 'NON-SPEC. Every SAML 2.0 service provider and the FOUR ENDPOINT ' +
+          'URLS each one is configured from — which is a per-row fact rather ' +
+          'than a constant, because the metadata is per application. A caller ' +
+          'that guessed the slug rule would be a second implementation of it. ' +
+          'Also the nine saml2.* settings as read, and two numbers about the ' +
+          'profile that are invisible until they are wrong: artifacts awaiting ' +
+          'resolution and requests held for sign-in. Mirrors GET /admin/saml2.' },
+  { path: '/admin-api/saml2/:action', group: 'Management API',
+    name: 'SAML 2.0 service provider actions',
+    specs: ['saml2', 'saml2-profiles'],
+    effect: 'writes to the LDAP directory — the application entry, through the same ' +
+            'function an ldapmodify reaches',
+    what: 'NON-SPEC. Four URLs behind one pattern: register, ' +
+          'set-logout-service, remove-logout-service, set-signing-certificate. ' +
+          'None of them decides whether a request is ACCEPTED — any entityID ' +
+          'is — they decide where a LogoutResponse goes and what is recorded. ' +
+          'Mirrors POST /admin/saml2.' },
+  { path: '/admin-api/saml11', group: 'Management API',
+    name: 'SAML 1.1 identity provider',
+    specs: ['saml11', 'saml11-profiles', 'saml2-metadata'],
+    what: 'NON-SPEC. Every SAML 1.1 relying party and the THREE ENDPOINT URLS ' +
+          'each one is configured from, per row for the same reason the SAML ' +
+          '2.0 resource\'s are. Also the nine saml11.* settings as read, and ' +
+          'THREE numbers about the profile: artifacts awaiting resolution and ' +
+          'flows held for sign-in, which behave like the 2.0 ones, and ' +
+          'assertions held by reference, which does NOT — it is capped rather ' +
+          'than swept, so sitting at its ceiling is the healthy state. Mirrors ' +
+          'GET /admin/saml11.' },
+  { path: '/admin-api/saml11/:action', group: 'Management API',
+    name: 'SAML 1.1 relying party actions',
+    specs: ['saml11', 'saml11-profiles'],
+    effect: 'writes to the LDAP directory — the application entry, through the same ' +
+            'function an ldapadd reaches',
+    what: 'NON-SPEC. ONE action, `register`, where the SAML 2.0 resource has ' +
+          'four: there is no logout service to declare and no signing ' +
+          'certificate to record, because SAML 1.1 has neither a Single Logout ' +
+          'nor a request for a relying party to sign. Registering is optional ' +
+          'and buys two things — a metadata document to hand somebody, and a ' +
+          'NAME to put in providerId so the audience is not guessed. Mirrors ' +
+          'POST /admin/saml11.' },
   { path: '/admin-api/saml-attributes', group: 'Management API',
     name: 'Custom SAML attributes',
     specs: ['saml2', 'saml11'],
@@ -1951,6 +2334,274 @@ const ENDPOINTS = [
           'the same symptom as a lost session). Also answers wa=wsignoutcleanup1.0, which is the ' +
           'direction that message is really defined for.' },
 
+  // --- SAML 2.0 ---
+  // The profile whose absence this file documented at length until 2026-08-24.
+  // The `saml2` coverage note above was rewritten in the same change; if one of
+  // them says there is no Web SSO profile here, it is that note that is wrong.
+  { path: '/saml2', group: 'SAML 2.0', name: 'What the profile is',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'saml2-metadata'],
+    what: 'A description page: the endpoints, the three bindings, and how the ' +
+          'per-service-provider metadata works. GET /sts and GET /wsfed answer ' +
+          'the same way for the same reason — an endpoint that 400s at ' +
+          'somebody who wanted to know what it was is a bad first impression.' },
+  { path: '/saml2/metadata', group: 'SAML 2.0', name: 'Identity provider metadata',
+    specs: ['saml2-metadata', 'xmldsig'],
+    what: 'The SIGNED IDPSSODescriptor: both SSO bindings, both SLO bindings, ' +
+          'the artifact resolution service, the NameID formats and the signing ' +
+          'certificate. ds:Signature goes FIRST inside EntityDescriptor, where ' +
+          'the metadata schema puts it — a protocol message puts it after ' +
+          'Issuer, so the two are not interchangeable. no-store, because the ' +
+          'signing key is regenerated on every start.' },
+  { path: '/saml2/metadata/:sp', group: 'SAML 2.0',
+    name: 'Identity provider metadata for ONE service provider',
+    specs: ['saml2-metadata', 'xmldsig'],
+    what: 'THE SAME DOCUMENT, PER APPLICATION: a distinct identity provider ' +
+          'entityID and endpoints scoped to that service provider, which is ' +
+          'what Okta and Ping publish. IT 404s FOR NOTHING — an entityID ' +
+          'nobody registered is registered BY THE ASK, so a service provider ' +
+          'can be pointed here before anything is provisioned. The segment is ' +
+          'the percent-encoded entityID, or a slug (app-<12 hex>) where the ' +
+          'entityID is not safe in a path. saml2.perApplicationEntityId turns ' +
+          'the separate entityID off; the endpoints stay per-application.' },
+  { path: '/saml2/sso', group: 'SAML 2.0', name: 'Single Sign-On service',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'xmldsig'],
+    effect: 'starts a browser sign-on session — the SAME session OAuth 2.0 / OIDC and ' +
+            'WS-Federation use',
+    what: 'GET is the HTTP Redirect binding and POST is the HTTP POST binding; ' +
+          'the RESPONSE goes back on whichever the AuthnRequest\'s ' +
+          'ProtocolBinding asked for, HTTP POST by default. It has NO SIGN-IN ' +
+          'SCREEN OF ITS OWN: a POST-binding request is held and turned into a ' +
+          'GET so the SameSite=Lax session cookie is visible, and the screen is ' +
+          '/authn/login. ANY entityID is accepted, and the first valid request ' +
+          'from one creates its application entry. A request signature is ' +
+          'RECORDED AND NOT CHECKED, like every credential here.' },
+  { path: '/saml2/sso/:sp', group: 'SAML 2.0',
+    name: 'Single Sign-On service for ONE service provider',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'xmldsig'],
+    effect: 'the same, and it is the same endpoint',
+    what: 'The address the per-application metadata publishes. The scope in ' +
+          'the path decides which identity provider names itself in the ' +
+          'answer; the AuthnRequest\'s own Issuer decides who the assertion is ' +
+          'for either way, so a request that disagrees with the path is ' +
+          'answered for its Issuer.' },
+  { path: '/saml2/ars', group: 'SAML 2.0', name: 'Artifact Resolution Service',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles'],
+    what: 'POST a SOAP 1.1 envelope carrying an ArtifactResolve and get one ' +
+          'back carrying the message. A BACK CHANNEL: the browser never ' +
+          'touches it, which is the whole point of the artifact profile — the ' +
+          'assertion never passes through the user agent. AN ARTIFACT ' +
+          'RESOLVES EXACTLY ONCE (section 3.6.4.1): resolving destroys it, and ' +
+          'the second attempt is refused with a status naming the reason. GET ' +
+          'describes the endpoint and shows the curl.' },
+  { path: '/saml2/ars/:sp', group: 'SAML 2.0',
+    name: 'Artifact Resolution Service for ONE service provider',
+    specs: ['saml2', 'saml2-bindings'],
+    what: 'The address the per-application metadata publishes, and the same ' +
+          'service: an artifact is found by its own value rather than by the ' +
+          'path it is resolved at.' },
+  { path: '/saml2/slo', group: 'SAML 2.0', name: 'Single Logout service',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'xmldsig'],
+    effect: 'ENDS the browser sign-on session, which signs the OAuth 2.0 / OIDC and ' +
+            'WS-Federation sides out too',
+    what: 'Both directions. A LogoutRequest from a service provider ends the ' +
+          'session and is answered with a LogoutResponse on the binding it ' +
+          'arrived on; a bare GET ends the session and NAMES every service ' +
+          'provider it signed into, with a LogoutRequest built for each. WHERE ' +
+          'THE LogoutResponse GOES IS A GUESS unless it was declared — a ' +
+          'LogoutRequest carries no return address, only SP metadata does, and ' +
+          'this service does not consume SP metadata. Declare it on ' +
+          '/admin/saml2 or with saml2.defaultSingleLogoutService.' },
+  { path: '/saml2/slo/:sp', group: 'SAML 2.0',
+    name: 'Single Logout service for ONE service provider',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles'],
+    effect: 'the same, and it is the same endpoint',
+    what: 'The address the per-application metadata publishes.' },
+  { path: '/saml2/autopost.js', group: 'SAML 2.0', name: 'HTTP POST binding auto-post script',
+    specs: ['saml2-bindings'],
+    what: 'The FIFTH scripted page in this service, and the argument is made ' +
+          'again in saml2_sso.js rather than by analogy: the HTTP POST binding ' +
+          'IS a self-submitting form, so there is no version of it without a ' +
+          'script. script-src is relaxed to \'self\' naming this one resource, ' +
+          'never \'unsafe-inline\', and the page carries a REAL SUBMIT BUTTON ' +
+          '— with scripting off the button is the whole mechanism.' },
+  { path: '/saml2/sp', group: 'SAML 2.0', name: 'Mock service provider (not a spec endpoint)',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'xmldsig'],
+    effect: 'mints a RelayState and offers a complete AuthnRequest for each of the three bindings',
+    what: 'NON-SPEC — a service provider is not part of an identity provider. ' +
+          'It is here because it is the default AssertionConsumerServiceURL, ' +
+          'and because it VERIFIES the response check by check: both ' +
+          'signatures, the issuer, the audience, the validity window, the ' +
+          'bearer SubjectConfirmationData that section 4.1.4.2 requires, and ' +
+          'the RelayState round trip. It also resolves an artifact, in ' +
+          'process rather than by this service making a SOAP call to itself.' },
+
+  // --- SAML 1.1 ---
+  { path: '/saml11', group: 'SAML 1.1', name: 'What the profile is',
+    specs: ['saml11', 'saml11-bindings', 'saml11-profiles'],
+    what: 'A description page: the endpoints, the two browser profiles, and ' +
+          'the list of what SAML 1.1 spells differently from 2.0 — which is ' +
+          'most of what makes this a separate implementation rather than a ' +
+          'flag. GET /saml2, GET /sts and GET /wsfed answer the same way.' },
+  { path: '/saml11/metadata', group: 'SAML 1.1', name: 'Identity provider metadata',
+    specs: ['saml11', 'saml2-metadata', 'xmldsig'],
+    what: 'SIGNED, and it is a SAML 2.0 METADATA DOCUMENT describing a SAML ' +
+          '1.1 identity provider — which is correct rather than a compromise: ' +
+          'SAML 1.1 has no metadata specification of its own, and what every ' +
+          'relying party consumes is an EntityDescriptor whose ' +
+          'protocolSupportEnumeration is urn:oasis:names:tc:SAML:1.1:protocol. ' +
+          'TWO descriptors: an IDPSSODescriptor for the browser profiles and ' +
+          'an AttributeAuthorityDescriptor for the responder\'s query half, ' +
+          'because a Shibboleth service provider looks for its attribute ' +
+          'authority in the second and will not find it in the first. THERE IS ' +
+          'NO SingleLogoutService — SAML 1.1 has no Single Logout. no-store, ' +
+          'because the signing key is regenerated on every start.' },
+  { path: '/saml11/metadata/:rp', group: 'SAML 1.1',
+    name: 'Identity provider metadata for ONE relying party',
+    specs: ['saml11', 'saml2-metadata', 'xmldsig'],
+    what: 'THE SAME DOCUMENT, PER APPLICATION, and the same rule the SAML 2.0 ' +
+          'one follows: it 404s for nothing, because an identifier nobody ' +
+          'registered is registered BY THE ASK. The segment is the ' +
+          'percent-encoded identifier or a slug, and the slug is THE SAME ONE ' +
+          '/saml2 uses — one application has one handle across both profiles, ' +
+          'or the console would show one entry as two. ' +
+          'saml11.perApplicationProviderId turns the separate providerID off; ' +
+          'the endpoints stay per-application.' },
+  { path: '/saml11/sso', group: 'SAML 1.1', name: 'Inter-site transfer service',
+    specs: ['saml11', 'saml11-bindings', 'saml11-profiles', 'xmldsig'],
+    effect: 'starts a browser sign-on session — the SAME session OAuth 2.0 / OIDC, ' +
+            'WS-Federation and SAML 2.0 use',
+    what: 'SAML 1.1\'s name for what SAML 2.0 calls the Single Sign-On ' +
+          'service, and the difference is not only vocabulary: THERE IS NO ' +
+          'REQUEST MESSAGE. A flow starts with a TARGET and nothing else, so ' +
+          'the relying party is named by Shibboleth\'s providerId parameter, ' +
+          'by the path segment, or — failing both — GUESSED FROM THE ORIGIN of ' +
+          'the TARGET, which is logged as a guess. It has no sign-in screen of ' +
+          'its own and needs no POST-to-GET dance: the flow arrives as a ' +
+          'top-level GET, which a SameSite=Lax cookie is carried on. ' +
+          'ForceAuthn, IsPassive and RequestedAuthnContext have no spelling in ' +
+          'this protocol, so they are absent rather than unimplemented.' },
+  { path: '/saml11/sso/:rp', group: 'SAML 1.1',
+    name: 'Inter-site transfer service for ONE relying party',
+    specs: ['saml11', 'saml11-profiles'],
+    effect: 'the same, and it is the same endpoint',
+    what: 'The address the per-application metadata publishes. With no ' +
+          'providerId parameter the path segment is what names the relying ' +
+          'party — which in SAML 1.1 matters more than it does in 2.0, where ' +
+          'the request\'s own Issuer always could.' },
+  { path: '/saml11/responder', group: 'SAML 1.1', name: 'SAML responder (SOAP)',
+    specs: ['saml11', 'saml11-bindings', 'xmldsig'],
+    what: 'POST a SOAP envelope carrying a <samlp:Request>. FOUR shapes are ' +
+          'answered where the SAML 2.0 artifact service answers one, because ' +
+          'this endpoint has to exist for the artifact profile anyway and an ' +
+          'AttributeQuery is then the same builder behind the same envelope: ' +
+          'AssertionArtifact (ONE-SHOT — resolving destroys it), ' +
+          'AssertionIDReference (NOT one-shot; a reference is not a ' +
+          'credential), AttributeQuery and AuthenticationQuery. The last two ' +
+          'are SAML 1.1\'s ATTRIBUTE AUTHORITY, which is the half Shibboleth ' +
+          'deployments leaned on. NOTHING AUTHENTICATES A CALLER: anybody who ' +
+          'can reach this port can ask it about anybody, by name, and every ' +
+          'query is logged saying so. GET describes the endpoint.' },
+  { path: '/saml11/responder/:rp', group: 'SAML 1.1',
+    name: 'SAML responder for ONE relying party',
+    specs: ['saml11', 'saml11-bindings'],
+    what: 'The address the per-application metadata publishes, and the same ' +
+          'service: an artifact is found by its own value rather than by the ' +
+          'path it is resolved at. The scope decides the Recipient on the ' +
+          'answer and the audience of a query\'s assertion when the query ' +
+          'named no Resource.' },
+  { path: '/saml11/autopost.js', group: 'SAML 1.1',
+    name: 'Browser/POST profile auto-post script',
+    specs: ['saml11-bindings', 'saml11-profiles'],
+    what: 'The SIXTH scripted page in this service, and the argument is made ' +
+          'again in saml11_sso.js rather than by analogy — which matters here ' +
+          'precisely because the fifth was /saml2/autopost.js and "the same as ' +
+          'next door" is the least useful thing that could be said. The ' +
+          'Browser/POST profile IS a self-submitting form in its own older ' +
+          'specification, arrived at independently. script-src is relaxed to ' +
+          '\'self\' naming this one resource, never \'unsafe-inline\', and the ' +
+          'page carries a REAL SUBMIT BUTTON — with scripting off the button ' +
+          'is the whole mechanism.' },
+  { path: '/saml11/rp', group: 'SAML 1.1', name: 'Mock relying party (not a spec endpoint)',
+    specs: ['saml11', 'saml11-bindings', 'saml11-profiles', 'xmldsig'],
+    effect: 'starts a complete flow on either browser profile and verifies what comes back',
+    what: 'NON-SPEC — a relying party is not part of an identity provider. It ' +
+          'is here because it is the default assertion consumer, and because ' +
+          'it VERIFIES check by check: both signatures through the id ' +
+          'attributes SAML 1.1 actually uses, the status QName, the Recipient, ' +
+          'the ABSENCE of InResponseTo on a profile with no request, the ' +
+          'confirmation method matching the profile, and the ' +
+          'DoNotCacheCondition that Browser/POST carries and the artifact ' +
+          'profile does not. It resolves an artifact IN PROCESS rather than by ' +
+          'this service making a SOAP call to itself, and reloading the result ' +
+          'page demonstrates the one-shot rule rather than erroring.' },
+
+  // --- Federation ---
+  //
+  // THE ONLY GROUP ON THIS PAGE WHERE THIS SERVICE IS THE CLIENT. Every other
+  // endpoint listed here is something a caller asks OF this service; these are
+  // where it consumes what somebody else issued, and where it will refuse.
+  { path: '/federation', group: 'Federation', name: 'What federation is here',
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    what: 'A description page listing every configured relationship in both ' +
+          'directions and the URL to configure at each partner. GET /saml2, ' +
+          'GET /saml11 and GET /wsfed answer the same way and for the same ' +
+          'reason. It is also the one page in this service that says out loud ' +
+          'that a feature here REFUSES by default.' },
+  { path: '/federation/login/:id', group: 'Federation',
+    name: 'Start a federated sign-in',
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    effect: 'sends the browser to a FOREIGN identity provider — an ' +
+            '<AuthnRequest>, an inter-site transfer URL, wa=wsignin1.0 or an ' +
+            'OAuth 2.0 authorization request, whichever the relationship says',
+    what: 'Takes ?returnTo=, a path on this service to land on afterwards, ' +
+          'which is how a partner button on /authn/login satisfies whatever ' +
+          'flow was already in progress. It REFUSES a relationship that is ' +
+          'disabled (403) or enabled-and-half-configured (409) rather than ' +
+          'starting something that cannot finish — the only endpoints in this ' +
+          'service that refuse for a configuration reason. PKCE is always sent ' +
+          'on the two OAuth-shaped protocols and there is no setting to stop ' +
+          'it.' },
+  { path: '/federation/acs/:id', group: 'Federation',
+    name: 'Assertion consumer service / wreply / redirect_uri',
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'saml11',
+            'saml11-bindings', 'ws-federation', 'oidc', 'rfc6749', 'xmldsig'],
+    effect: 'STARTS A BROWSER SIGN-ON SESSION for somebody this service has ' +
+            'never authenticated — the same session OAuth 2.0 / OIDC, ' +
+            'WS-Federation, SAML and the admin console all read — and creates ' +
+            'their directory entry',
+    what: 'ONE PATH RECEIVES ALL FIVE PROTOCOLS: five would mean five URLs to ' +
+          'configure at a partner and four ways to configure the wrong one, ' +
+          'whose failure is a 404 in a browser AFTER a successful sign-in ' +
+          'somewhere else. **THIS IS THE ONE ENDPOINT IN THIS SERVICE THAT IS ' +
+          'NOT PERMISSIVE, AND CANNOT BE.** What arrives is an ' +
+          'unauthenticated HTTP request claiming to be a person; the only ' +
+          'thing between that and a session is the signature check against ' +
+          'the certificate configured on the relationship. So: the signature ' +
+          'must verify against THAT key and not against one the document ' +
+          'brought, the issuer must be the configured partner, the assertion ' +
+          'must be inside its validity window, and the response must answer a ' +
+          'request this service sent unless fedAllowUnsolicited says ' +
+          'otherwise. Every refusal draws a page naming the check and writes ' +
+          'fedLastError on the relationship — it never redirects, because the ' +
+          'person\'s sign-in already succeeded at the partner and the only ' +
+          'interesting question is what this service disliked about the ' +
+          'answer.' },
+  { path: '/federation/metadata/:id', group: 'Federation',
+    name: 'This service\'s OWN SAML metadata, per partner',
+    specs: ['saml2-metadata', 'saml2', 'saml11'],
+    what: 'An SPSSODescriptor rather than an IDPSSODescriptor — this is the ' +
+          'half of this service that is a service provider. Per relationship, ' +
+          'because this service calls itself something different to every ' +
+          'partner. UNSIGNED, deliberately, and it is the one metadata ' +
+          'document here that is: /saml2/metadata is signed because a service ' +
+          'provider configuring its trust in this service gains from checking ' +
+          'who wrote the document, and here the partner is being told where ' +
+          'to send things by the very key a signature would be made with. It ' +
+          '404s for a relationship that is not SAML, where /saml2/metadata ' +
+          '404s for nothing — because that one mints a document for any ' +
+          'entityID asked for and this one describes an arrangement that ' +
+          'either exists or does not.' },
+
   // --- OAuth 2.0 / OIDC ---
   { path: '/.well-known/oauth-authorization-server', group: 'OAuth 2.0 / OIDC',
     name: 'Authorization Server Metadata', specs: ['rfc8414'],
@@ -2010,6 +2661,29 @@ const ENDPOINTS = [
           'client\'s registered URI is a hop an attacker can send a victim through with no ' +
           'interaction. prompt=none and a refusal coming back from the sign-in screen are the ' +
           'two exceptions, both from the specification.' },
+  // ---------------------------------------------------------------------
+  // THE PROTOCOL-INDEPENDENT SIGN-OUT. In the Authentication group and not in
+  // a group of its own, because it is the other end of what that group does —
+  // and deliberately not under any protocol, which is the whole point of it.
+  // ---------------------------------------------------------------------
+  { path: '/logout', group: 'Authentication', name: 'Sign out of everything',
+    specs: ['oidc-fclogout', 'rfc7009', 'ws-federation', 'saml2', 'rfc4120', 'rfc4511'],
+    what: 'THE PROTOCOL-INDEPENDENT SIGN-OUT, and the only endpoint here that is about all ' +
+          'sixteen families at once. GET lists everything this service is still holding for ' +
+          'one identity — every browser sign-on session, every OIDC relying party, ' +
+          'WS-Federation realm and SAML 2.0 service provider signed into on one, every token ' +
+          'it can still revoke, every outstanding authorization and pre-authorized code, every ' +
+          'directory connection bound as them, and the Kerberos ticket position — with a ' +
+          'checkbox against each. POST ends what was ticked, and a POST that ticks NOTHING is a ' +
+          'GLOBAL logout, which is the default and the point. It also sends what only a browser ' +
+          'can send: the Front-Channel Logout iframes, the wsignoutcleanup1.0 images, and the ' +
+          'SAML LogoutRequests as links. WHAT IT CANNOT END IS LISTED WITH THE REASON — an ' +
+          'assertion, a service ticket or an SVID already issued is beyond recall because ' +
+          'nothing consults this service when one is presented, and hiding those would make a ' +
+          'global logout look complete when it is not. No console role is needed; with no ' +
+          'session it sends the browser to /authn/login and back. logout.anyUser decides ' +
+          'whether ?username= may name somebody else, which grants nothing that signing in as ' +
+          'them would not. Add ?format=json.' },
   { path: '/authn/login', group: 'Authentication', name: 'Sign-in screen',
     specs: ['oidc'],
     effect: 'shows the sign-in screen for a request another endpoint sent here; needs an ?authn= id, ' +
@@ -2343,19 +3017,59 @@ const PROTOCOLS = [
           'UserInfo and RP-initiated logout, with as many named ' +
           'authorization servers as have been asked for. RFC 9700 mode ' +
           'turns the BCP\'s refusals on.' },
-  { name: 'SAML 2.0', groups: [], specs: ['saml2', 'xmldsig'],
-    what: 'Assertions: built, signed and optionally encrypted by ' +
-          'saml/saml2.js. NO ROUTE OF ITS OWN — this service is not a SAML ' +
-          'identity provider; it issues SAML 2.0 assertions INSIDE the two ' +
-          'protocols below, which is what a security token service does with ' +
-          'them.',
-    sockets: 'Carried in a WS-Trust RSTR and in a WS-Federation wresult.' },
-  { name: 'SAML 1.1', groups: [], specs: ['saml11', 'xmldsig'],
+  { name: 'Federation', groups: ['Federation'],
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    what: 'BOTH ENDS OF A FEDERATION RELATIONSHIP, in five protocols: SAML ' +
+          '2.0, SAML 1.1, WS-Federation 1.2, OpenID Connect and OAuth 2.0. As ' +
+          'a SERVICE PROVIDER it consumes what a foreign identity provider ' +
+          'issued, verifies it against a configured key, maps the attributes ' +
+          'onto a directory entry and starts a session — the same session ' +
+          'every other protocol here reads, which is what lets a federated ' +
+          'identity satisfy an OAuth 2.0 authorization request or a SAML ' +
+          'AuthnRequest without either of those knowing federation exists. As ' +
+          'an IDENTITY PROVIDER it marks a partner as a federation partner ' +
+          'rather than a test client and decides which attributes are ' +
+          'released to it.\n\n**IT IS THE ONE FEATURE HERE THAT REFUSES BY ' +
+          'DEFAULT AND HAS TO BE CONFIGURED BEFORE IT WILL DO ANYTHING**, and ' +
+          'that is not an omission to fix: "accept any assertion" would not ' +
+          'be a permissive mock of federation, it would be an authentication ' +
+          'bypass for every protocol in this process. A relationship is ' +
+          'created disabled, at /admin/federation or POST ' +
+          '/admin-api/federation/create.' },
+  { name: 'SAML 2.0', groups: ['SAML 2.0'],
+    specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'saml2-metadata', 'xmldsig'],
+    what: 'A full identity provider since 2026-08-24: the Web Browser SSO ' +
+          'profile over all three bindings — HTTP Redirect and HTTP POST for ' +
+          'the AuthnRequest, and HTTP POST, HTTP Redirect or HTTP Artifact for ' +
+          'the Response, with a SOAP artifact resolution service behind the ' +
+          'third — plus Single Logout and SIGNED METADATA PER SERVICE ' +
+          'PROVIDER, minted for any entityID asked for. **This card used to ' +
+          'say NO ROUTE OF ITS OWN**, and it was true for years: the ' +
+          'assertions were built by saml/saml2.js and travelled inside ' +
+          'somebody else\'s envelope. They still do — a WS-Trust RSTR and a ' +
+          'WS-Federation wresult carry the same builder\'s output — and now ' +
+          'there is a browser profile of their own beside it.',
+    sockets: 'Also carried in a WS-Trust RSTR and in a WS-Federation wresult, ' +
+             'which is where every SAML 2.0 assertion here went before this ' +
+             'profile existed.' },
+  { name: 'SAML 1.1', groups: ['SAML 1.1'],
+    specs: ['saml11', 'saml11-bindings', 'saml11-profiles', 'xmldsig'],
     what: 'The same again in the older grammar (saml/saml11.js), because a ' +
           'WS-Federation relying party is as likely to want SAML 1.1 as 2.0 ' +
           'and an implementation that only ever tested the newer one has ' +
-          'tested half of what it claims.',
-    sockets: 'Carried in a WS-Federation wresult and in a WS-Trust RSTR.' },
+          'tested half of what it claims. **This card used to say it had no ' +
+          'groups**, and it was true: the assertions travelled only inside ' +
+          'somebody else\'s envelope. Since 2026-08-24 /saml11 is a ' +
+          'browser-facing identity provider of its own — BOTH browser ' +
+          'profiles, the SOAP responder behind the artifact one, and an ' +
+          'attribute authority answering AttributeQuery and ' +
+          'AuthenticationQuery. It is a SEPARATE implementation from the SAML ' +
+          '2.0 profile rather than a mode of it, because SAML 1.1 has no ' +
+          'request message, no Single Logout, and a different spelling for ' +
+          'almost every element the two have in common.',
+    sockets: 'Also carried in a WS-Federation wresult and in a WS-Trust RSTR, ' +
+             'which is where every SAML 1.1 assertion here went before this ' +
+             'profile existed.' },
   { name: 'WS-Federation', groups: ['WS-Federation'],
     specs: ['ws-federation', 'saml11', 'saml2'],
     what: 'The 1.2 Web (Passive) Requestor Profile: /wsfed dispatching on ' +

@@ -170,6 +170,17 @@ const KINDS = [
     what: 'An AppliesTo from a RequestSecurityToken — the service the token is for.' },
   { kind: 'oid4vp-verifier', label: 'OpenID4VP verifier',
     what: 'The client_id the mock Verifier presents in an Authorization Request.' },
+  { kind: 'federation-identity-provider', label: 'Federated identity provider',
+    what: 'A FOREIGN identity service this instance federates with as a service ' +
+          'provider — it authenticates people TO this service rather than asking ' +
+          'anything OF it, which makes it the one kind here that is not a client. ' +
+          'It is in this registry anyway, because the question this container ' +
+          'exists to answer is "what parties has this service dealt with?" and a ' +
+          'federation partner is the most consequential of them: it is a party ' +
+          'whose signature this service BELIEVES. See federation/CLAUDE.md. The ' +
+          'relationship itself — the endpoints, the certificate, the attribute ' +
+          'mapping — lives under ou=federations and not here; this record is the ' +
+          'partner as a party, and that one is the arrangement with it.' },
   { kind: 'kerberos-service', label: 'Kerberos service principal',
     what: 'A service principal name a ticket was issued for, or that the acceptor ' +
           'was asked to be.' }
@@ -302,6 +313,24 @@ const SCHEMA = {
     { name: 'oauthPostLogoutRedirectUri', kind: 'multi', from: 'POST /oauth2/register',
       what: 'Registered post_logout_redirect_uris, which RP-Initiated Logout matches ' +
             'against in RFC 9700 mode.' },
+    { name: 'oauthFrontchannelLogoutUri', kind: 'single',
+      from: 'POST /oauth2/register, the console, or by hand',
+      what: 'WHERE THIS CLIENT IS TOLD THAT THE USER SIGNED OUT — OpenID Connect ' +
+            'Front-Channel Logout 1.0 section 2\'s frontchannel_logout_uri. The ' +
+            'sign-out page loads it in a hidden iframe, with iss and sid on the query ' +
+            'string when the client asked for them. It is SINGLE-valued because the ' +
+            'specification defines one URI per client, unlike the redirect URIs beside ' +
+            'it; a client with none registered is not notified at all and is listed on ' +
+            '/logout as such rather than silently skipped.' },
+    { name: 'oauthFrontchannelLogoutSessionRequired', kind: 'single',
+      from: 'POST /oauth2/register, the console, or by hand',
+      what: 'TRUE if this client requires `iss` and `sid` on the notification above — ' +
+            'Front-Channel Logout 1.0 section 2\'s ' +
+            'frontchannel_logout_session_required. It matters because an RP with ' +
+            'several sessions in one browser cannot tell which one ended without the ' +
+            'sid, and RFC 7591 section 2 makes an omitted boolean FALSE rather than ' +
+            'unknown — so an absent value here means the client did not ask, which is ' +
+            'a different fact from the client not having registered.' },
     { name: 'oauthGrantType', kind: 'multi', from: 'OAuth 2.0 / OIDC',
       what: 'Grant types registered or observed at the token endpoint.' },
     { name: 'oauthResponseType', kind: 'multi', from: 'OAuth 2.0 / OIDC',
@@ -347,6 +376,37 @@ const SCHEMA = {
       what: 'The service provider\'s entityID — the assertion audience.' },
     { name: 'samlAssertionConsumerService', kind: 'multi', from: 'SAML / WS-Federation',
       what: 'Where a response is posted back to: an ACS URL, or WS-Federation\'s wreply.' },
+    { name: 'samlSingleLogoutService', kind: 'multi', from: 'by hand',
+      what: 'WHERE A <samlp:LogoutResponse> IS SENT for this service provider, and where a ' +
+            'LogoutRequest goes when this identity provider starts the logout. DECLARED, ' +
+            'not observed, and it is the one SAML attribute that has to be: a LogoutRequest ' +
+            'carries no return address, only SP METADATA does, and this service does not ' +
+            'consume SP metadata. With none recorded the fallback is the assertion consumer ' +
+            'service URL above, which is a guess this service makes out loud rather than ' +
+            'quietly — see saml2.defaultSingleLogoutService.' },
+    { name: 'samlNameIdFormat', kind: 'multi', from: 'SAML 2.0',
+      what: 'Every NameID Format this service provider has asked for in a NameIDPolicy, ' +
+            'accumulated. It is evidence rather than configuration: this identity provider ' +
+            'answers with whatever was asked for, including a format nobody has ever heard ' +
+            'of, so a value here does not restrict the next request.' },
+    { name: 'samlResponseBinding', kind: 'multi', from: 'SAML 2.0',
+      what: 'The ProtocolBinding values it has asked its responses back on — HTTP-POST, ' +
+            'HTTP-Redirect or HTTP-Artifact. Several is the ordinary case for a service ' +
+            'provider being exercised, which is what makes this a list.' },
+    { name: 'samlSigningCertificate', kind: 'single', from: 'SAML 2.0, or by hand',
+      what: 'THE SERVICE PROVIDER\'S SIGNING CERTIFICATE, base64 DER, taken off the ' +
+            'ds:KeyInfo of a signed AuthnRequest when one carries it. It is RECORDED AND ' +
+            'NOT CHECKED — see saml/CLAUDE.md, where the refusal to verify a request ' +
+            'signature is argued rather than assumed — so it is here to be read, and to be ' +
+            'what a later verification would read, rather than because anything depends on ' +
+            'it today. Public key material, so unlike oauthClientSecret it is worth nothing ' +
+            'to whoever reads this directory.' },
+    { name: 'samlAuthnRequestSigned', kind: 'single', from: 'SAML 2.0',
+      what: 'TRUE when the last AuthnRequest from this service provider carried a signature ' +
+            '— an enveloped ds:Signature on the POST binding, or the Signature parameter of ' +
+            'section 3.4.4.1 on the Redirect binding. ASSIGNED rather than accumulated, ' +
+            'because it is a fact about the last request and a history of booleans would ' +
+            'say nothing.' },
     { name: 'wsfedRealm', kind: 'single', from: 'WS-Federation',
       what: 'The wtrealm from a wsignin1.0 request.' },
     { name: 'wstrustAppliesTo', kind: 'single', from: 'WS-Trust',
@@ -421,12 +481,21 @@ const EDITABLE = {
   oauthConfidential: 'set',
   appRegistrationAccessToken: 'set',
   samlEntityId: 'set',
+  // DECLARED, both of them, which is why they are here and the four SAML
+  // attributes beside them are not: where a LogoutResponse goes and which
+  // certificate the service provider signs with are configuration, and the
+  // NameID formats it has asked for and whether its last request was signed
+  // are what HAPPENED.
+  samlSigningCertificate: 'set',
+  samlSingleLogoutService: 'multi',
   wsfedRealm: 'set',
   wstrustAppliesTo: 'set',
   krb5ServicePrincipalName: 'set',
   oid4vpClientId: 'set',
   oauthRedirectUri: 'multi',
   oauthPostLogoutRedirectUri: 'multi',
+  oauthFrontchannelLogoutUri: 'set',
+  oauthFrontchannelLogoutSessionRequired: 'set',
   oauthGrantType: 'multi',
   oauthResponseType: 'multi',
   oauthScope: 'multi',
@@ -946,6 +1015,16 @@ function applyRegistrationFields(record, registration) {
   setField(record, 'oauthTlsClientAuthSubjectDn', meta.tls_client_auth_subject_dn);
   setField(record, 'oauthRedirectUri', meta.redirect_uris);
   setField(record, 'oauthPostLogoutRedirectUri', meta.post_logout_redirect_uris);
+  // Front-Channel Logout 1.0 section 2. The boolean is written as the string
+  // TRUE/FALSE the directory holds, and only when the registration SAID
+  // something: RFC 7591 section 2 makes an omitted member false, but "false"
+  // and "not stated" are different facts about a client and this registry
+  // records which one happened. clientConfigOf() below applies the default.
+  setField(record, 'oauthFrontchannelLogoutUri', meta.frontchannel_logout_uri);
+  if (meta.frontchannel_logout_session_required !== undefined) {
+    setField(record, 'oauthFrontchannelLogoutSessionRequired',
+             meta.frontchannel_logout_session_required ? 'TRUE' : 'FALSE');
+  }
   setField(record, 'oauthGrantType', meta.grant_types);
   setField(record, 'oauthResponseType', meta.response_types);
   if (meta.scope) setField(record, 'oauthScope', String(meta.scope).split(/\s+/));
@@ -1084,6 +1163,13 @@ function registrationOf(clientId) {
   if (fields.oauthPostLogoutRedirectUri) {
     document.post_logout_redirect_uris = fields.oauthPostLogoutRedirectUri.slice(0);
   }
+  if (fields.oauthFrontchannelLogoutUri !== undefined) {
+    document.frontchannel_logout_uri = fields.oauthFrontchannelLogoutUri;
+  }
+  if (fields.oauthFrontchannelLogoutSessionRequired !== undefined) {
+    document.frontchannel_logout_session_required =
+      String(fields.oauthFrontchannelLogoutSessionRequired).toUpperCase() === 'TRUE';
+  }
   if (fields.oauthGrantType) document.grant_types = fields.oauthGrantType.slice(0);
   if (fields.oauthResponseType) document.response_types = fields.oauthResponseType.slice(0);
   if (fields.oauthTokenEndpointAuthMethod !== undefined) {
@@ -1122,6 +1208,7 @@ function clientConfigOf(identifier) {
     log.debug("Leaving clientConfigOf(). Never seen.");
     return { known: false, registered: false, redirect_uris: [],
              post_logout_redirect_uris: [], token_endpoint_auth_method: '',
+             frontchannel_logout_uri: '', frontchannel_logout_session_required: false,
              client_secret: '' };
   }
   const fields = loaded.record.fields;
@@ -1138,6 +1225,15 @@ function clientConfigOf(identifier) {
     registered: loaded.record.registered,
     redirect_uris: (fields.oauthRedirectUri || []).slice(0),
     post_logout_redirect_uris: (fields.oauthPostLogoutRedirectUri || []).slice(0),
+    // Where a sign-out notifies this client, and whether it wants to be told
+    // WHICH session ended. The boolean defaults FALSE per RFC 7591 section 2's
+    // rule for an omitted member — the same rule the auth method above follows
+    // — so a client that registered a URI and said nothing else is notified
+    // without iss and sid, which is what it asked for.
+    frontchannel_logout_uri: fields.oauthFrontchannelLogoutUri === undefined
+      ? '' : String(fields.oauthFrontchannelLogoutUri),
+    frontchannel_logout_session_required:
+      String(fields.oauthFrontchannelLogoutSessionRequired || '').toUpperCase() === 'TRUE',
     token_endpoint_auth_method: method,
     client_secret: fields.oauthClientSecret === undefined
       ? '' : String(fields.oauthClientSecret),

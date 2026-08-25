@@ -61,6 +61,59 @@ binding 88 needs root, and on a host run it usually fails.
   and the trust must be three different secrets or assertions about which key sealed
   what pass for the wrong reason.
 
+## Delegation is recorded, refusals included, and the policy is published
+
+Four of the eight mechanisms `/admin/delegation` knows are this directory's:
+S4U2Self, S4U2Proxy classic, S4U2Proxy resource-based, and a forwarded
+ticket-granting ticket. **Kerberos is also the ONLY family in this service that
+polices delegation at all** — WS-Trust puts no authorization on `OnBehalfOf` or
+`ActAs` and RFC 8693 leaves it to a policy this authorization server has not got
+— so this is the one place where a refusal has a reason worth publishing.
+
+Two halves, and they live where their stores do:
+
+* **`krb5_kdc.js` records the ACTS**, through `../common/delegation.js` (rule
+  3l). `resolveS4u()` can refuse ELEVEN ways and every one of them goes through
+  **`refuseS4u()`**, which attaches the `intent` built at the top of that
+  function to the error it is already returning; `handleTgsReq()` then records at
+  the ONE place it handles `s4u.error`. That is what keeps eleven refusal sites
+  to one recording site — the same arrangement `recordAuthentication()` has for
+  the sixteen families. **The reason on the row is the error's own `e-text`**,
+  not a second sentence written for the console: that text is what the client is
+  about to be sent, and two wordings of one refusal would eventually disagree
+  about which attribute was missing. An ISSUED act is recorded at the bottom of
+  `handleTgsReq()`, beside `stats.recordTicket()`, because that is the first line
+  at which the ticket exists. The FORWARDED block records its own three (two
+  refusals and the success) inline, because it never passes through
+  `resolveS4u()` and its parties are different: the user is handing its OWN
+  credentials over, and this KDC is never told to whom — which is what the empty
+  intermediary on that row means and is the definition of unconstrained
+  delegation.
+* **`krb5_principals.js` publishes the POLICY**, as `delegationPolicy()`. It
+  owns the two attributes, so it is where what they MEAN is decided; `admin.js`
+  requires it and renders the answer. It reports the pairs from both
+  `msDS-AllowedToDelegateTo` (front end) and
+  `msDS-AllowedToActOnBehalfOfOtherIdentity` (back end) in ONE list with a field
+  saying which account carries the permission — the messages and the KDC options
+  are identical and that is the whole difference — plus the account flags that
+  STOP delegation (`NOT_DELEGATED`) or enable protocol transition
+  (`TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION`), and `ok-as-delegate`, which is
+  advice to the client and not a control.
+
+**`warning` on a pair is for something genuinely WRONG, and it got that wrong
+once.** The resource-based rows used to push "this also needs PA-PAC-OPTIONS"
+into it unconditionally, so every RBCD pair reported something missing for ever
+and the field could never say *nothing is*. That sentence is a property of the
+MECHANISM and belongs in `requires`, where it already was. What `warning` is for
+is the expensive case: a front end with `msDS-AllowedToDelegateTo` set and NO
+`TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION`, whose S4U2Self ticket is simply not
+forwardable — so classic S4U2Proxy fails a step later complaining about the
+evidence, two steps from the attribute that caused it. `HTTP/notrusted` exists in
+the principal table to produce exactly that, and the page now says so before
+anybody tries it.
+
+---
+
 ## The parent project loads these modules in-process
 
 `tests/krb5_as_exchange.js`, `tests/krb5_tgs_ap.js`, `tests/krb5_spnego_http.js`
@@ -74,3 +127,57 @@ together with the `sts/` gitlink bump.
 
 `MOCK_STS_DIR=/path/to/mock-sts` still points those tests at a working copy, and
 it will keep working once `mockStsModule()` knows about the subdirectories.
+
+---
+
+## A logout stops a ticket-granting ticket, and it is the only thing a KDC can honestly do
+
+`/logout` — the protocol-independent sign-out — stamps a **sign-out instant** on
+the principal (`krb5_principals.js`'s `signedOutAt`, with `signOut()`,
+`clearSignOut()`, `signedOutAt()` and `signedOutPrincipals()` around it), and
+`handleTgsReq()` refuses a request whose ticket was authenticated before it with
+**KDC_ERR_TGT_REVOKED (20)** — the code RFC 4120 defines for exactly this and
+which nothing here could produce before.
+
+**A ticket-granting ticket is an encrypted blob in somebody's cache.** There is
+no list of them in this process and there could not be one on a real KDC either.
+What a KDC *does* see is the next TGS-REQ, so an instant is the whole of what is
+available.
+
+**FIVE things about it are load-bearing, and four of them are ways to get it
+wrong:**
+
+* **It is checked on `authtime` and NOT on the ticket's issue time**, because a
+  RENEWED ticket deliberately preserves `authtime` — the renewal block says why:
+  a service reading `authtime` to decide how recently somebody proved themselves
+  must not be told a renewal was a fresh proof. Checking anything else would let
+  a renewal launder a signed-out ticket into a live one, which is the single most
+  obvious way to break this.
+* **It is in `handleTgsReq()` and NOT in `handleAsReq()`.** Signing out is not
+  disabling an account. The next AS exchange must succeed — and it **CLEARS the
+  instant**, which is not tidiness: Kerberos timestamps are second-granular and
+  `Date.now()` is not, so a fresh ticket's `authtime` can land *before* an
+  instant stamped moments earlier, and without the clear the TGS-REQ that
+  immediately follows a sign-in would be refused. That case was reached in
+  testing, not reasoned about.
+* **It is `revoked`'s neighbour and not `revoked`.** That flag is a disabled
+  account and refuses the AS exchange too. Conflating them would mean a person
+  could log out and never log back in.
+* **It tests the TICKET's client, not the request's `cname`** — a TGS-REQ does
+  not carry one — so a ticket obtained for somebody through S4U2Self is tested
+  against the person who signed out.
+* **IT DOES NOT REACH A SERVICE TICKET ALREADY IN A CACHE.** The service that
+  accepts one decrypts it with its own key and never contacts the KDC. That is a
+  fact about Kerberos rather than a gap here, and `/logout` says so on the row
+  rather than implying a completeness it has not got.
+
+`logout.kerberosSignOut` turns the whole thing off, and then this KDC behaves
+exactly as it did before the feature existed — the same switchability every
+refusal in this service has, for the reason RFC 9700 mode's have it.
+
+`signOut()` **creates nothing**: a name nobody has authenticated as has no
+principal here, and stamping one into existence would put an account in the
+database because somebody typed a name at a logout screen. That is the opposite
+of `findOrCreateUser()`'s rule, which creates a CLIENT because an AS-REQ named
+one, and `/logout` reports the absence rather than a success it did not have.
+

@@ -41,15 +41,19 @@ the package root. **The files did not change; the paths did.**
 | `authn/` | the sign-in screen and the WebAuthn relying party. Owns the session |
 | `saml/` | the two assertion builders |
 | `ws-trust/` · `ws-federation/` | the two WS-\* profiles |
+| `federation/` | **federation relationships** — the register, the attribute mapping, the four endpoints, and the only outbound request this service makes |
 | `kerberos/` | the KDC, the acceptor, SPNEGO, and the codec |
 | `ldap/` · `scim/` · `tls/` · `spiffe/` · `oid4vc/` | one family each |
 | `admin-ui/` · `mgmt-api/` | the console and the management API |
 | `home/` | the front door — `GET /`, and the one image this service serves |
+| `logout/` | the protocol-independent sign-out — one model of what a live session IS across every family, and the endpoint that ends it |
 | `docs/` | the user-facing documentation, published as a GitHub Pages site |
 
 At the package root there are exactly two modules: **`server.js`**, the shell that
 requires the others and listens, and **`sts_metadata.js`**, which reads the router
-to list what everything else registered and is therefore required last.
+to list what everything else registered and is therefore required last. `logout/logout.js`
+is required immediately before it, second to last, because it reads nine of the
+modules above and must come after every one of them.
 
 Every directory carries a `CLAUDE.md` with the reasoning for the modules in it —
 that is where the engineering notes below have been distributed to. `CLAUDE.md` at
@@ -69,10 +73,13 @@ this; what the pin bump needs is written down in
 | **Kerberos v5 (RFC 4120)** | a KDC, on **raw TCP and UDP port 88** and over MS-KKDCP: the AS and TGS exchanges, pre-authentication carrying the salt in PA-ETYPE-INFO2, a signed [MS-PAC] in every ticket, two realms with a trust between them so cross-realm referrals work, and delegation all four ways ([MS-SFU] S4U2Self, S4U2Proxy under either authorization, forwarded tickets, renewals) — plus a **service** that decrypts an RFC 4121 GSS token, checks the ticket eight ways and proves itself back |
 | **SPNEGO (RFC 4178) over HTTP (RFC 4559)** | a **protected web page**: `/spnego` advertises it — the SPN, the realm, the mechanisms, the hosts it will answer for (`acceptsAnySpnForHosts`) and three knobs that break the negotiation one way each — and the 401 itself carries `X-Krb5-Service-Principal` and `X-Krb5-Accepts-Spn-Hosts`, which are nobody's standard and exist because SPNEGO carries no SPN at all: a client has to guess `HTTP/<url host>`, and that guess being wrong is the commonest SPNEGO failure there is — and `/spnego/protected` answers `401 WWW-Authenticate: Negotiate` to an unauthenticated request and `200` with an AP-REP in that header to a valid one. NegTokenInit with the optimistic mechToken, NegTokenResp in all four negStates, and the mechListMIC in both directions with section 5's rule for when it is mandatory. Only Kerberos is offered: NTLM is recognised in a client's list and never selected, because advertising a mechanism this service cannot perform would be a lie a client would act on. **Every Kerberos check is the protected service's, unchanged** — this is a transport and a negotiation, and no protocol code of its own |
 | **WS-Trust 1.0–1.4** | Issue / Renew / Validate / Cancel, WS-Security, WS-Addressing, optional XML-DSIG and XML-Enc |
-| **SAML 2.0 and SAML 1.1** | signed assertions of both vintages, and the metadata a relying party needs. 1.1 is here because it is what a WS-Federation relying party expects by default |
+| **SAML 2.0 and SAML 1.1** | signed assertions of both vintages, the metadata a relying party needs, and **a browser-facing identity provider for each** — SAML 2.0's Web Browser SSO profile over all three bindings with Single Logout, and SAML 1.1's Browser/POST and Browser/Artifact profiles with a SOAP responder that is also an attribute authority. They are separate implementations: SAML 1.1 has no request message and no Single Logout. 1.1 is also what a WS-Federation relying party expects by default |
+| **SAML 2.0 Web Browser SSO** | a full identity provider at `/saml2`: the Single Sign-On service over **HTTP Redirect** and **HTTP POST**, and the Response over **HTTP POST, HTTP Redirect or HTTP Artifact** — the third with a **SOAP Artifact Resolution Service** behind it, where the assertion never passes through the browser at all and an artifact resolves **exactly once**. Plus **Single Logout** in both directions, and **signed metadata PER SERVICE PROVIDER**: `/saml2/metadata/{sp}` names an identity provider of its own with its own endpoints, the way Okta and Ping do, and **it is minted for any entityID asked for** — nothing has to be provisioned before a service provider can be pointed here, and the first valid AuthnRequest creates its application entry. It accepts every entityID and verifies no request signature (both are recorded); `NameIDPolicy`, `ForceAuthn`, `IsPassive` (answered with `NoPassive`, not a screen) and `RequestedAuthnContext` are all honoured, and a `ProtocolBinding` it does not implement is refused **by name**. It has no sign-in screen of its own — see below for the SameSite hop that makes that possible — and a mock service provider at `/saml2/sp` verifies a response check by check |
 | **WS-Federation 1.2** | the Web (Passive) Requestor Profile of section 13 — `wsignin1.0` with `wtrealm`, `wreply`, `wctx`, `wct`, `wfresh`, `wauth`, `whr` and `wreq`, the response as a **form POST**, `wsignout1.0` with front-channel cleanup, signed federation metadata at AD FS's path, and a mock relying party that verifies the response check by check |
+| **Federation, in five of those protocols** | this service as **either end** of a relationship with a foreign identity service — SAML 2.0, SAML 1.1, WS-Federation 1.2, OpenID Connect and OAuth 2.0. As a **service provider** it sends the request, consumes what comes back at `/federation/acs/{id}`, **verifies it against a certificate configured on that relationship**, maps the attributes onto an entry under `ou=users` and starts a session — the SAME session every other protocol here reads, which is what lets a federated identity satisfy an OAuth 2.0 authorization request, a WS-Federation `wsignin1.0` or a SAML `AuthnRequest` without any of those knowing federation exists. `/authn/login` grows a button per usable partner for exactly that reason. As an **identity provider** it marks a partner as a federation partner rather than a test client and decides **which attributes are released to it**. **It is the one feature here that has to be configured before it will do anything, and the one that refuses by default** — see *Federation* below, where that inversion is argued rather than assumed: "accept any SAML Response" is not a permissive mock, it is an authentication bypass for every protocol in the process. It is also the only thing here that makes an **outbound** request, and `jwks_uri` on an application entry and WS-Federation's `wreqptr` are still never followed — the difference is a URL an administrator configured against a URL a caller supplied |
 | **OAuth 2.0** | a full authorization server: RFC 8414 metadata plus every endpoint it advertises — authorize (which redirects to the authentication service when nobody is signed in), token, userinfo, introspect, revoke, register (RFC 7591, and the RFC 7592 read/update/delete operations), jwks. PKCE (RFC 7636), Rich Authorization Requests (RFC 9396), the `iss` authorization response parameter (RFC 9207), and every one of the seven grant types its metadata advertises — including **Token Exchange (RFC 8693)**. It is permissive by design, and it can be told not to be: `oauth2.rfc9700` puts the authorization flow into **RFC 9700** mode — exact-string redirect URI matching with RFC 8252's loopback port exception, no open redirector at either redirecting endpoint, PKCE required of public clients with S256 only, the PKCE downgrade and value reuse refused, and no response type that issues an access token from the authorization endpoint, refresh token rotation with replay detection that revokes the whole chain, no password grant, no CORS at the authorization endpoint, and the one client credential this service checks — and it turns port 8081 itself into an **HTTPS** listener, on the certificate 8443, 9443 and LDAPS 636 already share, so the issuer and every endpoint in every metadata document follow. Off by default; `GET /oauth2/rfc9700` says what it does and does not enforce |
-| **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, and RP-Initiated Logout |
+| **OpenID Connect 1.0** | `id_token` with `nonce`, `at_hash` and `c_hash` across all three flows, the section 5.3 UserInfo endpoint, **Discovery 1.0** at all three URLs a client may look at, RP-Initiated Logout, and **Front-Channel Logout 1.0** — the provider's side of it: the two discovery members, the two per-client registration members, the `sid` claim on an ID Token issued on a browser session, and a hidden iframe per registered `frontchannel_logout_uri` on every sign-out. Back-channel logout is a different specification and is not implemented; the metadata says so |
+| **A protocol-independent sign-out** | `GET /logout` lists **everything this service is still holding for one identity across every family** — sessions, relying parties, realms, service providers, revocable tokens, outstanding authorization and pre-authorized codes, directory connections bound as them, and the Kerberos ticket position — with a checkbox against each, and a POST that ticks nothing ends all of it. Two of those mechanisms are new: a **Kerberos sign-out instant**, after which a `TGS-REQ` carrying an older ticket is refused KDC_ERR_TGT_REVOKED (20), and closing the **LDAP connections** bound as that person, which is the only sign-out RFC 4511 has. **What cannot be ended is listed anyway, with the reason** — an assertion, a service ticket or an SVID already issued is beyond recall because nothing consults this service when one is presented, and hiding those would make a global logout look complete when it is not |
 | **WebAuthn Level 3** | the relying party's half, on the login screen, in **both roles**: a second factor after the password, or the **primary credential** with no password at all. Registration and assertion are verified either way, and `amr` / `acr` in the tokens that follow say which happened — `["pwd","hwk"]`/`mfa` for two factors, `["hwk"]`/`1` for a passwordless sign-in, which is one factor however phishing-resistant it is |
 | **DPoP (RFC 9449)** | all twelve section 4.3 proof checks, `cnf.jkt` on access *and* refresh tokens, `dpop_jkt`, replay detection, the nonce handshake |
 | **mTLS client authentication (RFC 8705 §2)** | `tls_client_auth` matches the client certificate's subject DN and `self_signed_tls_client_auth` its thumbprint, beside `private_key_jwt` and `client_secret_jwt` — all six token-endpoint authentication methods are genuinely verified, and the metadata advertises only what the verifier can check |
@@ -105,11 +112,18 @@ with a browser-facing SSO profile. It now has one; see *WS-Federation* below. Wh
 is still absent is named there rather than left to be inferred, which is the point
 this paragraph was making in the first place.
 
-**There is still no SAML 2.0 Web SSO profile**, and that is the gap that remains
-beside it: no `SingleSignOnService`, no `AuthnRequest`, no `Response`. The browser
-SSO profile this service has is WS-Federation's, and the federation metadata
-deliberately publishes no `IDPSSODescriptor` for exactly that reason — advertising
-one would be a relying party's first configuration attempt and its first 404.
+**SAML 2.0 Web SSO used to be the gap beside it, and as of 2026-08-24 it is
+not.** This paragraph said there was no `SingleSignOnService`, no `AuthnRequest`
+and no `Response`, and that the only browser SSO profile here was
+WS-Federation's. There is now a full SAML 2.0 identity provider at `/saml2` —
+see *SAML 2.0 Web Browser SSO* below — over all three bindings, with Single
+Logout and **signed metadata per service provider**.
+
+The WS-Federation metadata still publishes no `IDPSSODescriptor`, and the reason
+has changed: it is a statement about *that document*, which describes a
+`fed:SecurityTokenServiceType` and not a SAML identity provider. The
+`IDPSSODescriptor` is at `/saml2/metadata`, and at
+`/saml2/metadata/{sp}` there is one per service provider.
 
 ## Running it
 
@@ -375,6 +389,18 @@ Four things about these settings do not fit in a cell and have cost real time:
   way at the same time.
 
 
+#### Trust realms
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `realms.enabled` | `STS_REALMS_ENABLED` | `true` | yes | Whether the realms defined on `/admin/realms` answer on their path prefixes. Turning it OFF leaves every definition in place and stops the paths working, which is what to reach for when a realm is answering something it should not: nothing has to be deleted to find out whether a realm is the reason for something. It has no effect at all until at least one realm is defined. |
+| `realms.pathSegment` | `STS_REALMS_PATH_SEGMENT` | `realm` | yes | The segment in front of a realm id, so that the realm `acme` is at `/realm/acme/oauth2/token`. Set it to the empty string for the bare `/acme/oauth2/token` shape. A realm may never be named after the first segment of a path this service already serves, WHATEVER this is set to, precisely so that clearing it cannot turn an existing realm into a shadow over the console or the authorization server. |
+
+**Neither of these two can be set ON a realm.** A realm that could switch realms
+off would be doing it from inside the request that found it, and a realm that
+could move its own prefix would change the prefix already used to find it. They
+are refused at both ends.
+
 #### Global
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
@@ -394,6 +420,7 @@ Four things about these settings do not fit in a cell and have cost real time:
 | `oauth2.breakIdTokenNonce` | `STS_OAUTH2_BREAK_ID_TOKEN_NONCE` | `false` | yes | Put a DELIBERATELY WRONG nonce in every ID Token that should carry one. |
 | `oauth2.refreshIdleSeconds` | `STS_OAUTH2_REFRESH_IDLE_SECONDS` | `86400` | yes | In RFC 9700 mode, how long a refresh CHAIN may go unused before it stops working — section 2.2.2 says a refresh token SHOULD expire after a period of client inactivity, and says the period is deployment-dependent, which is why this is a setting rather than a constant. |
 | `oauth2.revokeRefreshOnLogout` | `STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT` | `true` | yes | In RFC 9700 mode, end a browser sign-on session and every refresh token issued ON that session is revoked — the section MAY that names logout and a password change as the examples. |
+| `oauth2.frontchannelLogout` | `STS_OAUTH2_FRONTCHANNEL_LOGOUT` | `true` | yes | OpenID Connect Front-Channel Logout 1.0: the two discovery members, the `sid` claim on an ID Token issued on a browser sign-on session, and a hidden iframe per registered `frontchannel_logout_uri` on every sign-out — with `iss` and `sid` where the client registered `frontchannel_logout_session_required`. Off, none of the three happens and the tokens are byte-for-byte what this service issued before the feature existed. |
 | `oauth2.clientAssertionSkewS` | `STS_OAUTH2_CLIENT_ASSERTION_SKEW_S` | `60` | yes | How far out a client assertion's exp, nbf and iat may be and still be accepted (RFC 7523 section 3, private_key_jwt and client_secret_jwt). Sixty seconds is the usual allowance for two machines that are not synchronised. |
 | `oauth2.accessTokenTtlS` | `STS_OAUTH2_ACCESS_TOKEN_TTL_S` | `3600` | yes | How long an access token is good for: its `exp` is this many seconds after it was signed, and it is the `expires_in` of every token response that carries one. One hour by default. |
 | `oauth2.idTokenTtlS` | `STS_OAUTH2_ID_TOKEN_TTL_S` | `3600` | yes | How long an ID Token is good for. |
@@ -418,11 +445,68 @@ Four things about these settings do not fit in a cell and have cost real time:
 | `applications.max` | `STS_APPLICATIONS_MAX` | `500` | yes | How many entries may live under ou=applications — an OAuth client_id, a WS-Federation wtrealm, a SAML entityID, a WS-Trust AppliesTo, a Kerberos SPN. |
 | `applications.seedInternal` | `STS_APPLICATIONS_SEED_INTERNAL` | `true` | **restart** — the two entries are written once, as ldap_server.js is required and fills the registry's directory slot | Create an application entry for the ADMIN CONSOLE at /admin and one for the MANAGEMENT API at /admin-api when this service starts, under ou=applications with everything else. |
 
+#### Federation
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `federation.enabled` | `STS_FEDERATION_ENABLED` | `true` | yes | Whether /federation answers at all. |
+| `federation.max` | `STS_FEDERATION_MAX` | `50` | yes | How many entries may live under ou=federations. |
+| `federation.usernamePrefix` | `STS_FEDERATION_USERNAME_PREFIX` | *(empty)* | yes | Put in front of every username a foreign identity provider supplies, so a federated `alice` and the local `alice` are two entries. |
+| `federation.loginButtons` | `STS_FEDERATION_LOGIN_BUTTONS` | `true` | yes | Show a button per usable service-provider-side relationship on /authn/login, so a federated identity can satisfy ANY flow already in progress — an OAuth 2.0 authorization request, a WS-Federation sign-in, a SAML AuthnRequest, the admin console. |
+| `federation.outbound` | `STS_FEDERATION_OUTBOUND` | `true` | yes | Whether this service may make an HTTP request OUT, to a partner's token endpoint, UserInfo endpoint or JWKS. |
+| `federation.outboundTimeoutMs` | `STS_FEDERATION_OUTBOUND_TIMEOUT_MS` | `5000` | yes | How long to wait for a partner to answer before giving up. |
+| `federation.outboundAllowInsecure` | `STS_FEDERATION_OUTBOUND_ALLOW_INSECURE` | `false` | yes | OFF by default, which is the one place this service is stricter than a mock would ordinarily be: what travels on these requests is a client secret and an authorization code, at somebody else's service. |
+| `federation.requestTtlMin` | `STS_FEDERATION_REQUEST_TTL_MIN` | `10` | yes | How long this service remembers that it sent somebody to a partner. |
+
 #### SAML
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
 | `saml.issuer` | `STS_SAML_ISSUER`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The <saml:Issuer> of every SAML 2.0 assertion and the Issuer attribute of every SAML 1.1 one. WS-Federation's assertions are built by the same two functions, so this is their issuer too, and it is what /wsfed/rp checks a presented assertion against. |
+
+#### SAML 2.0
+
+These nine are their own group and `saml.issuer` above is deliberately not one of
+them: that setting names whoever SIGNED an assertion and is shared with WS-Trust
+and WS-Federation, while every row here governs how this service behaves as an
+identity provider in a browser profile.
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `saml2.entityId` | `STS_SAML2_ENTITY_ID` | `urn:sts-mock:idp` | yes | The entityID this identity provider publishes in its SAML 2.0 metadata, and the <saml:Issuer> of every Response and Assertion the Web Browser SSO profile issues. It is NOT the SAML issuer above: that one names whoever signed an assertion and is shared with WS-Trust and WS-Federation, and a service provider checks THIS one against the metadata it was configured from. They are separate for the reason wsfed.entityId is separate from it. |
+| `saml2.perApplicationEntityId` | `STS_SAML2_PER_APPLICATION_ENTITY_ID` | `true` | yes | ON by default, and it is what makes the metadata at /saml2/metadata/{sp} UNIQUE PER APPLICATION: the identity provider names itself <entityID>:{sp} in that document and in everything it issues to that service provider, the way Okta and Ping give each application its own identity provider. OFF makes every document carry the entityID above and differ only in its endpoint URLs, which is what a service provider library that keys its trust store off the entityID expects. Both are real deployments, which is why it is a setting and not a decision. |
+| `saml2.assertionLifetimeMin` | `STS_SAML2_ASSERTION_LIFETIME_MIN` | `60` | yes | How long an issued assertion is valid for: it becomes Conditions/NotOnOrAfter and the bearer SubjectConfirmationData/NotOnOrAfter alike. Set it to 1 to watch a service provider refuse a stale assertion, which is the check most of them get wrong. |
+| `saml2.signAssertion` | `STS_SAML2_SIGN_ASSERTION` | `true` | yes | Sign the <saml:Assertion> itself. ON by default because a service provider that verifies anything verifies this, and because an assertion that travels on its own — out of an ArtifactResponse, say — has nothing else carrying a signature. Turning it OFF is a test case rather than a mistake: a service provider that accepts an unsigned assertion has a hole, and this is how to find out. |
+| `saml2.signResponse` | `STS_SAML2_SIGN_RESPONSE` | `true` | yes | Sign the <samlp:Response> around the assertion as well, which is what AD FS and Keycloak do by default. Both signatures are ordinary: the response is signed AFTER the assertion inside it, so the assertion's own signature is part of what the response signature covers. On the HTTP Redirect binding this ALSO controls the query-string signature of section 3.4.4.1, which is the one a redirect response is really verified by. |
+| `saml2.nameIdFormat` | `STS_SAML2_NAMEID_FORMAT` | `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` | yes | The Format on the NameID when the AuthnRequest's NameIDPolicy asks for none. A request that DOES name one is answered with the one it named — any of them, including a format this service has never heard of, because a service provider being told its own format back is the behaviour worth exercising and refusing with InvalidNameIDPolicy would remove the test case. |
+| `saml2.artifactTtlS` | `STS_SAML2_ARTIFACT_TTL_S` | `300` | yes | How long a SAML artifact can be resolved for at the Artifact Resolution Service. An artifact is ALSO one-shot — resolving it destroys it, which section 3.6.4.1 requires and which no lifetime can express — so a second ArtifactResolve for the same artifact is refused however long this is. |
+| `saml2.autocreateApplications` | `STS_SAML2_AUTOCREATE_APPLICATIONS` | `true` | yes | ON by default: an entityID this service has not seen before gets an application entry under ou=applications the moment it appears in a valid AuthnRequest — or the moment somebody asks for its metadata — so nothing has to be provisioned before a service provider can be pointed here. OFF still ANSWERS the request; it simply records nothing, which is what somebody driving a fuzzer at this endpoint wants before their directory has ten thousand entries in it. |
+| `saml2.defaultSingleLogoutService` | `STS_SAML2_DEFAULT_SLO_SERVICE` | *(empty)* | yes | Where a <samlp:LogoutResponse> goes when the service provider has no SingleLogoutService recorded on its application entry. A LogoutRequest carries no return address of its own — only SP metadata has one, and this service does not consume SP metadata — so without this the fallback is the assertion consumer service URL that application last used, which is stated on the page rather than done quietly. Set it to remove the guess. |
+
+#### SAML 1.1
+
+These nine are a group of their own for the reason the SAML 2.0 nine are, and for
+one more besides. The shared reason: `saml.issuer` above names whoever SIGNED an
+assertion and is read by WS-Trust and WS-Federation, while every row here governs
+how this service behaves as an identity provider in a browser profile. The reason
+peculiar to this group: **SAML 1.1 and SAML 2.0 are different specifications
+rather than two dialects**, and a shared set of rows would make `signResponse`
+mean two things — over there it is an XML signature or a signed query string
+depending on the binding, and here there is no redirect binding for a response at
+all. A relying party that trusts this service for 1.1 and not for 2.0 is also the
+ordinary case, and one `entityId` between them would make that unexpressible.
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `saml11.providerId` | `STS_SAML11_PROVIDER_ID` | `urn:sts-mock:idp:saml11` | yes | What this identity provider calls itself in the SAML 1.1 browser profiles: the `Issuer` ATTRIBUTE of every assertion they issue, the `entityID` of the metadata document at /saml11/metadata, and the string whose SHA-1 becomes the SourceID inside every type 0x0001 artifact. SAML 1.1 calls it a providerID and SAML 2.0 metadata calls the same thing an entityID; they are one value and this row is it. It is deliberately NOT saml2.entityId — a relying party that trusts this service for 1.1 and not for 2.0 is the ordinary case, and one value would make that unexpressible. |
+| `saml11.perApplicationProviderId` | `STS_SAML11_PER_APPLICATION_PROVIDER_ID` | `true` | yes | Give every relying party its own providerID — `{providerID}:{slug}` — and its own endpoints under the same path segment, which is what /saml11/metadata/{rp} publishes. Turn it off for a relying party whose trust store is keyed off the providerID and which is surprised to meet a new one per application. THE ENDPOINTS STAY PER-APPLICATION either way, because that is what makes the documents worth having separately. It also changes every artifact this service mints: the SourceID is a hash of the providerID, so turning this off makes one SourceID where there were many. |
+| `saml11.assertionLifetimeMin` | `STS_SAML11_ASSERTION_LIFETIME_MIN` | `60` | yes | How long the browser profiles' assertions are valid for, in the NotBefore and NotOnOrAfter of <saml:Conditions>. It is separate from the WS-Federation lifetime for the same reason the SAML 2.0 one is: a browser profile assertion is consumed within seconds of being issued and a short lifetime here is a realistic test, where the same value would make a WS-Federation session expire while somebody was reading it. |
+| `saml11.signAssertion` | `STS_SAML11_SIGN_ASSERTION` | `true` | yes | Sign the <saml:Assertion> itself, with ds:Signature as its LAST child and the reference naming AssertionID — which is where the 1.1 schema puts it and is not where SAML 2.0 does. ON by default because the Browser/POST profile REQUIRES a signed assertion (saml-profile-1.1 section 4.2.1.4): the assertion passes through the browser, so nothing else authenticates it. Turning it off is a test case rather than a mistake — a relying party that accepts it anyway has a hole in it, and this is how somebody finds that out. |
+| `saml11.signResponse` | `STS_SAML11_SIGN_RESPONSE` | `true` | yes | Sign the <samlp:Response> around the assertion as well, with the reference naming ResponseID. Real identity providers differ here and both are worth exercising, which is why it is a setting: the profile requires the RESPONSE to be signed in Browser/POST and says nothing about it for the assertion pulled back over the artifact channel, where the SOAP exchange is what a relying party is trusting. |
+| `saml11.nameIdFormat` | `STS_SAML11_NAMEID_FORMAT` | `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` | yes | The Format on the <saml:NameIdentifier> when the request asks for none — which in SAML 1.1 is ALWAYS, because the profile has no request message to carry a NameIDPolicy in. That is the difference from saml2.nameIdFormat, which is a default a request routinely overrides: this one is the answer unless the non-spec `format` parameter overrides it. |
+| `saml11.defaultProfile` | `STS_SAML11_DEFAULT_PROFILE` | `post` | yes | Which profile the inter-site transfer service uses when the request does not say: Browser/POST (section 4.2), where the assertion travels through the browser in a form POST, or Browser/Artifact (section 4.1), where a reference travels through the browser and the relying party fetches the assertion over SOAP. POST is the default because it needs no server behind the relying party's assertion consumer, so it is the one that works when somebody points this at a URL and watches. A request naming `profile` or carrying `SAMLart` overrides it. |
+| `saml11.artifactTtlS` | `STS_SAML11_ARTIFACT_TTL_S` | `300` | yes | How long an artifact can be resolved for at the SAML responder before it is swept. It is an UPPER bound and not the rule that matters: an artifact is resolvable exactly ONCE (saml-bindings-1.1 section 3.2.3), so resolving one destroys it whatever this says, and no lifetime setting can express that. Five minutes is what the profile recommends and is generous for an exchange that takes milliseconds. |
+| `saml11.autocreateApplications` | `STS_SAML11_AUTOCREATE_APPLICATIONS` | `true` | yes | Create an application entry under ou=applications the first time a relying party is named — by a TARGET arriving, by a metadata document being fetched, or by an artifact being resolved. Off means the browser profiles still work and /admin/saml11 stays empty, which is what somebody driving a load test wants and nobody else does. |
 
 #### WS-Trust
 
@@ -540,6 +624,16 @@ Four things about these settings do not fit in a cell and have cost real time:
 | `audit.maxEvents` | `AUDIT_MAX_EVENTS` | `5000` | yes | How many audit events /admin/audit keeps before the oldest are dropped. What was dropped is COUNTED and shown, so a truncated log says it was truncated rather than implying the cap is all there ever was. |
 | `audit.protocolCalls` | `AUDIT_PROTOCOL_CALLS` | `true` | yes | Whether every call into a protocol endpoint gets an audit event. |
 
+#### Delegation
+
+| Appconfig key | Environment variable | Default | Change while running? | What it does |
+|---|---|---|---|---|
+| `delegation.maxRecords` | `DELEGATION_MAX_RECORDS` | `2000` | yes | How many delegation acts /admin/delegation keeps before the oldest are dropped. An act is one exchange in which somebody acted on somebody else's behalf — a Kerberos S4U request or forwarded ticket, a WS-Trust OnBehalfOf or ActAs, an RFC 8693 token exchange — and REFUSED attempts are recorded too. What was dropped is COUNTED and shown. |
+| `logout.anyUser` | `LOGOUT_ANY_USER` | `true` | yes | Whether `/logout` honours a `username` naming somebody other than whoever the session cookie names. It grants nothing that was not already true — no password is checked at any sign-in screen here, so becoming that person takes one request — and what it buys is a headless test. Off, `/logout` acts only on the caller's own session and 403s a request that names another name; `/admin/logout` and `/admin-api/logout` are unaffected. |
+| `logout.kerberosSignOut` | `LOGOUT_KERBEROS_SIGN_OUT` | `true` | yes | Whether a logout stamps a sign-out instant on the Kerberos principal, after which a `TGS-REQ` carrying a ticket whose `authtime` is earlier is refused KDC_ERR_TGT_REVOKED (20). It does NOT stop a service ticket already in a cache — accepting one never contacts the KDC — and an `AS-REQ` still succeeds and clears the instant. Off, the KDC behaves exactly as it did before this feature existed. |
+| `logout.ldapDisconnect` | `LOGOUT_LDAP_DISCONNECT` | `true` | yes | Whether a logout closes every connection to the embedded directory, 389 and 636 alike, whose bind DN names that person. RFC 4511 section 4.2 makes the bind the authorization state of a CONNECTION, so the connection is the session. Off, they are left alone and listed on `/logout` as untouched rather than hidden. |
+| `logout.maxRows` | `LOGOUT_MAX_ROWS` | `500` | yes | How many live items `/logout` lists for one person. The cap is on what is DRAWN and offered as a checkbox, never on what a termination reaches — a global logout still ends all of them. |
+
 #### SPIFFE
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
@@ -636,6 +730,136 @@ arrangement from `webauthn.js` and `bbs2023.js`, deliberately: a codec has to pr
 the same bytes wherever it runs, so the tests over it are a **round-trip oracle**
 (`tests/krb5_codec.js` re-encodes what it read) and byte-level pinning
 (`tests/krb5_gss_tokens.js`) rather than two implementations agreeing with each other.
+
+### Trust realms — several logical copies of this service, on one port
+
+A **trust realm** is a whole mock identity service: its own configuration, its
+own signing key, and its own sessions, authorization codes, access and refresh
+tokens, credential offers, SAML request state, artifacts, statistics and audit
+log. Every realm answers on the SAME sockets as every other, and they are told
+apart by a segment at the front of the path.
+
+```
+http://host:8081/oauth2/token                the DEFAULT realm
+http://host:8081/realm/acme/oauth2/token     the realm `acme`
+```
+
+**The default realm has an empty prefix, and a service with no realms defined
+behaves exactly as it did before this existed.** Nothing is stripped, no URL is
+rewritten, no page grows a control. If you are not using realms you can stop
+reading here and nothing about this service has changed.
+
+#### Defining one
+
+```bash
+curl -X POST http://localhost:8081/admin-api/realms/create \
+     -H 'content-type: application/json' \
+     -d '{"id":"acme","name":"Acme Corporation"}'
+```
+
+or on `/admin/realms` in the console, which is also where a realm's settings,
+its endpoints and its signing key identifier are. Realms are held in memory like
+everything else here and die with the process, so a stack that wants them back
+after a restart creates them from that call.
+
+The id becomes a path segment: lower-case letters, digits and hyphens, starting
+with a letter or a digit. It may not be `default`, and it may not be the first
+segment of a path this service already serves — `GET /admin-api/realms` lists
+those in `reserved`, read off the live router.
+
+#### Finding one
+
+`GET /realms` is the directory, and it is **deliberately ungated**: the prefix
+segment is a setting and the ids are whatever somebody typed, so a client being
+pointed at a realm cannot construct a single URL without it.
+
+```json
+{
+  "pathSegment": "realm",
+  "enabled": true,
+  "active": true,
+  "current": "default",
+  "realms": [
+    { "id": "default", "pathPrefix": "",            "baseUrl": "http://localhost:8081" },
+    { "id": "acme",    "pathPrefix": "/realm/acme", "baseUrl": "http://localhost:8081/realm/acme" }
+  ],
+  "support": [ ... ]
+}
+```
+
+Everything follows from `baseUrl`: `…/realm/acme/.well-known/openid-configuration`
+publishes an `issuer` of `http://localhost:8081/realm/acme` and endpoints under
+it, `…/realm/acme/oauth2/jwks` publishes that realm's own key, and
+`…/realm/acme/saml2/metadata` publishes an entityID of its own.
+
+#### What a realm actually separates
+
+**A REALM SEPARATES WHAT THIS SERVICE ISSUES, NOT WHO IT KNOWS**, and the
+distinction is worth understanding before you build a test on it.
+
+Separated, completely, by the path:
+
+* the **signing key** — each realm generates its own, so a token minted in one
+  does not verify against another's JWKS. That is the point of a realm rather
+  than a side effect of one, and each realm's `kid` is on `/admin/realms`.
+* every **setting** in the table above, per realm, above whatever the process is
+  configured with. `/admin/config` and `POST /admin-api/config/set` reached under
+  a realm's prefix read and write THAT realm.
+* **sessions** (so signing in to one realm signs you in to that realm only),
+  authorization codes, access and refresh tokens, refresh families, DPoP replay
+  and nonce state, client-assertion replay state, named authorization servers,
+  credential offers, pre-authorized codes, deferred transactions, issuance
+  nonces, presentation transactions, SAML 2.0 and 1.1 request state and
+  artifacts, the custom claim and credential claim selections, the verifier's
+  request, the **statistics** and the **audit log** (whose sequence numbers are
+  per realm, so one realm's rows are contiguous).
+* the six settings that are **NAMES** — the SAML 2.0 entityID, the SAML 1.1
+  providerID, the WS-Federation entityID, the WS-Trust issuer, the SAML
+  assertion issuer and the OpenID4VP verifier client id. A new realm is created
+  with each of them suffixed with its id, because two realms carrying one
+  entityID is two identity providers claiming one name. They are ordinary
+  settings on the realm: change them, or unset them to go back to sharing the
+  process's name.
+
+**Not separated — the embedded directory.** One `ou=users`, one `ou=groups` and
+one `ou=applications` for the whole process, because LDAP answers on a socket
+with no path to put a segment in. So:
+
+* the same person can sign in to two realms and be **one directory entry**;
+* an **OAuth client** registered once can be used in every realm;
+* a **SAML service provider** entry is shared, though the metadata published for
+  it is per realm;
+* the **SPIFFE registry** is shared;
+* and **the two admin console roles are held once** — there is no per-realm
+  administrator.
+
+**Not separated — the four socket families.** Kerberos (over raw UDP/TCP 88 and
+over MS-KKDCP alike: `/KdcProxy` is reachable under a prefix but reaches the same
+KDC), the two TLS listeners, LDAP's 389 and 636, and SPIFFE's four sockets. A
+socket has no path in it. Kerberos is the one with an obvious way forward and it
+is written down rather than left to be rediscovered — Kerberos already HAS a
+realm, so give each trust realm a `krb5.realm` of its own and dispatch on the
+realm name a request carries; what stands in the way is that `krb5.realm` is not
+runtime-settable, since the principal database and its long-term keys are built
+from it at startup.
+
+`GET /realms` and `/admin/realms` both publish this list, family by family, so
+the answer is something the service tells you rather than something to remember.
+
+#### The console
+
+Every page shows ONE realm — the one whose prefix it was reached under — and
+carries a switcher at the top of the sidebar that moves to the same page in
+another realm. The switcher's links are absolute URLs on purpose: every
+root-relative link in an HTML response is rewritten to carry the current realm's
+prefix, which is what makes the console work inside a realm without a link being
+edited, and is exactly wrong for the one control whose job is to leave.
+
+`/admin-api` is realm-scoped by the same prefix, so `/realm/acme/admin-api/config`
+is that realm's configuration and every one of its operations works per realm.
+The five operations under `/admin-api/realms` manage the registry itself, which
+is process-wide: there is one list of realms, and `remove` refuses to remove the
+realm the call arrived in.
 
 ### The signing key is regenerated on every start
 
@@ -1167,7 +1391,7 @@ a security event, and it names logout — and it matters more than a MAY suggest
 without it, signing out drops a cookie and leaves a *thirty-day credential* in the
 client's hands, while a person who signed out of a shared browser has every reason to
 believe otherwise. It happens in `authn.js`'s `endSession()`, which is the single place
-`/oauth2/logout` and WS-Federation's `wsignout1.0` both end a session — a revocation at
+`/oauth2/logout`, WS-Federation's `wsignout1.0`, SAML 2.0's `/saml2/slo` and `/logout` all end a session — a revocation at
 each would be two that could come to disagree. **Access tokens are deliberately left
 alone**: they expire in an hour, and revoking them would take away the evidence of what
 the session did.
@@ -1839,6 +2063,141 @@ own screen for now: section 13.2.1 lets its sign-in request arrive as a cross-si
 form POST, `SameSite=Lax` keeps the cookie off that, and a redirect chain would
 lose the request.
 
+### Signing out of everything — `/logout`
+
+Every family here that can sign somebody **in** has a sign-out of its own, and
+each one signs them out of itself: `/oauth2/logout` is OpenID Connect's
+RP-Initiated Logout, `/wsfed?wa=wsignout1.0` is WS-Federation 1.2 section
+13.2.4, `/saml2/slo` is SAML 2.0 Single Logout. None of them is the question a
+person actually arrives with, which is *what am I still signed into, and how do
+I stop being signed into it*.
+
+That question is protocol-independent and so is the answer. `GET /logout` lists
+**everything this service is still holding for one identity, across every
+family**, with a checkbox against each:
+
+```
+GET /logout                       no session -> /authn/login and back
+                                  session    -> the list
+POST /logout                      ends what was ticked
+POST /logout   (nothing ticked)   ends EVERYTHING — the default, and the point
+GET /logout?format=json           the same list, for a test
+```
+
+What it finds, and what it does about it:
+
+| Family | What is listed | What ending it does |
+|---|---|---|
+| Browser sign-on session | every session held for that person | drops it through the one function `/oauth2/logout`, `wsignout1.0` and `/saml2/slo` all end a session with — so the RFC 9700 refresh revocation and the audit row happen once |
+| OIDC relying parties | every client issued an authorization response on that session | loads its `frontchannel_logout_uri` in a hidden iframe, with `iss` and `sid` where it asked for them |
+| WS-Federation realms | every realm signed into | sends `wa=wsignoutcleanup1.0` as a one-pixel image, with the URL printed beside it |
+| SAML 2.0 service providers | every service provider signed into | builds the signed `LogoutRequest` and offers it as a link |
+| Tokens | every access, refresh and ID token still revocable | adds the `jti` to the one revocation set `/oauth2/revoke` and the console write to |
+| Authorization codes | codes issued and not yet redeemed | discards them, so no more tokens come from that sign-on |
+| Pre-authorized codes | Credential Offer codes minted for that person | the same |
+| Directory connections | every LDAP connection bound as them, on 389 and 636 | closes the socket — RFC 4511 section 4.2 makes the bind the state of a **connection**, so that is the only sign-out LDAP has |
+| Kerberos tickets | the principal, and its sign-out instant | stamps the instant; a `TGS-REQ` presenting a ticket authenticated before it is refused **KDC_ERR_TGT_REVOKED (20)** |
+| Issued and beyond recall | assertions, service tickets, credentials, SVIDs | **nothing** — and they are listed anyway |
+
+**That last row is the point of the page rather than an admission at the bottom
+of it.** A SAML assertion in a service provider's hands, a Kerberos service
+ticket in a cache and an X509-SVID already minted cannot be ended by this
+service or by a real one, and the reason is the same in all three cases:
+*nothing consults the issuer when they are presented*. A relying party checks a
+signature and some `Conditions` and asks nobody; a Kerberos service decrypts a
+ticket with its own key; an SVID verifies against a bundle. Hiding those rows
+would make a global logout look complete when it is not, which is the single
+most misleading thing this endpoint could do — so each carries a dash and a
+sentence saying why.
+
+Two mechanisms did not exist before this endpoint did, and both are worth
+knowing because they are the honest analogue rather than a pretence:
+
+**Kerberos.** A ticket-granting ticket is an encrypted blob in somebody's cache.
+There is no list of them here and there could not be one on a real KDC either.
+What a KDC *does* see is the next `TGS-REQ` — so signing out records an instant
+on the principal, and a request presenting a ticket whose `authtime` is earlier
+is refused. It is checked on `authtime` and not on the issue time because a
+renewed ticket deliberately preserves `authtime`, and checking anything else
+would let a renewal launder a signed-out ticket back into a live one. **It does
+not reach a service ticket already in a cache** — accepting one never contacts
+the KDC — and a fresh `AS-REQ` succeeds and clears the instant, because signing
+out is not being locked out. `logout.kerberosSignOut` turns it off.
+
+**LDAP.** The connection is the session, so the sign-out is the socket closing.
+What the client sees is its connection ending mid-conversation, which is what a
+directory revoking a session looks like from the other end. An *Unsolicited
+Notice of Disconnection* (RFC 4511 section 4.4.1) would be the polite form and
+node-ldapjs has no way to send one — it is a submodule this repository uses
+unmodified. `logout.ldapDisconnect` turns it off.
+
+**No console role is needed, and that is not an oversight**: signing yourself out
+must not require a role that signing in did not. With no session the browser goes
+to `/authn/login` and comes back — signing out may mean signing in first, because
+this service has no other way to know who is asking, and the session that creates
+is listed with everything else. `?username=` names somebody else and grants
+nothing that was not already true, since no password is checked at any screen
+here; `logout.anyUser` turns that off for a deployment that wants the tighter
+story.
+
+**Two more doors onto the same two functions.** `/admin/logout` is the operator's
+view — the same lists for a person *named*, filtered and paged, behind the
+console's two roles, and with the two NON-SPEC undos this page has not (restoring
+a revoked token, clearing a Kerberos sign-out instant). `GET|POST
+/admin-api/logout` is the same again for a test, with four operations. All three
+call one pair of functions in `logout/logout.js`, which is what stops them coming
+to disagree about what a live session is.
+
+### OpenID Connect Front-Channel Logout 1.0
+
+The other half of a sign-out. Ending a session here drops a cookie and revokes
+what this service issued; every relying party the person signed into still
+believes they are signed in. Front-Channel Logout is how a provider says
+otherwise, and this service implements the provider's side of it:
+
+```
+POST /oauth2/register
+  { "frontchannel_logout_uri": "https://rp.example/logout",
+    "frontchannel_logout_session_required": true }
+
+GET /.well-known/openid-configuration
+  "frontchannel_logout_supported": true
+  "frontchannel_logout_session_required": true
+
+id_token: { …, "sid": "EO-iqvyoBaXVAwJMzzHQuEcBlw4dcI36" }
+
+any sign-out ->  <iframe src="https://rp.example/logout?iss=…&sid=EO-iqvy…">
+```
+
+Four things about it:
+
+* **`sid` reverses a decision this project documented at length.** The token
+  registry used to say, in as many words, that no token here carries a session
+  identifier and that inventing one to make a console page easier would change
+  what every client receives. That reasoning is kept and is exactly why this is
+  switchable: a claim is added because a *specification* needs it, and section 3
+  of Front-Channel Logout is that specification. `oauth2.frontchannelLogout` off
+  restores the tokens and the metadata this service issued before the feature
+  existed, byte for byte.
+* **`iss` and `sid` go only to a client that registered
+  `frontchannel_logout_session_required`.** Section 2 says they are otherwise
+  omitted, and an RP that did not ask may well be validating the query string it
+  gets. RFC 7591 section 2 makes an omitted boolean false rather than unknown.
+* **Every URL is printed as a link beside its iframe.** Section 5 says the
+  provider cannot know whether a notification succeeded — so a dead relying
+  party, a certificate the browser will not accept and a URI somebody mistyped
+  all look exactly like success. The link is the only thing that turns "nothing
+  happened" into something a person can click and see. It is the same decision
+  `wsignout1.0`'s cleanup pings already made.
+* **It can turn a redirect into a page.** A 302 to `post_logout_redirect_uri`
+  abandons the document before any iframe loads, so where there is a fan-out to
+  perform `/oauth2/logout` renders it and offers the return as a link instead.
+  **Where there is nothing to notify, nothing changes** — which is every
+  deployment that has not registered a logout URI.
+
+**Back-channel logout is a different specification and is not implemented.** The
+metadata says so rather than claiming it because front-channel arrived.
+
 ### WebAuthn: a second factor, or the only one
 
 The login screen carries **two** security-key boxes, because a key is two different
@@ -1912,6 +2271,383 @@ exactly as a password sign-in makes one. A second factor authenticates nobody ne
 person is the one the password step named — so it creates nothing and writes a **flag**
 on the entry that already exists. See the directory's own section for the three
 attributes that carries.
+
+### SAML 2.0 Web Browser SSO — the profile this file documented the absence of
+
+For years the note near the top of this file said there was no SAML 2.0 Web SSO
+profile here: no `SingleSignOnService`, no `AuthnRequest`, no `Response`. There
+is one now, at `/saml2`, and it is a full identity provider rather than a
+demonstration.
+
+| Endpoint | What it is |
+|---|---|
+| `GET\|POST /saml2/sso[/{sp}]` | the Single Sign-On service. **GET is the HTTP Redirect binding** (bindings §3.4 — DEFLATE, base64, and the detached query-string signature of §3.4.4.1) and **POST is the HTTP POST binding** (§3.5). Which binding the *Response* comes back on is the AuthnRequest's own `ProtocolBinding` |
+| `POST /saml2/ars[/{sp}]` | the **Artifact Resolution Service**, SOAP 1.1 over HTTP (§3.2.3). A back channel: the browser never touches it |
+| `GET\|POST /saml2/slo[/{sp}]` | **Single Logout** (profiles §4.4), both directions |
+| `GET /saml2/metadata[/{sp}]` | the signed `IDPSSODescriptor` — **one per service provider** |
+| `GET\|POST /saml2/sp` | a **mock service provider**. Non-spec, the default assertion consumer service, and where a response is verified check by check |
+| `GET /saml2` | what all of that is, for somebody who followed the link |
+
+**The metadata is unique per service provider, and it is minted for anything
+asked for.** `/saml2/metadata/{sp}` publishes an identity provider entityID of
+its own — `urn:sts-mock:idp:{slug}` — with SSO, SLO and artifact endpoints under
+that same segment. That is what Okta and Ping give each application, and it means
+two service providers integrated here are configured from two documents that
+share nothing but a signing certificate. **It 404s for nothing**: an entityID
+nobody has registered is registered *by the ask*, so a service provider can be
+pointed at this service before anything at all has been provisioned. The segment
+is the percent-encoded entityID, or a slug (`app-` and twelve hex characters)
+where the entityID is not safe in a URL path.
+`saml2.perApplicationEntityId` turns the separate entityID off, for a service
+provider library that keys its trust store off the entityID and is surprised to
+find a new one per application; the *endpoints* stay per-application either way.
+
+**It has no sign-in screen of its own, and that is the one design decision here
+worth reading twice.** WS-Federation below has one because its sign-in request
+can arrive as a cross-site form POST, which `SameSite=Lax` keeps the session
+cookie off — so that profile cannot see the session it would need in order to
+skip the screen. The HTTP POST binding has exactly the same problem, and the
+answer here is different: **the request is held and the browser is 303'd to a GET
+on the same endpoint**, which is a top-level GET navigation and therefore *does*
+carry a Lax cookie. Three things follow that WS-Federation does not get — single
+sign-on with OAuth 2.0 and WS-Federation in one session, a WebAuthn ceremony
+available at the screen (`/authn/login`, the same one the authorization endpoint
+uses), and one fewer place asking for a username.
+
+**An artifact resolves exactly once.** Bindings §3.6.4.1 requires it, no lifetime
+setting can express it, and it is the single easiest thing in this profile to get
+wrong and the hardest to notice — the happy path passes either way. Resolving
+destroys the artifact; a second `ArtifactResolve` for the same one is refused with
+a status naming the reason. The artifact itself is the 44 bytes §3.6.4 specifies:
+type code `0x0004`, an endpoint index, the SHA-1 of the issuer's entityID as a
+`SourceID`, and twenty random bytes.
+
+**Where a `LogoutResponse` goes is a guess unless you declare it.** A
+`<samlp:LogoutRequest>` carries no return address — only SP metadata has one, in a
+`SingleLogoutService` element, and this service publishes metadata and does not
+consume it. So the address is looked for in three places in order: the
+`samlSingleLogoutService` attribute on the application's directory entry, then
+`saml2.defaultSingleLogoutService`, then the assertion consumer service URL that
+service provider last used — **which is a guess, and it is logged as one**. It is
+a guess that usually works, because a service provider's ACS and its SLO endpoint
+are commonly the same handler, and it is the difference between Single Logout
+being exercisable here and not. Declare it on `/admin/saml2`, through
+`POST /admin-api/saml2/set-logout-service`, or with an `ldapmodify`.
+
+An identity-provider-initiated logout — a bare `GET /saml2/slo` — ends the
+session and **names** every service provider it signed into, with a
+`LogoutRequest` built for each. It does not fan them out into hidden frames:
+WS-Federation's `wsignoutcleanup1.0` is an idempotent GET that works as a
+one-pixel image, and a SAML `LogoutRequest` is a signed message that a service
+provider *answers*, so firing those blind would produce a page claiming a
+federation-wide logout it cannot observe.
+
+**What it does not do**, stated rather than left to be discovered: no assertion
+is encrypted (WS-Trust's `/sts?encrypt=1` still is — a passive AuthnRequest
+carries no recipient certificate to encrypt to unless SP metadata is consumed,
+and it is not); **no AuthnRequest signature is verified**, which is why the
+metadata advertises `WantAuthnRequestsSigned="false"` and why the signing
+certificate off a signed request is *recorded* on the application entry — so the
+check has somewhere to read from the day it is wanted; no SP metadata is
+consumed; and there is no identity-provider-initiated SSO with an unsolicited
+Response, no ECP profile and its PAOS binding (refused **by name** rather than
+quietly answered over HTTP POST — a service provider that asked for PAOS and got
+a form post would conclude that PAOS worked), no Name Identifier Management and
+no Assertion Query and Request profile.
+
+`/admin/saml2` is the console page for it, and it answers the one question
+nothing else here can: **which metadata document do I configure this service
+provider from** — which is not one URL, and whose slug nobody derives by hand. It
+holds nothing; every row is an entry in `ou=applications`.
+
+### SAML 1.1 — the two browser profiles, and an attribute authority
+
+Beside the SAML 2.0 profile above sits a SAML 1.1 one at `/saml11`, and the most
+useful thing to say about it first is what it is **not**: it is not the same
+implementation with the version number turned down. **SAML 1.1 has no request
+message.** There is no `<AuthnRequest>` — the browser profiles are
+identity-provider-initiated, and a flow begins when a browser arrives at the
+*inter-site transfer service* carrying a `TARGET`, the URL at the relying party
+it wants to end up at.
+
+Almost everything that reads oddly here comes out of that one fact.
+
+| Endpoint | What it is |
+|---|---|
+| `GET\|POST /saml11/sso[/{rp}]` | the **inter-site transfer service** — SAML 1.1's name for what 2.0 calls the Single Sign-On service |
+| `POST /saml11/responder[/{rp}]` | the **SAML responder**, SOAP over HTTP (bindings §3.1). It resolves artifacts, returns assertions by `AssertionID`, and answers `AttributeQuery` and `AuthenticationQuery` |
+| `GET /saml11/metadata[/{rp}]` | signed metadata — **one document per relying party** |
+| `GET\|POST /saml11/rp` | a **mock relying party**. Non-spec, the default assertion consumer, and where a response is verified check by check |
+| `GET /saml11/autopost.js` | the one script the Browser/POST profile runs |
+| `GET /saml11` | what all of that is, for somebody who followed the link |
+
+**The two profiles are chosen here, not asked for.** Browser/POST (profiles §4.2)
+puts the whole signed assertion in a self-submitting form; Browser/Artifact
+(§4.1) sends a 42-byte reference on a redirect and the relying party fetches the
+assertion from the responder over SOAP, so **the assertion never passes through
+the browser at all**. Nothing in SAML 1.1 lets a relying party say which it
+wants, so `saml11.defaultProfile` decides and a **non-spec** `profile=post|artifact`
+parameter overrides it — the same device `/sts?encrypt=1` is, and marked as
+non-spec wherever it appears.
+
+**The confirmation method is the profile, and the two are not interchangeable.**
+§4.1.1.4 requires `urn:oasis:names:tc:SAML:1.0:cm:artifact` for Browser/Artifact
+and §4.2.1.4 requires `...:cm:bearer` for Browser/POST. That element is the
+assertion's own statement of *how it reached the relying party*, so an
+artifact-profile assertion confirmed as `bearer` claims to have travelled through
+the browser when it did not. A relying party that checks refuses it; one that does
+not check works with either. The mock relying party checks.
+
+**The relying party cannot identify itself, so sometimes this service guesses.**
+With no `<saml:Issuer>` to read, the audience of the assertion comes from
+Shibboleth's `providerId` parameter, from the `{rp}` path segment of a scoped
+endpoint, or — failing both — **from the origin of the `TARGET`**. That last one
+is a guess, it is logged as one, and `/admin/saml11` marks an identifier that
+looks like a bare origin as probably guessed. It matters because a relying party
+expecting `urn:example:app` and handed an assertion whose audience is
+`https://app.example.com` refuses it inside a signature check, with nothing
+saying why. Send `providerId`.
+
+**Shibboleth's request profile is supported and is not a standard.** Real SAML
+1.1 service providers do send a request: a redirect carrying `shire`, `target`,
+`providerId` and `time`, identified as
+`urn:mace:shibboleth:1.0:profiles:AuthnRequest`. It is accepted, and it is
+advertised in the metadata, because a mock that could not be told where to send
+the assertion would be a mock nobody could point at anything.
+
+**The metadata is a SAML 2.0 document describing a SAML 1.1 identity provider**,
+which is correct rather than a compromise: SAML 1.1 never had a metadata
+specification, and what every relying party consumes is an `<EntityDescriptor>`
+whose `protocolSupportEnumeration` is `urn:oasis:names:tc:SAML:1.1:protocol`.
+There are **two descriptors** in it — an `IDPSSODescriptor` for the browser
+profiles and an `AttributeAuthorityDescriptor` for the responder's query half,
+because a Shibboleth service provider looks for its attribute authority in the
+second and will not find it in the first. As with the 2.0 document it is per
+relying party and **minted for anything asked for**.
+
+**The responder answers four request types where the SAML 2.0 artifact service
+answers one**, and that is not scope creep: the endpoint has to exist for the
+artifact profile anyway, and once it does an `<AttributeQuery>` is the same
+assertion builder behind the same envelope. `AssertionArtifact` is **one-shot** —
+resolving destroys it (bindings §3.2.3) and a second attempt is refused with a
+status naming the reason. `AssertionIDReference` is **not** one-shot, because a
+reference is not a credential: whoever holds it holds the assertion already.
+`AttributeQuery` and `AuthenticationQuery` are SAML 1.1's **attribute
+authority**, which is the half Shibboleth deployments leaned on hardest. The
+fifth type, `AuthorizationDecisionQuery`, is refused by name — this service makes
+no authorization decisions.
+
+**Nothing authenticates a caller at that endpoint**, and it is worth stating more
+loudly than the equivalent sentence about `/saml2/ars`. An artifact is protected
+by twenty random bytes and the one-shot rule. An `AttributeQuery` is protected by
+nothing: anybody who can reach this port can ask for an assertion about anybody,
+by name, with no credential and no attribute release policy. A real attribute
+authority uses mutual TLS and a policy. Every query is logged saying so.
+
+**There is no Single Logout, and that is the protocol rather than a gap.** It
+arrived with SAML 2.0. There is likewise no `ForceAuthn`, no `IsPassive` and no
+`RequestedAuthnContext` — none of them has a spelling in SAML 1.1 — and **no
+error response**: a failure here is a page, because there is no request to answer
+and no `InResponseTo` to name.
+
+Six spellings differ from SAML 2.0 in ways that break a parser, and the
+implementation notes in `saml/CLAUDE.md` list all of them; the ones worth knowing
+before reading a captured document are that the id attribute is `AssertionID` (on
+an assertion) or `ResponseID` (on a response) rather than `ID`, the `Issuer` is an
+**attribute** rather than a child element, the status code is a **QName**
+(`samlp:Success`) rather than a URI, and `ds:Signature` goes **last** inside an
+assertion and **first** inside a response.
+
+`/admin/saml11` is the console page for all of it, and `GET /admin-api/saml11`
+the same thing as JSON.
+
+### Federation — the one feature here that refuses by default
+
+Everything above this line is this service being **asked** for something. This is
+the other direction: a relationship with a foreign identity service, in five
+protocols — SAML 2.0, SAML 1.1, WS-Federation 1.2, OpenID Connect and OAuth 2.0 —
+with this service at **either end** of it.
+
+| | |
+|---|---|
+| `GET /federation` | what all of this is, every configured relationship in both directions, and the URL to give each partner |
+| `GET /federation/login/{id}` | **start.** Sends the browser to the partner — an `<AuthnRequest>`, an inter-site transfer URL, `wa=wsignin1.0`, or an OAuth 2.0 authorization request, whichever the relationship says. Takes `?returnTo=`, a path on this service to land on afterwards |
+| `GET\|POST /federation/acs/{id}` | **finish.** The assertion consumer service, the WS-Federation `wreply` and the OAuth 2.0 `redirect_uri`, all one path. **This is the URL to configure at the partner** |
+| `GET /federation/metadata/{id}` | this service's own SAML metadata for that partner — an `SPSSODescriptor`, which is the half of this service that is a service provider |
+
+Configure them at `/admin/federation`, or through `POST
+/admin-api/federation/create` and its six siblings, or with an `ldapmodify` under
+`ou=federations` — three doors onto one register, which is one entry per
+relationship and no copy anywhere.
+
+#### Why this one cannot be permissive
+
+This service checks no password, validates no access token and attests no
+workload, and that is the point of it. Three surfaces are already exceptions —
+SCIM, the SPIRE Server API, the admin console — and all three are **turnstiles**:
+they refuse a caller so that a client can be made to exercise a refusal, and any
+of them could be opened tomorrow with nothing lost but an error path.
+
+This one is different, and the difference is worth being exact about.
+
+`/federation/acs/{id}` receives **an unauthenticated HTTP request that claims to
+be a person.** The only thing standing between "alice signed in at the partner"
+and "somebody POSTed some XML" is the signature check. And the session that comes
+out of it is **the same session** `/oauth2/authorize`, `/wsfed`, `/saml2/sso`,
+`/saml11/sso` and `/admin` all read.
+
+So "accept any SAML Response" would not be a permissive mock of federation. It
+would be an authentication bypass for every protocol in this process, reachable
+with `curl`, and the tokens minted afterwards would be indistinguishable from
+real ones. There is no version of this endpoint that is both useful and
+permissive.
+
+What that costs is one sentence in the documentation and four in the code:
+
+* nothing federated happens until a relationship is **created**;
+* a relationship is created **disabled**, and enabling it is a second act;
+* an enabled relationship missing a field its protocol needs **refuses and says
+  which field**, rather than half-working;
+* an assertion is refused unless it verifies against the certificate configured
+  on that relationship — **not** against a certificate the document brought with
+  it, which is the difference between a signature check and a decoration.
+
+**Past that gate, everything is as permissive as the rest of this service.** Any
+username in a verified assertion is accepted. Any attribute is mapped. Nothing
+about the person is checked, and a directory entry is created for them. *The gate
+is on the signer, not on the subject.*
+
+#### What a federated sign-in leaves behind
+
+An entry under `ou=users`, with the partner's attributes on it, and five
+attributes that exist nowhere else in this directory:
+
+```
+uid=fedalice,ou=users,dc=example,dc=com
+  cn: Alice Anderson              <- from the partner
+  mail: alice@partner.example     <- from the partner
+  federationRelationship: partner-a
+  federationIssuer: https://idp.partner.example/saml
+  federationSubject: alice@partner.example
+  federationAttribute: cn | mail | givenName | sn
+  federationLastSeen: 20260824T235014Z
+```
+
+`federationAttribute` is the useful one and has no analogue anywhere else here.
+This service **invents** a persona for everybody it has never met — that is what
+fills `mail` and `givenName` for a person who signed in with a name and nothing
+else — so a federated `mail` and an invented `mail` are indistinguishable on the
+entry. This says which is which, and it is exactly the question a person reading
+a federated directory entry has.
+
+A partner's value **overwrites** an invented one and never the other way round.
+An attribute the partner has stopped sending is **left alone** — a partner that
+dropped `title` from its release policy has not said the person has no title.
+`uid` is never written from an assertion, because that is what the DN is built
+from.
+
+An incoming name that nothing maps is **not written under its own name.** It is
+listed as unmapped on the result page, on `/admin/federation` and in the log.
+That looks worse on the first run and is deliberate: this directory has no
+schema, so an attribute nobody defined would be accepted silently and nothing
+would ever report that the name was wrong. The ordinary OpenID Connect claims,
+the SAML `urn:oid:` names and the AD FS claim URIs are mapped already —
+`fedAttributeMap` is for a partner's own inventions.
+
+#### It works in every protocol without any of them being told
+
+The federated sign-in ends by calling the same `startSession()` the sign-in
+screen calls. There is no federation session store, and no protocol module here
+contains the word.
+
+Which is why `/authn/login` grows a **button per usable partner**
+(`federation.loginButtons`): a person arriving at that screen is in the middle of
+something — an authorization request, a `wsignin1.0`, an `AuthnRequest`, the
+console — and the button hands that whole request to the federated flow and
+brings them back to it. Only relationships that would actually work are offered;
+a button leading to a refusal is worse than no button, because the person has
+already left the screen by the time they find out.
+
+#### The other direction: releasing attributes to a partner
+
+Every protocol endpoint here already issues to anybody that asks, so an
+identity-provider-side relationship changes nothing about whether a partner is
+**answered**. It adds two things: the partner is marked as a federation partner
+rather than a test client, and `fedRelease` decides **which attributes reach it**.
+
+The release list can only **remove**, and only from what `/admin/claims`,
+`/admin/saml-attributes` and the groups claim would add. It cannot touch `sub`,
+`iss`, `exp`, a `NameID` or anything else the protocol puts in an artifact
+itself — those are what make the artifact verifiable, and a release list that
+could drop `iss` would produce tokens that fail to verify with nothing pointing
+back at the page.
+
+**An empty release list means no policy, not "release nothing".** That is what
+every partner has on the day it is registered, and treating it as the strict
+reading would mean registering a partner silently stopped it receiving what it
+received the day before.
+
+#### The only outbound request this service makes
+
+Redeeming an OpenID Connect authorization code means calling somebody else's
+token endpoint. Nothing else in this repository has ever dialled anything, and
+that was a position taken twice: `jwks_uri` on an application entry is *recorded
+and never fetched*, and WS-Federation's `wreqptr` is refused, both for the same
+reason — following a URL somebody registered, in order to verify a credential,
+is a server-side request forgery with a specification citation attached.
+
+**Both of those still stand.** The distinction is not "this feature needs it",
+which is the argument every SSRF ever shipped was made with:
+
+> Those URLs are supplied by the **caller**. These are supplied by the
+> **administrator**.
+
+`POST /oauth2/register` is unauthenticated and takes any `jwks_uri` anybody
+types. A federation relationship is created through the gated console or through
+`/admin-api`, and anybody who can set `fedTokenUrl` can already do worse things
+than make this process issue a GET.
+
+The mechanism that keeps that honest is the API rather than the intention.
+`federation_http.js` **will not take a URL**: it takes a relationship and the
+*name* of the attribute holding one, and refuses any name outside its list of
+three. A caller with a URL from anywhere else cannot use it. Beside that: `https`
+only unless `federation.outboundAllowInsecure` says otherwise (warned on every
+request, not once at startup), **no redirects followed** — a 302 from a token
+endpoint would hand the credential in the `Authorization` header to whatever
+`Location` said — a capped body, a short timeout because a browser is waiting,
+and no judgement at all about what comes back.
+
+`federation.outbound` turns it off entirely. SAML, SAML 1.1 and WS-Federation
+need no back channel at all, and an OpenID Connect partner can still be used with
+`fedResponseType: id_token` and its keys pasted into `fedJwks` — so a deployment
+with no egress can federate in four of the five protocols and most of the fifth.
+
+#### OAuth 2.0 is listed separately, and warns
+
+Federating over plain OAuth 2.0 means resting a sign-in on an **access token**,
+which says a client was *authorized* — not that a person signed in just now. That
+gap is the whole of why OpenID Connect exists. It is supported here because real
+deployments do it and being able to exercise one is the point, and it logs a
+warning on every sign-in, because doing it silently would be this repository
+teaching the mistake.
+
+#### What it deliberately does not do
+
+It does not decrypt an `<EncryptedAssertion>` (a partner configured to encrypt
+produces a Response with no assertion, and that cause is *named* rather than
+reported as "the partner sent nothing"). It does not check the partner's
+certificate against a CA or its validity dates — `fedSigningCertificate` is a
+**pinned key**, which is the stronger of the two for this purpose. It does not
+consume a federated **sign-out**: a `wsignout1.0` or `<LogoutRequest>` arriving at
+the ACS is refused by name. It holds no refresh token belonging to anybody else's
+service. And it never re-checks a person after the session exists — a partner
+that revokes somebody five minutes later is not consulted, because nothing here
+polls.
+
+`federation/CLAUDE.md` argues every one of those, and carries the list of
+negatives a test would have to cover. **There is no test yet, and this is the
+surface where that costs most**: it is the only one here whose bugs are security
+bugs rather than fidelity bugs, and a happy path proves close to nothing.
 
 ### WS-Federation — the profile that joins the pieces
 
@@ -2026,7 +2762,9 @@ every relying party in this ecosystem looks first, and it is signed, and it carr
 `fed:SecurityTokenServiceType` with both the `PassiveRequestorEndpoint` and the
 `SecurityTokenServiceEndpoint` — the latter pointing at `/sts`, which is the same
 service answering the active profile. What it deliberately does **not** carry is an
-`IDPSSODescriptor`, per the note near the top of this file.
+`IDPSSODescriptor`, per the note near the top of this file: this document describes a
+security token service, and the SAML 2.0 identity provider describes itself at
+`/saml2/metadata`.
 
 Not implemented, and named here rather than left to be discovered: the attribute
 service (`wattr1.0`) and the pseudonym service (`wpseudo1.0`), which both answer 501
@@ -2402,9 +3140,21 @@ Three further details of that page are worth knowing before changing it. It keep
 
 **`/admin/authorization-servers`** decides what each discovery document *publishes*. One process serves as many authorization servers as somebody configures — the path component both discovery shapes already carry selects a profile, and each can have its own endpoints, capabilities and issuer. Any member is settable, including one this service has never heard of. It is the one page here whose whole purpose is to be able to say something untrue, so every view computes the **drift** between what a profile publishes and what this service actually does. See *Authorization server metadata* above.
 
+**`/admin/delegation`** answers a question no other page here can, and one most identity providers cannot answer at all: *who acted on whose behalf, through what, to reach what.* Three of the protocol families in this service can delegate and each calls it something different — Kerberos has S4U2Self, two flavours of S4U2Proxy and a forwarded ticket-granting ticket; WS-Trust has `OnBehalfOf` and `ActAs`; OAuth 2.0 Token Exchange has impersonation and delegation. All eight are recorded against ONE model, because the question somebody arrives with is protocol-independent: *alice never touched the back end, so why is there a ticket to it in her name, and who asked for it?*
+
+Every act names the three **layers of the architecture** — the *initial identity* the credential is about, the *intermediary* acting on their behalf, and the *target* being reached — and a layer can be a person, an application, or both. The middle one routinely is both: `HTTP/frontend.example.com` has an entry under `ou=users`, because it authenticates, and an entry under `ou=applications`, because tickets are issued for it, and the page links to whichever of the two exist. An application marked *not in the registry* is not an error; that registry holds what this service has been ASKED ABOUT, and an RFC 8693 `audience` nobody has otherwise mentioned is exactly that.
+
+**Impersonation and delegation is the axis worth reading first, and it is not a matter of degree.** Under a delegation the credential CARRIES the chain — an `act` claim, a composite `ActAs`, `S4U_DELEGATION_INFO` in the PAC — so the service at the far end can see who is really asking and can decide differently because of it. Under an impersonation nothing does, which means **this page is the only place that fact will ever be visible**: no reading of the token afterwards, at the resource server or in a log, can recover that a middle tier was involved. That is the property that makes a page like this worth having on an issuer rather than a client.
+
+**Refusals are recorded and are most of what it is for.** A delegation that worked tells you the plumbing is connected. A delegation that was refused names the two accounts, the two attributes and which of them was missing, at the moment the KDC decided — and the text shown is the KDC's own, the same sentence the client was sent. A refused delegation appears in no other list here, because nothing was accepted, so no authentication was recorded; closing that gap is why this page keeps its own store.
+
+A second table is **configuration rather than history**: who MAY delegate to whom, out of `msDS-AllowedToDelegateTo` on the front-end account and `msDS-AllowedToActOnBehalfOfOtherIdentity` on the back-end account, with the flags that stop delegation (`NOT_DELEGATED`) or enable protocol transition (`TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION`) beside them. It answers *why would this be refused* before anybody has tried — including the expensive case that is invisible everywhere else: a front end allowed to delegate but not trusted for protocol transition gets a ticket out of S4U2Self that is simply not forwardable, so classic S4U2Proxy then fails complaining about the evidence, two steps from the attribute that caused it. **It is Kerberos only, and that is not an omission**: Kerberos is the only family here that polices delegation at all. WS-Trust puts no authorization on either element and this service adds none; RFC 8693 leaves the policy to the authorization server and this one has none, so any client may exchange any token for a token about anybody. Every act says which of the two it was, in the same column — the same picture, policed at one end and not at the other.
+
+It has no form and no clear control: everything on it either happened or is somebody else's configuration. The same data is at `GET /admin-api/delegation`, with the acts, the distinct *chains* among them (one per edge of the picture) and the policy. It is in memory, capped by `delegation.maxRecords`, and gone on restart like everything else here.
+
 **`/admin/audit`** is the one page here that reports *history* rather than *state*, and that distinction is the whole reason it exists. Every other page answers a question about now: how many calls, which tokens are still valid, who is in `cn=developers`. None of them can answer *when*, or *by whom*, or *in what order*. `/admin/metrics` will tell you the directory holds eleven entries; only this page can tell you that a twelfth was created at 14:02 and deleted at 14:03 by somebody bound as `uid=carol`, over LDAPS — and that in the same minute a token was revoked from the console. Those are three rows here and three numbers that each went up by one over there.
 
-Six categories, and the shape of them is the point rather than the count. **Authentication** is a credential having been *accepted* in any of the sixteen protocol families. **Session** is a browser sign-on session created or ended — shared between OAuth 2.0 / OIDC and WS-Federation, so a `wsignout1.0` and an `/oauth2/logout` produce the same row. **Directory** is every LDAP operation over 389 and 636 alike. **Admin** and **API** are the console and `/admin-api`. **Protocol** is every other endpoint.
+Six categories, and the shape of them is the point rather than the count. **Authentication** is a credential having been *accepted* in any of the sixteen protocol families. **Session** is a browser sign-on session created or ended — shared between OAuth 2.0 / OIDC, WS-Federation and SAML 2.0, so a `wsignout1.0`, an `/oauth2/logout` and a `/saml2/slo` produce the same row. It also carries the two rows `/logout` writes, `logout.global` and `logout.selective`, which are **one row per act and not one per thing ended**: every session ended already wrote its own `session.end`, so a row per item would count one sign-out twice at two layers. What those two add is what none of the others can say — that these were one act, at one moment, and how much of it could *not* be ended. **Directory** is every LDAP operation over 389 and 636 alike. **Admin** and **API** are the console and `/admin-api`. **Protocol** is every other endpoint.
 
 Each of those arrives through a funnel this service already had, which is the property worth keeping. `admin_stats.recordAuthentication()` is the single point all sixteen families pass through the moment a credential is accepted, so one line there is one line and not sixteen; `app.js`'s call log is the single place every answered request passes through, so one call there covers the console, the API and every protocol endpoint rather than a recording site in each of forty route handlers, thirty-seven of which would never have been added. Only the directory needed a site per operation, because ldapjs dispatches straight into the handler and what a row has to say genuinely differs — a modify names its changed attributes, a search names how many entries came back. What is *not* repeated across those seven is the rule that decides whether an add is a user, a group or something else: that is **placement**, since this directory is schemaless and believing the `objectClass` a client sent would file a `groupOfNames` added under `ou=users` as a group, and it lives in one function that `/admin/groups` agrees with by construction.
 
@@ -2496,7 +3246,7 @@ Everything the console holds is **in memory and dies with the process**, like th
 
 **The navigation is a grouped list down the left rather than a row of tabs across the top.** Seventeen tabs on one line wrapped to three rows on a laptop, and a reader looking for *Verifier request* had to read all seventeen labels to find out it was not *Credential claims*. The five sections are **Overview** (the console index), **Protocols** (authorization servers, token lifetimes, custom claims, the custom SAML attributes, credential claims, the verifier request, SCIM, and SPIFFE with its registration entries and agents), **Directory** (users, groups, applications), **Monitoring** (metrics, issued tokens, the audit log) and **Server configuration** (configuration, admin roles, the service metadata). Monitoring holds its three in widening detail — how much this service has done, what came out of it, and what happened in order — because those are three ways of asking one question and filing the counters away from the events they count helps nobody. **Overview** is a section of one on purpose: `/admin` is where a reader lands and the only page whose job is to point at the others, so it is the one page that cannot sit under a heading naming a kind of content. The breadcrumb trail is unchanged and deliberately does **not** gain a crumb for the section: a section has no page of its own, so its crumb could not be a link, and a dead crumb in the middle of a trail is the same mistake the last-crumb rule exists to prevent.
 
-Three things the console deliberately does **not** do. It does not invalidate a SAML assertion, a Kerberos ticket or a credential: none of those has a revocation mechanism a relying party consults — an assertion is valid because its signature verifies and its `Conditions` hold, and nothing about this service is asked — so a button claiming to revoke one would change a number here and nothing at all out there. It does not end a sign-on session, because `/oauth2/logout` and `wsignout1.0` already do and the second has cleanup to fan out to every relying party the session signed into; a third way to end one would be a third way to get that wrong. And it adds no claims to refresh tokens: a refresh token is presented back to this server and to nothing else, so a claim in one reaches no relying party and would only make the two halves of a grant disagree.
+Two things the console deliberately does **not** do, and one it used to. It does not invalidate a SAML assertion, a Kerberos ticket or a credential: none of those has a revocation mechanism a relying party consults — an assertion is valid because its signature verifies and its `Conditions` hold, and nothing about this service is asked — so a button claiming to revoke one would change a number here and nothing at all out there. **It DOES end a sign-on session now, at `/admin/logout`, and this paragraph used to say the opposite.** The old argument was a good one: `/oauth2/logout` and `wsignout1.0` each had a fan-out written into it, so a third button here would have been a third copy that quietly notified nobody. That stopped being true when the fan-outs became functions owned by the protocol module each belongs to, and one function in `authn.js` became the only place a session actually stops existing — see *Signing out of everything*. What this console still cannot do is *deliver* the notifications: a front-channel logout is an iframe in the signed-out person's own browser, and this is not that browser. And it adds no claims to refresh tokens: a refresh token is presented back to this server and to nothing else, so a claim in one reaches no relying party and would only make the two halves of a grant disagree.
 
 ### The management API
 

@@ -51,6 +51,12 @@ var config = {
     trustProxy: false  // Trust forwarded headers
   },
 
+  // --- Trust realms ----------------------------------------------------
+  realms: {
+    enabled: true,        // Trust realms enabled
+    pathSegment: "realm"  // Realm path segment
+  },
+
   // --- OAuth 2.0 / OIDC ------------------------------------------------
   oauth2: {
     issuer: "",                  // Issuer identifier
@@ -64,7 +70,8 @@ var config = {
     refreshTokenTtlS: 86400,     // Refresh token lifetime (s)
     clockSkewS: 30,              // Token clock skew (s)
     redirectUris: "",            // Registered redirect URIs
-    loopbackPortWildcard: true   // Loopback port wildcard
+    loopbackPortWildcard: true,  // Loopback port wildcard
+    frontchannelLogout: true     // OpenID Connect Front-Channel Logout
   },
 
   // --- Admin console ---------------------------------------------------
@@ -81,9 +88,47 @@ var config = {
     seedInternal: true  // Seed the console and this API as applications; restart to apply
   },
 
+  // --- Federation ------------------------------------------------------
+  federation: {
+    enabled: true,                // Federation endpoints answer
+    max: 50,                      // Relationships remembered
+    usernamePrefix: "",           // Prefix for federated usernames
+    loginButtons: true,           // Offer partners at the sign-in screen
+    outbound: true,               // Make back-channel requests to partners
+    outboundTimeoutMs: 5000,      // Back-channel timeout (ms)
+    outboundAllowInsecure: false, // Allow http:// and untrusted TLS to a partner
+    requestTtlMin: 10             // Outbound request lifetime (minutes)
+  },
+
   // --- SAML ------------------------------------------------------------
   saml: {
     issuer: "urn:wstrust:mock:sts"  // Assertion issuer
+  },
+
+  // --- SAML 2.0 --------------------------------------------------------
+  saml2: {
+    entityId: "urn:sts-mock:idp",                                          // Identity provider entityID
+    perApplicationEntityId: true,                                          // An entityID per service provider
+    assertionLifetimeMin: 60,                                              // Assertion lifetime (minutes)
+    signAssertion: true,                                                   // Sign the assertion
+    signResponse: true,                                                    // Sign the response
+    nameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified", // Default NameID format
+    artifactTtlS: 300,                                                     // Artifact lifetime (seconds)
+    autocreateApplications: true,                                          // Register a service provider on sight
+    defaultSingleLogoutService: ""                                         // Fallback logout return address
+  },
+
+  // --- SAML 1.1 --------------------------------------------------------
+  saml11: {
+    providerId: "urn:sts-mock:idp:saml11",                                 // Identity provider providerID
+    perApplicationProviderId: true,                                        // A providerID per relying party
+    assertionLifetimeMin: 60,                                              // Assertion lifetime (minutes)
+    signAssertion: true,                                                   // Sign the assertion
+    signResponse: true,                                                    // Sign the response
+    nameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified", // Default NameIdentifier format
+    defaultProfile: "post",                                                // Default browser profile
+    artifactTtlS: 300,                                                     // Artifact lifetime (seconds)
+    autocreateApplications: true                                           // Register relying parties on sight
   },
 
   // --- WS-Trust --------------------------------------------------------
@@ -188,6 +233,19 @@ var config = {
   audit: {
     maxEvents: 5000,     // Maximum events held
     protocolCalls: true  // Record protocol endpoint calls
+  },
+
+  // --- Delegation ------------------------------------------------------
+  delegation: {
+    maxRecords: 2000  // Maximum delegation acts held
+  },
+
+  // --- Logout ----------------------------------------------------------
+  logout: {
+    anyUser: true,         // Allow /logout to name somebody else
+    kerberosSignOut: true, // A logout stops older Kerberos tickets at the KDC
+    ldapDisconnect: true,  // A logout drops LDAP connections bound as that person
+    maxRows: 500           // Maximum rows in one logout inventory
   },
 
   // --- SPIFFE ----------------------------------------------------------
