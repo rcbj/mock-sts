@@ -615,6 +615,7 @@ function keyOf(principal) {
 }
 
 function register(def) {
+  log.debug('Entering register().');
   const principal = {
     name: def.name,
     type: def.type,
@@ -694,6 +695,7 @@ function register(def) {
     keys: new Map()
   };
   principals.set(keyOf(principal), principal);
+  log.debug('Leaving register().');
   return principal;
 }
 

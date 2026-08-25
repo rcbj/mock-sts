@@ -100,7 +100,8 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
    `items`), and `isNavGroup()` is the single predicate that decides which.
    There are four groups, all under Protocols — **OAuth2 / OIDC** (authorization
    servers, token lifetimes, custom claims), **SAML** (SAML 2.0 identity
-   provider, custom SAML attributes), **Verifiable Credentials** (credential
+   provider, SAML 1.1 identity provider, custom SAML attributes),
+   **Verifiable Credentials** (credential
    claims, verifier request) and **SPIFFE** (SPIFFE, registration entries,
    agents) — with SCIM left ungrouped beside them. **SAML USED TO BE THE
    EXCEPTION HERE and no longer is**: it held ONE page, and the argument for
@@ -220,6 +221,76 @@ person and not a JSON body. And **`number` was added to the shell's
 `input[type=text],…` selector** when this page arrived: its four inputs were the
 console's first, and without it they were the one control in the card drawn in
 the browser's default chrome.
+
+---
+
+## `/admin`'s OWN LIST OF THE PAGES IS DERIVED NOW, AND THE BUG IT FIXES IS THE ONE THIS REPOSITORY WARNS ABOUT EVERYWHERE ELSE
+
+*What this console is* on the Overview page was a hand-written `<ul>` in the
+index route from the day the console had four pages. On 2026-08-25 it described
+SEVEN of twenty-five — every page added since had been added to `SECTIONS` (so
+it appeared in the sidebar, in the trail and in `consoleJson().pages`) and to
+nothing else. So the one page in this console whose entire job is to point at
+the others had become the least complete description of it in the repository,
+and **nothing could have shown that**: a list of links reads as correct whatever
+it leaves out. It is exactly the failure `/admin/sts-metadata` exists to make
+impossible for endpoints, sitting undetected two clicks away from it.
+
+Three things about the fix are decisions rather than mechanics:
+
+* **Every page row in `SECTIONS` carries a `blurb`, and `consoleGuide()`
+  renders the list from that table.** The blurb is prose about ONE page and
+  lives beside that page's `path` and `label` for the reason its label does. A
+  separate `PAGE_BLURBS` map keyed by path was the obvious alternative and is
+  the same bug with a lookup in front of it — two tables that each look right
+  alone and are never compared.
+* **A page with no `blurb` is DRAWN, marked.** Skipping it would be the
+  original bug with a mechanism behind it. The marker is the only report
+  anything in this service makes about an undescribed console page, and it
+  warns rather than throwing, like `admin_rbac.js`'s install: a console that
+  will not start is worse than one line saying what is missing. **It has been
+  mutation-tested** — a blurb was removed, the marker appeared on that row and
+  on no other, and the blurb was put back — because a check that has never
+  fired has not been shown to check anything.
+* **The GROUPS are kept, where `sectionPages()` flattens them.** Grouping is a
+  fact about the sidebar everywhere else in this file; here it is not, because
+  this list IS the sidebar explained, and a reader looking for *Registration
+  entries* needs the same "these three are SPIFFE" that made the group worth
+  having. `consoleGuide()` therefore walks `SECTIONS` itself rather than `NAV`,
+  and it is the only reader of that table that does.
+
+**The page being drawn on is dropped, and a section emptied by that drop goes
+with it.** That is `trailBar()`'s last-crumb rule one level out — a link that
+reloads the page you are standing on teaches a reader not to trust the ones
+beside it — and it is why the `/admin` row in `SECTIONS` deliberately has no
+`blurb`: a description of the Overview page, on the Overview page, would be
+text nothing renders and everybody keeps editing.
+
+**What still cannot be checked from here is the same gap rule 7 and rule 7a
+both describe**: no code in this process can see that a blurb has gone STALE.
+The marker catches a missing one; a blurb describing what a page did last month
+is invisible, exactly as a `sts_metadata.js` coverage note is.
+
+### *What it deliberately does not do* is about THIS CONSOLE, not about the service
+
+The section under the list is the second half of the same edit and the
+distinction is worth keeping when adding to it: the root `CLAUDE.md` carries a
+table of what this SERVICE does not do, and this section is what an operator
+standing in the console will look for a control for and not find. The overlap
+is real and deliberate — persistence, the password nobody checks, the workload
+nobody attests — but the sentence has to be about the console for the entry to
+belong here. "This service checks no password" belongs in the root table; "the
+gate proves that somebody typed a name that holds a role, and `/admin-api` is
+not gated at all" belongs on the page, because it is the thing a person
+locked out of the console needs and the thing somebody about to expose the port
+must not miss.
+
+**One entry states the opposite of its own heading and must keep doing so.**
+*It DOES end a sign-on session now, and it used to say it did not* is kept in a
+list of non-goals rather than deleted, for the reason 8b keeps the qualified
+group sentence: the four places that said otherwise were read by people, and a
+reversal that leaves no trace is a reversal a reader cannot tell from a
+misremembering.
 
 ---
 
@@ -512,6 +583,76 @@ spellings in two columns where seeing them is the point.
 
 ---
 
+## TWO MORE DRILL-DOWNS UNDER `/admin/delegation`, AND THEY ASK DIFFERENT QUESTIONS
+
+`/admin/delegation/chain` and `/admin/delegation/application` joined the map on
+2026-08-25. Both hang under the delegation page exactly as the map does — no
+`NAV` row, `active` is `/admin/delegation`, `up` carries the filter the reader
+came in with — and both answer `?format=json` and `?format=svg`. Neither has a
+form, so neither needs an operation on `/admin-api`: rule 7 held here the way it
+held for the page above them, and `applications` was added to
+`delegationView()`'s JSON so that what the new chooser is built from is
+reachable without a browser.
+
+**`/admin/delegation/chain?chain=…` is ONE relationship drawn alone**, and every
+row of BOTH tables on the delegation page links to it. The whole picture is the
+right answer to *what does this service look like* and the wrong one to *what is
+this row, exactly*: on a service driven for an afternoon it is forty boxes.
+
+* **It is `delegation.graph()` over a subset and nothing more.** That function
+  takes the acts it is to draw, so this route hands it one chain's and the
+  shapes, the labels and the tables are the map's own — through
+  `delegationLooks()`, `delegationDrawing()`, `delegationTokenRow()` and
+  `sendDelegationSvg()`, which were extracted from the map route the day this
+  page was written because there were suddenly three callers. A second drawing
+  routine for one chain would have been a second answer to what a box is CALLED,
+  and a reader comparing the two pages could not have told that from two boxes
+  that really are different parties.
+* **The URL carries the `chainKey` and not an index.** An index into a capped
+  list moves when the cap bites, so a link somebody put in a ticket would come
+  back describing a DIFFERENT relationship rather than nothing — the one failure
+  mode a stale link must not have. The key is long; that is the price.
+* **A chain with no acts held is not a 404**, which is `/admin/logout`'s lookup
+  rule and matters more here: the store drops the oldest, so an old link coming
+  back empty is ORDINARY. The page says which of the two happened.
+* **The acts table on it has no `chain` link**, because every row on it belongs
+  to the chain being drawn. `delegationRow()` takes `chainLink: false` for that
+  one caller.
+
+**`/admin/delegation/application?application=…` is the other question:** not
+*what talks to what* but WHAT HAS BEEN ISSUED BECAUSE OF THIS APPLICATION —
+which is what somebody wants before turning a middle tier off, or when a resource
+server is seeing tokens it did not expect.
+
+* **REGARDLESS OF ROLE, and that is the page.** A middle tier is the
+  INTERMEDIARY of the chains it acts on and the TARGET of the ones that reach it.
+  Offering only the targets — the easy half — would hide what was issued THROUGH
+  it, which is the interesting half of a delegation, so the credentials table
+  carries a ROLE column rather than being filtered by one. `rolesBySeq` is keyed
+  on the act's sequence number, which is monotonic and never reused, so a role
+  cannot end up beside the wrong credential.
+* **The choice is from a LIST and not a text box, which is where it departs from
+  `/admin/logout`.** That page takes an identity and any name a person can type
+  is a legitimate thing to ask about. Here the question means something only for
+  an application some act NAMED, so the console offers what it has rather than
+  inviting somebody to guess a spelling and be told nothing matched. The chooser
+  is drawn in three places by one function — the delegation page, the bare
+  application page, and again under a selected one so that comparing two is one
+  click — and it is a `<select>` with a button because this console runs no
+  script and because thirty links above the table would push the table off the
+  screen. The same list IS drawn as links, below, where it is content rather than
+  a control.
+* **The chooser follows the filter and the page it opens does not**, which the
+  page says out loud. `applicationList()` is called on `filtered` for the reason
+  `chainList()` is; the page then shows everything that application has ever been
+  part of, because *what exists because of this thing* is not a question a
+  half-answer is useful for.
+* **What an application IS lives in `../common/delegation.js`**, not here — it is
+  keyed on the IDENTIFIER rather than on a box in the picture, and that file
+  argues why. This one only draws it.
+
+---
+
 ## `/admin/federation` IS THE ONE PAGE HERE THAT CONFIGURES A REFUSAL
 
 Every other page in this console either REPORTS what happened or WIDENS what this
@@ -574,11 +715,23 @@ guarded and one added above it would not be. There are none above it, and there
 is nowhere else in the file a route could go.
 
 **It authenticates nothing itself.** `authn.js` owns the session and the sign-in
-screen; the guard asks `sessionOf()` who is here and hands
+screen; the guard asks `sessionAnywhere()` who is here and hands
 `beginAuthentication()` the page they wanted. A login screen of this console's
 own would be a second authentication service. The good consequence of sharing the
 first is that signing in with a security key at `/authn/login` is visible here,
 because it is the same session WS-Federation and the authorization endpoint read.
+
+**`sessionAnywhere()` AND NOT `sessionOf()`, AND THIS GUARD IS ITS ONLY CALLER.**
+The ordinary reader answers out of the ambient realm's partition, which is right
+for `/oauth2/authorize` and was wrong here: the realm chooser on every page of
+this console is a link to the same page in another realm, and each click landed
+on the sign-in screen — then overwrote the browser's only session cookie, so
+clicking back landed there too. The argument for why the console may ask across
+realms when nothing else here may is in `../authn/CLAUDE.md`, beside the
+function; the short of it is that this guard decides from two groups in the ONE
+shared directory, so the authorization behind the session was never per realm.
+The banner names the realm holding the session when it is not the realm being
+read, because the protocol endpoints in this realm still see none.
 
 **A BROWSER IS REDIRECTED AND A PROGRAM IS REFUSED.** Every page here answers
 `?format=json` and every form takes a JSON body precisely so a test can drive
@@ -680,16 +833,37 @@ would cost an afternoon:
   this line's tooltip so that somebody who had learnt to read it out of the
   corner finds it where they look.
 
-* **`page()` draws a realm switcher above the nav**, on every page — but only
-  when a realm has actually been defined. A permanent "default" would be a
-  control that only ever says the same thing, and this console had no such
-  control before realms existed.
-* **The switcher's links are ABSOLUTE URLs and must stay that way.** `app.js`
-  rewrites every root-relative `href`, `action` and `src` in an HTML response to
-  carry the current realm's prefix, which is what makes this file's several
-  hundred hand-written links work inside a realm without one of them being
-  edited. That rewrite is exactly wrong for the one control whose job is to
-  LEAVE the current realm, and an absolute URL is what passes through it.
+* **`navBar()` draws a realm chooser as the FIRST thing inside the nav card**,
+  on every page — but only when a realm has actually been defined. A permanent
+  "default" would be a control that only ever says the same thing, and this
+  console had no such control before realms existed. It was its own card above
+  the nav until 2026-08-25, and that was one surface too many in a column whose
+  whole job is to be one list: a reader looking for where they are should find
+  it at the top of the thing they are already reading. It carries a label and a
+  `<select>` and nothing else — the prose that used to sit under it said what
+  `/admin/realms` says at length.
+* **It is a FORM, and it must stay one, because this console runs no script.**
+  `script-src 'none'` (common/app.js) is what makes the whole js/reflected-xss
+  family moot here rather than merely unlikely. A `<select>` that navigated on
+  change would need an inline handler the browser refuses to run, so the control
+  would silently do nothing — which is why it is a `<select>` and a button, the
+  same shape every filter on this console already uses.
+* **Its action, and the redirect the route it submits to makes, are ABSOLUTE
+  URLs and must stay that way.** `app.js` rewrites every root-relative `href`,
+  `action` and `src` in an HTML response to carry the current realm's prefix —
+  and wraps `res.location()` to do the same to a root-relative redirect target.
+  Both are what make this file's several hundred hand-written links work inside
+  a realm without one of them being edited, and both are exactly wrong for the
+  one control whose job is to LEAVE the current realm. An absolute URL names a
+  host, so it passes through both untouched.
+* **`GET /admin/realm-switch` BUILDS its target and never echoes one.** `to`
+  arrives in a query string and ends up in a `Location` header, which is the
+  shape of every open redirect there has ever been. It is accepted only as a
+  single-slash-rooted path with no whitespace — `//host` and `https://host` are
+  refused rather than corrected — and the realm id is looked up in the registry
+  rather than trusted, with `/admin` as the answer to both refusals. It is not
+  in `NAV`, so it is not one of the console's pages and `tests/admin_api.js`'s
+  page parity does not ask for a `/admin-api` operation mirroring it.
 * **`/admin/config` WRITES the realm it is read in.** `config.setOverride()`
   lands on the ambient realm — see rule 3m — so the Save button on this console
   changes one realm, and `/admin/token-lifetimes` and every other page that
@@ -703,6 +877,12 @@ would cost an afternoon:
   prefix is the same roster as the one reached without. Rule 8 is unchanged and
   there is deliberately no per-realm administrator; if there is ever to be one,
   it is a per-realm container in the directory rather than a second store here.
+* **AND NEITHER IS THE CONSOLE'S SIGN-ON, which follows from the line above.**
+  The guard resolves the one session cookie in whichever realm minted it
+  (`sessionAnywhere()`), so switching realm switches rather than asking somebody
+  to sign in again. Only this console reads a session that way — in the realm
+  switched to, `/oauth2/authorize`, `/wsfed` and the two SAML profiles see none,
+  and the banner says so.
 
 `/admin/realms` is the page for all of it, and it keeps nothing of its own: the
 registry is `common/realms.js`'s and a realm's settings go through the same

@@ -137,11 +137,13 @@ function tlv(tag, value) {
 
 // Two's complement, minimal length. See the header note: negative values occur.
 function integerContent(value) {
+  log.debug("Entering integerContent().");
   if (typeof value !== "number" || !isFinite(value) ||
       Math.floor(value) !== value) {
     throw new Error("krb5: INTEGER must be a whole number, got " + value);
   }
   if (value === 0) {
+    log.debug("Leaving integerContent().");
     return new Uint8Array([0]);
   }
   var bytes = [];
@@ -150,6 +152,7 @@ function integerContent(value) {
     while (v > 0) { bytes.unshift(v & 0xff); v = Math.floor(v / 256); }
     // A leading bit of 1 would read as negative, so pad.
     if (bytes[0] & 0x80) bytes.unshift(0);
+    log.debug("Leaving integerContent().");
     return new Uint8Array(bytes);
   }
   // Smallest n whose range -(2^(8n-1)) .. 2^(8n-1)-1 contains the value.
@@ -158,6 +161,7 @@ function integerContent(value) {
   var m = value + Math.pow(2, 8 * n);
   bytes = new Array(n);
   for (var i = n - 1; i >= 0; i--) { bytes[i] = m & 0xff; m = Math.floor(m / 256); }
+  log.debug("Leaving integerContent().");
   return new Uint8Array(bytes);
 }
 
@@ -236,6 +240,7 @@ function encSequence(items) { return tlv(TAG.SEQUENCE, concat(items)); }
 // absent. Every OPTIONAL field in this grammar is expressed by passing
 // undefined or null, which is what keeps the message builders readable.
 function encTaggedSequence(fields) {
+  log.debug("Entering encTaggedSequence().");
   var parts = [];
   fields.forEach(function (f) {
     if (f === null || f === undefined) {
@@ -246,6 +251,7 @@ function encTaggedSequence(fields) {
     }
     parts.push(tlv(contextTag(f.tag), f.value));
   });
+  log.debug("Leaving encTaggedSequence().");
   return encSequence(parts);
 }
 
@@ -263,6 +269,7 @@ function encSequenceOf(items) { return encSequence(items); }
 // ---------------------------------------------------------------------------
 
 function readTlv(bytes, offset, depth) {
+  log.debug("Entering readTlv().");
   var b = toBytes(bytes);
   var at = offset || 0;
   if ((depth || 0) > MAX_DEPTH) {
@@ -303,6 +310,7 @@ function readTlv(bytes, offset, depth) {
     throw new Error("krb5: ASN.1 element at offset " + at + " claims " + len +
       " bytes but only " + (b.length - valueStart) + " remain");
   }
+  log.debug("Leaving readTlv().");
   return {
     tag: tag,
     length: len,
@@ -338,6 +346,7 @@ function readChildren(value, depth) {
 // INSIDE that tag. Explicit tagging means each [n] wraps exactly one element,
 // and unwrapping it here is what keeps the message readers short.
 function readTaggedSequence(value, depth) {
+  log.debug("Entering readTaggedSequence().");
   var map = {};
   readChildren(value, depth).forEach(function (child) {
     if ((child.tag & 0xc0) !== 0x80) {
@@ -352,6 +361,7 @@ function readTaggedSequence(value, depth) {
     }
     map[n] = inner[0];
   });
+  log.debug("Leaving readTaggedSequence().");
   return map;
 }
 
@@ -364,6 +374,7 @@ function expectTag(t, tag, what) {
 }
 
 function decInteger(t) {
+  log.debug("Entering decInteger().");
   expectTag(t, TAG.INTEGER, "an INTEGER");
   var b = t.value;
   if (b.length === 0) {
@@ -376,6 +387,7 @@ function decInteger(t) {
   var negative = (b[0] & 0x80) !== 0;
   var v = 0;
   for (var i = 0; i < b.length; i++) v = v * 256 + b[i];
+  log.debug("Leaving decInteger().");
   return negative ? v - Math.pow(2, 8 * b.length) : v;
 }
 
@@ -521,20 +533,26 @@ function describeTag(tag) {
 // only to decide whether to recurse for display; a wrong guess costs a prettier
 // tree, not correctness.
 function looksConstructed(t) {
+  log.debug("Entering looksConstructed().");
   if ((t.tag & 0x20) === 0) {
+    log.debug("Leaving looksConstructed().");
     return false;
   }
   if (t.length === 0) {
+    log.debug("Leaving looksConstructed().");
     return false;
   }
   try {
     var children = readChildren(t.value, 0);
+    log.debug("Leaving looksConstructed().");
     return children.length > 0 &&
         children[children.length - 1].end === t.value.length;
   } catch (e) {
     // Not parseable as a sequence of elements: treat as opaque.
+    log.debug("Leaving looksConstructed().");
     return false;
   }
+  log.debug("Leaving looksConstructed().");
 }
 
 function tree(bytes, depth) {

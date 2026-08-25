@@ -447,6 +447,7 @@ function trimmed(value, limit) {
 }
 
 function detailOf(source) {
+  log.debug("Entering detailOf().");
   const out = {};
   const keys = Object.keys(source || {});
   keys.slice(0, MAX_DETAIL_KEYS).forEach(function (key) {
@@ -461,6 +462,7 @@ function detailOf(source) {
   if (keys.length > MAX_DETAIL_KEYS) {
     out['(more)'] = (keys.length - MAX_DETAIL_KEYS) + ' further field(s) not kept';
   }
+  log.debug("Leaving detailOf().");
   return out;
 }
 
@@ -477,6 +479,7 @@ function trimToCap() {
 }
 
 function record(event) {
+  log.debug("Entering record().");
   const info = event || {};
   const action = String(info.action || 'protocol.call');
   const category = CATEGORY_OF_ACTION[action] || String(info.category || 'protocol');
@@ -518,6 +521,7 @@ function record(event) {
   };
   events.push(row);
   trimToCap();
+  log.debug("Leaving record().");
   return row;
 }
 
@@ -561,20 +565,28 @@ function audit(event) {
 const MAX_ACTION_LENGTH = 60;
 
 function actionOf(req) {
+  log.debug("Entering actionOf().");
   const raw = typeof req.body === 'string' ? req.body : '';
-  if (!raw) return '';
+  if (!raw) {
+    log.debug("Leaving actionOf().");
+    return '';
+  }
   const type = String(req.headers['content-type'] || '');
   try {
     if (/json/i.test(type)) {
       const parsed = JSON.parse(raw);
+      log.debug("Leaving actionOf().");
       return trimmed(parsed && parsed.action, MAX_ACTION_LENGTH);
     }
+    log.debug("Leaving actionOf().");
     return trimmed(new URLSearchParams(raw).get('action') || '', MAX_ACTION_LENGTH);
   } catch (e) {
     // Not a body this can read; the row simply has no action name on it. Not an
     // error worth a line — an unparseable body is already a 400 the row records.
+    log.debug("Leaving actionOf().");
     return '';
   }
+  log.debug("Leaving actionOf().");
 }
 
 // What a status code means as an outcome. See OUTCOMES above for why 4xx and
@@ -715,17 +727,21 @@ function queryText(query) {
 // caller already has it resolved.
 // ---------------------------------------------------------------------------
 function objectKindOf(dn, containers) {
+  log.debug("Entering objectKindOf().");
   const lower = String(dn || '').toLowerCase().replace(/\s*,\s*/g, ',');
   const users = String((containers && containers.users) || '').toLowerCase()
                   .replace(/\s*,\s*/g, ',');
   const groups = String((containers && containers.groups) || '').toLowerCase()
                    .replace(/\s*,\s*/g, ',');
   if (users && lower !== users && lower.slice(-(users.length + 1)) === ',' + users) {
+    log.debug("Leaving objectKindOf().");
     return 'user';
   }
   if (groups && lower !== groups && lower.slice(-(groups.length + 1)) === ',' + groups) {
+    log.debug("Leaving objectKindOf().");
     return 'group';
   }
+  log.debug("Leaving objectKindOf().");
   return 'entry';
 }
 
@@ -737,7 +753,9 @@ function directoryActionFor(operation, dn, containers) {
 }
 
 function recordDirectory(event) {
+  log.debug("Entering recordDirectory().");
   const info = event || {};
+  log.debug("Leaving recordDirectory().");
   return audit({
     action: info.action,
     outcome: info.outcome,

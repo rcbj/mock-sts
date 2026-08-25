@@ -91,7 +91,7 @@ before you build a test on it.
 |---|---|
 | **The signing key** | Each realm generates its own. A token minted in one does not verify against another's JWKS. Each realm's `kid` is on `/admin/realms`. |
 | **Every setting** | Per realm, above whatever the process is configured with. `/admin/config` and `POST /admin-api/config/set` reached under a realm's prefix read *and write* that realm. |
-| **Sessions** | Signing in to one realm signs you in to that realm only. |
+| **Sessions** | Signing in to one realm signs you in to that realm only. **The admin console is the one exception**: its gate resolves your session cookie in whichever realm minted it, so the realm switcher switches rather than asking you to sign in again — the browser has only one session cookie, and before this a switch overwrote it. Every protocol endpoint is unchanged: in the realm you switched to, `/oauth2/authorize`, `/wsfed` and the two SAML profiles see no session. The console's banner names the realm your session belongs to whenever it is not the one you are looking at. |
 | **Everything in flight** | Authorization codes, access and refresh tokens, refresh families, DPoP replay and nonce state, client-assertion replay state, named authorization servers, credential offers, pre-authorized codes, deferred transactions, issuance nonces, presentation transactions, SAML 2.0 and 1.1 request state and artifacts. |
 | **What goes into a token** | The custom claim selections, the SAML attribute selections, the credential claims, the verifier's request. |
 | **The statistics and the audit log** | Including the audit sequence numbers, so one realm's rows are contiguous. |
@@ -131,8 +131,14 @@ is something the service tells you rather than something to remember.
 ## The console
 
 Every page shows **one** realm — the one whose prefix it was reached under — and
-carries a switcher at the top of the sidebar that moves to the same page in
-another realm, carrying the filter and the page you were on.
+carries a **Trust realm** chooser at the top of the sidebar, inside the same
+card as the sections, that moves to the same page in another realm, carrying the
+filter and the page you were on. It is a `<select>` and a button rather than a
+select that navigates on change, because the console runs no script at all
+(`script-src 'none'`) and an inline handler is the one thing that policy
+forbids. It submits to `GET /admin/realm-switch`, which builds the target from
+the realm registry and a path it has checked is rooted and single-slashed —
+never from the query string as given.
 
 `/admin-api` is realm-scoped by the same prefix, so `/realm/acme/admin-api/config`
 is that realm's configuration and every one of its operations works per realm.

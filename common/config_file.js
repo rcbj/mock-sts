@@ -41,6 +41,13 @@
 // It is a LIBRARY under config.js — it requires nothing at all, not even
 // bunyan, because config.js requires IT and a cycle there would hand back a
 // half-initialised module (rule 2 in the root CLAUDE.md).
+//
+// WHICH IS ALSO WHY THERE ARE NO Entering/Leaving LOGS BELOW, and that is an
+// exemption from this repository's code style rather than an oversight: this
+// module runs FIRST, above helpers.js, and there is no logger to reach yet. A
+// bunyan of its own would answer to no level, because the level is a setting
+// in the file this module is still working out the path of. The same exemption,
+// argued the same way, is at the top of mgmt-api/admin_api_explorer.js.
 // ---------------------------------------------------------------------------
 
 const path = require('path');

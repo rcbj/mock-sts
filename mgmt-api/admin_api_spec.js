@@ -25,14 +25,19 @@
 // `const` and nullable-by-union, all of which 3.0 spells differently or not at
 // all. Every tool this repository would plausibly meet reads 3.1.
 //
-// This module registers no route and requires nothing of this service's — it is
-// a pure function over a table — so its position in the require order does not
-// matter, in the sense rule 3 gives for dpop.js.
+// This module registers no route and requires nothing of this service's but the
+// LOGGER — it is a pure function over a table — so its position in the require
+// order does not matter, in the sense rule 3 gives for dpop.js, which reaches
+// for helpers.js on exactly the same terms. What it must not grow is a require
+// of anything that holds state: a document built from what the service happens
+// to be doing is a document that describes one moment.
 // ---------------------------------------------------------------------------
 
 // The reply shape shared by every POST here: the console's own action result,
 // unchanged. `ok` is the only member that is always present; the rest depends
 // on what was asked, which is why this schema is open rather than closed.
+const { log } = require('../common/helpers');
+
 const ACTION_RESULT = {
   type: 'object',
   description:
@@ -2080,6 +2085,60 @@ const SCHEMAS = {
                      'list it is derived from.',
         items: { $ref: '#/components/schemas/DelegationChain' }
       },
+      applications: {
+        type: 'array',
+        description: 'Every APPLICATION named by an act among what matched, ' +
+                     'in whatever role it played, with what it did. It is a ' +
+                     'strictly different question from `chains` and cannot be ' +
+                     'derived from one: an application is keyed on its ' +
+                     'IDENTIFIER, normalised, while a chain names three ' +
+                     'parties — one of which routinely carries an application ' +
+                     'identifier that is not its identity (an RFC 8693 ' +
+                     'intermediary is an ACTOR who exchanged through a ' +
+                     '`client_id`). This is what the chooser on ' +
+                     '/admin/delegation is built from, and ' +
+                     '/admin/delegation/application is one entry of it drawn ' +
+                     'in full.',
+        items: openObject('One application, in every role it has played.', {
+          key: { type: 'string',
+                 description: 'The normalised identifier. Two spellings of ' +
+                              'one application are one entry, on the same ' +
+                              'normalisation the picture merges boxes with.' },
+          identifier: { type: 'string',
+                        description: 'The most recent spelling, which is what ' +
+                                     'the console shows and links by.' },
+          spellings: { type: 'array', items: { type: 'string' },
+                       description: 'Every form seen. Carried so that the ' +
+                                    'collapse is something a reader can SEE ' +
+                                    'rather than take on trust.' },
+          identityKey: {
+            type: 'string',
+            description: 'Set when this application also PRESENTED a ' +
+                         'credential — the middle tier that is a person and ' +
+                         'an application at once. Empty otherwise.'
+          },
+          roles: openObject('How many acts it was the initial identity, the ' +
+                            'intermediary and the target of. One act can ' +
+                            'count twice: an S4U2Self names its requester as ' +
+                            'the intermediary AND the target.', {}),
+          protocols: { type: 'array', items: { type: 'string' } },
+          acts: { type: 'integer',
+                  description: 'Acts it took part in, counted ONCE each ' +
+                               'however many roles it played in one.' },
+          issued: { type: 'integer' }, refused: { type: 'integer' },
+          credentials: {
+            type: 'integer',
+            description: 'Credentials produced by the acts it took part in — ' +
+                         'issued THROUGH it where it was the intermediary and ' +
+                         'FOR it where it was the target. Both, because ' +
+                         '"related to this application" is the question, and ' +
+                         'a count that silently meant one of them would be ' +
+                         'the wrong answer half the time.'
+          },
+          chains: { type: 'integer' },
+          firstAt: { type: 'integer' }, lastAt: { type: 'integer' }
+        })
+      },
       policy: { $ref: '#/components/schemas/DelegationPolicy' }
     }, PAGING_PROPERTIES)),
 
@@ -2270,6 +2329,7 @@ const DESCRIPTION = [
 // One operation, as OpenAPI wants it. `entry` is a row of admin_api.js's route
 // table and `action` is one of its actions, or null for a plain route.
 function operationOf(entry, action) {
+  log.debug("Entering operationOf().");
   const source = action || entry;
   const mirrors = source.mirrors || entry.mirrors || '';
   const parts = [source.description || ''];
@@ -2304,6 +2364,7 @@ function operationOf(entry, action) {
       content: { 'application/json': {
         schema: { $ref: '#/components/schemas/ActionResult' } } }
     };
+    log.debug("Leaving operationOf().");
     return operation;
   }
   operation.responses['200'] = {
@@ -2314,6 +2375,7 @@ function operationOf(entry, action) {
                                      'application/json'] = {
     schema: source.responseSchema || { type: 'object' }
   };
+  log.debug("Leaving operationOf().");
   return operation;
 }
 
@@ -2322,6 +2384,7 @@ function operationOf(entry, action) {
 // which is a real address even though express serves the six of them from one
 // `:action` pattern.
 function buildSpec(routes, options) {
+  log.debug("Entering buildSpec().");
   const opts = options || {};
   const paths = {};
   const tags = [];
@@ -2341,6 +2404,7 @@ function buildSpec(routes, options) {
       paths[path][method] = operationOf(entry, action);
     });
   });
+  log.debug("Leaving buildSpec().");
   return {
     openapi: '3.1.0',
     info: {

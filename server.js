@@ -352,6 +352,7 @@ require('./sts_metadata');
 const useHttps = config.value('global.https');
 
 function announce() {
+  log.debug('Entering announce().');
   log.info('WS-Trust STS mock listening on ' + (useHttps ? 'https' : 'http') +
            '://' + HOST + ':' + PORT +
            ' (WS-Trust issuer ' + config.value('wstrust.issuer') +
@@ -493,6 +494,7 @@ function announce() {
     // later as a TLS endpoint that never answers.
     log.error('tls: the TLS endpoint could not start: ' + err.message);
   });
+  log.debug('Leaving announce().');
 }
 
 // Built rather than started above, because the two shapes differ only in this

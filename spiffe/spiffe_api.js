@@ -103,7 +103,11 @@ function trustDomain() { return ca.trustDomain(); }
 // 56000 and is reported by every tool as valid.
 // ---------------------------------------------------------------------------
 function entryToProto(entry, mask) {
-  if (!entry) return null;
+  log.debug('Entering entryToProto().');
+  if (!entry) {
+    log.debug('Leaving entryToProto().');
+    return null;
+  }
   const full = {
     id: entry.id,
     spiffe_id: spiffeId.toProto(entry.spiffeId),
@@ -123,6 +127,7 @@ function entryToProto(entry, mask) {
     hint: entry.hint || '',
     created_at: String(secondsFromGeneralizedTime(entry.createdAt))
   };
+  log.debug('Leaving entryToProto().');
   return applyEntryMask(full, mask);
 }
 
@@ -152,7 +157,9 @@ function applyEntryMask(full, mask) {
 // what makes `spire-server entry create -spiffeID x -selector y` work with no
 // parent given.
 function entryFromProto(message) {
+  log.debug('Entering entryFromProto().');
   const proto = message || {};
+  log.debug('Leaving entryFromProto().');
   return {
     id: String(proto.id || '').trim(),
     spiffeId: spiffeId.fromProto(proto.spiffe_id),
@@ -173,7 +180,11 @@ function entryFromProto(message) {
 }
 
 function agentToProto(agent, mask) {
-  if (!agent) return null;
+  log.debug('Entering agentToProto().');
+  if (!agent) {
+    log.debug('Leaving agentToProto().');
+    return null;
+  }
   const full = {
     id: spiffeId.toProto(agent.id),
     attestation_type: agent.attestationType || '',
@@ -186,15 +197,22 @@ function agentToProto(agent, mask) {
     can_reattest: !!agent.canReattest,
     agent_version: ''
   };
-  if (!mask || !Object.keys(mask).length) return full;
+  if (!mask || !Object.keys(mask).length) {
+    log.debug('Leaving agentToProto().');
+    return full;
+  }
   const anySet = Object.keys(mask).some(function (key) { return mask[key]; });
-  if (!anySet) return full;
+  if (!anySet) {
+    log.debug('Leaving agentToProto().');
+    return full;
+  }
   const out = { id: full.id };
   Object.keys(mask).forEach(function (key) {
     if (mask[key] && Object.prototype.hasOwnProperty.call(full, key)) {
       out[key] = full[key];
     }
   });
+  log.debug('Leaving agentToProto().');
   return out;
 }
 
@@ -267,52 +285,76 @@ function selectorSet(list) {
 }
 
 function selectorMatches(entrySelectors, match) {
-  if (!match) return true;
+  log.debug('Entering selectorMatches().');
+  if (!match) {
+    log.debug('Leaving selectorMatches().');
+    return true;
+  }
   const wanted = selectorSet(match.selectors);
   const have = selectorSet(entrySelectors);
   const wantedKeys = Object.keys(wanted);
   const haveKeys = Object.keys(have);
-  if (!wantedKeys.length) return true;
+  if (!wantedKeys.length) {
+    log.debug('Leaving selectorMatches().');
+    return true;
+  }
   const behavior = String(match.match || 'MATCH_EXACT');
   if (behavior === 'MATCH_EXACT') {
+    log.debug('Leaving selectorMatches().');
     return wantedKeys.length === haveKeys.length &&
            wantedKeys.every(function (k) { return have[k]; });
   }
   if (behavior === 'MATCH_SUBSET') {
+    log.debug('Leaving selectorMatches().');
     return haveKeys.every(function (k) { return wanted[k]; });
   }
   if (behavior === 'MATCH_SUPERSET') {
+    log.debug('Leaving selectorMatches().');
     return wantedKeys.every(function (k) { return have[k]; });
   }
   if (behavior === 'MATCH_ANY') {
+    log.debug('Leaving selectorMatches().');
     return wantedKeys.some(function (k) { return have[k]; });
   }
+  log.debug('Leaving selectorMatches().');
   return true;
 }
 
 function federatesWithMatches(entryFederates, match) {
-  if (!match) return true;
+  log.debug('Entering federatesWithMatches().');
+  if (!match) {
+    log.debug('Leaving federatesWithMatches().');
+    return true;
+  }
   const wanted = (match.trust_domains || []).map(function (t) {
     return String(t).trim().toLowerCase();
   }).filter(Boolean);
-  if (!wanted.length) return true;
+  if (!wanted.length) {
+    log.debug('Leaving federatesWithMatches().');
+    return true;
+  }
   const have = {};
   (entryFederates || []).forEach(function (t) { have[String(t).toLowerCase()] = true; });
   const haveKeys = Object.keys(have);
   const behavior = String(match.match || 'MATCH_EXACT');
   if (behavior === 'MATCH_EXACT') {
+    log.debug('Leaving federatesWithMatches().');
     return wanted.length === haveKeys.length &&
            wanted.every(function (t) { return have[t]; });
   }
   if (behavior === 'MATCH_SUBSET') {
+    log.debug('Leaving federatesWithMatches().');
     return haveKeys.every(function (t) { return wanted.indexOf(t) >= 0; });
   }
   if (behavior === 'MATCH_SUPERSET') {
+    log.debug('Leaving federatesWithMatches().');
     return wanted.every(function (t) { return have[t]; });
   }
   if (behavior === 'MATCH_ANY') {
+    log.debug('Leaving federatesWithMatches().');
     return wanted.some(function (t) { return have[t]; });
   }
+  log.debug('Leaving federatesWithMatches().');
   return true;
 }
 
@@ -330,11 +372,16 @@ function wrapped(value) {
 }
 
 function filterEntries(rows, filter) {
-  if (!filter) return rows;
+  log.debug('Entering filterEntries().');
+  if (!filter) {
+    log.debug('Leaving filterEntries().');
+    return rows;
+  }
   const bySpiffe = spiffeId.fromProto(filter.by_spiffe_id);
   const byParent = spiffeId.fromProto(filter.by_parent_id);
   const byHint = wrapped(filter.by_hint);
   const byDownstream = wrapped(filter.by_downstream);
+  log.debug('Leaving filterEntries().');
   return rows.filter(function (entry) {
     if (bySpiffe && entry.spiffeId !== bySpiffe) return false;
     if (byParent && entry.parentId !== byParent) return false;
@@ -347,12 +394,17 @@ function filterEntries(rows, filter) {
 }
 
 function filterAgents(rows, filter) {
-  if (!filter) return rows;
+  log.debug('Entering filterAgents().');
+  if (!filter) {
+    log.debug('Leaving filterAgents().');
+    return rows;
+  }
   const byType = String(filter.by_attestation_type || '');
   const byBanned = wrapped(filter.by_banned);
   const byReattest = wrapped(filter.by_can_reattest);
   const before = String(filter.by_expires_before || '');
   const beforeSeconds = before ? Math.floor(Date.parse(before) / 1000) : 0;
+  log.debug('Leaving filterAgents().');
   return rows.filter(function (agent) {
     if (byType && agent.attestationType !== byType) return false;
     if (byBanned !== undefined && !!agent.banned !== !!byBanned) return false;
@@ -499,9 +551,16 @@ const entryHandlers = {
 // all of them — which is what the specification says and is what
 // `spire-server entry update` relies on.
 function maskedChanges(submitted, mask) {
-  if (!mask) return submitted;
+  log.debug('Entering maskedChanges().');
+  if (!mask) {
+    log.debug('Leaving maskedChanges().');
+    return submitted;
+  }
   const anySet = Object.keys(mask).some(function (key) { return mask[key]; });
-  if (!anySet) return submitted;
+  if (!anySet) {
+    log.debug('Leaving maskedChanges().');
+    return submitted;
+  }
   const FIELD_OF = {
     spiffe_id: 'spiffeId', parent_id: 'parentId', selectors: 'selectors',
     x509_svid_ttl: 'x509SvidTtl', jwt_svid_ttl: 'jwtSvidTtl',
@@ -513,6 +572,7 @@ function maskedChanges(submitted, mask) {
   Object.keys(mask).forEach(function (key) {
     if (mask[key] && FIELD_OF[key]) changes[FIELD_OF[key]] = submitted[FIELD_OF[key]];
   });
+  log.debug('Leaving maskedChanges().');
   return changes;
 }
 
@@ -886,6 +946,7 @@ function agentIdFor(attestationType, payload) {
 // such — the `unverified` type is this service's own, and it is there so that
 // nobody reading an agent's selectors mistakes them for attested facts.
 function selectorsFromAttestation(attestationType, payload) {
+  log.debug('Entering selectorsFromAttestation().');
   const out = [{ type: attestationType, value: 'unverified:true' }];
   const text = Buffer.isBuffer(payload) ? payload.toString('utf8')
     : String(payload || '');
@@ -896,6 +957,7 @@ function selectorsFromAttestation(attestationType, payload) {
     // goes nowhere near a selector value.
     out.push({ type: attestationType, value: 'payload:' + text });
   }
+  log.debug('Leaving selectorsFromAttestation().');
   return out;
 }
 
@@ -903,6 +965,7 @@ function selectorsFromAttestation(attestationType, payload) {
 // THE BUNDLE SERVICE.
 // ===========================================================================
 async function ownBundleProto(mask) {
+  log.debug('Entering ownBundleProto().');
   const state = ca.state();
   const document = await ca.bundle();
   const full = {
@@ -930,13 +993,17 @@ async function ownBundleProto(mask) {
     sequence_number: String(document.spiffe_sequence || 0),
     wit_authorities: []
   };
-  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) return full;
+  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) {
+    log.debug('Leaving ownBundleProto().');
+    return full;
+  }
   const out = { trust_domain: full.trust_domain };
   Object.keys(mask).forEach(function (key) {
     if (mask[key] && Object.prototype.hasOwnProperty.call(full, key)) {
       out[key] = full[key];
     }
   });
+  log.debug('Leaving ownBundleProto().');
   return out;
 }
 
@@ -945,7 +1012,9 @@ async function ownBundleProto(mask) {
 // the conversion has to happen somewhere — here, once, rather than in each of
 // the three methods that build a Bundle.
 function derFromJwk(jwk) {
+  log.debug('Entering derFromJwk().');
   try {
+    log.debug('Leaving derFromJwk().');
     return crypto.createPublicKey({ key: jwk, format: 'jwk' })
       .export({ type: 'spki', format: 'der' });
   } catch (e) {
@@ -954,11 +1023,14 @@ function derFromJwk(jwk) {
     // than no bundle at all.
     log.error('spiffe: a JWT authority could not be exported as DER and is ' +
               'being sent empty: ' + e.message);
+    log.debug('Leaving derFromJwk().');
     return Buffer.alloc(0);
   }
+  log.debug('Leaving derFromJwk().');
 }
 
 function federatedBundleProto(entry, mask) {
+  log.debug('Entering federatedBundleProto().');
   const document = entry.document || {};
   const x509 = [];
   const jwt = [];
@@ -980,13 +1052,17 @@ function federatedBundleProto(entry, mask) {
     sequence_number: String(document.spiffe_sequence || 0),
     wit_authorities: []
   };
-  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) return full;
+  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) {
+    log.debug('Leaving federatedBundleProto().');
+    return full;
+  }
   const out = { trust_domain: full.trust_domain };
   Object.keys(mask).forEach(function (key) {
     if (mask[key] && Object.prototype.hasOwnProperty.call(full, key)) {
       out[key] = full[key];
     }
   });
+  log.debug('Leaving federatedBundleProto().');
   return out;
 }
 
@@ -995,6 +1071,7 @@ function federatedBundleProto(entry, mask) {
 // submitted over gRPC becomes one `/spiffe/bundle` and the Workload API can
 // serve.
 function bundleDocumentFromProto(message) {
+  log.debug('Entering bundleDocumentFromProto().');
   const proto = message || {};
   const keys = [];
   (proto.x509_authorities || []).forEach(function (authority) {
@@ -1037,6 +1114,7 @@ function bundleDocumentFromProto(message) {
                'read and was dropped: ' + e.message);
     }
   });
+  log.debug('Leaving bundleDocumentFromProto().');
   return {
     keys: keys,
     spiffe_sequence: Number(proto.sequence_number || 0),
@@ -1389,6 +1467,7 @@ const svidHandlers = {
 };
 
 function spiffeIdFromCsr(csr) {
+  log.debug('Entering spiffeIdFromCsr().');
   try {
     // Node's own X509 parser cannot read a CSR, so this uses the same pkijs the
     // CA does — through a require here rather than an export from spiffe_ca.js,
@@ -1417,6 +1496,7 @@ function spiffeIdFromCsr(csr) {
         });
       });
     });
+    log.debug('Leaving spiffeIdFromCsr().');
     return found;
   } catch (e) {
     // Not a readable CSR, or one with no extensions. The caller answers
@@ -1424,8 +1504,10 @@ function spiffeIdFromCsr(csr) {
     // thing to say; the parse failure itself is only interesting at debug.
     log.debug('spiffeIdFromCsr(): could not read a SPIFFE ID out of the CSR: ' +
               e.message);
+    log.debug('Leaving spiffeIdFromCsr().');
     return '';
   }
+  log.debug('Leaving spiffeIdFromCsr().');
 }
 
 function auditSvid(summary, subject) {
@@ -1446,6 +1528,7 @@ function auditSvid(summary, subject) {
 // `spiffe_ca.setFederatedBundle()` and `RefreshBundle` below.
 // ===========================================================================
 function relationshipProto(entry, mask) {
+  log.debug('Entering relationshipProto().');
   const full = {
     trust_domain: entry.trustDomain,
     bundle_endpoint_url: entry.bundleEndpointUrl || '',
@@ -1460,7 +1543,10 @@ function relationshipProto(entry, mask) {
   } else {
     full.https_web = {};
   }
-  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) return full;
+  if (!mask || !Object.keys(mask).some(function (k) { return mask[k]; })) {
+    log.debug('Leaving relationshipProto().');
+    return full;
+  }
   const out = { trust_domain: full.trust_domain };
   if (mask.bundle_endpoint_url) out.bundle_endpoint_url = full.bundle_endpoint_url;
   if (mask.bundle_endpoint_profile) {
@@ -1468,10 +1554,12 @@ function relationshipProto(entry, mask) {
     else out.https_web = full.https_web;
   }
   if (mask.trust_domain_bundle) out.trust_domain_bundle = full.trust_domain_bundle;
+  log.debug('Leaving relationshipProto().');
   return out;
 }
 
 function setRelationship(message, mask) {
+  log.debug('Entering setRelationship().');
   const name = String(message.trust_domain || '').trim().toLowerCase();
   const existing = ca.federatedBundle(name);
   const document = message.trust_domain_bundle
@@ -1484,10 +1572,12 @@ function setRelationship(message, mask) {
     endpointSpiffeId: (message.https_spiffe || {}).endpoint_spiffe_id || ''
   });
   if (!result.ok) {
+    log.debug('Leaving setRelationship().');
     return { status: statusFor(status.INVALID_ARGUMENT, result.reason),
              federation_relationship: null };
   }
   auditBundleChange('a federation relationship with ' + name + ' was set');
+  log.debug('Leaving setRelationship().');
   return { status: okStatus(),
            federation_relationship: relationshipProto(ca.federatedBundle(name), mask) };
 }

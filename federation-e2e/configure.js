@@ -21,12 +21,15 @@
 // this stack is `docker compose up` once and `node drive.js` twenty times.
 // ===========================================================================
 
+const bunyan = require('bunyan');
+// The suite's convention, and this repository's: bunyan rather than console,
+// so that a run reads the same way as the parent project's tests/*.js and can
+// be filtered by level. `./node_modules/.bin/bunyan` prettifies it.
+const log = bunyan.createLogger({ name: 'configure',
+                                  level: process.env.LOG_LEVEL || 'info' });
+
 const cfg = require('./config');
 const client = require('./http_client');
-
-function line() {
-  console.log(Array.prototype.slice.call(arguments).join(' '));
-}
 
 async function api(base, action, body) {
   const response = await client.request('POST', base + '/admin-api/federation/' + action,
@@ -42,11 +45,12 @@ async function api(base, action, body) {
 }
 
 async function main() {
-  line('Waiting for the two identity services…');
+  log.debug('Entering main().');
+  log.info('Waiting for the two identity services…');
   await client.waitFor(cfg.SP_FRONT + '/healthcheck', 90);
   await client.waitFor(cfg.IDP_FRONT + '/healthcheck', 90);
-  line('  service provider : ' + cfg.SP_FRONT + '   (dialled internally as ' + cfg.SP_BACK + ')');
-  line('  identity provider: ' + cfg.IDP_FRONT + '   (dialled internally as ' + cfg.IDP_BACK + ')');
+  log.info('  service provider : ' + cfg.SP_FRONT + '   (dialled internally as ' + cfg.SP_BACK + ')');
+  log.info('  identity provider: ' + cfg.IDP_FRONT + '   (dialled internally as ' + cfg.IDP_BACK + ')');
 
   // ---------------------------------------------------------------------
   // WHAT THE PARTNER PUBLISHES, read from the partner rather than written
@@ -68,10 +72,9 @@ async function main() {
     throw new Error('discovery at ' + discoveryUrl + ' answered ' + response.status);
   }
   const document = JSON.parse(response.text);
-  line('');
-  line('The identity provider publishes:');
-  line('  issuer                 : ' + document.issuer);
-  line('  authorization_endpoint : ' + document.authorization_endpoint);
+  log.info('The identity provider publishes:');
+  log.info('  issuer                 : ' + document.issuer);
+  log.info('  authorization_endpoint : ' + document.authorization_endpoint);
 
   // The PINNED issuer is what a token from over there will actually carry, and
   // it is what `fedPeer` has to match. If these two disagree, STS_OAUTH2_ISSUER
@@ -79,12 +82,11 @@ async function main() {
   // refused with "it was issued by somebody else" — which is a correct refusal
   // about a real mismatch, and takes a while to recognise.
   if (document.issuer !== cfg.IDP_BACK) {
-    line('');
-    line('  NOTE: the published issuer is "' + document.issuer + '" and this stack expects');
-    line('        "' + cfg.IDP_BACK + '". fedPeer is set to what the service actually');
-    line('        publishes, because that is what an ID Token will carry — but if these');
-    line('        differ, STS_OAUTH2_ISSUER is not pinned on the identity provider and');
-    line('        the issuer will change with whichever address the request arrived at.');
+    log.info('  NOTE: the published issuer is "' + document.issuer + '" and this stack expects');
+    log.info('        "' + cfg.IDP_BACK + '". fedPeer is set to what the service actually');
+    log.info('        publishes, because that is what an ID Token will carry — but if these');
+    log.info('        differ, STS_OAUTH2_ISSUER is not pinned on the identity provider and');
+    log.info('        the issuer will change with whichever address the request arrived at.');
   }
   const peer = document.issuer;
 
@@ -93,9 +95,7 @@ async function main() {
   const frontAuthorize = cfg.IDP_FRONT + '/oauth2/authorize';
   const backToken = cfg.IDP_BACK + '/oauth2/token';
   const backJwks = cfg.IDP_BACK + '/oauth2/jwks';
-
-  line('');
-  line('Configuring the relationship "' + cfg.RELATIONSHIP + '" on the service provider…');
+  log.info('Configuring the relationship "' + cfg.RELATIONSHIP + '" on the service provider…');
   const created = await api(cfg.SP_FRONT, 'create', {
     id: cfg.RELATIONSHIP,
     role: 'service-provider',
@@ -104,9 +104,9 @@ async function main() {
     peer: peer
   });
   if (created.ok) {
-    line('  created, and DISABLED — which is what this register always does.');
+    log.info('  created, and DISABLED — which is what this register always does.');
   } else if (/already registered/.test(String(created.errors))) {
-    line('  it is already registered; bringing its settings up to date.');
+    log.info('  it is already registered; bringing its settings up to date.');
   } else {
     throw new Error('create refused: ' + JSON.stringify(created.errors));
   }
@@ -124,7 +124,7 @@ async function main() {
     const result = await api(cfg.SP_FRONT, 'set',
                              { id: cfg.RELATIONSHIP, field: field, value: value });
     if (!result.ok) throw new Error('set ' + field + ' refused: ' + JSON.stringify(result.errors));
-    line('  ' + field.padEnd(16) + ' = ' + value + (why ? '   (' + why + ')' : ''));
+    log.info('  ' + field.padEnd(16) + ' = ' + value + (why ? '   (' + why + ')' : ''));
   }
 
   // ---------------------------------------------------------------------
@@ -137,35 +137,32 @@ async function main() {
   const mapping = 'groups=employeeType';
   const mapped = await api(cfg.SP_FRONT, 'add-value',
                            { id: cfg.RELATIONSHIP, field: 'fedAttributeMap', value: mapping });
-  if (mapped.ok) line('  fedAttributeMap  + ' + mapping + '   (a name the default table has not got)');
-  else if (/already carries/.test(String(mapped.errors))) line('  fedAttributeMap  already has ' + mapping);
+  if (mapped.ok) log.info('  fedAttributeMap  + ' + mapping + '   (a name the default table has not got)');
+  else if (/already carries/.test(String(mapped.errors))) log.info('  fedAttributeMap  already has ' + mapping);
   else throw new Error('add-value refused: ' + JSON.stringify(mapped.errors));
-
-  line('');
   const enabled = await api(cfg.SP_FRONT, 'enable', { id: cfg.RELATIONSHIP });
   if (!enabled.ok) throw new Error('enable refused: ' + JSON.stringify(enabled.errors));
 
   const view = await client.request('GET',
     cfg.SP_FRONT + '/admin-api/federation?relationship=' + encodeURIComponent(cfg.RELATIONSHIP), {});
   const relationship = JSON.parse(view.text);
-  line('The relationship is ' + (relationship.enabled ? 'ENABLED' : 'disabled') + ' and ' +
+  log.info('The relationship is ' + (relationship.enabled ? 'ENABLED' : 'disabled') + ' and ' +
        (relationship.ready ? 'READY.' : 'NOT READY: ' + relationship.missing.join(', ')));
   if (!relationship.usable) {
     throw new Error('the relationship is not usable, so nothing downstream can work');
   }
-  line('');
-  line('What to give the partner (this service is the SP, so these are OUR addresses):');
-  line('  redirect_uri : ' + relationship.endpoints.assertionConsumerService);
-  line('  sign-in here : ' + cfg.SP_FRONT + relationship.endpoints.login);
-  line('');
-  line('Configured. Nothing was provisioned on the identity provider — it accepts any');
-  line('client_id, which is the mock\'s ordinary permissiveness and is exactly what a');
-  line('real partner would NOT do.');
+  log.info('What to give the partner (this service is the SP, so these are OUR addresses):');
+  log.info('  redirect_uri : ' + relationship.endpoints.assertionConsumerService);
+  log.info('  sign-in here : ' + cfg.SP_FRONT + relationship.endpoints.login);
+  log.info('Configured. Nothing was provisioned on the identity provider — it accepts any');
+  log.info('client_id, which is the mock\'s ordinary permissiveness and is exactly what a');
+  log.info('real partner would NOT do.');
+  log.debug('Leaving main().');
 }
 
 main().then(function () {
   process.exit(0);
 }).catch(function (e) {
-  console.error('\nCONFIGURE FAILED: ' + e.message);
+  log.error('CONFIGURE FAILED: ' + e.message);
   process.exit(1);
 });

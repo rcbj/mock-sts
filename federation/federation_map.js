@@ -282,7 +282,11 @@ function flatten(bag) {
   log.debug('Entering flatten().');
   const out = {};
   const put = function (name, value) {
-    if (value == null) return;
+    log.debug('Entering put().');
+    if (value == null) {
+      log.debug('Leaving put().');
+      return;
+    }
     const key = String(name);
     const values = Array.isArray(value) ? value : [value];
     const flat = values.map(function (one) {
@@ -299,8 +303,12 @@ function flatten(bag) {
       }
       return String(one);
     }).filter(function (one) { return one !== ''; });
-    if (!flat.length) return;
+    if (!flat.length) {
+      log.debug('Leaving put().');
+      return;
+    }
     out[key] = (out[key] || []).concat(flat);
+    log.debug('Leaving put().');
   };
   Object.keys(bag || {}).forEach(function (name) {
     const value = bag[name];

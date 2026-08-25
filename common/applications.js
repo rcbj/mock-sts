@@ -560,7 +560,9 @@ function setDirectory(fns) {
 // Every read and every write goes through here, so the "there is no store"
 // case is answered in one place and complained about once rather than per call.
 function store() {
+  log.debug("Entering store().");
   if (directory) {
+    log.debug("Leaving store().");
     return directory;
   }
   if (!warnedAboutNoDirectory) {
@@ -572,6 +574,7 @@ function store() {
              'silently disagreed. Every query answers empty until that module ' +
              'is loaded.');
   }
+  log.debug("Leaving store().");
   return null;
 }
 
@@ -806,14 +809,17 @@ function addTo(list, value) {
 // it wrong per attribute — and an attribute that is not in the table is REFUSED
 // rather than written, which is what keeps the published schema true.
 function setField(record, name, value) {
+  log.debug("Entering setField().");
   const row = ATTRIBUTE_BY_NAME[name];
   if (!row) {
     log.warn('applications: "' + name + '" is not in the schema and was not recorded. ' +
              'Add a row to SCHEMA.attributes rather than writing an attribute nothing ' +
              'publishes.');
+    log.debug("Leaving setField().");
     return false;
   }
   if (value === undefined || value === null || value === '') {
+    log.debug("Leaving setField().");
     return false;
   }
   if (row.kind === 'multi') {
@@ -822,13 +828,16 @@ function setField(record, name, value) {
     (Array.isArray(value) ? value : [value]).forEach(function (one) {
       if (addTo(record.fields[name], one)) changed = true;
     });
+    log.debug("Leaving setField().");
     return changed;
   }
   const text = String(value);
   if (record.fields[name] === text) {
+    log.debug("Leaving setField().");
     return false;
   }
   record.fields[name] = text;
+  log.debug("Leaving setField().");
   return true;
 }
 
@@ -872,6 +881,7 @@ function setField(record, name, value) {
 // these counts rather than lists.
 // ---------------------------------------------------------------------------
 function seen(detail) {
+  log.debug("Entering seen().");
   const info = detail || {};
   const identifier = String(info.identifier == null ? '' : info.identifier).trim();
   // Normalised ONCE, because three lines below print it and a bare `info.kind`
@@ -883,6 +893,7 @@ function seen(detail) {
             ", kind=" + (statedKinds.join(', ') || '(unstated)'));
   if (!identifier) {
     log.debug("Leaving seen(). There was no identifier to record.");
+    log.debug("Leaving seen().");
     return null;
   }
   const loaded = load(identifier);
@@ -943,6 +954,7 @@ function seen(detail) {
 
   if (!changed) {
     log.debug("Leaving seen(). It was already known and said nothing new.");
+    log.debug("Leaving seen().");
     return record;
   }
   save(record);
@@ -979,6 +991,7 @@ function seen(detail) {
     }
   });
   log.debug("Leaving seen(). " + (known ? "It was already known." : "It is new."));
+  log.debug("Leaving seen().");
   return record;
 }
 
@@ -1132,8 +1145,10 @@ function forgetRegistration(clientId) {
 // member that has one is overwritten from it. That is what makes an
 // `ldapmodify` of `oauthRedirectUri` a configuration change rather than a note.
 function registrationOf(clientId) {
+  log.debug("Entering registrationOf().");
   const loaded = load(clientId);
   if (!loaded.known || !loaded.record.registered) {
+    log.debug("Leaving registrationOf().");
     return null;
   }
   const record = loaded.record;
@@ -1176,6 +1191,7 @@ function registrationOf(clientId) {
     document.token_endpoint_auth_method = fields.oauthTokenEndpointAuthMethod;
   }
   document.client_id = record.identifier;
+  log.debug("Leaving registrationOf().");
   return document;
 }
 
@@ -1260,9 +1276,11 @@ function clientConfigOf(identifier) {
 // identifier never reaches that funnel call `seen()` directly — see its header.
 // ---------------------------------------------------------------------------
 function recordAuthentication(info) {
+  log.debug("Entering recordAuthentication().");
   const detail = info || {};
   const identifier = String(detail.client_id || '').trim();
   if (!identifier) {
+    log.debug("Leaving recordAuthentication().");
     return null;
   }
   log.debug("Entering recordAuthentication(). client_id=" + identifier);
@@ -1291,6 +1309,7 @@ function recordAuthentication(info) {
     fields: fields
   });
   log.debug("Leaving recordAuthentication().");
+  log.debug("Leaving recordAuthentication().");
   return record;
 }
 
@@ -1315,33 +1334,41 @@ function recordAuthentication(info) {
 // that collides with something else in the tree is a directory problem rather
 // than a refusal somebody can act on — so the shapes are refused by name.
 function identifierProblem(identifier) {
+  log.debug("Entering identifierProblem().");
   const text = String(identifier || '').trim();
   if (!text) {
+    log.debug("Leaving identifierProblem().");
     return 'An identifier is required — the client_id, wtrealm, AppliesTo, entityID or ' +
            'service principal name this application is known by.';
   }
   if (text.length > 512) {
+    log.debug("Leaving identifierProblem().");
     return 'That identifier is ' + text.length + ' characters. The longest this registry ' +
            'will hold is 512, which is already far past anything a client_id or an ' +
            'entityID should be.';
   }
   if (/[\r\n\0]/.test(text)) {
+    log.debug("Leaving identifierProblem().");
     return 'An identifier cannot contain a line break or a NUL.';
   }
+  log.debug("Leaving identifierProblem().");
   return null;
 }
 
 function createApplication(detail) {
+  log.debug("Entering createApplication().");
   const info = detail || {};
   const identifier = String(info.identifier || '').trim();
   log.debug("Entering createApplication(). identifier=" + identifier);
   const problem = identifierProblem(identifier);
   if (problem) {
     log.debug("Leaving createApplication(). " + problem);
+    log.debug("Leaving createApplication().");
     return { ok: false, errors: [problem] };
   }
   if (!store()) {
     log.debug("Leaving createApplication(). There is no directory to create it in.");
+    log.debug("Leaving createApplication().");
     return { ok: false, errors: ['There is no directory loaded in this process, so there is ' +
                                  'no ou=applications container and nothing to create. The ' +
                                  'registry has no store of its own on purpose.'] };
@@ -1349,6 +1376,7 @@ function createApplication(detail) {
   const loaded = load(identifier);
   if (loaded.known) {
     log.debug("Leaving createApplication(). It is already here.");
+    log.debug("Leaving createApplication().");
     return { ok: false, errors: ['"' + identifier + '" is already in this registry. Change ' +
                                  'what it holds instead of creating it again — an identifier ' +
                                  'names one application here whatever protocol brought it.'] };
@@ -1356,6 +1384,7 @@ function createApplication(detail) {
   const kind = String(info.kind || '').trim();
   if (kind && KIND_IDS.indexOf(kind) < 0) {
     log.debug("Leaving createApplication(). Unknown kind.");
+    log.debug("Leaving createApplication().");
     return { ok: false, errors: ['"' + kind + '" is not one of the kinds this registry knows. ' +
                                  'The eight are: ' + KIND_IDS.join(', ') + '.'] };
   }
@@ -1372,6 +1401,7 @@ function createApplication(detail) {
   addTo(record.descriptions, 'created from the console; nothing has authenticated for it yet');
   if (!save(record)) {
     log.debug("Leaving createApplication(). The container would not take it.");
+    log.debug("Leaving createApplication().");
     return { ok: false, errors: ['The ou=applications container is full (applications.max) or ' +
                                  'the directory is. Nothing was created.'] };
   }
@@ -1385,6 +1415,7 @@ function createApplication(detail) {
   log.info('applications: "' + identifier + '" was created by hand. ' + count() +
            ' application(s) in the directory.');
   log.debug("Leaving createApplication(). Created.");
+  log.debug("Leaving createApplication().");
   return { ok: true, application: viewAfterWrite(identifier, record) };
 }
 
@@ -1405,6 +1436,7 @@ function viewAfterWrite(identifier, record) {
 // attribute would replace a list of redirect URIs with one and read afterwards
 // as the others having been forgotten.
 function updateApplication(identifier, change) {
+  log.debug("Entering updateApplication().");
   const asked = change || {};
   const attribute = String(asked.attribute || '');
   const mode = String(asked.mode || '');
@@ -1413,6 +1445,7 @@ function updateApplication(identifier, change) {
   const loaded = load(identifier);
   if (!loaded.known) {
     log.debug("Leaving updateApplication(). No such application.");
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['There is no application called "' + identifier + '" in this ' +
                                  'registry. An entry appears when an identifier is ACCEPTED by ' +
                                  'a protocol, or when one is created here.'] };
@@ -1420,6 +1453,7 @@ function updateApplication(identifier, change) {
   const row = ATTRIBUTE_BY_NAME[attribute];
   if (!row) {
     log.debug("Leaving updateApplication(). Not in the schema.");
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" is not in the published schema. ' +
                                  'GET /ldap/applications lists every attribute an entry may ' +
                                  'carry; adding one that is not there means adding a row to ' +
@@ -1427,6 +1461,7 @@ function updateApplication(identifier, change) {
   }
   if (!row.editable) {
     log.debug("Leaving updateApplication(). Not editable.");
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" is not editable here. It is DERIVED — ' +
                                  'what happened rather than what this application may do — and ' +
                                  'a form that could rewrite it would make this page lie about ' +
@@ -1437,10 +1472,12 @@ function updateApplication(identifier, change) {
                                  }).join(', ') + '.'] };
   }
   if (row.editable === 'set' && mode !== 'set') {
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" holds ONE value, so it is set rather ' +
                                  'than added to or removed from.'] };
   }
   if (row.editable === 'multi' && mode !== 'add' && mode !== 'remove') {
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" holds a LIST, so values are added and ' +
                                  'removed rather than set — a set would replace the list with ' +
                                  'one value and read afterwards as the others having been ' +
@@ -1448,6 +1485,7 @@ function updateApplication(identifier, change) {
   }
   const value = String(asked.value == null ? '' : asked.value);
   if (mode !== 'set' && !value) {
+    log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['A value is required to ' + mode + '.'] };
   }
   const record = loaded.record;
@@ -1503,6 +1541,7 @@ function updateApplication(identifier, change) {
 
   if (!changed) {
     log.debug("Leaving updateApplication(). Nothing changed.");
+    log.debug("Leaving updateApplication().");
     return { ok: true, changed: false, application: viewAfterWrite(identifier, record),
              message: 'Nothing changed: ' + attribute + ' already said that.' };
   }
@@ -1522,6 +1561,7 @@ function updateApplication(identifier, change) {
   });
   log.info('applications: "' + identifier + '" — ' + what + '.');
   log.debug("Leaving updateApplication(). " + what + ".");
+  log.debug("Leaving updateApplication().");
   return { ok: true, changed: true, application: viewAfterWrite(identifier, record),
            message: what + '.' };
 }
@@ -1532,21 +1572,25 @@ function updateApplication(identifier, change) {
 // a test that is over. It is the one operation here that LOSES a fact, so it
 // says so in the message rather than reporting a tidy success.
 function deleteApplication(identifier, options) {
+  log.debug("Entering deleteApplication().");
   const opts = options || {};
   log.debug("Entering deleteApplication(). identifier=" + identifier);
   const backing = store();
   if (!backing || !backing.deleteApplication) {
     log.debug("Leaving deleteApplication(). There is no directory.");
+    log.debug("Leaving deleteApplication().");
     return { ok: false, errors: ['There is no directory loaded in this process, so there is ' +
                                  'nothing to delete from.'] };
   }
   const loaded = load(identifier);
   if (!loaded.known) {
     log.debug("Leaving deleteApplication(). No such application.");
+    log.debug("Leaving deleteApplication().");
     return { ok: false, errors: ['There is no application called "' + identifier + '" here.'] };
   }
   const gone = backing.deleteApplication(String(identifier));
   if (!gone) {
+    log.debug("Leaving deleteApplication().");
     return { ok: false, errors: ['The directory would not delete "' + identifier + '".'] };
   }
   audit.audit({
@@ -1558,6 +1602,7 @@ function deleteApplication(identifier, options) {
   });
   log.info('applications: "' + identifier + '" was deleted. ' + count() + ' left.');
   log.debug("Leaving deleteApplication(). Gone.");
+  log.debug("Leaving deleteApplication().");
   return { ok: true,
            message: '"' + identifier + '" is gone from the registry, along with what it had ' +
                     'recorded: ' + loaded.record.authentications + ' authentication(s) and ' +
@@ -1633,8 +1678,10 @@ function view(record, entry) {
 }
 
 function list() {
+  log.debug("Entering list().");
   const backing = store();
   if (!backing) {
+    log.debug("Leaving list().");
     return [];
   }
   const rows = backing.allApplications().map(function (entry) {
@@ -1647,6 +1694,7 @@ function list() {
   // reads in the order they arrived rather than jumbled; it is not the sort
   // failing to work.
   rows.sort(function (a, b) { return String(b.lastSeen).localeCompare(String(a.lastSeen)); });
+  log.debug("Leaving list().");
   return rows;
 }
 

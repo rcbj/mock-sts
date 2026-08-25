@@ -385,6 +385,7 @@ function prepareCall(call, surface, method) {
 // protocol for the same reason those are: it says HOW the call arrived, which
 // is the question a reader of a mixed log is asking.
 function recordCall(surface, method, ok, detail, caller) {
+  log.debug('Entering recordCall().');
   try {
     stats.recordCall('grpc:' + method, ok ? 200 : 500, 0);
   } catch (e) {
@@ -404,6 +405,7 @@ function recordCall(surface, method, ok, detail, caller) {
     summary: (ok ? 'A ' : 'A refused ') + surface + ' gRPC call: ' + method,
     detail: detail || {}
   });
+  log.debug('Leaving recordCall().');
 }
 
 function unary(surface, method, handler) {

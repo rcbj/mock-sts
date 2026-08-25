@@ -626,11 +626,13 @@ const CANONICAL_NAMES = {};
 // read alone. Reported and not thrown, because a table of how to CAPITALISE a
 // name must never be able to stop this service starting.
 function learnName(spelling, source) {
+  log.debug('Entering learnName().');
   const canonical = String(spelling);
   const lower = canonical.toLowerCase();
   const known = CANONICAL_NAMES[lower];
   if (known === undefined) {
     CANONICAL_NAMES[lower] = canonical;
+    log.debug('Leaving learnName().');
     return;
   }
   if (known !== canonical) {
@@ -641,6 +643,7 @@ function learnName(spelling, source) {
              'differently; it is only the spelling shown on a page, and one of the two ' +
              'lists is wrong.');
   }
+  log.debug('Leaving learnName().');
 }
 
 STANDARD_NAMES.forEach(function (spelling) { learnName(spelling, 'the standard list'); });
@@ -1105,16 +1108,19 @@ function unescapeDnValue(value) {
 // modifyTimestamp moves: a timestamp that advanced on a reconnection that wrote
 // nothing would make every handshake look like a write.
 function addValues(stored, name, values) {
+  log.debug('Entering addValues().');
   const key = String(name).toLowerCase();
   const have = stored.attributes[key] || [];
   const added = valuesOf(values).filter(function (value) {
     return value !== '' && have.indexOf(value) === -1;
   });
   if (!added.length) {
+    log.debug('Leaving addValues().');
     return false;
   }
   stored.attributes[key] = have.concat(added);
   touchDirectory();
+  log.debug('Leaving addValues().');
   return true;
 }
 
@@ -1215,8 +1221,10 @@ function usernameOfEntry(stored) {
 // the very second entry the link exists to avoid, for a person whose entry
 // already names that identifier.
 function entryByDidSubject(did) {
+  log.debug('Entering entryByDidSubject().');
   const wanted = String(did == null ? '' : did).trim();
   if (!wanted) {
+    log.debug('Leaving entryByDidSubject().');
     return null;
   }
   let found = null;
@@ -1228,6 +1236,7 @@ function entryByDidSubject(did) {
       found = entry;
     }
   });
+  log.debug('Leaving entryByDidSubject().');
   return found;
 }
 
@@ -1238,8 +1247,10 @@ function entryByDidSubject(did) {
 // identity, and rebuilding the digest would be a second definition of where the
 // entry lives.
 function entryBySpiffeSubject(id) {
+  log.debug('Entering entryBySpiffeSubject().');
   const wanted = String(id == null ? '' : id).trim();
   if (!wanted) {
+    log.debug('Leaving entryBySpiffeSubject().');
     return null;
   }
   let found = null;
@@ -1251,12 +1262,15 @@ function entryBySpiffeSubject(id) {
       found = entry;
     }
   });
+  log.debug('Leaving entryBySpiffeSubject().');
   return found;
 }
 
 function existingUserEntry(name) {
+  log.debug('Entering existingUserEntry().');
   const wanted = String(name == null ? '' : name).trim().toLowerCase();
   if (!wanted) {
+    log.debug('Leaving existingUserEntry().');
     return null;
   }
   // The common case first and without a scan: this is called on every
@@ -1264,6 +1278,7 @@ function existingUserEntry(name) {
   // whose entry is exactly where namePlan() put it.
   const direct = getEntry('uid=' + name + ',' + USERS_DN);
   if (direct) {
+    log.debug('Leaving existingUserEntry().');
     return direct;
   }
   const parent = normalizeDn(USERS_DN);
@@ -1283,6 +1298,7 @@ function existingUserEntry(name) {
       found = entry;
     }
   });
+  log.debug('Leaving existingUserEntry().');
   return found;
 }
 
@@ -2192,6 +2208,7 @@ function applySpiffeCredentialStatus(stored, status, reason) {
 // failure that would be hard to find.
 // ---------------------------------------------------------------------------
 function observeIdentity(detail) {
+  log.debug('Entering observeIdentity().');
   const info = detail || {};
   const event = String(info.event || 'authentication');
   log.debug('Entering observeIdentity(). event=' + event +
@@ -2199,16 +2216,19 @@ function observeIdentity(detail) {
   if (event === 'authentication') {
     const record = autoCreateUser(info);
     log.debug('Leaving observeIdentity(). An authentication.');
+    log.debug('Leaving observeIdentity().');
     return record;
   }
   if (event === 'issuance') {
     const record = recordSpiffeIssuance(info);
     log.debug('Leaving observeIdentity(). An issuance.');
+    log.debug('Leaving observeIdentity().');
     return record;
   }
   if (event === 'credential-status') {
     const record = recordSpiffeCredentialStatus(info);
     log.debug('Leaving observeIdentity(). A credential status change.');
+    log.debug('Leaving observeIdentity().');
     return record;
   }
   log.warn('ldap: the identity funnel offered a "' + event + '" event, which ' +
@@ -2216,6 +2236,7 @@ function observeIdentity(detail) {
            'is a version skew between admin_stats.js and this module rather ' +
            'than anything a caller did.');
   log.debug('Leaving observeIdentity(). Unknown event.');
+  log.debug('Leaving observeIdentity().');
   return null;
 }
 
@@ -2704,6 +2725,7 @@ function applyVcAttributes(stored, key) {
 // then the CN, the fallback for a certificate-seeded entry, which has no uid;
 // then the DN, which is the last resort and is at least stable.
 function personaKeyOf(stored) {
+  log.debug('Entering personaKeyOf().');
   // The DID first, where there is one, and this line is load-bearing: on a
   // DID-named entry the uid is a DIGEST of the identity rather than the identity
   // (see didPlan()), so seeding from it would invent a SECOND person for
@@ -2719,7 +2741,10 @@ function personaKeyOf(stored) {
   // digest didPlan() would have built from that DID.
   const did = (stored.attributes.didsubject || [])[0];
   const uid = (stored.attributes.uid || [])[0];
-  if (did && (!uid || String(uid) === didUid(String(did)))) return String(did);
+  if (did && (!uid || String(uid) === didUid(String(did)))) {
+    log.debug('Leaving personaKeyOf().');
+    return String(did);
+  }
   // The same test for a SPIFFE identity, and it has to be the same shape rather
   // than "does this entry carry a spiffeSubject": the identifier is
   // multi-valued and an entry could hold one without having been NAMED by it,
@@ -2727,11 +2752,19 @@ function personaKeyOf(stored) {
   // invented person this paragraph exists to prevent.
   const spiffe = (stored.attributes.spiffesubject || [])[0];
   if (spiffe && (!uid || String(uid) === spiffeUid(String(spiffe)))) {
+    log.debug('Leaving personaKeyOf().');
     return String(spiffe);
   }
-  if (uid) return String(uid);
+  if (uid) {
+    log.debug('Leaving personaKeyOf().');
+    return String(uid);
+  }
   const cn = (stored.attributes.cn || [])[0];
-  if (cn) return String(cn);
+  if (cn) {
+    log.debug('Leaving personaKeyOf().');
+    return String(cn);
+  }
+  log.debug('Leaving personaKeyOf().');
   return stored.dn;
 }
 
@@ -3048,6 +3081,7 @@ const MEMBER_ATTRIBUTES = [
 
 // Is this entry a group, and by which rule? Returns '' for "it is not one".
 function groupRuleFor(stored) {
+  log.debug('Entering groupRuleFor().');
   const under = isUnder(stored.dn, GROUPS_DN) &&
                 normalizeDn(stored.dn) !== normalizeDn(GROUPS_DN);
   const classes = (stored.attributes.objectclass || []).map(function (value) {
@@ -3056,9 +3090,19 @@ function groupRuleFor(stored) {
   const classed = classes.some(function (value) {
     return GROUP_CLASSES.indexOf(value) >= 0;
   });
-  if (under && classed) return 'both';
-  if (under) return 'placement';
-  if (classed) return 'objectClass';
+  if (under && classed) {
+    log.debug('Leaving groupRuleFor().');
+    return 'both';
+  }
+  if (under) {
+    log.debug('Leaving groupRuleFor().');
+    return 'placement';
+  }
+  if (classed) {
+    log.debug('Leaving groupRuleFor().');
+    return 'objectClass';
+  }
+  log.debug('Leaving groupRuleFor().');
   return '';
 }
 
@@ -3096,11 +3140,13 @@ function consoleKeyFor(dn, stored) {
 // can reach in two operations and a page that quietly showed six members where
 // the entry lists seven would be hiding the very thing it was built to show.
 function resolveMember(value, attribute) {
+  log.debug('Entering resolveMember().');
   const raw = String(value == null ? '' : value);
   const holds = attribute.holds;
   const dn = holds === 'uid' ? 'uid=' + raw + ',' + USERS_DN : raw;
   const stored = getEntry(dn);
   const rule = stored ? groupRuleFor(stored) : '';
+  log.debug('Leaving resolveMember().');
   return {
     value: raw,
     attribute: canonicalName(attribute.name),
@@ -3149,6 +3195,7 @@ function membersOf(stored) {
 // says which side of the disagreement each name came from — merging them into
 // the member list would manufacture a consistency this directory never claimed.
 function claimedMembersOf(groupDn) {
+  log.debug('Entering claimedMembersOf().');
   const listed = {};
   const stored = getEntry(groupDn);
   if (stored) {
@@ -3172,6 +3219,7 @@ function claimedMembersOf(groupDn) {
       mail: (entry.attributes.mail || [])[0] || ''
     });
   });
+  log.debug('Leaving claimedMembersOf().');
   return out.sort(function (a, b) {
     return normalizeDn(a.dn) < normalizeDn(b.dn) ? -1 : 1;
   });
@@ -3967,6 +4015,7 @@ function boundDnOf(req) {
 // DN, and counting the three alike is exactly how every posixGroup member gets
 // missed.
 function membershipsNaming(dn) {
+  log.debug('Entering membershipsNaming().');
   const key = normalizeDn(dn);
   const uid = (splitRdns(dn)[0] || '').toLowerCase().indexOf('uid=') === 0
     ? unescapeDnValue(rdnPairs(splitRdns(dn)[0])[0].value) : '';
@@ -3981,6 +4030,7 @@ function membershipsNaming(dn) {
     });
     if (names) count++;
   });
+  log.debug('Leaving membershipsNaming().');
   return count;
 }
 
@@ -5007,6 +5057,7 @@ function applicationEntry(identifier) {
 // warns about three times.
 // ---------------------------------------------------------------------------
 function entryObject(stored) {
+  log.debug('Entering entryObject().');
   const attributes = {};
   Object.keys(stored.attributes).sort().forEach(function (attribute) {
     attributes[canonicalName(attribute)] = stored.attributes[attribute].slice(0);
@@ -5015,6 +5066,7 @@ function entryObject(stored) {
   // where the entry IS, so holding a copy of it on the entry would be a second
   // definition of the same fact and the one that goes stale on a rename.
   attributes[canonicalName('entrydn')] = [stored.dn];
+  log.debug('Leaving entryObject().');
   return {
     dn: stored.dn,
     origin: stored.origin || 'unstated',

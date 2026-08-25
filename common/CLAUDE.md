@@ -204,6 +204,12 @@ reader derives from four directory files. The short version:
   answers on a socket with no path to put a segment in. So OAuth client
   registrations, SAML service provider entries, the SPIFFE registry and **the
   two admin console roles** are shared — there is no per-realm administrator.
+  **The admin console's SIGN-ON follows those roles rather than the sessions**:
+  its gate is the one reader in this service that resolves the session cookie
+  across realms, so the realm switcher switches instead of asking for a second
+  sign-in. That is argued in `../authn/CLAUDE.md` beside `sessionAnywhere()`, and
+  it changes nothing for a protocol endpoint — `/oauth2/authorize` in the realm
+  switched to still sees no session, and still should.
 * **Kerberos, the two TLS listeners and SPIFFE's four sockets are shared**, for
   the same reason. Kerberos is the one with an obvious way forward, and it is
   written down in `realmSupport()` rather than left to be rediscovered: Kerberos
@@ -954,6 +960,29 @@ find module` naming a file the operator never mentioned.
    TABLE is deliberately left alone: it shows both spellings side by side, where
    seeing them is the point, and changing `chainKey` would change what
    `/admin-api/delegation` calls a chain.
+
+   **`actsOfChain()`, `applicationList()`, `applicationRolesIn()` and
+   `actsForApplication()` are the same rule again, for the two drill-downs the
+   console grew on 2026-08-25.** They are here, beside `chainList()`, because
+   each answers a question about what the STORE holds rather than about how a
+   page looks: which acts belong to one chain, which applications appear in
+   these acts, and what role a given application played in a given act. A
+   `filter()` in `admin.js` would have been a second opinion about the last of
+   those and would have drifted from the first.
+
+   **The APPLICATION is keyed on its IDENTIFIER and deliberately NOT on
+   `nodeIdOf()`'s answer**, which is the one thing to understand before touching
+   any of them. A node is what a party IS — its normalised identity where it
+   presented one — and for a Kerberos front end that is the same string as its
+   application. For an RFC 8693 exchange it is not: the intermediary's box is
+   the ACTOR named in the actor_token, and the application it acted THROUGH is
+   the `client_id` beside it. So a chooser built on node ids would offer that
+   client under a person's name or not at all, and *show me everything delegated
+   through this client* is the question `/admin/delegation/application` exists to
+   answer. The identifier is normalised the way `nodeIdOf()` normalises one, so
+   two spellings are one application, and every spelling is kept beside the key —
+   the collapse has to be something a reader can SEE, which is `party()`'s reason
+   for keeping `presented` next to `key`.
 
    **The CONFIGURED half of `/admin/delegation` is NOT in this file.** Who may
    delegate to whom is `krb5_principals.js`'s `delegationPolicy()`, because

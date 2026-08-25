@@ -628,7 +628,11 @@ function setDirectory(fns) {
 }
 
 function haveDirectory() {
-  if (directory) return true;
+  log.debug('Entering haveDirectory().');
+  if (directory) {
+    log.debug('Leaving haveDirectory().');
+    return true;
+  }
   if (!warnedAboutNoDirectory) {
     warnedAboutNoDirectory = true;
     log.warn('federation: the embedded directory was never loaded, so there is ' +
@@ -638,6 +642,7 @@ function haveDirectory() {
              'requires only app.js and one protocol module; it is not a ' +
              'failure and there is no fallback store, deliberately.');
   }
+  log.debug('Leaving haveDirectory().');
   return false;
 }
 
@@ -694,6 +699,7 @@ function byLowerName(attributes, name) {
 }
 
 function recordFromAttributes(attributes) {
+  log.debug('Entering recordFromAttributes().');
   const record = {};
   SCHEMA.attributes.forEach(function (row) {
     const values = byLowerName(attributes, row.name);
@@ -705,6 +711,7 @@ function recordFromAttributes(attributes) {
       .map(function (one) { return String(one); });
     record[row.name] = row.kind === 'multi' ? list : (list[0] || '');
   });
+  log.debug('Leaving recordFromAttributes().');
   return record;
 }
 
@@ -944,8 +951,12 @@ let releaseIndexAt = 0;
 const RELEASE_INDEX_TTL_MS = 5000;
 
 function releaseIndexNow() {
+  log.debug('Entering releaseIndexNow().');
   const now = Date.now();
-  if (releaseIndex && now - releaseIndexAt < RELEASE_INDEX_TTL_MS) return releaseIndex;
+  if (releaseIndex && now - releaseIndexAt < RELEASE_INDEX_TTL_MS) {
+    log.debug('Leaving releaseIndexNow().');
+    return releaseIndex;
+  }
   const index = new Map();
   inRole('identity-provider').forEach(function (record) {
     if (!isEnabled(record)) return;
@@ -959,32 +970,51 @@ function releaseIndexNow() {
   });
   releaseIndex = index;
   releaseIndexAt = now;
+  log.debug('Leaving releaseIndexNow().');
   return index;
 }
 
 function releaseFilterFor(context) {
+  log.debug('Entering releaseFilterFor().');
   const index = releaseIndexNow();
-  if (!index.size) return null;
+  if (!index.size) {
+    log.debug('Leaving releaseFilterFor().');
+    return null;
+  }
   const info = context || {};
   const clientId = String(info.client_id || '').trim();
-  if (clientId && index.has(clientId)) return index.get(clientId);
+  if (clientId && index.has(clientId)) {
+    log.debug('Leaving releaseFilterFor().');
+    return index.get(clientId);
+  }
   const audience = String(info.audience || '').trim();
-  if (!audience) return null;
-  if (index.has(audience)) return index.get(audience);
+  if (!audience) {
+    log.debug('Leaving releaseFilterFor().');
+    return null;
+  }
+  if (index.has(audience)) {
+    log.debug('Leaving releaseFilterFor().');
+    return index.get(audience);
+  }
   // A JWT `aud` may be a list, joined with spaces by the context builder. Each
   // member is tried, and the FIRST match wins rather than the union of them —
   // a token for two audiences with two release policies is a state nothing here
   // can resolve correctly, so it resolves it predictably and says so in the log
   // rather than quietly intersecting two lists.
   const parts = audience.split(/\s+/).filter(function (one) { return one !== ''; });
-  if (parts.length < 2) return null;
+  if (parts.length < 2) {
+    log.debug('Leaving releaseFilterFor().');
+    return null;
+  }
   for (let i = 0; i < parts.length; i++) {
     if (index.has(parts[i])) {
       log.debug('releaseFilterFor(): the audience names ' + parts.length + ' parties and ' +
                 parts[i] + ' has a release policy; it is the one applied.');
+      log.debug('Leaving releaseFilterFor().');
       return index.get(parts[i]);
     }
   }
+  log.debug('Leaving releaseFilterFor().');
   return null;
 }
 
@@ -1007,6 +1037,7 @@ function persist(record, why) {
 // follows, and it matters more on these entries than on any other:
 // `fedClientSecret` is a real credential at a real foreign service.
 function recordChange(action, record, summary, detail) {
+  log.debug('Entering recordChange().');
   audit.audit({
     action: action,
     actor: '',
@@ -1021,6 +1052,7 @@ function recordChange(action, record, summary, detail) {
       peer: record.fedPeer || ''
     }, detail || {})
   });
+  log.debug('Leaving recordChange().');
 }
 
 // ---------------------------------------------------------------------------

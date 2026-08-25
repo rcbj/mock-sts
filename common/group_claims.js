@@ -159,7 +159,9 @@ function directoryLoaded() {
 // would be most of what the log said about issuing one. It is the same
 // judgement admin_stats.js states beside its two resolver wrappers.
 function readGroups(username) {
+  log.debug("Entering readGroups().");
   if (!directoryLoaded()) {
+    log.debug("Leaving readGroups().");
     return null;
   }
   try {
@@ -169,12 +171,15 @@ function readGroups(username) {
     // look up an entry nothing ever created. identityKeyOf() is the one place
     // that mapping is made, which is what keeps `alice` one person here and one
     // person on /admin/users.
+    log.debug("Leaving readGroups().");
     return directory.groupsOfUser(stats.identityKeyOf(username)) || null;
   } catch (e) {
     log.error('the directory threw while being read for the groups claim and ' +
               'was ignored; the token is issued without it: ' + e.message);
+    log.debug("Leaving readGroups().");
     return null;
   }
+  log.debug("Leaving readGroups().");
 }
 
 // ---------------------------------------------------------------------------
@@ -187,11 +192,14 @@ function readGroups(username) {
 // it into a support question.
 // ---------------------------------------------------------------------------
 function nameProblem() {
+  log.debug("Entering nameProblem().");
   const name = claimName();
   if (!name) {
+    log.debug("Leaving nameProblem().");
     return 'groups.claimName is empty, so there is no claim to add.';
   }
   if (stats.RESERVED_JWT_CLAIMS.indexOf(name) >= 0) {
+    log.debug("Leaving nameProblem().");
     return '"' + name + '" is one of the names this service sets itself (' +
            stats.RESERVED_JWT_CLAIMS.join(', ') + '), so it is refused for ' +
            'the same reason a typed custom claim of that name is: a settable ' +
@@ -199,6 +207,7 @@ function nameProblem() {
            'change what UserInfo answers, with nothing pointing back at the ' +
            'setting. Choose another groups.claimName.';
   }
+  log.debug("Leaving nameProblem().");
   return '';
 }
 
@@ -221,6 +230,7 @@ function nameProblem() {
 // every time rather than one that reshuffles between tokens.
 // ---------------------------------------------------------------------------
 function valuesFrom(rows, form, useMemberOf) {
+  log.debug("Entering valuesFrom().");
   const seen = new Set();
   const out = [];
   (rows || []).forEach(function (row) {
@@ -234,6 +244,7 @@ function valuesFrom(rows, form, useMemberOf) {
     seen.add(value);
     out.push(value);
   });
+  log.debug("Leaving valuesFrom().");
   return out;
 }
 
@@ -342,8 +353,10 @@ function jwtClaimsFor(setId, context) {
 // samlAttributes()'s dedup filter exists to prevent: a relying party reads the
 // first and silently sees one group where the person is in four.
 function samlAttributesFor(setId, context) {
+  log.debug("Entering samlAttributesFor().");
   const answer = groupsOf(subjectOf(context));
   if (!answer.values.length) {
+    log.debug("Leaving samlAttributesFor().");
     return [];
   }
   const attribute = { name: answer.claim, value: answer.values[0],
@@ -355,6 +368,7 @@ function samlAttributesFor(setId, context) {
   if (setId === 'saml11') {
     attribute.namespace = stats.DEFAULT_SAML11_NAMESPACE;
   }
+  log.debug("Leaving samlAttributesFor().");
   return [attribute];
 }
 

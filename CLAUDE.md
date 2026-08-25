@@ -312,7 +312,11 @@ reaches outside that file:
    the embedded directory — one `ou=users`, one `ou=groups`, one
    `ou=applications` for the whole process — so OAuth client registrations, SAML
    service provider entries, the SPIFFE registry and **the two admin console
-   roles** are shared. Kerberos, the two TLS listeners and SPIFFE's four sockets
+   roles** are shared — and, following those roles rather than the sessions,
+   **the console's own sign-on**: its gate is the one reader here that resolves
+   the session cookie across realms, so the switcher switches instead of asking
+   for a second sign-in. `authn/CLAUDE.md` argues it; no protocol endpoint reads
+   a session that way. Kerberos, the two TLS listeners and SPIFFE's four sockets
    are shared too, because a socket has no path to put a segment in.
    `realmSupport()` in `common/realms.js` is the index, and both `/admin/realms`
    and `GET /realms` render it so that the answer is something the service says

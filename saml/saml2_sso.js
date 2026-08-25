@@ -1944,7 +1944,7 @@ app.post(ARS_PATH + '/:sp', resolveArtifact);
 // A GET on the artifact resolution service is a person who clicked it, and
 // answering "Cannot POST" would send them looking for a typo.
 app.get(ARS_PATH, function (req, res) {
-  log.debug("Serving the artifact resolution service description.");
+  log.debug("Entering the artifact resolution service description page.");
   sendPage(res, 200, 'Artifact Resolution Service — SAML 2.0',
     '<h1>Artifact Resolution Service</h1>' +
     '<p class="sub">SOAP over HTTP (saml-bindings-2.0-os section 3.2.3), at <code>' +
@@ -1966,6 +1966,7 @@ app.get(ARS_PATH, function (req, res) {
     '<div class="meta"><div>An artifact resolves EXACTLY ONCE — section 3.6.4.1 — so running ' +
     'that command twice with the same artifact is refused the second time, by design. It also ' +
     'expires: <code>saml2.artifactTtlS</code>.</div></div>');
+  log.debug("Leaving the artifact resolution service description page.");
 });
 
 app.get(SLO_PATH, singleLogout);

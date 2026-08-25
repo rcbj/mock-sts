@@ -411,11 +411,14 @@ function esc(value) { return xmlEscape(value == null ? '' : String(value)); }
 // which meets the difference as a handshake failure. Same reason
 // `tls_server.js` says on the page which port needs verification turned off.
 function listenerRows(bindings) {
+  log.debug('Entering listenerRows().');
   if (!bindings.length) {
+    log.debug('Leaving listenerRows().');
     return '<tr><td colspan="3">Nothing bound. Either this listener is ' +
            'turned off in configuration, or <code>listen()</code> has not ' +
            'run yet.</td></tr>';
   }
+  log.debug('Leaving listenerRows().');
   return bindings.map(function (binding) {
     return '<tr><td><code>' + esc(binding.address) + '</code>' +
       (binding.tls ? ' <span class="note">(mutual TLS)</span>' : '') +
@@ -437,7 +440,9 @@ function methodRows(methods) {
 }
 
 function page(document) {
+  log.debug('Entering page().');
   const state = ca.state();
+  log.debug('Leaving page().');
   return '<!doctype html><html><head><meta charset="utf-8">' +
     '<title>SPIFFE — mock STS</title><style>' +
     'body{font-family:system-ui,sans-serif;margin:2rem;max-width:60rem;line-height:1.5}' +
@@ -612,6 +617,7 @@ function page(document) {
 // 389 and 636, applied before it had to be learnt again.
 // ---------------------------------------------------------------------------
 function addressesFor(surface) {
+  log.debug('Entering addressesFor().');
   const out = [];
   if (surface === 'workload') {
     if (config.value('spiffe.workloadSocketEnabled')) {
@@ -632,6 +638,7 @@ function addressesFor(surface) {
       out.push({ address: config.value('spiffe.grpcHost') + ':' + port });
     }
   }
+  log.debug('Leaving addressesFor().');
   return out;
 }
 

@@ -862,14 +862,19 @@ async function validateJwtSvid(token, audience) {
 // null — not an empty array — when the trust domain is not one this service
 // knows, because those are different answers.
 function jwkSetFor(trustDomain) {
+  log.debug('Entering jwkSetFor().');
   if (trustDomain === TRUST_DOMAIN) {
+    log.debug('Leaving jwkSetFor().');
     return jwtAuthorities.map(function (authority) {
       return { kid: authority.id, pem: authority.publicKeyPem,
                algorithms: [authority.alg] };
     });
   }
   const foreign = federated.get(trustDomain);
-  if (!foreign) return null;
+  if (!foreign) {
+    log.debug('Leaving jwkSetFor().');
+    return null;
+  }
   const out = [];
   (foreign.document.keys || []).forEach(function (key) {
     if (key.use !== 'jwt-svid') return;
@@ -890,6 +895,7 @@ function jwkSetFor(trustDomain) {
                'not be read and was skipped: ' + e.message);
     }
   });
+  log.debug('Leaving jwkSetFor().');
   return out;
 }
 
@@ -961,8 +967,12 @@ async function x509BundleDer() {
 // The same, for a federated trust domain, built from the `x5c` members of the
 // bundle somebody gave us.
 function federatedX509BundleDer(trustDomain) {
+  log.debug('Entering federatedX509BundleDer().');
   const foreign = federated.get(trustDomain);
-  if (!foreign) return null;
+  if (!foreign) {
+    log.debug('Leaving federatedX509BundleDer().');
+    return null;
+  }
   const parts = [];
   (foreign.document.keys || []).forEach(function (key) {
     if (key.use !== 'x509-svid') return;
@@ -977,6 +987,7 @@ function federatedX509BundleDer(trustDomain) {
       }
     });
   });
+  log.debug('Leaving federatedX509BundleDer().');
   return Buffer.concat(parts);
 }
 

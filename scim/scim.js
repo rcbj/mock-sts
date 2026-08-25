@@ -1014,6 +1014,7 @@ SCIMMY.Resources.declare(SCIMMY.Resources.Group)
 // audit page already says happens and is why this does not try to suppress it.
 // ---------------------------------------------------------------------------
 function auditScim(action, dn, attributes, req) {
+  log.debug("Entering auditScim().");
   audit.audit({
     action: action,
     // The authenticated caller, which this surface has had since the SCIM
@@ -1030,6 +1031,7 @@ function auditScim(action, dn, attributes, req) {
              ' ' + dn,
     detail: { attributes: Object.keys(attributes || {}).sort().join(', ') }
   });
+  log.debug("Leaving auditScim().");
 }
 
 // ---------------------------------------------------------------------------

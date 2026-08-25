@@ -467,9 +467,11 @@ function trustProxy() {
 // comma-separated list takes its FIRST value, which is the client-facing hop —
 // each proxy appends, so the left-hand end is the one furthest from here.
 function forwardedFrom(req) {
+  log.debug("Entering forwardedFrom().");
   const socketProto = (req && req.protocol) || 'http';
   const socketHost = (req && req.get && req.get('host')) || ('localhost:' + PORT);
   if (!trustProxy()) {
+    log.debug("Leaving forwardedFrom().");
     return { proto: socketProto, host: socketHost, forwarded: false };
   }
   const headers = (req && req.headers) || {};
@@ -477,6 +479,7 @@ function forwardedFrom(req) {
     .split(',')[0].trim().toLowerCase() || socketProto;
   const host = String(headers['x-forwarded-host'] || socketHost)
     .split(',')[0].trim() || socketHost;
+  log.debug("Leaving forwardedFrom().");
   return {
     proto: proto, host: host,
     forwarded: !!(headers['x-forwarded-proto'] || headers['x-forwarded-host'])
@@ -593,7 +596,9 @@ function escapeRdnValue(value) {
 }
 
 function dnRfc4514(dn) {
+  log.debug("Entering dnRfc4514().");
   if (!dn) {
+    log.debug("Leaving dnRfc4514().");
     return '';
   }
   // crypto.X509Certificate's shape: one `type=value` per line. Split rather
@@ -605,8 +610,10 @@ function dnRfc4514(dn) {
       // A single-component subject, or something already in one line. Returned
       // as it stands rather than guessed at: a caller that already holds an
       // RFC 4514 string must get it back unchanged.
+      log.debug("Leaving dnRfc4514().");
       return dn.trim();
     }
+    log.debug("Leaving dnRfc4514().");
     return dn.split('\n').map(function (line) {
       const text = String(line).trim();
       const eq = text.indexOf('=');
@@ -619,6 +626,7 @@ function dnRfc4514(dn) {
     }).reverse().join(',');
   }
   if (typeof dn !== 'object') {
+    log.debug("Leaving dnRfc4514().");
     return String(dn);
   }
   const parts = [];
@@ -628,6 +636,7 @@ function dnRfc4514(dn) {
       parts.push(key + '=' + escapeRdnValue(one));
     });
   });
+  log.debug("Leaving dnRfc4514().");
   return parts.reverse().join(',');
 }
 

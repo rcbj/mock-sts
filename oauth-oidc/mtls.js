@@ -83,16 +83,20 @@ const CONFIRMATION_MEMBER = 'x5t#S256';
 // which is the trap this function exists to hold in one place.
 // ---------------------------------------------------------------------------
 function peerCertificate(req) {
+  log.debug("Entering peerCertificate().");
   const socket = req && req.socket;
   if (!socket || typeof socket.getPeerCertificate !== 'function') {
     // A plain HTTP connection. Not an error and not worth a log line per
     // request: it is the ordinary case for this service's default listener.
+    log.debug("Leaving peerCertificate().");
     return null;
   }
   const cert = socket.getPeerCertificate();
   if (!cert || !cert.raw || !cert.raw.length) {
+    log.debug("Leaving peerCertificate().");
     return null;
   }
+  log.debug("Leaving peerCertificate().");
   return cert;
 }
 

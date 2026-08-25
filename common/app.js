@@ -94,6 +94,7 @@ const app = express();
 // it did — it runs the same code it did, with two comparisons added.
 // ---------------------------------------------------------------------------
 app.use(function (req, res, next) {
+  log.debug("Entering the realm middleware.");
   const match = realms.matchPath(String(req.url || '').split('?')[0]);
 
   // Not in a realm — including a path that opens with the realm SEGMENT and an
@@ -104,6 +105,7 @@ app.use(function (req, res, next) {
   // unknown realms would break that distinction for every path under the
   // segment. `GET /realms` is where somebody finds out what the realms are.
   if (!match) {
+    log.debug("Leaving the realm middleware. Not in a realm.");
     next();
     return;
   }
@@ -172,6 +174,7 @@ app.use(function (req, res, next) {
     return send.apply(res, arguments);
   };
 
+  log.debug("Leaving the realm middleware. In realm " + match.realm + ".");
   realms.run(match.realm, next);
 });
 
@@ -322,6 +325,7 @@ function contentSecurityPolicy(overrides) {
 const CONTENT_SECURITY_POLICY = contentSecurityPolicy({});
 
 app.use(function (req, res, next) {
+  log.debug("Entering the security-headers middleware.");
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
   res.setHeader('X-Frame-Options', 'DENY');
@@ -361,6 +365,7 @@ app.use(function (req, res, next) {
     }
     return writeHead.apply(res, arguments);
   };
+  log.debug("Leaving the security-headers middleware.");
   next();
 });
 
@@ -415,6 +420,7 @@ app.use(bodyParser.text({ type: function () { return true; }, limit: '5mb' }));
 // answer goes out — so a request that never gets answered is still visible.
 // ---------------------------------------------------------------------------
 app.use(function (req, res, next) {
+  log.debug("Entering the call-log middleware.");
   const started = Date.now();
   const request = {
     path: req.originalUrl,
@@ -500,6 +506,8 @@ app.use(function (req, res, next) {
               'Response: ' + res.statusCode + ' ' + req.method + ' ' + req.originalUrl +
               ' in ' + (Date.now() - started) + 'ms');
   }));
+  log.debug("Leaving the call-log middleware. The response will be logged from " +
+            "its finish event.");
   next();
 });
 

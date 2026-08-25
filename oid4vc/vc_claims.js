@@ -538,19 +538,24 @@ function setDirectory(hooks) {
 }
 
 function directoryAttributes(name) {
+  log.debug("Entering directoryAttributes().");
   if (!directory || typeof directory.attributesFor !== 'function') {
+    log.debug("Leaving directoryAttributes().");
     return null;
   }
   try {
     // Normalised for the reason personaFor() gives: the directory files a person
     // under their local name, and an access token's `urn:sts-mock:user:alice`
     // would otherwise look up an entry nothing ever created.
+    log.debug("Leaving directoryAttributes().");
     return directory.attributesFor(stats.identityKeyOf(name)) || null;
   } catch (e) {
     log.error('the directory threw while being read for credential claims and ' +
               'was ignored; the credential is unaffected: ' + e.message);
+    log.debug("Leaving directoryAttributes().");
     return null;
   }
+  log.debug("Leaving directoryAttributes().");
 }
 
 // Fill in what the current selection needs, on every person already in the
@@ -617,6 +622,7 @@ function setPath(target, path, value) {
 // entry" versus "this was invented just now" is the difference between a
 // populated directory and one that silently is not.
 function valueFor(row, name, tokenClaims, attributes, persona) {
+  log.debug("Entering valueFor().");
   const flat = row.claim.join('.');
   // A token claim only counts when it is at the TOP level and scalar. The nested
   // ones (address.locality) would need the token to carry an `address` object of
@@ -624,6 +630,7 @@ function valueFor(row, name, tokenClaims, attributes, persona) {
   // assembled out of two sources — which is worse than either.
   if (row.claim.length === 1 && tokenClaims &&
       typeof tokenClaims[row.claim[0]] === 'string' && tokenClaims[row.claim[0]] !== '') {
+    log.debug("Leaving valueFor().");
     return { value: tokenClaims[row.claim[0]], source: 'access token', flat: flat };
   }
   const stored = attributes ? attributes[row.ldap.toLowerCase()] : null;
@@ -632,15 +639,19 @@ function valueFor(row, name, tokenClaims, attributes, persona) {
     // picking the first is the only rule that does not depend on insertion order
     // being meaningful — which it is not, in this store or in a real directory.
     const raw = String(stored[0]);
+    log.debug("Leaving valueFor().");
     return { value: row.toClaim ? row.toClaim(raw) : raw, source: 'directory', flat: flat };
   }
   if (!row.from) {
+    log.debug("Leaving valueFor().");
     return null;
   }
   const raw = persona[row.from];
   if (raw === undefined || raw === null || raw === '') {
+    log.debug("Leaving valueFor().");
     return null;
   }
+  log.debug("Leaving valueFor().");
   return { value: row.toClaim ? row.toClaim(String(raw)) : String(raw),
            source: 'generated', flat: flat };
 }
