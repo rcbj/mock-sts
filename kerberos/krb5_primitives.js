@@ -85,25 +85,19 @@ var log = bunyan.createLogger({
 // ---------------------------------------------------------------------------
 
 function toBytes(value) {
-  log.debug("Entering toBytes().");
   if (value === null || value === undefined) {
-    log.debug("Leaving toBytes().");
     return new Uint8Array(0);
   }
   if (value instanceof Uint8Array) {
-    log.debug("Leaving toBytes().");
     return value;
   }
   if (Array.isArray(value)) {
-    log.debug("Leaving toBytes().");
     return new Uint8Array(value);
   }
   if (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer) {
-    log.debug("Leaving toBytes().");
     return new Uint8Array(value);
   }
   if (ArrayBuffer.isView(value)) {
-    log.debug("Leaving toBytes().");
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   throw new Error("krb5: expected bytes, got " + (typeof value));
@@ -113,7 +107,6 @@ function toBytes(value) {
 // the same behaviour wherever it runs. Kerberos principal names and passwords
 // are not ASCII-only in general.
 function utf8(text) {
-  log.debug("Entering utf8().");
   var s = String(text);
   var out = [];
   for (var i = 0; i < s.length; i++) {
@@ -134,7 +127,6 @@ function utf8(text) {
       out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
     }
   }
-  log.debug("Leaving utf8().");
   return new Uint8Array(out);
 }
 
@@ -177,7 +169,6 @@ function toHex(bytes) {
 }
 
 function fromHex(text) {
-  log.debug("Entering fromHex().");
   var s = String(text).replace(/[\s:]/g, "");
   if (s.length % 2) {
     throw new Error("krb5: hex string has an odd length");
@@ -190,7 +181,6 @@ function fromHex(text) {
     }
     out[i] = byte;
   }
-  log.debug("Leaving fromHex().");
   return out;
 }
 

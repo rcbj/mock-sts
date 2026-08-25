@@ -105,15 +105,24 @@ common case is byte-for-byte what it was, and then every other realm's partition
 by name. It returns `{ session, realm, foreign }`, and it sweeps an expired
 session out of the realm that holds it exactly as `sessionOf()` does.
 
-**Three things make this the boundary already drawn rather than a hole in it, and
-all three have to stay true if anything here is reworked:**
+**THE FUNCTION IS `consoleSession()` AND IT ANSWERS "THE DEFAULT REALM'S", NOT
+"ANY REALM'S" — and the paragraph below this one used to say the opposite.** The
+old argument was explicit about its own premise: *the authorization behind it was
+never per realm, because Admin Read and Admin Write are groups in the ONE shared
+directory, so `rbac.rolesOf()` returns the same answer in every realm.* **That
+premise became false on 2026-08-25**, when the embedded directory became a
+subtree per realm. Each realm has its own `ou=groups` now, so a session minted in
+`acme` still opening the console would mean anybody who can create a realm can
+grant themselves both roles inside it and walk back out into the default one —
+the realm feature would have become a privilege escalation.
+`ldap/ldap_server.js` pins `admin_rbac.js`'s whole directory to the default realm
+for that reason, and this function is the other half of the same decision. **The
+two have to agree**: a gate that accepted an `acme` session while the roster
+could only name default-realm people would let somebody in and then insist they
+were nobody.
 
-* **The authorization behind it was never per realm.** The console's gate decides
-  from Admin Read and Admin Write, which are groups in the ONE shared directory —
-  `rbac.rolesOf()` returns the same answer in every realm, and `common/CLAUDE.md`
-  says there is no per-realm administrator. A session refused for having been
-  minted next door would have been refused on a boundary the decision behind it
-  does not have.
+**Two things make this the boundary already drawn rather than a hole in it, and
+both have to stay true if anything here is reworked:**
 * **It grants nothing else.** `gateStateFor()` in `admin-ui/admin.js` is the only
   caller, and the only thing it answers is "may this browser read this console".
   No token is issued on the session it finds and no assertion names it. Every

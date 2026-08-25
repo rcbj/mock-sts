@@ -339,6 +339,109 @@ ldapjs implements none, and this repository does not patch that submodule.
 
 ---
 
+## A SUBTREE PER TRUST REALM, INSIDE ONE NAMING CONTEXT
+
+Since 2026-08-25 the directory is **per realm**, and the partition is a subtree
+of the one tree rather than a store of its own:
+
+```
+dc=example,dc=com                    the DEFAULT realm      (ROOT_DN, ldap.baseDn)
+  ou=users, ou=groups, ou=applications, ou=federations, ou=spiffe
+dc=acme,dc=example,dc=com            the realm `acme`
+  ou=users, ou=groups, ou=applications, ou=federations, ou=spiffe
+```
+
+`ROOT_DN` is what the **socket** serves and never changes. `baseDn()` is what the
+**ambient realm** owns, and the six container accessors — `usersDn()`,
+`groupsDn()`, `applicationsDn()`, `federationsDn()`, `spiffeEntriesDn()`,
+`spiffeAgentsDn()` — are built from it. They were `const` strings until that
+date; **every one of them is a function now**, and the exports changed with them,
+so a consumer that still reads `directory.USERS_DN` gets `undefined` rather than
+quietly reading the default realm's container. That was the point of removing
+them rather than leaving them beside the functions.
+
+**WHY THE REALM IS IN THE DN.** The realm is ambient, in an AsyncLocalStorage
+that `app.js`'s first middleware enters — and that middleware runs on an HTTP
+request. **LDAP has no HTTP request.** An `ldapsearch` arrives on 389 carrying a
+bind DN and a base DN and nothing else: no path, no header, nowhere to put a
+realm segment. If the partition were a Map per realm selected by an ambient
+value, an LDAP client could never reach any realm but the default one, and a
+realm that exists over HTTP and not over LDAP is exactly the half-truth this
+service is supposed to make impossible. Putting it in the DN is what makes
+`ldapsearch -b "dc=acme,dc=example,dc=com"` mean what it says. A listener per
+realm would isolate as well and would cost the thing the feature is for: a port
+is bound when the process starts, so realms would stop being creatable at
+runtime.
+
+**THE BASE IS DERIVED FROM THE REALM ID AND IS NOT A SETTING.** `ldap.baseDn` is
+restart-only *because the tree is built under it at startup* — the "material
+derived at startup" kind that `common/CLAUDE.md` names as the case that must
+never get the `realmRuntime` marker. So a realm cannot carry `ldap.baseDn`, and
+its base is computed instead. That is the rule being right rather than something
+worked around: a configurable base would let two realms name one subtree.
+
+**THE SUBTREE IS BUILT WHEN THE REALM IS.** Every other per-realm store in this
+service is built lazily by `realms.keyed()`, which works because every one of
+them is reached through a request that has already entered the realm. This one
+is not — "first touch" can be an `ldapsearch` for a base DN — so `realms.onCreate()`
+was added to `realms.js` for this and has one caller. It runs the SAME `seed()`
+inside the realm: the six containers, the bind account, alice, bob, carol and the
+two groups, under the realm's own base. A realm is a whole logical copy of this
+service, and one whose `ldapsearch` taught less than the default's would not be.
+`realms.onRemove()` purges the subtree, for the reason every other store purges.
+
+**`eachEntryInRealm()` IS THE CHOKE POINT AND THERE ARE TWENTY-FOUR CALLERS.**
+One Map holds every realm's subtree, so `entries.forEach()` means "every entry in
+the process" and almost nothing here wants that. The leak that made the rule was
+not hypothetical: `allGroupEntries()` walked the whole Map and asked
+`groupRuleFor()` about each entry, and that predicate answers `objectClass` for
+anything carrying a group class **wherever it sits** — a deliberate rule, so a
+group somebody put outside `ou=groups` still counts. Generous with one tree; with
+a tree per realm it meant the default realm listing `acme`'s groups as its own.
+The fix was not to tighten the predicate, whose rule is still right INSIDE a
+realm — it was to stop showing it entries that belong to somebody else.
+
+`entries.forEach()` survives at exactly three kinds of site, and each is correct:
+the **LDAP handlers**, which serve a socket that has no realm and answer for the
+naming context; **`hasChildren()`**, which is a question about one DN; and the
+**purge**, which is deleting a realm.
+
+**THE DEFAULT REALM NEEDS A CARVE-OUT AND IT IS THE HALF THAT WAS MISSED FIRST.**
+Every other realm's base is a sibling — `dc=acme,…` and `dc=beta,…` contain
+nothing of each other's — so "under my base" is the whole test. The default
+realm's base is ROOT_DN and every realm is UNDER it, so "under my base" still
+listed four groups where there are two. `containedRealmBases()` answers with the
+bases that lie **strictly inside** this realm's, which is the rule in both
+directions and needs no special case for either. Note it is asked by
+containment rather than by "every realm but me": `realms.list()` includes the
+default realm, so the naive version carved ROOT_DN out of `acme` and left `acme`
+reporting an empty directory.
+
+**IT IS NOT APPLIED TO AN LDAP SEARCH.** A subtree search based at
+`dc=example,dc=com` returns every realm's entries, and that is correct — a
+naming context is exactly that, and a directory that hid part of its own tree
+from a client that asked for it would be lying about the thing LDAP exists to
+answer. What is isolated is the CONTAINER: `ou=users,dc=example,dc=com` holds no
+`acme` person.
+
+**THE GROUP INDEX IS PER REALM**, via `realms.keyed()`. `buildGroupIndex()` walks
+the ambient realm and classifies with `groupRuleFor()`, which asks
+`isUnder(dn, groupsDn())` — an ambient question — so a single module-level cache
+would have handed the default realm's index to every other one. The symptom would
+have been the worst kind: a `groups` claim in a token issued under `/realm/acme`
+naming the DEFAULT realm's groups, correct-looking, verifiable and wrong.
+
+**AND THE TWO ADMIN CONSOLE ROLES ARE PINNED TO THE DEFAULT REALM.**
+`adminRbac.setDirectory()` is handed nine functions wrapped in `inDefaultRealm()`,
+which is `realms.run(DEFAULT_REALM, …)`. A role is permission to change what
+every realm does, so a per-realm roster would mean anybody who can create a realm
+can grant themselves both roles inside it and walk back out into the default one.
+`setDirectoryReader()` and `setDirectoryWriter()` are deliberately NOT pinned:
+those draw the console's user pages, and `/realm/acme/admin/users` showing the
+default realm's people would be a console that cannot see the realm it is pointed
+at. Reading a realm is the console's job; being let in is not the realm's
+decision. `authn.js`'s `consoleSession()` is the other half and has to agree.
+
 ## `ou=federations` IS THE SIXTH CONTAINER, AND THE ONLY ONE WHERE AN `ldapmodify` IS A SECURITY CHANGE
 
 The applications container's arrangement made a third time — this file owns

@@ -10,15 +10,38 @@ and they divide into three groups.
 load in a test with no configuration at all — which is what the guarded
 `require(process.env.CONFIG_FILE)` at the top of each is for.
 
+**EVERY ONE OF THOSE SEVEN IS VENDORED, and so is `krb5_spnego.js` below —
+eight files in this directory are somebody else's, and NONE of them may be
+edited here.** They are byte-identical copies of the parent project's
+`common/krb5/*.js`, written by that repository's
+`common/krb5/sync-to-mock-sts.sh` and held to byte equality by its
+`tests/krb5_codec_sync.js`. A change made here is reverted by the next sync and
+fails that test in the meantime — which is what happened on 2026-08-25, when a
+logging sweep added `log.debug()` pairs to `krb5_primitives.js`,
+`krb5_asn1.js` and `krb5_messages.js`: 48 lines, no behaviour, and a red test in
+a repository that does not contain them. **A sweep over this repository must
+skip these eight**, the way it already skips `../common/vendored/` and
+`../spiffe/protos/`.
+
+The fix for a real defect in one of them is to change it in the parent project,
+run that script, then commit here — in that order, because the script overwrites
+whatever is here. Note that the behavioural half of `krb5_codec_sync.js` can
+still PASS while the byte comparison fails: two copies can differ in comments or
+log lines and agree perfectly on the wire, right up until the day the difference
+stops being cosmetic.
+
 **The service**: `krb5_principals.js` (the principal database and every long-term
 key in it), `krb5_kdc.js` (AS and TGS, plus `/KdcProxy` and `/krb5/principals`),
 `krb5_service.js` (the acceptor).
 
-**`krb5_spnego.js` is VENDORED** — a byte-identical copy of the parent project's
+**`krb5_spnego.js` is VENDORED too**, and is called out separately only because
+it is the one that reads as this service's own: `spnego.js` sits beside it and IS
+ours. Like the seven above it is a byte-identical copy of the parent project's
 `common/krb5/krb5_spnego.js`, kept honest by `tests/krb5_codec_sync.js` over
-there. It is NOT in `../common/vendored/` with the other five, because it belongs
-to the codec it sits beside and moving it would put half the Kerberos wire format
-in a directory that has nothing else Kerberos in it. **Do not edit it here.**
+there. None of the eight is in `../common/vendored/` with the other five copies,
+because they belong to the codec they sit beside and moving them would put the
+whole Kerberos wire format in a directory that has nothing else Kerberos in it.
+**Do not edit any of them here.**
 
 **`spnego.js` must stay after `krb5_service.js` in the require order**, and that is a
 dependency rather than a preference: it calls that module's `accept()` for every

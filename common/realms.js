@@ -451,6 +451,10 @@ function create(spec) {
   realms.set(id, realm);
   log.info('realms: "' + id + '" defined; its endpoints are under ' +
            prefixOf(realm) + '/.');
+  // AFTER the row is written, because a builder may want to read the realm
+  // back through get() — and because a builder that throws must leave a realm
+  // that exists rather than half of one. See onCreate() above.
+  built(realm);
   log.debug("Leaving create().");
   return { ok: true, errors: [], realm: realm };
 }
@@ -514,7 +518,14 @@ function checkRealmOverride(key, raw) {
       'reached it. Set it on the service as a whole — /admin/config, or POST ' +
       '/admin-api/config/set.';
   }
-  return config.checkOverride(key, raw);
+  // `true` is the `forRealm` argument, and it is what admits the one setting
+  // that is restart-only for the PROCESS and legitimate on a realm:
+  // `oauth2.rfc9700`. See the `realmRuntime` paragraph at the top of config.js
+  // — a realm binds no socket, so the reason that flag is restart-only (it
+  // derives `global.https`, and a listener's scheme is settled when it is
+  // bound) is not a reason a realm cannot carry it. Everything else that is
+  // restart-only is still refused here, in the same sentence as before.
+  return config.checkOverride(key, raw, true);
 }
 
 // One setting, set or cleared on one realm. Separate from update() because the
@@ -592,6 +603,48 @@ const purges = [];
 
 function onRemove(fn) {
   purges.push(fn);
+}
+
+// ---------------------------------------------------------------------------
+// AND THE OTHER END: A REALM THAT NEEDS SOMETHING BUILT MUST GET IT BUILT.
+//
+// `keyed()` covers every store that can be built LAZILY — a Map made on first
+// touch, a signing key generated the first time something is signed — and that
+// is almost all of them, which is why this hook did not exist until the
+// embedded directory needed one.
+//
+// The directory is the case `keyed()` cannot answer. It is ONE tree in one Map
+// keyed by DN, served by ONE socket that has no path to put a realm segment in,
+// and a realm's isolation is a SUBTREE of it (`dc=acme,dc=example,dc=com`).
+// Nothing "touches the acme partition" — an `ldapsearch` arrives on 389 with no
+// realm ambient at all and simply asks for a base DN, and if that subtree was
+// never built the honest answer is LDAP_NO_SUCH_OBJECT. So the subtree has to
+// exist from the moment the realm does, which means a hook that fires on
+// CREATE.
+//
+// A listener that throws does not stop the realm being created — the registry
+// row is already written by then, exactly as `onRemove()`'s purges run after
+// the row is deleted. The asymmetry is deliberate in both directions: a realm
+// that exists with an unbuilt subtree is recoverable (build it), and a create
+// that failed half way is not.
+// ---------------------------------------------------------------------------
+const builders = [];
+
+function onCreate(fn) {
+  builders.push(fn);
+}
+
+function built(realm) {
+  log.debug("Entering built(). id=" + realm.id);
+  builders.forEach(function (build) {
+    try {
+      build(realm.id, realm);
+    } catch (e) {
+      log.warn('realms: a store could not build itself for "' + realm.id +
+               '": ' + e.message);
+    }
+  });
+  log.debug("Leaving built(). " + builders.length + " store(s) built.");
 }
 
 function remove(id) {
@@ -795,23 +848,33 @@ function realmSupport() {
       note: 'Its own issuer, signing key, authorization codes, access and ' +
             'refresh tokens, refresh families, DPoP replay and nonce state, ' +
             'client-assertion replay state and named authorization servers. ' +
-            'The CLIENT REGISTRATIONS are shared, because they are entries in ' +
-            'the directory: a client registered once can be used in every ' +
-            'realm, and what differs is the key its tokens are signed with.' },
+            'The CLIENT REGISTRATIONS are per realm as of 2026-08-25, ' +
+            'because the directory is: a client registered under one realm ' +
+            'lives in that realm\'s ou=applications and is unknown to every ' +
+            'other. This line said the opposite until then. ' +
+            'RFC 9700 MODE IS PER REALM TOO — `oauth2.rfc9700` is the one ' +
+            'setting here that is restart-only for the process and settable ' +
+            'on a realm, because a realm binds no socket — so one process can ' +
+            'answer permissively at /oauth2/authorize and enforce the BCP at ' +
+            'a realm\'s. What a realm cannot bring with it is a SCHEME: the ' +
+            'main port is https or it is not, for every realm at once, and ' +
+            'GET /oauth2/rfc9700 reports which.' },
     { family: 'Authentication service', state: 'full', by: 'path',
       note: 'Its own sessions and WebAuthn credentials, so signing in to one ' +
             'realm signs you in to that realm only. That is the point of a ' +
             'realm rather than a limitation of one. Who you may sign in AS is ' +
-            'shared, since this service checks no password anywhere. The ' +
-            'admin console is the ONE reader that crosses this line, and the ' +
-            'row below says why.' },
+            'shared only in the sense that this service checks no password ' +
+            'anywhere — the PERSON is an entry in the realm\'s own directory. ' +
+            'The admin console is the ONE reader that crosses this line, and ' +
+            'it crosses it in exactly one direction: it accepts the DEFAULT ' +
+            'realm\'s session and no other. The row below says why.' },
     { family: 'SAML 2.0 / SAML 1.1', state: 'full', by: 'path',
       note: 'Its own entityID and providerID (seeded distinct when the realm ' +
             'is created), its own signing key, request state, artifacts and ' +
             'per-service-provider metadata — whose URL therefore carries the ' +
             'realm as well as the SP digest. The SERVICE PROVIDER ENTRIES are ' +
-            'shared, for the reason the OAuth clients are: they are ' +
-            'applications in the directory.' },
+            'per realm, for the reason the OAuth clients are: they are ' +
+            'applications in the realm\'s own directory.' },
     { family: 'WS-Trust', state: 'full', by: 'path',
       note: 'Its own token issuer and signing key.' },
     { family: 'WS-Federation', state: 'full', by: 'path',
@@ -828,29 +891,47 @@ function realmSupport() {
       note: 'Each realm counts and records what happened under its own ' +
             'prefix. The audit sequence numbers are per realm too, so one ' +
             'realm\'s rows are contiguous.' },
-    { family: 'SCIM 2.0', state: 'partial', by: 'path',
-      note: 'The ENDPOINTS are per realm and the STORE is not: SCIM ' +
-            'provisions into the shared directory, so a user created through ' +
-            'one realm\'s /scim/v2 exists in every realm. That is the ' +
-            'directory\'s sharing rather than a decision SCIM makes.' },
+    { family: 'SCIM 2.0', state: 'full', by: 'path',
+      note: 'The endpoints AND the store. A user created through one realm\'s ' +
+            '/scim/v2 is an entry in that realm\'s ou=users and exists ' +
+            'nowhere else — this row read `partial` and said the opposite ' +
+            'until 2026-08-25, when the directory became per realm. SCIM ' +
+            'still makes no decision of its own about it: it provisions into ' +
+            'the directory, and the directory is the thing that is ' +
+            'partitioned.' },
     { family: 'Admin console and management API', state: 'partial', by: 'path',
       note: 'Every page and every operation is per realm — /admin/config ' +
-            'READS and WRITES the realm it is reached in. The two ADMIN ROLES ' +
-            'are not: they are groups in the shared directory, so somebody ' +
-            'who holds Admin Write holds it in every realm. There is no ' +
-            'per-realm administrator — and the CONSOLE SIGN-ON follows that ' +
-            'rather than the sessions: its gate resolves the one session ' +
-            'cookie in whichever realm minted it, so the realm switcher ' +
-            'switches instead of asking you to sign in again. Nothing else ' +
-            'reads a session that way; in the realm you switched to, ' +
-            '/oauth2/authorize and the SAML and WS-Federation endpoints still ' +
-            'see none.' },
-    { family: 'LDAP (389 / 636)', state: 'none', by: 'shared',
-      note: 'ONE DIRECTORY FOR THE WHOLE PROCESS, and it is the sharing every ' +
-            'other line here refers back to. Every realm sees the same ' +
-            'people, groups and applications, because LDAP answers on a ' +
-            'socket with no path to put a realm segment in. What differs ' +
-            'between realms is what each ISSUES about them.' },
+            'READS and WRITES the realm it is reached in, and /admin/users ' +
+            'lists the realm\'s own people. The two ADMIN ROLES are the ' +
+            'exception and are DELIBERATELY pinned: they are groups in the ' +
+            'DEFAULT realm\'s ou=groups, read there whichever realm the ' +
+            'console is reached in, and a grant made through a realm\'s ' +
+            '/admin-api/rbac/grant lands there too and says so. There is one ' +
+            'administrator roster for the process, on purpose: a role is ' +
+            'permission to change what EVERY realm does, so a per-realm ' +
+            'roster would mean anybody who can create a realm can make ' +
+            'themselves an administrator of the service. The CONSOLE SIGN-ON ' +
+            'follows the roster: its gate accepts the DEFAULT realm\'s ' +
+            'session and no other, and an unauthenticated reader of any ' +
+            'realm\'s console is sent to the default realm\'s sign-in screen. ' +
+            'Nothing else reads a session across realms at all; in the realm ' +
+            'you switched to, /oauth2/authorize and the SAML and ' +
+            'WS-Federation endpoints see none.' },
+    { family: 'LDAP (389 / 636)', state: 'full', by: 'dn',
+      note: 'A SUBTREE PER REALM, inside one naming context: the default ' +
+            'realm is ldap.baseDn itself (dc=example,dc=com) and every other ' +
+            'realm is dc=<id> beneath it. So ou=users, ou=groups, ' +
+            'ou=applications, ou=federations and the two SPIFFE containers ' +
+            'exist once per realm and share nothing — this row read `none` ' +
+            'and said every realm saw the same people until 2026-08-25. The ' +
+            'realm is in the DN and not in a partitioned store BECAUSE the ' +
+            'socket has no path to put a segment in: an ldapsearch arrives ' +
+            'with a base DN and nothing else, so `-b dc=acme,dc=example,dc=com` ' +
+            'is the only way a client could ever name a realm, and it works. ' +
+            'A subtree search from the naming context itself still returns ' +
+            'every realm\'s entries, because that is what a naming context ' +
+            'IS; what is isolated is the CONTAINER each realm reads and ' +
+            'writes.' },
     { family: 'Kerberos v5', state: 'none', by: 'shared',
       note: 'One KDC, one principal database and one Kerberos realm name for ' +
             'the whole process — over raw UDP/TCP 88 AND over MS-KKDCP, ' +
@@ -868,8 +949,12 @@ function realmSupport() {
     { family: 'SPIFFE', state: 'none', by: 'shared',
       note: 'One trust domain, one signing authority and one registry per ' +
             'process. A SPIFFE trust domain is already the thing a trust ' +
-            'realm is, so the two would be nested rather than combined — and ' +
-            'the registry is in the shared directory in any case.' }
+            'realm is, so the two would be nested rather than combined. The ' +
+            'REGISTRY is per realm now, since it is a container in the ' +
+            'directory — but the trust domain, the signing authority and the ' +
+            'four sockets in front of them are not, so what a realm gets is ' +
+            'its own list of registrations for one shared authority. That is ' +
+            'why this row is still `none`.' }
   ];
 }
 
@@ -898,6 +983,7 @@ module.exports = {
   currentPrefix: currentPrefix,
   href: href,
   matchPath: matchPath,
+  onCreate: onCreate,
   onRemove: onRemove,
   realmContext: realmContext,
   keyed: keyed,

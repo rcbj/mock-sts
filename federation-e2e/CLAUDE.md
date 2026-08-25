@@ -1,6 +1,8 @@
 # federation-e2e/
 
-**The only test in this repository, and the only kind there will be.** Three
+**One of the two tests in this repository, and the integration one** — the
+other is `../tests/`, which asserts this repository's own module contracts in
+process, needs no port and no container, and drives nothing. Three
 containers, two identity services and one application that has never heard of
 federation, and one sign-in driven across all three with 56 assertions on the
 way.

@@ -113,7 +113,7 @@ const stats = require('../common/admin_stats');
 // the one that skipped the RFC 9700 refresh revocation and the audit row.
 //
 // THREE MORE THINGS COME FROM THAT MODULE NOW, and they are the whole of how
-// this console is protected: `sessionAnywhere()` reads the cookie,
+// this console is protected: `consoleSession()` reads the cookie,
 // `beginAuthentication()`
 // stashes the page somebody asked for and hands back the URL of the sign-in
 // screen, and `LOGIN_PATH` is where they are sent. Nothing about signing in is
@@ -121,18 +121,25 @@ const stats = require('../common/admin_stats');
 // of its own would be a second authentication service, and this service has
 // exactly one on purpose.
 //
-// **`sessionAnywhere()` AND NOT `sessionOf()`, AND IT IS THE ONE CALLER OF IT.**
+// **`consoleSession()` AND NOT `sessionOf()`, AND IT IS THE ONE CALLER OF IT.**
 // The protocol reader answers out of the ambient realm's partition, which is
 // exactly right for `/oauth2/authorize` and exactly wrong here: the realm
 // SWITCHER at the top of every page in this console is a link to the same page
 // in another realm, and with the per-realm reader every click on it landed on
 // the sign-in screen — then overwrote the browser's only session cookie, so
-// clicking back landed there again. The reasoning, and why the console may ask
-// the question this way when nothing else here may, is in the header above that
-// function in `authn.js`. The short of it: the two roles this gate decides from
-// are groups in the ONE shared directory, so the authorization behind the
-// session was never per realm to begin with.
-const { sessions, sessionAnywhere, beginAuthentication, LOGIN_PATH } =
+// clicking back landed there again.
+//
+// **IT IS THE DEFAULT REALM'S SESSION, ALWAYS**, and that is the second half of
+// a decision whose first half is in `ldap_server.js`: the embedded directory is
+// per realm since 2026-08-25, so the two console roles are groups in the DEFAULT
+// realm's `ou=groups` and nowhere else, and `admin_rbac.js`'s whole directory is
+// pinned there. If a session minted in `acme` still opened this console, anybody
+// who could create a realm could grant themselves both roles inside it and walk
+// back out into the default realm. The gate and the roster have to agree about
+// which realm decides, and they do. `authn.js`'s header above `consoleSession()`
+// argues it at length, including why this ALSO ends the switcher loop rather
+// than merely surviving it.
+const { sessions, consoleSession, beginAuthentication, LOGIN_PATH } =
   require('../authn/authn');
 // WHO MAY USE THIS CONSOLE. A library (rule 3): it registers no route, so
 // requiring it here moves nothing in the router, and it requires only config.js,
@@ -1723,9 +1730,10 @@ function respondToAction(req, res, target, result) {
 function gateStateFor(req) {
   log.debug("Entering gateStateFor().");
   const enforced = !!config.value('admin.authRequired');
-  // ACROSS REALMS, and only here — see the require at the top of this file for
-  // why the console asks the question that way and why no other module may.
-  const found = sessionAnywhere(req);
+  // THE DEFAULT REALM'S SESSION, whichever realm is being read, and only here —
+  // see the require at the top of this file for why the console asks the
+  // question that way and why no other module may.
+  const found = consoleSession(req);
   const session = found ? found.session : null;
   const username = session ? session.user.username : '';
   const held = rbac.rolesOf(username);
@@ -1809,6 +1817,72 @@ function refuse(req, res, status, code, title, message, detail) {
   log.debug("Leaving refuse(). Answered HTML.");
 }
 
+// The default realm's sign-in screen as an ABSOLUTE URL. See the note at its
+// one caller for why absolute: a root-relative href in an HTML body is rewritten
+// by app.js to carry the realm being read, and this link must not be.
+function defaultRealmSignInUrl(req) {
+  return realms.run(realms.DEFAULT_REALM, function () {
+    return baseUrlOf(req) + LOGIN_PATH;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// WHERE THE CONSOLE SENDS SOMEBODY TO SIGN IN, AND WHY IT IS NEVER THIS REALM'S
+// LOGIN SCREEN.
+//
+// The gate accepts the DEFAULT realm's session and nothing else (see
+// `consoleSession()`), so the sign-in it sends an anonymous reader to has to
+// mint one there. Two things stand in the way of just handing back LOGIN_PATH,
+// and both are `app.js` doing exactly what it was built to do:
+//
+//   * `res.location()` is wrapped in a realm to prepend that realm's prefix, so
+//     `/authn/login` becomes `/realm/acme/authn/login` on the way out;
+//   * `beginAuthentication()` stashes the pending transaction in a per-realm
+//     store, so a record created while `acme` is ambient cannot be redeemed at
+//     the default realm's screen — the reader would arrive at a sign-in that
+//     had never heard of the page they asked for.
+//
+// Running BOTH inside `realms.run(DEFAULT_REALM, …)` settles both at once: the
+// record lands in the default realm's store, and `realms.href()` — which reads
+// the prefix at call time — prepends nothing. The URL that comes out is
+// `/authn/login?authn=…`, which is what it says.
+//
+// `returnTo` is deliberately NOT run in the default realm. It is
+// `req.originalUrl`, which `app.js` leaves alone precisely so that it still
+// carries the realm — `/realm/acme/admin/users` — so signing in at the default
+// realm's screen returns the reader to the realm's page they asked for. That is
+// the whole shape of this feature in one line: sign in once, in one realm, read
+// every realm.
+// ---------------------------------------------------------------------------
+function sendToConsoleSignIn(req, res) {
+  log.debug("Entering sendToConsoleSignIn().");
+  realms.run(realms.DEFAULT_REALM, function () {
+    const where = beginAuthentication({
+      returnTo: String(req.originalUrl || '/admin'),
+      protocol: 'Admin console',
+      details: [
+        { label: 'Signing in to', value: 'the mock STS admin console' },
+        { label: 'Page you asked for', value: String(req.originalUrl || '/admin') },
+        // Said on the screen rather than only here, because the person about
+        // to type a username is exactly the one who needs to know that the
+        // username decides whether the console lets them in.
+        { label: 'What decides access',
+          value: 'membership of ' + config.value('admin.readGroup') + ' or ' +
+                 config.value('admin.writeGroup') + ' in the directory' },
+        // And WHICH directory, because there are several now and only one of
+        // them decides this. A reader who has just created a realm and put
+        // themselves in its admin group would otherwise be refused with no way
+        // to tell why.
+        { label: 'Which directory', value: 'the DEFAULT realm\'s ou=groups. A ' +
+          'trust realm has its own directory and its own groups, and neither ' +
+          'grants this console.' }
+      ]
+    });
+    res.set('Cache-Control', 'no-store').redirect(302, where);
+  });
+  log.debug("Leaving sendToConsoleSignIn().");
+}
+
 app.use('/admin', function (req, res, next) {
   log.debug("Entering the admin console gate. " + req.method + " " + req.originalUrl);
   if (!config.value('admin.authRequired')) {
@@ -1823,11 +1897,15 @@ app.use('/admin', function (req, res, next) {
     if (wantsJson(req)) {
       refuse(req, res, 401, 'login_required',
              'Sign in first.',
-             'This console needs a browser sign-on session from ' + LOGIN_PATH +
-             ', and this request carries none. The session is a cookie, so a ' +
-             'program driving this console has to sign in at that screen and keep ' +
-             'it — or turn admin.authRequired off, or use /admin-api, which is not gated.',
-             { needed: 'session', signIn: LOGIN_PATH });
+             'This console needs a browser sign-on session from the DEFAULT ' +
+             'realm\'s ' + LOGIN_PATH + ', and this request carries none. It has ' +
+             'to be that realm\'s: a trust realm has its own directory and its ' +
+             'own groups, and the two roles this console decides from are ' +
+             'groups in the default realm\'s ou=groups only. The session is a ' +
+             'cookie, so a program driving this console has to sign in at that ' +
+             'screen and keep it — or turn admin.authRequired off, or use ' +
+             '/admin-api, which is not gated.',
+             { needed: 'session', signIn: LOGIN_PATH, signInRealm: realms.DEFAULT_ID });
       log.debug("Leaving the admin console gate. Refused 401 to a JSON caller.");
       return;
     }
@@ -1838,29 +1916,24 @@ app.use('/admin', function (req, res, next) {
     // click silently discarded. Better to say what happened and let them post it
     // again.
     if (req.method === 'GET' || req.method === 'HEAD') {
-      const where = beginAuthentication({
-        returnTo: String(req.originalUrl || '/admin'),
-        protocol: 'Admin console',
-        details: [
-          { label: 'Signing in to', value: 'the mock STS admin console' },
-          { label: 'Page you asked for', value: String(req.originalUrl || '/admin') },
-          // Said on the screen rather than only here, because the person about
-          // to type a username is exactly the one who needs to know that the
-          // username decides whether the console lets them in.
-          { label: 'What decides access',
-            value: 'membership of ' + config.value('admin.readGroup') + ' or ' +
-                   config.value('admin.writeGroup') + ' in the directory' }
-        ]
-      });
-      res.set('Cache-Control', 'no-store').redirect(302, where);
+      sendToConsoleSignIn(req, res);
       log.debug("Leaving the admin console gate. Sent to the sign-in screen.");
       return;
     }
     refuse(req, res, 401, 'login_required', 'Sign in first.',
            'This form needs a browser sign-on session and this request carries none — ' +
            'the session it was posted with has probably expired.',
-           { needed: 'session', signIn: LOGIN_PATH,
-             html: '<p class="note"><a href="' + esc(LOGIN_PATH) + '">Sign in</a>, then post ' +
+           { needed: 'session', signIn: LOGIN_PATH, signInRealm: realms.DEFAULT_ID,
+             // AN ABSOLUTE URL, and that is not decoration. `app.js` rewrites
+             // every root-relative href in an HTML response to carry the realm
+             // being read, so `href="/authn/login"` would send this reader to
+             // THIS realm's sign-in screen — where they would sign in
+             // successfully and still be refused, because the gate accepts the
+             // default realm's session only. An absolute URL is not matched by
+             // that rewrite, which is what makes it the right shape here rather
+             // than a way around it.
+             html: '<p class="note"><a href="' + esc(defaultRealmSignInUrl(req)) +
+                   '">Sign in to the default realm</a>, then post ' +
                    'the form again. It is not resubmitted for you: a redirect after a POST ' +
                    'becomes a GET and the fields would be lost, so a control you did not ' +
                    'press twice would not fire twice.</p>' });
@@ -11836,12 +11909,23 @@ function realmsJson(req) {
   return out;
 }
 
+// HOW a family is separated, in the words the row itself carries. This used to
+// print the literal "by path" for every `full` row, which was true of all of
+// them until the embedded directory became per realm: LDAP is separated by DN —
+// a subtree per realm inside one naming context — and a table that called that
+// "by path" would be describing the one family whose separation is NOT a path
+// segment as though it were.
+function separatedBy(by) {
+  const how = String(by || 'path');
+  return 'by ' + (how === 'dn' ? 'DN' : how);
+}
+
 function realmSupportTable() {
   const rows = realms.realmSupport().map(function (row) {
     const state = row.state === 'full'
-      ? '<span class="m">by path</span>'
+      ? '<span class="m">' + esc(separatedBy(row.by)) + '</span>'
       : (row.state === 'partial'
-          ? '<span class="eff" title="Realm-aware, but not by path">' + esc(row.by) + '</span>'
+          ? '<span class="eff" title="Realm-aware, but not wholly">' + esc(row.by) + '</span>'
           : '<span class="none">shared</span>');
     return '<tr><td>' + esc(row.family) + '</td><td>' + state + '</td><td>' +
            esc(row.note) + '</td></tr>';
