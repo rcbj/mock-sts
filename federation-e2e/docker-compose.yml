@@ -1,0 +1,163 @@
+# Three containers, two identity services and one application that has never
+# heard of federation.
+#
+#   browser ──▶ webapp:3000            an ordinary OIDC relying party
+#             └─▶ sts-sp:8081          an OIDC PROVIDER to the webapp,
+#                                      and an OIDC CLIENT of sts-idp.
+#                                      The SERVICE PROVIDER of the federation
+#                                      relationship.
+#               └─▶ sts-idp:8082       the upstream OpenID Provider. The
+#                                      IDENTITY PROVIDER of the relationship,
+#                                      and the only place a name is ever typed.
+#
+# `docker compose up --build -d`, then `node configure.js` and `node drive.js`
+# — or `./run.sh`, which does all four steps and asserts.
+#
+# ---------------------------------------------------------------------------
+# THE ONE THING IN THIS FILE THAT IS NOT OBVIOUS, AND IT IS THE WHOLE REASON
+# THIS TEST IS WORTH RUNNING IN CONTAINERS RATHER THAN AS THREE PROCESSES.
+#
+# EVERY SERVICE HAS TWO ADDRESSES AND THEY ARE NOT INTERCHANGEABLE:
+#
+#   http://sts-idp:8081     what another CONTAINER dials  (back channel)
+#   http://localhost:8082   what the BROWSER visits       (front channel)
+#
+# A federated OIDC flow uses both, for one partner, in one sign-in:
+#
+#   fedSsoUrl    is followed by a BROWSER   → must be localhost:8082
+#   fedTokenUrl  is dialled by sts-sp       → must be sts-idp:8081
+#   fedJwksUri   is dialled by sts-sp       → must be sts-idp:8081
+#
+# Get that backwards in either direction and the failure is silent until it is
+# baffling: a front-channel URL in `fedTokenUrl` makes sts-sp dial a name docker
+# will not resolve for it, and a back-channel URL in `fedSsoUrl` sends the
+# browser to `sts-idp`, which the host cannot resolve at all. Neither produces a
+# useful message anywhere, because the request never arrives.
+#
+# ---------------------------------------------------------------------------
+# AND THE CONSEQUENCE THAT BITES AFTER THAT ONE IS FIXED: **`iss` WOULD DIFFER
+# BETWEEN THE TWO CHANNELS.**
+#
+# The mock STS derives every published URL — including the `iss` of every token
+# — from the Host header of the request it is answering. That is exactly right
+# for a service reached at one address, and it means an ID Token minted on a
+# browser-facing authorization request would say `iss: http://localhost:8082`
+# while the same service's discovery document, fetched back-channel, says
+# `iss: http://sts-idp:8081`. Two truths, one provider, and every conforming
+# client refuses the mismatch — correctly.
+#
+# `STS_OAUTH2_ISSUER` pins it, which is what a real deployment behind a proxy
+# does and what `config.js`'s own description of that setting warns about. Both
+# identity services pin theirs, and `fedPeer` on the relationship is set to the
+# pinned value rather than to either URL.
+version: '2.4'
+
+services:
+
+  # -------------------------------------------------------------------------
+  # THE UPSTREAM IDENTITY PROVIDER — the far end of the federation
+  # relationship, and the only service in this stack where a human types a name.
+  # It knows nothing about federation: to it, sts-sp is an ordinary OIDC client.
+  # -------------------------------------------------------------------------
+  sts-idp:
+    container_name: fed-sts-idp
+    hostname: sts-idp
+    image: rcbj/sts
+    build:
+      # The repo root, two levels of meaning up: the Dockerfile COPYs the whole
+      # context and .dockerignore decides what is in it.
+      context: ..
+    ports:
+      - "8082:8081"
+    environment:
+      - CONFIG_FILE=./env/local.js
+      # PINNED. See the header — without this, `iss` follows the Host header and
+      # the two channels disagree.
+      - STS_OAUTH2_ISSUER=http://sts-idp:8081
+      # The console is open on this one so `drive.js` can read what happened
+      # without holding a cookie. It is a test stack on a private network; the
+      # management API is not gated either way, which is what configure.js uses.
+      - ADMIN_AUTH_REQUIRED=false
+      # Nothing federated is configured here, so the sign-in screen shows the
+      # ordinary username box and nothing else. Left ON rather than off to prove
+      # that: an identity service with no relationships must look exactly as it
+      # always did.
+      - STS_FEDERATION_LOGIN_BUTTONS=true
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get({host:'localhost',port:8081,path:'/healthcheck'},function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # -------------------------------------------------------------------------
+  # THE SERVICE PROVIDER of the federation relationship — and an ordinary
+  # OpenID Provider to the web application at the same time.
+  #
+  # This is the interesting container. It never authenticates anybody: it has no
+  # password to check and, once the relationship is configured, the only way in
+  # is the button on its sign-in screen that hands the question to sts-idp.
+  # -------------------------------------------------------------------------
+  sts-sp:
+    container_name: fed-sts-sp
+    hostname: sts-sp
+    image: rcbj/sts
+    build:
+      context: ..
+    ports:
+      - "8081:8081"
+    environment:
+      - CONFIG_FILE=./env/local.js
+      - STS_OAUTH2_ISSUER=http://sts-sp:8081
+      - ADMIN_AUTH_REQUIRED=false
+      # THE BACK CHANNEL IS PLAIN http INSIDE THIS NETWORK, so the outbound
+      # module has to be told that is acceptable. It is OFF by default and that
+      # default is right — what travels on those requests is a client secret and
+      # an authorization code — and this is the case it exists to be turned on
+      # for. Every request made under it is logged as insecure, so `docker
+      # compose logs sts-sp` shows exactly which ones.
+      - STS_FEDERATION_OUTBOUND_ALLOW_INSECURE=true
+      # Left at its default (empty) DELIBERATELY, so a federated `alice` and a
+      # local `alice` are ONE entry under ou=users. Set it to `fed-` and run the
+      # stack again to watch them become two — which is the question that
+      # setting exists for.
+      # - STS_FEDERATION_USERNAME_PREFIX=fed-
+    depends_on:
+      sts-idp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get({host:'localhost',port:8081,path:'/healthcheck'},function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # -------------------------------------------------------------------------
+  # THE APPLICATION. It has never heard of federation and cannot tell that its
+  # provider is federating on its behalf — which is the property this whole
+  # stack exists to demonstrate.
+  # -------------------------------------------------------------------------
+  webapp:
+    container_name: fed-webapp
+    hostname: webapp
+    build:
+      context: ./webapp
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - APP_NAME=Hello World
+      # Back channel: discovery, the token endpoint and JWKS.
+      - OIDC_ISSUER=http://sts-sp:8081
+      # Front channel: where the BROWSER is sent. See the header.
+      - OIDC_BROWSER_BASE=http://localhost:8081
+      - OIDC_CLIENT_ID=hello-world-app
+      # A PUBLIC client — no secret. The mock STS mints a secret only for a
+      # client that registers through RFC 7591, and this one deliberately does
+      # not: it turns up with a client_id, which is the ordinary case here and
+      # is what PKCE is for.
+      - OIDC_REDIRECT_URI=http://localhost:3000/callback
+      - OIDC_SCOPE=openid profile email
+    depends_on:
+      sts-sp:
+        condition: service_healthy

@@ -47,6 +47,7 @@ the package root. **The files did not change; the paths did.**
 | `admin-ui/` · `mgmt-api/` | the console and the management API |
 | `home/` | the front door — `GET /`, and the one image this service serves |
 | `logout/` | the protocol-independent sign-out — one model of what a live session IS across every family, and the endpoint that ends it |
+| `federation-e2e/` | **the only test in this repository** — three containers, two identity services and a web application that has never heard of federation, and one sign-in driven across all three. Every other test of this service lives in the [OAuth2/OIDC Debugger](https://idptools.com) project's suite |
 | `docs/` | the user-facing documentation, published as a GitHub Pages site |
 
 At the package root there are exactly two modules: **`server.js`**, the shell that
@@ -2113,11 +2114,22 @@ sentence saying why.
 Two mechanisms did not exist before this endpoint did, and both are worth
 knowing because they are the honest analogue rather than a pretence:
 
-**Kerberos.** A ticket-granting ticket is an encrypted blob in somebody's cache.
-There is no list of them here and there could not be one on a real KDC either.
-What a KDC *does* see is the next `TGS-REQ` — so signing out records an instant
-on the principal, and a request presenting a ticket whose `authtime` is earlier
-is refused. It is checked on `authtime` and not on the issue time because a
+**Kerberos, and it is an invention rather than a specified behaviour — which is
+worth knowing before relying on it.** Kerberos defines **no logout message, no
+session and no revocation of any kind**: no CRL, no status query, and no list of
+issued tickets anywhere, because a KDC deliberately keeps no state about what it
+has issued (that is what lets one be replicated read-only). A ticket is valid
+because it decrypts and its `endtime` has not passed, and a service accepts one
+using its own key without ever contacting the KDC. **Short lifetimes are the
+whole revocation model.** `KDC_ERR_TGT_REVOKED` (20) is a *registered* code whose
+text says what is meant (RFC 4120 §7.5.9), but the specification defines no
+mechanism that emits it.
+
+What a KDC *does* see is the next `TGS-REQ` — the one moment it is back in the
+loop, and the same lever that makes disabling an Active Directory account bite
+within the service-ticket lifetime rather than the TGT's. So signing out records
+an instant on the principal, and a request presenting a ticket whose `authtime`
+is earlier is refused. It is checked on `authtime` and not on the issue time because a
 renewed ticket deliberately preserves `authtime`, and checking anything else
 would let a renewal launder a signed-out ticket back into a live one. **It does
 not reach a service ticket already in a cache** — accepting one never contacts
@@ -4870,12 +4882,22 @@ Extracted from the OAuth2/OIDC Debugger. Two things were adapted rather than cop
   it rather than staying at the root: keeping them a SIBLING is what let a vendored
   file stay byte-identical.
 
-**The tests did not come with it.** They live in the parent project's `tests/`
-directory, and four of them need only this service — `sts_metadata.js` (the drift
-checks described above), `sts_dpop.js` (the RFC 9449 negatives), and
-`oauth2_sts_endpoints.js` and `vc_did.js`. Porting those is the obvious next step;
-without them the drift checks this README describes are documentation rather than
+**The tests did not come with it, and new ones go back there rather than being
+written here.** They live in the parent project's `tests/` directory, and five of
+them need only this service — `sts_metadata.js` (the drift checks described
+above), `sts_dpop.js` (the RFC 9449 negatives), `oauth2_sts_endpoints.js`,
+`vc_did.js`, and `saml11_sso.js`, which drives the SAML 1.1 browser profiles over
+HTTP with a relying party it writes itself and 131 checks, most of them refusals.
+The first four are still unported and doing that is the obvious next step; until
+they are, the drift checks this README describes are documentation rather than
 enforcement.
+
+`saml11_sso.js` is also the answer to "where does a new test go". It was written
+in a `tests/` directory in THIS repository on 2026-08-25 and moved to the parent
+suite the same day, because a second suite here would mean a second runner, a
+second report and a second place to forget. The one exception is
+`federation-e2e/`, which stays because it builds a topology out of several copies
+of this service rather than driving one.
 
 The protocols added since then bring more of them into that category, and the Kerberos
 and WebAuthn ones are the interesting cases because of *how* they check rather than what:

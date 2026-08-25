@@ -92,6 +92,15 @@ Two more things it does not reach, and both are honest rather than missing:
   it.** The sign-out instant is checked at the *KDC*, and accepting a service
   ticket never contacts the KDC. A fresh `AS-REQ` also succeeds and clears the
   instant — signing out is not being locked out.
+
+  Worth being plain about: **Kerberos itself has no logout, no session and no
+  revocation.** There is no CRL, no status query and no list of issued tickets —
+  a ticket is valid because it decrypts and hasn't expired, and short lifetimes
+  are the entire revocation model. `KDC_ERR_TGT_REVOKED` (20) is a registered
+  error code whose text says what is meant, but no specification defines a
+  mechanism that emits it. What this service does is an invention using the one
+  lever a real KDC has — the `TGS-REQ`, which is the only moment the KDC is back
+  in the loop. Do not read it as conformance.
 * **SPIFFE is not in the list at all.** A SPIFFE identity is a workload, attested
   per call, holding no session. The registry can end an identity's ability to
   obtain *another* SVID, which is a ban rather than a logout; that lives at

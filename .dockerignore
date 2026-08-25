@@ -43,6 +43,13 @@ COVERAGE.md
 SECURITY.md
 LICENSE.md
 clean.sh
+# The federation end-to-end test: three containers, a driver and a web
+# application of its own. It BUILDS this image (its compose file's context is
+# the repo root) and must not be INSIDE it — the harness is not part of the
+# service, and the webapp has a separate build context of its own, so nothing
+# here needs it. Excluding it also keeps a change to the test from busting the
+# image layer cache.
+federation-e2e
 docker-compose.yml
 Dockerfile
 .dockerignore

@@ -136,8 +136,33 @@ it will keep working once `mockStsModule()` knows about the subdirectories.
 the principal (`krb5_principals.js`'s `signedOutAt`, with `signOut()`,
 `clearSignOut()`, `signedOutAt()` and `signedOutPrincipals()` around it), and
 `handleTgsReq()` refuses a request whose ticket was authenticated before it with
-**KDC_ERR_TGT_REVOKED (20)** — the code RFC 4120 defines for exactly this and
-which nothing here could produce before.
+**KDC_ERR_TGT_REVOKED (20)**, which nothing here could produce before.
+
+**BE PRECISE ABOUT WHAT THAT CODE IS.** RFC 4120 LISTS it in the error table at
+section 7.5.9 — *"TGT has been revoked"* — and that is all it does. The
+specification defines **no mechanism that emits it**, no state a KDC keeps in
+order to decide it, and no way for anything to cause it; it is effectively
+reserved for implementations. **Kerberos has no logout message, no session
+concept and no revocation of any kind**: there is no CRL, no status query, no
+list of issued tickets anywhere (the KDC is stateless about them on purpose —
+that is what lets a KDC be replicated read-only), and a service validates an
+AP-REQ with its own key without contacting the KDC at all. A ticket is valid
+because it decrypts and its `endtime` has not passed. **Short lifetimes ARE the
+revocation model.**
+
+So the instant is an INVENTION rather than an implementation of a specified
+behaviour, and any prose here that implies otherwise is wrong — this paragraph
+replaced one that did. What makes it the right invention is that it is the same
+lever a real KDC has: the **TGS exchange is the one moment a KDC is back in the
+loop**, which is why disabling an account in Active Directory bites within the
+service-ticket lifetime rather than the TGT's. Code 20 is the closest registered
+code to what is happening and its text says what is meant.
+
+The alternatives, for anyone weighing this again: changing the USER's password
+invalidates nothing (the TGT is sealed under the *krbtgt* key), changing the
+*krbtgt* key invalidates every TGT in the realm at once, and disabling the
+account is `KDC_ERR_CLIENT_REVOKED` (18) — which refuses the AS exchange too and
+is therefore being locked out rather than signed out.
 
 **A ticket-granting ticket is an encrypted blob in somebody's cache.** There is
 no list of them in this process and there could not be one on a real KDC either.

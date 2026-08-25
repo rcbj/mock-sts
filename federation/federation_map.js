@@ -76,6 +76,13 @@
 const config = require('./../common/config');
 const { log } = require('./../common/helpers');
 const vcClaims = require('./../oid4vc/vc_claims');
+// `identityKeyOf()`, and ONLY that. See usernameFor() below, where the reason is
+// argued: the local name a foreign subject becomes has to be the SAME name the
+// identity funnel and the directory will file them under, and that function is
+// where this service decides it. A plain require in the ordinary direction —
+// `admin_stats.js` requires `federation.js`, not this file, so there is no cycle
+// — and it registers no route, so nothing moves.
+const stats = require('./../common/admin_stats');
 
 // ---------------------------------------------------------------------------
 // LAYER 2, PART ONE: the OIDC claims, inverted from the credential catalogue.
@@ -311,9 +318,37 @@ function flatten(bag) {
 // THE USERNAME.
 //
 // `fedUsernameSource` names the incoming value to use; empty means the subject
-// the protocol itself carried — a SAML NameID, or `sub`. The prefix is applied
-// LAST and to whatever was chosen, so that turning it on cannot change WHICH
-// value was picked, only what it is called here.
+// the protocol itself carried — a SAML NameID, or `sub`.
+//
+// THREE STEPS, IN THIS ORDER, AND THE ORDER IS THE WHOLE OF IT:
+//
+//   1. CHOOSE, from the configured attribute or from the subject;
+//   2. NORMALISE, through the same `identityOf()` every other family here is
+//      filed by;
+//   3. PREFIX, if `federation.usernamePrefix` says so.
+//
+// **STEP 2 WAS MISSING AND IT WAS A REAL DEFECT**, found the first time this
+// was pointed at another instance of this service. A foreign `sub` is an opaque
+// string, and that partner's happened to be `urn:sts-mock:user:alice` — this
+// service's OWN subject format, because the partner IS this service. The raw
+// value went to `startSession()`, `userFor()` put the prefix on again, and every
+// downstream token carried `sub: urn:sts-mock:user:urn:sts-mock:user:alice`.
+//
+// The doubling is the symptom and not the bug. The bug is that the identity
+// funnel ALREADY normalises — `recordAuthentication()` runs `presented` through
+// `identityOf()`, which is what makes `alice`, `urn:sts-mock:user:alice` and
+// `alice@REALM` one person and one directory entry — so an unnormalised name
+// reaching the SESSION means the session and the directory disagree about who
+// signed in. `/admin/users` said `alice` while the tokens said something else,
+// and that split is exactly what the one-entry-per-person rule exists to
+// prevent. It would have happened with any partner whose subject carried an
+// `@`, not only with one that shares this service's URN format.
+//
+// **THE PREFIX IS APPLIED AFTER NORMALISATION**, which is what makes it work at
+// all: `fed-alice` separates a federated person from a local one, and
+// `fed-urn:sts-mock:user:alice` would separate them from everybody including
+// themselves on their next sign-in. It cannot change WHICH incoming value was
+// picked, only what it is called here.
 // ---------------------------------------------------------------------------
 function usernameFor(record, flat, subject) {
   log.debug('Entering usernameFor(). source=' +
@@ -345,10 +380,17 @@ function usernameFor(record, flat, subject) {
     from = 'the subject';
   }
   raw = raw.trim();
+  // Step 2. See the header.
+  const normalised = stats.identityKeyOf(raw);
+  if (normalised !== raw) {
+    log.debug('usernameFor(): the partner\'s subject "' + raw + '" is filed here as "' +
+              normalised + '" — the same normalisation every other family goes ' +
+              'through, so the session and the directory name one person.');
+  }
   const prefix = String(config.value('federation.usernamePrefix') || '');
-  const username = prefix && raw ? prefix + raw : raw;
+  const username = prefix && normalised ? prefix + normalised : normalised;
   log.debug('Leaving usernameFor(). username=' + username + ' from ' + from);
-  return { username: username, raw: raw, from: from, prefixed: !!(prefix && raw) };
+  return { username: username, raw: raw, from: from, prefixed: !!(prefix && normalised) };
 }
 
 // ---------------------------------------------------------------------------

@@ -2068,7 +2068,14 @@ const SETTINGS = [
                  'ticket whose authtime is EARLIER is refused ' +
                  'KDC_ERR_TGT_REVOKED (20). It is the only thing a KDC can ' +
                  'honestly do about a credential it handed out and cannot ' +
-                 'recall, and the error code exists for exactly this. What it ' +
+                 'recall. KDC_ERR_TGT_REVOKED is a REGISTERED code whose text ' +
+                 'says what is meant (RFC 4120 section 7.5.9) — but the ' +
+                 'specification defines no mechanism that emits it, and ' +
+                 'Kerberos has no logout, no session and no revocation at all, ' +
+                 'so this instant is an invention rather than a spec\'d ' +
+                 'behaviour. It is the same lever a real KDC has: the TGS ' +
+                 'exchange is the one moment the KDC is back in the loop. ' +
+                 'What it ' +
                  'does NOT do is stop a service ticket already in a cache from ' +
                  'working against the service that accepts it — nothing ' +
                  'contacts the KDC on that exchange — which is a fact about ' +
