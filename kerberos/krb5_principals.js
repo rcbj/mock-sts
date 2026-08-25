@@ -660,8 +660,24 @@ function register(def) {
     // one on a real KDC either. What a KDC DOES see is the next TGS-REQ that
     // presents it — so a sign-out records an INSTANT, and handleTgsReq()
     // refuses a ticket whose `authtime` is earlier than it with
-    // KDC_ERR_TGT_REVOKED (20), which is the error RFC 4120 defines for exactly
-    // this and which nothing here had a way to produce before.
+    // KDC_ERR_TGT_REVOKED (20).
+    //
+    // BE PRECISE ABOUT WHAT THAT CODE IS, because it is easy to overclaim and
+    // this comment used to. RFC 4120 LISTS it in the error table at section
+    // 7.5.9 — "TGT has been revoked" — and that is ALL it does: the
+    // specification defines no mechanism that emits it, no state a KDC keeps in
+    // order to decide it, and no way for anything to cause it. Kerberos has no
+    // logout message, no session, and no revocation of any kind; a ticket is
+    // valid because it decrypts and its endtime has not passed, and the KDC is
+    // not consulted when a service accepts one. Short lifetimes ARE the
+    // revocation model.
+    //
+    // So the instant below is an INVENTION, not an implementation of a spec'd
+    // behaviour. What makes it the right invention is that it is the same lever
+    // a real KDC has: the TGS exchange is the one moment a KDC is back in the
+    // loop, which is why disabling an account in Active Directory bites within
+    // the service-ticket lifetime rather than the TGT's. Code 20 is the closest
+    // registered code to what is happening and its text says what we mean.
     //
     // Three things it deliberately is not. It is NOT `revoked`, one field up:
     // that is a disabled account and it refuses the AS exchange as well, where

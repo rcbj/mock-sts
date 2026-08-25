@@ -354,7 +354,7 @@ written. Same exception, same width, same real submit button.
 
 ---
 
-## There is no test for this in either repository — but there is now a driver
+## SAML 1.1 has a test of its own; SAML 2.0 has only the browser pair
 
 Hand-verified end to end on 2026-08-24 against a throwaway instance: 90 checks
 over all three bindings, the SOAP back channel, the one-shot artifact rule, the
@@ -366,10 +366,19 @@ this profile with the same assertions they drive Keycloak with, which is the
 arrangement `tests/wsfed_sso.js` already had — and the one that catches a mock
 being quietly more permissive than the real thing.
 
-What a test of this repository's own would still add is the negatives that are
-awkward from a browser: an artifact resolved twice, an artifact minted for one
-service provider and resolved by another, a RelayState past 80 bytes, a Response
-over the Redirect binding long enough to be truncated, and the `saml2.*` settings
-turned off one at a time — especially `signAssertion`, since an unsigned
-assertion being ACCEPTED by a service provider is the finding that matters and no
-happy path shows it.
+What is still missing for **2.0** is the negatives that are awkward from a
+browser: an artifact resolved twice, an artifact minted for one service provider
+and resolved by another, a RelayState past 80 bytes, a Response over the Redirect
+binding long enough to be truncated, and the `saml2.*` settings turned off one at
+a time — especially `signAssertion`, since an unsigned assertion being ACCEPTED
+by a service provider is the finding that matters and no happy path shows it.
+
+**SAML 1.1 already has exactly that test and it is the model for this one.**
+`tests/saml11_sso.js` in the parent project drives `/saml11` over HTTP with a
+relying party it writes itself and no browser at all — 131 checks, mostly
+negatives, the settings one at a time, the one-shot artifact rule, and the
+confirmation method neither profile's happy path can show. It goes THERE rather
+than here for the reason the root `CLAUDE.md`'s *Tests* section gives: a second
+suite in this repository is a second runner, a second report and a second place
+to forget. The 2.0 equivalent should be written the same way and in the same
+directory, and it can borrow that file's whole harness.

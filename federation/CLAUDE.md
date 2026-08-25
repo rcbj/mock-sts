@@ -485,8 +485,37 @@ provider**, which is exactly the moment a deliberate click is worth having.
 
 ## Tests
 
-**There are none, in this repository or the parent, and this is the surface
-where that costs most** — because it is the only one here whose bugs are
+**THERE IS ONE NOW, AND IT IS THE ONLY TEST IN THIS REPOSITORY** — a protocol
+test goes in the parent project's suite instead, which is where
+`tests/saml11_sso.js` went on the day it was written; this one stays because it
+builds a TOPOLOGY out of this service rather than driving one copy of it. The
+root `CLAUDE.md`'s *Tests* section draws that line.
+`../federation-e2e/` is a three-container stack — two instances of this service
+and a web application that has never heard of federation — driven end to end
+with 56 assertions. `./run.sh` builds and runs it; `./run-host.sh` runs the same
+thing as three node processes for anybody who cannot reach a docker daemon.
+
+**It is an INTEGRATION test and it covers exactly ONE of the refusals below.**
+What it proves is that the pieces fit — that a federated identity satisfies a
+flow the application started, that the ID Token the application verifies comes
+from the SERVICE PROVIDER rather than from the partner, that the directory
+entry, the counters, the per-partner attribute mapping and the applications
+registry all record what actually happened, and that an unsolicited callback is
+refused and recorded without counting as a sign-in.
+
+**It found a real defect on its first run**, which is the best argument for it:
+a foreign `sub` reached `startSession()` unnormalised, so `userFor()` applied
+this service's own subject prefix a second time and every downstream token
+carried `urn:sts-mock:user:urn:sts-mock:user:alice`. The doubling was the
+symptom; the bug was that the identity funnel normalises and the session did
+not, so `/admin/users` said `alice` while the tokens said something else. It
+would have happened with any partner whose subject carried an `@`. See
+`usernameFor()`, where the three steps and their order are now written down.
+
+**What it does not cover is everything below**, and that list is still the gap:
+
+**There are none for the refusals, in this repository or the parent, and this is
+the surface where that costs most** — because it is the only one here whose bugs are
 security bugs rather than fidelity bugs. What a test would have to cover is
 almost entirely NEGATIVES, and a happy path proves close to nothing: an
 assertion that verifies against the key it was signed with is not evidence that

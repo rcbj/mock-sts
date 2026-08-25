@@ -545,7 +545,12 @@ function completeSignIn(req, res, record, result) {
   // recorded the authentication itself. See its sixth argument, where the
   // reasoning is written down.
   const detail = {
-    method: 'a ' + protocolLabel + ' assertion from ' + (record.fedPeer || record.fedId) +
+    // No indefinite article: "a OpenID Connect" and "an SAML 2.0" are both
+    // wrong, and picking between them by first letter gets both of those wrong
+    // too — the article follows the SOUND, and three of the five labels are
+    // initialisms. federation.js's create() note is phrased around the same
+    // problem.
+    method: protocolLabel + ' assertion from ' + (record.fedPeer || record.fedId) +
             ', verified against this relationship\'s configured key',
     sub: result.subject,
     // NO `client_id`. It was here first and was a real bug: the identity funnel

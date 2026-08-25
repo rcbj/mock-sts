@@ -576,10 +576,18 @@ const FAMILIES = [
   { id: 'krb5', endOrder: 24,
     label: 'Kerberos tickets',
     protocol: 'Kerberos v5',
-    spec: 'RFC 4120. KDC_ERR_TGT_REVOKED (20) is the error this produces.',
+    spec: 'None — Kerberos defines no logout, no session and no revocation. ' +
+          'KDC_ERR_TGT_REVOKED (20) is a registered code (RFC 4120 section ' +
+          '7.5.9) whose text says what is meant, but the specification ' +
+          'defines no mechanism that emits it; this is an invention using it.',
     what: 'A ticket-granting ticket is an encrypted blob in somebody\'s cache ' +
           'and there is no list of them here — there could not be one on a ' +
-          'real KDC either. What a KDC does see is the next TGS-REQ, so a ' +
+          'real KDC either, which is deliberate: a KDC keeps no state about ' +
+          'the tickets it has issued, and that is what lets one be replicated ' +
+          'read-only. A ticket is valid because it decrypts and its endtime ' +
+          'has not passed, and a service never contacts the KDC to accept one, ' +
+          'so SHORT LIFETIMES are the whole revocation model Kerberos has. ' +
+          'What a KDC does see is the next TGS-REQ, so a ' +
           'sign-out records an INSTANT on the principal and a request ' +
           'presenting a ticket authenticated before it is refused ' +
           'KDC_ERR_TGT_REVOKED. IT DOES NOT REACH A SERVICE TICKET ALREADY IN ' +
