@@ -39,6 +39,26 @@ passwordless sign-in a two-factor one. Anything reading `hwk` to mean "two
 factors" is wrong for the reason `../authn/CLAUDE.md` gives; this now tests for
 `hwk` AND `pwd`.
 
+## Both of this module's Maps are per trust realm, and one of them was a hole
+
+`pendingSignIns` (the sign-in request the screen interrupted) and `rpContexts`
+(the `wctx` values the mock relying party minted) were plain `Map`s until
+2026-08-25, and the first was a realm-isolation hole rather than an
+untidiness. `POST /wsfed/login` looks a sign-in up by the id on the form, so an
+id minted at `/realm/acme/wsfed` was found by the DEFAULT realm's handler, which
+then called `startSession()` and issued the response with the default realm's
+key and issuer for a request that began in `acme`. It was verified by hand
+before the fix — the cross-realm POST answered 303 rather than "this sign-in
+form has expired" — and after it, both.
+
+`realmSupport()` publishes this family as `full` and says single sign-on with
+OAuth "does not cross realms"; the store now agrees with the claim. `rpContexts`
+followed for a quieter reason worth stating rather than inheriting: `/wsfed/rp`
+answers under every realm prefix, so there is one mock relying party per realm,
+and a `wctx` minted by one being recognised by another would make the check that
+Map exists for — did my own value come back? — answer yes across a boundary the
+rest of the profile does not cross.
+
 ## The autopost page is one of the three scripted pages
 
 Section 13.2.1's sign-in response is a self-submitting form, so

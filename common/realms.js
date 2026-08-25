@@ -928,10 +928,19 @@ function realmSupport() {
             'socket has no path to put a segment in: an ldapsearch arrives ' +
             'with a base DN and nothing else, so `-b dc=acme,dc=example,dc=com` ' +
             'is the only way a client could ever name a realm, and it works. ' +
-            'A subtree search from the naming context itself still returns ' +
-            'every realm\'s entries, because that is what a naming context ' +
-            'IS; what is isolated is the CONTAINER each realm reads and ' +
-            'writes.' },
+            'A SUBTREE SEARCH IS SCOPED TO THE REALM ITS BASE NAMES, since ' +
+            '2026-08-25 and at rcbj\'s request — this line said the opposite ' +
+            'until then, on the argument that a naming context IS the whole ' +
+            'tree. It left port 389 as the one door through which a realm ' +
+            'could see another realm\'s people, groups and applications, ' +
+            'while the console, /scim/v2 and the group claim showed each ' +
+            'realm only its own. So `-b dc=example,dc=com` is the default ' +
+            'realm\'s directory, `-b dc=acme,dc=example,dc=com` is acme\'s, ' +
+            'and the root DSE publishes one namingContexts value per realm so ' +
+            'that a client can still discover them. An operation naming ONE ' +
+            'DN — add, modify, delete, compare, a base-scope search — is ' +
+            'answered wherever that DN is, because spelling the DN out is how ' +
+            'a client names a realm here.' },
     { family: 'Kerberos v5', state: 'none', by: 'shared',
       note: 'One KDC, one principal database and one Kerberos realm name for ' +
             'the whole process — over raw UDP/TCP 88 AND over MS-KKDCP, ' +

@@ -82,7 +82,7 @@ expired, because an observer that quietly ended sessions while reporting on them
 would be changing the thing it describes — the same rule `audit.js`'s actor
 resolver follows.
 
-## `sessionAnywhere()` — the one reader that crosses a realm boundary, and the ADMIN CONSOLE is its only caller
+## `consoleSession()` — the one reader that crosses a realm boundary, and the ADMIN CONSOLE is its only caller
 
 The session store is `realms.map()`, so `sessionOf()` answers out of the ambient
 realm's partition and a session minted in `acme` does not satisfy the default
@@ -100,10 +100,13 @@ OVERWROTE the only cookie slot the browser has, so switching back landed there
 too. **One sign-in per click, forever, with nothing expired and nothing
 misconfigured** — the two realms were taking turns holding one cookie.
 
-`sessionAnywhere(req)` asks the ambient realm first, through `sessionOf()` so the
-common case is byte-for-byte what it was, and then every other realm's partition
-by name. It returns `{ session, realm, foreign }`, and it sweeps an expired
-session out of the realm that holds it exactly as `sessionOf()` does.
+The function that fixed that was `sessionAnywhere(req)`: it asked the ambient
+realm first, through `sessionOf()` so the common case was byte-for-byte what it
+had been, and then every other realm's partition by name. **It is
+`consoleSession(req)` now and it asks ONE realm** — the default — and the
+paragraph below says why the change was forced rather than tidied. It still
+returns `{ session, realm, foreign }`, and it still sweeps an expired session
+out of the realm that holds it exactly as `sessionOf()` does.
 
 **THE FUNCTION IS `consoleSession()` AND IT ANSWERS "THE DEFAULT REALM'S", NOT
 "ANY REALM'S" — and the paragraph below this one used to say the opposite.** The

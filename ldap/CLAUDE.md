@@ -402,9 +402,25 @@ The fix was not to tighten the predicate, whose rule is still right INSIDE a
 realm — it was to stop showing it entries that belong to somebody else.
 
 `entries.forEach()` survives at exactly three kinds of site, and each is correct:
-the **LDAP handlers**, which serve a socket that has no realm and answer for the
-naming context; **`hasChildren()`**, which is a question about one DN; and the
+the **LDAP handlers**, which serve a socket that has no ambient realm on it —
+the SEARCH handler walks the whole Map and then filters on the realm its BASE
+names, see below; **`hasChildren()`**, which is a question about one DN; and the
 **purge**, which is deleting a realm.
+
+**A LOOKUP BY DN IS NOT AN ENUMERATION, AND THAT IS THE HALF THAT WAS MISSED.**
+The walk above was scoped on the day the subtree landed; every reader that
+starts from a DN somebody handed in was left calling `getEntry()`, which reads
+the one Map holding every realm. So the list on a page was right and the thing
+it linked to was not: `/realm/acme/admin/groups?group=<a default-realm DN>`
+rendered that group in full, `GET /realm/acme/scim/v2/Groups/<same DN>` answered
+200, and **`DELETE` on it answered 204 and the group was gone** — a cross-realm
+destructive write. The person half never had it, because `readPerson()` guards
+with `isPersonEntry()`, which tests placement under the AMBIENT realm's
+`usersDn()`; the group half guards with `groupRuleFor()`, which answers "this is
+a group" wherever it sits, on purpose. `inRealm()` and `realmEntry()` are the
+fix, `tests/realm_directory_lookups.js` is the guard, and the rule for anything
+added here is: **a reader that takes a DN from outside this process asks
+`realmEntry()`, never `getEntry()`.**
 
 **THE DEFAULT REALM NEEDS A CARVE-OUT AND IT IS THE HALF THAT WAS MISSED FIRST.**
 Every other realm's base is a sibling — `dc=acme,…` and `dc=beta,…` contain
@@ -417,12 +433,42 @@ containment rather than by "every realm but me": `realms.list()` includes the
 default realm, so the naive version carved ROOT_DN out of `acme` and left `acme`
 reporting an empty directory.
 
-**IT IS NOT APPLIED TO AN LDAP SEARCH.** A subtree search based at
-`dc=example,dc=com` returns every realm's entries, and that is correct — a
-naming context is exactly that, and a directory that hid part of its own tree
-from a client that asked for it would be lying about the thing LDAP exists to
-answer. What is isolated is the CONTAINER: `ou=users,dc=example,dc=com` holds no
-`acme` person.
+**IT IS APPLIED TO AN LDAP SEARCH TOO, SINCE 2026-08-25, AND THIS SECTION SAID
+THE OPPOSITE UNTIL THEN.** The original rule was that a subtree search based at
+`dc=example,dc=com` returns every realm's entries — a naming context being
+exactly that, and a directory that hid part of its own tree from a client that
+asked for it being one that lies about the thing LDAP exists to answer. rcbj
+asked for the reverse, and the reason it is the better answer is that the old
+one left **port 389 as the single door** through which one realm could read
+another realm's people, groups and applications, while the console, `/scim/v2`,
+the group claim and every enumerator in this file showed a realm only its own. A
+naming context narrower than the store is a smaller surprise than one surface
+disagreeing with all the others.
+
+How it works: the search handler asks `realmBaseForDn()` which realm the CLIENT'S
+BASE names — the only thing in an LDAP request that can name one — and filters
+with the same `insideRealmContainer()` rule the enumerators use. So
+`-b "dc=example,dc=com"` is the default realm's directory and
+`-b "dc=acme,dc=example,dc=com"` is acme's. Three things follow and each is
+deliberate:
+
+* **The root DSE publishes one `namingContexts` value per realm.** Discovery is
+  the only job that attribute has, and a client that read a single root and
+  searched from it would now have no way to learn the others exist.
+* **The count filtered out is logged and named**, with the base to search from
+  instead. A search that quietly returns fewer entries than the tree holds is
+  the shape of problem that costs an afternoon.
+* **An operation that names ONE DN is untouched** — add, modify, delete,
+  compare, and a base-scope search of a single entry. Spelling out
+  `…,dc=acme,dc=example,dc=com` is how a client names a realm on a socket with
+  nowhere else to put one, so refusing it would make a realm unreachable rather
+  than isolated.
+
+With no realms defined the carve-out is empty and every byte of every answer is
+what it was. **This half has no in-process test**: it needs the listener, and
+`tests/CLAUDE.md` says a test that needs one belongs in the parent project's
+suite. It was verified by hand with an ldapjs client — the counts from each base,
+the root DSE, an exact-DN read into a realm, and an add and delete inside one.
 
 **THE GROUP INDEX IS PER REALM**, via `realms.keyed()`. `buildGroupIndex()` walks
 the ambient realm and classifies with `groupRuleFor()`, which asks

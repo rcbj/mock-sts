@@ -332,6 +332,38 @@ divs rather than two — `.meta`, `.card`, `.main`, `.shell` — and one missing
 nests the next page's sidebar inside the last one's card, which looks like a CSS
 bug rather than a markup one.
 
+### The head row, and the one control that is on every page
+
+Under `.card` the first thing is `.pagehead`: the page's `<h1>`, and a
+**Refresh** link pushed to the far end of it. Three things about it are
+deliberate.
+
+**It is a LINK and it has to be.** `script-src 'none'` means there is no
+`location.reload()` available anywhere in this console, and a
+`<form method="get">` back to the same path would drop the query string it was
+submitted with unless every parameter were re-emitted as a hidden field. An
+`<a>` to the current URL is a real fetch either way, because `respond()` sends
+every page `Cache-Control: no-store`.
+
+**Its href is the REALM-RELATIVE path, not `req.originalUrl`.** `app.js`
+rewrites every root-relative `href` on the way out to carry the realm being
+read, so the obvious version produces `/realm/acme/realm/acme/admin/tokens` and
+a 404 a long way from `refreshHref()`. That function starts from
+`realmRelativePath()` — the same path with the prefix taken off — which is what
+the realm switcher already sends.
+
+**It SUBTRACTS `notice` and `error` and keeps everything else.**
+`respondToAction()` puts those on the redirect after a form POST; they describe
+something that has already happened, and a Refresh carrying them would
+re-announce "12 tokens revoked" over a page where nothing had been revoked this
+time. The filter, the page number and the search are what the reader is looking
+AT and have to survive, which is why it is a subtraction rather than a bare
+path.
+
+**The issuer line that used to sit here is gone**, and the argument is under
+*Every page here shows ONE trust realm* below, because it is the second half of
+that same decision.
+
 ## Four reader slots and two writer slots point INTO this module
 
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,
@@ -715,13 +747,13 @@ guarded and one added above it would not be. There are none above it, and there
 is nowhere else in the file a route could go.
 
 **It authenticates nothing itself.** `authn.js` owns the session and the sign-in
-screen; the guard asks `sessionAnywhere()` who is here and hands
+screen; the guard asks `consoleSession()` who is here and hands
 `beginAuthentication()` the page they wanted. A login screen of this console's
 own would be a second authentication service. The good consequence of sharing the
 first is that signing in with a security key at `/authn/login` is visible here,
 because it is the same session WS-Federation and the authorization endpoint read.
 
-**`sessionAnywhere()` AND NOT `sessionOf()`, AND THIS GUARD IS ITS ONLY CALLER.**
+**`consoleSession()` AND NOT `sessionOf()`, AND THIS GUARD IS ITS ONLY CALLER.**
 The ordinary reader answers out of the ambient realm's partition, which is right
 for `/oauth2/authorize` and was wrong here: the realm chooser on every page of
 this console is a link to the same page in another realm, and each click landed
@@ -844,10 +876,20 @@ would cost an afternoon:
   the fact a reader most needs before they act, since `/admin/config` writes the
   realm it is read in. It is deliberately NOT the switcher said twice: the
   switcher appears only when a realm has been DEFINED, which is exactly the
-  ordinary case where that corner was saying nothing useful. **Nothing was
-  lost** — the issuer is still under the heading on every page, and it is in
-  this line's tooltip so that somebody who had learnt to read it out of the
-  corner finds it where they look.
+  ordinary case where that corner was saying nothing useful.
+
+  **AND ON 2026-08-25 THE ISSUER CAME OFF THE SHELL ENTIRELY**, which is the
+  same argument read once more rather than a reversal of it. It had moved from
+  the corner into the line under the heading — `Mock STS admin console — issuer
+  <code>…</code>`, drawn on every page of the console — where it was still a
+  name that ONE of sixteen protocol families uses, sitting at the top of the
+  seventy-odd pages the other fifteen never mention it on. **Nothing is lost**,
+  and it is worth knowing where each half of it went before putting it back:
+  it is on `/admin/sts-metadata`, the one page whose subject is what this
+  service IS; it is on `/admin/config` under WS-Trust, which is where it is
+  SET; and it is in this line's tooltip, so that somebody who had learnt to
+  read it off the shell finds it where they look. What is at the top of every
+  page instead is the Refresh control — see *The head row* above.
 
 * **`navBar()` draws a realm chooser as the FIRST thing inside the nav card**,
   on every page — but only when a realm has actually been defined. A permanent
@@ -894,11 +936,15 @@ would cost an afternoon:
   there is deliberately no per-realm administrator; if there is ever to be one,
   it is a per-realm container in the directory rather than a second store here.
 * **AND NEITHER IS THE CONSOLE'S SIGN-ON, which follows from the line above.**
-  The guard resolves the one session cookie in whichever realm minted it
-  (`sessionAnywhere()`), so switching realm switches rather than asking somebody
-  to sign in again. Only this console reads a session that way — in the realm
-  switched to, `/oauth2/authorize`, `/wsfed` and the two SAML profiles see none,
-  and the banner says so.
+  The guard resolves the one session cookie in the DEFAULT realm — that is
+  `consoleSession()`, and the name it had while it accepted any realm's session
+  was `sessionAnywhere()`. Switching realm therefore switches rather than asking
+  somebody to sign in again, and a session minted inside `acme` opens nothing:
+  the gate has to agree with the roster, which is the default realm's
+  `ou=groups`, or creating a realm would be a way to grant yourself both roles.
+  Only this console reads a session across a realm boundary at all — in the
+  realm switched to, `/oauth2/authorize`, `/wsfed` and the two SAML profiles see
+  none, and the banner says so.
 
 `/admin/realms` is the page for all of it, and it keeps nothing of its own: the
 registry is `common/realms.js`'s and a realm's settings go through the same
