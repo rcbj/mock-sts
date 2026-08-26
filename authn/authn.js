@@ -686,41 +686,113 @@ function federationFor(applicationId) {
   }
   const auto = federation.boolOf(((entry || {}).fields ||
                                   {}).appFederationAutoRedirect, true);
-  const record = federation.get(named);
-  if (!record) {
-    log.debug("Leaving federationFor(). No such relationship in this realm.");
+  // THE FOUR CHECKS ARE federation.js's, not this function's, since
+  // fedAuthnRelationship gave them a second caller — see
+  // usableServiceProvider() there. They were written out here first and
+  // copying them was never going to hold: a relationship id on an application
+  // entry and one on another relationship are the same string, checkable the
+  // same four ways, and two implementations of "would this actually work"
+  // would answer differently the first time one of them learned a fifth.
+  const usable = federation.usableServiceProvider(
+    named, 'This application');
+  if (usable.problem) {
+    log.debug("Leaving federationFor(). " + usable.problem);
     return { id: named, relationship: null, auto: auto,
-             problem: 'This application is configured to authenticate through ' +
-                      'the federation relationship "' + named + '", and there ' +
-                      'is no such relationship in this trust realm.' };
-  }
-  if (record.fedRole !== 'service-provider') {
-    log.debug("Leaving federationFor(). It goes the other way.");
-    return { id: named, relationship: null, auto: auto,
-             problem: 'This application names the federation relationship "' +
-                      named + '", which is identity-provider-side: this ' +
-                      'service ASSERTS to that partner rather than consuming ' +
-                      'from it, so there is nothing to sign in to there.' };
-  }
-  if (!federation.isEnabled(record)) {
-    log.debug("Leaving federationFor(). It is disabled.");
-    return { id: named, relationship: null, auto: auto,
-             problem: 'This application authenticates through the federation ' +
-                      'relationship "' + named + '", which is DISABLED. Every ' +
-                      'relationship is created disabled deliberately; enable ' +
-                      'it on /admin/federation.' };
-  }
-  const readiness = federation.readinessOf(record);
-  if (!readiness.ready) {
-    log.debug("Leaving federationFor(). It is not fully configured.");
-    return { id: named, relationship: null, auto: auto,
-             problem: 'This application authenticates through the federation ' +
-                      'relationship "' + named + '", which is enabled and not ' +
-                      'fully configured: ' + readiness.missing.join(', ') +
-                      ' still to set.' };
+             problem: usable.problem };
   }
   log.debug("Leaving federationFor(). " + named + ", auto=" + auto + ".");
-  return { id: named, relationship: record, auto: auto, problem: '' };
+  return { id: named, relationship: usable.relationship, auto: auto,
+           problem: '' };
+}
+
+// ---------------------------------------------------------------------------
+// WHAT THIS SIGN-IN IS ACTUALLY GOING TO DO, from the two places that can say.
+//
+// This is the ONE order in which the two sources are read, and writing it in
+// one function is the price of having two. They answer different questions and
+// that is why both exist:
+//
+//   * an IDENTITY-PROVIDER-SIDE RELATIONSHIP answers "when this partner asks
+//     me to authenticate somebody, what do I do?" — a fact about the
+//     relationship, and the one that makes this service an identity BRIDGE:
+//     `fedAuthnMechanism: federation` sends the person to a relationship in
+//     the other direction, so a SAML 2.0 partner is satisfied by a
+//     WS-Federation identity provider that this service consumes from. That
+//     partner never learns it happened, which is the same property the
+//     application at the top of the chain has, one layer down.
+//
+//   * an APPLICATION ENTRY answers "where do this application's people sign
+//     in?" — `appFederationRelationship`, home realm discovery by
+//     configuration, and what this service has done since 2026-08-26.
+//
+// THE RELATIONSHIP WINS, when one has anything to say. It is the more specific
+// statement: an application entry may be a federation partner AND an ordinary
+// OAuth client, registered by two different people, and only one of those two
+// facts is about the exchange actually in progress.
+//
+// AN EMPTY MECHANISM IS NOT AN ANSWER. A relationship that declares none —
+// which is every relationship created before the attribute existed — falls
+// through to the application entry and then to the screen, so this function
+// returns exactly what federationFor() alone used to return for every
+// configuration that predates it. That is the whole compatibility argument and
+// it is why authenticationFor() returns null rather than 'password'.
+//
+// A PROBLEM IS CARRIED RATHER THAN THROWN. Both sources report a relationship
+// that is missing, disabled, half-configured or pointing the wrong way as a
+// `problem` string, and the screen prints it. Falling silently back to the
+// password box is the failure worth being loud about: a federated application
+// authenticating people locally looks exactly like a federated application
+// working, and a BROKER that has quietly stopped brokering looks exactly like
+// one that is.
+// ---------------------------------------------------------------------------
+function mechanismFor(applicationId) {
+  log.debug("Entering mechanismFor(). application=" +
+            (applicationId || '(none)'));
+  const wanted = String(applicationId || '').trim();
+  if (!wanted) {
+    log.debug("Leaving mechanismFor(). The caller named no application.");
+    return { mechanism: 'password', source: 'default', federation: null,
+             via: '', problem: '' };
+  }
+  let broker = null;
+  try {
+    broker = federation.authenticationFor(
+      federation.identityProviderFor(wanted));
+  } catch (e) {
+    // Swallowed for federationFor()'s reason and no other: this runs on the
+    // way to the sign-in screen, so a register that throws must cost the
+    // shortcut and never the screen. It is logged at error because a throw
+    // here is a bug in this service rather than a configuration.
+    log.error('authn: the federation register threw while looking for an ' +
+              'identity-provider-side relationship naming "' + wanted +
+              '" and was ignored; the sign-in screen itself is unaffected: ' +
+              e.message);
+    broker = null;
+  }
+  if (broker) {
+    const home = broker.relationship
+      ? { id: broker.onward, relationship: broker.relationship, auto: true,
+          problem: '' }
+      : null;
+    log.info('authn: the federation relationship "' + broker.via + '" says ' +
+             'this sign-in is "' + (broker.mechanism || 'unrecognised') +
+             '"' + (broker.onward ? ', through "' + broker.onward + '"' : '') +
+             (broker.problem ? ' — and it cannot be done: ' + broker.problem
+                             : '') + '.');
+    log.debug("Leaving mechanismFor(). The relationship decided it.");
+    return { mechanism: broker.mechanism || 'password',
+             source: 'relationship', federation: home, via: broker.via,
+             problem: broker.problem };
+  }
+  const home = federationFor(wanted);
+  if (home) {
+    log.debug("Leaving mechanismFor(). The application entry decided it.");
+    return { mechanism: 'federation', source: 'application', federation: home,
+             via: '', problem: home.problem };
+  }
+  log.debug("Leaving mechanismFor(). Nothing configured; the screen it is.");
+  return { mechanism: 'password', source: 'default', federation: null,
+           via: '', problem: '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -780,25 +852,72 @@ function beginAuthentication(opts) {
   // that one catches somebody handing the federated entry point a returnTo of
   // their own.
   // ---------------------------------------------------------------------
-  const home = federationFor(opts.application);
+  const chosen = mechanismFor(opts.application);
+  const home = chosen.federation;
   if (home && home.relationship && home.auto) {
     const target = federation.PATHS.login + '/' +
       encodeURIComponent(home.relationship.fedId) +
       '?returnTo=' + encodeURIComponent(returnTo);
     log.info('authn: "' + String(opts.application) + '" authenticates through ' +
              'the federation relationship "' + home.relationship.fedId +
-             '", so this sign-in goes straight there rather than to the sign-in ' +
+             '"' + (chosen.source === 'relationship'
+                      ? ', because the identity-provider-side relationship "' +
+                        chosen.via + '" brokers it there'
+                      : '') +
+             ', so this sign-in goes straight there rather than to the sign-in ' +
              'screen.');
     log.debug("Leaving beginAuthentication(). Federated to " +
               home.relationship.fedId + ".");
     return target;
+  }
+  // ---------------------------------------------------------------------
+  // THE THREE MECHANISMS THAT STILL DRAW THIS SCREEN, folded into the record
+  // the screen is drawn from rather than handled beside it — so that a
+  // relationship configuring `password-mfa` and a RequestedAuthnContext
+  // demanding two factors produce ONE screen and not two code paths that
+  // could come to differ.
+  //
+  // forceMfa WINS OVER forcePasswordless and says so in the log. They are
+  // mutually exclusive by construction — one enum value, one mechanism — but
+  // `opts.forceMfa` does not come from the register at all: it comes from the
+  // request a protocol module is answering, and a caller that has been told
+  // two factors are required does not get a one-factor answer because a
+  // relationship preferred one. `webauthn` here is PASSWORDLESS, which is amr
+  // ["hwk"] and a single factor, however phishing-resistant it is.
+  // ---------------------------------------------------------------------
+  const forceMfa = !!opts.forceMfa || chosen.mechanism === 'password-mfa';
+  let forcePasswordless = chosen.mechanism === 'webauthn';
+  if (forcePasswordless && forceMfa) {
+    log.info('authn: the configured mechanism for "' +
+             String(opts.application || '(none)') + '" is a passwordless ' +
+             'security key, and this request demands two factors, so the ' +
+             'demand wins: the screen asks for a password and a key. One ' +
+             'factor does not answer a request for two, however ' +
+             'phishing-resistant that factor is.');
+    forcePasswordless = false;
   }
   const record = {
     id: randomId(18),
     returnTo: returnTo,
     details: Array.isArray(opts.details) ? opts.details : [],
     hint: String(opts.hint || ''),
-    forceMfa: !!opts.forceMfa,
+    forceMfa: forceMfa,
+    // Set only by a relationship configuring `webauthn`. Nothing a protocol
+    // module passes can turn it on: a caller asking for a passwordless
+    // sign-in is a caller choosing somebody else's authenticator for them,
+    // which is a deployment decision and not a request parameter.
+    forcePasswordless: forcePasswordless,
+    mechanism: chosen.mechanism,
+    mechanismSource: chosen.source,
+    mechanismVia: chosen.via,
+    // The problem is on the RECORD and not only inside `federation`, because
+    // the two sources fail differently: an application entry naming an
+    // unusable relationship still produces a `federation` object to hang it
+    // on, and a BROKERING relationship whose onward partner is disabled
+    // produces no such object at all — there is nothing usable to describe.
+    // Reading it from one place is what stops the second case being the
+    // silent fallback the first case was made loud to prevent.
+    mechanismProblem: chosen.problem || '',
     protocol: opts.protocol || 'OAuth 2.0 / OIDC',
     // Carried so the screen can offer the RIGHT partner rather than every
     // usable one, and so that a relationship this application names and cannot
@@ -1006,13 +1125,38 @@ function loginPage(base, record, error) {
     // decides between them and `webauthn_only` wins. Under forceMfa the
     // passwordless box is disabled: one factor does not answer a request for
     // two, however phishing-resistant that factor is.
+    // forcePasswordless is the mirror image and arrives from the OTHER
+    // direction: forceMfa is a demand the CALLING PROTOCOL made, and this is a
+    // mechanism an operator CONFIGURED on the federation relationship the
+    // partner is registered under (fedAuthnMechanism: webauthn). Both end here
+    // because both decide what this one screen offers, and they cannot both be
+    // on — beginAuthentication() resolves that, loudly, before the record is
+    // written.
+    //
+    // THE HIDDEN INPUT IS NOT THE ENFORCEMENT. A disabled checkbox posts
+    // nothing and a hidden one can be deleted by anybody with the developer
+    // tools open, so handleLogin() reads the RECORD as well: see the note
+    // there. The markup is what a person sees; the record is what decides.
     '<label class="chk"><input type="checkbox" id="use_webauthn" name="use_webauthn" value="1"' +
-    (record.forceMfa ? ' checked disabled' : '') + '> Use a security key (WebAuthn) as a second factor</label>' +
+    (record.forceMfa ? ' checked disabled' : '') +
+    (record.forcePasswordless ? ' disabled' : '') +
+    '> Use a security key (WebAuthn) as a second factor' +
+    (record.forcePasswordless
+       ? ' — not available: this partner is configured for a passwordless key'
+       : '') + '</label>' +
     (record.forceMfa ? '<input type="hidden" name="use_webauthn" value="1">' : '') +
     '<label class="chk"><input type="checkbox" id="webauthn_only" name="webauthn_only" value="1"' +
-    (record.forceMfa ? ' disabled' : '') + '> Sign in with the security key alone (passwordless — ' +
+    (record.forceMfa ? ' disabled' : '') +
+    (record.forcePasswordless ? ' checked disabled' : '') +
+    '> Sign in with the security key alone (passwordless — ' +
     'no password step, and the tokens will say one factor)' +
-    (record.forceMfa ? ' — not available: this request demands two factors' : '') + '</label>' +
+    (record.forceMfa ? ' — not available: this request demands two factors' : '') +
+    (record.forcePasswordless
+       ? ' — required: the federation relationship "' +
+         xmlEscape(record.mechanismVia || '') + '" configures this'
+       : '') + '</label>' +
+    (record.forcePasswordless
+       ? '<input type="hidden" name="webauthn_only" value="1">' : '') +
     '<div class="row"><button type="submit" id="kc-login" name="action" value="login">Sign In</button>' +
     '<button type="submit" id="kc-cancel" name="action" value="cancel" class="secondary">Cancel</button></div>' +
     '</form>' +
@@ -1074,7 +1218,8 @@ app.get(LOGIN_PATH, function (req, res) {
   // than being replaced silently by the password box below it. That fallback is
   // the failure worth being loud about: a federated application authenticating
   // people locally looks exactly like a federated application working.
-  const problem = ((record.federation || {}).problem) || '';
+  const problem = record.mechanismProblem ||
+                  ((record.federation || {}).problem) || '';
   sendLoginPage(res, loginPage(baseUrlOf(req), record, problem));
   log.debug("Leaving the authentication screen. Showed the form for " + record.id +
             (problem ? ", with a federation problem." : "."));
@@ -1116,7 +1261,14 @@ app.post(LOGIN_PATH, function (req, res) {
   // carry both — and `webauthn_only` wins, because the two mean different
   // things and answering "both" with the second-factor path would put somebody
   // through a password step they explicitly asked not to have.
-  const passwordless = String(body.webauthn_only || '') === '1';
+  // READ OFF THE RECORD AND NOT ONLY OFF THE BODY. The screen posts a hidden
+  // `webauthn_only` when the mechanism demands one, and a hidden input is a
+  // suggestion: it is deleted by anybody with the developer tools open, and
+  // the request that arrives then looks exactly like an ordinary password
+  // sign-in. A configured mechanism that a client can opt out of is not a
+  // mechanism, so the record decides and the markup only shows.
+  const passwordless = !!record.forcePasswordless ||
+                       String(body.webauthn_only || '') === '1';
   const secondFactor = !passwordless && String(body.use_webauthn || '') === '1';
 
   // A caller that demanded a second factor does not get the passwordless path.

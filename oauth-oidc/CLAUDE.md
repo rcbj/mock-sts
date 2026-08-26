@@ -181,6 +181,72 @@ are facts about `server.js`: `ws-federation/wsfed.js` must be required AFTER
    127.0.0.1, while a token narrowed to somebody else always has a different
    path.
 
+   **`resource` IS READ FOR EVERY GRANT, and it was read for two until
+   2026-08-26.** Section 2 puts the parameter on *a token request* — the grant
+   types RFC 6749 defines and the extensions built on them, not a chosen pair.
+   Only `authorization_code` and `refresh_token` parsed it, because only they
+   have something to NARROW, and the other four IGNORED IT SILENTLY: a
+   `client_credentials` request asking for `https://apigw1.example.com` got
+   `<base>/resource` and no error, so the restriction the client believed it had
+   was never there. It is parsed ONCE now, above every grant in
+   `tokenEndpoint()`, for the reason the DPoP check above it is where it is — a
+   malformed `resource` is malformed whatever is being asked for. The two
+   narrowing RULES stay per grant, because they are the half that depends on
+   what came before; the four direct grants have no earlier decision for a rule
+   to be about, and inventing one would refuse the only request they can make.
+
+   **THE REPETITION WAS A SECOND HOLE UNDER THE FIRST.** `helpers.parseBody()`
+   builds a plain object, so `resource=a&resource=b` arrived as `b` and
+   `parseResourceIndicators()` — written to accept an array since the day it was
+   added — could never be handed one. `bodyValues()` in `helpers.js` reads the
+   repetition from the raw body, and `parseBody()` is deliberately NOT changed:
+   sixty-odd call sites across fourteen modules read that object with
+   `String(body.x)`. `admin-ui/admin.js`'s `listField()` is the same function
+   written first, for the console's checkbox columns; the two are deliberately
+   identical in shape so that folding them is a one-line delegation, which has
+   to happen in THAT file because it requires this one (rule 5).
+
+   **AND THE TOKEN EXCHANGE HAD BOTH BUGS AT ONCE.** `body.audience ||
+   body.resource` discarded the resource whenever both were sent — RFC 8693
+   section 2.1 says outright that they MAY be used together — and never
+   validated it, so a fragment or an array went straight into `aud`. They are
+   unioned now, with the resources read through the shared parse. `audience` is
+   NOT put through it: section 2.1 calls it a *logical name*, which is not
+   required to be a URI. Audiences come FIRST in the union, and that ordering is
+   the one compatibility decision here rather than a reading of the RFC — order
+   means nothing in an `aud` array, but the delegation act files an exchange
+   against ONE target and `audience` winning is what it did before.
+
+   **AND A SCOPE THAT NAMES ANOTHER APPLICATION IS AN AUDIENCE TOO — added
+   2026-08-26, and it is the mechanism clients ACTUALLY use.** RFC 8707 above is
+   how a client SHOULD say which resource server a token is for; a scope list
+   carrying the API's name (`scope=openid email profile apigw1`, no `resource`
+   parameter anywhere) is how every real deployment of the pattern does it. So
+   `audienceScopes()` in `oauth2.js` reads one: a scope value that is the
+   `oauthClientId` of ANOTHER application in the registry becomes the `aud` and
+   comes off the scope claim, and everything else is untouched. Four rules and
+   each has a reason written above the function — the match is against
+   `oauthClientId` and not the audience or the entry's `cn`; the audience is the
+   scope value VERBATIM rather than that application's `oauthAudience`; a
+   spec-defined scope is never an audience whatever the registry says (nothing
+   stops somebody registering a client called `profile`); and the client's own
+   client_id is skipped.
+
+   **TWO CONSEQUENCES ARE THE INTERESTING PART, AND BOTH WERE FOUND BY RUNNING
+   IT.** The refresh token keeps the WHOLE scope while the access token loses
+   the value that became its audience — the one place the two halves of a grant
+   deliberately disagree, because section 2.2.2 binds a refresh token to what
+   was AUTHORIZED and `oauth2_bcp.js`'s `refresh-not-wider-than-grant` compares
+   a refresh request against it, so stripping it there refuses a client that
+   refreshes with the scope list it originally sent. And an `openid` token gets
+   the default audience APPENDED beside the derived one
+   (`withOwnResource()`), because `audienceRefusal()` in `dpop.js` refuses a
+   token addressed elsewhere and `/oauth2/userinfo` is one of the endpoints it
+   guards: without it, the exact request this feature was written for produced a
+   token that could not call UserInfo. RFC 8707's `resource` is deliberately NOT
+   given that — a client that sent it narrowed its token on purpose, and a
+   client that wrote a scope did not ask for anything of the sort.
+
    **THE REPLAY RELAXATION IS THE ONE THING THE TWO MODES ANSWER DIFFERENTLY
    ABOUT A CODE.** `redeemedCodes` in `oauth2.js` answers an IDENTICAL repeat
    with the tokens it already bought, for the reason written where it is

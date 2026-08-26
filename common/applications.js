@@ -2477,6 +2477,59 @@ function forAudience(audience) {
   return found[0];
 }
 
+// ---------------------------------------------------------------------------
+// WHICH APPLICATION ANSWERS TO THIS CLIENT_ID, or null.
+//
+// The SECOND lookup here that is not by identifier, and it exists because a
+// client_id and an identifier are not the same thing even though they are equal
+// on almost every entry in this registry: `seen()` files an OAuth client under
+// its client_id, so the two agree for anything that turned up on its own — and
+// an entry CREATED from the console gets whatever `cn` somebody typed, with the
+// client_id in `oauthClientId` beside it. `load()` would find the first and miss
+// the second, which is the whole reason this reads the attribute.
+//
+// It is `forAudience()`'s shape and not `forAudience()` itself, for the reason
+// that function's header gives: `oauthAudience` and `oauthClientId` are two
+// different registrations and one lookup answering to both would make
+// `apigw1` and `https://apigw1.example.com` indistinguishable in the one place
+// the difference is the point. The CALLER decides which question it is asking;
+// oauth2.js's `audienceScopes()` asks this one, because a scope value is a bare
+// name and never a URI.
+//
+// Same three properties as its neighbour, for the same reasons: it is not a
+// permission (an unmatched name returns null and nothing is refused), it is not
+// case-folded, and it walks the container rather than keeping an index.
+// ---------------------------------------------------------------------------
+function forClientId(clientId) {
+  log.debug("Entering forClientId(). clientId=" + clientId);
+  const wanted = String(clientId == null ? '' : clientId).trim();
+  if (!wanted) {
+    log.debug("Leaving forClientId(). Nothing was asked for.");
+    return null;
+  }
+  const found = list().filter(function (row) {
+    return valuesOf(row.fields.oauthClientId).indexOf(wanted) >= 0;
+  });
+  if (!found.length) {
+    log.debug("Leaving forClientId(). No application has registered it.");
+    return null;
+  }
+  if (found.length > 1) {
+    // Two entries claiming one client_id is a configuration mistake rather than
+    // a state to resolve here — the same sentence forAudience() says about an
+    // audience, and with a sharper consequence: a client_id is what a Token
+    // Request authenticates as, so two entries answering to one mean two sets of
+    // registration facts for one caller.
+    log.warn('applications: ' + found.length + ' applications have registered ' +
+             'the client_id "' + wanted + '" (' +
+             found.map(function (row) { return row.identifier; }).join(', ') +
+             '). The first is the one anything looking a client up by id will ' +
+             'find. A client_id names one client; remove it from the others.');
+  }
+  log.debug("Leaving forClientId(). " + found[0].identifier + ".");
+  return found[0];
+}
+
 function count() {
   const backing = store();
   return backing ? backing.countApplications() : 0;
@@ -2748,6 +2801,9 @@ module.exports = {
   // The audience lookup, exported for the token endpoint. See its header for
   // why it is a lookup and not a check.
   forAudience: forAudience,
+  // The client_id lookup beside it, exported for oauth2.js's audienceScopes().
+  // Two lookups rather than one that tries both — see forClientId()'s header.
+  forClientId: forClientId,
   count: count,
   containerDn: containerDn,
   maxApplications: maxApplications

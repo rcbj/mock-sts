@@ -21,7 +21,7 @@
 //     error-response shapes, and the mock's one user.
 //
 // The last group is why this file exists at all rather than each protocol
-// keeping its own: `userFor`, `parseBody`, `oauthError`, `signJwt` and `vciError`
+// keeping its own: `userFor`, `parseBody`, `bodyValues`, `oauthError`, `signJwt` and `vciError`
 // were used across the OAuth2, OID4VCI and OID4VP sections, and leaving them in
 // any one of those made the modules require each other in a CYCLE (the offer
 // pages need the mock user; the authorization server needs the offer state).
@@ -382,6 +382,56 @@ function parseBody(req) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// THE VALUES OF A PARAMETER THAT IS ALLOWED TO APPEAR MORE THAN ONCE.
+//
+// `parseBody()` above builds a PLAIN OBJECT, so a repeated field keeps only its
+// last value — `resource=a&resource=b` arrives as `b` and the first is silently
+// gone. That is not a bug there and it is not going to be fixed there: sixty-odd
+// call sites across fourteen modules read that object with `String(body.x)`, and
+// giving them an array for a repeat would change what every one of them sees to
+// fix the two parameters that need it.
+//
+// So the repetition is read HERE, from the raw body, beside the parsed one — and
+// only by the callers whose specification says the parameter may repeat. Two of
+// them do: RFC 8707 section 2's `resource` (repeating it asks for the "small
+// set" of resource servers RFC 9700 section 2.3 allows) and RFC 8693 section
+// 2.1's `audience` and `resource` on a token exchange. Until 2026-08-26 neither
+// could actually be repeated at the token endpoint whatever the RFC said,
+// because this function did not exist and `parseBody()` had already thrown the
+// extras away. `parseResourceIndicators()` in `oauth2.js` had handled an array
+// since it was written; nothing could ever hand it one.
+//
+// **THE AUTHORIZATION ENDPOINT NEEDS NONE OF THIS**, which is worth knowing
+// before somebody looks for a bug there: it reads `req.query`, and express's
+// query parser gives an array for a repeat already.
+//
+// `admin-ui/admin.js`'s `listField()` is the same function, written first, for
+// the console's checkbox columns. It is not called from here and this is not
+// called from there — that module requires `oauth2.js` (rule 5), so nothing
+// below it can require it back. Folding the two together is a change to make in
+// that file, and the shape here is deliberately identical so that it is a
+// one-line delegation when somebody does.
+// ---------------------------------------------------------------------------
+function bodyValues(req, body, name) {
+  log.debug("Entering bodyValues(). name=" + name);
+  const type = String((req && req.headers && req.headers['content-type']) || '');
+  if (/json/i.test(type)) {
+    // A JSON body carries its own repetition, as an array. Read off the PARSED
+    // object rather than the raw text, because that is where JSON.parse already
+    // put it.
+    const value = body ? body[name] : undefined;
+    const out = Array.isArray(value) ? value.map(String)
+              : (value === undefined || value === null || value === '' ? [] : [String(value)]);
+    log.debug("Leaving bodyValues(). " + out.length + " value(s) from a JSON body.");
+    return out;
+  }
+  const raw = typeof req.body === 'string' ? req.body : '';
+  const out = new URLSearchParams(raw).getAll(name);
+  log.debug("Leaving bodyValues(). " + out.length + " value(s) from a form body.");
+  return out;
+}
+
 function oauthError(res, status, error, description) {
   log.debug("Entering oauthError(). status=" + status + ", error=" + error);
   res.status(status).type('application/json').set('Cache-Control', 'no-store')
@@ -664,6 +714,9 @@ module.exports = {
   bbsKeyPair: bbsKeyPair,
   walletBaseUrl: walletBaseUrl,
   parseBody: parseBody,
+  // The repeated-parameter reader beside it. See its header for why parseBody()
+  // is not the place.
+  bodyValues: bodyValues,
   oauthError: oauthError,
   vciError: vciError,
   signJwt: signJwt,

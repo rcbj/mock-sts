@@ -68,7 +68,7 @@ const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const app = require('../common/app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
-        xmlEscape, parseBody, oauthError, signJwt, userFor,
+        xmlEscape, parseBody, bodyValues, oauthError, signJwt, userFor,
         hasScope } = require('../common/helpers');
 const dpop = require('./dpop');
 // RFC 8705 — certificate-bound access tokens, the other mechanism RFC 9700
@@ -1214,14 +1214,57 @@ function idToken(base, opts) {
 
 function tokenSet(base, opts) {
   log.debug("Entering tokenSet(). scope=" + (opts.scope || '(none)'));
-  const access = accessToken(base, opts);
+  // A SCOPE NAMING ANOTHER APPLICATION BECOMES THE AUDIENCE — see
+  // audienceScopes(). Here rather than inside accessToken(), because the
+  // decision changes three things and only one of them is the access token: the
+  // scope claim on it, the `scope` member of the token response, and the
+  // `resources` the refresh token remembers. accessToken() can only reach the
+  // first, and a call site that set the other two would be a fourth place this
+  // has to be got right — which is the argument that keeps `issue()` the single
+  // entry to this function and signJwt() the single counter.
+  //
+  // An audience that arrived some other way WINS and nothing is derived: RFC
+  // 8707's `resource` is the mechanism a client used deliberately, an exchange's
+  // `audience` is RFC 8693 section 2.1's parameter, and a refresh carries
+  // forward what its grant was authorized for. Deriving a second audience beside
+  // any of those would WIDEN a set the two narrowing checks at the token
+  // endpoint exist to stop widening.
+  const named = audienceScopes(opts.scope, opts.client_id);
+  const derived = (opts.audience === undefined || opts.audience === null ||
+                   opts.audience === '') && named.audiences.length;
+  // See withOwnResource(): an OIDC token is addressed to the API AND to this
+  // service's own UserInfo endpoint, or the flag would take UserInfo away from
+  // every client that ever wrote an API's name in a scope list.
+  const addressed = derived ? withOwnResource(base, named.audiences, named.scope) : [];
+  const issuing = named.audiences.length
+    ? Object.assign({}, opts, {
+        scope: named.scope,
+        audience: derived ? audienceClaim(addressed) : opts.audience,
+        // Onto the refresh token as well, for the reason the RFC 8707 call
+        // sites give: a grant cannot widen itself by being renewed, and the
+        // refresh grant reads the audience of what it mints off this list.
+        // The APPLICATIONS only, not this service's own resource server: what a
+        // refresh must not widen is which parties the grant reaches, and the
+        // UserInfo endpoint is re-derived from the scope on every renewal
+        // anyway. Putting the default in here would put it in the RFC 8707
+        // narrowing check, where a client asking to narrow to the API it
+        // already had would be told it was asking for something new.
+        resources: derived && !(opts.resources && opts.resources.length)
+          ? named.audiences.slice(0) : opts.resources
+      })
+    : opts;
+  const access = accessToken(base, issuing);
   // RFC 9700 section 2.2, and it refuses nothing: whether a token is
   // sender-constrained is the CLIENT's decision, since it binds by sending a
   // DPoP proof. Noted at the one place every grant mints a token set, so that
   // "this server issued a bearer token" is a line somebody can find rather than
   // an absence they have to notice. A no-op while the mode is off.
   bcp.noteTokenBinding({
-    jkt: opts.jkt, clientId: opts.client_id, scope: opts.scope,
+    // The scope the token actually CARRIES. Section 2.3's least-privilege note
+    // reads what was issued, so a scope that became the audience must not be
+    // reported here as one this server does not advertise — it is not on the
+    // token to be least-privileged about.
+    jkt: opts.jkt, clientId: opts.client_id, scope: issuing.scope,
     // Whether the connection this token was minted on carried a client
     // certificate — a token bound that way is sender-constrained too, and
     // reporting it as a bearer token would be the note contradicting the cnf on
@@ -1235,11 +1278,31 @@ function tokenSet(base, opts) {
     // bound token announced as Bearer would be presented as one and refused.
     token_type: opts.jkt ? 'DPoP' : 'Bearer',
     expires_in: accessTokenTtl(),
-    scope: opts.scope || ''
+    // RFC 6749 section 5.1: `scope` describes the ACCESS TOKEN that was issued,
+    // and this one no longer carries the value that became its audience. It is
+    // therefore not identical to what was requested, which is the case that
+    // section makes the member REQUIRED rather than optional — it is always
+    // sent here, so nothing changes about when.
+    scope: issuing.scope || ''
   };
   if (opts.authorization_details) body.authorization_details = opts.authorization_details;
-  if (opts.withRefresh !== false) body.refresh_token = refreshToken(base, opts);
+  if (opts.withRefresh !== false) {
+    // THE REFRESH TOKEN KEEPS THE WHOLE SCOPE, and that is the one place the two
+    // halves of a grant deliberately disagree. The access token's scope claim is
+    // what the token can do; the refresh token's is what was AUTHORIZED, which
+    // is what RFC 9700 section 2.2.2 binds it to and what oauth2_bcp.js's
+    // `refresh-not-wider-than-grant` compares a refresh request against. Strip
+    // it here as well and a client that refreshes with the scope list it
+    // originally sent — the ordinary thing to do — is refused for asking for a
+    // scope its own grant supposedly never carried.
+    body.refresh_token = refreshToken(base,
+      Object.assign({}, issuing, { scope: opts.scope || '' }));
+  }
   if (hasScope(opts.scope, 'openid')) {
+    // From `opts` and not from `issuing`: an ID Token carries no scope claim and
+    // its audience is the CLIENT, so neither of the two things above applies to
+    // it. Passing the derived audience here would readdress it to the resource
+    // server and every relying party would refuse its own ID Token.
     body.id_token = idToken(base, Object.assign({}, opts, { access_token: access }));
   }
   log.debug("Leaving tokenSet(). Issued: " + Object.keys(body).join(', '));
@@ -1489,6 +1552,207 @@ function parseResourceIndicators(raw) {
   return { resources: wanted };
 }
 
+// ---------------------------------------------------------------------------
+// A SCOPE THAT NAMES ANOTHER APPLICATION IS AN AUDIENCE, and the access token
+// says so instead.
+//
+// RFC 8707 above is how a client SHOULD ask which resource server a token is
+// for, and it is what this service already honoured. It is not what clients
+// actually do. The overwhelmingly common shape — the one every deployment of
+// this pattern has, and the one the debugger sends — is a scope list carrying
+// the name of the API the token is meant for:
+//
+//     scope=openid email profile offline_access apigw1
+//
+// and no `resource` parameter at all. Before this, such a request produced an
+// access token audienced to `<base>/resource`, the stand-in for a resource
+// nobody named — so the ONE fact in the request about which party the token was
+// for went into a string nothing reads, and the token said it was for
+// everything this service protects. Every downstream reader inherited that:
+// /admin/tokens showed a party column with a placeholder in it, and
+// /admin/delegation/user could not draw the first hop of a chain, because the
+// only line it has to draw a `reaches` from is the audience.
+//
+// So a scope value that is the CLIENT_ID OF ANOTHER APPLICATION in this
+// registry becomes the audience, and comes out of the scope list. Four things
+// about that are decisions rather than mechanics.
+//
+// **THE MATCH IS AGAINST `oauthClientId`, NOT AGAINST THE IDENTIFIER OR THE
+// AUDIENCE.** `applications.forClientId()` is a lookup of its own for the reason
+// its header gives — matching `oauthAudience` would mean a scope had to be a URL
+// to work, and matching the entry's `cn` would mean an application created from
+// the console under one name and registered under another matched on the wrong
+// one. A scope is a bare name, so it is compared with the bare name a client
+// answers to.
+//
+// **THE AUDIENCE IS THE SCOPE VALUE VERBATIM, not the matched application's
+// `oauthAudience`.** The client said `apigw1`, so the token says `aud: apigw1`,
+// which is the same spelling the ID Token uses for the party it is for and the
+// same one `applications.get()` and the delegation register file everything
+// under. Substituting the registered URL would be this endpoint deciding that a
+// client asking for one string meant another — and it would break the moment an
+// application has no `oauthAudience`, which most of them do not.
+//
+// **A SPEC-DEFINED SCOPE IS NEVER AN AUDIENCE, whatever the registry says.**
+// `PROTOCOL_SCOPES` below is that vocabulary, and the guard is not theoretical:
+// nothing stops somebody registering a client called `profile`, and without this
+// every OIDC request in the service would start issuing tokens audienced to it.
+// A protocol's own word wins over a registration, always.
+//
+// **THE CLIENT'S OWN client_id IS SKIPPED.** `scope=webapp1` from webapp1 is a
+// token addressed to itself, which is what an ID Token already is; drawing it
+// would put a line from a box to itself on every picture in the console.
+//
+// A request that names none of these is unaffected in every respect — same
+// scope, same default audience — which is what keeps this invisible to every
+// caller that was working before, exactly like the RFC 8707 block above.
+// ---------------------------------------------------------------------------
+
+// The scope values this service's protocols define, which is the whole of what
+// is exempt above. Computed rather than written out, because three of the four
+// groups can change while the process runs: the SCIM scope names are settings,
+// and the OpenID4VCI ones come from the credential configurations. A list
+// written here would have gone stale the first time `scim.scopeRead` was set
+// from /admin/config, and the symptom would have been a token quietly audienced
+// to whatever an application had registered that name as.
+function protocolScopes() {
+  log.debug("Entering protocolScopes().");
+  // OpenID Connect Core 1.0 section 5.4, plus section 11's offline_access. All
+  // six, including the two this service issues no claims for: `address` and
+  // `phone` are still OpenID Connect's words and must not become an audience
+  // because nothing here answers them.
+  const names = ['openid', 'profile', 'email', 'address', 'phone', 'offline_access'];
+  // RFC 7644 section 2, by way of scim_auth.js. Their names are settings, which
+  // is why they are read and not written — see the note above.
+  names.push(String(config.value('scim.scopeRead') || 'scim:read'));
+  names.push(String(config.value('scim.scopeWrite') || 'scim:write'));
+  // OpenID4VCI 1.0 section 5.1.2: a credential configuration may name a scope,
+  // and a wallet asks for the credential by asking for it.
+  Object.keys(VCI_CONFIGS).forEach(function (id) {
+    const scope = VCI_CONFIGS[id] && VCI_CONFIGS[id].scope;
+    if (scope && names.indexOf(scope) < 0) {
+      names.push(String(scope));
+    }
+  });
+  log.debug("Leaving protocolScopes(). " + names.length + " reserved name(s).");
+  return names;
+}
+
+// Split a scope list into the scopes it really is and the audiences it was
+// naming. Returns the scope string to put ON the access token and the audiences
+// to address it to; `audiences` is empty for every request that names none,
+// and the caller then changes nothing.
+function audienceScopes(scope, clientId) {
+  log.debug("Entering audienceScopes(). scope=" + (scope || '(none)'));
+  const asked = String(scope || '').split(/\s+/).filter(Boolean);
+  if (!asked.length) {
+    log.debug("Leaving audienceScopes(). Nothing was asked for.");
+    return { scope: String(scope || ''), audiences: [], matched: [] };
+  }
+  const reserved = protocolScopes();
+  const mine = String(clientId || '').trim();
+  const kept = [];
+  const audiences = [];
+  const matched = [];
+  asked.forEach(function (one) {
+    if (reserved.indexOf(one) >= 0 || (mine && one === mine)) {
+      // A protocol's own word, or this client naming itself. Both stay scopes
+      // and neither is looked up — see the third and fourth decisions above.
+      kept.push(one);
+      return;
+    }
+    const application = applications.forClientId(one);
+    if (!application) {
+      // An ordinary scope nobody here has heard of, which is most of them and
+      // is exactly what a caller comes to this service to send. Kept verbatim;
+      // RFC 9700 mode notes it as unadvertised and grants it anyway.
+      kept.push(one);
+      return;
+    }
+    if (audiences.indexOf(one) < 0) {
+      audiences.push(one);
+      matched.push({ scope: one, identifier: application.identifier });
+    }
+  });
+  if (audiences.length) {
+    logArtifact('scopes naming an application', 'read as an audience', matched);
+    log.info('An access token for client "' + (mine || '(unnamed)') + '" is being ' +
+             'addressed to ' + audiences.join(', ') + ', named as ' +
+             (audiences.length === 1 ? 'a scope' : 'scopes') + ' rather than through ' +
+             'RFC 8707\'s resource parameter. ' + matched.map(function (one) {
+               return '"' + one.scope + '" is the client_id of the application "' +
+                      one.identifier + '"';
+             }).join('; ') + '. It is the audience now and not a scope, so it is not ' +
+             'on the token\'s scope claim; the grant still remembers it, which is what ' +
+             'keeps a refresh from widening the audience.');
+  }
+  log.debug("Leaving audienceScopes(). " + audiences.length + " audience(s), " +
+            kept.length + " scope(s).");
+  return { scope: kept.join(' '), audiences: audiences, matched: matched };
+}
+
+// The `aud` claim for a list of them: one value where there is one, an array
+// where there are several. The same shape rule the RFC 8707 call sites use, in
+// one place because there are now four of them — a single-element array is a
+// shape some libraries read differently from a string, so the ordinary case
+// stays a string.
+function audienceClaim(list) {
+  if (!list || !list.length) {
+    return undefined;
+  }
+  return list.length === 1 ? list[0] : list.slice(0);
+}
+
+// ---------------------------------------------------------------------------
+// AN `openid` TOKEN IS FOR THIS SERVICE AS WELL, AND THIS IS THE ONE PLACE THAT
+// HAD TO BE SAID OUT LOUD.
+//
+// `audienceScopes()` above readdresses an access token to the API named in its
+// scope list, and the FIRST version of it broke OpenID Connect doing so. The
+// protected endpoints here refuse a token whose `aud` is somebody else —
+// `audienceRefusal()` in `dpop.js`, in both modes, RFC 9700 section 2.3 — and
+// `/oauth2/userinfo` is one of them. So `scope=openid email profile apigw1`, the
+// exact request this feature was written for, produced a token that could not
+// call UserInfo: the audience restriction was correct, the OIDC flow was broken,
+// and nothing said which had happened.
+//
+// The answer is that BOTH statements are true at once and the token should make
+// both. A client holding one access token from an OIDC sign-on legitimately has
+// something addressed to the API it asked for AND to this authorization server's
+// own UserInfo endpoint — which is exactly the "small set of resource servers"
+// RFC 9700 section 2.3 allows where one is impractical, and exactly the array
+// RFC 7519 section 4.1.3 exists for. So the default audience is APPENDED, and
+// the `openid` scope is what decides it: that scope IS the request for the
+// UserInfo endpoint, and without it there is nothing here for the token to be
+// presented back to.
+//
+// **RFC 8707's `resource` IS DELIBERATELY NOT GIVEN THIS**, and the difference
+// is the whole reason this is a separate function rather than a line in
+// `accessToken()`. A client that sent `resource` narrowed its token on purpose
+// and losing UserInfo is what it asked for; a client that wrote a scope did not
+// ask for anything of the sort, and would have had a working flow taken away by
+// a feature it never opted into. Same claim, two meanings, because one of them
+// was a deliberate act and the other is this service reading a hint.
+// ---------------------------------------------------------------------------
+function withOwnResource(base, audiences, scope) {
+  log.debug("Entering withOwnResource().");
+  if (!audiences.length || !hasScope(scope, 'openid')) {
+    log.debug("Leaving withOwnResource(). Nothing derived, or no openid scope.");
+    return audiences;
+  }
+  // The same expression accessToken() uses for the default, so the two spellings
+  // cannot drift — `isOwnResourceAudience()` matches on the path and a base that
+  // differed by a segment would be refused with a message about somebody else's
+  // resource server.
+  const own = base + '/resource';
+  if (audiences.indexOf(own) >= 0) {
+    log.debug("Leaving withOwnResource(). Already named.");
+    return audiences;
+  }
+  log.debug("Leaving withOwnResource(). Added " + own + ".");
+  return audiences.concat([own]);
+}
+
 function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   log.debug("Entering issueAuthorizationResponse().");
   // Everything minted below is this authorization server's, so the base it is
@@ -1642,14 +1906,27 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
   // browser and one that will come back through the token endpoint.
   const flow = types.indexOf('code') >= 0 ? 'hybrid (authorization endpoint)' : 'implicit';
   if (types.indexOf('token') >= 0) {
-    out.access_token = accessToken(base, { user: user, client_id: String(query.client_id), scope: scope,
+    // The same reading tokenSet() does one grant later — see audienceScopes().
+    // It is done here TOO rather than only there because a token that comes back
+    // from the AUTHORIZATION endpoint never goes through tokenSet() at all:
+    // implicit and hybrid mint it on the spot, and leaving this out would mean
+    // one flow's token said `apigw1` and another's said `<base>/resource` for
+    // the same request. `resources` still wins, for the reason given there.
+    const named = audienceScopes(scope, String(query.client_id));
+    out.access_token = accessToken(base, { user: user, client_id: String(query.client_id),
+                                           scope: named.scope,
                                            audience: resources.length
                                              ? (resources.length === 1 ? resources[0] : resources)
-                                             : undefined,
+                                             : audienceClaim(withOwnResource(
+                                                 base, named.audiences, named.scope)),
                                            session_id: sessionId, grant: flow });
     out.token_type = 'Bearer';
     out.expires_in = accessTokenTtl();
-    out.scope = scope;
+    // What the ACCESS TOKEN carries, which is RFC 6749 section 5.1's rule read
+    // through section 4.2.2 — and the code beside it in a hybrid response is
+    // unaffected: `authzCodes` above holds the scope as AUTHORIZED, so redeeming
+    // it derives the same audience again at the token endpoint.
+    out.scope = named.scope;
   }
   if (types.indexOf('id_token') >= 0) {
     out.id_token = idToken(base, {
@@ -2889,6 +3166,62 @@ function tokenEndpoint(req, res) {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // RFC 8707 SECTION 2 — `resource` IS READ FOR EVERY GRANT, AND IT USED TO BE
+  // READ FOR TWO.
+  //
+  // Section 2 says the parameter belongs on "a token request", full stop: the
+  // grant types it names are the ones RFC 6749 defines and the extensions built
+  // on them, not a chosen pair. Until 2026-08-26 only `authorization_code` and
+  // `refresh_token` parsed it here — the two that have something to NARROW —
+  // and the other four IGNORED it silently. That is the worst shape a parameter
+  // can have: a client asking `client_credentials` for a token addressed to
+  // `https://apigw1.example.com` got one addressed to `<base>/resource` and no
+  // error, so the audience restriction it thought it had was never there. It
+  // was found by testing the scope-derived audience above against a request
+  // carrying both, and it is a hole in RFC 8707 rather than anything to do with
+  // that feature.
+  //
+  // Parsed ONCE, here, above every grant, for the reason the DPoP check above is
+  // where it is: a malformed `resource` is malformed whatever the client is
+  // asking for, and six parses is five that agree and a sixth added later that
+  // does not. The two RULES stay per grant, because they are the half that
+  // depends on what came before:
+  //
+  //   * `authorization_code` and `refresh_token` may only NARROW what was
+  //     already authorized (section 2.2). Both compare this list against what
+  //     the code or the refresh token carries, and both refuse `invalid_target`
+  //     for anything extra.
+  //   * `client_credentials`, `password`, the pre-authorized code grant and the
+  //     token exchange have NOTHING to narrow against — no authorization request
+  //     preceded any of them — so what is asked for is what is granted. That is
+  //     not a relaxation: there is no earlier decision for a narrowing rule to
+  //     be about, and inventing one would refuse the only request those grants
+  //     can make.
+  //
+  // **A GRANT THAT NARROWS ITSELF OUT OF THIS SERVICE IS THE CLIENT'S DECISION.**
+  // `audienceRefusal()` in `dpop.js` refuses a token addressed elsewhere at
+  // every protected endpoint here, so `resource` on the pre-authorized code
+  // grant produces a token the CREDENTIAL endpoint will not accept, exactly as
+  // it does for UserInfo. That was already reachable through the authorization
+  // code flow and is what the parameter means; the alternative is a grant that
+  // quietly ignores it, which is the bug being fixed.
+  // ---------------------------------------------------------------------------
+  // Through `bodyValues()` and not off `body`, and that is the other half of
+  // this hole: `parseBody()` keeps only the LAST value of a repeated parameter,
+  // so `resource=a&resource=b` reached here as `b` alone. Section 2 allows the
+  // repetition and `parseResourceIndicators()` has handled an array since it was
+  // written — nothing could ever hand it one. See `bodyValues()` in helpers.js.
+  const askedResources = parseResourceIndicators(bodyValues(req, body, 'resource'));
+  if (askedResources.error) {
+    log.debug("Leaving the token endpoint. " + askedResources.error);
+    return oauthError(res, 400, 'invalid_target', askedResources.error);
+  }
+  const requestedResources = askedResources.resources;
+  if (requestedResources.length) {
+    logArtifact('RFC 8707 resource indicators', 'on the Token Request', requestedResources);
+  }
+
   const respond = function (payload) {
     res.status(200).type('application/json').send(JSON.stringify(payload));
     log.debug("Leaving the token endpoint. Issued: " + Object.keys(payload).join(', '));
@@ -3028,18 +3361,14 @@ function tokenEndpoint(req, res) {
     // only be one the authorization request already asked for. Widening here
     // would let a client award itself an audience the End-User never approved,
     // which is the same escalation the refresh grant's scope check refuses one
-    // step later.
-    const askedResources = parseResourceIndicators(body.resource);
-    if (askedResources.error) {
-      log.debug("Leaving the token endpoint. " + askedResources.error);
-      return oauthError(res, 400, 'invalid_target', askedResources.error);
-    }
+    // step later. The parameter itself was read and validated above, for every
+    // grant; what is left here is the RULE, which is this grant's alone.
     const granted = record.resources || [];
-    const narrowed = askedResources.resources.filter(function (one) {
+    const narrowed = requestedResources.filter(function (one) {
       return granted.indexOf(one) >= 0;
     });
-    if (askedResources.resources.length && narrowed.length !== askedResources.resources.length) {
-      const extra = askedResources.resources.filter(function (one) {
+    if (requestedResources.length && narrowed.length !== requestedResources.length) {
+      const extra = requestedResources.filter(function (one) {
         return granted.indexOf(one) < 0;
       });
       log.debug("Leaving the token endpoint. The Token Request asked for a resource the code " +
@@ -3153,6 +3482,14 @@ function tokenEndpoint(req, res) {
     const issued = issue({
       jkt: dpopJkt,
       user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false,
+      // RFC 8707 on an OpenID4VCI Token Request, which OID4VCI section 6.1
+      // inherits from RFC 6749 along with everything else about this endpoint.
+      // A wallet that sends it gets a token the CREDENTIAL endpoint will refuse
+      // — `audienceRefusal()` guards that endpoint too — and that is the
+      // parameter working rather than failing: the same is already true of the
+      // authorization code flow, and a grant that read the parameter and threw
+      // it away would be the bug this closes.
+      audience: audienceClaim(requestedResources),
       grant: 'pre-authorized code',
       authorization_details: grantIdentifiers(askedFor.details, record.user)
     });
@@ -3238,12 +3575,7 @@ function tokenEndpoint(req, res) {
     // escalation the scope check refuses, and the reason the refresh token
     // carries `resources` at all.
     const grantedResources = Array.isArray(claims.resources) ? claims.resources : [];
-    const askedOnRefresh = parseResourceIndicators(body.resource);
-    if (askedOnRefresh.error) {
-      log.debug("Leaving the token endpoint. " + askedOnRefresh.error);
-      return oauthError(res, 400, 'invalid_target', askedOnRefresh.error);
-    }
-    const extraResources = askedOnRefresh.resources.filter(function (one) {
+    const extraResources = requestedResources.filter(function (one) {
       return grantedResources.indexOf(one) < 0;
     });
     if (extraResources.length) {
@@ -3256,8 +3588,8 @@ function tokenEndpoint(req, res) {
         '. The request asks additionally for: ' + extraResources.join(', ') + '. A grant ' +
         'cannot widen itself by being renewed.');
     }
-    const refreshResources = askedOnRefresh.resources.length
-      ? askedOnRefresh.resources : grantedResources;
+    const refreshResources = requestedResources.length
+      ? requestedResources : grantedResources;
 
     const refreshed = issue({
       // The presented token's jti, so the one it mints belongs to the same
@@ -3358,6 +3690,12 @@ function tokenEndpoint(req, res) {
       jkt: dpopJkt,
       sub: clientSubject, username: client.client_id,
       client_id: client.client_id, scope: String(body.scope || ''), withRefresh: false,
+      // RFC 8707, read above for every grant. Nothing preceded this request, so
+      // what was asked for is what is granted — there is no earlier decision for
+      // a narrowing rule to be about. No `resources` beside it because this
+      // grant issues no refresh token: that field exists so a renewal cannot
+      // widen, and nothing here can be renewed.
+      audience: audienceClaim(requestedResources),
       grant: 'client_credentials',
       user: Object.assign(userFor(client.client_id), { sub: clientSubject })
     }));
@@ -3388,6 +3726,13 @@ function tokenEndpoint(req, res) {
     return respond(issue({
       jkt: dpopJkt,
       user: userFor(username), client_id: client.client_id, scope: String(body.scope || 'openid'),
+      // RFC 8707 again. This grant DOES issue a refresh token, so the list goes
+      // onto it as well — section 2.2.2's rule that a grant cannot widen itself
+      // by being renewed applies here exactly as it does to a code, and the
+      // refresh branch above reads `claims.resources` without caring which grant
+      // wrote it.
+      audience: audienceClaim(requestedResources),
+      resources: requestedResources,
       grant: 'password'
     }));
   }
@@ -3437,12 +3782,47 @@ function tokenEndpoint(req, res) {
           'verifying anything, so this is a subject this service has been TOLD about rather than ' +
           'one it authenticated.'
     });
+    // -----------------------------------------------------------------------
+    // WHAT THIS EXCHANGE IS FOR, WHICH RFC 8693 SECTION 2.1 SPELLS TWO WAYS.
+    //
+    // `audience` is "the logical name of the target service" and `resource` is
+    // "a URI that indicates the target service or resource" — two ways to name
+    // the same kind of thing, both OPTIONAL, both allowed to be repeated, and
+    // the section says outright that they MAY BE USED TOGETHER to name several.
+    // This used to read `body.audience || body.resource`, which silently
+    // DISCARDED the resource whenever both were sent and never validated it at
+    // all: a `resource` carrying a fragment, or a repeated one arriving from
+    // express as an array, went straight into `aud`.
+    //
+    // So they are unioned, and the resources are the ones read through
+    // `parseResourceIndicators()` above — RFC 8693 section 2.1 cites RFC 8707
+    // for that parameter, so it is the same parameter with the same two rules
+    // and a malformed one is now refused here as it is everywhere else.
+    // `audience` is NOT put through it: a logical name is not required to be a
+    // URI and validating it as one would refuse the ordinary case.
+    //
+    // AUDIENCES FIRST, and that ordering is the one thing here that is a
+    // compatibility decision rather than a reading of the RFC. Order means
+    // nothing in an `aud` array — but the delegation act below files this
+    // exchange against ONE target, and `audience` winning is what it did
+    // before. A union that reordered them would quietly move an existing
+    // exchange from one box to another in /admin/delegation.
+    // -----------------------------------------------------------------------
+    // RFC 8693 section 2.1 lets `audience` repeat as well, so it is read the same
+    // way. Not through `parseResourceIndicators()` — see the note above.
+    const askedAudiences = bodyValues(req, body, 'audience')
+      .map(function (one) { return String(one).trim(); })
+      .filter(function (one) { return !!one; });
+    const exchangeAudiences = askedAudiences.concat(
+      requestedResources.filter(function (one) {
+        return askedAudiences.indexOf(one) < 0;
+      }));
     const exchanged = issue({
       jkt: dpopJkt,
       sub: subject.sub || 'urn:sts-mock:exchanged',
       user: Object.assign(userFor(subject.username), subject.sub ? { sub: subject.sub } : {}),
       client_id: client.client_id, scope: String(body.scope || subject.scope || ''),
-      audience: body.audience || body.resource, act: act, withRefresh: false,
+      audience: audienceClaim(exchangeAudiences), act: act, withRefresh: false,
       grant: 'token exchange'
     });
     exchanged.issued_token_type = 'urn:ietf:params:oauth:token-type:access_token';
@@ -3497,7 +3877,11 @@ function tokenEndpoint(req, res) {
     // was exchanged to get this" about a token that was exchanged is worse than
     // a row that says nothing, so both are named here.
     const issuedIdJti = jtiOf(exchanged.id_token);
-    const audience = String(body.audience || body.resource || '');
+    // The FIRST of them, which is `audience` where one was sent and the resource
+    // otherwise — see the ordering note above. A delegation act names one
+    // target; an exchange asking for several is drawn against the one it named
+    // first, and the raw string is kept in the sentence beside it either way.
+    const audience = String(exchangeAudiences[0] || '');
     // ---------------------------------------------------------------------
     // WHICH APPLICATION THAT AUDIENCE IS, when one has registered it.
     //

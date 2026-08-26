@@ -804,10 +804,12 @@ Seven things about it are decisions rather than defaults.
   line touches, was in the middle of the picture rather than over it. So the
   parties are laid out by dagre ALONE and the issuer is put back above them,
   centred, with its lines drawn as straight segments by hand. What that buys is
-  that every application is on one plane, so a reader compares them by looking
-  along a line; and that the dashed issuer lines all run the same way, so they
-  read as one statement rather than as a relationship competing with the ones
-  that matter.
+  that a CHAIN comes out as the single horizontal line it should always have
+  been — read the next bullet before believing anything stronger, because
+  "every application is on one plane" is what this bullet claimed on the day it
+  was written and it was only ever true of a chain — and that the dashed issuer
+  lines all run the same way, so they read as one statement rather than as a
+  relationship competing with the ones that matter.
 
   What it COST is the label placement dagre used to do for those lines, and it
   is the fiddly half of the change. Every one of them starts at the same point,
@@ -820,6 +822,43 @@ Seven things about it are decisions rather than defaults.
   and a gap no deeper than it ever was. `tests/delegation_map_bands.js` guards
   all of it — the bands, the one plane, the centring, and that no two label
   panels overlap — because none of it fails loudly.
+
+* **AND SINCE LATER THE SAME DAY THE ROW OWNS BOTH COORDINATES, so the plane is
+  real rather than a property of chains.** Taking the issuer out bought half of
+  it. The moment a graph BRANCHES it stops being a chain and dagre goes back to
+  spreading the parties vertically, because that is what a layered layout is
+  for: a person who signed in at one application and was delegated through two
+  others came out as four boxes at four heights, all of them the same KIND of
+  thing, with a reader hunting up and down a staircase to compare them. So the
+  y is taken away from dagre as well and every party — the person included —
+  goes on ONE CENTRELINE.
+
+  **THE X HAD TO GO WITH IT, and that is the part that is not obvious.** In
+  `rankdir: 'LR'` the RANK is the x, so dagre gives every node on one rank the
+  SAME x and tells them apart by the y alone — the coordinate just discarded.
+  Flattening the y by itself is perfect on a chain (one node per rank) and draws
+  a FAN of four applications exactly on top of each other. The
+  `tests/delegation_map_bands.js` fixture for that existed already and caught
+  it, which is the best argument for the file. So the boxes are packed left to
+  right instead, and dagre is left with the one thing it is being kept for: the
+  ORDER — its ranking is the depth of the chain and its ordering pass is the
+  arrangement that crosses fewest lines, so sorting by (x, then y) is that whole
+  result read off as a sequence. The GAP between two boxes is then the label of
+  the line that lies between them, which inverts what `ranksep` was doing:
+  dagre reserved a rank for a label and hoped it fitted, and this measures it.
+
+  **WHAT IT COSTS IS PAID IN THE LINES, and that is the trade.** Crossings do
+  not disappear because the boxes lined up. A line whose ends are NEIGHBOURS on
+  the row lies along it and reads as a chain; everything else — a box in
+  between, a second mechanism between the same pair — arcs UNDER the row, in
+  lanes assigned greedily by x-overlap, which is the same problem the issuer's
+  label rows solve and the same answer. Under rather than over because over is
+  where the issuer's band is. The lane DEPTHS come from the labels in them for
+  the reason the rows do: the first version used a constant and the picture came
+  back with one arc's label written across the arc below it. Two assertions in
+  that test file guard it and both were mutation-tested — the parties of a FAN
+  share one plane, AND no two of them overlap, because `spread` alone is
+  satisfied by the bug.
 
 * **THE DEPENDENCY WAS WEIGHED, in `delegation_map.js`'s own header, the way
   `scimmy` and `swagger-ui-dist` were.** `@dagrejs/dagre` is 1.4 MB unpacked with
