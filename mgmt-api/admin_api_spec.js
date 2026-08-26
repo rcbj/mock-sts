@@ -1245,14 +1245,40 @@ const SCHEMAS = {
                      'add one.',
         items: openObject('One protocol family.', {})
       },
+      declarations: {
+        type: 'array',
+        description: 'THE FIELDS THE CREATE FORM IS DRAWN FROM, in the order it ' +
+                     'draws them: one row per ATTRIBUTE a protocol family names ' +
+                     'as its identifier or as where its responses go back to, ' +
+                     'each `{attribute, role, kind, editable, sensitive, what, ' +
+                     'families}`. `role` is `identifier` or `redirect`; `kind` ' +
+                     'is `multi` where the attribute holds a list; `families` ' +
+                     'names every family the attribute serves.\n\n**It is ' +
+                     'DEDUPED BY ATTRIBUTE, so it is shorter than `protocols` ' +
+                     'above.** Three families name `oauthClientId` — an OpenID ' +
+                     'Connect relying party IS an OAuth client and an OpenID4VCI ' +
+                     'wallet authenticates as one — and both SAML profiles name ' +
+                     '`samlEntityId`, because those specifications genuinely ' +
+                     'share the identifier. Two attributes for one fact would be ' +
+                     'two spellings that disagree the first time either is ' +
+                     'edited.\n\nThese are the names a create sends in ' +
+                     '`fields`. Publishing them is what stops this document and ' +
+                     'the console offering different fields: both are the same ' +
+                     'walk of the same table.',
+        items: openObject('One declared attribute, and the families it serves.', {})
+      },
       editable: {
         type: 'array',
-        description: 'What comes NEXT: the attributes a create cannot take and ' +
-                     'POST /admin-api/applications/set, /add and /remove can, ' +
-                     'each `{name, mode, sensitive}` where `mode` is `set` for ' +
-                     'a single-valued attribute and `multi` for a list. This is ' +
-                     'where the configuration RFC 9700 mode actually reads goes ' +
-                     '— the redirect URIs, the grant types, the secret.',
+        description: 'EVERY attribute that may be changed — a superset of ' +
+                     '`declarations` above, which is the identifier and ' +
+                     'redirect-URI half of it. Each `{name, mode, sensitive}` ' +
+                     'where `mode` is `set` for a single-valued attribute and ' +
+                     '`multi` for a list. A create takes any of them in `fields`, ' +
+                     'and POST /admin-api/applications/set, /add and /remove ' +
+                     'change them afterwards. This is where the configuration ' +
+                     'RFC 9700 mode actually reads goes — the redirect URIs, the ' +
+                     'grant types, the secret.'
+                     ,
         items: openObject('One editable attribute.', {})
       }
     }),

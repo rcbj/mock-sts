@@ -245,9 +245,55 @@ What is different is the READER'S TASK, which is the test that header sets:
 * **The families do not fit in a `.formrow`.** Fourteen choices with a sentence
   each is a table, and a table at the foot of the applications list would have
   had to become a link to somewhere anyway.
+* **NOR DO THE IDENTIFIERS AND THE REDIRECT URIS**, which is the 2026-08-25
+  addition and the half that makes this the only place a whole application can
+  be configured in one post. Fourteen more fields — eleven identifiers and three
+  return addresses — drawn from `applications.declarationAttributes()`.
 * **Creating one is a different errand from reading the list.** The inline form
   sits BELOW the paging, so on a service with forty applications the one control
   somebody came for is off the bottom of the page.
+
+**THE KIND SELECT WAS REMOVED AND THAT IS THE MOST INSTRUCTIVE THING ON THIS
+PAGE.** It sat beside the family checkboxes and asked the same question in a
+vocabulary that did not line up with theirs: eight kinds against fourteen
+families, five of those families having no kind at all, and a reader made to
+choose in both. Worse, the two are on opposite sides of the line
+`applications.js`'s `EDITABLE` header draws and this file repeats everywhere — a
+family is DECLARED and a kind is DERIVED, written by `seen()` when a protocol
+recognises the identifier — so the select was a console form asserting a
+sighting that had not happened, which is exactly what every other form here is
+refused. It is also why `view()`'s `recordedProtocols` had to carry a paragraph
+saying it was not evidence of traffic. **`createApplication()` still TAKES a
+kind and the API still documents one**: `saml2Action()` and `saml11Action()`
+pass one when *Register* creates a service provider, and that is a protocol
+module's statement rather than a guess in a select. The rule to take from it:
+**when two controls on one form are two vocabularies for one question, the one
+that survives is the one on the DECLARED side of the line.**
+
+**THE FIELD NAMES ARE THE SCHEMA'S OWN, PREFIXED `field.`**, and both halves of
+that are deliberate. The prefix is what lets `applicationFieldsFrom()` tell an
+attribute from `name` or `action` without scanning the body for schema names, so
+a field added to this form tomorrow cannot collide with one. The attribute name
+itself is on the label, unfriendly as it is, because it is the same name an
+`ldapsearch` shows and the same name `POST /admin-api/applications/create` takes
+in its `fields` object — one vocabulary across the page, the directory and the
+API, so a person who learns the form can drive the API.
+
+**A MULTI-VALUED FIELD IS A TEXTAREA SPLIT ON NEWLINES, NOT ON COMMAS.** A
+redirect URI may legally contain a comma and may not contain a newline; splitting
+on the wrong one cuts a URI into two that each fail an RFC 9700 exact match,
+silently, and only in that mode. The protocol checkboxes one section up DO split
+on commas and spaces, because a family id is a short lower-case word — the two
+are different for a reason rather than by accident.
+
+**THE FIELD LIST IS `applications.declarationAttributes()` AND NOT A LIST IN
+THIS FILE.** It is one walk of the `PROTOCOLS` table, deduped by attribute, so
+this page and `GET /admin-api/applications/new` cannot offer different fields and
+neither can offer one `createApplication()` would refuse — the property
+`editableAttributes()` already gives the two edit selects on the list page. It is
+deduped rather than one field per family because three families name
+`oauthClientId` and two name `samlEntityId`: two boxes writing one attribute
+would be a form that silently kept whichever was filled in second.
 
 **THE DECLARATION GRANTS NOTHING AND THE PAGE SAYS SO THREE TIMES.** Nothing in
 this service reads `appAllowedProtocol`: an application declared for SAML 2.0
@@ -279,14 +325,27 @@ Three things about it are decisions rather than mechanics:
   a way that looked right: a federation partner's sighting is written under the
   protocol its relationship speaks, so every ordinary OAuth client read as a
   federation partner. The column is called *Recorded* rather than *Seen*
-  because a create takes a kind too — the Authentications tile is the figure
-  that answers whether anything has actually happened.
+  because a create can still be given a kind through the API and by the two SAML
+  *Register* buttons — the Authentications tile is the figure that answers
+  whether anything has actually happened.
 
 **No new POST, and that is rule 7 read exactly.** The rule is about CONTROLS:
 this page's one control posts to a handler that already has its operation
 (`createApplication`), so what `/admin-api` gained is the GET —
 `/admin-api/applications/new`, which answers the two closed vocabularies the
-create validates against. See `../mgmt-api/CLAUDE.md`.
+create validates against and, since the fields arrived, the `declarations` list
+they are drawn from. See `../mgmt-api/CLAUDE.md`.
+
+**ONE THING THIS PAGE FIXED THAT WAS NOT ITS OWN BUG.** `createApplication()`
+had never read the `fields` member of its argument, and `saml2Action()` and
+`saml11Action()` have passed `fields: { samlEntityId: identifier }` since they
+were written — so *Register* on `/admin/saml2` and `/admin/saml11` produced an
+entry with no `samlEntityId` on it, and the attribute only appeared later when a
+real AuthnRequest arrived and `seen()` wrote it. Nothing failed, which is why it
+survived: the entry existed, the page rendered, and the missing attribute looked
+like an application that had not been used yet. Wiring the create form's fields
+through the same member fixed it, and both buttons now write the entityID they
+always claimed to.
 
 ---
 

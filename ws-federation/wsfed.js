@@ -802,8 +802,18 @@ function issueSignInResponse(req, res, params, session, realm, wreply, tokenType
     note: 'issued a wsignin1.0 response',
     fields: {
       wsfedRealm: realm,
+      // The realm is ALSO the audience of whichever assertion was just built,
+      // which is why it lands on the SAML attribute as well — that is the same
+      // reason the kind above is a list of two.
       samlEntityId: realm,
-      samlAssertionConsumerService: wreply
+      // `wreply` goes on WS-FEDERATION'S OWN attribute since 2026-08-25, and
+      // not on samlAssertionConsumerService as it did before. The two are
+      // different facts and that attribute is READ: /admin/saml2 and
+      // /admin/saml11 take the last value on it as the assertion consumer
+      // service and as the Single Logout fallback, so a wreply arriving in it
+      // gave a WS-Federation application a SAML ACS URL it had never named,
+      // and could hand a LogoutResponse to a WS-Federation endpoint.
+      wsfedReplyUrl: wreply
     }
   });
   const user = session.user;

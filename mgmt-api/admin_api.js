@@ -2909,7 +2909,10 @@ const ROUTES = [
     operationId: 'getNewApplicationForm',
     summary: 'The vocabulary a new application may be created with, and where it would land',
     description: 'The eight KINDS and the fourteen PROTOCOL FAMILIES a create ' +
-                 'takes, each with what it means, plus the container DN a new ' +
+                 'takes, each with what it means, the FIELDS the console\'s form ' +
+                 'is drawn from (`declarations` — the per-protocol identifiers ' +
+                 'and the redirect URIs, deduped by attribute and each naming ' +
+                 'the families it serves), plus the container DN a new ' +
                  'entry would be created under and how many that container will ' +
                  'hold.\n\n**It creates nothing** — the create is `POST ' +
                  '/admin-api/applications/create`. This is the list that call ' +
@@ -2929,7 +2932,8 @@ const ROUTES = [
                  'would remove a test case rather than add one. The ' +
                  'configuration that DOES take effect is in `editable`.',
     mirrors: 'GET /admin/applications/new',
-    responseDescription: 'The two vocabularies, the container and the realm.',
+    responseDescription: 'The two vocabularies, the fields a create may carry, ' +
+                         'the container and the realm.',
     responseSchema: { $ref: '#/components/schemas/NewApplicationForm' },
     handler: function (req, res) {
       log.debug("Entering the management API new-application endpoint.");
@@ -2984,7 +2988,18 @@ const ROUTES = [
                     description: 'Optional, one of the eight. It is a claim ' +
                                  'about what this application IS, which is ' +
                                  'why a value the registry does not know is ' +
-                                 'refused rather than recorded.' },
+                                 'refused rather than recorded.\n\n**No ' +
+                                 'console form offers this any more** and it ' +
+                                 'is still taken here. It was a select on ' +
+                                 '/admin/applications/new beside the protocol ' +
+                                 'families, which is two vocabularies for one ' +
+                                 'question — eight kinds against fourteen ' +
+                                 'families, five of them with no kind at all — ' +
+                                 'and it is DERIVED rather than declared: a ' +
+                                 'kind is written when a protocol actually ' +
+                                 'recognises the identifier, so a form ' +
+                                 'choosing one asserted a sighting that had ' +
+                                 'not happened. Prefer `protocols`.' },
             protocols: {
               type: 'array', items: { type: 'string', enum: applications.PROTOCOL_IDS },
               description: 'THE PROTOCOL FAMILIES THIS APPLICATION IS DECLARED ' +
@@ -3006,21 +3021,63 @@ const ROUTES = [
                            'form-encoded body may repeat `protocol` instead, ' +
                            'which is how the console\'s checkbox column posts ' +
                            'it, and a single string may carry several separated ' +
-                           'by spaces or commas.' }
+                           'by spaces or commas.' },
+            fields: {
+              type: 'object', additionalProperties: true,
+              description: 'THE ATTRIBUTES THE ENTRY IS CREATED WITH, keyed by ' +
+                           'the schema\'s own attribute name and valued with a ' +
+                           'string or an array of strings. This is where the ' +
+                           'per-protocol identifiers and the redirect URIs go — ' +
+                           '`oauthClientId`, `samlEntityId`, `wsfedRealm`, ' +
+                           '`krb5ServicePrincipalName`, `oauthRedirectUri`, ' +
+                           '`samlAssertionConsumerService`, `wsfedReplyUrl` and ' +
+                           'the rest.\n\nGET /admin-api/applications/new ' +
+                           'publishes the list as `declarations`, with the ' +
+                           'families each attribute serves and whether it holds ' +
+                           'a list; it is the same walk of the protocol table ' +
+                           'the console\'s form is drawn from, so this document ' +
+                           'and that page cannot offer different fields. GET ' +
+                           '/ldap/applications publishes every attribute in the ' +
+                           'schema with an `editable` member.\n\n**Only ' +
+                           'DECLARED attributes may be given.** A derived one — ' +
+                           'a counter, a sighting, `appProtocol`, ' +
+                           '`appRedirectUriObserved` — is REFUSED by name rather ' +
+                           'than written, because an entry created with one ' +
+                           'would be asserting a past it does not have. A ' +
+                           'single-valued attribute given several values is ' +
+                           'refused as well, rather than truncated to the first: ' +
+                           'the only one you are likely to meet is ' +
+                           '`oauthTlsClientAuthSubjectDn`, which an RFC 8705 ' +
+                           'check compares by exact string equality, and quietly ' +
+                           'keeping one of two is exactly the wrong answer ' +
+                           'there.\n\n**Nothing given here is CHECKED except ' +
+                           'the OAuth redirect URIs, and those only in RFC 9700 ' +
+                           'mode.** The rest are recorded, in the way being in ' +
+                           'this registry at all is a record.' }
           },
           required: ['identifier'],
           examples: [{ identifier: 'urn:example:crm', name: 'CRM',
-                       kind: 'wsfed-relying-party',
-                       protocols: ['wsfed', 'saml11'] }],
+                       protocols: ['wsfed', 'saml11'],
+                       fields: { wsfedRealm: 'urn:example:crm',
+                                 wsfedReplyUrl: ['https://crm.example.com/wsfed'],
+                                 samlEntityId: 'urn:example:crm' } }],
           additionalProperties: false
         },
         responseDescription: 'The application as it now stands, in `application`.' },
 
       { action: 'set', operationId: 'setApplicationAttribute',
         summary: 'Set a single-valued attribute',
-        description: 'For the attributes that hold ONE value — `appName`, ' +
-                     '`oauthClientSecret`, `oauthTokenEndpointAuthMethod`, ' +
-                     '`oauthConfidential`, the SAML and Kerberos identifiers. ' +
+        // THE LIST IS READ OFF THE SCHEMA rather than typed here, and this and
+        // the one on `add` below were typed until 2026-08-25. Making the
+        // per-protocol identifiers multi-valued moved six names from this
+        // sentence to that one — and neither sentence noticed, which is the
+        // whole argument: a hand-written list of what an operation accepts is a
+        // second definition of the EDITABLE table, and it goes wrong silently
+        // in the document a caller trusts most.
+        description: 'For the attributes that hold ONE value — ' +
+                     applications.editableAttributes('set').map(function (row) {
+                       return '`' + row.name + '`';
+                     }).join(', ') + '. ' +
                      'An empty `value` CLEARS the attribute.\n\n**What may be ' +
                      'changed is DECLARED and not DERIVED.** Configuration — ' +
                      'what this application is allowed to do, which is what ' +
@@ -3062,10 +3119,11 @@ const ROUTES = [
 
       { action: 'add', operationId: 'addApplicationValue',
         summary: 'Add a value to a multi-valued attribute',
-        description: 'For the attributes that hold a LIST — `oauthRedirectUri`, ' +
-                     '`oauthPostLogoutRedirectUri`, `oauthGrantType`, ' +
-                     '`oauthResponseType`, `oauthScope`, ' +
-                     '`samlAssertionConsumerService`, `description`.\n\nThis ' +
+        // Read off the schema, for the reason `set` above gives.
+        description: 'For the attributes that hold a LIST — ' +
+                     applications.editableAttributes('multi').map(function (row) {
+                       return '`' + row.name + '`';
+                     }).join(', ') + '.\n\nThis ' +
                      'is the one that matters most: a value added to ' +
                      '`oauthRedirectUri` is a redirect URI RFC 9700 mode ' +
                      'accepts by exact string match on the next authorization ' +

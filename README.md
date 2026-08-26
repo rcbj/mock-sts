@@ -3015,7 +3015,30 @@ second rule about. Beside the identity and the counters (`appAuthentications`,
 `appSessions`, `appUsers`) sit the protocol-specific ones: `oauthClientId`,
 `oauthRedirectUri`, `oauthGrantType`, `oauthTokenEndpointAuthMethod`,
 `oauthConfidential`, `samlEntityId`, `samlAssertionConsumerService`, `wsfedRealm`,
-`wstrustAppliesTo`, `krb5ServicePrincipalName`, `oid4vpClientId`.
+`wsfedReplyUrl`, `wstrustAppliesTo`, `krb5ServicePrincipalName`, `oid4vpClientId`,
+`federationPartnerId`, `ldapBindDn`, `scimClientId`, `spiffeWorkloadId`.
+
+**Every protocol family has an identifier attribute, and all of them accumulate
+bar one.** Fourteen families, eleven attributes — three families share
+`oauthClientId` (an OpenID Connect relying party *is* an OAuth client, and an
+OpenID4VCI wallet authenticates as one) and both SAML profiles share
+`samlEntityId`, because those specifications genuinely share the identifier and two
+attributes for one fact would be two spellings that disagree the first time either
+was edited. They are `multi` because one application legitimately answers to two
+`client_id`s or two SPNs — one per environment being exercised — and a `set` would
+replace the list with one value and read afterwards as the others having been
+forgotten. The exception is mutual TLS's `oauthTlsClientAuthSubjectDn`, which stays
+single-valued because it is the one of them something *enforces*: RFC 8705 section
+2.1 compares it to the certificate's subject by exact string equality, so widening
+it means first deciding what *any of these* should mean to a security check.
+
+**Four of them are declaration and only ever declaration.** Nothing in this service
+writes `federationPartnerId`, `ldapBindDn`, `scimClientId` or `spiffeWorkloadId`:
+LDAP and SCIM authenticate the *caller* rather than an application identifier,
+SPIFFE files the identity under `ou=spiffe`, and a federation relationship lives
+under `ou=federations`. They exist because *what is this application called when it
+talks to us that way* is a fact an operator has and the registry had nowhere to put
+— and, like everything else here, a value in one grants nothing.
 
 Two attributes hold **credentials in the clear** — `oauthClientSecret` and
 `appRegistrationAccessToken` — in a directory where every bind succeeds and whose
@@ -3112,21 +3135,53 @@ only the registration, the secret and the registration access token away.
 
 `create` has a page of its own as well as the row at the foot of the list. Name a
 `client_id`, `wtrealm`, `AppliesTo`, entityID or service principal name that has
-never connected, optionally a kind, and tick the **protocol families** it is
-declared for from a closed list of fourteen — OAuth 2.0, OpenID Connect, SAML 2.0,
-SAML 1.1, WS-Federation, WS-Trust, Kerberos v5, OpenID4VCI, OpenID4VP, Federation,
-LDAP, SCIM 2.0, SPIFFE and TLS / mutual TLS. They land on `appAllowedProtocol`, and
-`GET /admin-api/applications/new` answers the same vocabulary as JSON so a caller
-can read what a create will accept off the service rather than off this page.
-`POST /admin-api/applications/create` takes them as `protocols`.
+never connected, tick the **protocol families** it is declared for from a closed
+list of fourteen — OAuth 2.0, OpenID Connect, SAML 2.0, SAML 1.1, WS-Federation,
+WS-Trust, Kerberos v5, OpenID4VCI, OpenID4VP, Federation, LDAP, SCIM 2.0, SPIFFE
+and TLS / mutual TLS — and fill in **what each protocol will call it** and **where
+its responses go back to**. They land on `appAllowedProtocol` and on the schema's
+own attributes, and `GET /admin-api/applications/new` answers the same vocabulary
+as JSON so a caller can read what a create will accept off the service rather than
+off this page. `POST /admin-api/applications/create` takes the families as
+`protocols` and the attributes as `fields`, keyed by attribute name.
+
+**There is no *Kind* select, and its absence is the point rather than a tidy-up.**
+The page used to carry one beside the families, and they were two vocabularies for
+one question that did not line up: eight kinds against fourteen families, five of
+those families having no kind at all, and a reader made to choose in both. They are
+also on opposite sides of the line this registry draws everywhere else — a family is
+*declared* and a kind is *derived*, written when a protocol actually recognises the
+identifier — so the select let a form assert a sighting that had not happened. The
+families won because they are what an operator is actually declaring; the kinds
+fill themselves in as the application is used. `POST
+/admin-api/applications/create` still accepts `kind`, because *Register* on
+`/admin/saml2` and `/admin/saml11` passes one, and that is a protocol module's
+statement rather than a person's guess in a select.
+
+**The identifiers and the redirect URIs are the reason the page exists as much as
+the families are.** Before them a create took an identifier and a name and nothing
+else, so every attribute that actually *configures* an application — the
+`client_id` RFC 9700 mode reads, the redirect URIs it matches against, the
+`entityID`, the `wtrealm` — had to be added afterwards, one `add` at a time, from a
+different page. There are eleven identifier fields for the fourteen families and
+three redirect-URI fields, because only three families send a response back through
+a browser: `oauthRedirectUri`, `samlAssertionConsumerService` and `wsfedReplyUrl`.
+Multi-valued fields take **one value per line** — newline-separated and
+deliberately not comma-separated, since a redirect URI may legally contain a comma
+and may not contain a newline, and splitting on the wrong one would cut a URI into
+two that each fail to match. Only the OAuth list is ever checked, and only in RFC
+9700 mode; the SAML and WS-Federation ones are recorded and not checked, in the way
+everything else here is.
 
 **It is not a second store, or even a second door onto one.** The form posts
 `action=create` to `/admin/applications` — the same action the list page's own row
 posts, calling the same function in `applications.js` that a protocol endpoint and
-an `ldapmodify` reach. What it adds is room: fourteen choices with a sentence each
-is a table rather than a form row, and the inline version sits below the paging, so
-on a service with forty applications the one control somebody came for is off the
-bottom of the screen.
+an `ldapmodify` reach. What it adds is room: fourteen choices with a sentence each,
+plus fourteen fields, is a set of tables rather than a form row, and the inline
+version sits below the paging, so on a service with forty applications the one
+control somebody came for is off the bottom of the screen. That inline row is still
+there and still takes an identifier and a name — the short way in for somebody
+already looking at the list.
 
 **The entry lands in the directory of the trust realm the console is showing**, at
 that realm's `ou=applications` — the console shows one realm at a time, and the
@@ -3153,9 +3208,11 @@ column and a **Recorded** one — and the match between them is made on the entr
 *kinds* rather than on the protocol labels, because a federation partner's sighting
 is recorded under whichever protocol its relationship speaks and by label is
 indistinguishable from an ordinary OAuth client's. *Recorded* is also not the same
-as *has authenticated*: a create takes a kind too, so a hand-made entry can be
-recorded in a family it has never connected in, and the Authentications count is
-the figure that answers that. Four families — LDAP, SCIM, SPIFFE and mutual TLS,
+as *has authenticated*: `POST /admin-api/applications/create` and the two SAML
+*Register* buttons take a kind, so a hand-made entry can be recorded in a family it
+has never connected in, and the Authentications count is the figure that answers
+that. No console form asks for one any more, which makes that the narrow case it
+always should have been. Four families — LDAP, SCIM, SPIFFE and mutual TLS,
 and OpenID4VCI beside them — have no kind at all, because this service records no
 application identifier in them; those rows say *never recorded here* rather than
 *no*, since the question cannot be answered rather than having a negative answer.
@@ -3255,7 +3312,7 @@ The list is **filtered by family, kind and state and then paged**, newest first,
 
 Three further details of that page are worth knowing before changing it. It keeps **the claims and never the credential** — not the signed token, not the assertion XML, not the ticket — because a page rendering a thousand live credentials in a form a browser will display is a page that leaks them, and the `jti` is all any button needs. Pasting a whole token works and **its signature is not verified**, which is safe rather than sloppy: the only thing read out of it is the `jti`, which is then looked up in this service's own registry, and a forged token yields a jti this service never issued — revoking one of those invalidates nothing. RFC 7009's endpoint *does* verify, because there the token is the credential being presented. And **Restore is offered and is labelled NON-SPEC**: no authorization server can undo a revocation, since a resource server may already have cached the refusal, but without it getting back to a working token means restarting the service and losing the signing key with it.
 
-**`/admin/applications`** is the other side of `/admin/users`, and the second page here that reports the *directory* rather than what this service has issued. Where that page lists every identity that has authenticated, this lists what they authenticated **to** — every OAuth client, OpenID Connect relying party, SAML 2.0 or 1.1 service provider, WS-Federation application, WS-Trust relying party, OpenID4VP verifier and Kerberos service, one entry per unique identifier whatever protocol brought it. Filter by identifier or name and by kind, page with `?page=` and `?per=`, and `?application=<id>` drills into one: every attribute of its directory entry, each shown with what the published schema says it *is*, paged under `?attributesPage=`. It differs from `/admin/groups` in one way worth knowing — that page reports the directory, this one reports a **registry** that lives in it, so an `ldapmodify` here changes what the protocol endpoints do. It carries forms as well: create an application before it connects, and add, remove or set the attributes that say what it is allowed to do — never the counters or the sightings, which are what happened rather than what it may do. **`/admin/applications/new`** is the create on a page of its own, with the fourteen protocol families an application may be *declared* for as checkboxes; the declaration is a record of intent and nothing reads it. See *Applications* above.
+**`/admin/applications`** is the other side of `/admin/users`, and the second page here that reports the *directory* rather than what this service has issued. Where that page lists every identity that has authenticated, this lists what they authenticated **to** — every OAuth client, OpenID Connect relying party, SAML 2.0 or 1.1 service provider, WS-Federation application, WS-Trust relying party, OpenID4VP verifier and Kerberos service, one entry per unique identifier whatever protocol brought it. Filter by identifier or name and by kind, page with `?page=` and `?per=`, and `?application=<id>` drills into one: every attribute of its directory entry, each shown with what the published schema says it *is*, paged under `?attributesPage=`. It differs from `/admin/groups` in one way worth knowing — that page reports the directory, this one reports a **registry** that lives in it, so an `ldapmodify` here changes what the protocol endpoints do. It carries forms as well: create an application before it connects, and add, remove or set the attributes that say what it is allowed to do — never the counters or the sightings, which are what happened rather than what it may do. **`/admin/applications/new`** is the create on a page of its own, with the fourteen protocol families an application may be *declared* for as checkboxes and a field for each family's own identifier and redirect URIs; the declaration is a record of intent and nothing reads it, and of the attributes only the OAuth redirect URIs are ever checked, in RFC 9700 mode. See *Applications* above.
 
 **`/admin/authorization-servers`** decides what each discovery document *publishes*. One process serves as many authorization servers as somebody configures — the path component both discovery shapes already carry selects a profile, and each can have its own endpoints, capabilities and issuer. Any member is settable, including one this service has never heard of. It is the one page here whose whole purpose is to be able to say something untrue, so every view computes the **drift** between what a profile publishes and what this service actually does. See *Authorization server metadata* above.
 
