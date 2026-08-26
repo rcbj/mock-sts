@@ -3466,18 +3466,59 @@ function tokenEndpoint(req, res) {
     // already holds, against changing the return type of the one helper every
     // grant here mints through — and jsonFromB64u() is the same reader the
     // actor_token was decoded with twelve lines above.
-    let issuedJti = '';
-    try {
-      issuedJti = (jsonFromB64u(String(exchanged.access_token).split('.')[1]) || {}).jti || '';
-    } catch (e) {
-      // The token was signed by this service a line ago, so this cannot
-      // ordinarily fail — and if it somehow does, a row with no identifier on
-      // it is still a row worth having. Swallowed rather than thrown for the
-      // reason the whole of delegation.record() is wrapped: a console page must
-      // not be able to fail a token this endpoint has already issued.
-      log.error('the access token just issued could not be re-read for its jti: ' + e.message);
-    }
+    const jtiOf = function (token) {
+      log.debug("Entering jtiOf().");
+      try {
+        log.debug("Leaving jtiOf().");
+        return (jsonFromB64u(String(token || '').split('.')[1]) || {}).jti || '';
+      } catch (e) {
+        // The token was signed by this service a line ago, so this cannot
+        // ordinarily fail — and if it somehow does, a row with no identifier on
+        // it is still a row worth having. Swallowed rather than thrown for the
+        // reason the whole of delegation.record() is wrapped: a console page
+        // must not be able to fail a token this endpoint has already issued.
+        log.error('a token just issued could not be re-read for its jti: ' + e.message);
+        log.debug("Leaving jtiOf(). It could not be read.");
+        return '';
+      }
+    };
+    const issuedJti = jtiOf(exchanged.access_token);
+    // AND THE ID TOKEN, WHEN ONE CAME WITH IT. An exchange for a scope carrying
+    // `openid` mints two credentials and the act produced BOTH — recording only
+    // the access token made the second one an orphan, which
+    // /admin/tokens/credential then described as having been issued directly
+    // when it had in fact come out of this exchange. A row that says "nothing
+    // was exchanged to get this" about a token that was exchanged is worse than
+    // a row that says nothing, so both are named here.
+    const issuedIdJti = jtiOf(exchanged.id_token);
     const audience = String(body.audience || body.resource || '');
+    // ---------------------------------------------------------------------
+    // WHICH APPLICATION THAT AUDIENCE IS, when one has registered it.
+    //
+    // An `audience` names a RESOURCE — `https://esb1.example.com` — and this
+    // registry is keyed by the identifier an application presents, which for an
+    // OAuth client is its client_id. Recording the raw audience as the target
+    // therefore draws a box on /admin/delegation/map that nothing else in the
+    // picture mentions: a two-hop chain through a middle tier appears as two
+    // unconnected halves, because the URL the first hop reached and the
+    // client_id the second hop exchanged AS are the same application under two
+    // names. So the audience is looked up on `oauthAudience` and the
+    // application's own identifier is what the act is filed under, with the
+    // audience that was actually asked for kept in the sentence beside it —
+    // the raw string is a fact about the request and must not be lost to a
+    // resolution.
+    //
+    // NOTHING IS REFUSED. An audience nobody registered resolves to null and is
+    // recorded verbatim, exactly as it was before this existed. See
+    // applications.forAudience(), where the difference between a lookup and a
+    // permission is argued.
+    // ---------------------------------------------------------------------
+    const audienceApplication = audience ? applications.forAudience(audience) : null;
+    if (audienceApplication) {
+      log.debug('the audience "' + audience + '" is registered to application "' +
+                audienceApplication.identifier + '", so the delegation is recorded ' +
+                'against that application rather than against the URI.');
+    }
     delegation.record({
       protocol: 'OAuth 2.0',
       type: act ? 'oauth-delegation' : 'oauth-impersonation',
@@ -3502,9 +3543,16 @@ function tokenEndpoint(req, res) {
             'no identity is named — the client is the whole of the middle here'
       },
       target: {
-        application: audience,
+        application: audienceApplication ? audienceApplication.identifier : audience,
         what: audience
-          ? 'the audience or resource the exchanged token is for'
+          ? (audienceApplication
+              ? 'the application registered for the audience "' + audience +
+                '", which is what the exchanged token is addressed to. The ' +
+                'request named the audience; this registry named the ' +
+                'application'
+              : 'the audience or resource the exchanged token is for. No ' +
+                'application here has registered it on `oauthAudience`, so it ' +
+                'is recorded exactly as it was asked for')
           : 'unstated — neither `audience` nor `resource` was sent, so the ' +
             'token that came back is not addressed to anything in particular'
       },
@@ -3529,7 +3577,14 @@ function tokenEndpoint(req, res) {
         identifier: issuedJti,
         note: act ? 'carries an `act` claim naming ' + String(act.sub || '(nobody)')
                   : 'carries nothing about the client that exchanged it'
-      }],
+      }].concat(exchanged.id_token ? [{
+        kind: 'id_token',
+        identifier: issuedIdJti,
+        note: 'minted alongside because the requested scope carries `openid`. ' +
+              'RFC 8693 returns ONE token — the `access_token` member above is ' +
+              'what `issued_token_type` describes — and this one rides along ' +
+              'because every grant here mints a token SET.'
+      }] : []),
       // No session, and that is a fact about token exchange rather than a gap:
       // a service exchanging a token on somebody's behalf has no browser
       // anywhere in it. issue() records the same emptiness on the token itself.

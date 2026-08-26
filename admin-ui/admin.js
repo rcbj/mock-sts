@@ -277,6 +277,19 @@ const delegation = require('../common/delegation');
 // and the directory reader are here) and where a box GOES belongs there. Its own
 // header weighs the dependency and argues why the layout is not hand-rolled.
 const delegationMap = require('./delegation_map');
+// ONE PERSON, END TO END: the same picture drawn of everything this service has
+// done in one identity's name — the delegation acts naming them AND the ordinary
+// OAuth 2.0, OIDC, SAML, Kerberos and SPIFFE issuance that no delegation
+// register has ever held. A library like the two above: it registers no route,
+// requires only helpers.js, admin_stats.js and delegation.js, and holds the
+// MODEL while this file holds the HTML. Its header argues why the union of the
+// two registers is there rather than here.
+const userGraph = require('../common/user_graph');
+// ONE CREDENTIAL'S ANCESTRY, at /admin/tokens/credential. A library like the one
+// above (rule 3): it registers nothing, requires nothing in this service but the
+// two registers and `user_graph.js`, and is HANDED nothing — it is asked for an
+// identifier and answers with a graph in the shape this file already draws.
+const credentialGraph = require('../common/credential_graph');
 // The CONFIGURED half of that page: which Kerberos principals may delegate to
 // which, out of the two attributes that decide it. It is read from the module
 // that OWNS the principal database, for the reason every store rule here is
@@ -877,6 +890,31 @@ SECTIONS.forEach(function (section) {
   });
 });
 
+// The two measurements the folds below are decided by. They are declared
+// HERE, above everything, rather than beside note() where they are read:
+// several of this file's module-level constants are built by calling note()
+// and warn() at require time, and a `const` is in its temporal dead zone
+// until the line that declares it runs — so a definition beside the
+// function throws `Cannot access before initialization` while the module
+// is still loading, which takes the whole service down (rule 1).
+// About one rendered line of `.note` text in this console's content column.
+// The column is 62rem at `.note`'s .78em, so a line is nearer 130 characters
+// than this; the number is deliberately under that, because the test worth
+// applying is "does this read as a paragraph" rather than "does it wrap".
+const ONE_LINE_CHARS = 110;
+
+// A summary has to fit on one line beside its marker, whatever the note it
+// opens. Past this the opening sentence is truncated rather than allowed to
+// become the wall of text this exists to fold away.
+const SUMMARY_CHARS = 96;
+
+// A tooltip may run to a couple of lines where a summary may not: it is drawn
+// over the page rather than in it, so length costs a reader nothing until they
+// ask for it. Past this it is truncated, because a browser renders a title of
+// any length and one of them will happily draw a paragraph the width of the
+// screen.
+const TIP_CHARS = 190;
+
 function esc(v) { return xmlEscape(v == null ? '' : String(v)); }
 
 // A list of names, each in its own <code>. Written as a function because the
@@ -916,6 +954,11 @@ const LIST_PARAMS = {
   // control, so a reader who narrowed the table and then drew it gets the
   // picture of what they were looking at.
   '/admin/delegation': ['type', 'mode', 'outcome', 'protocol', 'q', 'per', 'page'],
+  // The tokens page's own three filters and its paging, here since 2026-08-26
+  // because that page now HAS a drill-down: every identifier links to
+  // /admin/tokens/credential, and without this entry the way back from it landed
+  // on page 1 of an unfiltered list of everything this service has ever issued.
+  '/admin/tokens': ['family', 'kind', 'state', 'per', 'page'],
   '/admin/logout': ['family', 'per', 'page'],
   '/admin/realms': ['per', 'page'],
   '/admin/federation': ['q', 'role', 'per', 'page']
@@ -1185,13 +1228,13 @@ function trailBar(active, up, title) {
 // somebody is.
 // ---------------------------------------------------------------------------
 const OPEN_BANNER =
-  '<div class="warn"><strong>This console is not protected.</strong> ' +
+  warn('<strong>This console is not protected.</strong> ' +
   '<code>admin.authRequired</code> is OFF, so nothing here checks a credential — and nothing ' +
   'else in this service does either: the username typed at the sign-in screen is the identity ' +
   'in every token it issues. Anyone who can reach this port can revoke every token and change ' +
   'what the next one contains. That is fine on a laptop or a compose network and is not fine on ' +
   'a public address. Turn it on from <a href="/admin/config">Configuration</a>, and say who may ' +
-  'get in on <a href="/admin/rbac">Admin roles</a>.</div>';
+  'get in on <a href="/admin/rbac">Admin roles</a>.');
 
 // SAID WHEN — AND ONLY WHEN — THE SESSION BELONGS TO ANOTHER REALM.
 //
@@ -1231,7 +1274,7 @@ function gateBanner(gate) {
   const elsewhere = foreignSessionNote(info);
   if (info.open) {
     log.debug("Leaving gateBanner(). The roster is empty.");
-    return '<div class="warn"><strong>Signed in as ' + who + ', and holding both roles ' +
+    return warn('<strong>Signed in as ' + who + ', and holding both roles ' +
       'because NOBODY HOLDS EITHER.</strong> <code>admin.authRequired</code> is on, so this ' +
       'console asked you to sign in — but neither <code>' + esc(info.readGroup) + '</code> nor ' +
       '<code>' + esc(info.writeGroup) + '</code> has a single member, and while that is true ' +
@@ -1239,7 +1282,7 @@ function gateBanner(gate) {
       'administrator with, which is why the empty roster opens rather than closes ' +
       '(<code>admin.openWhenEmpty</code>). <strong>Grant somebody a role on ' +
       '<a href="/admin/rbac">Admin roles</a></strong> and the roster is enforced from that ' +
-      'moment — including against you, so grant yourself one first.' + elsewhere + '</div>';
+      'moment — including against you, so grant yourself one first.' + elsewhere);
   }
   if (info.closed) {
     // Rendered for completeness rather than because a reader will meet it: a
@@ -1553,6 +1596,71 @@ function page(title, active, inner, up, gate, req) {
     'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;background:#f4f4f8;' +
     'padding:.1rem .25rem;border-radius:3px;word-break:break-all}a{color:#12107c}' +
     '.note{font-size:.78em;color:#666;margin:.3em 0 1em}' +
+
+    // ---------------------------------------------------------------------
+    // THE FOLDS. See note() for what is folded and why; this is only what one
+    // LOOKS like, and two of the rules here are doing more than decoration.
+    //
+    // `list-style:none` and the ::-webkit-details-marker rule remove the
+    // browser's own triangle so that ::before can draw one that points the
+    // same way in every engine — Safari's marker and Firefox's differ, and a
+    // page of two kinds of triangle reads as two kinds of control. The
+    // triangle is drawn in the link colour because that is what this console
+    // has already taught a reader to click.
+    //
+    // The summary is `display:list-item` NOWHERE and flex here on purpose: a
+    // summary of two lines with the marker floating beside the first is the
+    // one layout that made the fold look broken at narrow widths.
+    // ---------------------------------------------------------------------
+    'details.fold{margin:.3em 0 1em}' +
+    'details.fold>summary{cursor:pointer;list-style:none;display:flex;gap:.45em;' +
+    'align-items:baseline;font-weight:600;color:#3a3a4a}' +
+    'details.fold>summary::-webkit-details-marker{display:none}' +
+    'details.fold>summary::before{content:"\\25b8";color:#12107c;flex:none;font-size:.9em}' +
+    'details.fold[open]>summary::before{content:"\\25be"}' +
+    'details.fold>summary:hover{color:#12107c}' +
+    // A fold inside a table cell takes the cell's own weight and slant. The
+    // summary is emphasised elsewhere because it is a heading over a
+    // paragraph; in a column it is the cell's text, and a bold row beside a
+    // plain one reads as the bold one meaning more.
+    'td details.fold>summary{font-weight:inherit;font-style:inherit;color:inherit}' +
+    'td details.fold{margin:0}' +
+    'td details.fold .foldbody{margin:.3em 0 0 1.05em}' +
+    'details.fold>summary:focus-visible{outline:2px solid #12107c;outline-offset:2px;border-radius:3px}' +
+    // The body sits under the summary, indented to the width of the marker so
+    // that the prose lines up with the words above it rather than with the
+    // triangle.
+    'details.fold .foldbody{margin:.45em 0 0 1.05em}' +
+    'details.fold .foldbody>p:first-child{margin-top:0}' +
+    'details.fold .foldbody>p:last-child{margin-bottom:0}' +
+    // A folded warning keeps the box, so a page with a caveat on it still
+    // looks like one when the caveat is closed.
+    'details.warn.fold{margin:.6em 0}' +
+    'details.warn.fold>summary{color:#6b4e00}' +
+    'details.warn.fold>summary::before{color:#8a6d00}' +
+    // A folded list item. The marker of the <li> would sit beside the fold's
+    // own triangle, which is two bullets for one item.
+    'li.foldli{list-style:none;margin-left:-1.2em}' +
+    'li.foldli details.fold{margin:.35em 0}' +
+
+    // ---------------------------------------------------------------------
+    // THE TOOLTIP AFFORDANCE, DRAWN BY AN ATTRIBUTE SELECTOR AND NOT BY A
+    // MARKER IN THE MARKUP. A label that carries a `title` gets the dotted
+    // underline and the help cursor because it carries one — so a caller that
+    // adds a tooltip cannot forget to add the sign that there is one, which is
+    // the whole failure mode of a tooltip nobody can see. `code[title]` is
+    // left alone deliberately: shortened() has put the full value in a title
+    // on hundreds of table cells since long before this, and underlining every
+    // one of them would draw a page of dotted lines.
+    // ---------------------------------------------------------------------
+    // A fold that lands inside a form row takes a line of its own. Without
+    // this it is a flex item beside the control it captions, which shrinks the
+    // summary to a column two words wide.
+    '.formrow details.fold{flex-basis:100%;margin:.2em 0 0}' +
+    'label[title]{cursor:help;text-decoration:underline dotted #b4b4c4;' +
+    'text-underline-offset:3px}' +
+    'th[title],.tipword[title]{cursor:help;text-decoration:underline dotted #b4b4c4;' +
+    'text-underline-offset:3px}' +
     // THE OVERVIEW PAGE'S DERIVED LIST OF EVERY PAGE HERE (consoleGuide()).
     // Its shape is the sidebar's — sections, one group level under Protocols,
     // pages under that — so it is given the sidebar's rhythm rather than the
@@ -1564,6 +1672,10 @@ function page(title, active, inner, up, gate, req) {
     '.guide h3{margin:1.6em 0 .1em;color:#12107c}' +
     '.guide p.note{margin:.1em 0 .5em}' +
     '.guide li{margin:.5em 0}' +
+    // The page's link and its folded description read as one row: the fold
+    // sits tight under the link rather than at a paragraph's distance.
+    '.guide details.fold{margin:.1em 0 .1em .1em}' +
+    '.guide details.fold>summary{font-weight:400;color:#666}' +
     '.guide .grp{display:block;font-weight:700;color:#12107c}' +
     '.guide .grpwhat{display:block;font-size:.92em;color:#666;margin:.1em 0 .2em}' +
     // A page in the nav that nobody described. Marked rather than dropped —
@@ -2028,11 +2140,11 @@ app.use('/admin', function (req, res, next) {
              // default realm's session only. An absolute URL is not matched by
              // that rewrite, which is what makes it the right shape here rather
              // than a way around it.
-             html: '<p class="note"><a href="' + esc(defaultRealmSignInUrl(req)) +
+             html: note('<a href="' + esc(defaultRealmSignInUrl(req)) +
                    '">Sign in to the default realm</a>, then post ' +
                    'the form again. It is not resubmitted for you: a redirect after a POST ' +
                    'becomes a GET and the fields would be lost, so a control you did not ' +
-                   'press twice would not fire twice.</p>' });
+                   'press twice would not fire twice.') });
     log.debug("Leaving the admin console gate. Refused 401 to a form POST.");
     return;
   }
@@ -2059,15 +2171,15 @@ app.use('/admin', function (req, res, next) {
          ' needs ' + role.label + ', which is membership of cn=' + group + '.',
          { needed: needsWrite ? 'write' : 'read', group: group,
            roles: state.roles,
-           html: '<p class="note">The role is an ordinary group in the embedded LDAP ' +
+           html: note('The role is an ordinary group in the embedded LDAP ' +
                  'directory, and there are four doors onto it: the <a href="/admin/rbac">Admin ' +
                  'roles</a> screen (which you also need a role to use), ' +
                  '<code>POST /admin-api/rbac/grant</code> (the management API is NOT gated, ' +
                  'so this is the one that works from here), an <code>ldapmodify</code> on 389 ' +
-                 'or 636, and a SCIM PATCH of the group.</p>' +
-                 '<p class="note">Nothing else about this service is affected. Every protocol ' +
+                 'or 636, and a SCIM PATCH of the group.') +
+                 note('Nothing else about this service is affected. Every protocol ' +
                  'endpoint is exactly as open as it was — these two groups grant this console ' +
-                 'and nothing else.</p>' });
+                 'and nothing else.') });
   log.debug("Leaving the admin console gate. Refused 403 to " + state.username + ".");
 });
 
@@ -2082,6 +2194,322 @@ function messagesOf(req) {
 
 function tile(n, label) {
   return '<div class="tile"><div class="n">' + esc(n) + '</div><div class="l">' + esc(label) + '</div></div>';
+}
+
+// ---------------------------------------------------------------------------
+// PROSE LONGER THAN A LINE IS COLLAPSED, AND THIS IS THE ONE PLACE THAT
+// DECIDES IT.
+//
+// Every page in this console explains itself at length, and that prose is the
+// point of a mock — the reasoning is the half a person cannot read off a
+// protocol trace. What it cost was the other half: on most pages here the
+// controls somebody actually came for sat several screens down a wall of
+// paragraphs, and the page read as documentation with a form hidden in it. So
+// a note of more than about a line is drawn as a `<details>` whose `<summary>`
+// is its own opening sentence: the point stays on the page, and the argument
+// for it is one click away rather than gone.
+//
+// FOUR THINGS ABOUT IT ARE DECISIONS RATHER THAN MECHANICS.
+//
+// * IT IS NATIVE `<details>`, AND NOTHING ELSE COULD BE. This console is
+//   served under `script-src 'none'` — see ../CLAUDE.md, where that rule and
+//   the six pages that relax it are argued — so the debugger's collapse-all
+//   switch, which is a checkbox and a listener, has no equivalent here.
+//   `<details>` needs no script at all, so the whole of this change leaves
+//   that policy untouched and adds no seventh exception to it. What it costs
+//   is the *expand everything* control, which is why the shape below keeps
+//   every summary a full sentence: a reader skimming for one paragraph has to
+//   be able to find it without opening all of them.
+// * THE SUMMARY IS DERIVED, NOT WRITTEN BESIDE THE PROSE. A hand-written label
+//   over a paragraph is a second copy of that paragraph's point, and the two
+//   drift the way every other pair of hand-kept lists in this repository has —
+//   the Overview page's list of console pages is the standing example, and it
+//   described seven pages of twenty-five before anybody noticed. So the label
+//   is the note's own first sentence, which in this codebase's house style is
+//   already the point said shortly. A caller may still pass one, for the few
+//   places where the opening sentence is a fact and the paragraph is about
+//   something else.
+// * THE TEST IS ON THE RENDERED TEXT, NOT ON THE CALLER'S JUDGEMENT. A caller
+//   deciding "this one is short enough" is a decision made once, at writing
+//   time, against a paragraph that then grows. `plainTextOf()` measures what a
+//   reader will actually see — tags stripped, entities resolved — so a note
+//   that grows past a line starts collapsing itself with no edit anywhere.
+// * A SHORT NOTE IS LEFT ALONE. Collapsing a line of text behind a control
+//   that is itself a line of text saves nothing and costs a click, and a page
+//   of nothing but disclosure triangles is the same wall of text with the
+//   words taken out.
+//
+// EVERY FUNCTION IN THIS BLOCK IS DELIBERATELY WITHOUT ENTERING/LEAVING LOGS,
+// which is the exception whenText() and its neighbours already take and for a
+// stronger version of the same reason: note() alone is called about three
+// hundred times on `/admin/config`, so the pair of lines the style rule asks
+// for would be six hundred of them for one page draw, and the request that
+// drew it would be somewhere in the middle. The two places something is worth
+// saying — a list item left open, a page in the nav nobody described — log at
+// the point the decision is made instead.
+// ---------------------------------------------------------------------------
+
+
+// The visible text of a fragment of markup — tags removed, whitespace
+// collapsed, AND ENTITIES LEFT EXACTLY AS THEY WERE.
+//
+// Leaving them is the whole of the fix for a bug this had twice: `&apos;` and
+// `&rarr;` appeared in summaries as themselves. Decoding an entity here and
+// escaping the result on the way into a <summary> turns `&apos;` into
+// `&amp;apos;`, and the escaping cannot be dropped without deciding whether
+// the text was escaped in the first place.
+//
+// So the rule is the other one, and it holds for every caller in this file:
+// WHAT COMES IN IS A VALID HTML FRAGMENT — prose written as markup, or a value
+// already through esc() — so what comes out is valid HTML text and goes into a
+// <summary> UNESCAPED. A caller that hands this an unescaped `<` loses it to
+// the tag stripper either way, which is the same thing escaping would have
+// done to it.
+function plainTextOf(html) {
+  return String(html == null ? '' : html)
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// How long that text READS, which is not its length: `&mdash;` is one dash and
+// seven characters. Only the two measurements use this — what goes on the page
+// is always plainTextOf()'s own output.
+function visibleLength(text) {
+  return text.replace(/&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, '-').length;
+}
+
+// Where the opening sentence ends, as an offset INTO THE MARKUP — or -1 if it
+// cannot be cut there.
+//
+// The cut has to be at element depth zero and nowhere else. A sentence that
+// ends inside a `<strong>` is the ordinary case in this file's prose ("<strong>
+// This is not a second door. It posts to…</strong>"), and cutting there would
+// hand the summary an unclosed tag and the body an unopened one — which no
+// browser reports and every browser renders differently. So depth is tracked
+// and a boundary inside anything is refused; the caller then falls back to a
+// truncation, which repeats the opening in the body and is merely untidy
+// rather than broken.
+//
+// A boundary is a full stop, question or exclamation mark followed by
+// whitespace. The whitespace is what keeps `oauth2.rfc9700` and `RFC 7644` out
+// of it: an abbreviation's stop is followed by a letter, not a space. The
+// thirty-character minimum is what keeps a leading "e.g. " — or any other
+// short opener — from becoming the whole summary.
+function sentenceEnd(html) {
+  let depth = 0;
+  for (let i = 0; i < html.length; i++) {
+    const c = html[i];
+    if (c === '<') {
+      const close = html.indexOf('>', i);
+      if (close < 0) {
+        return -1;
+      }
+      const tag = html.slice(i, close + 1);
+      if (/^<\//.test(tag)) {
+        depth -= 1;
+      } else if (!/\/>$/.test(tag) && !/^<(br|hr|img|input|meta|link)\b/i.test(tag)) {
+        depth += 1;
+      }
+      i = close;
+      continue;
+    }
+    // A COLON IS NOT A SENTENCE END HERE, though it looks like one. It almost
+    // always INTRODUCES the rest — "The same two halves for the assertions:
+    // ..." — so cutting there produced summaries that were a fragment with
+    // nothing after them, which is worse than no summary at all. A colon still
+    // ends a headline (see foldOf), because a title ending in one is a title.
+    if (depth === 0 && i >= 30 && /[.!?]/.test(c) && /^\s/.test(html.slice(i + 1, i + 2))) {
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+// The opening sentence, cut short at a word boundary if it is longer than a
+// summary line. The ellipsis is not decoration: it is what tells a reader that
+// the words in the summary are the words the body opens with, so that the
+// repetition below reads as *read more* rather than as the same sentence
+// printed twice.
+function teaserOf(text, max) {
+  const limit = max || SUMMARY_CHARS;
+  if (visibleLength(text) <= limit) {
+    return text;
+  }
+  let cut = text.slice(0, limit);
+  const space = cut.lastIndexOf(' ');
+  if (space > 40) {
+    cut = cut.slice(0, space);
+  }
+  // A cut can land inside an entity — `&mda` — which a browser renders
+  // literally, so the half is dropped rather than shown.
+  return cut.replace(/&[a-zA-Z0-9#]*$/, '').replace(/[\s,.;:—-]+$/, '') + '&hellip;';
+}
+
+// The entities a title attribute cannot show, resolved. Only tip() needs it —
+// see the comment in there. `&amp;` is resolved LAST so that `&amp;lt;` comes
+// out as the four characters somebody wrote rather than as a `<`.
+function unescapeText(text) {
+  return String(text)
+    .replace(/&mdash;|&ndash;/g, '\u2014')
+    .replace(/&middot;/g, '\u00b7')
+    .replace(/&rarr;/g, '\u2192')
+    .replace(/&hellip;/g, '\u2026')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;|&ldquo;|&rdquo;/g, '"')
+    .replace(/&#39;|&apos;|&rsquo;|&lsquo;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+// A TOOLTIP, AS AN ATTRIBUTE READY TO GO INTO A TAG — including its leading
+// space, so a caller can drop it into markup without deciding whether one is
+// needed.
+//
+// This is the other half of the folds and it answers the other half of the
+// problem: prose long enough to be an argument folds, and prose short enough
+// to be a caption belongs ON the control it captions rather than under it.
+// Every label in this console that grows one gets the dotted underline and
+// the help cursor from a `label[title]` rule in page(), so the affordance
+// arrives with the tooltip and cannot be forgotten separately.
+//
+// NOTHING IS EVER SAID ONLY IN A TOOLTIP, and that is the rule to hold on to
+// rather than the mechanism: a title attribute is unreachable from a keyboard,
+// invisible on a touch screen and unread by most screen readers. What goes in
+// one is a shorter saying of something the page still carries — which is why
+// shortened() above, this console's first tooltip, puts the FULL value in the
+// title and the truncation on the page rather than the other way round.
+function tip(text) {
+  const plain = plainTextOf(text);
+  if (!plain) {
+    return '';
+  }
+  // Escaped, unlike a summary: a title attribute is TEXT rather than markup —
+  // a browser shows `&mdash;` in one literally — and this is also the one
+  // helper here that is handed raw strings out of config.js as often as it is
+  // handed markup. esc() on an already-escaped fragment would double it, so
+  // the entities are resolved for this one path.
+  return ' title="' + esc(unescapeText(teaserOf(plain, TIP_CHARS))) + '"';
+}
+
+// The summary and the body of one collapsed block. Where the opening sentence
+// could be cut out of the markup cleanly it becomes the summary and the body
+// is what is left, so nothing is said twice; where it could not, the summary
+// is a truncation and the body is the whole note.
+function foldOf(html, label) {
+  if (label) {
+    // A LABEL IS THE ONE THING THAT IS ESCAPED. Everything else here is text
+    // taken out of markup the caller already built; a label is a plain string
+    // a caller passed — a setting's own name, most often — and has been
+    // through nothing.
+    return { summary: esc(label), body: html };
+  }
+  // THE COMMONEST SHAPE IN THIS FILE IS A BOLDED HEADLINE AND THEN THE
+  // ARGUMENT FOR IT — `<strong>This is not a second door.</strong> The form
+  // below posts to…` — and that headline is a better summary than any
+  // sentence-splitting could find, because somebody wrote it to be one. It is
+  // taken only when it ends in sentence punctuation: a bolded PHRASE opening a
+  // sentence that runs on ("<strong>THE KEY</strong>, exactly as…") is part of
+  // the first sentence rather than a title for the paragraph.
+  // A headline under about two dozen characters is a PREFIX rather than a
+  // title — `<strong>Restart to apply:</strong>` is the one that showed it, and
+  // taking it left a fold whose summary was two words and whose body held the
+  // reason somebody opened it for.
+  const headline = /^\s*<(strong|b|em)>([\s\S]*?)<\/\1>/.exec(html);
+  if (headline) {
+    const title = plainTextOf(headline[2]);
+    if (title.length >= 24 && title.length <= SUMMARY_CHARS && /[.:!?]$/.test(title)) {
+      return { summary: title,
+               body: html.slice(headline[0].length).replace(/^\s+/, '') };
+    }
+  }
+  const cut = sentenceEnd(html);
+  const head = cut > 0 ? plainTextOf(html.slice(0, cut)) : '';
+  if (head && head.length <= SUMMARY_CHARS) {
+    return { summary: head, body: html.slice(cut).replace(/^\s+/, '') };
+  }
+  return { summary: teaserOf(plainTextOf(html)), body: html };
+}
+
+// A paragraph of explanation. Short ones are the paragraph they always were;
+// long ones fold. `label` overrides the derived summary and forces the fold,
+// because a caller that bothered to name a block wanted the block.
+function note(html, label) {
+  // Coerced once, here: a caller may hand this a number of rows or a
+  // fragment built by a .map(), and everything below slices and measures.
+  html = String(html == null ? '' : html);
+  const text = plainTextOf(html);
+  if (!label && visibleLength(text) <= ONE_LINE_CHARS) {
+    return '<p class="note">' + html + '</p>';
+  }
+  const fold = foldOf(html, label);
+  return '<details class="note fold"><summary>' + fold.summary +
+         '</summary><div class="foldbody">' + fold.body + '</div></details>';
+}
+
+// The same, for the amber box. A warning folds like anything else and for the
+// same reason — most of them here are a headline and three sentences of why —
+// but the box KEEPS ITS COLOUR CLOSED, so a page with a caveat on it still
+// looks like a page with a caveat on it. Folding a warning into something that
+// looks like body text would be the one case where this change hid a fact
+// rather than tidying it.
+function warn(html, label) {
+  // Coerced once, here: a caller may hand this a number of rows or a
+  // fragment built by a .map(), and everything below slices and measures.
+  html = String(html == null ? '' : html);
+  const text = plainTextOf(html);
+  if (!label && visibleLength(text) <= ONE_LINE_CHARS) {
+    return '<div class="warn">' + html + '</div>';
+  }
+  const fold = foldOf(html, label);
+  return '<details class="warn fold"><summary>' + fold.summary +
+         '</summary><div class="foldbody">' + fold.body + '</div></details>';
+}
+
+// One item of a prose list — the *what it deliberately does not do* lists, and
+// nothing else. Every one of those bullets opens with a bolded headline and
+// then argues it for a paragraph, which is exactly the shape a fold suits: the
+// list stays a list of claims, and the argument for each is under it.
+function bullet(html, label) {
+  // Coerced once, here: a caller may hand this a number of rows or a
+  // fragment built by a .map(), and everything below slices and measures.
+  html = String(html == null ? '' : html);
+  const text = plainTextOf(html);
+  if (!label && visibleLength(text) <= ONE_LINE_CHARS) {
+    return '<li>' + html + '</li>';
+  }
+
+  // AN ITEM THAT OPENS WITH A LINK IS NEVER FOLDED, and this is the rule that
+  // stops this helper quietly breaking two lists. The Overview page's list of
+  // every console page and the sidebar's are the same list, and each row of it
+  // IS a link — folding one puts the only control in the row behind a summary
+  // made of text, so the reader has to open the thing to find out it was the
+  // link they were looking for. A link inside a <summary> is also a control
+  // inside a control, which browsers resolve differently from each other.
+  if (/^\s*<a\b/i.test(html)) {
+    log.debug("bullet(). Left open: the item opens with a link.");
+    return '<li>' + html + '</li>';
+  }
+
+  // AN ITEM THAT OPENS WITH A CODE PATH KEEPS IT IN THE SUMMARY. The
+  // machine-readable lists here are a URL and then a paragraph about it, and
+  // the URL is what somebody came for — but <code> is not interactive, so it
+  // can sit in the summary beside the teaser rather than forcing the whole row
+  // open. This is why fold.summary is escaped everywhere else and this one
+  // place composes markup: the prefix is the caller's own element, and only
+  // the text after it is escaped.
+  const lead = /^\s*(<code\b[^>]*>[\s\S]*?<\/code>)/i.exec(html);
+  if (!label && lead) {
+    const rest = html.slice(lead[0].length).replace(/^[\s,—-]+/, '');
+    return '<li class="foldli"><details class="fold"><summary>' + lead[1] + ' ' +
+           teaserOf(plainTextOf(rest)) + '</summary><div class="foldbody">' +
+           rest + '</div></details></li>';
+  }
+
+  const fold = foldOf(html, label);
+  return '<li class="foldli"><details class="fold"><summary>' + fold.summary +
+         '</summary><div class="foldbody">' + fold.body + '</div></details></li>';
 }
 
 // The three formatters below are deliberately without entering/leaving logs: they
@@ -2238,15 +2666,41 @@ function presentedCell(record) {
 
 // The handle the row can be quoted by — and for one family there is none, which is
 // worth saying rather than leaving as a bare dash beside two columns full of them.
-function identifierCell(record) {
+// THE IDENTIFIER, AND THE WAY TO WHERE THE CREDENTIAL CAME FROM.
+//
+// The cell is a link since 2026-08-26 and the id is the only thing it could be
+// keyed on — /admin/tokens/credential walks the delegation register by exactly
+// this string, which is what both registers hold about the same object. A row
+// with NO identifier therefore cannot have a link, and that is the same sentence
+// the cell already had to make: a Kerberos ticket has nothing to quote, so it has
+// nothing to look up, and the tooltip says why rather than offering a link that
+// could only ever answer "nothing is known".
+//
+// `listView` is the tokens page as the reader left it, carried into the query so
+// the drill-down's trail comes back to the same filter and the same page.
+function identifierCell(record, listView) {
   if (record.family === 'ticket') {
     return '<span class="state-none" title="' +
       esc('A Kerberos ticket carries no identifier anybody can quote: no jti, no ID. It is named ' +
           'by its client, its service and when it was issued — the columns to the left — and the ' +
           'KDC keeps no handle on it either, because the KDC is stateless and the ticket is the ' +
-          'state.') + '">—</span>';
+          'state. With no identifier there is nothing to look a lineage up BY either, which is ' +
+          'why this row has no link where the others do.') + '">—</span>';
   }
-  return shortened(record.identifier, 12);
+  if (!record.identifier) {
+    return '<span class="state-none" title="' +
+      esc('This one carries no identifier — the signed UserInfo response has no jti, and the ' +
+          'WS-Trust JWT is signed directly rather than through signJwt(). Nothing can be looked ' +
+          'up by a name that does not exist.') + '">—</span>';
+  }
+  return '<a href="' +
+    esc('/admin/tokens/credential' +
+        queryWith(listView || {}, { id: record.identifier })) +
+    '" title="' +
+    esc('Where this credential came from: who it was issued to, in whose name, to reach what — ' +
+        'and, if it came out of a token exchange, the credential handed in to get it and every ' +
+        'generation behind that, back to the issuance the whole line rests on.') + '">' +
+    shortened(record.identifier, 12) + '</a>';
 }
 
 // The button, or why there is not one. Two different reasons, and they are not
@@ -2274,7 +2728,7 @@ function actionCell(record, backRow) {
     (record.revoked ? 'Restore' : 'Revoke') + '</button></form>';
 }
 
-function issuedRow(record, backRow) {
+function issuedRow(record, backRow, listView) {
   return '<tr><td>' + esc(record.kind) + '</td>' +
     '<td class="' + stateClass(record.state) + '">' + esc(record.state) + '</td>' +
     '<td>' + userCell(record) + '</td>' +
@@ -2284,7 +2738,7 @@ function issuedRow(record, backRow) {
     '<td>' + presentedCell(record) + '</td>' +
     '<td>' + esc(whenText(record.issuedAt)) + '</td>' +
     '<td>' + esc(record.expiresAtMs ? whenText(record.expiresAtMs) : '—') + '</td>' +
-    '<td>' + identifierCell(record) + '</td>' +
+    '<td>' + identifierCell(record, listView) + '</td>' +
     '<td>' + actionCell(record, backRow) + '</td></tr>';
 }
 
@@ -2478,9 +2932,9 @@ function perPageForm(path, key, value, perPage, extraNote, carry) {
     '<label for="per">Rows per table</label>' +
     '<select id="per" name="per">' + perPageOptions(perPage) + '</select>' +
     '<button class="secondary">Apply</button>' +
-    '<span class="note">Every table below is paged separately and they share this ' +
+    note('Every table below is paged separately and they share this ' +
     'size. Changing it starts each of them at its first page.' +
-    (extraNote ? ' ' + extraNote : '') + '</span>' +
+    (extraNote ? ' ' + extraNote : '')) +
     '</div></form>';
   log.debug("Leaving perPageForm().");
   return html;
@@ -2647,14 +3101,26 @@ function guideItem(page) {
     // makes about a slot nobody filled — and this is the only report anything
     // makes about a page nobody described.
     log.debug("guideItem(). No blurb for " + page.path + ".");
-    return '<li><a href="' + esc(page.path) + '">' + esc(page.label) + '</a> — ' +
+    return bullet('<a href="' + esc(page.path) + '">' + esc(page.label) + '</a> — ' +
            '<span class="undescribed">this page has no description in ' +
            '<code>SECTIONS</code>. It was added to the nav and not described ' +
            'here; the list you are reading is derived from that table, so ' +
-           'this row is the report rather than a gap.</span></li>';
+           'this row is the report rather than a gap.</span>');
   }
-  return '<li><a href="' + esc(page.path) + '">' + esc(page.label) + '</a> — ' +
-         page.blurb + '</li>';
+  // THE LINK STAYS ON THE ROW AND THE BLURB FOLDS UNDER IT. Every blurb in
+  // SECTIONS runs to between three and six lines — they are the description of
+  // a page rather than a caption for it — so this list, which is the one page
+  // in this console whose whole job is pointing at the others, was twenty-six
+  // paragraphs deep and the twenty-six links were scattered through it. It is
+  // an index again: the labels are a column somebody can run an eye down, and
+  // the paragraph is under whichever one they stopped at.
+  //
+  // The link is deliberately NOT inside the summary. bullet() refuses to fold
+  // an item that opens with one for the reason given there — a link inside a
+  // <summary> is a control inside a control — and this row would have been the
+  // first place that bit.
+  return '<li><a href="' + esc(page.path) + '">' + esc(page.label) + '</a>' +
+         note(page.blurb) + '</li>';
 }
 
 function consoleGuide(activePath) {
@@ -2670,8 +3136,11 @@ function consoleGuide(activePath) {
         if (!pages.length) {
           return;
         }
+        // The group's own description folds like a page's, for the same
+        // reason: SAML's runs to five lines and sat between the heading and
+        // the three pages under it.
         items.push('<li><span class="grp">' + esc(item.title) + '</span>' +
-                   '<span class="grpwhat">' + esc(item.what) + '</span>' +
+                   note(esc(item.what)) +
                    '<ul>' + pages.map(guideItem).join('') + '</ul></li>');
         return;
       }
@@ -2685,7 +3154,7 @@ function consoleGuide(activePath) {
       return;
     }
     out.push('<h3>' + esc(section.title) + '</h3>' +
-             '<p class="note">' + esc(section.what) + '</p>' +
+             note(esc(section.what)) +
              '<ul>' + items.join('') + '</ul>');
   });
   log.debug("Leaving consoleGuide(). " + out.length + " section(s) drawn.");
@@ -2706,21 +3175,21 @@ app.get('/admin', function (req, res) {
       tile(durationText(snap.uptimeMs), 'uptime') +
     '</div>' +
     '<h2>What this console is</h2>' +
-    '<p class="note">This service exists to exercise clients, and the pages here exist to ' +
+    note('This service exists to exercise clients, and the pages here exist to ' +
     'exercise the parts of a client that only show themselves when something changes underneath it: ' +
     'what happens when a token it holds stops being valid, and what happens when a token it reads ' +
-    'grows a claim it was not expecting.</p>' +
-    '<p class="note">Every page in the sidebar is below, in the sidebar\'s own order and grouping, ' +
+    'grows a claim it was not expecting.') +
+    note('Every page in the sidebar is below, in the sidebar\'s own order and grouping, ' +
     'because this list is DERIVED from the same table the sidebar is drawn from. A page cannot be ' +
     'added to this console and left out of here; one added without a description says so on its ' +
-    'own row rather than going quietly.</p>' +
+    'own row rather than going quietly.') +
     consoleGuide('/admin') +
     '<h2>What it deliberately does not do</h2>' +
-    '<p class="note">Worth knowing before looking for a control that is not here. Most of these ' +
+    note('Worth knowing before looking for a control that is not here. Most of these ' +
     'are things this console CANNOT do rather than things somebody has not got to yet, and each ' +
-    'says which.</p>' +
+    'says which.') +
     '<ul>' +
-    '<li><strong>It does not invalidate a SAML assertion, a Kerberos ticket or a credential.</strong> ' +
+    bullet('<strong>It does not invalidate a SAML assertion, a Kerberos ticket or a credential.</strong> ' +
     'It counts them, it lists the first two on the tokens page beside the JWTs, and it says when ' +
     'each expires — but none of those has a revocation mechanism a relying party consults. A SAML ' +
     'assertion is valid because its signature verifies and its Conditions hold, and a Kerberos ' +
@@ -2729,8 +3198,8 @@ app.get('/admin', function (req, res) {
     'out there, which is why those rows carry a dash and the reason for it. The same is true one ' +
     'family further out: <strong>an X509-SVID already handed to a workload keeps working until it ' +
     'expires</strong>, and banning a SPIFFE identity records who may still be ISSUED one, which is ' +
-    'a different claim.</li>' +
-    '<li><strong>It DOES end a sign-on session now, and it used to say it did not.</strong> ' +
+    'a different claim.') +
+    bullet('<strong>It DOES end a sign-on session now, and it used to say it did not.</strong> ' +
     'The old reason was a good one: <code>/oauth2/logout</code> and ' +
     'WS-Federation\'s <code>wsignout1.0</code> each had a fan-out written into it, so a third ' +
     'button here would have been a third copy that quietly notified nobody. What changed on ' +
@@ -2739,54 +3208,54 @@ app.get('/admin', function (req, res) {
     'stops existing. <a href="/admin/logout">/admin/logout</a> calls them; so does ' +
     '<a href="/logout">/logout</a>, which is the same act without a console role. What this ' +
     'console still cannot do is DELIVER the notifications — a front-channel logout is an ' +
-    'iframe in the signed-out person\'s own browser, and this is not that browser.</li>' +
-    '<li><strong>It does not keep the tokens themselves</strong>, only their claims. A page listing ' +
+    'iframe in the signed-out person\'s own browser, and this is not that browser.') +
+    bullet('<strong>It does not keep the tokens themselves</strong>, only their claims. A page listing ' +
     'a thousand live bearer credentials in a form a browser will render is a page that leaks them, ' +
     'and the <code>jti</code> is all any button here needs. One configured field is held back for ' +
     'the same reason and no stronger one: a federation relationship\'s ' +
     '<code>fedClientSecret</code> is this service\'s own credential AT a real foreign service, so ' +
     'it is never printed here and never reaches the audit log — an <code>ldapsearch</code> shows ' +
-    'it anyway, and this console not being a second way to read it is not a security boundary.</li>' +
-    '<li><strong>It persists nothing, and a restart is not a reload.</strong> Every store behind ' +
+    'it anyway, and this console not being a second way to read it is not a security boundary.') +
+    bullet('<strong>It persists nothing, and a restart is not a reload.</strong> Every store behind ' +
     'these pages is in memory — the counters, the token and artifact registries, the audit ring, ' +
     'the sessions, the role roster, the embedded directory and every setting changed here — and ' +
     'the signing key is REGENERATED on every start, so a token issued by the previous process no ' +
     'longer verifies against the published JWKS. That is deliberate rather than a limitation: a ' +
-    'mock whose state survives is a mock a test has to clean up after.</li>' +
-    '<li><strong>It does not remember everything, either.</strong> The token, artifact and user ' +
+    'mock whose state survives is a mock a test has to clean up after.') +
+    bullet('<strong>It does not remember everything, either.</strong> The token, artifact and user ' +
     'registries and the audit ring are CAPPED and drop their oldest rows — and each says how many ' +
     'it dropped rather than pretending they were never there: <code>forgotten</code> on ' +
     '<a href="/admin/metrics">Metrics</a>, <code>dropped</code> on ' +
     '<a href="/admin/audit">the audit log</a>, and one collapsed row for the paths that matched no ' +
     'route. A count that grew without limit would be one a scanner inventing URLs could ' +
-    'exhaust.</li>' +
-    '<li><strong>It checks no password — not even at its own door.</strong> The gate proves that ' +
+    'exhaust.') +
+    bullet('<strong>It checks no password — not even at its own door.</strong> The gate proves that ' +
     'somebody typed a name that holds one of two roles, and nothing verifies that it is them. ' +
     'The roles are ordinary directory groups, so an <code>ldapmodify</code> or a SCIM PATCH grants ' +
     'them too; while neither group has a member, anybody who signs in holds both; and ' +
     '<strong><code>/admin-api</code> is deliberately NOT gated</strong>, which is what a test ' +
     'drives and the way back in when nobody holds a role — and also means anybody who can reach ' +
     'this port can grant themselves both. The gate exists so a client can be driven through ' +
-    '302, 401, 403 and a role model. It does not make this port safe to expose.</li>' +
-    '<li><strong>It enforces nothing by default, and widening is what most of these pages do.</strong> ' +
+    '302, 401, 403 and a role model. It does not make this port safe to expose.') +
+    bullet('<strong>It enforces nothing by default, and widening is what most of these pages do.</strong> ' +
     'RFC 9700 mode is the one MODE that makes this service refuse what it would otherwise accept, ' +
     'and it is off unless <a href="/admin/config">Configuration</a> turns it on. Three surfaces ' +
     'ask for a credential without it — <a href="/admin/scim">SCIM</a>, the SPIRE Server API and ' +
     'this console — and all three are a turnstile rather than a lock: each can be switched off, ' +
     'and none of them checks a password. <a href="/admin/federation">Federation</a> is the one ' +
     'refusal that is not a mode and cannot be switched off, because at an assertion consumer ' +
-    'service there is no permissive answer available.</li>' +
-    '<li><strong>It does not decide who may delegate to whom.</strong> ' +
+    'service there is no permissive answer available.') +
+    bullet('<strong>It does not decide who may delegate to whom.</strong> ' +
     '<a href="/admin/delegation">Delegation</a> reports eight mechanisms and polices none of ' +
     'them: Kerberos is the only family here that polices delegation at all, and that policy ' +
     'belongs to the principal database rather than to this console. WS-Trust\'s ' +
     '<code>OnBehalfOf</code> and RFC 8693\'s token exchange are unpoliced, and the rows say so ' +
-    'rather than being tidied into an em dash.</li>' +
-    '<li><strong>It does not attest a workload or a node</strong>, and no setting on ' +
+    'rather than being tidied into an em dash.') +
+    bullet('<strong>It does not attest a workload or a node</strong>, and no setting on ' +
     '<a href="/admin/spiffe">SPIFFE</a> turns that on. The Workload API authenticates nobody ' +
     'because its specification says it MUST NOT — a workload has no root of trust until that ' +
-    'call gives it one — so what is missing there is attestation rather than authentication.</li>' +
-    '<li><strong>It deletes CONFIGURATION and never a person.</strong> An authorization server, a ' +
+    'call gives it one — so what is missing there is attestation rather than authentication.') +
+    bullet('<strong>It deletes CONFIGURATION and never a person.</strong> An authorization server, a ' +
     'SPIFFE registration entry, an attested agent\'s record and a federation relationship can all ' +
     'be removed here. A PERSON cannot be: somebody can be created on ' +
     '<a href="/admin/users">Users</a> ahead of their first sign-in and a SPIFFE identity can be ' +
@@ -2795,45 +3264,45 @@ app.get('/admin', function (req, res) {
     'which is the property most of these pages are reading. <a href="/admin/scim">SCIM</a> is the ' +
     'exception and it is a whole protocol rather than a button — a <code>DELETE ' +
     '/scim/v2/Users/{id}</code> really does remove the entry, while its <code>active: false</code> ' +
-    'deactivates nobody at all.</li>' +
-    '<li><strong>It shows ONE trust realm at a time, and it writes the one it is read in.</strong> ' +
+    'deactivates nobody at all.') +
+    bullet('<strong>It shows ONE trust realm at a time, and it writes the one it is read in.</strong> ' +
     'Every page here reports the realm in the path it was reached by, and the switcher above the ' +
     'nav is how you leave it — so a setting saved on <a href="/admin/config">Configuration</a> ' +
     'changes that realm and no other. There is deliberately no per-realm administrator: the two ' +
     'roles are groups in the ONE shared directory, so somebody who holds Admin Write holds it ' +
-    'everywhere, and the console\'s own sign-on follows the roles rather than the sessions.</li>' +
-    '<li><strong>It runs no script, and that costs one thing worth naming.</strong> ' +
+    'everywhere, and the console\'s own sign-on follows the roles rather than the sessions.') +
+    bullet('<strong>It runs no script, and that costs one thing worth naming.</strong> ' +
     '<code>script-src \'none\'</code> holds over every page in this console, which is what makes ' +
     'a family of reflected-content problems moot here rather than merely unlikely. ' +
     '<a href="/admin/delegation/map">The delegation picture</a> is therefore laid out on the ' +
     'SERVER and arrives as ordinary markup, so it does not pan or zoom — ' +
-    '<code>?format=svg</code> hands over the document for something that does.</li>' +
+    '<code>?format=svg</code> hands over the document for something that does.') +
     '</ul>' +
     '<h2>Reading it from a test</h2>' +
-    '<p class="note">Every page above answers <code>?format=json</code>, and so does every ' +
+    note('Every page above answers <code>?format=json</code>, and so does every ' +
     'drill-down under one — the same object, the same 200, the same ' +
     '<code>Cache-Control: no-store</code>. A caller that asks for JSON is never redirected to a ' +
     'sign-in screen either: it gets 401 or 403 with a body, because a 302 to an HTML login page ' +
     'arrives at a program as a 200 full of markup. Every form takes a JSON body, and the same ' +
-    'service is at <a href="/admin-api">/admin-api</a>, which is not gated at all.</p>' +
+    'service is at <a href="/admin-api">/admin-api</a>, which is not gated at all.') +
     '<ul>' +
     '<li><code>GET ' + esc(base) + '/admin/metrics?format=json</code></li>' +
-    '<li><code>GET ' + esc(base) + '/admin/groups?format=json</code>, and ' +
+    bullet('<code>GET ' + esc(base) + '/admin/groups?format=json</code>, and ' +
     '<code>GET ' + esc(base) + '/admin/groups?group=cn=developers,ou=groups,...&amp;format=json' +
-    '</code> — the second carries every attribute of that group and every member resolved.</li>' +
-    '<li><code>GET ' + esc(base) + '/admin/users?format=json</code>, and ' +
+    '</code> — the second carries every attribute of that group and every member resolved.') +
+    bullet('<code>GET ' + esc(base) + '/admin/users?format=json</code>, and ' +
     '<code>GET ' + esc(base) + '/admin/users?user=alice&amp;format=json</code> — the second carries ' +
     '<code>sessions</code>, each with the tokens issued on it, plus the tokens that belong to no ' +
-    'session and the artifacts</li>' +
-    '<li><code>GET ' + esc(base) + '/admin/tokens?format=json&amp;page=1&amp;per=100</code> — the ' +
+    'session and the artifacts') +
+    bullet('<code>GET ' + esc(base) + '/admin/tokens?format=json&amp;page=1&amp;per=100</code> — the ' +
     'reply carries <code>page</code>, <code>pages</code> and <code>matched</code>, so walking the ' +
     'whole list needs no guess about where it ends. Every paged list here answers the same three ' +
-    'fields, so one walker serves all of them.</li>' +
-    '<li><code>GET ' + esc(base) + '/admin/sts-metadata?format=json</code> — every endpoint this ' +
+    'fields, so one walker serves all of them.') +
+    bullet('<code>GET ' + esc(base) + '/admin/sts-metadata?format=json</code> — every endpoint this ' +
     'process registered, which is the list to check a client\'s assumptions against rather than ' +
-    'this page.</li>' +
-    '<li><code>GET ' + esc(base) + '/admin/delegation/map?format=json</code> for the graph, and ' +
-    '<code>?format=svg</code> for the drawing alone — the one page here with a fourth shape.</li>' +
+    'this page.') +
+    bullet('<code>GET ' + esc(base) + '/admin/delegation/map?format=json</code> for the graph, and ' +
+    '<code>?format=svg</code> for the drawing alone — the one page here with a fourth shape.') +
     '<li><code>POST ' + esc(base) + '/admin/tokens</code> with ' +
     '<code>{"action":"revoke","target":"&lt;jti or token&gt;"}</code></li>' +
     '<li><code>POST ' + esc(base) + '/admin/claims</code> with ' +
@@ -2898,12 +3367,12 @@ function callTable(snap) {
     '<th class="num">2xx</th><th class="num">3xx</th><th class="num">4xx</th><th class="num">5xx</th>' +
     '<th class="num">Avg ms</th><th class="num">Max ms</th><th>Last</th></tr>' +
     (body || '<tr><td colspan="10">No call has been recorded yet.</td></tr>') + '</table>' +
-    (hidden > 0 ? '<p class="note">' + hidden + ' further route(s) are not shown; the table draws the ' +
-                  MAX_ROWS + ' busiest.</p>' : '') +
+    (hidden > 0 ? note(hidden + ' further route(s) are not shown; the table draws the ' +
+                  MAX_ROWS + ' busiest.') : '') +
     (snap.calls.pathsCollapsed > 0
-      ? '<p class="note">' + snap.calls.pathsCollapsed + ' request(s) to paths that matched no route ' +
+      ? note(snap.calls.pathsCollapsed + ' request(s) to paths that matched no route ' +
         'were counted in the single <code>' + esc('(other unmatched paths)') + '</code> row: the table ' +
-        'is capped so that a scanner inventing URLs cannot grow it without limit.</p>'
+        'is capped so that a scanner inventing URLs cannot grow it without limit.')
       : '');
 }
 
@@ -3009,45 +3478,45 @@ app.get('/admin/metrics', function (req, res) {
       tile(snap.sessions.distinctSubjects, 'subjects with a live artifact') +
       tile(durationText(snap.uptimeMs), 'uptime') +
     '</div>' +
-    '<p class="note">Since <code>' + esc(whenText(snap.startedAt)) + '</code>. Every figure on this ' +
+    note('Since <code>' + esc(whenText(snap.startedAt)) + '</code>. Every figure on this ' +
     'page is computed when the page is drawn rather than kept up to date as things happen, because ' +
     '&ldquo;valid&rdquo; and &ldquo;expired&rdquo; are functions of the clock: a counter incremented ' +
-    'at issuance would be wrong a second later.</p>' +
+    'at issuance would be wrong a second later.') +
 
     '<h2>Endpoint calls</h2>' +
-    '<p class="note">Keyed on the route Express matched, not on the URL requested, so ' +
+    note('Keyed on the route Express matched, not on the URL requested, so ' +
     '<code>/oauth2/register/:client_id</code> is one row rather than one row per client. These are ' +
     'the same route patterns <a href="/admin/sts-metadata">' +
-    '/admin/sts-metadata</a> lists.</p>' +
+    '/admin/sts-metadata</a> lists.') +
     callTable(snap) +
 
     '<h2>Tokens</h2>' +
-    '<p class="note">Every JWT this service signs, by <code>typ</code> — which is the only thing ' +
+    note('Every JWT this service signs, by <code>typ</code> — which is the only thing ' +
     'that tells them apart, since all of them are RS256 and signed with the same key. ' +
     '<a href="/admin/tokens">The tokens page</a> lists them one by one — beside the SAML ' +
-    'assertions and Kerberos tickets, which it also lists — and can invalidate these.</p>' +
+    'assertions and Kerberos tickets, which it also lists — and can invalidate these.') +
     tokenKindTable(snap) +
     (snap.tokens.forgotten > 0
-      ? '<p class="note">' + snap.tokens.forgotten + ' older token(s) have been forgotten: the ' +
+      ? note(snap.tokens.forgotten + ' older token(s) have been forgotten: the ' +
         'registry holds the most recent ' + snap.tokens.cap + '. Their revocations are NOT ' +
         'forgotten — the set of revoked <code>jti</code>s is kept separately and is not capped, so ' +
-        'a token revoked long ago stays revoked.</p>'
+        'a token revoked long ago stays revoked.')
       : '') +
 
     '<h2>Assertions, tickets and credentials</h2>' +
-    '<p class="note">The artifacts that are not JWTs. None of them can be revoked and the console ' +
+    note('The artifacts that are not JWTs. None of them can be revoked and the console ' +
     'does not pretend otherwise — see the index for why — so the only distinction here is whether ' +
     'the validity window has closed. The assertions and the tickets are listed one by one on ' +
     '<a href="/admin/tokens">the tokens page</a>, beside the JWTs and in the order they were all ' +
-    'issued; the credentials are counted here and nowhere else.</p>' +
+    'issued; the credentials are counted here and nowhere else.') +
     artifactKindTable(snap) +
     (snap.artifacts.forgotten > 0
-      ? '<p class="note">' + snap.artifacts.forgotten + ' older artifact(s) have been forgotten; the ' +
-        'registry holds the most recent ' + snap.artifacts.cap + '.</p>'
+      ? note(snap.artifacts.forgotten + ' older artifact(s) have been forgotten; the ' +
+        'registry holds the most recent ' + snap.artifacts.cap + '.')
       : '') +
 
     '<h2>Sessions, counted both ways</h2>' +
-    '<p class="note">The two numbers mean different things and disagree on purpose. A ' +
+    note('The two numbers mean different things and disagree on purpose. A ' +
     '<strong>sign-on session</strong> is a real one: a browser holding the ' +
     '<code>sts_mock_session</code> cookie, shared between the OAuth 2.0 / OIDC login screen and ' +
     'WS-Federation, which is what makes single sign-on across the two work. An ' +
@@ -3057,21 +3526,21 @@ app.get('/admin/metrics', function (req, res) {
     'that has signed in but been issued nothing yet is the first and not the second; a Kerberos ' +
     'client is never the first at all. Both are counted here per family; ' +
     '<a href="/admin/users">the users page</a> is where one person\'s sessions and the tokens ' +
-    'issued on each of them are.</p>' +
+    'issued on each of them are.') +
     '<h3>Sign-on sessions (' + liveSignOn.length + ' active of ' + signOn.length + ' held)</h3>' +
     '<table><tr><th>User</th><th>State</th><th>amr</th><th>acr</th><th>Signed in</th>' +
     '<th>Expires</th><th>WS-Fed relying parties signed into</th></tr>' +
     (signOnRows || '<tr><td colspan="7">Nobody is signed in.</td></tr>') + '</table>' +
-    '<p class="note">An expired session stays in the map until something reads it — ' +
+    note('An expired session stays in the map until something reads it — ' +
     '<code>sessionOf()</code> drops one when it finds it stale — so it is listed as held but not ' +
-    'active rather than quietly omitted.</p>' +
+    'active rather than quietly omitted.') +
     '<h3>Artifact-derived sessions (' + snap.sessions.distinctSubjects + ' distinct subject(s))</h3>' +
     '<table><tr><th>Protocol family</th><th class="num">Subjects</th><th>Who</th></tr>' +
     (sessionFamilyRows || '<tr><td colspan="3">Nothing valid has been issued yet.</td></tr>') +
     '</table>' +
-    '<p class="note">A Kerberos TGT is counted as a session and a service ticket is not, because ' +
+    note('A Kerberos TGT is counted as a session and a service ticket is not, because ' +
     'that is what they are: the TGT is the credential the session consists of, and a service ticket ' +
-    'is one use of it. Counting both would report the same session twice.</p>';
+    'is one use of it. Counting both would report the same session twice.');
 
   respond(req, res, json, 'Metrics', '/admin/metrics', inner);
   log.debug("Leaving the admin metrics page.");
@@ -3386,8 +3855,12 @@ app.get('/admin/tokens', function (req, res) {
   const backRow = queryWith(filterParams, { page: paging.page });
   const backFilter = queryWith(filterParams, {});
 
+  // The list as the reader left it, for the drill-down link on every row: the
+  // filter AND the page, so the way back from a credential is the row it was
+  // clicked on rather than the top of everything.
+  const listView = Object.assign({}, filterParams, { page: paging.page });
   const rows = shown.map(function (record) {
-    return issuedRow(record, backRow);
+    return issuedRow(record, backRow, listView);
   }).join('');
 
   const familyOptions = ['<option value=""' + (wantedFamily ? '' : ' selected') + '>any family</option>']
@@ -3416,24 +3889,24 @@ app.get('/admin/tokens', function (req, res) {
   const perOptions = perPageOptions(paging.perPage);
 
   const inner = messagesOf(req) +
-    '<p class="note">Everything this service has issued and still remembers: every JWT, every SAML ' +
+    note('Everything this service has issued and still remembers: every JWT, every SAML ' +
     'assertion — whether WS-Trust issued it or a WS-Federation sign-in did — and every Kerberos ' +
     'ticket the KDC minted, in one table, newest first. One table rather than three because a ' +
     'WS-Federation sign-in that produced an ID Token and a SAML 1.1 assertion is <em>one event</em>, ' +
-    'and three tables would leave it to be reassembled by comparing timestamps.</p>' +
-    '<p class="note">Only the JWTs can be invalidated. Revoking one here is the SAME operation ' +
+    'and three tables would leave it to be reassembled by comparing timestamps.') +
+    note('Only the JWTs can be invalidated. Revoking one here is the SAME operation ' +
     'RFC 7009\'s <code>/oauth2/revoke</code> performs — there is one set of revoked ' +
     '<code>jti</code>s in this service, not one per page. So a token revoked here immediately ' +
     'introspects as inactive at <code>/oauth2/introspect</code>, is refused by ' +
     '<code>/oauth2/userinfo</code> with <code>invalid_token</code>, and fails the refresh grant ' +
     'with <code>invalid_grant</code>. Two sets would each look correct on their own and never see ' +
-    'each other, which is a debugging session with no error message anywhere in it.</p>' +
-    '<p class="note">An assertion and a ticket have no button and are listed anyway, which is the ' +
+    'each other, which is a debugging session with no error message anywhere in it.') +
+    note('An assertion and a ticket have no button and are listed anyway, which is the ' +
     'point of listing them: <strong>nothing consults this service about either</strong>. An ' +
     'assertion is valid because its signature verifies and its <code>Conditions</code> hold, and a ' +
     'ticket because the service it names can decrypt it with a key it already has. So the only ' +
     'thing that ends one is its own expiry, and the only way to see when that is — or to see that ' +
-    'a sign-in produced one at all — is a page that shows it.</p>' +
+    'a sign-in produced one at all — is a page that shows it.') +
 
     '<h2>Invalidate</h2>' +
     '<form method="post" action="/admin/tokens">' +
@@ -3442,11 +3915,11 @@ app.get('/admin/tokens', function (req, res) {
       '<div class="formrow"><label for="target">A jti, or paste the whole token</label>' +
       '<input type="text" id="target" name="target" size="60" placeholder="jti, or eyJhbGciOi...">' +
       '<button class="danger">Revoke</button></div></form>' +
-    '<p class="note">Pasting a token is read for its <code>jti</code> and the signature is not ' +
+    note('Pasting a token is read for its <code>jti</code> and the signature is not ' +
     'checked, which is safe: a forged token yields a jti this service never issued, and revoking ' +
     'one of those invalidates nothing. To undo a revocation, use the Restore button in the table — ' +
     'a NON-SPEC operation no real authorization server can offer, kept because otherwise getting ' +
-    'back to a working token means restarting this service.</p>' +
+    'back to a working token means restarting this service.') +
     '<div class="formrow">' +
       ['access_token', 'id_token', 'refresh_token'].map(function (kind) {
         return '<form method="post" action="/admin/tokens" class="inline">' +
@@ -3485,15 +3958,15 @@ app.get('/admin/tokens', function (req, res) {
     // (Kerberos tickets, id_token) matches nothing. Said here rather than prevented,
     // because the alternative is a page that silently ignores one of the two
     // selects the reader can see it obeying.
-    '<p class="note">Family and Kind narrow together: choosing a family and a kind from a ' +
-    'different one matches nothing, which is what an empty table below then means.</p>' +
+    note('Family and Kind narrow together: choosing a family and a kind from a ' +
+    'different one matches nothing, which is what an empty table below then means.') +
     nav +
     '<table><tr><th>Kind</th><th>State</th><th>User</th><th>Subject</th>' +
     '<th>Client, audience or service</th><th>Detail</th>' +
     '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti or ID</th><th></th></tr>' +
     (rows || '<tr><td colspan="11">Nothing matches.</td></tr>') + '</table>' +
     nav +
-    '<p class="note">' + filtered.length + ' row(s) match' +
+    note(filtered.length + ' row(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
                         ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
     '; ' + all.length + ' held in total — ' +
@@ -3503,29 +3976,323 @@ app.get('/admin/tokens', function (req, res) {
     '. Newest first, so page 1 is what somebody is most likely to be debugging. Only the claims ' +
     'and the facts below are kept, never the signed token, the assertion XML or the ticket: a page ' +
     'rendering a thousand live credentials in a form a browser will display is a page that leaks ' +
-    'them, and the <code>jti</code> is all any button here needs.</p>' +
+    'them, and the <code>jti</code> is all any button here needs.') +
 
     '<h3>What each column means</h3>' +
-    '<p class="note">Three families in one table, so most columns answer a slightly different ' +
-    'question depending on the row. Rather than leave that to be inferred:</p>' +
+    note('Three families in one table, so most columns answer a slightly different ' +
+    'question depending on the row. Rather than leave that to be inferred:') +
     COLUMN_LEGEND +
-    '<p class="note">OID4VCI credentials are <strong>not</strong> in this table. They are recorded ' +
+    note('OID4VCI credentials are <strong>not</strong> in this table. They are recorded ' +
     'and counted on <a href="/admin/metrics">the metrics page</a> and listed nowhere. That is a ' +
     'gap rather than a principle — a credential is as much an issued artifact as an assertion is — ' +
     'and it is named here so that "everything this service has issued" above is read as the three ' +
-    'families it says and not as four.</p>' +
+    'families it says and not as four.') +
 
-    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' + MAX_ROWS +
+    note('Paging is <code>?page=</code> and <code>?per=</code> (at most ' + MAX_ROWS +
     ' rows a page), and both work with <code>?format=json</code> — where the reply carries ' +
     '<code>page</code>, <code>pages</code> and <code>matched</code>, so a test can walk the whole ' +
     'list without guessing when it has reached the end. The rows are in <code>issued</code> there, ' +
     'each carrying its <code>family</code>; it was <code>tokens</code> when this page listed only ' +
     'JWTs. Every button on this page acts on a <code>jti</code> and never on a row number, so a ' +
     'revocation between two clicks cannot make the wrong token the target — the most it can do is ' +
-    'shift a row onto another page.</p>';
+    'shift a row onto another page.');
 
   respond(req, res, view.json, 'Tokens', '/admin/tokens', inner);
   log.debug("Leaving the admin tokens page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/tokens/credential?id=… — WHERE ONE CREDENTIAL CAME FROM.
+//
+// A DRILL-DOWN OF THE TOKENS PAGE, and the first that page has had: every
+// identifier in its last column links here. It hangs under it exactly as the
+// three delegation drill-downs hang under /admin/delegation — no `NAV` row,
+// `active` is '/admin/tokens', `up` carries the filter and the page the reader
+// left — so the trail reads `Tokens › One credential` and the way back is the
+// row they clicked on rather than the top of a list of everything.
+//
+// **IT IS THE SAME PICTURE AS THE DELEGATION MAP, ASKED A DIFFERENT QUESTION.**
+// `common/credential_graph.js` holds the model (rule 3l, the same division
+// `delegation.js` and `user_graph.js` are on the other side of) and returns a
+// graph in `delegation.graph()`'s shape, so `delegation_map.js` draws it, the
+// party table is `delegationNodeRow()` and the line table is `userEdgeRow()` —
+// the one that already knows the two relations an ISSUANCE uses. Nothing here
+// draws anything of its own, which is what keeps a party on this page the same
+// party, drawn the same way, as on the four pages that had it first.
+//
+// **THE QUESTION IS ANCESTRY AND THE ANSWER IS USUALLY "NONE", WHICH IS NOT AN
+// EMPTY PAGE.** Most credentials were issued directly: no exchange, one
+// generation, three boxes and the grant that produced them. That is the common
+// case and the page leads with it. The interesting case is the other one — a
+// token that came out of an RFC 8693 exchange, whose subject token came out of
+// another, back to a browser sign-in three tiers away — and it is drawn as one
+// picture with every generation on it, because the whole point is that the far
+// end of that chain holds a credential naming somebody who never spoke to it.
+//
+// **A CREDENTIAL THIS SERVICE NO LONGER HOLDS IS NOT A 404**, which is the rule
+// /admin/logout and both delegation drill-downs already follow and which matters
+// more here than anywhere: BOTH registers behind this page are capped and drop
+// the oldest, and they are capped separately — so a lineage can know an
+// identifier existed (a delegation act names it) and nothing else about it, and
+// an old link coming back thin is the ordinary outcome rather than a mistake.
+// The page says which of the two states it is in.
+//
+// No form, so no operation on /admin-api — rule 7, satisfied exactly as the
+// delegation drill-downs satisfy it. `?format=json` is the lineage and the
+// graph; `?format=svg` is the document alone.
+// ---------------------------------------------------------------------------
+app.get('/admin/tokens/credential', function (req, res) {
+  log.debug("Entering the admin credential lineage page.");
+  const asked = String(req.query.id || '').trim();
+  const known = knownUserKeys();
+  const lineage = asked ? credentialGraph.lineageOf(asked) : null;
+  // An empty graph rather than none when nothing is selected: `?format=svg` is
+  // answered before the prose below is drawn, and a route that answered HTML
+  // there would send a browser a diagram it asked for as an image.
+  const graph = lineage ? lineage.graph : delegation.graph([]);
+  const look = delegationLooks(graph, known);
+  const labelOf = look.labelOf;
+
+  // WHICH BOX IS THE ONE THIS CREDENTIAL IS AT NOW. `delegationNodeLook()` stays
+  // the one answer to "what is this box" — that is what keeps every page here
+  // drawing one party one way — so this is APPENDED to what it said, the way the
+  // person's page appends its own counts.
+  const holder = lineage && lineage.credential
+    ? stats.identityKeyOf(userGraph.holderOf(lineage.credential)) : '';
+  if (holder) {
+    const entry = look.looks[holder];
+    if (entry) {
+      entry.title = entry.title + '\nTHIS IS WHERE THE CREDENTIAL THIS PAGE IS ' +
+        'ABOUT ENDED UP: ' + (lineage.credential.kind || 'a credential') + ' ' +
+        asked + '.';
+    }
+  }
+
+  const drawingLabel = lineage
+    ? 'How ' + (lineage.credential ? lineage.credential.kind : 'this credential') +
+      ' ' + asked + ' came to exist'
+    : 'One credential, and every generation behind it';
+
+  if (String(req.query.format || '') === 'svg') {
+    sendDelegationSvg(res, graph, look, drawingLabel);
+    log.debug("Leaving the admin credential lineage page. Answered SVG.");
+    return;
+  }
+
+  const listView = listViewOf('/admin/tokens', req.query);
+  const up = upTo('/admin/tokens', 'One credential', listView);
+  const back = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the tokens table</a>');
+
+  if (!lineage) {
+    const inner = messagesOf(req) + back +
+      note('<strong>Name a credential.</strong> This page draws ONE ' +
+      'of them and the way to it is a link on <a href="' + esc(up.href) +
+      '">the tokens table</a> — every identifier there is one. It is keyed on ' +
+      'the identifier the protocol gave the credential (a <code>jti</code>, an ' +
+      '<code>AssertionID</code>), which is the only thing the issued register ' +
+      'and the delegation register both hold about the same object, and is the ' +
+      'reason a Kerberos ticket has no link: that protocol has no identifier to ' +
+      'quote.');
+    respond(req, res, { identifier: null, lineage: null },
+            'Tokens — one credential', '/admin/tokens', inner, up);
+    log.debug("Leaving the admin credential lineage page. Nothing was asked for.");
+    return;
+  }
+
+  const parties = graph.nodes.filter(function (node) {
+    return node.kind !== 'sts';
+  });
+  const picture = delegationDrawing(graph, look, '/admin/tokens/credential',
+                                    Object.assign({}, listView, { id: asked }),
+                                    drawingLabel);
+  const credential = lineage.credential;
+
+  // THE ONE SENTENCE THIS PAGE OPENS WITH. A reader arriving from a row of a
+  // ten-column table has to be told immediately that they are looking at the
+  // same credential — and then the one fact the row could not tell them, which
+  // is whether anything is behind it.
+  const sentence = note('<strong><code>' + esc(asked) +
+    '</code></strong> — ' +
+    (credential
+      ? esc(credential.kind) + ', issued ' + esc(whenText(credential.issuedAt)) +
+        ', <span class="' + stateClass(credential.state) + '">' +
+        esc(credential.state) + '</span>'
+      : '<span class="state-expired" title="' +
+        esc('The issued register is capped and drops the oldest, so a credential ' +
+            'a delegation act still names can be one this service can no longer ' +
+            'describe. That is a bounded store working as intended rather than a ' +
+            'gap in the recording.') +
+        '">no longer held in the issued register</span>') +
+    '. ' +
+    (lineage.counts.exchanges
+      ? '<strong>' + esc(lineage.counts.exchanges) + ' exchange(s)</strong> ' +
+        'are behind it, so it is generation ' +
+        esc(lineage.generations.length - 1) + ' of a line that starts at an ' +
+        'ordinary issuance.'
+      : '<strong>Nothing was exchanged to get it.</strong> It was issued ' +
+        'directly, which is the ordinary case: three of the sixteen protocol ' +
+        'families here can delegate at all.'));
+
+  const inner = messagesOf(req) + back +
+    '<div class="tiles">' +
+      tile(lineage.counts.generations, 'generations') +
+      tile(lineage.counts.exchanges, 'exchanges behind it') +
+      tile(lineage.counts.parties, 'parties involved') +
+      tile(lineage.counts.acts, 'delegation acts') +
+    '</div>' +
+
+    sentence +
+
+    (lineage.truncated
+      ? '<p class="note state-expired"><strong>The line is longer than ' +
+        esc(credentialGraph.MAX_GENERATIONS) + ' generations and the rest was ' +
+        'not walked.</strong> What is drawn below is the newest ' +
+        esc(credentialGraph.MAX_GENERATIONS) + ' of it, so the oldest box on ' +
+        'this picture is NOT the origin. Said rather than left to be assumed, ' +
+        'because a lineage that stops quietly reads as an issuance that never ' +
+        'happened.</p>'
+      : '') +
+
+    '<h2>How it came to exist</h2>' +
+    note('One row per generation, newest first: the credential ' +
+    'itself, then whatever was handed in to get it, and so on. <strong>The last ' +
+    'row is the origin</strong> — the row with no exchange behind it, which is ' +
+    'the issuance the whole line rests on.') +
+    '<table><tr><th class="num">Gen</th><th>Identifier</th><th>Kind</th>' +
+    '<th>Held by</th><th>In whose name</th><th>Issued</th>' +
+    '<th>How it was got</th></tr>' +
+    lineage.generations.map(function (row) {
+      const held = row.credential;
+      return '<tr>' +
+        '<td class="num">' + esc(row.generation) + '</td>' +
+        '<td class="who">' + shortened(row.identifier, 14) +
+          (row.identifier === asked
+            ? '<br><span class="state-none">this page</span>' : '') + '</td>' +
+        '<td>' + (held ? esc(held.kind)
+          : '<span class="state-none" title="' +
+            esc('Named by a delegation act, and no longer in the issued ' +
+                'register — the two stores are capped separately.') +
+            '">not held</span>') + '</td>' +
+        '<td class="who">' + (held
+          ? esc(userGraph.holderOf(held) || '—') : '<span class="state-none">' +
+            '&mdash;</span>') + '</td>' +
+        '<td class="who">' + (held
+          ? esc((held.family === 'token' ? (held.username || held.sub)
+                                         : held.subject) || '—')
+          : '<span class="state-none">&mdash;</span>') + '</td>' +
+        '<td>' + (held ? esc(whenText(held.issuedAt))
+          : '<span class="state-none">&mdash;</span>') + '</td>' +
+        '<td>' + (row.act
+          ? '<code>' + esc(row.act.type) + '</code><br>' +
+            '<span class="state-none">' + esc(row.act.typeLabel) + '</span>' +
+            '<br><a href="' + esc('/admin/delegation/chain' +
+              queryWith({}, { chain: row.act.chainKey })) +
+            '">the relationship</a>'
+          : '<strong>the origin</strong><br><span class="state-none">' +
+            esc(held && held.family === 'token'
+              ? userGraph.flowRow(held.grant).label
+              : (held ? userGraph.artifactFlowRow(held.kind).label
+                      : 'nothing here produced it')) + '</span>') + '</td>' +
+        '</tr>';
+    }).join('') + '</table>' +
+
+    (lineage.walls.length
+      ? note('<strong>One line stops at a credential this service ' +
+        'cannot name.</strong> ' +
+        lineage.walls.map(function (wall) {
+          return esc(wall.credential.kind) + ' — ' +
+            esc(wall.credential.note || 'no identifier');
+        }).join('; ') +
+        '. That is a different answer from "this is the origin": something was ' +
+        'presented and exchanged, and the protocol gave it nothing this ' +
+        'register could write down. A Kerberos ticket has no identifier at all, ' +
+        'and WS-Trust consumes the requester\'s WS-Security credential, which ' +
+        'this service never issued.')
+      : '') +
+
+    '<h2>The whole line, as one picture</h2>' +
+    note('Every actor and every relationship behind this one ' +
+    'credential. <strong>The hexagon is this service</strong>; a dashed grey ' +
+    'line from it is a credential being handed to whoever asked. An ' +
+    '<em>issued for</em> line is an ordinary grant — this client holds a ' +
+    'credential naming that person — and it is the console\'s neutral indigo, ' +
+    'because an authorization code grant claims neither impersonation nor ' +
+    'delegation. <em>acts for</em> and <em>reaches</em> are the delegation ' +
+    'picture\'s own two claims and are coloured by mode, exactly as they are on ' +
+    '<a href="/admin/delegation/map">the map</a>.') +
+    picture.html +
+
+    '<h2>The parties</h2>' +
+    note('Every box on the picture. A party can appear because it ' +
+    'held one of these credentials, because it exchanged one, or both — the ' +
+    'middle tier of a chain is the TARGET of one generation and the ' +
+    'INTERMEDIARY of the next, which is what makes the two hops one line rather ' +
+    'than two pictures.') +
+    '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
+    '<th>Roles it played</th><th>Acts</th><th>Protocols</th></tr>' +
+    (parties.map(function (node) {
+      return delegationNodeRow(node, known, look.looks[node.id]);
+    }).join('') || '<tr><td colspan="6">No parties.</td></tr>') + '</table>' +
+
+    '<h2>Every line, in words</h2>' +
+    note('The picture read as a table, because a diagram nobody can ' +
+    'quote is a diagram nobody can put in a bug report.') +
+    '<table><tr><th>From</th><th>To</th><th>Relationship</th>' +
+    '<th>Mechanism or grant</th><th>Kind</th><th>Acts</th><th>Credentials</th>' +
+    '<th>What came out</th></tr>' +
+    (graph.edges.map(function (edge) {
+      return userEdgeRow(edge, labelOf);
+    }).join('') || '<tr><td colspan="8">No lines.</td></tr>') + '</table>' +
+
+    (lineage.acts.length
+      ? '<h2>Every delegation act in the line</h2>' +
+        note('The rows <a href="/admin/delegation">the delegation ' +
+        'table</a> holds for this lineage, in order, not paged.') +
+        '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
+        '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
+        '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
+        '<th>Credentials</th></tr>' +
+        lineage.acts.map(function (row) {
+          return delegationRow(row, known, { listView: {} });
+        }).join('') + '</table>'
+      : '') +
+
+    (credential && credential.family === 'token' &&
+     (credential.username || credential.sub)
+      ? note('<a href="' + esc('/admin/delegation/user' +
+          queryWith({}, { user: stats.identityKeyOf(credential.username ||
+                                                    credential.sub) })) +
+        '">Everything this service has done in that person\'s name</a> is the ' +
+        'other picture: this one is one credential and its ancestors, that one ' +
+        'is one person and everything ever issued naming them.')
+      : '') +
+
+    note('<code>?format=json</code> carries the lineage — every ' +
+    'generation with the act that produced it, the acts, the origins and the ' +
+    'graph behind the picture; <code>?format=svg</code> is the document alone. ' +
+    'There is no form on this page and therefore no operation on ' +
+    '<code>/admin-api</code>: the acts are in ' +
+    '<code>GET /admin-api/delegation</code> and the credentials are in ' +
+    '<code>GET /admin-api/tokens</code>.');
+
+  respond(req, res, {
+    identifier: asked,
+    held: lineage.held,
+    credential: lineage.credential,
+    counts: lineage.counts,
+    generations: lineage.generations,
+    origins: lineage.origins,
+    issuances: lineage.issuances,
+    walls: lineage.walls,
+    truncated: lineage.truncated,
+    acts: lineage.acts,
+    graph: graph,
+    drawing: { width: picture.drawn.width, height: picture.drawn.height,
+               failed: picture.drawn.failed || null }
+  }, 'Tokens — one credential', '/admin/tokens', inner, up);
+  log.debug("Leaving the admin credential lineage page. " +
+            lineage.counts.generations + " generation(s).");
 });
 
 // ---------------------------------------------------------------------------
@@ -3912,10 +4679,10 @@ function logoutView(req) {
     // list of everybody is /admin/users' job rather than a second copy here.
     const inner = messagesOf(req) +
       (logoutReader ? '' : logoutNoReaderNote()) +
-      '<p class="note">Name an identity to see everything this service is still holding for ' +
+      note('Name an identity to see everything this service is still holding for ' +
       'them — every browser sign-on session, every token it can still revoke, every ' +
       'outstanding code, every directory connection bound as them, and the Kerberos ' +
-      'sign-out instant — and to end any of it.</p>' +
+      'sign-out instant — and to end any of it.') +
       '<form method="get" action="/admin/logout">' +
       '<label>Identity <input name="user" value="" placeholder="alice"></label> ' +
       '<button type="submit">Look</button></form>' +
@@ -3925,15 +4692,20 @@ function logoutView(req) {
       families.map(function (family) {
         return '<tr><td>' + esc(family.label) + '</td><td>' + esc(family.protocol) + '</td>' +
           '<td>' + (family.terminable ? 'yes' : '<span class="state-none">no</span>') + '</td>' +
-          '<td class="sub">' + esc(family.what) + '<br><em>' + esc(family.spec) + '</em></td></tr>';
+          // The family's prose is a paragraph on most rows and it is the same
+          // prose logout.js owns (see FAMILIES over there) — so it folds here
+          // rather than being shortened, which would have made this file the
+          // second place it is written.
+          '<td class="sub">' + note(esc(family.what)) + '<em>' + esc(family.spec) +
+          '</em></td></tr>';
       }).join('') + '</tbody></table>' +
-      '<p class="note">The families that cannot be ended are listed on purpose. Nothing ' +
+      note('The families that cannot be ended are listed on purpose. Nothing ' +
       'consults this service when a SAML assertion, a Kerberos service ticket or an X509-SVID ' +
       'is presented, so there is no revocation any issuer could perform — and a page that hid ' +
-      'them would make a global logout look complete when it is not.</p>' +
-      '<p class="note">A person signing THEMSELVES out uses <code>/logout</code>, which needs ' +
+      'them would make a global logout look complete when it is not.') +
+      note('A person signing THEMSELVES out uses <code>/logout</code>, which needs ' +
       'no console role and is where the front-channel notifications actually load: those are ' +
-      'iframes in the signed-out person\'s own browser, and this console is not that browser.</p>';
+      'iframes in the signed-out person\'s own browser, and this console is not that browser.');
     log.debug("Leaving logoutView(). The lookup form.");
     return { json: { user: '', known: false, families: families }, inner: inner,
              title: 'Sign-out' };
@@ -3976,12 +4748,12 @@ function logoutView(req) {
     }).join('') + '</tbody></table>';
 
   const inner = messagesOf(req) +
-    '<p class="note"><strong>' + inventory.total + '</strong> live item(s) for <code>' +
+    note('<strong>' + inventory.total + '</strong> live item(s) for <code>' +
     esc(wantedUser) + '</code>, in ' +
     inventory.families.filter(function (f) { return f.held; }).length + ' family/families. ' +
     'Filed under the key <code>' + esc(key) + '</code>, which is what folds <code>' +
     esc(wantedUser) + '</code>, <code>' + esc(wantedUser) + '@' +
-    esc(krb5Principals.REALM) + '</code> and a <code>urn:</code> subject into one person.</p>' +
+    esc(krb5Principals.REALM) + '</code> and a <code>urn:</code> subject into one person.') +
     summary +
     (canWrite
       ? '<form method="post" action="/admin/logout">' +
@@ -3991,7 +4763,7 @@ function logoutView(req) {
         '<p><button type="submit">Global logout — end everything above</button> ' +
         '<span class="sub">Everything endable, in every family, in one act. What cannot be ' +
         'ended is reported rather than skipped silently.</span></p></form>'
-      : '<p class="note">Ending anything needs the Admin Write role.</p>') +
+      : note('Ending anything needs the Admin Write role.')) +
     '<h2>Live items' + (wantedFamily ? ' — ' + esc(wantedFamily) : '') + '</h2>' +
     perPageForm('/admin/logout', 'family', wantedFamily, pg.paging.perPage,
                 'Filter by family, and choose how many rows a page holds.',
@@ -4001,13 +4773,13 @@ function logoutView(req) {
         '<th>Until</th><th>End</th></tr></thead><tbody>' +
         pg.shown.map(function (r) { return logoutRowHtml(r, canWrite, back); }).join('') +
         '</tbody></table>' + pageNav('/admin/logout', params, pg.paging)
-      : '<p class="note">Nothing live' + (wantedFamily ? ' in that family' : '') + '.</p>') +
+      : note('Nothing live' + (wantedFamily ? ' in that family' : '') + '.')) +
     (canWrite
       ? '<h2>Undo — both NON-SPEC</h2>' +
-        '<p class="note">Neither of these is an operation any real deployment could offer, and ' +
+        note('Neither of these is an operation any real deployment could offer, and ' +
         'they are here for the reason /admin/tokens\' restore button is: having to restart this ' +
         'service to get back to a working credential turns a two-second test into a ' +
-        'two-minute one.</p>' +
+        'two-minute one.') +
         '<form method="post" action="/admin/logout">' +
         '<input type="hidden" name="action" value="restore-kerberos">' +
         '<input type="hidden" name="user" value="' + esc(wantedUser) + '">' +
@@ -4120,14 +4892,14 @@ app.get('/admin/audit', function (req, res) {
       tile(summary.byCategory.session || 0, 'session events') +
     '</div>' +
 
-    '<p class="note">What this service has been asked to do, in the order it was ' +
+    note('What this service has been asked to do, in the order it was ' +
     'asked, newest first. The other pages here are <em>state</em> — how many calls, ' +
     'which tokens are still valid, who is in <code>cn=developers</code>. This one is ' +
     '<em>history</em>: the metrics page can say the directory holds eleven entries, and ' +
     'only this page can say that a twelfth was created at 14:02 and deleted at 14:03 by ' +
-    'somebody bound as <code>uid=carol</code>, over LDAPS.</p>' +
+    'somebody bound as <code>uid=carol</code>, over LDAPS.') +
 
-    '<p class="note"><strong>No credential is ever recorded here.</strong> Not a ' +
+    note('<strong>No credential is ever recorded here.</strong> Not a ' +
     'password, not a bearer token, not an assertion, and no request or response body. ' +
     'An event carries the facts of what happened — who, what, where, the outcome — and ' +
     'the identifiers that are already safe to show. A modify names the attributes it ' +
@@ -4135,9 +4907,9 @@ app.get('/admin/audit', function (req, res) {
     'gets set; a compare says whether it matched and not what was tried; an ' +
     '<code>authorization code</code> in a query string is replaced with ' +
     '<code>(redacted)</code>. The debug log is where somebody who wants the bodies looks, ' +
-    'and it is a log rather than a web page.</p>' +
+    'and it is a log rather than a web page.') +
 
-    '<p class="note"><strong>One act usually produces several rows, and they are not ' +
+    note('<strong>One act usually produces several rows, and they are not ' +
     'duplicates.</strong> Signing in at <code>/authn/login</code> writes three: the HTTP ' +
     'call (<code>protocol.call</code>), the credential being accepted ' +
     '(<code>authentication</code>) and the session that came out of it ' +
@@ -4145,13 +4917,13 @@ app.get('/admin/audit', function (req, res) {
     'answers your question depends on the question — a Kerberos AS-REQ authenticates ' +
     'somebody and starts no session at all, and an LDAP bind does both without an HTTP ' +
     'request anywhere in it. Collapsing them would mean choosing, once and for everybody, ' +
-    'which of the three this page can answer.</p>' +
+    'which of the three this page can answer.') +
 
-    '<p class="note"><strong>This log observes itself.</strong> Drawing this page is ' +
+    note('<strong>This log observes itself.</strong> Drawing this page is ' +
     'console access, so fetching it records an <code>admin.view</code> event and the list ' +
     'is one row longer than it was when you asked. That is not a defect being left ' +
     'unfixed: suppressing it would put a blind spot exactly where the person reading the ' +
-    'audit log stands. Filter by category to read past it.</p>' +
+    'audit log stands. Filter by category to read past it.') +
 
     '<h2>What happened</h2>' +
     // No `page` input in this form, deliberately: changing a filter or the page
@@ -4177,19 +4949,19 @@ app.get('/admin/audit', function (req, res) {
       '<button class="secondary">Filter</button>' +
       (filtering ? ' <a href="/admin/audit">clear</a>' : '') +
     '</div></form>' +
-    '<p class="note">Category and Action narrow together, like any two filters, so an ' +
+    note('Category and Action narrow together, like any two filters, so an ' +
     'action from another category matches nothing — which is what an empty table below ' +
     'then means. Actor matches a substring of either spelling of the name, because the ' +
     'actor on a directory row is a bind DN and the one on a Kerberos row is ' +
     '<code>alice@REALM</code>; the collapse to a single key can only be done where an ' +
-    'identity is normalised.</p>' +
+    'identity is normalised.') +
     nav +
     '<table><tr><th class="num">#</th><th>When</th><th>Category</th><th>Action</th>' +
     '<th>Outcome</th><th>Actor</th><th>Target</th><th>What happened</th><th>Detail</th></tr>' +
     (rows || '<tr><td colspan="9">Nothing matches.</td></tr>') + '</table>' +
     nav +
 
-    '<p class="note">' + view.filtered.length + ' row(s) match' +
+    note(view.filtered.length + ' row(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
                         ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
     '; ' + summary.held + ' held of ' + summary.recorded + ' recorded since this process ' +
@@ -4199,45 +4971,47 @@ app.get('/admin/audit', function (req, res) {
         summary.maxEvents + ' events and discards the oldest first. Raise ' +
         '<code>audit.maxEvents</code> on <a href="/admin/config">the configuration page</a> ' +
         'if that is losing something you need.'
-      : '. The cap is ' + summary.maxEvents + ' events and nothing has been dropped yet.') +
-    '</p>' +
+      : '. The cap is ' + summary.maxEvents + ' events and nothing has been dropped yet.')) +
 
-    '<p class="note">The <strong>#</strong> column is a sequence number, and it is ' +
+    note('The <strong>#</strong> column is a sequence number, and it is ' +
     'monotonic and never reused — including across a drop. That is what makes it a stable ' +
     'name for an event: a caller can say &ldquo;I have read up to ' +
     (summary.newestSeq || 0) + '&rdquo; and mean it, where a row number would silently ' +
     'name a different event as soon as anything was discarded. <code>?format=json</code> ' +
     'carries <code>oldestSeq</code> and <code>newestSeq</code> for exactly that: a gap ' +
     'between the last one you saw and <code>oldestSeq</code> is how many events you ' +
-    'missed.</p>' +
+    'missed.') +
 
     '<h3>Where the rows come from</h3>' +
-    '<p class="note">Six categories and five recording points, rather than a recording ' +
-    'site per feature. Each of these is a funnel this service already had:</p>' +
+    note('Six categories and five recording points, rather than a recording ' +
+    'site per feature. Each of these is a funnel this service already had:') +
     '<ul>' + auditLog.CATEGORIES.map(function (entry) {
+      // The label, the category and the count stay on the row and the
+      // paragraph explaining the category folds under them, which is the
+      // shape every legend on this console now has.
       return '<li><strong>' + esc(entry.label) + '</strong> (<code>' + esc(entry.category) +
-             '</code>, ' + (summary.byCategory[entry.category] || 0) + ') — ' +
-             esc(entry.what) + '</li>';
+             '</code>, ' + (summary.byCategory[entry.category] || 0) + ') ' +
+             note(esc(entry.what)) + '</li>';
     }).join('') + '</ul>' +
 
-    '<p class="note"><strong>What is deliberately not on a row: the client\'s address.</strong> ' +
+    note('<strong>What is deliberately not on a row: the client\'s address.</strong> ' +
     'On a mock this service is reached over a compose bridge, through a published port, or ' +
     'from the same machine, so what it would record is the bridge — a fact about docker ' +
     'rather than about whoever made the call. A column that was right on a laptop and ' +
     'quietly wrong everywhere else is worse than no column. What a row does say is the ' +
     'CHANNEL it arrived on — <code>http</code>, <code>ldap</code>, <code>ldaps</code>, or ' +
     '<code>internal</code> for the things this service did on its own — which is the part ' +
-    'that is actually knowable and is what somebody turning on LDAPS wants to check.</p>' +
+    'that is actually knowable and is what somebody turning on LDAPS wants to check.') +
 
-    '<p class="note"><strong>It is in memory and dies with the process</strong>, like the ' +
+    note('<strong>It is in memory and dies with the process</strong>, like the ' +
     'counters, the sessions and the signing key. There is no compliance story here to ' +
     'serve: this service checks no password anywhere, so an audit log of it is a debugging ' +
     'aid and not a record of anything. It also has no clear button, and that is a decision ' +
     'rather than an omission — an erase control on an unprotected console would make the ' +
     'page unable to answer the one question an audit log exists for. Restarting the ' +
-    'service is how you get an empty one.</p>' +
+    'service is how you get an empty one.') +
 
-    '<p class="note">Two settings on <a href="/admin/config">the configuration page</a> ' +
+    note('Two settings on <a href="/admin/config">the configuration page</a> ' +
     'change this page and both take effect immediately: <code>audit.maxEvents</code> (now ' +
     summary.maxEvents + ') is the cap, and <code>audit.protocolCalls</code> (now ' +
     (summary.protocolCalls ? 'on' : '<strong>off</strong>') + ') is whether ordinary ' +
@@ -4245,9 +5019,9 @@ app.get('/admin/audit', function (req, res) {
     'JWKS poll and metadata fetch is an event — so turning it off is how somebody watching ' +
     'the directory or the console gets a readable page. It never affects the other five ' +
     'categories, and <a href="/admin/metrics">the metrics page</a> counts every call either ' +
-    'way.</p>' +
+    'way.') +
 
-    '<p class="note"><strong>One request is deliberately never a row here: ' +
+    note('<strong>One request is deliberately never a row here: ' +
     '<code>GET /healthcheck</code> when it answered 200.</strong> It is asked ' +
     'every few seconds for the whole life of this service — by the compose ' +
     'healthcheck and by every launcher that waits for it to come up — and it ' +
@@ -4257,13 +5031,13 @@ app.get('/admin/audit', function (req, res) {
     'ELSE is recorded as usual, which is the half worth knowing: a failing ' +
     'healthcheck is exactly the event somebody hunting a start-up failure is ' +
     'looking for. <a href="/admin/metrics">The metrics page</a> counts every ' +
-    'probe either way.</p>' +
+    'probe either way.') +
 
-    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at most ' +
+    note('Paging is <code>?page=</code> and <code>?per=</code> (at most ' +
     MAX_ROWS + ' rows a page) and both work with <code>?format=json</code>, whose reply ' +
     'carries <code>page</code>, <code>pages</code> and <code>matched</code> so a test can ' +
     'walk the whole list without guessing where it ends. The same list is at ' +
-    '<code>GET /admin-api/audit</code> with the same parameters.</p>';
+    '<code>GET /admin-api/audit</code> with the same parameters.');
 
   respond(req, res, view.json, 'Audit log', '/admin/audit', inner);
   log.debug("Leaving the admin audit page.");
@@ -4713,7 +5487,7 @@ app.get('/admin/delegation', function (req, res) {
       tile(policy.pairs.length, 'configured pairs') +
     '</div>' +
 
-    '<p class="note"><strong>Who acted on whose behalf, through what, to reach ' +
+    note('<strong>Who acted on whose behalf, through what, to reach ' +
     'what.</strong> Three of the protocol families here can delegate and each ' +
     'calls it something different — Kerberos has S4U2Self, two flavours of ' +
     'S4U2Proxy and a forwarded ticket-granting ticket; WS-Trust has ' +
@@ -4721,17 +5495,17 @@ app.get('/admin/delegation', function (req, res) {
     'has impersonation and delegation. This page records all eight against one ' +
     'model, because the question people arrive with is protocol-independent: ' +
     '<em>alice never touched the back end, so why is there a ticket to it in ' +
-    'her name, and who asked for it?</em></p>' +
+    'her name, and who asked for it?</em>') +
 
-    '<p class="note"><strong>The three columns in the middle are the layers of ' +
+    note('<strong>The three columns in the middle are the layers of ' +
     'the architecture</strong>, and the names are this page\'s own rather than ' +
     'any protocol\'s — a Kerberos front end, a WS-Trust requester and an OAuth ' +
-    'client doing an exchange are the same position in the same picture:</p>' +
+    'client doing an exchange are the same position in the same picture:') +
     '<ul>' + delegation.ROLES.map(function (entry) {
       return '<li><strong>' + esc(entry.label) + '</strong> — ' + esc(entry.what) +
              '</li>';
     }).join('') + '</ul>' +
-    '<p class="note">A party can be a <em>person</em>, an <em>application</em>, ' +
+    note('A party can be a <em>person</em>, an <em>application</em>, ' +
     'or both, and the middle one routinely is both: ' +
     '<code>HTTP/frontend.example.com</code> has an entry under ' +
     '<code>ou=users</code> (it authenticates, so this service files it with the ' +
@@ -4739,9 +5513,9 @@ app.get('/admin/delegation', function (req, res) {
     'FOR it). Each cell links to whichever of the two exist. An application ' +
     'marked <em>not in the registry</em> is not an error — the registry holds ' +
     'what this service has been ASKED ABOUT, and an RFC 8693 <code>audience</code> ' +
-    'nobody has otherwise mentioned is exactly that.</p>' +
+    'nobody has otherwise mentioned is exactly that.') +
 
-    '<p class="note"><strong>Impersonation and delegation are the axis worth ' +
+    note('<strong>Impersonation and delegation are the axis worth ' +
     'filtering on</strong>, and they are not a matter of degree. Under a ' +
     'delegation the credential CARRIES the chain — an <code>act</code> claim, a ' +
     'composite <code>ActAs</code>, <code>S4U_DELEGATION_INFO</code> in the PAC — ' +
@@ -4749,15 +5523,15 @@ app.get('/admin/delegation', function (req, res) {
     'because of it. Under an impersonation nothing does, which means <strong>this ' +
     'page is the only place it will ever be visible</strong>: no reading of the ' +
     'token afterwards, at the resource server or in a log, can recover the fact ' +
-    'that a middle tier was involved.</p>' +
+    'that a middle tier was involved.') +
 
-    '<p class="note"><strong>Refusals are recorded and are most of what this ' +
+    note('<strong>Refusals are recorded and are most of what this ' +
     'page is for.</strong> A delegation that worked tells you the plumbing is ' +
     'connected. A delegation that was refused names the two accounts, the two ' +
     'attributes and which of them was missing, at the moment the KDC decided — ' +
     'and the text in the <em>Authorized by / why not</em> column is the KDC\'s ' +
     'OWN words, the same sentence the client was sent, rather than a second ' +
-    'wording that could come to disagree with it.</p>' +
+    'wording that could come to disagree with it.') +
 
     // THE WAY TO THE PICTURE, ABOVE THE TABLE RATHER THAN UNDER IT. The chains
     // table lower down is what the diagram is drawn from and the obvious place
@@ -4769,7 +5543,7 @@ app.get('/admin/delegation', function (req, res) {
     // It carries the CURRENT FILTER AND NOT THE PAGE: the picture has no paging
     // (see that route's header) and a `page` in its query would be a parameter
     // that does nothing.
-    '<p class="note"><a class="btn" href="' +
+    note('<a class="btn" href="' +
       esc('/admin/delegation/map' + queryWith({ type: view.wantedType,
         mode: view.wantedMode, outcome: view.wantedOutcome,
         protocol: view.wantedProtocol, q: view.wantedText }, {})) +
@@ -4780,7 +5554,7 @@ app.get('/admin/delegation', function (req, res) {
     'credential was FOR. ' + (filtering
       ? 'It opens with the filter you have set here.'
       : 'Filter first if this list is long — the picture is drawn from ' +
-        'everything that matches, not from one page.') + '</p>' +
+        'everything that matches, not from one page.')) +
 
     // THE SECOND WAY IN, BESIDE THE PICTURE AND ABOVE THE TABLE. The picture
     // link answers "what does all of this look like"; this answers "what has
@@ -4788,7 +5562,7 @@ app.get('/admin/delegation', function (req, res) {
     // person arrives with and the one the tables below cannot be sorted into.
     // Both are here rather than at the foot, because a reader who wants either
     // wants it before reading four hundred rows.
-    '<p class="note"><strong>Or pivot on an application.</strong> A delegation ' +
+    note('<strong>Or pivot on an application.</strong> A delegation ' +
     'has three parties and an application can be two of them — the ' +
     '<em>intermediary</em> that acts on somebody\'s behalf, and the ' +
     '<em>target</em> the credential is for. Choose one and see everything that ' +
@@ -4796,8 +5570,26 @@ app.get('/admin/delegation', function (req, res) {
     'credential that came out. <strong>The chooser follows the filter above and ' +
     'the page it opens does not</strong>: it shows everything that application ' +
     'has ever been part of, because <em>what exists because of this thing</em> ' +
-    'is not a question a half-answer is useful for.</p>' +
+    'is not a question a half-answer is useful for.') +
     delegationApplicationChooser(view.applications, '', listView) +
+
+    // AND THE THIRD WAY IN, which is the other half of the same question. The
+    // application chooser answers *what has this thing got itself into*; this
+    // one answers *what has this service done in somebody's NAME* — and it is
+    // the only one of the three that leaves this register: a person's picture
+    // draws their ordinary OAuth 2.0, OIDC, SAML, Kerberos and SPIFFE issuance
+    // too, because most of what happens in somebody's name is not a delegation
+    // and a page drawn from these acts alone would be empty for anybody who
+    // merely signed in. See that route's header.
+    note('<strong>Or pivot on a person.</strong> Everything issued ' +
+    'in their name, end to end: every grant and flow with the exact one ' +
+    'labelled, every assertion, ticket and SVID, the applications holding all ' +
+    'of it, and the sign-ins it rests on — with any delegation naming them ' +
+    'drawn in the same picture. <strong>The list includes people nothing was ' +
+    'ever issued to</strong>, because an S4U2Self or an <code>OnBehalfOf</code> ' +
+    'names somebody who was never present, and that is the row worth ' +
+    'opening.') +
+    delegationUserChooser(userGraph.userList(), '', listView) +
 
     '<h2>What happened</h2>' +
     // No `page` input in this form, deliberately: changing a filter or the page
@@ -4820,15 +5612,15 @@ app.get('/admin/delegation', function (req, res) {
       '<button class="secondary">Filter</button>' +
       (filtering ? ' <a href="/admin/delegation">clear</a>' : '') +
     '</div></form>' +
-    '<p class="note">The text box searches every party of the chain and both ' +
+    note('The text box searches every party of the chain and both ' +
     'explanations at once, because the fact somebody arrives with names one of ' +
-    'them and they do not know which column it will be in.</p>' +
-    '<p class="note">The <strong>chain</strong> link under each row\'s number ' +
+    'them and they do not know which column it will be in.') +
+    note('The <strong>chain</strong> link under each row\'s number ' +
     'draws THAT RELATIONSHIP on its own — the whole chain the act belongs to, ' +
     'with everything else in the service left out. It goes to the chain rather ' +
     'than to the act because an act has no picture of its own: a diagram has ' +
     'the times taken out, and four acts a second apart between the same three ' +
-    'parties are one line.</p>' +
+    'parties are one line.') +
     nav +
     '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
@@ -4847,7 +5639,7 @@ app.get('/admin/delegation', function (req, res) {
       '</td></tr>') + '</table>' +
     nav +
 
-    '<p class="note">' + view.filtered.length + ' act(s) match' +
+    note(view.filtered.length + ' act(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
                         ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
     '; ' + summary.held + ' held of ' + summary.recorded + ' recorded since this ' +
@@ -4863,10 +5655,10 @@ app.get('/admin/delegation', function (req, res) {
     ' The <strong>#</strong> column is a sequence number and is monotonic and ' +
     'never reused, including across a drop, so <code>?format=json</code>\'s ' +
     '<code>oldestSeq</code> and <code>newestSeq</code> let a caller poll this ' +
-    'without guessing what it missed.</p>' +
+    'without guessing what it missed.') +
 
     '<h2>The chains</h2>' +
-    '<p class="note">The same acts with the time and the credentials taken out: ' +
+    note('The same acts with the time and the credentials taken out: ' +
     'one row per distinct <em>(mechanism, initial, intermediary, target)</em>. ' +
     '<a href="/admin/delegation/map">This is what the picture is drawn from</a> ' +
     '— one edge per row, and up to TWO lines per row, because a chain has three ' +
@@ -4876,7 +5668,7 @@ app.get('/admin/delegation', function (req, res) {
     'times and then fixed is one row that changes rather than two that do not ' +
     'meet. <strong>The last column draws one row alone</strong>, which is the ' +
     'answer to <em>what is this one, exactly</em> on a service that has been ' +
-    'driven for an afternoon and whose whole picture is forty boxes.</p>' +
+    'driven for an afternoon and whose whole picture is forty boxes.') +
     '<table><tr><th>Mechanism</th><th>Kind</th><th>Initial identity</th>' +
     '<th>Intermediary</th><th>Target</th><th>Acts</th><th>Last seen</th>' +
     '<th>Just this one</th></tr>' +
@@ -4905,7 +5697,7 @@ app.get('/admin/delegation', function (req, res) {
     }).join('') || '<tr><td colspan="8">No chains yet.</td></tr>') + '</table>' +
 
     '<h2>Who may delegate to whom</h2>' +
-    '<p class="note"><strong>This half is CONFIGURATION rather than history, and ' +
+    note('<strong>This half is CONFIGURATION rather than history, and ' +
     'it is Kerberos only.</strong> That is not an omission: Kerberos is the one ' +
     'family here that polices delegation at all. WS-Trust puts no authorization ' +
     'on <code>OnBehalfOf</code> or <code>ActAs</code> and this service adds none; ' +
@@ -4914,14 +5706,14 @@ app.get('/admin/delegation', function (req, res) {
     'of those are stated on every row they produce above, in the same column ' +
     'that names an attribute for a Kerberos row — <strong>the asymmetry is the ' +
     'most useful thing on this page</strong>: the same picture, policed at one ' +
-    'end and not at the other.</p>' +
-    '<p class="note">The whole of the KDC\'s decision rests on two attributes on ' +
+    'end and not at the other.') +
+    note('The whole of the KDC\'s decision rests on two attributes on ' +
     'two OPPOSITE accounts, which is why they are in one table with a column ' +
     'saying which account carries the permission. Same messages, same KDC ' +
     'options, opposite direction of trust — and the second one turns <em>I can ' +
     'write to this computer object</em> into <em>I can reach this service as ' +
-    'anybody</em>.</p>' +
-    '<p class="note">Each mechanism needs one thing BEYOND the attribute, and ' +
+    'anybody</em>.') +
+    note('Each mechanism needs one thing BEYOND the attribute, and ' +
     'it is the same thing on every row of that kind, so it is here rather than ' +
     'in a column: <strong>classic</strong> needs a FORWARDABLE evidence ' +
     'ticket, which S4U2Self returns only to an account flagged ' +
@@ -4931,7 +5723,7 @@ app.get('/admin/delegation', function (req, res) {
     'a KDC to answer <code>KDC_ERR_BADOPTION</code> without it — an error that ' +
     'says nothing about padata. Resource-based needs no forwardable evidence ' +
     'and no flag on the front end at all, which is why it is the easier ' +
-    'path.</p>' +
+    'path.') +
     '<table><tr><th>Mechanism</th><th>Front end (who acts)</th>' +
     '<th>Target (what is reached)</th><th>Attribute, and where it lives</th>' +
     '<th>Anything missing?</th></tr>' +
@@ -4940,53 +5732,57 @@ app.get('/admin/delegation', function (req, res) {
       'delegation of either kind.</td></tr>') + '</table>' +
 
     '<h3>Account flags</h3>' +
-    '<p class="note">Two of these three STOP delegation rather than permit it, ' +
+    note('Two of these three STOP delegation rather than permit it, ' +
     'and the third is not a control at all. An account appears here whether or ' +
     'not any pair above names it, because an account named in no pair is ' +
-    'precisely the one somebody is wondering about.</p>' +
+    'precisely the one somebody is wondering about.') +
     '<table><tr><th>Principal</th><th>Flags</th><th>What each one does</th></tr>' +
     (policy.accounts.map(policyAccountRow).join('') ||
       '<tr><td colspan="3">No principal here carries one of these flags.</td></tr>') +
     '</table>' +
 
     '<h3>The mechanisms</h3>' +
-    '<p class="note">Read off the same table this page records against, so a ' +
+    note('Read off the same table this page records against, so a ' +
     'mechanism cannot be recordable and undocumented, nor described here and ' +
-    'never occur.</p>' +
+    'never occur.') +
     '<ul>' + delegation.TYPES.map(function (entry) {
+      // The mechanism, its id, its specification and how many have been
+      // recorded stay on the row; the paragraph saying what it IS folds under
+      // them. Folding the whole item would have put the count — the one figure
+      // that changes while somebody watches this page — behind a click.
       return '<li><strong>' + esc(entry.label) + '</strong> (<code>' +
         esc(entry.type) + '</code>, ' + esc(entry.protocol) + ', ' +
         esc(entry.spec) + ' — ' + (summary.byType[entry.type] || 0) + ' recorded) ' +
-        '— ' + esc(entry.what) +
-        (entry.policed
-          ? ' <strong>This service decides who may do it.</strong>'
-          : ' <strong>Nothing here checks who may do it.</strong>') +
+        note(esc(entry.what) +
+          (entry.policed
+            ? ' <strong>This service decides who may do it.</strong>'
+            : ' <strong>Nothing here checks who may do it.</strong>')) +
         '</li>';
     }).join('') + '</ul>' +
 
-    '<p class="note"><strong>It is in memory and dies with the process</strong>, ' +
+    note('<strong>It is in memory and dies with the process</strong>, ' +
     'like the counters, the audit log, the sessions and the signing key. It also ' +
     'has no clear button and no way to add a row by hand, which is a decision ' +
     'rather than an omission: every row here is something that actually ' +
     'happened, and a table mixing those with typed-in ones would be worth much ' +
-    'less than either. Restarting the service is how you get an empty one.</p>' +
+    'less than either. Restarting the service is how you get an empty one.') +
 
-    '<p class="note"><strong>A delegation that SUCCEEDED also appears on ' +
+    note('<strong>A delegation that SUCCEEDED also appears on ' +
     '<a href="/admin/audit">the audit log</a></strong> as an ordinary ' +
     '<code>authentication</code> row, and on <a href="/admin/users">the users ' +
     'page</a> as a credential accepted for the initial identity — which is right: ' +
     'this service did accept one. A delegation that was REFUSED appears in ' +
     'NEITHER, because nothing was accepted, and that gap is the reason this page ' +
-    'keeps its own list rather than a filter over one of theirs.</p>' +
+    'keeps its own list rather than a filter over one of theirs.') +
 
-    '<p class="note">Paging is <code>?page=</code> and <code>?per=</code> (at ' +
+    note('Paging is <code>?page=</code> and <code>?per=</code> (at ' +
     'most ' + MAX_ROWS + ' rows a page) and both work with ' +
     '<code>?format=json</code>, whose reply carries <code>page</code>, ' +
     '<code>pages</code> and <code>matched</code> so a test can walk the whole ' +
     'list without guessing where it ends — along with <code>chains</code> and ' +
     'the configured <code>policy</code>, which have no paging because neither ' +
     'can be longer than the list they are derived from. The same data is at ' +
-    '<code>GET /admin-api/delegation</code> with the same parameters.</p>';
+    '<code>GET /admin-api/delegation</code> with the same parameters.');
 
   respond(req, res, view.json, 'Delegation', '/admin/delegation', inner);
   log.debug("Leaving the admin delegation page.");
@@ -5186,7 +5982,12 @@ function firstAttributeValue(entry, name) {
 // palette rather than out of a second set of shapes written for the legend,
 // because a legend that is drawn separately is a legend that will eventually
 // describe a picture this service no longer draws.
-function delegationMapKey() {
+// `options.issuance` adds the two lines only the person's picture has. It is a
+// parameter rather than two more rows for everybody, because a legend must
+// describe the diagram beside it: a reader of /admin/delegation/map looking for
+// a dotted `signed in` line would never find one, and a key that lists shapes a
+// page does not draw teaches a reader to stop trusting it.
+function delegationMapKey(options) {
   const swatch = function (inner, width) {
     return '<svg width="' + width + '" height="40" viewBox="0 0 ' + width +
       ' 40" aria-hidden="true">' + inner + '</svg>';
@@ -5251,6 +6052,28 @@ function delegationMapKey() {
             'that party.</strong> It goes to whoever ASKED — the intermediary ' +
             'where a chain has one, the initial identity where it does not.' }
   ];
+  if (options && options.issuance) {
+    items.push(
+      { art: swatch(line(C.indigo, '2 3'), 64),
+        what: '<strong>Dotted, into the hexagon: this person AUTHENTICATED ' +
+              'here.</strong> The label is the protocol family and the tooltip ' +
+              'is the method — the sign-in screen, an AS-REQ, a ' +
+              'UsernameToken, a federated assertion. It is why everything else ' +
+              'on the picture was allowed.' },
+      { art: swatch(line(C.indigo, ''), 64),
+        what: '<strong>Solid indigo: an ORDINARY GRANT, and the label is the ' +
+              'exact one</strong> — <code>authorization_code</code>, ' +
+              '<code>refresh_token</code>, <code>client_credentials</code>, ' +
+              'with the specification section in the tooltip. Out of the ' +
+              'PERSON it means a credential naming them went to that ' +
+              'application; out of the HEXAGON it means nobody else holds it — ' +
+              'a <code>client_credentials</code> token is about the client ' +
+              'itself and an X509-SVID has no audience, so the subject and the ' +
+              'holder are one box and there is one line rather than two. It ' +
+              'takes no amber or green, because impersonation and delegation ' +
+              'are properties of a delegation mechanism and a grant claims ' +
+              'neither.' });
+  }
   return '<table class="key"><tr><th>Shape</th><th>What it means</th></tr>' +
     items.map(function (one) {
       return '<tr><td class="art">' + one.art + '</td><td>' + one.what + '</td></tr>';
@@ -5408,12 +6231,12 @@ function delegationApplicationChooser(catalogue, selectedKey, carry) {
   log.debug("Entering delegationApplicationChooser().");
   if (!catalogue.length) {
     log.debug("Leaving delegationApplicationChooser(). Nothing to choose from.");
-    return '<p class="note"><strong>No delegation held here names an ' +
+    return note('<strong>No delegation held here names an ' +
       'application yet</strong>, so there is nothing to choose between. An ' +
       'application arrives in this list the moment something delegates through ' +
       'it or to it: an RFC 8693 <code>audience</code> or the <code>client_id</code> ' +
       'that performed the exchange, a WS-Trust <code>AppliesTo</code>, or the ' +
-      'service principal a Kerberos S4U request asked for a ticket to.</p>';
+      'service principal a Kerberos S4U request asked for a ticket to.');
   }
   const options = catalogue.map(function (entry) {
     const roles = [];
@@ -5579,13 +6402,13 @@ function delegationDrawing(graph, look, path, params, label) {
     links: true, id: 'delmap', label: label
   });
   const html = '<div class="diagram">' + drawn.svg + '</div>' +
-    '<p class="note">' + drawn.width + '&times;' + drawn.height + ' — ' +
+    note(drawn.width + '&times;' + drawn.height + ' — ' +
     '<a href="' + esc(path + queryWith(params, { format: 'svg' })) +
     '">the document on its own</a> (SVG, no links in it), or ' +
     '<a href="' + esc(path + queryWith(params, { format: 'json' })) +
     '">the graph as JSON</a>.' +
     (drawn.failed ? ' <span class="state-revoked">The layout failed: ' +
-      esc(drawn.failed) + '</span>' : '') + '</p>';
+      esc(drawn.failed) + '</span>' : ''));
   log.debug("Leaving delegationDrawing(). " + drawn.width + "x" + drawn.height + ".");
   return { drawn: drawn, html: html };
 }
@@ -5643,8 +6466,8 @@ app.get('/admin/delegation/map', function (req, res) {
     { type: view.wantedType, mode: view.wantedMode, outcome: view.wantedOutcome,
       protocol: view.wantedProtocol, q: view.wantedText }, drawingLabel);
   const drawn = picture.drawn;
-  const up = upTo('/admin/delegation', 'The picture',
-                  listViewOf('/admin/delegation', req.query));
+  const listView = listViewOf('/admin/delegation', req.query);
+  const up = upTo('/admin/delegation', 'The picture', listView);
 
   const filtering = view.wantedType || view.wantedMode || view.wantedOutcome ||
                     view.wantedProtocol || view.wantedText;
@@ -5699,8 +6522,8 @@ app.get('/admin/delegation/map', function (req, res) {
     // small grey text a reader learns to look at, and somebody who followed a
     // link into a diagram is looking at the diagram. It carries the filter, so
     // "back" means the table they came from and not the top of an unfiltered one.
-    '<p class="note"><a class="btn" href="' + esc(up.href) + '">&larr; Back to ' +
-    'the delegation table</a></p>' +
+    note('<a class="btn" href="' + esc(up.href) + '">&larr; Back to ' +
+    'the delegation table</a>') +
 
     '<div class="tiles">' +
       tile(parties.length, 'parties') +
@@ -5712,22 +6535,22 @@ app.get('/admin/delegation/map', function (req, res) {
       tile(graph.tokens.length, 'credentials issued') +
     '</div>' +
 
-    '<p class="note"><strong>The same acts as ' +
+    note('<strong>The same acts as ' +
     '<a href="' + esc(up.href) + '">the table</a>, with the time taken out and ' +
     'the parties shared.</strong> A party that is the intermediary of six chains ' +
     'is ONE box here with six lines leaving it, which is the thing a table of ' +
     'rows cannot show and the reason to draw this at all. Every box and every ' +
     'line carries the whole story in its tooltip; the two tables under the ' +
     'picture say the same things in words, because a diagram nobody can quote is ' +
-    'a diagram nobody can put in a bug report.</p>' +
+    'a diagram nobody can put in a bug report.') +
 
-    '<p class="note"><strong>It is drawn from everything that MATCHED the filter ' +
+    note('<strong>It is drawn from everything that MATCHED the filter ' +
     'and not from one page of it.</strong> ' + view.filtered.length + ' act(s) ' +
     'match' + (view.all.length !== view.filtered.length
       ? ' of ' + view.all.length + ' held' : '') +
     ', and all of them are in the picture — paging a diagram would draw the boxes ' +
     'that happen to be on page 2 and the lines that happen to join them, which is ' +
-    'a picture of the pagination.</p>' +
+    'a picture of the pagination.') +
 
     '<form method="get" action="/admin/delegation/map"><div class="formrow">' +
       '<label for="type">Mechanism</label><select id="type" name="type">' +
@@ -5743,36 +6566,56 @@ app.get('/admin/delegation/map', function (req, res) {
       '<button class="secondary">Redraw</button>' +
       (filtering ? ' <a href="/admin/delegation/map">clear</a>' : '') +
     '</div></form>' +
-    '<p class="note">The same filter the table has, so narrowing one narrows the ' +
+    note('The same filter the table has, so narrowing one narrows the ' +
     'other. <strong>Filtering to one person is how a busy picture is read</strong> ' +
     '— the text box searches every party of the chain and both explanations at ' +
-    'once.</p>' +
+    'once.') +
+
+    // THE TWO PIVOTS, HERE AS WELL AS ON THE TABLE, and this is where the
+    // person one was actually asked for: somebody looking at a picture wants to
+    // narrow the PICTURE, and the text box above narrows it to acts that
+    // mention a name where these two redraw it around one party. They are the
+    // same two controls the delegation table carries, so a reader who learnt
+    // them there finds them here.
+    //
+    // The difference between them is worth the sentence: the application
+    // chooser stays inside this register, and the person chooser leaves it —
+    // that page also draws the ordinary issuance, which is most of what happens
+    // in somebody's name and none of what is on this diagram.
+    note('<strong>Or draw one party\'s picture instead.</strong> ' +
+    'These redraw around a single party rather than narrowing these acts: an ' +
+    'application, with everything delegated through it or to it in either ' +
+    'role — or a <strong>person</strong>, which is the wider picture of the ' +
+    'two, because it adds every ordinary grant, assertion, ticket and SVID ' +
+    'issued in their name and the sign-ins the lot rests on. None of that is a ' +
+    'delegation, so none of it can be on this diagram.') +
+    delegationApplicationChooser(view.applications, '', listView) +
+    delegationUserChooser(userGraph.userList(), '', listView) +
 
     (graph.acts
       ? picture.html
-      : '<p class="note"><strong>Nothing has delegated anything yet' +
+      : note('<strong>Nothing has delegated anything yet' +
         (filtering ? ' that matches this filter' : '') + ', so there is nothing ' +
         'to draw.</strong> Three things put a box on this page: a Kerberos ' +
         'S4U2Self, S4U2Proxy or forwarded-TGT request at the KDC; a WS-Trust ' +
         '<code>RequestSecurityToken</code> carrying ' +
         '<code>&lt;wst:OnBehalfOf&gt;</code> or <code>&lt;wst14:ActAs&gt;</code>; ' +
         'and an RFC 8693 token exchange at <code>/oauth2/token</code>. A REFUSED ' +
-        'attempt counts and is drawn in red.</p>') +
+        'attempt counts and is drawn in red.')) +
 
     '<h2>The key</h2>' +
-    '<p class="note">The shapes are drawn by the same functions the picture uses, ' +
-    'so a legend cannot come to describe a diagram this service no longer draws.</p>' +
+    note('The shapes are drawn by the same functions the picture uses, ' +
+    'so a legend cannot come to describe a diagram this service no longer draws.') +
     delegationMapKey() +
 
     '<h2>The parties</h2>' +
-    '<p class="note">Every box, with both of its links where it has two. The ' +
+    note('Every box, with both of its links where it has two. The ' +
     'picture can only put a shape inside ONE anchor, so a party that is a person ' +
     'AND an application links to the users page there and to both here.' +
     (directoryReader ? '' :
       ' <strong>No LDAP directory is loaded in this process</strong>, so nothing ' +
       'here can be resolved to a person and every box is drawn from its role. ' +
-      'That is a build without <code>ldap_server.js</code> and not a failure.') +
-    '</p>' +
+      'That is a build without <code>ldap_server.js</code> and not a failure.')) +
     '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
     '<th>Roles it played</th><th>Acts</th><th>Protocols</th></tr>' +
     (parties.map(function (node) {
@@ -5780,14 +6623,14 @@ app.get('/admin/delegation/map', function (req, res) {
     }).join('') || '<tr><td colspan="6">No parties yet.</td></tr>') + '</table>' +
 
     '<h2>The relationships</h2>' +
-    '<p class="note">Every line, as a sentence. <strong>The two kinds are ' +
+    note('Every line, as a sentence. <strong>The two kinds are ' +
     'different claims and the picture colours them differently</strong>: ' +
     '<em>acts for</em> is the DELEGATION relationship — who is acting on whose ' +
     'behalf — and <em>reaches</em> is the TRUST relationship, what the credential ' +
     'is FOR, which is the question <em>what is this token\'s audience</em> asked ' +
     'as a picture. The grey lines from the hexagon are neither: they are this ' +
-    'service handing a credential to whoever asked for one.</p>' +
-    '<p class="note"><strong>The last column collapses one sentence and it is ' +
+    'service handing a credential to whoever asked for one.') +
+    note('<strong>The last column collapses one sentence and it is ' +
     'the same collapse the delegation table makes.</strong> Kerberos is the only ' +
     'family here that polices delegation at all, so a Kerberos row names an ' +
     'ATTRIBUTE and an account — short, and different on every row — while every ' +
@@ -5796,7 +6639,7 @@ app.get('/admin/delegation/map', function (req, res) {
     'it is <em>nothing checks this</em> with the wording in the tooltip. ' +
     '<strong>A REFUSAL is never collapsed</strong> and prints in full: it is the ' +
     'KDC\'s own words, the same sentence the client was sent, and it is specific ' +
-    'to the act rather than to the mechanism.</p>' +
+    'to the act rather than to the mechanism.') +
     '<table><tr><th>From</th><th>To</th><th>Relationship</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Acts</th><th>What came out</th>' +
     '<th>Authorized by / why not</th></tr>' +
@@ -5806,17 +6649,17 @@ app.get('/admin/delegation/map', function (req, res) {
     '</table>' +
 
     '<h2>What was issued</h2>' +
-    '<p class="note"><strong>Every credential that came out of an act in this ' +
+    note('<strong>Every credential that came out of an act in this ' +
     'picture</strong>, newest first — a Kerberos service ticket, a SAML ' +
     'assertion, an access token — with the chain it came out of. <strong>NO ' +
     'CREDENTIAL IS EVER HERE, only its kind and its identifier</strong>, which is ' +
     'the rule the audit log follows and which applies here for one more reason: a ' +
     'delegation act is precisely the request that carries two credentials at ' +
     'once. A Kerberos ticket genuinely has no identifier to quote, which this ' +
-    'says rather than leaving a blank column to be read as a bug.</p>' +
-    '<p class="note">A REFUSED act produced nothing by definition, so it is not ' +
+    'says rather than leaving a blank column to be read as a bug.') +
+    note('A REFUSED act produced nothing by definition, so it is not ' +
     'in this list — which is why ' + graph.tokens.length + ' credential(s) sit ' +
-    'under ' + graph.acts + ' act(s) and the two numbers do not have to agree.</p>' +
+    'under ' + graph.acts + ' act(s) and the two numbers do not have to agree.') +
     '<table><tr><th class="num">#</th><th>When</th><th>Credential</th>' +
     '<th>Subject</th><th>Actor</th><th>Target</th><th>Mechanism</th></tr>' +
     (graph.tokens.map(function (token) {
@@ -5826,46 +6669,46 @@ app.get('/admin/delegation/map', function (req, res) {
       'and an empty table here is a consistent state rather than a broken ' +
       'one.</td></tr>') + '</table>' +
     (graph.tokensLeftOff
-      ? '<p class="note"><strong>' + graph.tokensLeftOff + ' more credential(s) ' +
+      ? note('<strong>' + graph.tokensLeftOff + ' more credential(s) ' +
         'are not listed.</strong> This list holds at most ' + graph.maxTokenRows +
         ' and keeps the newest; every one of them is still COUNTED on its line in ' +
         'the picture and in the relationship table, so what is lost is the ' +
-        'individual identifiers of the oldest. Filter to narrow it.</p>'
+        'individual identifiers of the oldest. Filter to narrow it.')
       : '') +
 
     '<h2>What this picture cannot say</h2>' +
-    '<p class="note"><strong>An IMPERSONATION is invisible everywhere else, and ' +
+    note('<strong>An IMPERSONATION is invisible everywhere else, and ' +
     'that is why the amber lines matter.</strong> Under a delegation the ' +
     'credential carries the chain, so a resource server can read the actor off ' +
     'the token afterwards. Under an impersonation nothing does: no reading of the ' +
     'token, at the far end or in a log, can recover the fact that a middle tier ' +
     'was involved. This diagram and the table behind it are the only places that ' +
-    'fact will ever exist.</p>' +
-    '<p class="note"><strong>A line is a RELATIONSHIP and not a request.</strong> ' +
+    'fact will ever exist.') +
+    note('<strong>A line is a RELATIONSHIP and not a request.</strong> ' +
     'Four acts a second apart between the same three parties are one line with ' +
     '<em>4 issued</em> on it; the outcome is deliberately not part of a chain\'s ' +
     'identity, so a chain refused nine times and then fixed is one line that ' +
     'changes colour rather than two that never meet. ' +
     '<a href="' + esc(up.href) + '">The table</a> is where the individual acts ' +
-    'are, in order, with their times.</p>' +
-    '<p class="note"><strong>Who MAY delegate to whom is not on this page</strong>, ' +
+    'are, in order, with their times.') +
+    note('<strong>Who MAY delegate to whom is not on this page</strong>, ' +
     'because it is CONFIGURATION rather than history and it is Kerberos-only — ' +
     'Kerberos is the one family here that polices delegation at all. It is the ' +
     'second half of <a href="' + esc(up.href) + '">the delegation page</a>, and ' +
     'the asymmetry between the two is worth reading there: the same picture, ' +
-    'policed at one end and not at the other.</p>' +
-    '<p class="note"><strong>This page runs no script and neither does anything ' +
+    'policed at one end and not at the other.') +
+    note('<strong>This page runs no script and neither does anything ' +
     'else in this console.</strong> The diagram is generated on the server and ' +
     'arrives as markup, which is why it does not pan, zoom or drag — and why ' +
     'nothing here relaxes <code>script-src \'none\'</code>. Use the filter to ' +
     'narrow a busy picture, or take the document and open it in something that ' +
-    'does zoom.</p>' +
-    '<p class="note"><code>?format=json</code> carries the whole graph — the ' +
+    'does zoom.') +
+    note('<code>?format=json</code> carries the whole graph — the ' +
     'nodes, the edges, the credentials folded onto each edge, and the token list ' +
     '— and it is also in the <code>graph</code> member of ' +
     '<code>GET /admin-api/delegation</code>, so a test can assert what this page ' +
     'draws without parsing an SVG. <code>?format=svg</code> is the document ' +
-    'alone.</p>';
+    'alone.');
 
   respond(req, res, Object.assign({}, graph, {
     // The filter that produced it, so a caller polling this endpoint can tell a
@@ -5942,8 +6785,8 @@ app.get('/admin/delegation/chain', function (req, res) {
 
   const listView = listViewOf('/admin/delegation', req.query);
   const up = upTo('/admin/delegation', 'One relationship', listView);
-  const back = '<p class="note"><a class="btn" href="' + esc(up.href) +
-    '">&larr; Back to the delegation table</a></p>';
+  const back = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the delegation table</a>');
 
   const json = {
     chain: chain, chainKey: wanted, found: !!chain,
@@ -5954,7 +6797,7 @@ app.get('/admin/delegation/chain', function (req, res) {
   if (!chain) {
     const inner = messagesOf(req) + back +
       (wanted
-        ? '<p class="note"><strong>No act held here belongs to that ' +
+        ? note('<strong>No act held here belongs to that ' +
           'relationship.</strong> <code>' + esc(wanted) + '</code> names a ' +
           'chain this page can describe only while at least one of its acts is ' +
           'still held, and this store is CAPPED — it keeps at most ' +
@@ -5964,15 +6807,15 @@ app.get('/admin/delegation/chain', function (req, res) {
           'restarted since: nothing here is persisted. Raise ' +
           '<code>delegation.maxRecords</code> on <a href="/admin/config">the ' +
           'configuration page</a> if this keeps happening to something you ' +
-          'need.</p>'
-        : '<p class="note"><strong>Name a relationship.</strong> This page draws ' +
+          'need.')
+        : note('<strong>Name a relationship.</strong> This page draws ' +
           'ONE of them, and the way to it is a link on ' +
           '<a href="' + esc(up.href) + '">the delegation table</a> — every row ' +
           'of both tables there has one, because the key that identifies a chain ' +
           'is <em>(mechanism, initial identity, intermediary, target)</em> and ' +
-          'is not something worth typing.</p>') +
-      '<p class="note"><a href="/admin/delegation/map">The whole picture</a> is ' +
-      'everything that is still held, drawn together.</p>';
+          'is not something worth typing.')) +
+      note('<a href="/admin/delegation/map">The whole picture</a> is ' +
+      'everything that is still held, drawn together.');
     respond(req, res, json, 'Delegation — one relationship', '/admin/delegation',
             inner, up);
     log.debug("Leaving the admin delegation chain page. Nothing under that key.");
@@ -5993,7 +6836,7 @@ app.get('/admin/delegation/chain', function (req, res) {
   // to open by confirming it is describing the same four, or a reader who
   // followed the wrong link finds out three tables later.
   const sentence =
-    '<p class="note"><strong>' +
+    note('<strong>' +
     esc(chain.initial.presented || chain.initial.application || 'somebody nobody named') +
     '</strong> — ' +
     (chain.intermediary.presented || chain.intermediary.application
@@ -6008,7 +6851,7 @@ app.get('/admin/delegation/chain', function (req, res) {
     esc(chain.typeLabel) + ', ' + esc(chain.protocol) + '). ' +
     'It is an ' + modeCell(chain.mode) + ' and it has happened ' +
     esc(chain.acts) + ' time(s) — first ' + esc(whenText(chain.firstAt)) +
-    ', last ' + esc(whenText(chain.lastAt)) + '.</p>';
+    ', last ' + esc(whenText(chain.lastAt)) + '.');
 
   const inner = messagesOf(req) + back +
     '<div class="tiles">' +
@@ -6023,7 +6866,7 @@ app.get('/admin/delegation/chain', function (req, res) {
 
     sentence +
 
-    '<p class="note"><strong>This is one row of ' +
+    note('<strong>This is one row of ' +
     '<a href="' + esc(up.href) + '">the chains table</a> drawn on its own</strong> ' +
     ', with everything else in the service left out. A chain is ' +
     '<em>(mechanism, initial identity, intermediary, target)</em> and the ' +
@@ -6032,24 +6875,24 @@ app.get('/admin/delegation/chain', function (req, res) {
     'which is why the acts below can be red and green at once. ' +
     '<a href="/admin/delegation/map">The whole picture</a> is every ' +
     'relationship at once, where this one\'s parties are shared with the ' +
-    'others they take part in.</p>' +
+    'others they take part in.') +
 
     (graph.acts
       ? picture.html
-      : '<p class="note">There is nothing to draw.</p>') +
+      : note('There is nothing to draw.')) +
 
     '<h2>The key</h2>' +
-    '<p class="note">The shapes are drawn by the same functions the picture ' +
+    note('The shapes are drawn by the same functions the picture ' +
     'uses, so a legend cannot come to describe a diagram this service no longer ' +
-    'draws.</p>' +
+    'draws.') +
     delegationMapKey() +
 
     '<h2>The parties</h2>' +
-    '<p class="note">Up to three boxes — the layers of the architecture — with ' +
+    note('Up to three boxes — the layers of the architecture — with ' +
     'both of a party\'s links where it has two. <strong>A box here can carry ' +
     'more acts than this relationship has</strong> only if it played two roles ' +
     'in one of them, which is what S4U2Self is: the requester asks for a ticket ' +
-    'to itself, so it is the intermediary AND the target.</p>' +
+    'to itself, so it is the intermediary AND the target.') +
     '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
     '<th>Roles it played</th><th>Acts</th><th>Protocols</th></tr>' +
     (parties.map(function (node) {
@@ -6057,12 +6900,12 @@ app.get('/admin/delegation/chain', function (req, res) {
     }).join('') || '<tr><td colspan="6">No parties.</td></tr>') + '</table>' +
 
     '<h2>The relationships</h2>' +
-    '<p class="note">A chain has three parties and therefore up to TWO lines, ' +
+    note('A chain has three parties and therefore up to TWO lines, ' +
     'and they are different claims: <em>acts for</em> is the DELEGATION ' +
     'relationship — who is acting on whose behalf — and <em>reaches</em> is the ' +
     'TRUST relationship, what the credential is FOR. The grey line from the ' +
     'hexagon is neither: it is this service handing a credential to whoever ' +
-    'asked for one.</p>' +
+    'asked for one.') +
     '<table><tr><th>From</th><th>To</th><th>Relationship</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Acts</th><th>What came out</th>' +
     '<th>Authorized by / why not</th></tr>' +
@@ -6072,13 +6915,13 @@ app.get('/admin/delegation/chain', function (req, res) {
     '</table>' +
 
     '<h2>What was issued on it</h2>' +
-    '<p class="note"><strong>Every credential that came out of this ' +
+    note('<strong>Every credential that came out of this ' +
     'relationship</strong>, newest first. <strong>NO CREDENTIAL IS EVER HERE, ' +
     'only its kind and its identifier</strong> — the rule the audit log follows, ' +
     'and one that applies here for one more reason: a delegation act is ' +
     'precisely the request that carries two credentials at once. A REFUSED act ' +
     'produced nothing by definition, which is why ' + graph.tokens.length +
-    ' credential(s) sit under ' + chain.acts + ' act(s).</p>' +
+    ' credential(s) sit under ' + chain.acts + ' act(s).') +
     '<table><tr><th class="num">#</th><th>When</th><th>Credential</th>' +
     '<th>Subject</th><th>Actor</th><th>Target</th><th>Mechanism</th></tr>' +
     (graph.tokens.map(function (token) {
@@ -6088,12 +6931,12 @@ app.get('/admin/delegation/chain', function (req, res) {
       'state rather than a broken one.</td></tr>') + '</table>' +
 
     '<h2>Every act on it</h2>' +
-    '<p class="note">The same rows <a href="' + esc(up.href) + '">the delegation ' +
+    note('The same rows <a href="' + esc(up.href) + '">the delegation ' +
     'table</a> holds, narrowed to this relationship and not paged — there are ' +
     esc(acts.length) + ' of them and the cap on the whole store is ' +
     esc(delegation.summary().maxRecords) + '. This is where the TIMES are: the ' +
     'picture has them taken out, because four acts a second apart between the ' +
-    'same three parties are one line.</p>' +
+    'same three parties are one line.') +
     '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
     '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
@@ -6104,12 +6947,12 @@ app.get('/admin/delegation/chain', function (req, res) {
       return delegationRow(row, known, { chainLink: false });
     }).join('') + '</table>' +
 
-    '<p class="note"><code>?format=json</code> carries this chain, its acts and ' +
+    note('<code>?format=json</code> carries this chain, its acts and ' +
     'the graph behind the picture; <code>?format=svg</code> is the document ' +
     'alone, with no links in it. There is no form on this page and therefore no ' +
     'operation on <code>/admin-api</code> — everything here is an observation, ' +
     'and the acts are in <code>GET /admin-api/delegation</code> where a caller ' +
-    'can filter them.</p>';
+    'can filter them.');
 
   respond(req, res, json, 'Delegation — one relationship', '/admin/delegation',
           inner, up);
@@ -6205,8 +7048,8 @@ app.get('/admin/delegation/application', function (req, res) {
 
   const listView = listViewOf('/admin/delegation', req.query);
   const up = upTo('/admin/delegation', 'One application', listView);
-  const back = '<p class="note"><a class="btn" href="' + esc(up.href) +
-    '">&larr; Back to the delegation table</a></p>';
+  const back = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the delegation table</a>');
 
   // The chooser itself, drawn on the bare page AND under a selected application
   // — the second is what makes comparing two of them one click rather than two.
@@ -6215,7 +7058,7 @@ app.get('/admin/delegation/application', function (req, res) {
   if (!entry) {
     const inner = messagesOf(req) + back +
       (asked
-        ? '<p class="note"><strong>No act held here names ' +
+        ? note('<strong>No act held here names ' +
           '<code>' + esc(asked) + '</code> as an application.</strong> Three ' +
           'things could be true and they are different: nothing has ever ' +
           'delegated through or to it; something did and the acts have been ' +
@@ -6223,24 +7066,24 @@ app.get('/admin/delegation/application', function (req, res) {
           esc(delegation.summary().maxRecords) + ' and discards the oldest; or ' +
           'the name is spelled differently from the way a protocol presented ' +
           'it. The list below is every application some act actually named, ' +
-          'which settles the third.</p>'
+          'which settles the third.')
         : '') +
-      '<p class="note"><strong>Choose an application to see everything that has ' +
+      note('<strong>Choose an application to see everything that has ' +
       'been delegated through it or to it.</strong> A delegation has three ' +
       'parties and an application can be two of them — the INTERMEDIARY that ' +
       'acts on somebody\'s behalf, and the TARGET the credential is for — so ' +
       'this page shows both sides of one application rather than making you ' +
       'pick a side. That is the question worth asking before turning a middle ' +
       'tier off: not <em>what reaches it</em>, but <em>what exists because of ' +
-      'it</em>.</p>' +
+      'it</em>.') +
       chooser +
       delegationApplicationTable(catalogue, known, listView) +
-      '<p class="note">The list is built from the ACTS rather than from ' +
+      note('The list is built from the ACTS rather than from ' +
       '<a href="/admin/applications">the registry</a>, which is why an entry ' +
       'here can be marked <em>not in the registry</em>: the registry holds what ' +
       'this service has been asked about, and an RFC 8693 <code>audience</code> ' +
       'nobody has otherwise mentioned is a real delegation target that nothing ' +
-      'else in this console knows the name of.</p>';
+      'else in this console knows the name of.');
     respond(req, res, { application: null, asked: asked || null,
                         applications: catalogue, held: delegation.summary().held },
             'Delegation — one application', '/admin/delegation', inner, up);
@@ -6287,7 +7130,7 @@ app.get('/admin/delegation/application', function (req, res) {
       tile(entry.roles.intermediary, 'as the intermediary') +
     '</div>' +
 
-    '<p class="note"><strong><code>' + esc(entry.identifier) + '</code></strong> — ' +
+    note('<strong><code>' + esc(entry.identifier) + '</code></strong> — ' +
     (registered
       ? '<a href="' + esc('/admin/applications' +
           queryWith({ application: entry.identifier }, {})) + '">in the ' +
@@ -6316,13 +7159,13 @@ app.get('/admin/delegation/application', function (req, res) {
       : '') +
     ' Protocols: ' + (entry.protocols.length ? codeList(entry.protocols) : 'none') +
     '. First seen ' + esc(whenText(entry.firstAt)) + ', last ' +
-    esc(whenText(entry.lastAt)) + '.</p>' +
+    esc(whenText(entry.lastAt)) + '.') +
 
     '<h2>What it does in a delegation</h2>' +
-    '<p class="note"><strong>Both sides of one application.</strong> The counts ' +
+    note('<strong>Both sides of one application.</strong> The counts ' +
     'below are of ACTS, and one act can count twice here — an S4U2Self names the ' +
     'requester as the intermediary and as the target, because the ticket is to ' +
-    'itself.</p>' +
+    'itself.') +
     '<table><tr><th>Role</th><th>Acts</th><th>What the role is</th></tr>' +
     delegation.ROLES.map(function (role) {
       const n = entry.roles[role.role] || 0;
@@ -6337,22 +7180,22 @@ app.get('/admin/delegation/application', function (req, res) {
 
     (graph.acts
       ? '<h2>The relationships it is part of</h2>' +
-        '<p class="note">Every chain this application appears in, drawn ' +
+        note('Every chain this application appears in, drawn ' +
         'together — so a middle tier shows the people it acts for on one side ' +
         'and what it reaches on the other, which is the shape a list of rows ' +
         'cannot show. The <strong>chain</strong> link beside each act at the ' +
-        'foot of this page draws ONE of them alone.</p>' + picture.html
+        'foot of this page draws ONE of them alone.') + picture.html
       : '') +
 
     '<h2>The key</h2>' +
-    '<p class="note">The shapes are drawn by the same functions the picture ' +
+    note('The shapes are drawn by the same functions the picture ' +
     'uses, so a legend cannot come to describe a diagram this service no longer ' +
-    'draws.</p>' +
+    'draws.') +
     delegationMapKey() +
 
     '<h2>The parties it deals with</h2>' +
-    '<p class="note">Every box in the picture above, including this application ' +
-    'itself.</p>' +
+    note('Every box in the picture above, including this application ' +
+    'itself.') +
     '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
     '<th>Roles it played</th><th>Acts</th><th>Protocols</th></tr>' +
     (parties.map(function (node) {
@@ -6360,7 +7203,7 @@ app.get('/admin/delegation/application', function (req, res) {
     }).join('') || '<tr><td colspan="6">No parties.</td></tr>') + '</table>' +
 
     '<h2>Every delegated credential related to it</h2>' +
-    '<p class="note"><strong>This is the list this page exists for.</strong> ' +
+    note('<strong>This is the list this page exists for.</strong> ' +
     'Every credential that came out of an act this application took part in, ' +
     'newest first, WHATEVER ROLE IT PLAYED — so a token issued THROUGH it (it ' +
     'was the intermediary) and one issued FOR it (it was the target) are both ' +
@@ -6368,7 +7211,7 @@ app.get('/admin/delegation/application', function (req, res) {
     'only its kind and its identifier</strong>, which is the rule the audit log ' +
     'follows; a Kerberos ticket genuinely has no identifier to quote. A REFUSED ' +
     'act produced nothing by definition, which is why ' + graph.tokens.length +
-    ' credential(s) sit under ' + entry.acts + ' act(s).</p>' +
+    ' credential(s) sit under ' + entry.acts + ' act(s).') +
     '<table><tr><th class="num">#</th><th>When</th><th>Its role</th>' +
     '<th>Credential</th><th>Subject</th><th>Actor</th><th>Target</th>' +
     '<th>Mechanism</th></tr>' +
@@ -6379,18 +7222,18 @@ app.get('/admin/delegation/application', function (req, res) {
       'application or to it. A page of red acts and an empty table here is a ' +
       'consistent state rather than a broken one.</td></tr>') + '</table>' +
     (graph.tokensLeftOff
-      ? '<p class="note"><strong>' + graph.tokensLeftOff + ' more credential(s) ' +
+      ? note('<strong>' + graph.tokensLeftOff + ' more credential(s) ' +
         'are not listed.</strong> This list holds at most ' + graph.maxTokenRows +
         ' and keeps the newest; every one of them is still COUNTED on its line ' +
         'in the picture, so what is lost is the individual identifiers of the ' +
-        'oldest.</p>'
+        'oldest.')
       : '') +
 
     '<h2>Every act it took part in</h2>' +
-    '<p class="note">The rows <a href="' + esc(up.href) + '">the delegation ' +
+    note('The rows <a href="' + esc(up.href) + '">the delegation ' +
     'table</a> holds, narrowed to this application and not paged. This is where ' +
     'the TIMES and the REFUSALS are — a refusal produced no credential, so it ' +
-    'is in this table and not in the one above.</p>' +
+    'is in this table and not in the one above.') +
     '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
     '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
@@ -6402,12 +7245,12 @@ app.get('/admin/delegation/application', function (req, res) {
     '<h2>Another application</h2>' + chooser +
     delegationApplicationTable(catalogue, known, listView) +
 
-    '<p class="note"><code>?format=json</code> carries this application, its ' +
+    note('<code>?format=json</code> carries this application, its ' +
     'acts and the graph behind the picture; <code>?format=svg</code> is the ' +
     'document alone. There is no form that changes anything on this page and ' +
     'therefore no operation on <code>/admin-api</code> — the acts are in ' +
     '<code>GET /admin-api/delegation</code>, where a caller can filter them by ' +
-    'the same free text.</p>';
+    'the same free text.');
 
   respond(req, res, {
     application: entry,
@@ -6427,6 +7270,720 @@ app.get('/admin/delegation/application', function (req, res) {
   }, 'Delegation — one application', '/admin/delegation', inner, up);
   log.debug("Leaving the admin delegation application page. " + acts.length +
             " act(s), " + graph.tokens.length + " credential(s).");
+});
+
+// ---------------------------------------------------------------------------
+// THE PERSON CHOOSER, AND IT IS THE APPLICATION CHOOSER'S ARGUMENT MADE AGAIN
+// RATHER THAN COPIED.
+//
+// Drawn in three places for the same reason that one is: on /admin/delegation
+// (where somebody looking at the table wants to pivot), on
+// /admin/delegation/map (where the ask came from — *filter the picture by a
+// person the way it filters by an application*), and on the person's own page
+// (so comparing two is one click rather than two).
+//
+// **THE OPTION'S VALUE IS THE NORMALISED KEY AND NOT A SPELLING**, which is the
+// one place this differs from the application chooser next door, and the
+// difference is the whole reason the two lists are keyed differently
+// (`delegation.js`'s `identityList()` header argues it). An application is
+// chosen by the identifier a protocol NAMED, because that is what a reader
+// recognises in a URL. A person has no such identifier: they arrive as `alice`,
+// as `alice@STS.MOCK` and as `urn:sts-mock:user:alice`, and the console has
+// filed all three under one name — which is the name on /admin/users, on
+// /admin/audit and in the directory. Putting a spelling in the URL would make a
+// link from this console disagree with every other link in it. The route
+// normalises whatever it is given anyway, so a hand-written `?user=alice@REALM`
+// still lands on the right page.
+//
+// **IT OFFERS IDENTITIES NOTHING WAS EVER ISSUED TO, AND THAT IS THE POINT.**
+// `userGraph.userList()` unions the identity register with the delegation
+// register, so somebody who has never signed in here is in this list if an
+// S4U2Self or an OnBehalfOf named them — which is the case worth finding, and
+// exactly the case a chooser built from /admin/users alone would hide.
+// ---------------------------------------------------------------------------
+function delegationUserChooser(catalogue, selectedKey, carry) {
+  log.debug("Entering delegationUserChooser().");
+  if (!catalogue.length) {
+    log.debug("Leaving delegationUserChooser(). Nothing to choose from.");
+    return note('<strong>Nothing has authenticated here and no ' +
+      'delegation names anybody</strong>, so there is nobody to choose. An ' +
+      'identity arrives in this list the moment a credential is accepted in ' +
+      'any of the sixteen families, the moment a token or an assertion is ' +
+      'issued naming somebody, or the moment a delegation names them — ' +
+      'including one they were never present for.');
+  }
+  const options = catalogue.map(function (entry) {
+    const facts = [];
+    if (entry.authentications) facts.push(entry.authentications + ' sign-in(s)');
+    if (entry.tokens.issued) facts.push(entry.tokens.issued + ' token(s)');
+    if (entry.artifacts) facts.push(entry.artifacts + ' artifact(s)');
+    if (entry.acts) facts.push(entry.acts + ' delegation act(s)');
+    return '<option value="' + esc(entry.key) + '"' +
+      (entry.key === selectedKey ? ' selected' : '') + '>' +
+      esc(entry.key) + (entry.isClient ? ' (a client)' : '') +
+      (facts.length ? ' — ' + esc(facts.join(', ')) : ' — nothing yet') +
+      '</option>';
+  }).join('');
+  const carried = Object.keys(carry || {}).map(function (name) {
+    return '<input type="hidden" name="' + esc(name) + '" value="' +
+           esc((carry || {})[name]) + '">';
+  }).join('');
+  log.debug("Leaving delegationUserChooser(). " + catalogue.length + " option(s).");
+  return '<form method="get" action="/admin/delegation/user">' +
+    '<div class="formrow">' + carried +
+      '<label for="user">Person</label>' +
+      '<select id="user" name="user">' +
+        (selectedKey ? '' : '<option value="">choose one&hellip;</option>') +
+        options +
+      '</select>' +
+      '<button class="secondary">Everything issued in their name</button>' +
+    '</div></form>';
+}
+
+// The same list as CONTENT. It is not /admin/users and the page says so: that
+// page is the identity register, and this one holds everybody that register
+// knows PLUS everybody a delegation named who has never been near this service.
+// The `Where from` column is the only reason to draw it rather than link to the
+// users page, and it is the column worth reading.
+function delegationUserTable(catalogue, known, carry) {
+  log.debug("Entering delegationUserTable(). " + catalogue.length + " row(s).");
+  const rows = catalogue.map(function (entry) {
+    const where = [];
+    if (entry.authenticated) {
+      where.push('<span class="state-valid" title="A credential was accepted ' +
+        'for this name here, so the identity register has a row for them.">' +
+        'authenticated here</span>');
+    }
+    if (entry.delegated) {
+      where.push('<span class="state-expired" title="Some delegation act names ' +
+        'them, in one of the three roles. That does NOT mean they were present ' +
+        '— S4U2Self and OnBehalfOf name somebody who proved nothing.">named in ' +
+        'a delegation</span>');
+    }
+    if (!entry.authenticated) {
+      where.push('<span class="state-none" title="Nothing has ever presented a ' +
+        'credential under this name in this process. Something was issued in ' +
+        'it, or somebody delegated using it, which is exactly the state worth ' +
+        'noticing.">never authenticated here</span>');
+    }
+    return '<tr>' +
+      '<td class="who"><a href="' + esc('/admin/delegation/user' +
+        queryWith(carry || {}, { user: entry.key })) + '"><code>' +
+        esc(entry.key) + '</code></a>' +
+        (entry.isClient
+          ? '<br><span class="state-none" title="Something authenticated as ' +
+            'this name and said it was a client rather than a person — the ' +
+            'client_credentials grant is the usual way.">a client, not a ' +
+            'person</span>'
+          : '') +
+        '<br>' + usersPageCell(entry.key, known) + '</td>' +
+      '<td>' + where.join('<br>') + '</td>' +
+      '<td class="num">' + esc(entry.authentications) + '</td>' +
+      '<td class="num">' + esc(entry.tokens.issued) + ' — ' +
+        '<span class="state-valid">' + esc(entry.tokens.valid) + ' valid</span>' +
+        (entry.tokens.revoked
+          ? ', <span class="state-revoked">' + esc(entry.tokens.revoked) +
+            ' revoked</span>' : '') + '</td>' +
+      '<td class="num">' + esc(entry.artifacts) + '</td>' +
+      '<td class="num">' + (entry.acts
+        ? esc(entry.acts) + ' — <span class="state-valid">' + esc(entry.issued) +
+          ' issued</span>' + (entry.refused
+            ? ', <span class="state-revoked">' + esc(entry.refused) +
+              ' refused</span>' : '')
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td>' + (entry.protocols.map(esc).join('<br>') ||
+                '<span class="state-none">&mdash;</span>') + '</td>' +
+      '<td>' + esc(whenText(entry.lastAt)) + '</td>' +
+      '</tr>';
+  }).join('');
+  log.debug("Leaving delegationUserTable().");
+  return '<table><tr><th>Identity</th><th>Where from</th><th>Sign-ins</th>' +
+    '<th>Tokens</th><th>Artifacts</th><th>Delegation acts</th>' +
+    '<th>Protocols</th><th>Last seen</th></tr>' +
+    (rows || '<tr><td colspan="8">Nobody has authenticated here and no ' +
+     'delegation names anybody.</td></tr>') + '</table>';
+}
+
+// WHAT ISSUED ONE CREDENTIAL, as a cell, and this is the column the whole page
+// was asked for: *label exactly what OAuth2 grant or OIDC authentication flow
+// was used, if not a delegation call.*
+//
+// Three states rather than two, and the third is the one worth keeping apart.
+// A JWT that states a grant gets the grant, with the OIDC name for the same
+// exchange beside it where OpenID Connect gives it one — an *Authorization Code
+// grant* and an *Authorization Code Flow* are one thing under two vocabularies,
+// and somebody debugging an OIDC client is looking for the second while the
+// token endpoint is answering the first. An ARTIFACT gets the mechanism its own
+// specification names, because a SAML assertion was never issued by an OAuth
+// grant and borrowing the word would be a small lie. And a JWT that states
+// NOTHING says so in as many words: `signJwt()` is reached from outside the
+// token endpoint by WS-Trust's JWT token type and by the credential issuer, and
+// an empty cell there would read as a recording failure.
+function userFlowCell(credential) {
+  if (credential.flowStated) {
+    return '<code>' + esc(credential.flow) + '</code><br>' +
+      '<strong>' + esc(credential.flowLabel) + '</strong>' +
+      (credential.flowOidc && credential.flowOidc !== credential.flowLabel
+        ? '<br><span class="state-none" title="OpenID Connect\'s name for the ' +
+          'same exchange. One thing, two vocabularies.">OIDC: ' +
+          esc(credential.flowOidc) + '</span>'
+        : '') +
+      (credential.flowSpec
+        ? '<br><span class="state-none">' + esc(credential.flowSpec) + '</span>'
+        : '');
+  }
+  if (credential.family !== 'token') {
+    return '<strong>' + esc(credential.flowLabel) + '</strong>' +
+      (credential.flowProtocol
+        ? '<br><span class="state-none">' + esc(credential.flowProtocol) +
+          (credential.flowSpec ? ' &middot; ' + esc(credential.flowSpec) : '') +
+          '</span>'
+        : '') +
+      '<br><span class="state-none" title="A SAML assertion, a Kerberos ticket ' +
+      'and an SVID are issued by protocols that have never heard of an OAuth ' +
+      'grant. The mechanism named here is their own specification\'s.">not an ' +
+      'OAuth grant</span>';
+  }
+  return '<span class="state-none" title="' +
+    esc(userGraph.FLOW_NOT_STATED.what) + '">no grant stated</span>';
+}
+
+// One credential from the ISSUED register, as a row. `back` carries the list the
+// reader came from, so the revoke button on a token returns them to it — the
+// same `carryBack` rule every form on a drill-down follows.
+function userCredentialRow(credential, known) {
+  const holder = credential.holder
+    ? delegationPartyCell({ key: '', presented: '',
+                            application: credential.holder, what: '' }, known)
+    : '<span class="state-none" title="Nothing holds this one. An X509-SVID has ' +
+      'no audience, and a token can be minted with no client_id — this service ' +
+      'issued it and there is no second party to draw.">&mdash;</span>';
+  return '<tr>' +
+    '<td>' + esc(whenText(credential.at)) + '</td>' +
+    '<td class="who"><code>' + esc(credential.kind) + '</code>' +
+      (credential.identifier
+        ? '<br>' + shortened(credential.identifier, 14)
+        : '<br><span class="state-none" title="A Kerberos ticket has no ' +
+          'identifier this service could quote — there is no jti and no ' +
+          'AssertionID in one.">no identifier</span>') +
+      (credential.detail
+        ? '<br><span class="state-none">' + esc(credential.detail) + '</span>'
+        : '') + '</td>' +
+    '<td>' + userFlowCell(credential) + '</td>' +
+    '<td class="who">' + holder + '</td>' +
+    '<td class="' + stateClass(credential.state) + '">' + esc(credential.state) +
+      '</td>' +
+    '<td>' + (credential.sessionId
+      ? shortened(credential.sessionId, 10)
+      : '<span class="state-none" title="No browser sign-on session was stated. ' +
+        'That is true of every direct grant — client_credentials, password, the ' +
+        'pre-authorized code, a token exchange — and of everything issued ' +
+        'outside the token endpoint.">none</span>') + '</td>' +
+    '</tr>';
+}
+
+// One box on the person's picture. `delegationNodeRow()`'s columns plus the two
+// this page adds, rather than that function with a flag: half its columns are
+// about ACTS, and a box that received four tokens and took part in no delegation
+// would otherwise be a row of zeroes with the interesting number nowhere on it.
+function userNodeRow(node, known, look) {
+  if (node.kind === 'sts') {
+    return '';
+  }
+  const party = { key: node.key, presented: node.presented,
+                  application: node.application, what: node.what };
+  const roles = [];
+  if (node.roles.initial) roles.push(node.roles.initial + ' × initial identity');
+  if (node.roles.intermediary) roles.push(node.roles.intermediary + ' × intermediary');
+  if (node.roles.target) roles.push(node.roles.target + ' × target');
+  return '<tr>' +
+    '<td>' + esc(look.label) +
+      (node.isSubject
+        ? '<br><span class="state-valid" title="This is the person this page is ' +
+          'about. Every line on the picture starts or ends here.">this ' +
+          'page</span>'
+        : '') + '</td>' +
+    '<td>' + (look.shape === 'both'
+                ? 'person <strong>and</strong> application'
+                : look.shape === 'person' ? 'person'
+                : look.shape === 'application' ? 'application' : look.shape) +
+      (look.dashed
+        ? '<br><span class="state-none" title="Neither ou=users nor ' +
+          'ou=applications holds an entry for this. The shape is the one its ' +
+          'role implies.">drawn from its role &mdash; neither store knows it</span>'
+        : '') + '</td>' +
+    '<td class="who">' + delegationPartyCell(party, known) + '</td>' +
+    '<td class="num">' + (node.credentials
+      ? '<strong>' + esc(node.credentials) + '</strong>'
+      : '<span class="state-none">0</span>') + '</td>' +
+    '<td>' + (node.flows.map(esc).join('<br>') ||
+              '<span class="state-none">&mdash;</span>') + '</td>' +
+    '<td>' + (roles.join('<br>') || '<span class="state-none" title="This box is ' +
+      'in no delegation at all — it holds credentials from an ordinary grant. ' +
+      'The delegation roles are a fact about the OTHER register.">not in a ' +
+      'delegation</span>') + '</td>' +
+    '<td class="num">' + (node.acts
+      ? esc(node.acts) + ' — <span class="state-valid">' + esc(node.issued) +
+        ' issued</span>' + (node.refused
+          ? ', <span class="state-revoked">' + esc(node.refused) + ' refused</span>'
+          : '')
+      : '<span class="state-none">0</span>') + '</td>' +
+    '<td>' + (node.protocols.map(esc).join('<br>') ||
+              '<span class="state-none">&mdash;</span>') + '</td>' +
+    '</tr>';
+}
+
+// One line of the person's picture, in words. `delegationEdgeRow()`'s argument
+// applied to five relations instead of three: everything the diagram says in
+// colour is said here in text, because a picture nobody can quote is a picture
+// nobody can put in a bug report.
+function userEdgeRow(edge, lookOf) {
+  const relation =
+    edge.relation === 'issued'
+      ? '<span class="state-none" title="This service handed that party a ' +
+        'credential.">issued to</span>'
+    : edge.relation === 'signed-in'
+      ? '<strong>signed in</strong><br><span class="state-none">to this ' +
+        'service</span>'
+    : edge.relation === 'issued-for'
+      ? '<strong>issued for</strong><br><span class="state-none">by an ' +
+        'ordinary grant</span>'
+    : edge.relation === 'acts-for'
+      ? '<strong>acts for</strong><br><span class="state-none">a delegation</span>'
+      : '<strong>reaches</strong>' +
+        (edge.subject ? '<br><span class="state-none">as ' + esc(edge.subject) +
+                        '</span>' : '');
+  const mechanism = edge.typeLabel
+    ? (edge.type ? '<code>' + esc(edge.type) + '</code><br>' : '') +
+      '<span class="state-none">' + esc(edge.typeLabel) + '</span>' +
+      (edge.protocol || edge.spec
+        ? '<br><span class="state-none">' + esc(edge.protocol) +
+          (edge.spec ? ' &middot; ' + esc(edge.spec) : '') + '</span>'
+        : '')
+    : '<span class="state-none">' +
+      esc((edge.protocols || []).join(', ') || '—') + '</span>';
+  return '<tr>' +
+    '<td class="who">' + esc(lookOf(edge.from)) + '</td>' +
+    '<td class="who">' + esc(lookOf(edge.to)) + '</td>' +
+    '<td>' + relation +
+      ((edge.skipped || []).length
+        ? '<br><span class="state-expired" title="Nobody named this party on ' +
+          'these acts, so the line jumps it.">jumps the ' +
+          esc(edge.skipped.join(' and ')) + '</span>'
+        : '') + '</td>' +
+    '<td>' + mechanism + '</td>' +
+    '<td>' + (edge.mode ? modeCell(edge.mode)
+      : '<span class="state-none" title="Impersonation and delegation are ' +
+        'properties of a DELEGATION mechanism. An ordinary grant makes neither ' +
+        'claim, and calling it one would be this console inventing a judgement.' +
+        '">&mdash;</span>') + '</td>' +
+    '<td class="num">' + (edge.acts
+      ? esc(edge.acts) + (edge.relation === 'signed-in' ? ''
+          : ' — <span class="state-valid">' + esc(edge.issued) + ' issued</span>' +
+            (edge.refused
+              ? ', <span class="state-revoked">' + esc(edge.refused) +
+                ' refused</span>' : ''))
+      : '<span class="state-none">&mdash;</span>') + '</td>' +
+    '<td class="num">' + (edge.credentials
+      ? '<strong>' + esc(edge.credentials) + '</strong>'
+      : '<span class="state-none">0</span>') + '</td>' +
+    '<td class="who">' + ((edge.produced || []).length
+      ? edge.produced.map(function (one) {
+          return '<code>' + esc(one.kind) + '</code> × ' + esc(one.count) +
+            (one.identifiers.length
+              ? '<br>' + one.identifiers.map(function (id) {
+                  return shortened(id, 10);
+                }).join(' ') +
+                (one.moreIdentifiers ? ' <span class="state-none">+' +
+                  esc(one.moreIdentifiers) + ' more</span>' : '')
+              : '');
+        }).join('<br>')
+      : '<span class="state-none">&mdash;</span>') + '</td>' +
+    '</tr>';
+}
+
+// ---------------------------------------------------------------------------
+// GET /admin/delegation/user?user=… — ONE PERSON, END TO END.
+//
+// The FOURTH drill-down of /admin/delegation and the only page in this console
+// that draws MORE than the delegation register. That is the whole of what makes
+// it worth having and it is worth stating plainly rather than leaving to be
+// discovered: /admin/delegation/map answers *what talks to what*,
+// /admin/delegation/application answers *what exists because of this
+// application*, and neither of them can answer *what has this service done in
+// alice's name* — because most of what it has done in alice's name is not a
+// delegation. An authorization code grant is not an act. A Kerberos AS-REQ is
+// not an act. A SAML assertion is not an act. Drawn from the delegation
+// register alone, a person who signed in nine times and holds twenty tokens is
+// an empty picture.
+//
+// **SO IT IS A UNION OF TWO REGISTERS AND THE UNION IS NOT HERE.** It is in
+// `common/user_graph.js`, which holds the model for the reason every other
+// store rule in this console holds: what counts as one credential seen twice,
+// what a `client_id` on a token and an `application` on a party have in common,
+// and which spelling of a person is THE spelling are statements about the
+// stores, and a renderer holding a second opinion about any of them is drift
+// nothing can see. This file renders what it is handed, and every table below
+// is drawn from the same graph the picture is.
+//
+// **WHAT THE PICTURE GAINS IS TWO KINDS OF LINE**, and each answers a question
+// the delegation picture cannot:
+//
+//   * a DOTTED line from the person into the hexagon — they authenticated, in
+//     that family, by that method. It is the OIDC/Kerberos/SAML *authentication*
+//     half, and without it the diagram shows tokens beside somebody who, as far
+//     as it goes, has never been here.
+//   * a SOLID indigo line from the person to an application — a credential
+//     naming them was issued to it, LABELLED WITH THE GRANT: `Authorization
+//     Code grant`, `Refresh Token grant`, `Client Credentials grant`, with RFC
+//     6749's section beside it and OpenID Connect's name for the same exchange
+//     where it has one.
+//
+// Neither takes a MODE colour, and that is deliberate rather than an omission:
+// amber and green are this console's judgement about impersonation versus
+// delegation, and an ordinary grant makes no such claim. A reader who has learnt
+// that pairing from the delegation table would be told something false by a
+// green authorization code grant.
+//
+// **A TOKEN EXCHANGE IS IN BOTH REGISTERS AND IS DRAWN ONCE**, on its delegation
+// line, because that line says strictly more (it names the actor and the mode).
+// The count of what was left off is printed rather than left to be noticed. A
+// Kerberos S4U ticket is the one overlap that survives, because a ticket has no
+// identifier in either register to collapse the two on — the page says so where
+// it matters rather than pretending the picture is exact.
+//
+// **THE CHOICE IS FROM A LIST AND A BARE PAGE IS THE CHOOSER**, both of them
+// /admin/delegation/application's rules and both for its reasons. The list
+// unions the identity register with the delegation register, so it offers
+// people nothing was ever issued to — somebody an S4U2Self named who has never
+// been near this service is exactly the row worth opening.
+//
+// No form that CHANGES anything, so no operation on /admin-api — rule 7 as the
+// other three drill-downs satisfy it. `?format=json` carries the person, their
+// credentials, their acts and the graph; `?format=svg` is the picture alone.
+// ---------------------------------------------------------------------------
+app.get('/admin/delegation/user', function (req, res) {
+  log.debug("Entering the admin delegation user page.");
+  const asked = String(req.query.user || '').trim();
+  // Normalised the way the identity register normalises one, so a link carrying
+  // `alice@STS.MOCK` — which is what a reader will paste out of the acts table —
+  // finds the same person the chooser's own link does. It is the same
+  // normalisation /admin/users applies to its own `?user=`.
+  const key = stats.identityKeyOf(asked);
+  const known = knownUserKeys();
+  const catalogue = userGraph.userList();
+  const activity = key ? userGraph.activityFor(key) : null;
+  // An empty graph rather than none when nobody is selected: `?format=svg` is
+  // answered before the chooser is drawn, and a route that answered HTML there
+  // would send a browser a diagram it asked for as an image.
+  const graph = activity ? activity.graph : delegation.graph([]);
+  const look = delegationLooks(graph, known);
+
+  // WHAT THE ISSUANCE HALF ADDS TO A TOOLTIP. `delegationNodeLook()` is the one
+  // answer to "what is this box" and must stay that way — it is what keeps this
+  // page, the map and the two other drill-downs drawing one party one way — so
+  // the credentials are APPENDED to what it said rather than folded into it.
+  graph.nodes.forEach(function (node) {
+    const entry = look.looks[node.id];
+    if (!entry || node.kind === 'sts') {
+      return;
+    }
+    // A CLIENT IS DRAWN AS AN APPLICATION, and only where neither store has an
+    // opinion. `delegationNodeLook()`'s fallback is the shape the ROLE implies
+    // and the subject of this page is an initial identity, so a
+    // `client_credentials` client — which is a client BY ITS OWN SAYING, at the
+    // one funnel that can know — was coming out as a stick figure. Where the
+    // directory or the registry DOES know it, that answer stands: the fallback
+    // is what is being corrected, not the stores.
+    if (node.isClient && entry.dashed) {
+      entry.shape = 'application';
+      entry.sublabel = 'a client, not a person';
+    }
+    const extra = [];
+    if (node.isSubject) {
+      extra.push('THIS IS THE PERSON THIS PAGE IS ABOUT.');
+    }
+    if (node.isClient) {
+      extra.push('It is a CLIENT rather than a person: something ' +
+                 'authenticated under this name and said the client is the ' +
+                 'identity, which the client_credentials grant is the usual ' +
+                 'way of doing.');
+    }
+    if (node.credentials) {
+      extra.push(node.credentials + ' credential(s) issued' +
+                 (node.isSubject ? ' naming them' : ' to it') +
+                 (node.kinds.length ? ': ' + node.kinds.join(', ') : '') + '.');
+    }
+    if (node.flows.length) {
+      extra.push('By: ' + node.flows.join(', ') + '.');
+    }
+    if (node.authentications) {
+      extra.push(node.authentications + ' authentication(s) here.');
+    }
+    if (extra.length) {
+      entry.title = entry.title + '\n' + extra.join('\n');
+    }
+  });
+
+  const drawingLabel = activity
+    ? 'Everything issued in the name of ' + activity.key
+    : 'People and the credentials issued in their name';
+
+  if (String(req.query.format || '') === 'svg') {
+    sendDelegationSvg(res, graph, look, drawingLabel);
+    log.debug("Leaving the admin delegation user page. Answered SVG.");
+    return;
+  }
+
+  const listView = listViewOf('/admin/delegation', req.query);
+  const up = upTo('/admin/delegation', 'One person', listView);
+  const back = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the delegation table</a>');
+  const chooser = delegationUserChooser(catalogue, key, listView);
+
+  if (!activity) {
+    const inner = messagesOf(req) + back +
+      (asked
+        ? note('<strong>Neither register names ' +
+          '<code>' + esc(asked) + '</code>.</strong> Three things could be true ' +
+          'and they are different: nothing has ever authenticated, been issued ' +
+          'anything or been delegated under that name; something did and the ' +
+          'records have been DROPPED, because each of these stores keeps a ' +
+          'bounded number and discards the oldest; or the name is spelled ' +
+          'differently from the way a protocol presented it. The list below is ' +
+          'every identity either register actually holds, which settles the ' +
+          'third.')
+        : '') +
+      note('<strong>Choose a person to see everything this service ' +
+      'has done in their name.</strong> Not just the delegations — this is the ' +
+      'one picture here that also draws the ordinary issuance: every OAuth 2.0 ' +
+      'grant and OIDC flow, every SAML assertion, every Kerberos ticket and ' +
+      'every SVID, each labelled with exactly what produced it, beside the ' +
+      'applications that hold them and the sign-ins the whole lot rests on.') +
+      chooser +
+      delegationUserTable(catalogue, known, listView) +
+      note('The list is the identity register and the delegation ' +
+      'register UNIONED, which is why a row can say <em>never authenticated ' +
+      'here</em>: a delegation names somebody who was not present and proved ' +
+      'nothing — that is what S4U2Self and <code>OnBehalfOf</code> ARE — so ' +
+      'their name exists here and in no other list this console keeps.');
+    respond(req, res, { user: null, asked: asked || null, users: catalogue },
+            'Delegation — one person', '/admin/delegation', inner, up);
+    log.debug("Leaving the admin delegation user page. " +
+              (asked ? "Nothing named that." : "Drew the chooser."));
+    return;
+  }
+
+  const parties = graph.nodes.filter(function (node) {
+    return node.kind !== 'sts';
+  });
+  const picture = delegationDrawing(graph, look, '/admin/delegation/user',
+                                    Object.assign({}, listView,
+                                                  { user: activity.key }),
+                                    drawingLabel);
+  const entry = activity.entry;
+
+  const inner = messagesOf(req) + back +
+    '<div class="tiles">' +
+      tile(activity.counts.credentials, 'credentials issued') +
+      tile(activity.counts.authentications, 'sign-ins') +
+      tile(activity.flows.length, 'grants used') +
+      tile(activity.counts.applications, 'other parties') +
+      tile(activity.counts.acts, 'delegation acts') +
+      tile(activity.counts.chains, 'delegation relationships') +
+    '</div>' +
+
+    note('<strong><code>' + esc(activity.key) + '</code></strong> — ' +
+    (entry.authenticated
+      ? 'they have <a href="' + esc('/admin/users' +
+          queryWith({ user: activity.key }, {})) + '">authenticated here</a> ' +
+        esc(entry.authentications) + ' time(s)'
+      : '<span class="state-expired" title="Nothing has ever presented a ' +
+        'credential under this name in this process. Something was issued in ' +
+        'it, or somebody delegated using it — which is exactly the state this ' +
+        'page exists to make visible.">they have NEVER authenticated here</span>') +
+    (entry.isClient
+      ? '. It is a <strong>client rather than a person</strong>: something ' +
+        'authenticated under this name and said so, which the ' +
+        '<code>client_credentials</code> grant is the usual way of doing'
+      : '') +
+    (entry.forms.length > 1
+      ? '. They have been spelled ' + entry.forms.length + ' ways and they are ' +
+        'one person here: ' + codeList(entry.forms) +
+        '. Two spellings of one identity is two people, so the console collapses ' +
+        'them on the same normalisation the picture uses'
+      : '') +
+    '. Protocols: ' + (entry.protocols.length ? codeList(entry.protocols) : 'none') +
+    '. Last seen ' + esc(whenText(entry.lastAt)) + '.') +
+
+    '<h2>Everything, as one picture</h2>' +
+    note('<strong>This is the page.</strong> The dotted line into the ' +
+    'hexagon is them SIGNING IN, and it is why anything else here was allowed. ' +
+    'Every solid indigo line is a credential issued NAMING them, labelled with ' +
+    'the exact grant or flow that produced it: out of THEM it went to that ' +
+    'application, and out of the HEXAGON nobody else holds it — a ' +
+    '<code>client_credentials</code> token is about the client itself and an ' +
+    'X509-SVID has no audience. The amber and green lines, where there are any, are ' +
+    'delegations — somebody acting on their behalf — and they are the only ' +
+    'lines here that carry a mode, because impersonation and delegation are ' +
+    'properties of a delegation mechanism and an ordinary grant makes neither ' +
+    'claim.') +
+    picture.html +
+
+    '<h2>The key</h2>' +
+    note('The shapes are drawn by the same functions the picture ' +
+    'uses, so a legend cannot come to describe a diagram this service no longer ' +
+    'draws. The last two rows are this page\'s own — no other picture in this ' +
+    'console has a line for an ordinary grant, because no other picture is ' +
+    'drawn from anything but the delegation register.') +
+    delegationMapKey({ issuance: true }) +
+
+    '<h2>What was used to get a credential</h2>' +
+    note('<strong>Exactly which OAuth 2.0 grant or OpenID Connect ' +
+    'flow, with the section that defines it.</strong> Only the ones this ' +
+    'person\'s credentials actually used are here; the rest of the table is on ' +
+    'no page, because a list of eight grants under a person who used one is a ' +
+    'list nobody reads. A SAML assertion, a Kerberos ticket and an SVID have no ' +
+    'grant at all and are not in this table — the credentials below say what ' +
+    'their own specifications call the mechanism instead.') +
+    (activity.flows.length
+      ? '<table><tr><th>Grant</th><th>OpenID Connect calls it</th>' +
+        '<th>Specification</th><th>Through a browser</th><th>What it is</th></tr>' +
+        activity.flows.map(function (flow) {
+          return '<tr>' +
+            '<td><code>' + esc(flow.flow) + '</code><br>' +
+              '<strong>' + esc(flow.label) + '</strong></td>' +
+            '<td>' + (flow.oidc ? esc(flow.oidc)
+              : '<span class="state-none" title="OpenID Connect defines no ' +
+                'flow of its own for this grant — it is OAuth 2.0\'s, used as ' +
+                'it is.">&mdash;</span>') + '</td>' +
+            '<td>' + esc(flow.spec) + '</td>' +
+            '<td>' + (flow.browser
+              ? '<span class="state-valid" title="The person was at an ' +
+                'authorization endpoint in a browser, so this issuance can be ' +
+                'put under a sign-on session.">yes</span>'
+              : '<span class="state-none" title="A direct grant: there is no ' +
+                'browser anywhere in it, which is why its credentials are ' +
+                'listed with no session.">no</span>') + '</td>' +
+            '<td>' + esc(flow.what) +
+              (flow.delegating
+                ? ' <strong>It is also a delegation act</strong>, so its ' +
+                  'credentials are drawn on the delegation line rather than ' +
+                  'twice.'
+                : '') + '</td>' +
+            '</tr>';
+        }).join('') + '</table>'
+      : note('No credential of theirs states a grant. That is the ' +
+        'ordinary state for somebody who has only ever been issued assertions, ' +
+        'tickets or SVIDs — none of those protocols has a grant — and for a ' +
+        'JWT minted outside the token endpoint.')) +
+
+    '<h2>Every credential issued in their name</h2>' +
+    note('<strong>The issued register: every JWT, assertion, ticket, ' +
+    'SVID and verifiable credential this service has minted naming them, newest ' +
+    'first.</strong> <strong>NO CREDENTIAL IS EVER HERE, only its kind and its ' +
+    'identifier</strong> — the rule the audit log follows — and a Kerberos ' +
+    'ticket genuinely has none to quote. <em>Went to</em> is the application ' +
+    'that holds it: a token\'s <code>client_id</code>, an assertion\'s ' +
+    'audience, the service principal a ticket was cut for. Nothing holds an ' +
+    'X509-SVID, which is why some rows have none.' +
+    (activity.onDelegationLines
+      ? ' <strong>' + esc(activity.onDelegationLines) + ' more are not in this ' +
+        'table</strong> and are not missing: a token exchange writes a row in ' +
+        'BOTH registers for one credential, so those are listed under the ' +
+        'delegation acts below, where the row says more — it names the actor ' +
+        'and whether the far end can see them.'
+      : '')) +
+    '<table><tr><th>When</th><th>Credential</th><th>What issued it</th>' +
+    '<th>Went to</th><th>State</th><th>Session</th></tr>' +
+    (activity.credentials.map(function (credential) {
+      return userCredentialRow(credential, known);
+    }).join('') || '<tr><td colspan="6">Nothing has been issued naming them. ' +
+      'For somebody only a delegation names — an S4U2Self subject, an ' +
+      '<code>OnBehalfOf</code> — that is the expected state and not a broken ' +
+      'one.</td></tr>') + '</table>' +
+    note('The same rows with their revoke buttons, grouped by the ' +
+    'sign-on session each was issued on, are on <a href="' +
+    esc('/admin/users' + queryWith({ user: activity.key }, {})) +
+    '">their page in the identity register</a>. This page draws the ' +
+    'RELATIONSHIPS; that one is where a token is acted on.') +
+
+    '<h2>The parties</h2>' +
+    note('Every box in the picture above, including them. A box with ' +
+    'credentials and no delegation roles is an ordinary client — it has never ' +
+    'been part of a delegation, which is a fact about the other register rather ' +
+    'than a gap here.') +
+    '<table><tr><th>Label</th><th>Drawn as</th><th>Identity</th>' +
+    '<th>Credentials</th><th>By</th><th>Delegation roles</th><th>Acts</th>' +
+    '<th>Protocols</th></tr>' +
+    (parties.map(function (node) {
+      return userNodeRow(node, known, look.looks[node.id]);
+    }).join('') || '<tr><td colspan="8">No parties.</td></tr>') + '</table>' +
+
+    '<h2>Every line, in words</h2>' +
+    note('The picture read as a table, because a diagram nobody can ' +
+    'quote is a diagram nobody can put in a bug report. <strong>Acts and ' +
+    'credentials are different units</strong> and have their own columns: an ' +
+    'act is one delegation exchange, a credential is one thing that came out of ' +
+    'the issued register, and a line can carry either, both or — a refused ' +
+    'delegation — acts and nothing else.') +
+    '<table><tr><th>From</th><th>To</th><th>Relationship</th>' +
+    '<th>Mechanism or grant</th><th>Kind</th><th>Acts</th><th>Credentials</th>' +
+    '<th>What came out</th></tr>' +
+    (graph.edges.map(function (edge) {
+      return userEdgeRow(edge, look.labelOf);
+    }).join('') || '<tr><td colspan="8">No lines.</td></tr>') + '</table>' +
+
+    (activity.acts.length
+      ? '<h2>Every delegation act naming them</h2>' +
+        note('The rows <a href="' + esc(up.href) + '">the delegation ' +
+        'table</a> holds, narrowed to this person and not paged — in ANY of the ' +
+        'three roles, because the whole reason to look somebody up in a ' +
+        'delegation register is that their name appears in exchanges they were ' +
+        'never present for. This is where the REFUSALS are: a refusal produced ' +
+        'no credential, so it is in this table and in none of the ones above.') +
+        '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
+        '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
+        '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
+        '<th>Credentials</th></tr>' +
+        activity.acts.map(function (row) {
+          return delegationRow(row, known, { listView: listView });
+        }).join('') + '</table>'
+      : '<h2>Delegation</h2>' +
+        note('No delegation act names them, in any role. Everything ' +
+        'above was issued to them directly — which is the ordinary state, since ' +
+        'three of the sixteen families here can delegate at all.')) +
+
+    '<h2>Somebody else</h2>' + chooser +
+    delegationUserTable(catalogue, known, listView) +
+
+    note('<code>?format=json</code> carries this person, their ' +
+    'credentials with the grant on each, their acts and the graph behind the ' +
+    'picture; <code>?format=svg</code> is the document alone. There is no form ' +
+    'that changes anything on this page and therefore no operation on ' +
+    '<code>/admin-api</code> — the acts are in ' +
+    '<code>GET /admin-api/delegation</code> and the tokens in ' +
+    '<code>GET /admin-api/users</code>.');
+
+  respond(req, res, {
+    user: entry,
+    asked: asked,
+    // The whole model, so a test can assert what the page draws without parsing
+    // an SVG — the property /admin/delegation/map's header insists on, kept
+    // here for the same reason.
+    credentials: activity.credentials,
+    flows: activity.flows,
+    onDelegationLines: activity.onDelegationLines,
+    acts: activity.acts,
+    graph: graph,
+    counts: activity.counts,
+    users: catalogue,
+    drawing: { width: picture.drawn.width, height: picture.drawn.height,
+               failed: picture.drawn.failed || null }
+  }, 'Delegation — one person', '/admin/delegation', inner, up);
+  log.debug("Leaving the admin delegation user page. " +
+            activity.credentials.length + " credential(s), " +
+            activity.acts.length + " act(s).");
 });
 
 // ---------------------------------------------------------------------------
@@ -6501,22 +8058,22 @@ const GROUP_SUBJECT = { upper: 'The group below', lower: 'the group below',
 // afternoon looking for a directory that was there all along.
 function directoryListenerWarning(info, subject) {
   if (!info.listening && !info.ldapsListening) {
-    return '<div class="warn"><strong>The directory\'s listeners are not up</strong> — ' +
+    return warn('<strong>The directory\'s listeners are not up</strong> — ' +
       esc(info.listenError || 'it never bound') + '. ' + subject.upper + ' ' + subject.verb +
       ' in this process\'s store and ' + subject.verb + ' what an LDAP client WOULD read; ' +
       'right now no client can connect, most likely because TCP ' + esc(info.port) +
-      ' was already taken. This page is HTTP and answers either way.</div>';
+      ' was already taken. This page is HTTP and answers either way.');
   }
   if (!info.listening) {
-    return '<div class="warn"><strong>The directory\'s plain listener is not up</strong> — ' +
+    return warn('<strong>The directory\'s plain listener is not up</strong> — ' +
       esc(info.listenError || 'it never bound') + ' — but <strong>LDAPS on ' +
       esc(info.ldapsPort) + ' is</strong>, so ' + subject.lower + ' ' + subject.verb +
-      ' reachable over TLS. TCP ' + esc(info.port) + ' was most likely already taken.</div>';
+      ' reachable over TLS. TCP ' + esc(info.port) + ' was most likely already taken.');
   }
   if (info.ldapsPort && !info.ldapsListening) {
-    return '<div class="warn">The plain listener on ' + esc(info.port) + ' is up; ' +
+    return warn('The plain listener on ' + esc(info.port) + ' is up; ' +
       '<strong>LDAPS is not</strong>. That affects how ' + subject.lower + ' can be ' +
-      'reached, not whether ' + subject.pronoun + ' ' + subject.verb + ' there.</div>';
+      'reached, not whether ' + subject.pronoun + ' ' + subject.verb + ' there.');
   }
   return '';
 }
@@ -6688,26 +8245,26 @@ function ldapObjectSection(row, key) {
     log.debug("Leaving ldapObjectSection(). No directory is loaded.");
     return {
       html: heading +
-        '<p class="note">No LDAP directory is loaded in this process, so there is no entry to ' +
+        note('No LDAP directory is loaded in this process, so there is no entry to ' +
         'show. That is a build of this service without <code>ldap_server.js</code> and not a ' +
-        'failure — every other section of this page is unaffected.</p>',
+        'failure — every other section of this page is unaffected.'),
       json: null
     };
   }
   const info = directoryReader(key);
-  const link = '<p class="note"><a href="/ldap">What this directory is</a> &middot; ' +
+  const link = note('<a href="/ldap">What this directory is</a> &middot; ' +
     '<a href="/ldap/directory">every entry in it</a> &middot; ' +
-    '<a href="/ldap/directory?format=json">the same as JSON</a>.</p>';
+    '<a href="/ldap/directory?format=json">the same as JSON</a>.');
   // Said on every branch, including the ones with an entry: the entry can be there
   // and the socket down, and a reader who trusts this page to mean "an LDAP client
   // can fetch this" needs to know which.
   const listener = directoryListenerWarning(info, ENTRY_SUBJECT);
   const alsoNamed = info.alsoNamed.length
-    ? '<p class="note">' + info.alsoNamed.length + ' other entr' +
+    ? note(info.alsoNamed.length + ' other entr' +
       (info.alsoNamed.length === 1 ? 'y names' : 'ies name') + ' this uid: ' +
       codeList(info.alsoNamed) + '. Those were written through the protocol rather than seeded ' +
       'by an authentication — this directory has no schema and does not require a uid to be ' +
-      'unique, so they are shown rather than merged.</p>'
+      'unique, so they are shown rather than merged.')
     : '';
 
   if (!info.found) {
@@ -6749,7 +8306,7 @@ function ldapObjectSection(row, key) {
     log.debug("Leaving ldapObjectSection(). There is no entry at " + info.dn + ".");
     return {
       html: heading + listener +
-        '<p class="note">' + intro + ' ' + because + '</p>' + alsoNamed + link,
+        note(intro + ' ' + because) + alsoNamed + link,
       json: info
     };
   }
@@ -6757,29 +8314,29 @@ function ldapObjectSection(row, key) {
   const entry = info.entry;
 
   const html = heading + listener +
-    '<p class="note">The entry the embedded directory holds for this person &mdash; the object ' +
+    note('The entry the embedded directory holds for this person &mdash; the object ' +
     'itself and not a copy of it, so an LDAP client bound to <code>ldap://&lt;host&gt;:' +
     esc(info.port) + '</code> reading <code>' + esc(entry.dn) + '</code> sees exactly this. It ' +
     'appeared the first time they authenticated through any protocol here, and it carries no ' +
     'password: <strong>every bind to this directory succeeds anyway</strong>, whatever DN and ' +
-    'whatever password, so nothing in this object is a credential.</p>' +
+    'whatever password, so nothing in this object is a credential.') +
     '<table><tr><th>DN</th><th>Came from</th><th>Created</th><th>Last modified</th></tr>' +
     '<tr><td><code>' + esc(entry.dn) + '</code></td>' +
     '<td>' + esc(entry.origin) + '</td>' +
     '<td><code>' + esc(entry.createdAt) + '</code></td>' +
     '<td><code>' + esc(entry.modifiedAt) + '</code></td></tr></table>' +
-    '<p class="note">The two timestamps are <em>generalized time</em> ' +
+    note('The two timestamps are <em>generalized time</em> ' +
     '(<code>YYYYMMDDHHMMSSZ</code>), which is what a directory shows &mdash; not the ISO 8601 ' +
     'strings the rest of this console uses. The difference is only punctuation and it is kept ' +
     'because a debugger that showed one where the protocol carries the other would be showing ' +
-    'the wrong thing.</p>' +
+    'the wrong thing.') +
     attributeTable(entry) +
-    '<p class="note">Every attribute the entry has, operational ones included. This directory is ' +
+    note('Every attribute the entry has, operational ones included. This directory is ' +
     '<strong>schemaless</strong>: no <code>objectClass</code> is enforced and no value is checked ' +
     'against a syntax, so an attribute a real directory would refuse is here because something ' +
     'wrote it. The <code>description</code> values are this service\'s own note of which ' +
     'protocols this person has authenticated through &mdash; one line per protocol, added the ' +
-    'first time each is seen.</p>' +
+    'first time each is seen.') +
     alsoNamed + link;
 
   log.debug("Leaving ldapObjectSection(). " + Object.keys(entry.attributes).length +
@@ -6914,9 +8471,9 @@ function authenticationTable(row) {
              'they are known here only as the subject of something that was issued.</td></tr>') +
     '</table>' +
     (row.eventsForgotten > 0
-      ? '<p class="note">The most recent ' + stats.MAX_EVENTS_PER_USER + ' of ' +
+      ? note('The most recent ' + stats.MAX_EVENTS_PER_USER + ' of ' +
         (row.eventsForgotten + row.events.length) + ' authentication(s); the rest have been ' +
-        'forgotten. The counts above them are of all of them and are not capped.</p>'
+        'forgotten. The counts above them are of all of them and are not capped.')
       : '');
 }
 
@@ -7048,7 +8605,7 @@ function userDetailPage(req, key) {
       tile(expired, 'tokens expired') +
       tile(detail.artifacts.length, 'assertions, tickets, credentials') +
     '</div>' +
-    '<p class="note">Everything below is about the identity <code>' + esc(row.name) + '</code>, ' +
+    note('Everything below is about the identity <code>' + esc(row.name) + '</code>, ' +
     'which is <a href="/admin/users">one row of the users list</a>. ' +
     (row.authenticated
       ? 'They have presented a credential to this service ' + row.authentications + ' time(s).'
@@ -7059,18 +8616,33 @@ function userDetailPage(req, key) {
     (row.isClient
       ? ' <strong>This is a client, not a person</strong>: it appears here because ' +
         '<code>client_credentials</code> produces tokens with a subject and no human behind them.'
-      : '') + '</p>' +
+      : '')) +
+
+    // THE SAME PERSON AS A PICTURE. This page is the LEDGER — every token with
+    // its state and its revoke button, grouped by the session it was issued on
+    // — and the diagram is the RELATIONSHIPS: who holds what, by which grant,
+    // and who delegated in their name. Neither is the other's summary, so the
+    // link says which question the other page answers rather than offering
+    // itself as "more detail".
+    note('<a class="btn" href="' +
+      esc('/admin/delegation/user' + queryWith({ user: key }, {})) +
+      '">See this as a picture &rarr;</a> ' +
+    '<strong>Everything issued in their name, drawn.</strong> Every credential ' +
+    'as a line to the application holding it, labelled with the exact OAuth 2.0 ' +
+    'grant or OpenID Connect flow that produced it; their sign-ins as lines into ' +
+    'this service; and any delegation naming them in the same diagram. Tokens ' +
+    'are revoked HERE — that page draws and changes nothing.') +
 
     '<h2>Names this identity has been seen under</h2>' +
-    '<p class="note">One person reaches this service under several spellings and they are the same ' +
-    'row here — see the note at the top of the users list for what that costs.</p>' +
+    note('One person reaches this service under several spellings and they are the same ' +
+    'row here — see the note at the top of the users list for what that costs.') +
     '<table><tr><th>As presented</th><th class="num">Times</th></tr>' +
     (row.forms.map(function (form) {
       return '<tr><td><code>' + esc(form.form) + '</code></td><td class="num">' + form.count + '</td></tr>';
     }).join('') || '<tr><td colspan="2">—</td></tr>') + '</table>' +
     (row.realms.length
-      ? '<p class="note">Kerberos realm(s): ' +
-        codeList(row.realms.map(function (r) { return r.realm; })) + '.</p>'
+      ? note('Kerberos realm(s): ' +
+        codeList(row.realms.map(function (r) { return r.realm; })) + '.')
       : '') +
 
     '<h2>How they authenticated</h2>' +
@@ -7092,51 +8664,51 @@ function userDetailPage(req, key) {
                 filterOnly(listViewOf('/admin/users', req.query))) +
 
     '<h2>Sessions, and what was issued on each</h2>' +
-    '<p class="note">A <strong>sign-on session</strong> is a browser holding the ' +
+    note('A <strong>sign-on session</strong> is a browser holding the ' +
     '<code>sts_mock_session</code> cookie, shared between the OAuth 2.0 / OIDC login screen and ' +
     'WS-Federation. A token is placed under a session because the issuance said so — no token ' +
     'this service issues carries a session identifier, and OIDC\'s <code>sid</code> claim is for ' +
     'front-channel logout, so inventing one to make this page easier would change what every ' +
     'client receives. The link is recorded out of band at issuance instead, and it survives a ' +
     'refresh: a refreshed token is looked up by the refresh token\'s <code>jti</code> and lands ' +
-    'under the same session.</p>' +
+    'under the same session.') +
     sessionsNav +
-    (sessionBlocks || '<p class="note">This user holds no sign-on session. That is the normal state ' +
+    (sessionBlocks || note('This user holds no sign-on session. That is the normal state ' +
       'for every identity that never used a browser here — a password grant, a Kerberos client, a ' +
-      'WS-Trust requester — and for anyone whose session has expired and been swept.</p>') +
+      'WS-Trust requester — and for anyone whose session has expired and been swept.')) +
     sessionsNav +
 
     (split.ended.length
       ? '<h3>Issued on a session that has since ended</h3>' +
-        '<p class="note">These name a session this service no longer holds. It is not an error and ' +
+        note('These name a session this service no longer holds. It is not an error and ' +
         'it is the ordinary end state: the session expired or was signed out, and the tokens it ' +
         'produced outlived it — which is exactly the position a client is in when its access token ' +
-        'still verifies and the browser would be asked to sign in again.</p>' +
+        'still verifies and the browser would be asked to sign in again.') +
         endedNav + userTokenTable(endedPage.shown, back, '') + endedNav
       : '') +
 
     (split.sessionless.length
       ? '<h3>Issued with no browser session at all</h3>' +
-        '<p class="note">The grants that never involve a browser: <code>password</code>, ' +
+        note('The grants that never involve a browser: <code>password</code>, ' +
         '<code>client_credentials</code>, OID4VCI\'s pre-authorized code, and token exchange. The ' +
         'Grant column says which. An empty Grant means the token was minted somewhere that states ' +
-        'nothing about how — WS-Trust\'s JWT and the credential issuer both sign directly.</p>' +
+        'nothing about how — WS-Trust\'s JWT and the credential issuer both sign directly.') +
         sessionlessNav + userTokenTable(sessionlessPage.shown, back, '') + sessionlessNav
       : '') +
 
     '<h2>Assertions, tickets and credentials</h2>' +
-    '<p class="note">None of these can be revoked here and the console does not pretend otherwise: ' +
+    note('None of these can be revoked here and the console does not pretend otherwise: ' +
     'nothing consults this service about a SAML assertion, a Kerberos ticket or a credential, so a ' +
     'button would change a number on this page and nothing at all out there. The only distinction ' +
-    'is whether the validity window has closed.</p>' +
+    'is whether the validity window has closed.') +
     artifactNav + userArtifactTable(artifactPage.shown) + artifactNav +
 
     directory.html +
 
     '<h2>Invalidate everything for this user</h2>' +
-    '<p class="note">Every access token, ID Token and refresh token held for this identity under ' +
+    note('Every access token, ID Token and refresh token held for this identity under ' +
     'any of its spellings, revoked through the same set <code>/oauth2/revoke</code> writes to. ' +
-    'Assertions and tickets are untouched, for the reason above.</p>' +
+    'Assertions and tickets are untouched, for the reason above.') +
     '<form method="post" action="/admin/tokens">' +
       '<input type="hidden" name="action" value="revoke-user">' +
       '<input type="hidden" name="user" value="' + esc(key) + '">' +
@@ -7271,12 +8843,12 @@ function usersListPage(req) {
       tile(all.filter(function (row) { return row.isClient; }).length, 'clients, not people') +
       tile(Object.keys(liveByUser).length, 'with an active session') +
     '</div>' +
-    '<p class="note">Every userid this service has been given as part of an interaction that ' +
+    note('Every userid this service has been given as part of an interaction that ' +
     'succeeded — the name typed at either sign-in screen, the one on a password grant, the subject ' +
     'of a WS-Security <code>UsernameToken</code>, the client principal in a Kerberos AS-REQ or an ' +
     'accepted AP-REQ, and the subject of an exchanged token. A request that was REFUSED records ' +
     'nothing, so this is a list of identities that got somewhere rather than of names that were ' +
-    'tried. Click a name for its sessions and everything issued to it.</p>' +
+    'tried. Click a name for its sessions and everything issued to it.') +
     // WHERE AN ISSUED SPIFFE IDENTITY LANDS ON THIS TABLE, said here because
     // the row it produces is easy to misread. It has an artifact and NO
     // authentication, so it falls in the "seen only as a subject" tile above —
@@ -7285,7 +8857,7 @@ function usersListPage(req) {
     // receiving a credential is not presenting one, and an agent holding
     // FetchX509SVID open re-mints every half-lifetime, so one workload left
     // running overnight would read as several hundred authentications.
-    '<p class="note"><strong>An identity this trust domain has only ISSUED a ' +
+    note('<strong>An identity this trust domain has only ISSUED a ' +
     'certificate to is here with <em>never</em> in the Authenticated column' +
     '</strong> &mdash; it counts under &ldquo;seen only as a subject&rdquo;. ' +
     'Being issued a credential is not presenting one, and an agent re-mints ' +
@@ -7293,15 +8865,15 @@ function usersListPage(req) {
     'hundreds of sign-ins. It also gets a directory entry under ' +
     '<code>ou=users</code> carrying the certificate it currently holds &mdash; ' +
     'see <a href="/ldap/directory">the directory</a> and ' +
-    '<a href="/admin/spiffe">SPIFFE</a>.</p>' +
-    '<div class="warn"><strong>One row is one local name, across every protocol.</strong> The same ' +
+    '<a href="/admin/spiffe">SPIFFE</a>.') +
+    warn('<strong>One row is one local name, across every protocol.</strong> The same ' +
     'person arrives here as <code>alice</code> at the login screen, ' +
     '<code>urn:sts-mock:user:alice</code> in every token and <code>alice@STS.MOCK</code> as a ' +
     'Kerberos principal, and showing three rows for that would be a worse answer than one — the ' +
     'premise of this service is that the name you type is who you are in every protocol at once. ' +
     'What it costs: two different people called <code>alice</code> in two Kerberos realms are one ' +
     'row here. The Realms column is what makes that visible. Case is never collapsed, because ' +
-    'nothing in this service treats <code>Alice</code> and <code>alice</code> as one.</div>' +
+    'nothing in this service treats <code>Alice</code> and <code>alice</code> as one.') +
 
     '<form method="get" action="/admin/users"><div class="formrow">' +
       '<label for="q">Name contains</label>' +
@@ -7328,7 +8900,7 @@ function usersListPage(req) {
                'placeholder="username" required>' +
         '<button>Create</button>' +
       '</div>' +
-      '<p class="note">Puts an entry in the embedded LDAP directory at ' +
+      note('Puts an entry in the embedded LDAP directory at ' +
       // THE REALM'S OWN CONTAINER, ASKED FOR RATHER THAN BUILT HERE. This read
       // `ou=users,` + config.value('ldap.baseDn') until 2026-08-25, which is
       // the NAMING CONTEXT and is the default realm's container only: under
@@ -7346,7 +8918,7 @@ function usersListPage(req) {
       '<code>POST /admin-api/users/create</code> get, because all three call one function. ' +
       'The new user will not appear in the table below until they authenticate somewhere: that ' +
       'is who this service has SEEN, and this is what the directory HOLDS. No password is set, ' +
-      'because none is ever checked.</p>' +
+      'because none is ever checked.') +
     '</form>' +
     nav +
     '<table><tr><th>User</th><th>Kind</th><th>Authenticated</th><th>Protocols</th><th>Realms</th>' +
@@ -7357,16 +8929,15 @@ function usersListPage(req) {
     (rows || '<tr><td colspan="14">Nobody matches. Nothing has authenticated here yet unless a ' +
              'filter above is hiding it.</td></tr>') + '</table>' +
     nav +
-    '<p class="note">' + filtered.length + ' identit' + (filtered.length === 1 ? 'y' : 'ies') +
+    note(filtered.length + ' identit' + (filtered.length === 1 ? 'y' : 'ies') +
     ' match; ' + all.length + ' known in total, most recently active first. An identity marked ' +
     '<em>never</em> under Authenticated has been issued something without ever presenting a ' +
     'credential here: an exchanged token from another issuer, a WS-Trust <code>OnBehalfOf</code>, ' +
     'or a Kerberos S4U request that a service made in their name. Listing them is the point — a ' +
     'users page that showed only the sign-ins would deny the existence of subjects the tokens ' +
-    'page is showing at the same moment.</p>' +
-    '<p class="note">All of it is in memory and dies with the process, and the registry holds the ' +
-    'most recent ' + stats.MAX_USERS + ' identities.' +
-    '</p>';
+    'page is showing at the same moment.') +
+    note('All of it is in memory and dies with the process, and the registry holds the ' +
+    'most recent ' + stats.MAX_USERS + ' identities.');
 
   log.debug("Leaving usersListPage(). " + shown.length + " row(s) drawn.");
   return {
@@ -7471,15 +9042,15 @@ function usersView(req) {
       // to the cap since the link was drawn. Both are answers rather than errors, and
       // a 404 here would send a test looking for a routing problem.
       const inner = messagesOf(req) +
-        '<p class="note">Nothing here has authenticated as <code>' + esc(wantedUser) + '</code>, ' +
+        note('Nothing here has authenticated as <code>' + esc(wantedUser) + '</code>, ' +
         'and nothing has been issued naming them. Either the name is not one this service has ' +
         'seen, or it has been forgotten — the registry holds the most recent ' + stats.MAX_USERS +
-        ' identities, and everything in it dies with the process.</p>' +
+        ' identities, and everything in it dies with the process.') +
         // The same href the trail's section crumb carries, so the two ways back off
         // this page cannot land in different places.
-        '<p class="note"><a href="' +
+        note('<a href="' +
         esc('/admin/users' + queryWith(listViewOf('/admin/users', req.query), {})) +
-        '">Back to the list</a>.</p>';
+        '">Back to the list</a>.');
       log.debug("Leaving usersView(). No such user.");
       return { json: { user: wantedUser, known: false }, inner: inner,
                title: 'User',
@@ -7635,19 +9206,19 @@ function usersPageCell(userKey, known) {
 // claims, and this is the same line this service already draws between an
 // identity being recorded and an identity being authenticated.
 const GROUPS_CAVEAT =
-  '<p class="note"><strong>A group here grants nothing, with exactly two exceptions and they ' +
+  note('<strong>A group here grants nothing, with exactly two exceptions and they ' +
   'are named below.</strong> No <em>endpoint</em> in this service checks a group, and nothing ' +
   'in any protocol decides anything on one. Adding somebody to ' +
   '<code>cn=directory-admins</code> changes what a directory client sees, and what a token ' +
   '<em>says</em>, and changes nothing at all about what that token can DO &mdash; on a service ' +
-  'that authenticates nobody, it could hardly be otherwise.</p>' +
+  'that authenticates nobody, it could hardly be otherwise.') +
   // THE EXCEPTION, said HERE and not only on the page that owns it. A reader
   // meeting this caveat on the groups page and then finding cn=admin-write in
   // the table above it would be entitled to conclude that one of the two was
   // lying. The general claim is still the one that matters — it is true of every
   // group but these two, and true of these two everywhere except one console —
   // so it is qualified rather than dropped.
-  '<p class="note"><strong>The two exceptions are <code>' +
+  note('<strong>The two exceptions are <code>' +
   esc(config.value('admin.readGroup')) + '</code> and <code>' +
   esc(config.value('admin.writeGroup')) + '</code>, which decide who may use THIS CONSOLE</strong> ' +
   '&mdash; see <a href="/admin/rbac">Admin roles</a>, where they are granted and taken away. ' +
@@ -7655,8 +9226,8 @@ const GROUPS_CAVEAT =
   'alternative was a membership store of the console\'s own that an <code>ldapmodify</code> ' +
   'could not see. Even those two grant nothing outside <code>/admin</code> &mdash; no token, ' +
   'assertion, ticket, PAC or credential is changed by being in one, and every protocol endpoint ' +
-  'answers a member exactly as it answers anybody else.</p>' +
-  '<p class="note"><strong>A token can now carry one.</strong> With ' +
+  'answers a member exactly as it answers anybody else.') +
+  note('<strong>A token can now carry one.</strong> With ' +
   '<code>groups.claim</code> on &mdash; it is on by default &mdash; every OAuth 2.0 access ' +
   'token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion this service issues carries ' +
   'a claim naming the groups its subject is in, read from these entries at the moment it is ' +
@@ -7664,19 +9235,19 @@ const GROUPS_CAVEAT =
   'called, whether each value is a <code>cn</code> or a whole DN, and whether a person\'s own ' +
   '<code>memberOf</code> counts are on <a href="/admin/config">the configuration page</a>; ' +
   '<a href="/admin/claims">the claims page</a> shows what it would say about one person. No ' +
-  'Kerberos PAC and no WS-Federation-specific token carries a group either way.</p>';
+  'Kerberos PAC and no WS-Federation-specific token carries a group either way.');
 
 function noGroupDirectorySection() {
-  return '<p class="note">No LDAP directory is loaded in this process, so there are no groups to ' +
+  return note('No LDAP directory is loaded in this process, so there are no groups to ' +
     'show. That is a build of this service without <code>ldap_server.js</code> and not a failure ' +
-    '&mdash; every other page of this console is unaffected.</p>';
+    '&mdash; every other page of this console is unaffected.');
 }
 
 const GROUPS_LINKS =
-  '<p class="note"><a href="/ldap">What this directory is</a> &middot; ' +
+  note('<a href="/ldap">What this directory is</a> &middot; ' +
   '<a href="/ldap/directory">every entry in it</a> &middot; ' +
   '<a href="/ldap/directory?format=json">the same as JSON</a> &middot; ' +
-  '<a href="/admin/users">the people who have authenticated here</a>.</p>';
+  '<a href="/admin/users">the people who have authenticated here</a>.');
 
 // The list.
 function groupsListPage(req) {
@@ -7758,15 +9329,15 @@ function groupsListPage(req) {
               'the two it seeds can be deleted through the protocol like any other entry.') +
              '</td></tr>') + '</table>' +
     nav +
-    '<p class="note">A group is an entry that sits under <code>' + esc(info.groupsDn) + '</code>, ' +
+    note('A group is an entry that sits under <code>' + esc(info.groupsDn) + '</code>, ' +
     'or that carries one of the group object classes (<code>groupOfNames</code>, ' +
     '<code>groupOfUniqueNames</code>, <code>posixGroup</code>, <code>groupOfURLs</code>) wherever ' +
     'it sits &mdash; either rule is enough, and the column above says which one caught each. Both ' +
     'are applied because this directory is <strong>schemaless</strong>: nothing stops a client ' +
     'adding a <code>groupOfNames</code> under <code>' + esc(info.usersDn) + '</code>, or an entry ' +
     'with no <code>objectClass</code> at all under the groups container, and a page that applied ' +
-    'only one rule would answer for one of those and quietly lose the other.</p>' +
-    '<p class="note"><strong>Members</strong> counts the values of <code>member</code>, ' +
+    'only one rule would answer for one of those and quietly lose the other.') +
+    note('<strong>Members</strong> counts the values of <code>member</code>, ' +
     '<code>uniqueMember</code> and <code>memberUid</code> together; <strong>Resolve</strong> is ' +
     'how many of them name an entry this directory actually holds and <strong>Dangling</strong> ' +
     'is the rest. The two are shown apart because a group whose seven members resolve to five is ' +
@@ -7774,7 +9345,7 @@ function groupsListPage(req) {
     'every group that listed it &mdash; and one combined number would report that as seven ' +
     'members with nothing wrong. <strong>Claimed</strong> is the disagreement in the other ' +
     'direction: entries whose own <code>memberOf</code> names the group while the group does not ' +
-    'list them back.</p>' +
+    'list them back.') +
     GROUPS_CAVEAT + GROUPS_LINKS;
 
   log.debug("Leaving groupsListPage(). " + shown.length + " row(s) drawn of " +
@@ -7801,9 +9372,9 @@ function groupDetailPage(req, wantedDn) {
   const info = groupReader(wantedDn);
   // The same href the trail's section crumb carries — see listViewOf(). Two ways
   // back off one page that land in different places is worse than one.
-  const back = '<p class="note"><a href="' +
+  const back = note('<a href="' +
     esc('/admin/groups' + queryWith(listViewOf('/admin/groups', req.query), {})) +
-    '">Back to the groups</a>.</p>';
+    '">Back to the groups</a>.');
 
   if (!info.found) {
     // Three ways to be here and they are different answers, so they get different
@@ -7826,7 +9397,7 @@ function groupDetailPage(req, wantedDn) {
     log.debug("Leaving groupDetailPage(). Not a group.");
     return {
       inner: messagesOf(req) + directoryListenerWarning(info, GROUP_SUBJECT) +
-        '<p class="note">' + because + '</p>' + back,
+        note(because) + back,
       json: Object.assign({ found: false }, info)
     };
   }
@@ -7886,7 +9457,7 @@ function groupDetailPage(req, wantedDn) {
       '<table><tr><th>DN</th><th>cn</th><th>mail</th><th>On the users page</th></tr>' +
       claimedRows + '</table>' +
       claimedNav +
-      '<p class="note">Each of these carries a <code>memberOf</code> naming this group while this ' +
+      note('Each of these carries a <code>memberOf</code> naming this group while this ' +
       'group&rsquo;s own <code>member</code> does not name them back. <strong>Nothing here ' +
       'maintains <code>memberOf</code></strong> &mdash; it is not a standard attribute at all ' +
       '(Microsoft&rsquo;s directory and OpenLDAP&rsquo;s <code>memberof</code> overlay both write ' +
@@ -7894,7 +9465,7 @@ function groupDetailPage(req, wantedDn) {
       'that neither writes nor checks it lets a client create exactly this disagreement in one ' +
       '<code>modify</code>. They are listed apart from the members above rather than merged into ' +
       'them, because which side of the disagreement a name came from is the only interesting ' +
-      'thing about it.</p>'
+      'thing about it.')
     : '';
 
   const inner = messagesOf(req) +
@@ -7907,11 +9478,11 @@ function groupDetailPage(req, wantedDn) {
     '<td>' + esc(group.origin) + '</td>' +
     '<td><code>' + esc(group.createdAt) + '</code></td>' +
     '<td><code>' + esc(group.modifiedAt) + '</code></td></tr></table>' +
-    '<p class="note">The two timestamps are <em>generalized time</em> ' +
+    note('The two timestamps are <em>generalized time</em> ' +
     '(<code>YYYYMMDDHHMMSSZ</code>), which is what a directory shows &mdash; not the ISO 8601 ' +
     'strings the rest of this console uses. An LDAP client bound to <code>ldap://&lt;host&gt;:' +
     esc(info.port) + '</code> reading <code>' + esc(group.dn) + '</code> sees exactly the object ' +
-    'below, because it <em>is</em> that object and not a copy of it.</p>' +
+    'below, because it <em>is</em> that object and not a copy of it.') +
 
     perPageForm('/admin/groups', 'group', group.dn, memberPage.paging.perPage, '',
                 filterOnly(listViewOf('/admin/groups', req.query))) +
@@ -7928,18 +9499,18 @@ function groupDetailPage(req, wantedDn) {
         '<table><tr><th>Member</th><th>From</th><th>State</th><th>What it is</th><th>cn</th>' +
         '<th>mail</th><th>On the users page</th><th>The value as stored</th></tr>' +
         memberRows + '</table>' + membersNav
-      : '<p class="note">This group lists nobody. An empty <code>groupOfNames</code> is something ' +
+      : note('This group lists nobody. An empty <code>groupOfNames</code> is something ' +
         'a real directory refuses &mdash; RFC 4519 makes <code>member</code> MUST &mdash; and ' +
-        'this one has no schema, so it is here because something wrote it.</p>') +
-    '<p class="note">Membership is read from <code>' + esc(group.memberAttributes.join('</code>, ' +
+        'this one has no schema, so it is here because something wrote it.')) +
+    note('Membership is read from <code>' + esc(group.memberAttributes.join('</code>, ' +
     '<code>')) + '</code>. The first two hold a <strong>DN</strong>; <code>memberUid</code> holds ' +
     'a bare user name, which is looked up under <code>' + esc(info.usersDn) + '</code> &mdash; ' +
     'treating the three alike is how a page ends up reporting every <code>posixGroup</code> ' +
     'member as dangling. <strong>Nesting is shown and not expanded</strong>: a member that is ' +
     'itself a group links to its own page, and nobody inside it is counted here, because nothing ' +
     'in this service walks a group tree and a flattened list would be claiming a feature that is ' +
-    'not here.</p>' +
-    '<p class="note">The last column links to the users page only for somebody this service has ' +
+    'not here.') +
+    note('The last column links to the users page only for somebody this service has ' +
     'actually seen <strong>authenticate</strong>. The other members are marked <em>never ' +
     'here</em>, and that is not a fault: the directory holds whatever somebody wrote into it — ' +
     'the three people it seeds at startup, and anything a client has added since — while the ' +
@@ -7947,18 +9518,18 @@ function groupDetailPage(req, wantedDn) {
     'in this directory from the moment it starts and appears on the users page only once ' +
     'somebody signs in as her. A link that was always drawn would usually land on &ldquo;nothing ' +
     'here has authenticated as alice&rdquo;, which reads as a broken link rather than as the ' +
-    'answer it is.</p>' +
+    'answer it is.') +
     claimedSection +
 
     '<h2>Every attribute this group has</h2>' +
     attributeTable(group) +
-    '<p class="note">The whole object, operational attributes included &mdash; a search returns ' +
+    note('The whole object, operational attributes included &mdash; a search returns ' +
     'those only when they are asked for by name (RFC 4511 &sect;4.5.1.8), and this is a dump ' +
     'rather than a search. The membership attributes are in here too, as the raw values the ' +
     'store holds; the table above is the same values resolved. This directory is ' +
     '<strong>schemaless</strong>: no <code>objectClass</code> is enforced and no value is checked ' +
     'against a syntax, so an attribute a real directory would refuse is here because something ' +
-    'wrote it.</p>' +
+    'wrote it.') +
     GROUPS_CAVEAT + back + GROUPS_LINKS;
 
   log.debug("Leaving groupDetailPage(). " + memberPage.shown.length + " of " +
@@ -8041,21 +9612,21 @@ function groupsView(req) {
 // the parity is about CONTROLS, and there are none here).
 // ---------------------------------------------------------------------------
 const APPLICATIONS_CAVEAT =
-  '<p class="note"><strong>An entry here grants nothing.</strong> Being in this ' +
+  note('<strong>An entry here grants nothing.</strong> Being in this ' +
   'registry does not let an application do anything it could not do before &mdash; ' +
   'this service issues a token to any client_id that asks. The one place it is READ ' +
   'is RFC 9700 mode (<code>oauth2.rfc9700</code>), which matches a redirect_uri ' +
   'against <code>oauthRedirectUri</code> by exact string comparison, decides ' +
   'public-versus-confidential from <code>oauthTokenEndpointAuthMethod</code>, and ' +
   'checks <code>oauthClientSecret</code> at the token endpoint. With that mode off, ' +
-  'these entries are a record and nothing more.</p>' +
-  '<p class="note"><strong>Two attributes hold credentials in the clear</strong> ' +
+  'these entries are a record and nothing more.') +
+  note('<strong>Two attributes hold credentials in the clear</strong> ' +
   '&mdash; <code>oauthClientSecret</code> and <code>appRegistrationAccessToken</code> ' +
   '&mdash; in a directory where every bind succeeds. That is the same decision ' +
   '<code>/krb5/principals</code> makes about the Kerberos passwords and it costs more ' +
   'here than it does there: in RFC 9700 mode that secret is checked, so anyone who can ' +
   'read this directory can authenticate as that client. They are never written to the ' +
-  'audit log.</p>';
+  'audit log.');
 
 const APPLICATIONS_LINKS =
   '<p class="sub"><a href="/ldap/applications">the same registry as the directory ' +
@@ -8492,12 +10063,12 @@ function applicationsListPage(req) {
     'application</a> &mdash; the same action, with the PROTOCOL FAMILIES this application ' +
     'is declared for and a sentence about each. This row is the short way in for somebody ' +
     'already looking at the list; both post to this page and reach one function.</p>' +
-    '<p class="note">For a relying party that has not connected yet. An entry usually appears ' +
+    note('For a relying party that has not connected yet. An entry usually appears ' +
     'because an identifier was ACCEPTED — a client_id at the token endpoint, a wtrealm on a ' +
     'sign-in response — and this is how to get one in ahead of that, which is what RFC 9700 ' +
     'mode needs if it is to judge a client against its own redirect URIs rather than against ' +
     'the <code>oauth2.redirectUris</code> setting. It records that it was created by hand, so ' +
-    'it cannot be mistaken for one that turned up once and never came back.</p>' +
+    'it cannot be mistaken for one that turned up once and never came back.') +
     '<form method="post" action="/admin/applications"><div class="formrow">' +
     '<input type="hidden" name="action" value="create">' +
     '<label for="identifier">Identifier</label>' +
@@ -8507,25 +10078,25 @@ function applicationsListPage(req) {
     '<input type="text" id="newname" name="name" size="18" placeholder="optional">' +
     '<button type="submit">Add</button>' +
     '</div></form>' +
-    '<p class="note">This row takes the identifier and a name and nothing else &mdash; it is ' +
+    note('This row takes the identifier and a name and nothing else &mdash; it is ' +
     'the short way in for somebody already looking at the list. The <em>Kind</em> select that ' +
     'used to sit in it is gone for the reason <a href="/admin/applications/new">New ' +
     'application</a> gives at length: it asked the same question the protocol families do, in ' +
     'a vocabulary that does not line up with theirs, and it is DERIVED rather than declared ' +
     '&mdash; a kind is written when a protocol actually recognises the identifier. The fuller ' +
     'form is where the families, the per-protocol identifiers and the redirect URIs are, and ' +
-    'an entry made here can be given all of them afterwards from its own page.</p>' +
-    '<p class="note"><strong>One entry per identifier, whatever protocol brought it.</strong> ' +
+    'an entry made here can be given all of them afterwards from its own page.') +
+    note('<strong>One entry per identifier, whatever protocol brought it.</strong> ' +
     'The key is the identifier exactly as it arrived &mdash; not lower-cased and not ' +
     'namespaced by protocol &mdash; so an application appearing under one name in two ' +
     'protocols is one row with two kinds rather than two rows. That is the same rule that ' +
     'makes <code>alice</code>, <code>urn:sts-mock:user:alice</code> and ' +
-    '<code>alice@REALM</code> one person on the users page.</p>' +
-    '<p class="note"><strong>Sessions and Users are counts of CHANGES, not of distinct ' +
+    '<code>alice@REALM</code> one person on the users page.') +
+    note('<strong>Sessions and Users are counts of CHANGES, not of distinct ' +
     'sets.</strong> The ids themselves are deliberately not kept on the entry &mdash; an ' +
     'application used by two thousand people would otherwise carry two thousand values ' +
     '&mdash; so the count moves when the id differs from the last one recorded. Right for ' +
-    'the ordinary case, and it undercounts somebody alternating between two applications.</p>' +
+    'the ordinary case, and it undercounts somebody alternating between two applications.') +
     APPLICATIONS_CAVEAT + APPLICATIONS_LINKS;
 
   log.debug("Leaving applicationsListPage(). " + paged.shown.length + " row(s) of " +
@@ -8608,20 +10179,20 @@ function protocolFamilySection(row) {
 
   log.debug("Leaving protocolFamilySection(). " + shown.length + " row(s).");
   return '<h2>Protocol families</h2>' +
-    '<p class="note"><strong>Declared</strong> is <code>appAllowedProtocol</code> &mdash; what ' +
+    note('<strong>Declared</strong> is <code>appAllowedProtocol</code> &mdash; what ' +
     'somebody said this application is FOR, on <a href="/admin/applications/new">New ' +
     'application</a> or through the Add and Remove forms below. <strong>Recorded</strong> is ' +
     'read off the KINDS in the table above, and not off the protocol labels beside them, ' +
     'because a federation partner is recorded under the protocol its relationship speaks and ' +
-    'by label would be indistinguishable from an ordinary client.</p>' +
-    '<p class="note"><strong>Recorded is not the same as "has authenticated".</strong> A kind ' +
+    'by label would be indistinguishable from an ordinary client.') +
+    note('<strong>Recorded is not the same as "has authenticated".</strong> A kind ' +
     'is usually written when a protocol recognises the identifier &mdash; but a create takes ' +
     'one too, so an entry made by hand can be recorded in a family it has never connected in. ' +
     'The <em>Authentications</em> count above is the figure that answers whether anything has ' +
     'actually happened. <strong>And neither column grants anything:</strong> a family declared ' +
     'and not recorded is usually an application that has not connected yet, one recorded and ' +
     'never declared is the ordinary case, and nothing asks a protocol to check either &mdash; ' +
-    'a mock that refused a protocol would remove a test case rather than add one.</p>' +
+    'a mock that refused a protocol would remove a test case rather than add one.') +
     '<table><tr><th>Family</th><th>Value</th><th>Declared</th><th>Recorded</th></tr>' +
     (rows || '<tr><td colspan="4">Neither list has anything on it. Nothing has been declared ' +
              'for this application and it carries no kind &mdash; which for an entry created ' +
@@ -8753,12 +10324,12 @@ function applicationDetailPage(req, identifier) {
     nav +
 
     '<h2>Change what it is allowed to do</h2>' +
-    '<p class="note">These write the same entry an <code>ldapmodify</code> writes, through the ' +
+    note('These write the same entry an <code>ldapmodify</code> writes, through the ' +
     'same functions &mdash; the console is a set of controls in front of this registry and not ' +
     'a second copy of it. A change here is what RFC 9700 mode enforces on the very next ' +
     'request: add to <code>oauthRedirectUri</code> and that URI is accepted by exact match, set ' +
     '<code>oauthTokenEndpointAuthMethod</code> to <code>none</code> and the client becomes ' +
-    'public, so PKCE is required of it and its secret stops being checked.</p>' +
+    'public, so PKCE is required of it and its secret stops being checked.') +
     '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
@@ -8788,7 +10359,7 @@ function applicationDetailPage(req, identifier) {
     '<input type="text" id="remval" name="value" size="34" required>' +
     '<button type="submit">Remove</button>' +
     '</div></form>' +
-    '<p class="note"><strong>What these will not change, and why.</strong> The counters, the ' +
+    note('<strong>What these will not change, and why.</strong> The counters, the ' +
     'first and last sighting, the kinds and the protocols are DERIVED &mdash; they are what ' +
     'happened rather than what this application may do &mdash; and a form that could rewrite ' +
     'them would make this page lie about the service\'s own behaviour, in a way ' +
@@ -8796,7 +10367,7 @@ function applicationDetailPage(req, identifier) {
     'every one of them: an operator with an LDAP client is doing something deliberate, and ' +
     'refusing them HERE is the difference between offering an operation and merely not ' +
     'preventing it. <code>appRegistrationJson</code> is not offered either &mdash; edit the ' +
-    'attributes beside it instead, which is what the registration is rebuilt from.</p>' +
+    'attributes beside it instead, which is what the registration is rebuilt from.') +
 
     '<h2>Take it out of the registry</h2>' +
     (row.registered
@@ -8808,9 +10379,9 @@ function applicationDetailPage(req, identifier) {
         'access token and the registration itself go. Afterwards RFC 9700 mode treats it as an ' +
         'unregistered, public client.</span>' +
         '</div></form>'
-      : '<p class="note">It has no RFC 7591 registration to revoke &mdash; it is an identifier ' +
+      : note('It has no RFC 7591 registration to revoke &mdash; it is an identifier ' +
         'this service has seen rather than a client that registered, which RFC 9700 mode ' +
-        'already treats as public.</p>') +
+        'already treats as public.')) +
     '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="forget">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
@@ -8929,12 +10500,18 @@ function protocolChoiceRow(row) {
     ? '<code>' + esc(row.kind) + '</code>'
     : '<span class="state-none">none &mdash; this service records no application ' +
       'identifier in that family</span>';
+  // The family's own sentence appears TWICE and neither is the only copy: as a
+  // tooltip on the checkbox's label, where somebody deciding whether to tick it
+  // is already pointing, and folded in the last column, where it can be read
+  // from a keyboard and on a touch screen. See tip() for why nothing is ever
+  // said only in a title attribute.
   return '<tr><td><input type="checkbox" id="proto-' + esc(row.id) + '" name="protocol" ' +
-    'value="' + esc(row.id) + '"></td>' +
-    '<td><label for="proto-' + esc(row.id) + '">' + esc(row.label) + '</label></td>' +
+    'value="' + esc(row.id) + '"' + tip(row.what) + '></td>' +
+    '<td><label for="proto-' + esc(row.id) + '"' + tip(row.what) + '>' +
+    esc(row.label) + '</label></td>' +
     '<td><code>' + esc(row.id) + '</code></td>' +
     '<td>' + kindCell + '</td>' +
-    '<td class="why">' + esc(row.what) + '</td></tr>';
+    '<td class="why">' + note(esc(row.what)) + '</td></tr>';
 }
 
 // ---------------------------------------------------------------------------
@@ -8966,21 +10543,27 @@ function declarationFieldRow(row) {
   const families = row.families.map(function (one) {
     return esc(one.label);
   }).join(', ');
+  // The attribute's sentence, on the control itself. The schema's name is
+  // unfriendly on purpose (see the header above) — it is the name an
+  // ldapsearch and the management API both use — so the one place a reader can
+  // find out what `appWsFedRealm` is for without leaving the field is a
+  // tooltip on it. The same sentence is in the last column, folded.
+  const hint = tip(row.what);
   const control = row.kind === 'multi'
     ? '<textarea id="field-' + esc(row.attribute) + '" name="field.' + esc(row.attribute) +
-      '" rows="3" cols="42" placeholder="one per line; leave empty for none"></textarea>'
+      '"' + hint + ' rows="3" cols="42" placeholder="one per line; leave empty for none"></textarea>'
     : '<input type="text" id="field-' + esc(row.attribute) + '" name="field.' +
-      esc(row.attribute) + '" size="42" placeholder="optional">';
+      esc(row.attribute) + '"' + hint + ' size="42" placeholder="optional">';
   const shape = row.kind === 'multi'
     ? '<span class="note">a list &mdash; one value per line</span>'
     : '<span class="state-none">one value only &mdash; an RFC 8705 check compares this ' +
       'string to a certificate\'s subject by exact equality, so it cannot hold a list ' +
       'until somebody decides what &ldquo;any of these&rdquo; should mean to that check</span>';
-  return '<tr><td><label for="field-' + esc(row.attribute) + '"><code>' +
+  return '<tr><td><label for="field-' + esc(row.attribute) + '"' + hint + '><code>' +
     esc(row.attribute) + '</code></label></td>' +
     '<td>' + families + '</td>' +
     '<td>' + control + '<br>' + shape + '</td>' +
-    '<td class="why">' + esc(row.what) + '</td></tr>';
+    '<td class="why">' + note(esc(row.what)) + '</td></tr>';
 }
 
 // The two tables, split by what the attribute IS rather than drawn as one list
@@ -9010,32 +10593,32 @@ function declarationFieldsSection(role, heading, intro) {
 }
 
 const NEW_APPLICATION_IDENTIFIERS_INTRO =
-  '<p class="note">The name this application answers to in each family it speaks. They are ' +
+  note('The name this application answers to in each family it speaks. They are ' +
   'all optional and all independent of the <em>Identifier</em> above &mdash; that one is the ' +
   'KEY this registry files the entry under, and these are what the protocols will present. ' +
   'For an ordinary OAuth client the two are the same string, which is what a protocol sighting ' +
   'writes anyway; they differ when one application answers to a client_id in one environment ' +
   'and another in the next, or when it is a SAML service provider whose entityID is a URN and ' +
-  'whose entry you would rather file under a readable name.</p>' +
-  '<p class="note"><strong>Several families share a field where the specifications share the ' +
+  'whose entry you would rather file under a readable name.') +
+  note('<strong>Several families share a field where the specifications share the ' +
   'identifier.</strong> An OpenID Connect relying party IS an OAuth client and an OpenID4VCI ' +
   'wallet authenticates as one, so all three declare their name in ' +
   '<code>oauthClientId</code>; both SAML profiles name the same party, so both use ' +
   '<code>samlEntityId</code>. Two boxes writing one attribute would be a form that silently ' +
-  'kept whichever was filled in second.</p>' +
-  '<p class="note"><strong>Four of these are declaration and only ever declaration.</strong> ' +
+  'kept whichever was filled in second.') +
+  note('<strong>Four of these are declaration and only ever declaration.</strong> ' +
   'Nothing in this service writes <code>federationPartnerId</code>, <code>ldapBindDn</code>, ' +
   '<code>scimClientId</code> or <code>spiffeWorkloadId</code>, because those surfaces either ' +
   'authenticate the CALLER rather than an application, or file the identity in a container of ' +
   'their own. The value is a note about what this application is, in the one place the rest of ' +
   'what it is already lives &mdash; and, like every other field here, it grants nothing: a ' +
   'federation partner declared here federates with nobody until a relationship under ' +
-  '<code>ou=federations</code> says so.</p>';
+  '<code>ou=federations</code> says so.');
 
 const NEW_APPLICATION_REDIRECTS_INTRO =
-  '<p class="note">Where a response goes back to. Only three families send one through a ' +
-  'browser, which is why there are three of these and fourteen identifiers above.</p>' +
-  '<p class="note"><strong>Only the OAuth list is ever CHECKED, and only in RFC 9700 ' +
+  note('Where a response goes back to. Only three families send one through a ' +
+  'browser, which is why there are three of these and fourteen identifiers above.') +
+  note('<strong>Only the OAuth list is ever CHECKED, and only in RFC 9700 ' +
   'mode.</strong> <code>oauthRedirectUri</code> is what section 2.1\'s exact string ' +
   'comparison reads &mdash; give an application its redirect URIs here and the next ' +
   'authorization request is judged against them rather than against the ' +
@@ -9047,14 +10630,14 @@ const NEW_APPLICATION_REDIRECTS_INTRO =
   'add one. The SAML one is READ for something else &mdash; it is the fallback used when a ' +
   'Single Logout has nowhere else to go, which is why WS-Federation\'s ' +
   '<code>wreply</code> stopped being written into it on 2026-08-25 and has a field of its ' +
-  'own.</p>' +
-  '<p class="note"><strong>What a client has actually USED is a different attribute and is ' +
+  'own.') +
+  note('<strong>What a client has actually USED is a different attribute and is ' +
   'not here.</strong> <code>appRedirectUriObserved</code> records a redirect_uri seen on a ' +
   'request this service answered, it is not editable anywhere in this console, and RFC 9700 ' +
-  'section 2.1 is entirely about not confusing the two.</p>';
+  'section 2.1 is entirely about not confusing the two.');
 
 const NEW_APPLICATION_NOTES =
-  '<p class="note"><strong>Declaring a protocol family grants nothing and refuses ' +
+  note('<strong>Declaring a protocol family grants nothing and refuses ' +
   'nothing.</strong> No endpoint in this service reads <code>appAllowedProtocol</code>: an ' +
   'application declared for SAML 2.0 alone is still issued an access token at ' +
   '<code>/oauth2/token</code>, and one declared for nothing at all is treated exactly as it ' +
@@ -9064,23 +10647,23 @@ const NEW_APPLICATION_NOTES =
   'configuration that DOES take effect is the attributes underneath: give the entry its ' +
   'redirect URIs, its grant types and its secret from ' +
   '<a href="/admin/applications">Applications</a>, and RFC 9700 mode judges the next request ' +
-  'against them.</p>' +
-  '<p class="note"><strong>The families are DECLARED; <code>appProtocol</code> is what ' +
+  'against them.') +
+  note('<strong>The families are DECLARED; <code>appProtocol</code> is what ' +
   'HAPPENED.</strong> Those two attributes sit next to each other on the entry and must not be ' +
   'read as one thing. This form writes the first; the second is accumulated by the protocol ' +
   'endpoints as they accept this identifier and is not editable here, for the reason every ' +
   'derived attribute on that page is not &mdash; a form that could rewrite it would make this ' +
   'console lie about the service\'s own behaviour, in a way indistinguishable from the ' +
   'recording being broken. The Applications drill-down shows both side by side, and says ' +
-  'which of the declared families the entry has actually been recorded in.</p>' +
-  '<p class="note"><strong>One entry per identifier, whatever protocol brought it.</strong> The ' +
+  'which of the declared families the entry has actually been recorded in.') +
+  note('<strong>One entry per identifier, whatever protocol brought it.</strong> The ' +
   'key is the identifier exactly as it arrives &mdash; not lower-cased and not namespaced by ' +
   'protocol &mdash; so this is refused if the registry already holds one under that name, and ' +
   'an application that appears under one name in two protocols is one entry with two kinds. ' +
-  'Change what an existing one holds rather than creating it again.</p>' +
-  '<p class="note"><strong>Nothing here is persisted.</strong> This service holds everything in ' +
+  'Change what an existing one holds rather than creating it again.') +
+  note('<strong>Nothing here is persisted.</strong> This service holds everything in ' +
   'memory: the entry is gone on restart, along with every other application, person and group ' +
-  'in the directory. That is a property of the whole service and not of this page.</p>';
+  'in the directory. That is a property of the whole service and not of this page.');
 
 function newApplicationPage(req) {
   log.debug("Entering newApplicationPage().");
@@ -9117,19 +10700,19 @@ function newApplicationPage(req) {
     tile(applications.PROTOCOLS.length, 'Protocol families') +
     tile(applications.KINDS.length, 'Kinds') +
     '</div>' +
-    '<p class="note"><strong>The entry lands in this realm\'s directory, at <code>' +
+    note('<strong>The entry lands in this realm\'s directory, at <code>' +
     esc(container) + '</code></strong>' + (max ? ', which holds at most ' + esc(String(max)) +
     ' application(s)' : '') + '. The console shows one trust realm at a time and this form ' +
     'writes the one it is showing &mdash; <strong>' + esc(realm ? realm.name : 'Default') +
     '</strong> &mdash; because the realm is taken from the path this request arrived on. ' +
     'Applications are NOT shared between realms: an <code>ldapsearch</code> with that base DN ' +
-    'is the same entry this creates, and another realm\'s registry has never heard of it.</p>' +
-    '<p class="note"><strong>This is not a second door onto the registry.</strong> The form ' +
+    'is the same entry this creates, and another realm\'s registry has never heard of it.') +
+    note('<strong>This is not a second door onto the registry.</strong> The form ' +
     'below posts to <code>/admin/applications</code> with <code>action=create</code> &mdash; ' +
     'the same action the list page\'s own <em>Add an application</em> row posts, calling the ' +
     'same function in <code>applications.js</code> that a protocol endpoint and an ' +
     '<code>ldapmodify</code> reach. Two forms over one function are two doors; there is one ' +
-    'store behind them and nothing caches it.</p>' +
+    'store behind them and nothing caches it.') +
 
     '<form method="post" action="/admin/applications">' +
     '<input type="hidden" name="action" value="create">' +
@@ -9139,29 +10722,29 @@ function newApplicationPage(req) {
     '<input type="text" id="identifier" name="identifier" size="42" required ' +
     'placeholder="client_id, wtrealm, AppliesTo, entityID or SPN">' +
     '</div>' +
-    '<p class="note">THE KEY, exactly as the protocol will present it. At most 512 characters, ' +
+    note('THE KEY, exactly as the protocol will present it. At most 512 characters, ' +
     'and no line break: an entry whose <code>cn</code> would be longer than 64 characters is ' +
     'filed under <code>app-&lt;12 hex&gt;</code> instead, and <code>appIdentifier</code> is the ' +
-    'attribute to search on either way.</p>' +
+    'attribute to search on either way.') +
     '<div class="formrow">' +
     '<label for="newname">Name</label>' +
     '<input type="text" id="newname" name="name" size="24" placeholder="optional">' +
     '</div>' +
-    '<p class="note">The name is what pages call it; with none given the identifier is the ' +
-    'name, because inventing a friendly name for an opaque id would be inventing a fact.</p>' +
-    '<p class="note"><strong>There is no <em>Kind</em> to choose and that is deliberate.</strong> ' +
+    note('The name is what pages call it; with none given the identifier is the ' +
+    'name, because inventing a friendly name for an opaque id would be inventing a fact.') +
+    note('<strong>There is no <em>Kind</em> to choose and that is deliberate.</strong> ' +
     'It used to be a select here, and it asked the same question the protocol families below ' +
     'do in a vocabulary that does not line up with theirs &mdash; eight kinds against fourteen ' +
     'families, five of which have no kind at all. It is also the wrong side of the line this ' +
     'registry draws: a family is DECLARED and a kind is DERIVED, written when a protocol ' +
     'actually recognises the identifier, so choosing one here was a form asserting a sighting ' +
     'that had not happened. Tick the families instead; the kinds fill themselves in as this ' +
-    'application is used.</p>' +
+    'application is used.') +
 
     '<h2>Protocol families it is declared for</h2>' +
-    '<p class="note">Tick as many as apply. The list is CLOSED &mdash; a value that is not one ' +
+    note('Tick as many as apply. The list is CLOSED &mdash; a value that is not one ' +
     'of these is refused rather than recorded, because a typo that silently became a new ' +
-    'family is how one application comes to be declared for two spellings of one thing.</p>' +
+    'family is how one application comes to be declared for two spellings of one thing.') +
     '<table><tr><th>For</th><th>Family</th><th>Value</th>' +
     '<th>Recorded as, when it turns up</th><th>What it means</th></tr>' +
     applications.PROTOCOLS.map(protocolChoiceRow).join('') +
@@ -9173,9 +10756,9 @@ function newApplicationPage(req) {
                              NEW_APPLICATION_REDIRECTS_INTRO) +
 
     '<div class="formrow"><button type="submit">Create the application</button>' +
-    '<span class="note">It is created with zero counters and a description saying it was made ' +
+    note('It is created with zero counters and a description saying it was made ' +
     'by hand, so it cannot be mistaken for one that turned up once and never came back. You ' +
-    'land on its entry.</span></div>' +
+    'land on its entry.') + '</div>' +
     '</form>' +
 
     NEW_APPLICATION_NOTES + APPLICATIONS_CAVEAT + APPLICATIONS_LINKS;
@@ -9248,20 +10831,20 @@ app.get('/admin/applications/new', function (req, res) {
 // hide something real.
 // ---------------------------------------------------------------------------
 const AS_CAVEAT =
-  '<p class="note"><strong>What a document says is what that authorization server DOES.</strong> ' +
+  note('<strong>What a document says is what that authorization server DOES.</strong> ' +
   'Advertise <code>code_challenge_methods_supported: ["S256"]</code> here and this server\'s own ' +
   'authorization endpoint refuses <code>plain</code> — at <code>/{id}/oauth2/authorize</code>, ' +
   'and nowhere else. The members marked <em>enforced</em> below drive behaviour; the rest are ' +
   'published and cannot be made true by this service, which is still useful (a document a ' +
   'client did not expect is a client error path worth running) and is listed as <em>drift</em> ' +
-  'so that nobody discovers it the hard way.</p>' +
-  '<p class="note"><strong>Every authorization server starts equal.</strong> A new one — or one ' +
+  'so that nobody discovers it the hard way.') +
+  note('<strong>Every authorization server starts equal.</strong> A new one — or one ' +
   'created by somebody simply asking for it — has exactly the capabilities the default server ' +
   'has, and differs only where it has been made to. <strong>Every client may use every one of ' +
   'them</strong>: nothing here restricts a client to a server, and ' +
   '<a href="/admin/applications">the applications page</a> records which ones each client has ' +
   'actually used. What does NOT cross between them is a credential — an authorization code ' +
-  'issued by one is refused at another\'s token endpoint.</p>';
+  'issued by one is refused at another\'s token endpoint.');
 
 const AS_LINKS =
   '<p class="sub"><a href="/.well-known/oauth-authorization-server">the default RFC 8414 ' +
@@ -9385,14 +10968,14 @@ function asListPage(req) {
     tile(all.reduce(function (n, r) { return n + Object.keys(r.overrides).length; }, 0), 'Overrides') +
     tile(all.reduce(function (n, r) { return n + asDriftRows(r.id).length; }, 0), 'Drifting members') +
     '</div>' +
-    '<p class="note"><strong>One process, several authorization servers.</strong> The path ' +
+    note('<strong>One process, several authorization servers.</strong> The path ' +
     'component the two discovery shapes already carry now selects a CONFIGURATION as well as ' +
     'an issuer identifier &mdash; RFC 8414 section 3.1 <em>inserts</em> it after the well-known ' +
     'segment and OpenID Connect Discovery section 4 <em>appends</em> the well-known segment to ' +
     'it, which is the commonest reason a discovery fetch 404s, and this service has answered ' +
     'both for a long time. <strong>A path nobody has configured publishes the document this ' +
     'service always published</strong>, so nothing that worked before this page existed ' +
-    'behaves differently.</p>' +
+    'behaves differently.') +
     nav +
     '<table><tr><th>Authorization server</th><th>Label</th><th class="num">Overrides</th>' +
     '<th class="num">Removed</th><th class="num">Drift</th><th>Its endpoints</th>' +
@@ -9413,9 +10996,9 @@ function asListPage(req) {
     '<input type="text" id="asdesc" name="description" size="28" placeholder="what it is for">' +
     '<button type="submit">Add</button>' +
     '</div></form>' +
-    '<p class="note">The id is a single URL path segment &mdash; letters, digits, dot, dash, ' +
+    note('The id is a single URL path segment &mdash; letters, digits, dot, dash, ' +
     'underscore or tilde &mdash; because it has to appear in a URL without being escaped. One ' +
-    'that had to be escaped would be one nobody could find again.</p>' +
+    'that had to be escaped would be one nobody could find again.') +
     AS_CAVEAT + AS_LINKS;
 
   log.debug("Leaving asListPage(). " + paged.shown.length + " row(s).");
@@ -9500,7 +11083,7 @@ function asDetailPage(req, id) {
   const inner = messagesOf(req) +
     '<h2><code>' + esc(profile.id) + '</code>' +
     (profile.label ? ' &mdash; ' + esc(profile.label) : '') + '</h2>' +
-    (profile.description ? '<p class="note">' + esc(profile.description) + '</p>' : '') +
+    (profile.description ? note(esc(profile.description)) : '') +
     '<table><tr><th>Thing</th><th>Value</th></tr>' +
     '<tr><td>RFC 8414 document</td><td><a href="' + esc(profile.urls.oauth) + '"><code>' +
     esc(profile.urls.oauth) + '</code></a></td></tr>' +
@@ -9509,9 +11092,9 @@ function asDetailPage(req, id) {
     '<tr><td>Last changed</td><td><code>' + esc(profile.changedAt) + '</code></td></tr>' +
     '</table>' +
     (drift.length
-      ? '<div class="warn"><strong>' + drift.length + ' member(s) of this document do not ' +
+      ? warn('<strong>' + drift.length + ' member(s) of this document do not ' +
         'describe this service.</strong> That is allowed and is often the point &mdash; but ' +
-        'a client configured from this document will behave as though these were true.</div>'
+        'a client configured from this document will behave as though these were true.')
       : '<div class="ok">Every member of this document agrees with what this service would ' +
         'publish. A client configured from it is configured correctly.</div>') +
     '<h2>What this authorization server does</h2>' +
@@ -9539,11 +11122,11 @@ function asDetailPage(req, id) {
         removedRows + '</table>'
       : '') +
     '<h2>Publish a member</h2>' +
-    '<p class="note">The value is read as JSON first and as a plain string if that fails, so ' +
+    note('The value is read as JSON first and as a plain string if that fails, so ' +
     '<code>["S256"]</code> is a list, <code>false</code> is a boolean and ' +
     '<code>https://example.com/token</code> is a string. <strong>Any member name is accepted</strong> ' +
     '&mdash; the list below is help rather than a schema, and one this service has never heard ' +
-    'of is published just the same.</p>' +
+    'of is published just the same.') +
     '<form method="post" action="/admin/authorization-servers">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="profile" value="' + esc(id) + '">' +
@@ -9745,13 +11328,13 @@ function saml2ListPage(req) {
   const inner = '<h1>SAML 2.0 identity provider</h1>' +
     '<p class="sub">The Web Browser SSO profile, all three bindings, and Single Logout. This ' +
     'page holds nothing: every row is an entry in <code>ou=applications</code>.</p>' +
-    '<p class="note"><strong>Every service provider gets its own metadata document.</strong> The ' +
+    note('<strong>Every service provider gets its own metadata document.</strong> The ' +
     'identity provider names itself differently to each one and publishes endpoints scoped to it, ' +
     'which is what Okta and Ping do. <strong>And it is minted for anything asked for</strong> — a ' +
     'service provider does not have to appear here before it can be pointed at this service, ' +
     'because asking for its metadata is what creates it. The unscoped document at ' +
     '<a href="/saml2/metadata">/saml2/metadata</a> works too and names one identity provider for ' +
-    'everybody.</p>' +
+    'everybody.') +
     '<p class="sub"><a href="/saml2">what the profile is</a> &middot; ' +
     '<a href="/saml2/sp">the mock service provider</a> &middot; ' +
     '<a href="/admin/saml-attributes">what goes into an assertion</a> &middot; ' +
@@ -9770,9 +11353,9 @@ function saml2ListPage(req) {
       ? '<table><thead><tr><th>Service provider (entityID)</th><th>Its metadata</th>' +
         '<th>Assertion consumer service</th><th>Single logout service</th>' +
         '<th>Responses</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
-      : '<p>No service provider has used this profile yet' +
+      : note('No service provider has used this profile yet' +
         (needle ? ' under that filter' : '') + '. Start one at ' +
-        '<a href="/saml2/sp">the mock service provider</a>, or register an entityID below.</p>') +
+        '<a href="/saml2/sp">the mock service provider</a>, or register an entityID below.')) +
     '<h2>Register a service provider</h2>' +
     '<p class="sub">Optional, and it changes nothing about whether a request is accepted — an ' +
     'entityID is accepted whether or not it is here. What it buys is a metadata document to hand ' +
@@ -9904,11 +11487,11 @@ function saml2DetailPage(req, identifier) {
       '</td></tr>' +
     '</tbody></table>' +
     '<h2>Where its LogoutResponse goes</h2>' +
-    '<p class="note">A <code>&lt;samlp:LogoutRequest&gt;</code> carries no return address — only ' +
+    note('A <code>&lt;samlp:LogoutRequest&gt;</code> carries no return address — only ' +
     'SP metadata does, and this service does not consume SP metadata. So with nothing declared ' +
     'here the profile falls back to <code>saml2.defaultSingleLogoutService</code> and then to the ' +
     'assertion consumer service URL this service provider last used, <strong>which is a guess and ' +
-    'is logged as one</strong>. Declaring it removes the guess.</p>' +
+    'is logged as one</strong>. Declaring it removes the guess.') +
     (slo.length
       ? '<table><thead><tr><th>Declared</th><th></th></tr></thead><tbody>' +
         slo.map(function (one) {
@@ -9919,9 +11502,9 @@ function saml2DetailPage(req, identifier) {
             '<input type="hidden" name="value" value="' + esc(one) + '">' +
             '<button class="secondary">Remove</button></form></td></tr>';
         }).join('') + '</tbody></table>'
-      : '<p>Nothing is declared, so the fallback above applies' +
+      : note('Nothing is declared, so the fallback above applies' +
         (acs.length ? ' — and it would guess <code>' + esc(acs[acs.length - 1]) + '</code>' : '') +
-        '.</p>') +
+        '.')) +
     '<form method="post" action="/admin/saml2">' + carryBack + '<div class="formrow">' +
     '<input type="hidden" name="action" value="set-logout-service">' +
     '<input type="hidden" name="sp" value="' + esc(identifier) + '">' +
@@ -10208,18 +11791,18 @@ function saml11ListPage(req) {
   const inner = '<h1>SAML 1.1 identity provider</h1>' +
     '<p class="sub">Both browser profiles, and the SAML responder behind one of them. This page ' +
     'holds nothing: every row is an entry in <code>ou=applications</code>.</p>' +
-    '<p class="note"><strong>SAML 1.1 has no request message</strong>, which is where most of ' +
+    note('<strong>SAML 1.1 has no request message</strong>, which is where most of ' +
     'the differences from <a href="/admin/saml2">the SAML 2.0 page</a> come from. A relying ' +
     'party cannot identify itself in the protocol, so it is named by Shibboleth\'s ' +
     '<code>providerId</code> parameter, by the path segment of a scoped endpoint, or it is ' +
     'GUESSED from the origin of the <code>TARGET</code>. There is also no Single Logout to ' +
-    'configure &mdash; it arrived with SAML 2.0 &mdash; and no request signature to record.</p>' +
-    '<p class="note"><strong>Every relying party gets its own metadata document</strong>, minted ' +
+    'configure &mdash; it arrived with SAML 2.0 &mdash; and no request signature to record.') +
+    note('<strong>Every relying party gets its own metadata document</strong>, minted ' +
     'for anything asked for, exactly as the 2.0 profile does. It is a SAML 2.0 metadata document ' +
     'describing a SAML 1.1 identity provider, which is what every relying party actually ' +
     'consumes: SAML 1.1 never had a metadata specification. The unscoped document at ' +
     '<a href="/saml11/metadata">/saml11/metadata</a> works too and names one identity provider ' +
-    'for everybody.</p>' +
+    'for everybody.') +
     '<p class="sub"><a href="/saml11">what the profile is</a> &middot; ' +
     '<a href="/saml11/rp">the mock relying party</a> &middot; ' +
     '<a href="/admin/saml-attributes">what goes into an assertion</a> &middot; ' +
@@ -10238,9 +11821,9 @@ function saml11ListPage(req) {
       ? '<table><thead><tr><th>Relying party</th><th>Its metadata</th>' +
         '<th>Assertion consumer (shire)</th><th>Profiles used</th>' +
         '<th>Assertions</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
-      : '<p>No relying party has taken a SAML 1.1 assertion yet' +
+      : note('No relying party has taken a SAML 1.1 assertion yet' +
         (needle ? ' under that filter' : '') + '. Start one at ' +
-        '<a href="/saml11/rp">the mock relying party</a>, or register an identifier below.</p>') +
+        '<a href="/saml11/rp">the mock relying party</a>, or register an identifier below.')) +
     '<h2>Register a relying party</h2>' +
     '<p class="sub">Optional, and it changes nothing about whether a flow is accepted &mdash; any ' +
     'identifier is accepted whether or not it is here. What it buys is a metadata document to ' +
@@ -10345,13 +11928,13 @@ function saml11DetailPage(req, identifier) {
            '">in the applications registry</a>'
          : 'NOT in the registry yet — this page is showing what it WOULD be given') + '.</p>' +
     (looksGuessed
-      ? '<p class="note"><strong>This identifier is a bare origin, which is what this service ' +
+      ? note('<strong>This identifier is a bare origin, which is what this service ' +
         'writes down when nobody told it the relying party\'s name.</strong> SAML 1.1 has no ' +
         'request message, so a flow that sent no <code>providerId</code> and used no scoped ' +
         'endpoint leaves the audience to be guessed from the origin of the TARGET. The assertion ' +
         'is issued to THIS string, so a relying party expecting a different audience refuses it ' +
         'inside a signature check with nothing saying why. Send <code>providerId</code>, or use ' +
-        'the scoped endpoint above, to make it exact.</p>'
+        'the scoped endpoint above, to make it exact.')
       : '') +
     '<h2>The endpoints it is configured from</h2>' +
     '<table><thead><tr><th>What</th><th>Where</th><th></th></tr></thead><tbody>' +
@@ -10519,7 +12102,7 @@ app.get('/admin/groups', function (req, res) {
 // counterpart of GROUPS_CAVEAT and it says the opposite thing about two named
 // groups, which is why it is worded to leave the general claim standing.
 const RBAC_CAVEAT =
-  '<p class="note"><strong>These two groups are the only groups in this service that grant ' +
+  note('<strong>These two groups are the only groups in this service that grant ' +
   'anything, and what they grant is this console.</strong> Every other group here still grants ' +
   'nothing at all — see <a href="/admin/groups">Groups</a>, which says so — and even these two ' +
   'grant nothing outside <code>/admin</code>: no token\'s scopes change, no assertion gains an ' +
@@ -10528,7 +12111,7 @@ const RBAC_CAVEAT =
   'anybody else. They are also ordinary directory entries, so <code>ldapmodify</code>, a SCIM ' +
   'PATCH, this page and <code>POST /admin-api/rbac/grant</code> are four doors onto one ' +
   'membership — which is the point rather than a leak: a role no test can grant is a role no ' +
-  'test can exercise.</p>';
+  'test can exercise.');
 
 // A membership value that names an entry which is not there. It is a normal
 // state here rather than a fault — see the grant form's note — so it is marked
@@ -10667,18 +12250,18 @@ function rbacListPage(req) {
       'has a member, and <code>admin.openWhenEmpty</code> is off. Anything you are reading here ' +
       'you are reading through <code>/admin-api</code> or with the gate off.</div>'
     : (info.openToAnyone
-        ? '<div class="warn"><strong>No role has a member, so anybody who signs in has the ' +
+        ? warn('<strong>No role has a member, so anybody who signs in has the ' +
           'whole console.</strong> The first grant made on this page ends that — for everybody, ' +
           'including whoever makes it. <strong>Grant yourself a role before you grant anybody ' +
-          'else one</strong>, or the next page you click will be a 403.</div>'
+          'else one</strong>, or the next page you click will be a 403.')
         : (info.enforced
             ? '<div class="ok">The roster is enforced. ' + info.grantCount + ' grant(s) across ' +
               'two roles; everybody else is refused at every page of this console.</div>'
-            : '<div class="warn"><strong>None of this is in force.</strong> ' +
+            : warn('<strong>None of this is in force.</strong> ' +
               '<code>admin.authRequired</code> is OFF, so the console is open to anybody who ' +
               'can reach this port and these roles decide nothing. They are still real ' +
               'directory groups and can be granted now — turn the setting on from ' +
-              '<a href="/admin/config">Configuration</a> when the roster looks right.</div>'));
+              '<a href="/admin/config">Configuration</a> when the roster looks right.')));
 
   const noDirectory = info.available ? '' :
     '<div class="err">No LDAP directory is loaded in this process, so there is nowhere to hold ' +
@@ -10698,9 +12281,9 @@ function rbacListPage(req) {
       '<select id="role" name="role">' + roleOptions + '</select>' +
       '<button type="submit">Grant</button>' +
       '</div></form>' +
-      '<p class="note">The list is everybody with an entry in the directory and everybody this ' +
+      note('The list is everybody with an entry in the directory and everybody this ' +
       'service has seen authenticate — two different sets, which is why both are offered and ' +
-      'why each row says which it came from.</p>' +
+      'why each row says which it came from.') +
       '<h3>Grant to a name that is not listed</h3>' +
       '<form method="post" action="/admin/rbac"><div class="formrow">' +
       '<input type="hidden" name="action" value="grant">' + carryBack +
@@ -10711,14 +12294,14 @@ function rbacListPage(req) {
       '<select id="typedrole" name="role">' + roleOptions + '</select>' +
       '<button type="submit" class="secondary">Grant</button>' +
       '</div></form>' +
-      '<p class="note">The membership will DANGLE until that person exists — it names a DN this ' +
+      note('The membership will DANGLE until that person exists — it names a DN this ' +
       'directory does not hold yet — and the role counts from the moment they first sign in. ' +
       'That is the interesting case for a mock and is why this form is here: nothing about a ' +
       'grant requires the person to have been seen. A name carrying a character RFC 4514 ' +
-      'reserves in a DN is refused, the same refusal creating a person gets.</p>'
+      'reserves in a DN is refused, the same refusal creating a person gets.')
     : (info.available && info.enforced && !state.write
-        ? '<p class="note">Granting and revoking need <strong>Admin Write</strong>. The table ' +
-          'above is what you can see with <strong>Admin Read</strong>.</p>'
+        ? note('Granting and revoking need <strong>Admin Write</strong>. The table ' +
+          'above is what you can see with <strong>Admin Read</strong>.')
         : '');
 
   const inner = messagesOf(req) + noDirectory + status + tiles +
@@ -10748,7 +12331,7 @@ function rbacListPage(req) {
       '</td></tr>') +
     '</table>' + nav +
     (info.roles.some(function (r) { return r.claimedCount; })
-      ? '<p class="note"><strong>Some of those grants are on the PERSON rather than in the ' +
+      ? note('<strong>Some of those grants are on the PERSON rather than in the ' +
         'group.</strong> An entry whose own <code>memberOf</code> names a role group holds ' +
         'the role — the directory is asked in both directions — and nothing here maintains ' +
         '<code>memberOf</code>, so a client wrote it. They are listed because a page ' +
@@ -10757,7 +12340,7 @@ function rbacListPage(req) {
         'the value is on their entry, and this console writes only to groups. One edge worth ' +
         'knowing — a <code>memberOf</code> naming a role group that has <em>never been ' +
         'created</em> grants nothing, and starts granting the moment the first ordinary ' +
-        'grant creates it.</p>'
+        'grant creates it.')
       : '') + forms +
     '<h2>What the two roles are</h2>' +
     '<table><tr><th>Role</th><th>Group</th><th>What it allows</th><th class="num">Members</th></tr>' +
@@ -10775,10 +12358,10 @@ function rbacListPage(req) {
             'group.">(' + role.claimedCount + ')</span>'
           : '') + '</td></tr>';
     }).join('') + '</table>' +
-    '<p class="note"><strong>Write implies read.</strong> A member of <code>' +
+    note('<strong>Write implies read.</strong> A member of <code>' +
     esc(info.roles[1] ? info.roles[1].cn : '') + '</code> does not also need <code>' +
     esc(info.roles[0] ? info.roles[0].cn : '') + '</code>: a role that could post a form to a ' +
-    'page it was not allowed to look at would be a trap rather than a permission.</p>' +
+    'page it was not allowed to look at would be a trap rather than a permission.') +
     '<h2>How the gate is set</h2>' +
     '<table><tr><th>Setting</th><th>Now</th><th>What it does</th></tr>' +
     '<tr><td><code>admin.authRequired</code></td><td>' +
@@ -10796,11 +12379,11 @@ function rbacListPage(req) {
       '<td>Which groups these roles are. Renaming one does not move anybody: the members stay ' +
       'in the old group, which stops granting anything the moment the name changes.</td></tr>' +
     '</table>' +
-    '<p class="note">All four are on <a href="/admin/config">Configuration</a> and every one of ' +
+    note('All four are on <a href="/admin/config">Configuration</a> and every one of ' +
     'them takes effect on the next request. <code>/admin-api</code> is NOT gated by any of ' +
     'them, which is on purpose: it is the way back in when the roster is empty and ' +
     '<code>admin.openWhenEmpty</code> is off, and it is why turning this on does not break a ' +
-    'test suite driving the management API.</p>' +
+    'test suite driving the management API.') +
     RBAC_CAVEAT;
 
   log.debug("Leaving rbacListPage(). " + shown.length + " row(s) drawn of " +
@@ -11157,9 +12740,9 @@ function claimAttributeSection(setId, previewUser, values, pageUrl) {
 
   log.debug("Leaving claimAttributeSection(). " + selected.length + " of " +
             claimAttributes.CATALOGUE.length + " selected.");
-  return '<p class="note">' + (selected.length
+  return note((selected.length
       ? 'Carries ' + selected.length + ' directory attribute(s): ' + codeList(selected) + '.'
-      : 'Carries no directory attribute. Tick some and press Update.') + '</p>' +
+      : 'Carries no directory attribute. Tick some and press Update.')) +
     '<form method="post" action="' + esc(pageUrl) + '">' +
     '<input type="hidden" name="action" value="attributes">' +
     '<input type="hidden" name="set" value="' + esc(setId) + '">' +
@@ -11179,8 +12762,8 @@ function claimAttributeSection(setId, previewUser, values, pageUrl) {
     '<input type="hidden" name="action" value="attributes-clear">' +
     '<input type="hidden" name="set" value="' + esc(setId) + '">' +
     '<button class="secondary">Delete all</button></form>' +
-    '<span class="note">Both act immediately — there is no script on this page, so these are ' +
-    'form posts and not a way of ticking the boxes above.</span></div>';
+    note('Both act immediately — there is no script on this page, so these are ' +
+    'form posts and not a way of ticking the boxes above.') + '</div>';
 }
 
 // One set, rendered: what is in it, a way to remove each, and a way to add another.
@@ -11298,19 +12881,19 @@ function groupClaimSection(previewUser) {
   }).join('');
 
   const values = answer.values.length
-    ? '<p class="note">The claim <code>' + esc(state.claim) + '</code> would carry ' +
-      codeList(answer.values) + '.</p>'
-    : '<p class="note">No claim at all for this person &mdash; not an empty list, absent. ' +
-      esc(answer.reason) + '</p>';
+    ? note('The claim <code>' + esc(state.claim) + '</code> would carry ' +
+      codeList(answer.values) + '.')
+    : note('No claim at all for this person &mdash; not an empty list, absent. ' +
+      esc(answer.reason));
 
   log.debug("Leaving groupClaimSection(). " + answer.values.length + " value(s).");
   return '<h2>The groups claim</h2>' +
-    '<p class="note">The one thing on this page that is <strong>not</strong> chosen per set: ' +
+    note('The one thing on this page that is <strong>not</strong> chosen per set: ' +
     'with <code>groups.claim</code> on, all four carry it, for anybody who is a member of a ' +
     'group in <a href="/admin/groups">the embedded directory</a>. The membership is read at the ' +
     'moment a token is minted, so an <code>ldapmodify</code> changes the next one, and somebody ' +
     'in no group gets no claim rather than an empty list &mdash; which is why this can be on by ' +
-    'default without changing what an existing client receives.</p>' +
+    'default without changing what an existing client receives.') +
 
     '<div class="' + (state.enabled && !state.problem ? 'note' : 'warn') + '">' +
     (state.enabled
@@ -11329,23 +12912,23 @@ function groupClaimSection(previewUser) {
                          'so there are no groups to read.') +
     '</div>' +
 
-    '<div class="warn"><strong>Carrying a group is not granting one.</strong> No endpoint here ' +
+    warn('<strong>Carrying a group is not granting one.</strong> No endpoint here ' +
     'reads this claim and nothing decides anything on it &mdash; the same sentence ' +
     '<a href="/admin/groups">the groups page</a> has always carried, and the half of it that ' +
-    'changed is that a token now says so out loud.</div>' +
+    'changed is that a token now says so out loud.') +
 
-    '<p class="note">A typed claim above, and a ticked directory attribute above, both win over ' +
+    note('A typed claim above, and a ticked directory attribute above, both win over ' +
     'this one where the names collide: those were named on this page about this service, and ' +
-    'this comes from a setting and a directory.</p>' +
+    'this comes from a setting and a directory.') +
 
     '<h3>What ' + esc(previewUser) + ' would get</h3>' +
     values +
     (answer.groups.length
       ? '<table><tr><th>Group</th><th>cn</th><th>Named by</th><th>Counted</th></tr>' +
         rows + '</table>'
-      : '<p class="note">' + esc(previewUser) + ' is named by no group here' +
+      : note(esc(previewUser) + ' is named by no group here' +
         (answer.entryFound ? '' : ', and has no entry in the directory either') + '. ' +
-        'The entry would be at <code>' + esc(answer.dn) + '</code>.</p>');
+        'The entry would be at <code>' + esc(answer.dn) + '</code>.'));
 }
 
 // One family of sets and the rules that govern them. The rules are in the reply
@@ -11463,14 +13046,14 @@ function samlAttributesJson(previewUser) {
 function claimHalvesNote(family) {
   const noun = family === 'saml' ? 'attribute' : 'claim';
   const carrier = family === 'saml' ? 'assertion' : 'token';
-  return '<p class="note">Each set has <strong>two halves</strong>. A <em>typed ' + noun +
+  return note('Each set has <strong>two halves</strong>. A <em>typed ' + noun +
     '</em> is a name and a value somebody wrote here, the same for everybody except where it ' +
     'carries a <code>${placeholder}</code>. A <em>directory attribute</em> is ticked from the ' +
     'catalogue below and its value is whatever that person\'s entry under <code>ou=users</code> ' +
     'says — so an <code>ldapmodify</code> changes the next ' + carrier + ', and an LDAP client ' +
     'and a relying party pointed at this service are shown the same person. That is the half ' +
     'worth exercising, and until the catalogue existed only a Verifiable Credential could do ' +
-    'it.</p>';
+    'it.');
 }
 
 // The "show me somebody" form. It is a GET form posting to the page's own path,
@@ -11481,12 +13064,12 @@ function claimPreviewForm(path, previewUser, values) {
     '<label for="user">Show the values for</label>' +
     '<input type="text" id="user" name="user" size="20" value="' + esc(previewUser) + '">' +
     '<button class="secondary">Show</button>' +
-    '<span class="note">' + (values.entryFound
+    note((values.entryFound
       ? 'This person has an entry in the directory, so the values marked <em>directory</em> are ' +
         'what an LDAP client reads from it.'
       : 'This person has no entry in the directory — nobody has authenticated as them and nothing ' +
         'was added by hand — so every value below is generated. It will be the same one next ' +
-        'time: the invented person is seeded from the username.') + '</span></div></form>';
+        'time: the invented person is seeded from the username.')) + '</div></form>';
 }
 
 function attributeCatalogueNotes(family) {
@@ -11496,7 +13079,7 @@ function attributeCatalogueNotes(family) {
     : '<a href="/admin/saml-attributes">the SAML attributes page</a>';
   const otherThing = saml ? 'an access token or an ID Token carries' : 'an assertion carries';
   return '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
-    '<p class="note">The catalogue is of <strong>LDAP attribute types</strong> and not of ' +
+    note('The catalogue is of <strong>LDAP attribute types</strong> and not of ' +
     (saml ? 'attribute names' : 'claim names') + ', and it is the same catalogue ' +
     otherPage + ' and <a href="/admin/vc">the credential claims page</a> choose from — one list ' +
     'of spellings, because two would eventually disagree about what <code>schacDateOfBirth</code> ' +
@@ -11504,43 +13087,43 @@ function attributeCatalogueNotes(family) {
     '<code>ou=users</code>; where the entry has nothing, it is invented from the username — the ' +
     'same invented person every time, across restarts, in obviously fictional ranges. Three rows ' +
     'are not RFC 4519/4524/2798: there is no standard attribute type for a birthdate or a ' +
-    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
-    '<p class="note">The <strong>four selections are independent</strong>, and that is the point ' +
+    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.') +
+    note('The <strong>four selections are independent</strong>, and that is the point ' +
     'of having four: an access token carrying <code>employee_number</code> and a SAML 2.0 ' +
     'assertion carrying <code>email</code> is a normal arrangement and a single list could not ' +
     'express it. The two on this page are independent of what ' + otherThing + ' — ticked on ' +
     otherPage + ' — and of what a <a href="/admin/vc">credential</a> carries and what the ' +
     '<a href="/admin/vc-verifier-config">Verifier asks for</a>, deliberately: that is what keeps ' +
-    '"issue a credential carrying a claim the access token does not" reachable.</p>' +
+    '"issue a credential carrying a claim the access token does not" reachable.') +
     (saml
-      ? '<p class="note">A <strong>nested</strong> claim cannot stay nested here. A SAML ' +
+      ? note('A <strong>nested</strong> claim cannot stay nested here. A SAML ' +
         'Attribute\'s content model is a name and text values, so <code>address.locality</code> ' +
         'arrives as an attribute whose NAME is the dotted path, where a JWT would carry a ' +
         '<code>locality</code> member of an <code>address</code> object (OIDC Core 5.1.1). Both ' +
         'families then call one claim by one name, which is the property somebody comparing an ' +
-        'ID Token with an assertion needs.</p>'
-      : '<p class="note">A <strong>nested</strong> claim stays nested in a JWT: ' +
+        'ID Token with an assertion needs.')
+      : note('A <strong>nested</strong> claim stays nested in a JWT: ' +
         '<code>address.locality</code> is a <code>locality</code> member of an <code>address</code> ' +
         'object, which is what OIDC Core 5.1.1 defines. A SAML Attribute has no way to spell that — ' +
         'the content model is a name and text values — so the assertion carries the dotted path as ' +
         'the attribute\'s name. Both families then call one claim by one name, which is the ' +
-        'property somebody comparing an ID Token with an assertion needs.</p>') +
-    '<p class="note"><strong>A typed ' + (saml ? 'attribute' : 'claim') + ' of the same name ' +
+        'property somebody comparing an ID Token with an assertion needs.')) +
+    note('<strong>A typed ' + (saml ? 'attribute' : 'claim') + ' of the same name ' +
     'wins.</strong> Somebody who wrote <code>email</code> by hand on the set that also has ' +
     '<code>mail</code> ticked has said something specific, and the specific thing beats the ' +
     'general one. In an assertion that has to be a filter rather than an overwrite: two ' +
     '<code>&lt;Attribute&gt;</code> elements with one name would leave a relying party reading ' +
-    'whichever the builder emitted first.</p>' +
+    'whichever the builder emitted first.') +
     (saml
-      ? '<p class="note"><strong>And the protocol\'s own attribute beats both</strong>, which is ' +
+      ? note('<strong>And the protocol\'s own attribute beats both</strong>, which is ' +
         'worth knowing before it is discovered in an assertion. A SAML 2.0 assertion sets ' +
         '<code>name</code> from the sign-in and a WS-Federation one sets the whole identity claim ' +
         'list, so ticking <code>cn</code>, <code>givenName</code>, <code>sn</code>, ' +
         '<code>uid</code> or <code>mail</code> may change nothing a relying party sees. The rule ' +
         'is not this page\'s: a configured attribute is ADDED to an assertion and never ' +
         'substituted into one, because an attribute a relying party keys off that a web form ' +
-        'could displace would break a sign-in somewhere that looks nothing like this page.</p>'
-      : '<p class="note"><strong>And the protocol\'s own claim beats both</strong>, which is worth ' +
+        'could displace would break a sign-in somewhere that looks nothing like this page.')
+      : note('<strong>And the protocol\'s own claim beats both</strong>, which is worth ' +
         'knowing before it is discovered on a token. An ID Token always carries <code>name</code>, ' +
         '<code>given_name</code>, <code>family_name</code>, <code>preferred_username</code> and ' +
         '<code>email</code> built from the sign-in, so ticking <code>cn</code>, ' +
@@ -11549,13 +13132,13 @@ function attributeCatalogueNotes(family) {
         'where the protocol sets none of them, and reach it from the directory. The rule is not ' +
         'new and is not this page\'s: a configured claim is added to a token and never ' +
         'substituted into one, because a claim a relying party keys off that a web form could ' +
-        'displace would break a sign-in somewhere that looks nothing like this page.</p>') +
-    '<p class="note"><strong>None of it is verified and none of it grants anything.</strong> This ' +
+        'displace would break a sign-in somewhere that looks nothing like this page.')) +
+    note('<strong>None of it is verified and none of it grants anything.</strong> This ' +
     'service authenticates nobody — the username typed at the sign-in screen is the identity in ' +
     'everything it issues — so a birthdate from here is a birthdate from a web form. No endpoint ' +
     'here reads one of these back or decides anything on one. That is true of the groups claim as ' +
     'well: it is carried, and a group on that person\'s entry still grants them nothing &mdash; ' +
-    'see <a href="/admin/groups">the groups page</a>.</p>';
+    'see <a href="/admin/groups">the groups page</a>.');
 }
 
 // WHICH PLACEHOLDERS ACTUALLY EXPAND IN AN ASSERTION, which is not the list the
@@ -11577,7 +13160,7 @@ const SAML_PLACEHOLDERS = ['subject', 'audience', 'now', 'iso'];
 function claimValueNotes(family) {
   const saml = family === 'saml';
   return '<h2>Values</h2>' +
-    '<p class="note">A value may contain <code>${placeholders}</code>, because a value that can ' +
+    note('A value may contain <code>${placeholders}</code>, because a value that can ' +
     'only be a constant cannot exercise the thing worth testing — that an ' +
     (saml ? 'attribute' : 'claim') + ' carrying the signed-in user\'s identity reaches the ' +
     'relying party. ' +
@@ -11592,22 +13175,22 @@ function claimValueNotes(family) {
     ' An unknown one ' +
     'is left as it was written rather than replaced with nothing: <code>${dept}</code> that ' +
     'silently became an empty string is a bug that looks like a configuration mistake, and one ' +
-    'that still says <code>${dept}</code> names itself.</p>' +
+    'that still says <code>${dept}</code> names itself.') +
     (saml
-      ? '<p class="note"><strong>A SAML attribute value is never typed.</strong> The XML content ' +
+      ? note('<strong>A SAML attribute value is never typed.</strong> The XML content ' +
         'model is text, so <code>true</code> and <code>{"a":1}</code> reach the relying party as ' +
         'the characters they were written as — which is the opposite of what the same value does ' +
         'in a JWT, where it would arrive as a boolean and an object. That difference is worth ' +
         'knowing rather than discovering: a client library that parses an assertion attribute ' +
-        'into a boolean is doing that on its own.</p>'
-      : '<p class="note">A JWT claim value is typed: text that unambiguously looks like JSON — an ' +
+        'into a boolean is doing that on its own.')
+      : note('A JWT claim value is typed: text that unambiguously looks like JSON — an ' +
         'object, an array, a bare <code>true</code>/<code>false</code>/<code>null</code>, or a ' +
         'number — is used as that JSON, and anything else is a string. One consequence, stated ' +
         'rather than left to be discovered: a claim whose value is genuinely the four characters ' +
         '<code>true</code> cannot be configured, because a text field cannot tell the two apart. ' +
         'Write <code>"true"</code>, which parses as the JSON string. <a href="/admin/saml-' +
         'attributes">SAML attribute values</a> are never typed — the XML content model is ' +
-        'text.</p>');
+        'text.'));
 }
 
 // The "replace a whole set" form, which is the one a test wants: POST the same
@@ -11621,9 +13204,9 @@ function replaceSetForm(ids, pageUrl, family) {
   }).join('');
   const noun = family === 'saml' ? 'attributes' : 'claims';
   return '<h2>Replace a whole set</h2>' +
-    '<p class="note">The form a test wants. POST the same thing as JSON to get JSON back. This ' +
+    note('The form a test wants. POST the same thing as JSON to get JSON back. This ' +
     'replaces the <em>typed</em> ' + noun + ' only; the directory attributes ticked above are a ' +
-    'separate action (<code>attributes</code>) and are left alone by it.</p>' +
+    'separate action (<code>attributes</code>) and are left alone by it.') +
     '<form method="post" action="' + esc(pageUrl) + '">' +
       '<input type="hidden" name="action" value="replace">' +
       '<div class="formrow"><label for="set">Set</label>' +
@@ -11645,30 +13228,30 @@ app.get('/admin/claims', function (req, res) {
   const values = claimAttributes.catalogueValuesFor(previewUser);
 
   const inner = messagesOf(req) +
-    '<p class="note">What to add to every <strong>token</strong> this service issues <em>from now ' +
+    note('What to add to every <strong>token</strong> this service issues <em>from now ' +
     'on</em>. Nothing already issued changes — a token is a signed document and this page cannot ' +
     'reach inside one. Two sets, because an OAuth 2.0 access token and an OIDC ID Token go to ' +
     'different readers: one to a resource server and one to a client, and the interesting ' +
-    'configuration is usually the one where they DIFFER.</p>' +
+    'configuration is usually the one where they DIFFER.') +
 
-    '<p class="note">The other two sets are next door. <strong>SAML 2.0 and SAML 1.1 assertions ' +
+    note('The other two sets are next door. <strong>SAML 2.0 and SAML 1.1 assertions ' +
     'are configured on <a href="/admin/saml-attributes">Custom SAML attributes</a></strong>, ' +
     'under SAML, because those two spell an attribute differently enough from a JWT claim — and ' +
     'from each other — that one page had to explain three vocabularies before a reader could ' +
-    'change one. The store is the same one either way, and so is the audit row.</p>' +
+    'change one. The store is the same one either way, and so is the audit row.') +
 
     claimHalvesNote('jwt') +
 
     claimPreviewForm('/admin/claims', previewUser, values) +
 
-    '<div class="warn"><strong>Custom claims are additive.</strong> A configured claim is added to ' +
+    warn('<strong>Custom claims are additive.</strong> A configured claim is added to ' +
     'what the protocol already puts in the token and never replaces one. The names this service ' +
     'sets itself are refused rather than silently ignored: ' +
     codeList(stats.RESERVED_JWT_CLAIMS) + '. Every one of them is ' +
     'load-bearing somewhere here — an <code>exp</code> settable from a web form would produce ' +
     'tokens that fail to verify with nothing pointing back at this page. The list is a JWT rule ' +
     'and only a JWT rule: an <a href="/admin/saml-attributes">assertion attribute</a> called ' +
-    '<code>exp</code> collides with nothing and is allowed.</div>' +
+    '<code>exp</code> collides with nothing and is allowed.') +
 
     '<h2>The two token sets</h2>' +
     stats.JWT_CLAIM_SET_IDS.map(function (id) {
@@ -11714,31 +13297,31 @@ app.get('/admin/saml-attributes', function (req, res) {
   const values = claimAttributes.catalogueValuesFor(previewUser);
 
   const inner = messagesOf(req) +
-    '<p class="note">What to add to every <strong>SAML assertion</strong> this service issues ' +
+    note('What to add to every <strong>SAML assertion</strong> this service issues ' +
     '<em>from now on</em>. Nothing already issued changes — an assertion is a signed document and ' +
     'this page cannot reach inside one. Two sets, because SAML 2.0 and SAML 1.1 spell an ' +
     'attribute differently enough that one list could not serve both: 2.0 has ' +
     '<code>Name</code> and an optional <code>NameFormat</code>, and 1.1 has ' +
-    '<code>AttributeName</code> and a required <code>AttributeNamespace</code>.</p>' +
+    '<code>AttributeName</code> and a required <code>AttributeNamespace</code>.') +
 
-    '<p class="note"><strong>Where these assertions come from.</strong> The SAML 2.0 set reaches ' +
+    note('<strong>Where these assertions come from.</strong> The SAML 2.0 set reaches ' +
     'every assertion <a href="/admin/sts-metadata">WS-Trust</a> issues with a 2.0 token type; the ' +
     'SAML 1.1 set reaches the 1.1 ones, which is what <strong>WS-Federation\'s passive requestor ' +
     'profile</strong> carries — so the 1.1 half is the one a browser sign-in exercises. There is ' +
     'no SAML 2.0 Web SSO profile here, deliberately, so no assertion of that kind reaches a ' +
-    'browser: the 2.0 set is exercised by a WS-Trust client.</p>' +
+    'browser: the 2.0 set is exercised by a WS-Trust client.') +
 
-    '<p class="note">Tokens are next door. <strong>The OAuth 2.0 access token and the OIDC ID ' +
+    note('Tokens are next door. <strong>The OAuth 2.0 access token and the OIDC ID ' +
     'Token are configured on <a href="/admin/claims">Custom claims</a></strong>, under OAuth2 / ' +
     'OIDC. The store behind both pages is one store — the same four sets, the same ' +
     '<code>ldapmodify</code>-visible directory attributes, and one row in ' +
-    '<a href="/admin/audit">the audit log</a> per change whichever page made it.</p>' +
+    '<a href="/admin/audit">the audit log</a> per change whichever page made it.') +
 
     claimHalvesNote('saml') +
 
     claimPreviewForm('/admin/saml-attributes', previewUser, values) +
 
-    '<div class="warn"><strong>Custom attributes are additive.</strong> A configured attribute is ' +
+    warn('<strong>Custom attributes are additive.</strong> A configured attribute is ' +
     'added to what the protocol already puts in the assertion and never replaces one — a SAML 2.0 ' +
     'assertion sets <code>name</code> from the sign-in and a WS-Federation one sets the whole ' +
     'identity claim list, and neither can be displaced from here. <strong>The reserved list on ' +
@@ -11746,7 +13329,7 @@ app.get('/admin/saml-attributes', function (req, res) {
     'names are load-bearing in a JWT, and an assertion attribute called <code>exp</code> or ' +
     '<code>scope</code> collides with nothing. What is refused here is the same thing that is ' +
     'refused there — an entry with no name, and two entries of one name, because the second would ' +
-    'win silently.</div>' +
+    'win silently.') +
 
     '<h2>The two assertion sets</h2>' +
     stats.SAML_CLAIM_SET_IDS.map(function (id) {
@@ -11760,12 +13343,12 @@ app.get('/admin/saml-attributes', function (req, res) {
     claimValueNotes('saml') +
 
     '<h2>The SAML 1.1 namespace</h2>' +
-    '<p class="note">A SAML 1.1 attribute is a NAME IN A NAMESPACE, and an attribute configured ' +
+    note('A SAML 1.1 attribute is a NAME IN A NAMESPACE, and an attribute configured ' +
     'without one gets <code>' + esc(stats.DEFAULT_SAML11_NAMESPACE) + '</code> — the claim ' +
     'namespace every WS-Federation relying party already reads. That default is why an attribute ' +
     'added with a name and a value alone arrives somewhere useful instead of in a namespace ' +
     'nothing looks in. SAML 2.0 has no equivalent: <code>NameFormat</code> is optional there and ' +
-    'is left off unless it is typed.</p>' +
+    'is left off unless it is typed.') +
 
     replaceSetForm(stats.SAML_CLAIM_SET_IDS, pageUrl, 'saml');
 
@@ -11999,24 +13582,24 @@ function vcPreviewSection(previewUser) {
     '<label for="user">Preview the credential for</label>' +
     '<input type="text" id="user" name="user" size="20" value="' + esc(previewUser) + '">' +
     '<button class="secondary">Show</button></div></form>' +
-    '<p class="note">' + (built.entryFound
+    note((built.entryFound
       ? 'This person has an entry in the directory, so the values below marked ' +
         '<em>directory</em> are what an LDAP client reads from it.'
       : 'This person has no entry in the directory — nobody has authenticated as them and ' +
         'nothing was added by hand — so every value below is generated. It will be the same ' +
-        'one next time: the invented person is seeded from the username.') + '</p>' +
+        'one next time: the invented person is seeded from the username.')) +
     '<table><tr><th>Claim</th><th>Value</th><th>From</th><th>In ldp_vc</th></tr>' +
     (rows || '<tr><td colspan="4">No attribute is selected, so a credential carries nothing ' +
              'but its subject identifier. That is a legitimate thing to test and is not a ' +
              'mistake this page will correct.</td></tr>') + '</table>' +
     (omitted.length
-      ? '<p class="note"><strong>' + codeList(omitted) + '</strong> ' +
+      ? note('<strong>' + codeList(omitted) + '</strong> ' +
         (omitted.length === 1 ? 'is selected and does' : 'are selected and do') +
         ' not appear in an <code>ldp_vc</code> credential. That format is signed over ' +
         'canonicalized JSON-LD, so it can only carry terms the vendored context defines, and ' +
         'the context is vendored precisely because editing it would invalidate every ' +
         'credential already issued against it. The two JOSE-secured formats carry all of ' +
-        'them.</p>'
+        'them.')
       : '');
 }
 
@@ -12055,27 +13638,27 @@ app.get('/admin/vc', function (req, res) {
   const previewUser = vcPreviewUser(req.query);
 
   const inner = messagesOf(req) +
-    '<p class="note">Which claims a Verifiable Credential issued by this service carries, ' +
+    note('Which claims a Verifiable Credential issued by this service carries, ' +
     '<em>from now on</em>. Nothing already issued changes — a credential is a signed document ' +
     'and this page cannot reach inside one. It applies to all five OID4VCI configurations: the ' +
     'SD-JWT VC, the <code>jwt_vc_json</code> W3C credential, the <code>ldp_vc</code> one with a ' +
-    'BBS proof, and the two whose only difference is that the issuer names itself by DID.</p>' +
+    'BBS proof, and the two whose only difference is that the issuer names itself by DID.') +
 
-    '<p class="note">The list is of <strong>LDAP attribute types</strong> and not of claim ' +
+    note('The list is of <strong>LDAP attribute types</strong> and not of claim ' +
     'names, because this service has a directory and a claim with a value nothing else can see ' +
     'is half a demonstration. A selected attribute becomes the claim named beside it, and the ' +
     'value is the one on that person\'s entry under <code>ou=users</code> — so an LDAP client ' +
     'and an OID4VCI wallet pointed at this service are shown the same person. Three rows are ' +
     'not RFC 4519/4524/2798: there is no standard attribute type for a birthdate or a ' +
-    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.</p>' +
+    'nationality, so the SCHAC schema\'s names are borrowed rather than invented.') +
 
-    '<div class="warn"><strong>None of this is verified, and the values are garbage on ' +
+    warn('<strong>None of this is verified, and the values are garbage on ' +
     'purpose.</strong> This service authenticates nobody — the username typed at the sign-in ' +
     'screen is the identity in every token and credential it issues — so there is no source of ' +
     'a real birthdate here and there had better not be. What a person is missing is invented ' +
     'from their username: the same invented person every time, across restarts, so that two ' +
     'credentials issued a minute apart describe one human being rather than two. A verifier ' +
-    'that believed any of it would be believing this page.</div>' +
+    'that believed any of it would be believing this page.') +
 
     '<h2>The attributes</h2>' +
     vcAttributeTable(previewUser) +
@@ -12084,7 +13667,7 @@ app.get('/admin/vc', function (req, res) {
     vcPreviewSection(previewUser) +
 
     '<h2>Where a value comes from</h2>' +
-    '<p class="note">Three sources, in this order. <strong>The access token</strong>, where it ' +
+    note('Three sources, in this order. <strong>The access token</strong>, where it ' +
     'carries a claim of that name — that is a statement this service already made about the ' +
     'person, from the sign-in or from the <a href="/admin/claims">custom claims</a> page, and a ' +
     'credential contradicting the token that authorised it would be indefensible. Then <strong>' +
@@ -12092,16 +13675,16 @@ app.get('/admin/vc', function (req, res) {
     'exists and also where an <code>ldapmodify</code> lands: change <code>mail</code> on ' +
     '<code>uid=alice,ou=users</code> and the next credential says so. Then <strong>the ' +
     'generated persona</strong>, for a person with no entry, or an entry without that ' +
-    'attribute, or a directory that is not running.</p>' +
-    '<p class="note">Populating never overwrites. An attribute an entry already carries is left ' +
+    'attribute, or a directory that is not running.') +
+    note('Populating never overwrites. An attribute an entry already carries is left ' +
     'exactly as it is — which is why the three seeded people keep their names and only gain what ' +
-    'they had nothing for, and why a sweep run twice does nothing the second time.</p>' +
+    'they had nothing for, and why a sweep run twice does nothing the second time.') +
 
     '<h2>What these claims do not do</h2>' +
-    '<p class="note">Nothing reads them back. No access token, ID Token, SAML assertion or ' +
+    note('Nothing reads them back. No access token, ID Token, SAML assertion or ' +
     'Kerberos PAC carries a claim from this page, and no endpoint makes a decision on one — it ' +
     'reaches a credential and stops there. The <a href="/admin/users">users</a> page shows the ' +
-    'directory entry each of these values was written onto.</p>';
+    'directory entry each of these values was written onto.');
 
   respond(req, res, vcJson(previewUser), 'Credential claims', '/admin/vc',
           inner);
@@ -12280,10 +13863,10 @@ function vpExtraRows(format) {
     return '';
   }
   return '<h3>Asked for, and not in the catalogue</h3>' +
-    '<p class="note">Nothing this service issues carries these, which is what makes them worth ' +
+    note('Nothing this service issues carries these, which is what makes them worth ' +
     'asking for: it is the only way to see what a wallet does with a request it cannot satisfy, ' +
     'and what this Verifier says when it checks. They are ticked below so that saving the table ' +
-    'above keeps them — untick one to stop asking for it.</p>' +
+    'above keeps them — untick one to stop asking for it.') +
     '<table><tr><th>In</th><th>Claim</th><th>DCQL path (' + esc(format) + ')</th></tr>' +
     extras.map(function (row) {
       const paths = vpConfig.dcqlPathsFor(format, row.claim);
@@ -12307,17 +13890,17 @@ function vpClaimsSection(format) {
     '<th>Issued now</th></tr>' + rows + '</table>' +
     vpExtraRows(format) +
     '<div class="formrow"><button>Save this request</button>' +
-    '<span class="note">It applies to the next Authorization Request. One already in flight ' +
+    note('It applies to the next Authorization Request. One already in flight ' +
     'keeps the claims it was built with — a Verifier that judged a presentation against a list ' +
     'changed after it asked would refuse a wallet for answering the question it was really ' +
-    'asked.</span></div></form>' +
+    'asked.') + '</div></form>' +
     (omitted.length
-      ? '<p class="note"><strong>' + codeList(omitted) + '</strong> ' +
+      ? note('<strong>' + codeList(omitted) + '</strong> ' +
         (omitted.length === 1 ? 'is asked for and is' : 'are asked for and are') +
         ' dropped from an <code>ldp_vc</code> query. That format is signed over canonicalized ' +
         'JSON-LD, so only terms the vendored context defines can be named at all, and asking ' +
         'under a name it does not define would fail canonicalization rather than return less. ' +
-        'The two JOSE-secured formats ask for all of them.</p>'
+        'The two JOSE-secured formats ask for all of them.')
       : '') +
     '<div class="formrow">' +
     '<form method="post" action="/admin/vc-verifier-config" class="inline">' +
@@ -12359,19 +13942,19 @@ function vpFormatsSection(format) {
     '<th>Selective disclosure</th><th>Holder binding</th><th>Issued here as</th><th></th></tr>' +
     rows + '</table>' +
     '<div class="formrow"><button>Ask for this one by default</button>' +
-    '<span class="note">The default is what <code>/oid4vp/start</code> asks for when the link ' +
+    note('The default is what <code>/oid4vp/start</code> asks for when the link ' +
     'that reached it names no format. The bar door\'s three format buttons name one explicitly, ' +
     'so they are unaffected — a button saying "present an SD-JWT VC" that asked for something ' +
-    'else would be lying in the one place a reader is most likely to trust it.</span></div>' +
+    'else would be lying in the one place a reader is most likely to trust it.') + '</div>' +
     '</form>' +
-    '<p class="note">' + vpConfig.FORMATS.map(function (item) {
+    note(vpConfig.FORMATS.map(function (item) {
       return '<strong>' + esc(item.id) + '</strong> — ' + esc(item.what);
-    }).join('<br><br>') + '</p>' +
-    '<p class="note">The identifying values are not settable here. They are what this service\'s ' +
+    }).join('<br><br>')) +
+    note('The identifying values are not settable here. They are what this service\'s ' +
     'own issuer mints (<code>vc_configs.js</code>), and a Verifier asking for a <code>vct</code> ' +
     'nobody here issues would be a request no wallet in this stack could ever satisfy — a ' +
     'negative worth having, but one that belongs to the issuer\'s configuration rather than to a ' +
-    'text box on this page.</p>';
+    'text box on this page.');
 }
 
 // What the bar door asks for, and the dcql_query that carries it. The query is
@@ -12417,53 +14000,53 @@ app.get('/admin/vc-verifier-config', function (req, res) {
   const query = vpConfig.dcqlQuery(format);
 
   const inner = messagesOf(req) +
-    '<p class="note">What the mock Verifier at <a href="/oid4vp/verifier">/oid4vp/verifier</a> — ' +
+    note('What the mock Verifier at <a href="/oid4vp/verifier">/oid4vp/verifier</a> — ' +
     'the pages call it <em>The Bar Door</em> — asks a wallet for, and in which credential format. ' +
     'It reaches the wire as the <code>dcql_query</code> of the next OID4VP Authorization Request, ' +
     'and it is what the Verifier then checks the presentation against: a claim asked for and not ' +
-    'presented fails the <em>Requested claims</em> check by name.</p>' +
+    'presented fails the <em>Requested claims</em> check by name.') +
 
-    '<p class="note">The claims are the same catalogue <a href="/admin/vc">/admin/vc</a> fills a ' +
+    note('The claims are the same catalogue <a href="/admin/vc">/admin/vc</a> fills a ' +
     'credential from, grouped into <strong>claims</strong> rather than listed as attribute types. ' +
     'A credential carries one Disclosure per top-level claim, so <code>address</code> is one unit ' +
     'of disclosure however many LDAP attributes feed it — asking for it gets the street, the ' +
     'locality, the region, the postal code and the country together, and a page offering six ' +
-    'address checkboxes would be offering a choice that does not exist on the wire.</p>' +
+    'address checkboxes would be offering a choice that does not exist on the wire.') +
 
-    '<div class="warn"><strong>This asks; it does not admit anybody.</strong> A presentation that ' +
+    warn('<strong>This asks; it does not admit anybody.</strong> A presentation that ' +
     'verifies here starts no session, issues no token and grants no access — the door says yes and ' +
     'that is the whole of it. Nothing else in this service reads what was presented. The two ' +
     'settings are also deliberately separate: this page decides what is ASKED FOR and ' +
     '<a href="/admin/vc">/admin/vc</a> decides what is ISSUED, so that asking for a claim the ' +
     'issuer does not mint stays reachable. That is the negative worth testing, and one page ' +
-    'setting both would make it impossible to reach.</div>' +
+    'setting both would make it impossible to reach.') +
 
     '<h2>The claims</h2>' +
     (requested.length
-      ? '<p class="note">Asking for ' + requested.length + ': ' + codeList(requested) + '.</p>'
-      : '<div class="warn"><strong>No claim is selected, and that is a real request rather than ' +
+      ? note('Asking for ' + requested.length + ': ' + codeList(requested) + '.')
+      : warn('<strong>No claim is selected, and that is a real request rather than ' +
         'an empty form.</strong> DCQL reads an absent <code>claims</code> member as the WHOLE ' +
         'credential, so the query below carries none and the wallet is being asked for ' +
         'everything — the opposite of what selective disclosure is for, which is exactly why it ' +
-        'is worth being able to ask for it.</div>') +
+        'is worth being able to ask for it.')) +
     vpClaimsSection(format) +
 
     '<h2>The credential types that can be submitted</h2>' +
     vpFormatsSection(format) +
 
     '<h2>The query this builds</h2>' +
-    '<p class="note">Built by the function that builds the real one, not by a second walk of the ' +
+    note('Built by the function that builds the real one, not by a second walk of the ' +
     'table above — a preview that agreed with this page and disagreed with the request would be ' +
     'worse than no preview. It is the <code>dcql_query</code> parameter of the next ' +
-    'Authorization Request, by value or inside the signed Request Object.</p>' +
+    'Authorization Request, by value or inside the signed Request Object.') +
     '<textarea readonly spellcheck="false">' + esc(JSON.stringify(query, null, 2)) + '</textarea>' +
 
     '<h2>What this page does not change</h2>' +
-    '<p class="note">Not what the issuer mints — that is <a href="/admin/vc">/admin/vc</a>, and ' +
+    note('Not what the issuer mints — that is <a href="/admin/vc">/admin/vc</a>, and ' +
     'the <em>Issued now</em> column above is this page reporting on that one. Not a request ' +
     'already in flight, which keeps the claims it was built with. Not the <code>vct</code> or the ' +
     'type array a credential is identified by. And not what a verified presentation is worth: ' +
-    'nothing here turns one into a credential of any kind.</p>';
+    'nothing here turns one into a credential of any kind.');
 
   respond(req, res, vpConfigJson(), 'Verifier request',
           '/admin/vc-verifier-config', inner);
@@ -12518,7 +14101,7 @@ app.get('/admin/vc-verifier-config', function (req, res) {
 // service.
 // ---------------------------------------------------------------------------
 const REALMS_CAVEAT =
-  '<p class="note"><strong>A realm separates what this service ISSUES, not who it knows.</strong> ' +
+  note('<strong>A realm separates what this service ISSUES, not who it knows.</strong> ' +
   'Each realm has its own signing key, so a token minted in one does not verify against ' +
   'another\'s JWKS — that is the point of a realm rather than a side effect. What every realm ' +
   'SHARES is the embedded directory: one <code>ou=users</code>, one <code>ou=groups</code> and ' +
@@ -12526,11 +14109,11 @@ const REALMS_CAVEAT =
   'no path to put a realm segment in. So the same person can sign in to two realms and be one ' +
   'entry, a client registered once can be used in both, and <strong>the two admin roles are ' +
   'held once</strong> — there is no per-realm administrator. The table at the foot of this page ' +
-  'is the whole list of what is separated how.</p>' +
-  '<p class="note"><strong>Nothing here is persisted.</strong> Realms are held in memory like ' +
+  'is the whole list of what is separated how.') +
+  note('<strong>Nothing here is persisted.</strong> Realms are held in memory like ' +
   'everything else in this service and die with the process, along with the keys they signed ' +
   'with. Define them from <code>POST /admin-api/realms</code> in whatever starts your stack if ' +
-  'you want them back.</p>';
+  'you want them back.');
 
 // The base URL of this service WITHOUT any realm prefix. Every URL this page
 // prints is built from it, because a page read inside `acme` still has to be
@@ -12633,8 +14216,12 @@ function realmSupportTable() {
       : (row.state === 'partial'
           ? '<span class="eff" title="Realm-aware, but not wholly">' + esc(row.by) + '</span>'
           : '<span class="none">shared</span>');
+    // The note is realms.js's own prose and runs to a paragraph on the rows
+    // that matter most — the directory's is 1,700 characters — so it folds.
+    // What stays on the row is the family and whether it is separated, which
+    // is the question somebody scans this table to answer.
     return '<tr><td>' + esc(row.family) + '</td><td>' + state + '</td><td>' +
-           esc(row.note) + '</td></tr>';
+           note(esc(row.note)) + '</td></tr>';
   }).join('');
   return '<table><tr><th>Family</th><th>Separated</th><th>What that means</th></tr>' +
          rows + '</table>';
@@ -12681,13 +14268,13 @@ function realmsListPage(req) {
     (realms.active()
       ? ''
       : !config.value('realms.enabled')
-        ? '<div class="warn"><strong>Trust realms are switched off.</strong> ' +
+        ? warn('<strong>Trust realms are switched off.</strong> ' +
           '<code>realms.enabled</code> is false, so every prefix below answers 404 ' +
           'and this whole service is the default realm. The definitions are ' +
           'untouched — that is what this setting is for: it lets a realm be ruled ' +
           'out as the cause of something without anything being deleted. Turn it ' +
-          'back on from <a href="/admin/config">Configuration</a>.</div>'
-        : '<p class="note"><strong>Trust realms are switched ON and none has been ' +
+          'back on from <a href="/admin/config">Configuration</a>.')
+        : note('<strong>Trust realms are switched ON and none has been ' +
           'defined, which is this service\'s ordinary state rather than something ' +
           'to fix.</strong> <code>realms.enabled</code> is <code>true</code>; the ' +
           'feature does nothing until a realm exists, because the built-in ' +
@@ -12698,7 +14285,7 @@ function realmsListPage(req) {
           'unchanged. <strong>Define one below</strong> and its prefix starts ' +
           'answering immediately: a switcher appears on every page of this ' +
           'console, and <code>GET /realms</code> starts reporting ' +
-          '<code>active: true</code>.</p>') +
+          '<code>active: true</code>.')) +
 
     '<h2>The realms</h2>' +
     '<table><tr><th>Id</th><th>Name</th><th>Path prefix</th><th>Signing key</th>' +
@@ -12707,7 +14294,7 @@ function realmsListPage(req) {
     perPageForm('/admin/realms', 'per', req.query.per, pg.perPage, '', listView) +
 
     '<h2>Define a realm</h2>' +
-    '<p class="note">The id becomes a path segment, so it is lower-case letters, ' +
+    note('The id becomes a path segment, so it is lower-case letters, ' +
     'digits and hyphens. It may not be <code>default</code> and it may not be the ' +
     'first segment of a path this service already serves — ' +
     (json.reserved.length ? codeList(json.reserved.slice(0, 12)) +
@@ -12715,7 +14302,7 @@ function realmsListPage(req) {
       : 'nothing is registered yet') +
     ' — whatever <code>realms.pathSegment</code> is set to, precisely so that ' +
     'clearing that setting cannot turn an existing realm into a shadow over the ' +
-    'console or the authorization server.</p>' +
+    'console or the authorization server.') +
     '<form method="post" action="/admin/realms">' + carryBack +
     '<input type="hidden" name="action" value="create">' +
     '<div class="formrow"><label for="rid">Id</label>' +
@@ -12785,29 +14372,29 @@ function realmDetailPage(req, wanted) {
     (inRealm
       ? '<div class="ok">You are reading this console <strong>inside</strong> ' +
         'this realm. <a href="/admin/config">Configuration</a> writes here.</div>'
-      : '<div class="warn">You are reading this console in the <strong>' +
+      : warn('You are reading this console in the <strong>' +
         esc(realms.current().name) + '</strong> realm. The switcher on the left ' +
         'moves to this one; until then <a href="/admin/config">Configuration</a> ' +
-        'writes to the realm you are in, not to this one.</div>') +
+        'writes to the realm you are in, not to this one.')) +
 
     '<h2>Where it answers</h2>' +
-    '<p class="note">Path prefix <code>' + esc(json.pathPrefix || '(none — this is ' +
+    note('Path prefix <code>' + esc(json.pathPrefix || '(none — this is ' +
     'the default realm)') + '</code>. Every HTTP endpoint this service has is ' +
     'under it, unchanged: what is <code>/oauth2/token</code> in the default realm ' +
-    'is <code>' + esc(json.pathPrefix) + '/oauth2/token</code> here.</p>' +
+    'is <code>' + esc(json.pathPrefix) + '/oauth2/token</code> here.') +
     '<table><tr><th>Document</th><th>URL</th></tr>' + endpointRows + '</table>' +
-    '<p class="note">The signing key is <code>' + esc(json.kid) + '</code>, ' +
+    note('The signing key is <code>' + esc(json.kid) + '</code>, ' +
     'generated for this realm and held only in memory. A token minted here does ' +
     'not verify against any other realm\'s JWKS, which is what makes two realms ' +
-    'two authorization servers rather than one served twice.</p>' +
+    'two authorization servers rather than one served twice.') +
 
     '<h2>What this realm sets</h2>' +
-    '<p class="note">Every setting in <a href="/admin/config">this service\'s ' +
+    note('Every setting in <a href="/admin/config">this service\'s ' +
     'table</a> can be set per realm, above whatever the process as a whole is ' +
     'configured with and below nothing. The two exceptions are ' +
     '<code>realms.enabled</code> and <code>realms.pathSegment</code>: a realm ' +
     'that could switch realms off, or move the prefix it was found under, would ' +
-    'be doing it half way through the request that found it.</p>' +
+    'be doing it half way through the request that found it.') +
     '<table><tr><th>Key</th><th>Setting</th><th>Value</th><th></th></tr>' +
     settingRows + '</table>' +
     '<form method="post" action="/admin/realms">' + carryBack +
@@ -12832,17 +14419,17 @@ function realmDetailPage(req, wanted) {
 
     (realm.builtin
       ? '<h2>It cannot be removed</h2>' +
-        '<p class="note">Every URL this service published before trust realms ' +
+        note('Every URL this service published before trust realms ' +
         'existed is a URL in this realm, so removing it would remove the ' +
-        'service. There is deliberately no button.</p>'
+        'service. There is deliberately no button.')
       : '<h2>Remove it</h2>' +
-        '<p class="note"><strong>Everything it holds goes with it</strong> — its ' +
+        note('<strong>Everything it holds goes with it</strong> — its ' +
         'sessions, its authorization codes, its tokens, its offers, its service ' +
         'providers, its statistics, its audit log and its signing key. That is ' +
         'deliberate rather than thorough: a realm re-created with the same id ' +
         'inheriting the last one\'s sessions would be the single most surprising ' +
         'thing a re-created realm could do. Nothing is removed from the shared ' +
-        'directory, because nothing there belongs to a realm.</p>' +
+        'directory, because nothing there belongs to a realm.') +
         '<form method="post" action="/admin/realms">' + carryBack +
         '<input type="hidden" name="action" value="remove">' +
         '<input type="hidden" name="id" value="' + esc(realm.id) + '">' +
@@ -13126,22 +14713,25 @@ function sourceNote(setting) {
 
 function configRow(setting) {
   const id = 'cfg-' + setting.key.replace(/\./g, '-');
+  // The control carries the description as a tooltip, at the length a tooltip
+  // holds. See the comment above the return.
+  const hint = tip(setting.description);
   const input = setting.type === 'enum'
-    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' + hint +
       (setting.editable ? '' : ' disabled') + '>' +
       setting.enumValues.map(function (option) {
         return '<option value="' + esc(option) + '"' +
           (option === setting.text ? ' selected' : '') + '>' + esc(option) + '</option>';
       }).join('') + '</select>'
     : (setting.type === 'bool'
-      ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+      ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' + hint +
         (setting.editable ? '' : ' disabled') + '>' +
         ['true', 'false'].map(function (option) {
           return '<option value="' + option + '"' +
             (option === setting.text ? ' selected' : '') + '>' + option + '</option>';
         }).join('') + '</select>'
       : '<input type="text" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
-        ' size="34" value="' + esc(setting.text) + '"' +
+        hint + ' size="34" value="' + esc(setting.text) + '"' +
         (setting.editable ? '' : ' disabled') + '>');
 
   // The Reset button is its own form. It has to be: it is a different action
@@ -13158,15 +14748,34 @@ function configRow(setting) {
     ? '<strong>' + esc(sourceNote(setting)) + '</strong>'
     : esc(sourceNote(setting));
 
-  const note = setting.editable
+  // Named `restart` and not `note`, which it was until the folds arrived: a
+  // local called `note` shadows the helper of that name for the whole
+  // function, and the row then fails to render with `Cannot access 'note'
+  // before initialization` — at request time, on one page, which is the
+  // slowest possible way to find out.
+  const restart = setting.editable
     ? ''
-    : '<div class="note"><strong>Restart to apply:</strong> ' +
-      esc(setting.restartReason) + '.</div>';
+    : note('<strong>Restart to apply:</strong> ' +
+      esc(setting.restartReason) + '.');
 
+  // THE DESCRIPTION IS THE FOLD AND THE LABEL IS ITS SUMMARY. This table is
+  // 152 rows deep and every description is a paragraph — a median of 384
+  // characters — so the page was about forty screens of prose with 112 inputs
+  // buried in it. The setting's own short label is what a summary would have
+  // had to say anyway, which is why it is passed rather than derived: it is
+  // already written, already beside the key it describes, and cannot drift
+  // from the description the way a second label here would.
+  //
+  // The tooltips are the same text at two lengths rather than a third thing to
+  // keep in step: the key carries the label, and the input carries as much of
+  // the description as a tooltip can hold. Neither is the only place anything
+  // is said — everything they carry is in the fold under them — because a
+  // tooltip is unreachable from a keyboard and invisible on a touch screen.
   return '<tr>' +
-    '<td><label for="' + esc(id) + '"><code>' + esc(setting.key) + '</code></label>' +
-    '<div class="note">' + esc(setting.label) + '. ' + esc(setting.description) + '</div>' +
-    note + '</td>' +
+    '<td><label for="' + esc(id) + '"' + tip(setting.label) + '><code>' +
+    esc(setting.key) + '</code></label>' +
+    note(esc(setting.description), setting.label) +
+    restart + '</td>' +
     '<td>' + input + '</td>' +
     '<td>' + provenance + '</td>' +
     '<td>' + reset + '</td></tr>';
@@ -13180,10 +14789,10 @@ function configSection(group) {
     ? '<p><button>Save ' + esc(group.group) + '</button> ' +
       '<span class="note">Applies to the next token, assertion, ticket or ' +
       'search — nothing already issued changes.</span></p>'
-    : '<p class="note">Every setting in this section is read at startup, so ' +
+    : note('Every setting in this section is read at startup, so ' +
       'there is nothing here to save. Change them in ' +
       esc(process.env.CONFIG_FILE || 'the appconfig file') + ' or in the ' +
-      'environment and restart.</p>';
+      'environment and restart.');
   log.debug("Leaving configSection(). " + group.settings.length + " setting(s).");
   return '<h3>' + esc(group.group) + '</h3>' +
     '<form method="post" action="/admin/config">' +
@@ -13418,12 +15027,18 @@ function tokenLifetimeRow(setting, snapshot) {
       '<span class="state-expired">' + counts.expired + ' expired</span>, ' +
       '<span class="state-revoked">' + counts.revoked + ' revoked</span>'
     : '<span class="state-none">—</span>';
+  // The setting's own description, on the label and on the box. It is the same
+  // sentence /admin/config carries in the fold under each key, and the reason
+  // it is a tooltip HERE and a fold THERE is the two pages' different jobs:
+  // this one is four rows somebody sets a number in, so a paragraph under each
+  // would be most of the page, and there is a link to the full row next door.
+  const hint = tip(setting.description);
   return '<tr>' +
-    '<td><label for="' + esc(id) + '">' + esc(setting.label) + '</label>' +
+    '<td><label for="' + esc(id) + '"' + hint + '>' + esc(setting.label) + '</label>' +
     '<div class="note"><code>' + esc(setting.key) + '</code>' +
     (setting.env ? ', <code>' + esc(setting.env) + '</code>' : '') + '</div></td>' +
     '<td><input type="number" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
-      ' value="' + esc(setting.text) + '"' +
+      hint + ' value="' + esc(setting.text) + '"' +
       (typeof setting.min === 'number' ? ' min="' + setting.min + '"' : '') +
       (typeof setting.max === 'number' ? ' max="' + setting.max + '"' : '') +
       (typeof setting.step === 'number' ? ' step="' + setting.step + '"' : '') +
@@ -13467,7 +15082,7 @@ function tokenLifetimeWarnings() {
       'lifetime, unless that is the thing being tested.');
   }
   if (!notes.length) return '';
-  return notes.map(function (note) { return '<div class="warn">' + note + '</div>'; }).join('');
+  return notes.map(function (note) { return warn(note); }).join('');
 }
 
 // The action switch. Two actions, and both write through config.js.
@@ -13609,41 +15224,45 @@ app.get('/admin/token-lifetimes', function (req, res) {
   const anyOverridden = settings.some(function (setting) { return setting.overridden; });
 
   const inner = messagesOf(req) +
-    '<p class="note">How long an access token, an ID Token and a refresh token issued here are ' +
+    note('How long an access token, an ID Token and a refresh token issued here are ' +
     'good for, and how far out a clock may be before this service stops believing one of its ' +
     'own. All four are <a href="/admin/config">configuration settings</a> and this page is a ' +
     'shorter way to the same four rows — it writes through the same function, so a change ' +
-    'made here and one made there are one change.</p>' +
+    'made here and one made there are one change.') +
 
-    '<div class="warn"><strong>A change applies to the NEXT token and to nothing already ' +
+    warn('<strong>A change applies to the NEXT token and to nothing already ' +
     'issued.</strong> A lifetime is stamped into a token as its <code>exp</code> claim when it ' +
     'is signed, so a token in a client’s hands cannot be shortened or extended afterwards ' +
     'by anything on this page. That is a property of a signed statement rather than a ' +
     'limitation here — to take an issued token out of circulation, revoke it on ' +
     '<a href="/admin/tokens">the tokens page</a>. Changes are in memory and are gone on ' +
     'restart; to make one stick, put it in <code>' +
-    esc(process.env.CONFIG_FILE || 'env/local.js') + '</code>.</div>' +
+    esc(process.env.CONFIG_FILE || 'env/local.js') + '</code>.') +
 
     tokenLifetimeWarnings() +
 
     '<h2>The four settings</h2>' +
-    '<p class="note">Every lifetime is a whole number of <strong>thirty-second</strong> units. ' +
+    note('Every lifetime is a whole number of <strong>thirty-second</strong> units. ' +
     'That is not a formatting rule: these exist to be set short and watched, and below half a ' +
     'minute a token expires between the response being written and the client reading it, which ' +
     'is an hour spent debugging the wrong half. The clock skew is capped at <strong>300 ' +
     'seconds</strong> — five minutes is the allowance Kerberos uses here ' +
     '(<code>krb5.clockSkew</code>), and a window wider than that has stopped being a tolerance ' +
-    'and become a lifetime extension nobody asked for.</p>' +
+    'and become a lifetime extension nobody asked for.') +
     '<form method="post" action="/admin/token-lifetimes">' +
     '<input type="hidden" name="action" value="set">' +
     '<table><tr><th>Setting</th><th>Seconds</th><th>Which is</th><th>Allowed</th>' +
     '<th>Source</th><th>Tokens of that kind held here</th></tr>' +
     settings.map(function (setting) { return tokenLifetimeRow(setting, snapshot); }).join('') +
     '</table>' +
-    '<p><button>Save lifetimes</button> ' +
-    '<span class="note">All four are checked before any is applied — a form that took two ' +
-    'and refused the third would leave this service issuing a combination nobody chose.</span>' +
-    '</p></form>' +
+    // The caption is a fold BELOW the button rather than a span beside it, and
+    // the reason is markup rather than taste: a <details> inside a <p> is
+    // invalid and every browser closes the paragraph in front of it, which
+    // leaves the fold outside the form it belongs to.
+    '<p><button>Save lifetimes</button></p>' +
+    note('All four are checked before any is applied — a form that took two ' +
+    'and refused the third would leave this service issuing a combination nobody chose.') +
+    '</form>' +
 
     (anyOverridden
       ? '<div class="ok">' +
@@ -13654,13 +15273,13 @@ app.get('/admin/token-lifetimes', function (req, res) {
         '<button class="secondary">Put these four back</button></form>' +
         ' It clears the override on these four only, and leaves any other setting alone — ' +
         '<a href="/admin/config">Configuration</a> has the reset-all.</div>'
-      : '<p class="note">None of the four is overridden: each is coming from its environment ' +
+      : note('None of the four is overridden: each is coming from its environment ' +
         'variable, from <code>' + esc(process.env.CONFIG_FILE || 'the appconfig file') +
         '</code>, or from <code>' + esc(config.DEFAULTS_FILE) + '</code> under it. ' +
-        'The <em>Source</em> column says which.</p>') +
+        'The <em>Source</em> column says which.')) +
 
     '<h2>The clock skew is not a lifetime, and it is not the assertion skew either</h2>' +
-    '<p class="note"><code>oauth2.clockSkewS</code> is the allowance applied to <code>exp</code> ' +
+    note('<code>oauth2.clockSkewS</code> is the allowance applied to <code>exp</code> ' +
     'and <code>nbf</code> at every place this service reads back a token it signed: ' +
     '<code>/oauth2/introspect</code>, UserInfo, the refresh grant, token exchange, the ' +
     'DPoP-bound access token check the four protected endpoints share, and the state column on ' +
@@ -13669,16 +15288,16 @@ app.get('/admin/token-lifetimes', function (req, res) {
     'which is how far out a <em>client’s</em> assertion may be under RFC 7523 ' +
     '(<code>private_key_jwt</code> and <code>client_secret_jwt</code>): one is about somebody ' +
     'else’s clock and one is about this service’s, and a deployment wanting a strict ' +
-    'check on one and a forgiving reading of the other has to be able to say so.</p>' +
+    'check on one and a forgiving reading of the other has to be able to say so.') +
 
     '<h2>What is already out there</h2>' +
-    '<p class="note">Counted against the same clock the endpoints use — the skew above is ' +
+    note('Counted against the same clock the endpoints use — the skew above is ' +
     'applied here too, so a token this table calls expired is one ' +
     '<code>/oauth2/introspect</code> will report inactive. ' +
     esc(String(json.tokens.held)) + ' token(s) are held, of the most recent ' +
     esc(String(json.tokens.cap)) + '; ' + esc(String(json.tokens.forgotten)) +
     ' older one(s) have been forgotten. Every one of them, with its own expiry, is on ' +
-    '<a href="/admin/tokens">the tokens page</a>.</p>' +
+    '<a href="/admin/tokens">the tokens page</a>.') +
     '<table><tr><th>Kind</th><th class="num">Issued</th><th class="num">Valid</th>' +
     '<th class="num">Expired</th><th class="num">Revoked</th><th class="num">Not yet valid</th>' +
     '<th class="num">No expiry stated</th></tr>' +
@@ -13694,7 +15313,7 @@ app.get('/admin/token-lifetimes', function (req, res) {
     '</table>' +
 
     '<h2>Two lifetimes this page does not set</h2>' +
-    '<p class="note">An <strong>authorization code</strong> is good for five minutes and is not ' +
+    note('An <strong>authorization code</strong> is good for five minutes and is not ' +
     'configurable: it is redeemed within seconds of being issued or it is a bug in the client, ' +
     'and a code that could be made long-lived would be an invitation to build one that is. ' +
     'RFC 9700 mode’s <strong>refresh idle timeout</strong> ' +
@@ -13702,13 +15321,13 @@ app.get('/admin/token-lifetimes', function (req, res) {
     'different question from the refresh lifetime above: it is measured from the last time any ' +
     'token in a refresh CHAIN was redeemed rather than from issuance, so a busy client keeps its ' +
     'grant indefinitely and a quiet one is cut off. The lifetime here is a wall the chain cannot ' +
-    'be refreshed past however busy it is.</p>' +
+    'be refreshed past however busy it is.') +
 
-    '<p class="note">The same four over JSON are at ' +
+    note('The same four over JSON are at ' +
     '<code>/admin/token-lifetimes?format=json</code> and ' +
     '<code>GET /admin-api/token-lifetimes</code>; the two actions on this page are ' +
     '<code>POST /admin-api/token-lifetimes/set</code> and <code>/defaults</code>. They are also ' +
-    'four ordinary rows of <code>GET /admin-api/config</code>.</p>';
+    'four ordinary rows of <code>GET /admin-api/config</code>.');
 
   respond(req, res, json, 'Token lifetimes', '/admin/token-lifetimes', inner);
   log.debug("Leaving the admin token lifetimes page.");
@@ -13810,7 +15429,10 @@ function authenticationSection(auth, counters) {
   const rows = auth.schemes.map(function (row) {
     return '<tr><td>' + esc(row.name) +
       (row.primary ? ' <span class="sub">(primary)</span>' : '') +
-      '<div class="sub">' + esc(row.description) + '</div></td>' +
+      // The scheme's description is scim_auth.js's own and is a paragraph on
+      // every row, so five of them made this the longest table on the page
+      // while the column somebody scans — the scheme's NAME — was one line.
+      note(esc(row.description)) + '</td>' +
       '<td><code>' + esc(row.type) + '</code>' +
       (row.canonical ? '' : '<div class="sub">no canonical value in RFC 7643 ' +
         'section 5 — published beside the four that have one</div>') + '</td>' +
@@ -13828,10 +15450,10 @@ function authenticationSection(auth, counters) {
       '<td class="num">' + (counts[name] || 0) + '</td></tr>';
   }).join('');
   const policy = auth.policy.map(function (text) {
-    return '<li>' + esc(text) + '</li>';
+    return bullet(esc(text));
   }).join('');
   const out = '<h2>Authentication</h2>' +
-    '<p class="note">RFC 7644 section 2 defines no credential of its own — it ' +
+    note('RFC 7644 section 2 defines no credential of its own — it ' +
     'delegates to TLS and RFC 7235 and NAMES six schemes, and all six are ' +
     'here. Its one SHALL is that the schemes be indicated in ' +
     '<code>WWW-Authenticate</code>, which every 401 from these endpoints ' +
@@ -13842,16 +15464,16 @@ function authenticationSection(auth, counters) {
       ? 'OPEN, because a client has to be able to read which schemes exist ' +
         'before it can use one'
       : 'closed as well (<code>scim.authDiscovery</code>)') + '. Every switch ' +
-    'here is on <a href="/admin/config">Configuration</a>.</p>' +
+    'here is on <a href="/admin/config">Configuration</a>.') +
     '<table><tr><th>Scheme</th><th>type</th><th>State</th><th>May do</th>' +
     '<th class="num">Requests</th></tr>' + rows + extra + '</table>' +
-    '<p class="note">The two OAuth scopes are <code>' + esc(auth.scopes.read) +
+    note('The two OAuth scopes are <code>' + esc(auth.scopes.read) +
     '</code> and <code>' + esc(auth.scopes.write) + '</code> — the first scope ' +
     'requirement anywhere in this service — and they are published in ' +
     '<code>scopes_supported</code> in both discovery documents. Digest offers ' +
     esc(auth.digestAlgorithms.join(', ')) + '; HOBA keys are registered at ' +
     '<code>' + esc(auth.hobaRegistration) + '</code> and land on the person\'s ' +
-    'own directory entry, so <a href="/admin/users">Users</a> shows them.</p>' +
+    'own directory entry, so <a href="/admin/users">Users</a> shows them.') +
     '<h3>The access control policy</h3><ul class="note">' + policy + '</ul>';
   log.debug("Leaving authenticationSection(). " + auth.schemes.length + " scheme(s).");
   return out;
@@ -13873,12 +15495,19 @@ app.get('/admin/scim', function (req, res) {
   const json = scimJson(req);
   const counters = json.counters;
 
-  const tiles = tile(counters.total, 'SCIM requests') +
+  // The `<div class="tiles">` around them was missing since this page was
+  // written, so its six tiles were six full-width blocks down the page where
+  // every other page here has one row. Nothing failed and nothing could have
+  // shown it: `.tile` draws correctly on its own, and it is the CONTAINER that
+  // makes a row.
+  const tiles = '<div class="tiles">' +
+    tile(counters.total, 'SCIM requests') +
     tile(counters.ok, 'answered') +
     tile(counters.failed, 'refused') +
     tile(json.store ? json.store.userCount : '—', 'people in the directory') +
     tile(json.store ? json.store.groupCount : '—', 'groups') +
-    tile(json.store ? json.store.entryCount + ' / ' + json.store.maxEntries : '—', 'entries / max');
+    tile(json.store ? json.store.entryCount + ' / ' + json.store.maxEntries : '—', 'entries / max') +
+    '</div>';
 
   const operationRows = counters.operations.map(function (row) {
     return '<tr><td><code>' + esc(row.method) + '</code> ' + esc(row.label) + '</td>' +
@@ -13934,14 +15563,14 @@ app.get('/admin/scim', function (req, res) {
         'Everything else on this console is unaffected.</div>'
       : '') +
     (json.installed && !json.enabled
-      ? '<div class="warn"><strong>SCIM is turned off</strong> ' +
+      ? warn('<strong>SCIM is turned off</strong> ' +
         '(<code>scim.enabled</code>). The routes are still registered and answer ' +
         '<code>501</code> rather than <code>404</code>, because the feature ' +
         'being off and the URL being wrong are different sentences to a client. ' +
-        'Turn it back on at <a href="/admin/config">Configuration</a>.</div>'
+        'Turn it back on at <a href="/admin/config">Configuration</a>.')
       : '') +
 
-    '<p class="note">SCIM 2.0 — RFC 7642, 7643 and 7644 — at <code>' +
+    note('SCIM 2.0 — RFC 7642, 7643 and 7644 — at <code>' +
     esc(json.baseUrl || '/scim/v2') + '</code>. It is the only protocol family ' +
     'here whose purpose is to WRITE, and what it writes is the embedded LDAP ' +
     'directory: there is no second store and no cache. A ' +
@@ -13949,9 +15578,9 @@ app.get('/admin/scim', function (req, res) {
     'same entry, so somebody provisioned over SCIM appears on ' +
     '<a href="/admin/users">Users</a>, gains whatever attributes ' +
     '<a href="/admin/vc">Credential claims</a> selects, and lands in whatever ' +
-    'group a client puts them in on <a href="/admin/groups">Groups</a>.</p>' +
+    'group a client puts them in on <a href="/admin/groups">Groups</a>.') +
 
-    '<div class="warn"><strong>These endpoints create and delete accounts, and ' +
+    warn('<strong>These endpoints create and delete accounts, and ' +
     'they are the one surface in this service that requires a credential' +
     (json.authentication && !json.authentication.required
       ? ' — except that <code>scim.authRequired</code> is currently OFF, so ' +
@@ -13963,18 +15592,18 @@ app.get('/admin/scim', function (req, res) {
     'nobody</strong> — it is stored on the entry as <code>scimActive</code> ' +
     'and read by nothing here: no bind is refused, no token withheld, no ' +
     'session ended. Deprovisioning is the commonest thing a SCIM client does, ' +
-    'so that one is worth reading twice.</div>' +
+    'so that one is worth reading twice.') +
 
     tiles +
 
     (json.authentication ? authenticationSection(json.authentication, counters) : '') +
 
     '<h2>Operations</h2>' +
-    '<p class="note">Every operation this server implements, including the ones ' +
+    note('Every operation this server implements, including the ones ' +
     'nothing has used yet — a table listing only what has happened would answer ' +
     '&ldquo;does this support PATCH?&rdquo; by omission. <strong>The column does ' +
     'not tally</strong>, on purpose: one <code>Bulk</code> carrying five creates ' +
-    'is one bulk AND five creates, because each of the five really is performed.</p>' +
+    'is one bulk AND five creates, because each of the five really is performed.') +
     '<table><tr><th>Operation</th><th class="num">Count</th><th>What it is</th></tr>' +
     operationRows + '</table>' +
 
@@ -13983,10 +15612,10 @@ app.get('/admin/scim', function (req, res) {
     '</table>' +
 
     '<h2>What went back</h2>' +
-    '<p class="note">The HTTP status of every answer, and the <code>scimType</code> ' +
+    note('The HTTP status of every answer, and the <code>scimType</code> ' +
     'of every refusal (RFC 7644 section 3.12). <code>(none)</code> is a refusal ' +
     'that carried no such code — a 404 has none — and is counted rather than ' +
-    'dropped, so the two failure tables agree with each other.</p>' +
+    'dropped, so the two failure tables agree with each other.') +
     '<div class="tiles" style="align-items:flex-start">' +
     '<div><table><tr><th>Status</th><th class="num">Count</th></tr>' + statusRows +
     '</table></div>' +
@@ -13995,9 +15624,9 @@ app.get('/admin/scim', function (req, res) {
 
     (json.identifiers
       ? '<h2>The <code>id</code> is the DN</h2>' +
-        '<p class="note">' + esc(json.identifiers.why) + '</p>' +
-        '<p class="note">For example: <code>' + esc(json.identifiers.example) +
-        '</code></p>'
+        note(esc(json.identifiers.why)) +
+        note('For example: <code>' + esc(json.identifiers.example) +
+        '</code>')
       : '') +
 
     (endpointRows
@@ -14008,39 +15637,39 @@ app.get('/admin/scim', function (req, res) {
     (json.doesNotDo.length
       ? '<h2>What it deliberately does not do</h2><ul>' +
         json.doesNotDo.map(function (text) {
-          return '<li>' + esc(text) + '</li>';
+          return bullet(esc(text));
         }).join('') + '</ul>'
       : '') +
 
     (negativeRows
       ? '<h2>Things you can make fail</h2>' +
-        '<p class="note">A permissive server is hard to write error handling ' +
+        note('A permissive server is hard to write error handling ' +
         'against, so these are here on purpose — the same device as the reserved ' +
-        'password <code>invalid</code> everywhere else in this service.</p>' +
+        'password <code>invalid</code> everywhere else in this service.') +
         '<table><tr><th>Do this</th><th>Get this</th></tr>' + negativeRows +
         '</table>'
       : '') +
 
     '<h2>The User mapping</h2>' +
-    '<p class="note">Which LDAP attribute each SCIM member is. The attribute ' +
+    note('Which LDAP attribute each SCIM member is. The attribute ' +
     'spellings are the same catalogue <a href="/admin/vc">Credential claims</a> ' +
     'and <a href="/admin/claims">Custom claims</a> read, checked against it at ' +
     'startup rather than copied — four independently maintained lists of ' +
-    'spellings is how one of them comes to be quietly wrong.</p>' +
+    'spellings is how one of them comes to be quietly wrong.') +
     mappingTable(json.mapping.user) +
 
     '<h2>The Group mapping</h2>' +
     mappingTable(json.mapping.group) +
 
-    '<p class="note">Nothing on this page is a control, because everything about ' +
+    note('Nothing on this page is a control, because everything about ' +
     'SCIM that can be changed is a configuration row: <code>scim.enabled</code> ' +
     'and the three limits, on <a href="/admin/config">Configuration</a>. A form ' +
-    'here would be a second door to one setting.</p>' +
+    'here would be a second door to one setting.') +
 
-    '<p class="note"><a href="/scim">What this is, for a person</a> &middot; ' +
+    note('<a href="/scim">What this is, for a person</a> &middot; ' +
     '<a href="/admin/scim?format=json">this page as JSON</a> &middot; ' +
     '<a href="/admin-api/scim">the same over the management API</a> &middot; ' +
-    '<a href="/ldap">the directory it writes into</a></p>';
+    '<a href="/ldap">the directory it writes into</a>');
 
   respond(req, res, json, 'SCIM 2.0', '/admin/scim', inner);
   log.debug("Leaving the admin SCIM page.");
@@ -14052,7 +15681,7 @@ app.get('/admin/config', function (req, res) {
   const overridden = snapshot.overridden.length;
 
   const inner = messagesOf(req) +
-    '<p class="note">Every setting this service has, grouped by the protocol it ' +
+    note('Every setting this service has, grouped by the protocol it ' +
     'belongs to. A value can arrive from four places and the <em>Source</em> ' +
     'column says which: a runtime override set on this page, an environment ' +
     'variable, the appconfig file this process was started with (<code>' +
@@ -14060,30 +15689,30 @@ app.get('/admin/config', function (req, res) {
     esc(snapshot.defaultsFile) + '</code> — the default appconfig file that one ' +
     'is unioned on top of. Higher beats lower, so an environment variable set ' +
     'on the container still wins over the file — which is what keeps every ' +
-    'existing deployment working unchanged.</p>' +
+    'existing deployment working unchanged.') +
 
-    '<p class="note"><strong>There is no fifth place.</strong> A setting with no ' +
+    note('<strong>There is no fifth place.</strong> A setting with no ' +
     'value in either appconfig file and no environment variable stops this ' +
     'service from starting, by name, rather than falling back to a constant ' +
     'buried in a module. So every value below is one somebody can find in a ' +
-    'file — which is what makes the <em>Source</em> column worth reading.</p>' +
+    'file — which is what makes the <em>Source</em> column worth reading.') +
 
-    '<div class="warn"><strong>Changes here are in memory and are gone on ' +
+    warn('<strong>Changes here are in memory and are gone on ' +
     'restart.</strong> Nothing writes to the appconfig file. That is the same ' +
     'arrangement as the custom claims and the credential claims next door, and ' +
     'it is deliberate: a service that edited a file checked into a repository ' +
     'would leave a test\'s forgotten change behind permanently. To make ' +
     'something stick, put it in <code>' + esc(snapshot.configFile || 'env/local.js') +
-    '</code>.</div>' +
+    '</code>.') +
 
-    '<div class="warn"><strong>' + esc(String(snapshot.settingCount - snapshot.editableCount)) +
+    warn('<strong>' + esc(String(snapshot.settingCount - snapshot.editableCount)) +
     ' of these ' + esc(String(snapshot.settingCount)) + ' cannot be changed while ' +
     'this service runs</strong>, and they are shown with their inputs disabled ' +
     'and the reason beside them rather than hidden. They are the ones already ' +
     'consumed by the time the service was listening: a bound socket, the TLS ' +
     'certificate\'s names, the Kerberos principal database and its long-term ' +
     'keys, and the directory\'s base DN. Accepting a change to one of those ' +
-    'would do nothing and read as having worked.</div>' +
+    'would do nothing and read as having worked.') +
 
     '<h2>' + esc(String(snapshot.settingCount)) + ' settings, ' +
     esc(String(snapshot.editableCount)) + ' of them changeable here</h2>' +
@@ -14094,16 +15723,16 @@ app.get('/admin/config', function (req, res) {
         '<form method="post" action="/admin/config" class="inline">' +
         '<input type="hidden" name="action" value="reset-all">' +
         '<button class="secondary">Reset all</button></form></div>'
-      : '<p class="note">No runtime overrides are in force: every value below ' +
+      : note('No runtime overrides are in force: every value below ' +
         'is coming from the environment or from one of the two appconfig ' +
-        'files.</p>') +
+        'files.')) +
 
     snapshot.groups.map(configSection).join('') +
 
-    '<p class="note">The same table over JSON is at <code>/admin/config?format=json</code> ' +
+    note('The same table over JSON is at <code>/admin/config?format=json</code> ' +
     'and <code>GET /admin-api/config</code>; the four actions on this page are ' +
     '<code>POST /admin-api/config/set</code>, <code>/set-many</code>, ' +
-    '<code>/reset</code> and <code>/reset-all</code>.</p>';
+    '<code>/reset</code> and <code>/reset-all</code>.');
 
   respond(req, res, configJson(), 'Configuration', '/admin/config', inner);
   log.debug("Leaving the admin configuration page.");
@@ -14162,7 +15791,7 @@ app.get('/admin/config', function (req, res) {
 // direction as soon as one of them changed.
 function spiffePostureNote() {
   const enforced = spiffeAuth.authRequired();
-  return '<div class="warn"><strong>Nothing here is attested.</strong> A real ' +
+  return warn('<strong>Nothing here is attested.</strong> A real ' +
     'SPIFFE agent reads the peer credentials of its socket — pid, uid, gid, ' +
     'and from those the executable, the container, the pod — and hands a ' +
     'workload only the identities those selectors match. Node cannot read ' +
@@ -14172,7 +15801,7 @@ function spiffePostureNote() {
     '(<code>spiffe.attestWorkloads</code>), and they prove nothing about who ' +
     'is calling: anybody who can reach the socket can still get an identity. ' +
     'Node attestation is taken on trust too, which is why every agent below ' +
-    'carries an <code>unverified:true</code> selector.</div>' +
+    'carries an <code>unverified:true</code> selector.') +
     '<div class="' + (enforced ? 'note' : 'warn') + '">' +
     (enforced
       ? '<strong>The SPIRE Server API is the exception.</strong> Its TCP port ' +
@@ -14309,40 +15938,40 @@ function spiffePage(req) {
     'nobody.</td></tr>';
 
   const inner = messagesOf(req) + spiffePostureNote() +
-    (json.enabled ? '' : '<div class="warn">SPIFFE is turned OFF ' +
+    (json.enabled ? '' : warn('SPIFFE is turned OFF ' +
       '(<code>spiffe.enabled</code>): the bundle endpoint answers 404 and every ' +
       'gRPC call is refused with <code>Unavailable</code>. Turn it back on from ' +
-      '<a href="/admin/config">Configuration</a>; it needs no restart.</div>') +
-    (json.ready ? '' : '<div class="warn">' + (json.error
+      '<a href="/admin/config">Configuration</a>; it needs no restart.')) +
+    (json.ready ? '' : warn((json.error
       ? 'The issuing authority could not be built, so nothing here will issue ' +
         'an SVID: ' + esc(json.error)
       : 'The issuing authority is still being generated &mdash; an RSA-4096 key ' +
-        'takes a few seconds. Reload.') + '</div>') +
+        'takes a few seconds. Reload.'))) +
 
     '<h2>The trust domain</h2>' +
-    '<p>This service is the issuing authority for <code>' +
+    note('This service is the issuing authority for <code>' +
     esc(json.trustDomainId) + '</code>. Its own identity as a SPIFFE server is ' +
     '<code>' + esc(json.serverId || '(not yet)') + '</code>, and every ' +
     'registration entry hangs beneath that by default. The trust domain is ' +
     'restart-only (<code>spiffe.trustDomain</code>): every authority ' +
-    'certificate names it.</p>' +
-    '<p>The bundle is published at <a href="' + esc(json.bundle.path) +
+    'certificate names it.') +
+    note('The bundle is published at <a href="' + esc(json.bundle.path) +
     '"><code>' + esc(json.bundle.path) + '</code></a> &mdash; sequence <code>' +
     esc(json.bundle.sequence) + '</code>, refresh hint ' +
     esc(json.bundle.refreshHint) + ' seconds. The sequence changes whenever the ' +
     'bundle does and never otherwise, which is what lets a consumer tell ' +
     '&ldquo;I have the current bundle&rdquo; from &ldquo;I have a ' +
-    'bundle&rdquo;.</p>' +
+    'bundle&rdquo;.') +
 
     '<h2>Authorities</h2>' +
-    '<p>Generated per start and held in memory, exactly like the STS signing ' +
+    note('Generated per start and held in memory, exactly like the STS signing ' +
     'key and the TLS certificate &mdash; so a workload holding a bundle from ' +
     'before a restart will fail to verify every SVID minted after it. ' +
     'Rotating PREPENDS a new authority and keeps the old one published: an SVID ' +
     'minted a minute ago has to go on verifying, which is what a bundle is for. ' +
     'At most ' + esc(json.authorities.maxRetained) + ' are retained, and past ' +
     'that the oldest is dropped &mdash; anything it signed stops verifying at ' +
-    'that moment.</p>' +
+    'that moment.') +
     '<table><tr><th>Id</th><th>State</th><th>Key</th><th>Until</th>' +
     '<th>Subject</th></tr>' + x509Rows + jwtRows + '</table>' +
     '<form method="post" action="/admin/spiffe"><div class="formrow">' +
@@ -14358,10 +15987,10 @@ function spiffePage(req) {
     '</div></form>' +
 
     '<h2>The gRPC listeners</h2>' +
-    '<p>Neither <code>/admin/sts-metadata</code> nor this page can see a ' +
+    note('Neither <code>/admin/sts-metadata</code> nor this page can see a ' +
     'socket, so ' +
     'this table is the only place that reports whether each one actually ' +
-    'bound. All four are restart-only.</p>' +
+    'bound. All four are restart-only.') +
     '<table><tr><th>Surface</th><th>Address</th><th>State</th>' +
     '<th>What a caller presents</th></tr>' +
     spiffeListenerRows(json.listeners.workloadApi, 'Workload API') +
@@ -14370,17 +15999,17 @@ function spiffePage(req) {
 
     '<h2>Who may call the SPIRE Server API</h2>' +
     '<p>' + esc(json.authentication.what || '') + '</p>' +
-    '<p>A caller may be several of these at once and the check asks whether it ' +
+    note('A caller may be several of these at once and the check asks whether it ' +
     'is <em>any</em> of the ones a method allows, which is what SPIRE\'s own ' +
     'policy does: the <code>spire-server</code> CLI on this host is ' +
     '<code>local</code>, and an agent that also holds an entry marked ' +
-    '<code>admin</code> is both.</p>' +
+    '<code>admin</code> is both.') +
     '<table><tr><th>Entity</th><th>What it means</th></tr>' +
     json.authentication.entities.map(function (entity) {
       return '<tr><td><code>' + esc(entity.id) + '</code></td><td>' +
         esc(entity.what) + '</td></tr>';
     }).join('') + '</table>' +
-    '<p>Administrators by configuration ' +
+    note('Administrators by configuration ' +
     '(<a href="/admin/config"><code>spiffe.adminIds</code></a>): ' +
     (json.authentication.adminIds.length
       ? json.authentication.adminIds.map(function (id) {
@@ -14390,8 +16019,8 @@ function spiffePage(req) {
     'The other way to make one is to mark a registration entry ' +
     '<code>admin</code> on <a href="/admin/spiffe/entries">the entries ' +
     'page</a>; SPIRE has both, and neither is cached, so either takes effect ' +
-    'on the next call.</p>' +
-    '<p class="note">Workload API selectors: a caller there is identified as ' +
+    'on the next call.') +
+    note('Workload API selectors: a caller there is identified as ' +
     '<code>transport:</code>, <code>endpoint:</code> and <code>peer:</code>, ' +
     'and ' + (json.authentication.attestWorkloads
       ? 'those decide which entries answer it ' +
@@ -14403,17 +16032,16 @@ function spiffePage(req) {
     esc(json.authentication.assertedSelectorHeader) + '</code>) are ' +
     (json.authentication.acceptAssertedSelectors
       ? '<strong>believed</strong>, and nothing verifies them.'
-      : 'ignored (<code>spiffe.acceptAssertedSelectors</code> is off).') +
-    '</p>' +
+      : 'ignored (<code>spiffe.acceptAssertedSelectors</code> is off).')) +
     '<h3>The per-method table</h3>' +
-    '<p>Copied from SPIRE\'s own <code>policy_data.json</code> rather than ' +
+    note('Copied from SPIRE\'s own <code>policy_data.json</code> rather than ' +
     'reasoned out: a table derived from what each method &ldquo;obviously&rdquo; ' +
     'needs disagrees with SPIRE in two or three places, and the client author ' +
     'who meets the disagreement cannot tell which end is wrong. ' +
     '<code>any</code> means the method is open here and in a real server too ' +
     '&mdash; <code>AttestAgent</code> because an agent has no SVID until that ' +
     'call gives it one, <code>GetBundle</code> because a trust bundle is ' +
-    'public.</p>' +
+    'public.') +
     '<table><tr><th>Method</th><th>Allowed to</th></tr>' +
     json.authentication.policy.map(function (row) {
       return '<tr><td><code>' + esc(row.method) + '</code></td><td>' +
@@ -14421,7 +16049,7 @@ function spiffePage(req) {
     }).join('') + '</table>' +
 
     '<h2>Federated trust domains</h2>' +
-    '<p><strong>A foreign bundle is given to this service and never fetched by ' +
+    note('<strong>A foreign bundle is given to this service and never fetched by ' +
     'it.</strong> The federation specification has a bundle endpoint URL in the ' +
     'relationship and a real implementation polls it; this one records the URL ' +
     'and refuses to follow it, because fetching a URL somebody registered in ' +
@@ -14429,7 +16057,7 @@ function spiffePage(req) {
     'forgery with a citation attached &mdash; the same refusal this service ' +
     'gives WS-Federation\'s <code>wreqptr</code> and a client\'s ' +
     '<code>jwks_uri</code>. Paste the bundle in below, or push it with ' +
-    '<code>BatchSetFederatedBundle</code>.</p>' +
+    '<code>BatchSetFederatedBundle</code>.') +
     '<table><tr><th>Trust domain</th><th>Keys</th><th>Profile / endpoint</th>' +
     '<th>Sequence</th><th></th></tr>' + federatedRows + '</table>' +
     '<form method="post" action="/admin/spiffe">' +
@@ -14448,11 +16076,11 @@ function spiffePage(req) {
     '<textarea id="fed-doc" name="document" rows="6" cols="80" ' +
     'placeholder=\'{"keys":[{"kty":"EC","use":"x509-svid","x5c":["..."]}],"spiffe_sequence":1,"spiffe_refresh_hint":300}\'></textarea>' +
     '<button>Set</button>' +
-    '<span class="note">A JWK Set. Every key needs <code>use</code> of ' +
+    note('A JWK Set. Every key needs <code>use</code> of ' +
     '<code>x509-svid</code>, <code>jwt-svid</code> or <code>wit-svid</code>: a ' +
     'consumer MUST IGNORE one without it, so a bundle of keys missing that ' +
     'member verifies nothing and reports no error, which is why it is refused ' +
-    'here rather than stored.</span></div></form>' +
+    'here rather than stored.') + '</div></form>' +
 
     '<h2>Elsewhere</h2><ul>' +
     '<li><a href="/admin/spiffe/entries">Registration entries</a> &mdash; ' +
@@ -14528,12 +16156,12 @@ function spiffeEntriesListPage(req) {
         '</option>';
     })).join('');
   const inner = messagesOf(req) + spiffePostureNote() +
-    '<p>' + esc(json.total) + ' registration entry/entries, of at most ' +
+    note(esc(json.total) + ' registration entry/entries, of at most ' +
     esc(json.max) + ' (<code>spiffe.maxEntries</code>). The store is the ' +
     'embedded directory under <code>' + esc(json.container) + '</code>: ' +
     'an <code>ldapmodify</code> there, a form here and the SPIRE Server API\'s ' +
     '<code>BatchUpdateEntry</code> are three doors onto one entry, and nothing ' +
-    'caches it &mdash; so a change takes effect on the next SVID.</p>' +
+    'caches it &mdash; so a change takes effect on the next SVID.') +
     '<form method="get" action="/admin/spiffe/entries"><div class="formrow">' +
     '<label for="q">Search</label>' +
     '<input id="q" name="q" value="' + esc(json.filter.q) + '" size="28" ' +
@@ -14543,10 +16171,10 @@ function spiffeEntriesListPage(req) {
     '<label for="per">Rows</label>' +
     '<select id="per" name="per">' + perPageOptions(view.paging.perPage) +
     '</select><button class="secondary">Filter</button>' +
-    '<span class="note">Origin is how the entry got here: <code>seed</code> ' +
+    note('Origin is how the entry got here: <code>seed</code> ' +
     'at startup, <code>console</code>, <code>api</code>, <code>grpc</code>, ' +
     '<code>auto</code> (invented for a workload that matched nothing) or ' +
-    '<code>ldap</code>.</span></div></form>' +
+    '<code>ldap</code>.') + '</div></form>' +
     '<table><tr><th>SPIFFE ID / entry id</th><th>Selectors</th><th>Origin</th>' +
     '<th>Hint</th><th>SVIDs</th><th>Revision</th></tr>' + rows + '</table>' +
     pageNav('/admin/spiffe/entries', filterOnly(listView), view.paging) +
@@ -14557,10 +16185,10 @@ function spiffeEntriesListPage(req) {
 
 function spiffeCreateEntryForm() {
   return '<h2>Create a registration entry</h2>' +
-    '<p>The SPIFFE ID must be in this trust domain and outside the reserved ' +
+    note('The SPIFFE ID must be in this trust domain and outside the reserved ' +
     '<code>/spire</code> path &mdash; those two refusals are the whole of what ' +
     'is checked. The parent defaults to this server\'s own identity, which is ' +
-    'what SPIRE uses for an entry describing a workload rather than a node.</p>' +
+    'what SPIRE uses for an entry describing a workload rather than a node.') +
     '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
     '<input type="hidden" name="action" value="create">' +
     '<label for="e-id">SPIFFE ID</label>' +
@@ -14584,10 +16212,10 @@ function spiffeCreateEntryForm() {
     '<label for="e-fed">Federates with</label>' +
     '<input id="e-fed" name="federatesWith" size="20" placeholder="other.example">' +
     '<button>Create</button>' +
-    '<span class="note">Selectors, DNS names and trust domains are ' +
+    note('Selectors, DNS names and trust domains are ' +
     'comma-separated. A selector is <code>type:value</code>, split on the ' +
     'FIRST colon only &mdash; so <code>docker:label:app:web</code> is type ' +
-    '<code>docker</code>.</span></div></form>';
+    '<code>docker</code>.') + '</div></form>';
 }
 
 function spiffeEntryDetailPage(req, id) {
@@ -14599,11 +16227,11 @@ function spiffeEntryDetailPage(req, id) {
     log.debug("Leaving spiffeEntryDetailPage(). Not here.");
     return { json: { error: 'No registration entry has the id ' + id },
              inner: messagesOf(req) +
-               '<p>No registration entry has the id <code>' + esc(id) +
+               note('No registration entry has the id <code>' + esc(id) +
                '</code>. It may have been deleted &mdash; from this page, ' +
                'with <code>BatchDeleteEntry</code>, or with an ' +
                '<code>ldapdelete</code> under <code>ou=entries,ou=spiffe</code>, ' +
-               'which are three doors onto one store.</p>' +
+               'which are three doors onto one store.') +
                '<p><a href="/admin/spiffe/entries' + esc(back) +
                '">Back to the entries</a>.</p>' };
   }
@@ -14619,12 +16247,12 @@ function spiffeEntryDetailPage(req, id) {
                   '<input type="hidden" name="entry" value="' + esc(entry.id) + '">';
   const inner = messagesOf(req) + spiffePostureNote() +
     '<h2><code>' + esc(entry.spiffeId) + '</code></h2>' +
-    '<p>Entry <code>' + esc(entry.id) + '</code>, revision ' +
+    note('Entry <code>' + esc(entry.id) + '</code>, revision ' +
     esc(entry.revisionNumber) + ', created by <code>' + esc(entry.origin) +
     '</code>. It lives at <code>' + esc(entry.dn) + '</code>' +
     (entry.expired ? ' and <strong>has expired</strong> &mdash; it is kept and ' +
       'reported rather than deleted, because an entry that vanished is ' +
-      'indistinguishable from one nobody created' : '') + '.</p>' +
+      'indistinguishable from one nobody created' : '') + '.') +
     '<table><tr><th>Field</th><th>Value</th></tr>' +
     '<tr><td>Parent</td><td><code>' + esc(entry.parentId) + '</code></td></tr>' +
     '<tr><td>Selectors</td><td>' +
@@ -14652,12 +16280,12 @@ function spiffeEntryDetailPage(req, id) {
     '</td></tr></table>' +
 
     '<h3>Change it</h3>' +
-    '<p>Only the DECLARED half is editable here &mdash; what the entry may DO. ' +
+    note('Only the DECLARED half is editable here &mdash; what the entry may DO. ' +
     'The derived half (the revision number, the SVID counter, when it was ' +
     'created) is what HAPPENED, and a form that could rewrite it would make ' +
     'this page lie about the service\'s own behaviour. <code>ldapmodify</code> ' +
     'reaches everything: refusing it here is the difference between offering ' +
-    'an operation and merely not preventing it.</p>' +
+    'an operation and merely not preventing it.') +
     '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
     '<input type="hidden" name="action" value="update">' + carried +
     '<label for="u-field">Field</label>' +
@@ -14676,9 +16304,9 @@ function spiffeEntryDetailPage(req, id) {
     '<form method="post" action="/admin/spiffe/entries"><div class="formrow">' +
     '<input type="hidden" name="action" value="delete">' + carried +
     '<button class="danger">Delete this entry</button>' +
-    '<span class="note">Whatever holds an SVID minted from it keeps that SVID ' +
+    note('Whatever holds an SVID minted from it keeps that SVID ' +
     'until it expires. SPIFFE has no revocation &mdash; the answer is a short ' +
-    'lifetime, which is why the default is an hour.</span></div></form>' +
+    'lifetime, which is why the default is an hour.') + '</div></form>' +
 
     '<h3>The directory entry</h3>' +
     '<p>Every attribute, operational ones included. This is the store rather ' +
@@ -14750,16 +16378,16 @@ function spiffeAgentsListPage(req) {
     'appears when it calls <code>AttestAgent</code> on the SPIRE Server ' +
     'API.</td></tr>';
   const inner = messagesOf(req) + spiffePostureNote() +
-    '<p>' + esc(json.total) + ' agent(s), of at most ' + esc(json.max) +
+    note(esc(json.total) + ' agent(s), of at most ' + esc(json.max) +
     ' (<code>spiffe.maxAgents</code>). These entries are a RECORD rather than ' +
     'configuration &mdash; everything on them was written by this service when ' +
     'an agent attested &mdash; which is why nothing about an agent is editable ' +
-    'and only the ban is.</p>' +
-    '<div class="warn"><strong>Node attestation is never verified.</strong> ' +
+    'and only the ban is.') +
+    warn('<strong>Node attestation is never verified.</strong> ' +
     'Whatever attestor an agent names and whatever payload it sends are ' +
     'written down as claimed. That is why every agent carries a selector ' +
     'valued <code>unverified:true</code>: an agent\'s selectors here are ' +
-    'claims, not attested facts.</div>' +
+    'claims, not attested facts.') +
     '<form method="get" action="/admin/spiffe/agents"><div class="formrow">' +
     '<label for="q">Search</label>' +
     '<input id="q" name="q" value="' + esc(json.filter.q) + '" size="30" ' +
@@ -14798,12 +16426,12 @@ function spiffeAgentDetailPage(req, id) {
                   '<input type="hidden" name="agent" value="' + esc(agent.id) + '">';
   const inner = messagesOf(req) + spiffePostureNote() +
     '<h2><code>' + esc(agent.id) + '</code></h2>' +
-    '<p>Attested with <code>' + esc(agent.attestationType) + '</code>, ' +
+    note('Attested with <code>' + esc(agent.attestationType) + '</code>, ' +
     esc(agent.attestations) + ' time(s), first at ' + esc(agent.firstSeen) +
     ' and most recently at ' + esc(agent.lastSeen) + '. It lives at <code>' +
     esc(agent.dn) + '</code> &mdash; the RDN is a digest of the SPIFFE ID, ' +
     'because a SPIFFE ID is too long for a readable one, so <strong>the cn is ' +
-    'not the identity here</strong>: <code>spiffeAgentId</code> is.</p>' +
+    'not the identity here</strong>: <code>spiffeAgentId</code> is.') +
     '<table><tr><th>Field</th><th>Value</th></tr>' +
     '<tr><td>State</td><td>' + (agent.banned
       ? '<strong>banned</strong> — AttestAgent refuses it, which is one of ' +
@@ -14834,16 +16462,16 @@ function spiffeAgentDetailPage(req, id) {
     (agent.banned ? 'unban' : 'ban') + '">' + carried +
     '<button class="' + (agent.banned ? 'secondary' : 'danger') + '">' +
     (agent.banned ? 'Unban' : 'Ban') + ' this agent</button>' +
-    '<span class="note">A banned agent is refused at <code>AttestAgent</code> ' +
+    note('A banned agent is refused at <code>AttestAgent</code> ' +
     'with <code>PermissionDenied</code>. Whatever SVID it already holds keeps ' +
-    'working until it expires &mdash; there is no revocation in SPIFFE.</span>' +
+    'working until it expires &mdash; there is no revocation in SPIFFE.') +
     '</div></form>' +
     '<form method="post" action="/admin/spiffe/agents"><div class="formrow">' +
     '<input type="hidden" name="action" value="delete">' + carried +
     '<button class="danger">Delete this agent</button>' +
-    '<span class="note">It reappears the next time it attests, because ' +
+    note('It reappears the next time it attests, because ' +
     'attestation is not checked &mdash; deleting is forgetting, not ' +
-    'revoking.</span></div></form>' +
+    'revoking.') + '</div></form>' +
     '<h3>The directory entry</h3>' +
     '<table><tr><th>Attribute</th><th>Value</th></tr>' + attributeRows +
     '</table>';
@@ -15231,7 +16859,7 @@ app.post('/admin/spiffe/agents', function (req, res) {
 // them.
 // ---------------------------------------------------------------------------
 const FEDERATION_CAVEAT =
-  '<p class="note"><strong>This is the one feature here that has to be configured before it ' +
+  note('<strong>This is the one feature here that has to be configured before it ' +
   'will do anything, and the one page in this console that configures a REFUSAL.</strong> ' +
   'Everywhere else this service accepts what it is given — any username, any client_id, any ' +
   'entityID, any LDAP bind. It cannot do that at an assertion consumer service: what arrives ' +
@@ -15239,11 +16867,11 @@ const FEDERATION_CAVEAT =
   'produce is the same one <code>/oauth2/authorize</code>, <code>/wsfed</code>, ' +
   '<code>/saml2</code> and this console all read. A permissive version of it would not be a ' +
   'permissive mock; it would be an authentication bypass for every protocol in this ' +
-  'process.</p>' +
-  '<p class="note"><strong>The gate is on the SIGNER, not on the subject.</strong> Once a ' +
+  'process.') +
+  note('<strong>The gate is on the SIGNER, not on the subject.</strong> Once a ' +
   'relationship is configured and enabled, everything downstream is as permissive as the rest ' +
   'of this service: any username in the assertion is accepted, any attribute is mapped, ' +
-  'nothing about the person is checked, and a directory entry is created for them.</p>';
+  'nothing about the person is checked, and a directory entry is created for them.');
 
 const FEDERATION_LINKS =
   '<p class="sub"><a href="' + federation.PATHS.base + '">the federation index</a> &middot; ' +
@@ -15371,11 +16999,11 @@ function federationListPage(req) {
     federation.ROLES.map(function (one) {
       return '<tr><td>' + esc(one.short) + '</td><td>' + esc(one.what) + '</td></tr>';
     }).join('') + '</table>' +
-    '<p class="note"><strong>One relationship is one DIRECTION.</strong> A partner this ' +
+    note('<strong>One relationship is one DIRECTION.</strong> A partner this ' +
     'service both consumes from and asserts to is two relationships with two ids, because ' +
     'everything that configures one differs by direction — the endpoints are theirs or ours, ' +
     'the certificate is theirs or ours, the attribute mapping runs inbound or the release ' +
-    'list runs outbound.</p>' +
+    'list runs outbound.') +
     '<h2>The five protocols</h2>' +
     '<table><tr><th>Protocol</th><th>What happens</th><th>Specification</th></tr>' +
     federation.PROTOCOLS.map(function (one) {
@@ -15404,11 +17032,11 @@ function federationListPage(req) {
 
 function federationCreateForm() {
   return '<h2>Add a relationship</h2>' +
-    '<p class="note">It is created <strong>disabled</strong>, whatever is filled in here, ' +
+    note('It is created <strong>disabled</strong>, whatever is filled in here, ' +
     'and nothing about it does anything until it is enabled on its own page. That is not ' +
     'caution for its own sake: a partner that half-exists and silently accepts assertions is ' +
     'the failure this whole register is arranged to prevent, and enabling is the second, ' +
-    'deliberate act that says the configuration is finished.</p>' +
+    'deliberate act that says the configuration is finished.') +
     '<form method="post" action="/admin/federation"><div class="formrow">' +
     '<input type="hidden" name="action" value="create">' +
     '<label for="fedid">Id</label>' +
@@ -15430,11 +17058,11 @@ function federationCreateForm() {
     'placeholder="their entityID, issuer or realm">' +
     '<button type="submit">Add</button>' +
     '</div></form>' +
-    '<p class="note">The <strong>id</strong> is the key, the RDN and a URL segment, so it has ' +
+    note('The <strong>id</strong> is the key, the RDN and a URL segment, so it has ' +
     'to start with a letter or a digit and hold only letters, digits, dot, dash and ' +
     'underscore. <strong>Partner</strong> is their own identifier in whatever their protocol ' +
     'calls it, and on a service-provider-side relationship it is CHECKED: an assertion whose ' +
-    'issuer is not that string is refused, even when the signature verifies.</p>';
+    'issuer is not that string is refused, even when the signature verifies.');
 }
 
 // The drill-down. It is the page that actually does the work, because a
@@ -15481,15 +17109,15 @@ function federationDetailPage(req, id) {
       '<input type="hidden" name="action" value="set">' +
       '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
       '<input type="hidden" name="field" value="' + esc(field.name) + '">' +
-      '<input type="text" name="value" size="42" value="' +
+      '<input type="text" name="value" size="42"' + tip(field.what) + ' value="' +
       esc(field.sensitive && value ? '' : value) + '"' +
       (field.sensitive ? ' placeholder="set — not shown"' : '') + '>' +
       '<button type="submit">Set</button></div></form></td>' +
-      '<td class="sub">' + esc(field.what) +
-      (field.sensitive
-        ? ' <strong>Never printed on this page or in the audit log</strong>, though an ' +
-          'ldapsearch of this directory will show it — see the note at the foot.'
-        : '') + '</td></tr>';
+      '<td class="sub">' + note(esc(field.what) +
+        (field.sensitive
+          ? ' <strong>Never printed on this page or in the audit log</strong>, though an ' +
+            'ldapsearch of this directory will show it — see the note at the foot.'
+          : '')) + '</td></tr>';
   }).join('');
 
   const switches = ['fedEnabled'].concat(
@@ -15515,7 +17143,7 @@ function federationDetailPage(req, id) {
   const multiSections = multiFields.map(function (field) {
     const values = record[field.name] || [];
     return '<h3><code>' + esc(field.name) + '</code></h3>' +
-      '<p class="note">' + esc(field.what) + '</p>' +
+      note(esc(field.what)) +
       (values.length
         ? '<table><tr><th>Value</th><th></th></tr>' + values.map(function (value) {
             return '<tr><td class="who"><code>' + esc(value) + '</code></td>' +
@@ -15580,10 +17208,10 @@ function federationDetailPage(req, id) {
     '</table>' +
     (row.role === 'service-provider'
       ? '<h2>What to configure at the partner</h2>' +
-        '<p class="note">These are the URLs to give whoever runs the identity provider. The ' +
+        note('These are the URLs to give whoever runs the identity provider. The ' +
         'assertion consumer service is the one that matters: a partner sending its answer ' +
         'anywhere else produces a 404 in a browser AFTER a successful sign-in somewhere ' +
-        'else, which is the least diagnosable failure this feature has.</p>' +
+        'else, which is the least diagnosable failure this feature has.') +
         '<table><tr><th>What they need</th><th>Value</th></tr>' +
         '<tr><td>Assertion consumer service / <code>wreply</code> / ' +
           '<code>redirect_uri</code></td><td class="who"><code>' + esc(acs) +
@@ -15600,22 +17228,22 @@ function federationDetailPage(req, id) {
             'not already have to trust</span></td></tr>'
           : '') +
         '</table>' +
-        '<p><a class="btn" href="' + esc(login) + '">Start a federated sign-in through this ' +
+        note('<a class="btn" href="' + esc(login) + '">Start a federated sign-in through this ' +
         'partner</a> ' + (row.usable ? '' : '<span class="sub">— it will refuse until this ' +
-        'relationship is enabled and configured</span>') + '</p>'
+        'relationship is enabled and configured</span>'))
       : '<h2>What this relationship does</h2>' +
-        '<p class="note">Every protocol endpoint here already issues to anybody that asks, ' +
+        note('Every protocol endpoint here already issues to anybody that asks, ' +
         'so this relationship changes nothing about whether the partner is answered. What it ' +
         'adds is two things: the partner is marked as a FEDERATION PARTNER rather than a test ' +
         'client, and <code>fedRelease</code> below decides which attributes are released to ' +
-        'it.</p>' +
-        '<p class="note"><strong>The release list can only remove, and only from what ' +
+        'it.') +
+        note('<strong>The release list can only remove, and only from what ' +
         '<a href="/admin/claims">custom claims</a>, <a href="/admin/saml-attributes">custom ' +
         'SAML attributes</a> and the groups claim would add.</strong> It cannot touch ' +
         '<code>sub</code>, <code>iss</code>, <code>exp</code>, a NameID or anything else the ' +
         'protocol puts in an artifact itself — those are what make the artifact verifiable, ' +
         'and a release list that could drop <code>iss</code> would produce tokens that fail ' +
-        'to verify with nothing pointing back at this page.</p>') +
+        'to verify with nothing pointing back at this page.')) +
     '<h2>Settings</h2>' +
     '<table><tr><th>Field</th><th>Value</th><th>What it is</th></tr>' + fieldRows + '</table>' +
     '<h2>Switches</h2>' +
@@ -15632,14 +17260,14 @@ function federationDetailPage(req, id) {
     '<code>ou=users</code> — nothing is ever deleted from there — and any session they hold ' +
     'is unaffected until it expires or is ended.</span>' +
     '</div></form>' +
-    '<p class="note"><strong>Everything on this page is an attribute on one directory ' +
+    note('<strong>Everything on this page is an attribute on one directory ' +
     'entry</strong>, so an <code>ldapmodify</code> of <code>' + esc(row.dn) + '</code> does ' +
     'exactly what these forms do — two doors onto one register, not two registers. That cuts ' +
     'both ways: <code>fedClientSecret</code> is this service\'s own credential AT the ' +
     'partner, held in the clear, in a directory where every bind succeeds. It is never shown ' +
     'here and never written to the audit log, and anybody who can read this directory can ' +
     'authenticate as this service at that partner. A deployment federating with something ' +
-    'real should know that.</p>' +
+    'real should know that.') +
     FEDERATION_CAVEAT +
     '<p class="sub"><a href="' +
     esc('/admin/federation' + queryWith(listViewOf('/admin/federation', req.query), {})) +
@@ -15803,6 +17431,15 @@ module.exports = {
   // page SAYS is entirely that module's.
   respond: respond,
   page: page,
+  // THE FOLDS AND THE TOOLTIPS, for the same one module. They are exported for
+  // the reason page() is: `sts_metadata.js` draws a console page, and a page
+  // drawn in this console's shell whose prose did not fold would be the one
+  // page here that is still a wall of text — which is exactly what it was,
+  // being the longest page in the service. See the block above note().
+  note: note,
+  warn: warn,
+  bullet: bullet,
+  tip: tip,
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
   // Filled by spiffe_server.js at its require time, for the reason beside the

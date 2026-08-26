@@ -404,6 +404,30 @@ function edgeLook(edge) {
     log.debug("Leaving edgeLook().");
     return { colour: GREY, dash: '4 3', weight: 1.2 };
   }
+  // ---------------------------------------------------------------------------
+  // THE TWO RELATIONS THE PERSON'S PICTURE ADDS (common/user_graph.js), and
+  // NEITHER OF THEM TAKES A MODE COLOUR. That is the point rather than an
+  // omission: amber and green are this file's judgement about impersonation
+  // versus delegation, and an ordinary authorization code grant makes no such
+  // claim — colouring it green because nothing was impersonated would tell a
+  // reader who has learnt the pairing something false.
+  //
+  //   * `signed-in` — the person authenticated TO this service. DOTTED, because
+  //     it is the one line that is not a credential going anywhere; it is how
+  //     everything else on the picture came to be allowed.
+  //   * `issued-for` — a credential naming this person went to that
+  //     application. Solid indigo, the same weight as `reaches`, because it IS
+  //     the trust relationship: what this token is FOR, said about a grant
+  //     instead of about a delegation.
+  // ---------------------------------------------------------------------------
+  if (edge.relation === 'signed-in') {
+    log.debug("Leaving edgeLook().");
+    return { colour: INDIGO, dash: '2 3', weight: 1.4 };
+  }
+  if (edge.relation === 'issued-for') {
+    log.debug("Leaving edgeLook().");
+    return { colour: INDIGO, dash: '', weight: 1.6 };
+  }
   if (edge.relation === 'acts-for') {
     const colour = edge.mode === 'impersonation' ? AMBER
                  : edge.mode === 'delegation' ? GREEN : INDIGO;
@@ -430,6 +454,22 @@ function edgeLabelLines(edge, labelOf) {
     if (edge.protocols && edge.protocols.length) {
       lines.push(edge.protocols.join(', '));
     }
+  } else if (edge.relation === 'signed-in') {
+    // WHAT WAS ASKED FOR IN SO MANY WORDS: the family they signed in with. The
+    // METHODS are in `typeLabel` and are deliberately not here — `the sign-in
+    // screen (password + a security key) ×3` is a sentence, and a sentence on a
+    // line is what turns a diagram into a page of text laid out badly. It is in
+    // the tooltip and in the table under the picture.
+    lines.push('signed in');
+    if (edge.protocol) {
+      lines.push(trim(edge.protocol, 26));
+    }
+  } else if (edge.relation === 'issued-for') {
+    // AND THE GRANT, WHICH IS THE WHOLE LABEL. `typeLabel` carries the flow's
+    // own name — `Authorization Code grant`, `Refresh Token grant` — so this is
+    // the same expression the mechanism gets on a delegation line, which is
+    // what makes the two read as one picture.
+    lines.push(edge.typeLabel ? shortType(edge.typeLabel) : 'issued for');
   } else if (edge.relation === 'acts-for') {
     lines.push('acts for');
     if (edge.typeLabel) {
@@ -443,8 +483,29 @@ function edgeLabelLines(edge, labelOf) {
     }
   }
   const counts = [];
-  if (edge.issued) counts.push(edge.issued + ' issued');
-  if (edge.refused) counts.push(edge.refused + ' refused');
+  // A CREDENTIAL COUNT WHERE THE LINE IS ABOUT CREDENTIALS, an act count where
+  // it is about acts. The two are different units and one column for both would
+  // report `3 issued` on a line that carries three tokens and on a line that
+  // carries three delegations, which are not comparable numbers.
+  if (edge.relation === 'issued-for') {
+    if (edge.credentials) {
+      counts.push(edge.credentials + ' credential' + (edge.credentials === 1 ? '' : 's'));
+    }
+  } else if (edge.relation === 'signed-in') {
+    // `issued` on this line counts authentications, not credentials, so the
+    // word has to change with it: `4 issued` under a sign-in line would be four
+    // of something that does not exist.
+    counts.push(edge.acts + ' time' + (edge.acts === 1 ? '' : 's'));
+  } else {
+    if (edge.issued) counts.push(edge.issued + ' issued');
+    if (edge.refused) counts.push(edge.refused + ' refused');
+    // An `issued` line in a person's picture carries credentials that came out
+    // of no delegation act at all, so its act count can be zero while it is the
+    // busiest line on the page.
+    if (!edge.acts && edge.credentials) {
+      counts.push(edge.credentials + ' credential' + (edge.credentials === 1 ? '' : 's'));
+    }
+  }
   if (counts.length) {
     lines.push(counts.join(', '));
   }
@@ -683,6 +744,12 @@ function edgeTitle(edge) {
     if (edge.protocols && edge.protocols.length) {
       parts.push('Asked over: ' + edge.protocols.join(', ') + '.');
     }
+  } else if (edge.relation === 'signed-in') {
+    parts.push('This party AUTHENTICATED to this service — the sign-in that ' +
+               'everything else here rests on.');
+  } else if (edge.relation === 'issued-for') {
+    parts.push('A credential NAMING this party was issued to that one, by an ' +
+               'ordinary grant rather than by a delegation.');
   } else if (edge.relation === 'acts-for') {
     parts.push('Acts on behalf of.');
   } else {
@@ -704,8 +771,18 @@ function edgeTitle(edge) {
     parts.push('The ' + edge.skipped.join(' and ') + ' is NOT NAMED on these ' +
                'acts, so this line jumps it.');
   }
-  parts.push(edge.acts + ' act(s): ' + edge.issued + ' issued, ' +
-             edge.refused + ' refused.');
+  if (edge.relation === 'issued-for') {
+    parts.push(edge.credentials + ' credential(s).');
+  } else if (edge.relation === 'signed-in') {
+    parts.push(edge.acts + ' authentication(s), all of them accepted — this ' +
+               'service checks no password in any family.');
+  } else {
+    parts.push(edge.acts + ' act(s): ' + edge.issued + ' issued, ' +
+               edge.refused + ' refused.');
+    if (edge.credentials) {
+      parts.push(edge.credentials + ' credential(s) from the issued register.');
+    }
+  }
   (edge.produced || []).forEach(function (one) {
     parts.push('Produced ' + one.count + ' × ' + one.kind +
                (one.identifiers.length ? ' (' + one.identifiers.join(', ') +

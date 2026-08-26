@@ -14,6 +14,8 @@ more than one family needs it, not because it felt general.
 | `audit.js` | What happened, when, and to whom, as discrete events. Sits BESIDE `admin_stats.js`, not under it. |
 | `applications.js` | Every application this service has been asked about, stored in the directory under `ou=applications`. |
 | `delegation.js` | Who acted on whose behalf, through what, to reach what — eight mechanisms across three protocol families in ONE model. |
+| `user_graph.js` | ONE PERSON, END TO END: that register UNIONED with the issued one, so a picture can show every grant, flow, assertion, ticket and SVID in somebody's name beside every delegation naming them. |
+| `credential_graph.js` | ONE CREDENTIAL, END TO END: where it came from — who held it, in whose name, to reach what — and every generation of exchange behind it, back to the issuance the line rests on. |
 | `claim_attributes.js` | Which LDAP attributes a token or an assertion carries, per claim set. |
 | `group_claims.js` | The groups claim, in all four claim sets at once. |
 | `vendored/` | Byte-identical copies of the parent project's files. **Do not edit them here** — see `common/vendored/CLAUDE.md`. |
@@ -972,6 +974,25 @@ find module` naming a file the operator never mentioned.
    `EDITABLE` mode**, `set` to `multi`, or the console offers a `set` the action
    refuses.
 
+   **`oauthAudience` IS DECLARED AND IT IS READ, WHICH MAKES IT THE ONE OF ITS
+   KIND.** Added 2026-08-26. It is the audience an access token addressed to this
+   application carries — a URI, the resource rather than the client that calls
+   it — and it is the OAuth spelling of a fact `wstrustAppliesTo` and
+   `samlEntityId` already record for their own families. Nothing presents an
+   audience as its own name, so nothing here writes it and it cannot be derived.
+   What makes it different from the four declaration-only attributes below is
+   that `oauth-oidc/oauth2.js` LOOKS IT UP: `forAudience()` turns the `audience`
+   on an RFC 8693 exchange into the application that registered it, so a
+   delegation reaching `https://esb1.example.com` is filed against `esb1` and
+   `/admin/delegation/map` draws one chain instead of two halves that share
+   nothing. **It is a lookup and not a permission** — an audience nobody
+   registered is exchanged for exactly as before and recorded verbatim, which is
+   the same sentence `appAllowedProtocol` gets and for the same reason. Do not
+   give it a fallback to the identifier: `get()` already answers that question,
+   and a lookup trying both would make `audience=esb1` and
+   `audience=https://esb1.example.com` indistinguishable in the one place the
+   difference is the point.
+
    **FOUR ATTRIBUTES HERE ARE DECLARATION AND NOTHING EVER WRITES THEM** —
    `federationPartnerId`, `ldapBindDn`, `scimClientId`, `spiffeWorkloadId` —
    because those surfaces authenticate the CALLER rather than an application
@@ -1193,7 +1214,135 @@ find module` naming a file the operator never mentioned.
    would have been the layering inversion this directory's entry test exists to
    prevent; `admin.js` requires both and renders them side by side.
 
+3p. **`user_graph.js` is a library over TWO registers, and the whole of it is
+   the argument for why the union is here rather than in the console.** It
+   requires `helpers.js`, `admin_stats.js` and `delegation.js`; nothing requires
+   it but `../admin-ui/admin.js`, which renders it at `/admin/delegation/user`.
+   It registers no route, so rule 3e's test is not even reached — a plain
+   require in the ordinary direction closes no cycle and moves nothing.
+
+   **THE QUESTION IT ANSWERS CANNOT BE ASKED OF EITHER REGISTER ALONE.**
+   `/admin/delegation/application` next door narrows the ACTS and hands them to
+   `delegation.graph()`, because both halves of *what has been delegated through
+   this application* live in one store. *What has this service done in alice's
+   name* does not: an act is by definition a request carrying two credentials,
+   and an authorization code grant is not one, nor is a Kerberos AS-REQ, nor a
+   SAML assertion. Drawn from the delegation register alone, somebody who signed
+   in nine times and holds twenty tokens is an EMPTY PICTURE. So this file
+   unions that register with `admin_stats.js`'s — the tokens, the artifacts and
+   the authentication events — and it is a file rather than a `filter()` in
+   `admin.js` for the reason every other view function moved down here: the join
+   is a statement about what the two stores MEAN, and a renderer holding a
+   second opinion about any of it is drift nothing can see.
+
+   **IT EXTENDS `delegation.graph()`'s SHAPE AND DOES NOT INVENT A SECOND ONE.**
+   `graphFor()` starts by calling that function for the acts naming this person
+   — so the delegation half is drawn by the code that owns it, byte for byte as
+   `/admin/delegation/map` draws it — and folds the issuance on top as nodes and
+   edges carrying the same fields plus three (`credentials`, `flows`,
+   `isSubject` on a node; `credentials` on an edge). `../admin-ui/delegation_map.js`
+   therefore draws this picture with no idea it is different. A second shape
+   would have meant a second renderer, and two renderers agreeing about what a
+   box means is a thing that stays true for about a month.
+
+   **TWO NEW `relation` VALUES, AND NEITHER TAKES A MODE COLOUR.** `signed-in`
+   runs from the person INTO the hexagon, one line per protocol family, labelled
+   with the methods — it is the authentication half, and without it the picture
+   shows tokens beside somebody who as far as the drawing goes has never been
+   here. `issued-for` is a credential going to whoever holds it, LABELLED WITH
+   THE GRANT. Amber and green are this console's judgement about impersonation
+   versus delegation, which are properties of a DELEGATION mechanism; an
+   ordinary grant claims neither, so colouring one green would tell a reader who
+   learnt the pairing from the table something false.
+
+   **`FLOWS` IS KEYED ON THE STRING `oauth2.js` ALREADY RECORDS, VERBATIM.**
+   `issuanceContext()` over there puts a `grant` on every signed JWT and
+   `recordJwt()` keeps it; those strings are the ids here rather than a tidier
+   vocabulary, because a translation that misses a value fails SILENTLY. An
+   unknown one comes back NAMED AFTER ITSELF with a warning — the choice
+   `delegation.js`'s `recordUnguarded()` makes about a type it does not know —
+   so a grant added to `oauth2.js` and not to this table shows up as a bug
+   report rather than as an empty cell. **Adding a grant there is a row here**,
+   and nothing else.
+
+   **A CREDENTIAL BOTH REGISTERS KNOW IS DRAWN ONCE, DEDUPED ON THE IDENTIFIER
+   AND NOTHING ELSE.** An RFC 8693 exchange writes a delegation act AND a token
+   record for one access token, so the issuance half skips any JWT whose `jti`
+   the delegation half already carries, and the count of what was skipped is
+   REPORTED rather than left to be noticed. Matching on anything softer — a
+   subject and a kind within a time window — would eventually collapse two real
+   credentials into one, which is worse than listing one twice. **The Kerberos
+   overlap therefore survives on purpose**: an S4U service ticket is in both
+   registers and has no identifier in either, so it is drawn on both lines and
+   the page says which register each came from.
+
+   **`userList()` UNIONS THE TWO REGISTERS TOO, and that is the half worth
+   keeping.** An identity named only by a delegation — an S4U2Self subject, an
+   `OnBehalfOf` — has never authenticated and may have been issued nothing, and
+   *there is no such person* and *somebody was impersonated who has never signed
+   in* are opposite answers to one question. The chooser offers both and each
+   row says which side it came from.
+
 ---
+
+3q. **`credential_graph.js` is the same union asked a NARROWER question, and it
+   is a file for the same reason `user_graph.js` is.** It requires `helpers.js`,
+   `admin_stats.js`, `delegation.js`, `user_graph.js` and `applications.js`;
+   nothing requires it but `../admin-ui/admin.js`, which renders it at
+   `/admin/tokens/credential` — the first drill-down the tokens page has ever
+   had, reached from every identifier in its last column. It registers no route,
+   so rule 3e's test is not reached.
+
+   **A LINE, NOT A FAN, WHICH IS WHY IT IS NOT A FILTER ON THE PERSON'S
+   PICTURE.** `user_graph.js` answers *what has this service done in alice's
+   name*; this answers *where did THIS credential come from*, and the answer is
+   an ancestry. A token exchange consumes one credential and produces another,
+   so the identifiers form a chain, and following it is the only way to get from
+   an access token that reaches `sp1` back to the browser sign-in three tiers
+   away that everything after it rests on. Filtering the person's picture cannot
+   do it: that picture is every credential ever issued in their name, with
+   nothing to say which four are this one's ancestors.
+
+   **THE JOIN IS THE IDENTIFIER AND NOTHING ELSE.** An act records what it
+   CONSUMED and what it PRODUCED, each with the identifier its protocol gives it
+   — a `jti`, an `AssertionID` — and that is the one thing both registers hold
+   about the same object. `stats.issuedById()` (added with this file, for the
+   same reason `issuedList()` lives over there rather than in a caller) turns
+   one into a row. Anything cleverer — a subject and a time window, a kind and a
+   client — would eventually join two credentials that merely look alike, and a
+   lineage that is WRONG is worse than one that is short, because the whole page
+   is an assertion about causation.
+
+   **A WALL IS NOT AN ORIGIN, and they are reported separately.** Two mechanisms
+   here consume a credential with nothing to quote: WS-Trust consumes the
+   requester's WS-Security credential, which this service never issued, and a
+   Kerberos ticket has no identifier in the protocol at all. So a trail can stop
+   because it has reached the beginning, or because the thing handed in cannot
+   be named — and those are opposite answers. `walls` carries the second.
+
+   **THE ORIGIN IS DRAWN AS AN ISSUANCE, IN `user_graph.js`'s VOCABULARY.**
+   `issued-for` from the person to the application, labelled with the GRANT, plus
+   the dashed `issued` line from this service — not `acts-for`, which would
+   colour an authorization code grant amber for impersonation and claim a
+   mechanism that was not involved. The two pages therefore agree about what an
+   issuance looks like, which is what lets somebody read both. It is also why
+   `holderOf()` and `detailOf()` are exported from that file rather than written
+   again here: two answers to *whose token is this* would be two pictures of one
+   issuance on two pages of one console.
+
+   **THE AUDIENCE IS RESOLVED THROUGH THE REGISTRY, exactly as the token
+   exchange resolves one** (`applications.forAudience()`, and see the
+   `oauthAudience` note in 3g). A box for `https://esb1.example.com` beside a box
+   for `esb1` would be two parties for one, which is the failure that lookup
+   exists to prevent. And the audience is drawn ONLY for the credential at the
+   head of the line: everything below it was produced by an act, and the act
+   already says where it went.
+
+   **IT WALKS BACKWARDS ONLY.** *What was later made from this* is a tree rather
+   than a line — one subject token can be exchanged by any number of clients —
+   and drawing both would make the common case, a credential with no ancestry and
+   no descendants, into a page explaining itself in two directions. The forward
+   direction is what `/admin/delegation` and its map are for.
 
 ## An OAuth client is not a person, and now it has somewhere to be
 

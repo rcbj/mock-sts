@@ -589,6 +589,29 @@ const SCHEMA = {
             'protocol sighting writes; a SECOND value is a client_id this application also ' +
             'answers to — a per-environment id — and is why this accumulates rather than ' +
             'being assigned. Absent on an entry no OAuth family has been declared for.' },
+    { name: 'oauthAudience', kind: 'multi',
+      from: 'the console, the management API, or by hand',
+      what: 'THE AUDIENCE THIS APPLICATION ANSWERS TO — the `aud` an access token ' +
+            'addressed to it carries, and what a client puts in RFC 8693 section 2.1\'s ' +
+            '`audience` (or `resource`) when it exchanges a token to reach this ' +
+            'application. It is the OAuth spelling of a fact three other families here ' +
+            'already record under their own names: `wstrustAppliesTo` is the same thing ' +
+            'in a RequestSecurityToken and `samlEntityId` is the same thing in an ' +
+            'assertion\'s AudienceRestriction, and one attribute holding all three would ' +
+            'be one string that has to mean whichever protocol asked last.\n\nIt is ' +
+            'DECLARED — nobody presents an audience as their own name, so nothing here ' +
+            'writes it and it cannot be derived — and it is a URI rather than a ' +
+            'client_id because that is what an audience is: the resource, not the client ' +
+            'that calls it. Several values is the ordinary case (a per-environment ' +
+            'hostname), which is why it accumulates.\n\n**IT IS READ, WHICH MAKES IT ' +
+            'THE EXCEPTION** among the declaration attributes beside it. The token ' +
+            'exchange looks an `audience` UP here — forAudience() — so that a delegation ' +
+            'recorded for `https://esb1.example.com` names the application `esb1` on ' +
+            '/admin/delegation and in its picture, instead of drawing a box for a URL ' +
+            'that nothing else in the register mentions. It is a LOOKUP and not a ' +
+            'permission: an audience nobody registered is exchanged for exactly as ' +
+            'before and recorded verbatim, because a mock that refused would remove a ' +
+            'test case rather than add one.' },
     { name: 'oauthClientSecret', kind: 'single', from: 'POST /oauth2/register',
       sensitive: true,
       what: 'THE SECRET THIS SERVICE MINTED, in the clear, in a directory where every ' +
@@ -869,6 +892,14 @@ const EDITABLE = {
   // SPNs is one application, and a `set` here would replace the list with one
   // value and read afterwards as the others having been forgotten.
   oauthClientId: 'multi',
+  // THE AUDIENCE, which is the identifier from the OTHER side: what a token
+  // addressed to this application says in `aud`, rather than what the
+  // application calls itself at the token endpoint. `multi` because a per-
+  // environment hostname is the ordinary case, and because it is the one
+  // attribute here something LOOKS UP — see forAudience(), and the row in
+  // SCHEMA, where the difference between a lookup and a permission is spelled
+  // out.
+  oauthAudience: 'multi',
   oauthClientSecret: 'set',
   oauthTokenEndpointAuthMethod: 'set',
   oauthJwks: 'set',
@@ -2330,6 +2361,66 @@ function get(identifier) {
   return loaded.known ? view(loaded.record, loaded.entry) : null;
 }
 
+// ---------------------------------------------------------------------------
+// WHICH APPLICATION ANSWERS TO THIS AUDIENCE, or null.
+//
+// The one lookup in this module that is not by identifier, and the only thing
+// in this service that READS `oauthAudience`. The token endpoint calls it when
+// it records a delegation: a client exchanging a token for
+// `https://esb1.example.com` has named a resource rather than a client_id, and a
+// register that filed the act under the URL would draw a box in
+// /admin/delegation/map that nothing else in the picture ever mentions — while
+// the application it means is sitting in this registry two rows away.
+//
+// THREE THINGS IT DELIBERATELY IS NOT.
+//
+// It is not a PERMISSION. An audience nobody registered returns null and the
+// caller records what was asked for, verbatim; nothing is refused, because a
+// mock that refused would remove a test case rather than add one. It is not
+// CASE-FOLDED or normalised: RFC 8693 leaves an audience as an opaque string the
+// authorization server understands, and an audience that differs by a character
+// is a different audience — quietly matching `HTTPS://ESB1` to `https://esb1`
+// would be this registry deciding a URI comparison rule on the caller's behalf.
+// And it does not fall back to the IDENTIFIER: `applications.get(audience)`
+// already answers that question, and a lookup that tried both would make
+// `audience=esb1` and `audience=https://esb1.example.com` indistinguishable in
+// the one place the difference is the point.
+//
+// It walks the container, which is a linear read per exchange. That is honest
+// for a registry capped by `applications.max` and holding tens of entries; an
+// index would be a second copy of the attribute, and this module's whole
+// argument is that the directory is the one store.
+// ---------------------------------------------------------------------------
+function forAudience(audience) {
+  log.debug("Entering forAudience(). audience=" + audience);
+  const wanted = String(audience == null ? '' : audience).trim();
+  if (!wanted) {
+    log.debug("Leaving forAudience(). Nothing was asked for.");
+    return null;
+  }
+  const found = list().filter(function (row) {
+    return valuesOf(row.fields.oauthAudience).indexOf(wanted) >= 0;
+  });
+  if (!found.length) {
+    log.debug("Leaving forAudience(). No application has registered it.");
+    return null;
+  }
+  if (found.length > 1) {
+    // Two entries claiming one audience is a configuration mistake rather than
+    // a state to resolve here, and the first is as good an answer as any — but
+    // it is said out loud, because the consequence is a delegation filed under
+    // one of two applications with nothing on the page to say the other exists.
+    log.warn('applications: ' + found.length + ' applications have registered ' +
+             'the audience "' + wanted + '" (' +
+             found.map(function (row) { return row.identifier; }).join(', ') +
+             '). The first is what a token exchange for it will be recorded ' +
+             'against. An audience names one resource; remove it from the ' +
+             'others.');
+  }
+  log.debug("Leaving forAudience(). " + found[0].identifier + ".");
+  return found[0];
+}
+
 function count() {
   const backing = store();
   return backing ? backing.countApplications() : 0;
@@ -2598,6 +2689,9 @@ module.exports = {
   deleteApplication: deleteApplication,
   list: list,
   get: get,
+  // The audience lookup, exported for the token endpoint. See its header for
+  // why it is a lookup and not a check.
+  forAudience: forAudience,
   count: count,
   containerDn: containerDn,
   maxApplications: maxApplications

@@ -1718,6 +1718,44 @@ const ENDPOINTS = [
           'No credential is ever shown, only its kind and identifier. ' +
           '?format=json carries the application, its acts, the graph and the ' +
           'role played per act; ?format=svg is the picture alone.' },
+  { path: '/admin/delegation/user', group: 'Admin',
+    name: 'Delegation — one person',
+    // The four the picture's DELEGATION half is drawn from, plus the two that
+    // define what its ISSUANCE half labels every line with. rfc6749 and
+    // openid-connect are here and on no other delegation row, which is the
+    // whole difference between this page and the three beside it: it is the one
+    // that leaves the delegation register.
+    specs: ['ms-sfu', 'rfc4120', 'ws-trust', 'rfc8693', 'rfc6749', 'oidc'],
+    what: 'NON-SPEC PAGE OVER SIX SPECIFICATIONS, the FOURTH drill-down of ' +
+          '/admin/delegation and THE ONLY PICTURE IN THIS CONSOLE DRAWN FROM ' +
+          'MORE THAN THE DELEGATION REGISTER. It answers what has this service ' +
+          'done in one identity\'s name, END TO END — which the other three ' +
+          'cannot, because most of what happens in somebody\'s name is not a ' +
+          'delegation: an authorization code grant is not an act, nor is an ' +
+          'AS-REQ, nor a SAML assertion, so a person who signed in nine times ' +
+          'and holds twenty tokens is an empty picture drawn from acts alone. ' +
+          'Choose somebody from the list — the chooser is on /admin/delegation ' +
+          'and /admin/delegation/map as well — and get every credential ever ' +
+          'issued naming them (JWT, assertion, ticket, SVID, verifiable ' +
+          'credential) as a line to the application holding it, LABELLED WITH ' +
+          'THE EXACT OAUTH 2.0 GRANT OR OPENID CONNECT FLOW that produced it ' +
+          'and the section that defines it; their authentications as dotted ' +
+          'lines into this service, per protocol family, with the method on ' +
+          'each; and every delegation act naming them in any of the three ' +
+          'roles, drawn by the same code /admin/delegation/map uses. Neither ' +
+          'new line takes a mode colour, because impersonation and delegation ' +
+          'are properties of a delegation mechanism and a grant claims ' +
+          'neither. An RFC 8693 exchange writes a row in BOTH registers and is ' +
+          'drawn ONCE, on its delegation line, with the number left off ' +
+          'printed; a Kerberos S4U ticket is the overlap that survives, since a ' +
+          'ticket has no identifier either register could collapse on. The ' +
+          'chooser\'s list is the identity register UNIONED with the delegation ' +
+          'register, so it offers people nothing was ever issued to — an ' +
+          'S4U2Self subject who has never been here is the row worth opening. ' +
+          'A bare page is the chooser rather than a 404. No credential is ever ' +
+          'shown, only its kind and identifier. ?format=json carries the ' +
+          'person, the credentials with the grant on each, the acts and the ' +
+          'graph; ?format=svg is the picture alone.' },
   { path: '/admin/audit', group: 'Admin', name: 'Audit log',
     // rfc4511 is linked because the directory operations are its and they are the
     // largest source of rows here. Nothing else: an audit log is not a protocol,
@@ -3677,6 +3715,13 @@ function renderInner(base, report) {
   if (report.undocumented.length || report.stale.length ||
       report.unknownSpecs.length || report.unknownProtocolGroups.length ||
       report.unknownProtocolSpecs.length || report.unclaimedGroups.length) {
+    // NOT FOLDED, AND IT IS THE ONE BLOCK ON THIS PAGE THAT IS NOT. Every
+    // other paragraph here is prose a reader may skip; this one appears only
+    // when the page disagrees with the router, which is the whole reason this
+    // page exists (see the drift checks above). A report that has to be
+    // clicked open to be read is a report somebody can close and forget. It
+    // is also built across several statements rather than as one expression,
+    // so it could not go through admin.warn() as it stands.
     html += '<div class="warn"><strong>This page is out of step with the router.</strong><ul>';
     if (report.undocumented.length) {
       html += '<li>Registered but not described here: ' +
@@ -3737,7 +3782,13 @@ function renderInner(base, report) {
           '<td class="m">' + esc(r.methods.join(', ')) + '</td>' +
           '<td class="n">' + (r.documented === false ? '<span class="bad">' + esc(r.name) + '</span>'
                                                      : esc(r.name)) + '</td>' +
-          '<td>' + esc(r.what) + '</td>' +
+          // WHAT AN ENDPOINT IS, FOLDED. This table is every route the router
+          // has — around 250 of them — and this column is a paragraph on most
+          // rows, which made the one page in this console that lists
+          // everything the one page nobody could skim. admin.note() leaves a
+          // short description alone and folds a long one behind its first
+          // sentence; see the block above it in ../admin-ui/admin.js.
+          '<td>' + admin.note(esc(r.what)) + '</td>' +
           '<td class="s">' + specLinks(r.specs) + '</td></tr>';
       });
     html += '</tbody></table>';
@@ -3749,11 +3800,12 @@ function renderInner(base, report) {
   SPECS.forEach(function (s) {
     html += '<tr id="spec-' + esc(s.id) + '"><td class="n"><a href="' + esc(s.url) +
       '" target="_blank" rel="noopener noreferrer">' + esc(s.name) + '</a></td>' +
-      '<td>' + esc(s.where) + '</td><td>' + esc(s.coverage) + '</td></tr>';
+      '<td>' + esc(s.where) + '</td><td>' + admin.note(esc(s.coverage)) +
+      '</td></tr>';
   });
   html += '</tbody></table>';
 
-  html += '<p class="note">Machine-readable: <code>' + esc(base) +
+  html += admin.note('Machine-readable: <code>' + esc(base) +
     '/admin/sts-metadata?format=json</code>, which is what the button at ' +
     'the top hands you as a file. It is behind the console gate like the ' +
     'page, so a program fetching it signs in at <code>/authn/login</code> ' +
@@ -3764,7 +3816,7 @@ function renderInner(base, report) {
     '<code>/.well-known/oauth-authorization-server</code>, ' +
     '<code>/.well-known/openid-credential-issuer</code>, <code>/.well-known/jwt-vc-issuer</code>, ' +
     '<code>/.well-known/did.json</code> and ' +
-    '<code>/.well-known/did-configuration.json</code>.</p>';
+    '<code>/.well-known/did-configuration.json</code>.');
   log.debug("Leaving renderInner(). " + html.length + " characters.");
   return html;
 }

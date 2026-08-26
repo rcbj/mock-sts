@@ -18,7 +18,7 @@ files did not change; the paths did.
 
 | Directory | What is in it |
 |---|---|
-| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
 | `home/` | The front door: `GET /` and the one image on it. |
 | `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
@@ -430,6 +430,7 @@ in every file, including the ones in the source comments. This is the index.
 | 4b | `federation_sp.js` after `authn.js`, and why it needs no screen at all | `federation/CLAUDE.md` |
 | 4b | `saml11_sso.js` after `authn.js` and after `saml2_sso.js`, and why the two profiles are separate implementations | `saml/CLAUDE.md` |
 | 3l | `delegation.js`, and why it has no funnel | `common/CLAUDE.md` |
+| 3p | `user_graph.js`, and why the union of two registers is a library rather than a page | `common/CLAUDE.md` |
 | 3o | `federation.js`, why four modules may require it, and why `PATHS` is not beside the routes | `federation/CLAUDE.md` |
 | 3m | `realms.js`, the realm slot in `config.js`, and why the realm is ambient | `common/CLAUDE.md` |
 | 3m | `logout/logout.js` holds no state, and the reading order is not the ending order | `logout/CLAUDE.md` |
@@ -557,6 +558,19 @@ to wonder why dragging does nothing; the filter narrows a busy picture and
 follows is the one the six above establish read backwards: the argument for a
 script has to be that the page CANNOT work without one, and a diagram that does
 not move can.
+
+**THE COLLAPSIBLE PROSE BLOCKS ADDED TO THE CONSOLE ON 2026-08-26 ARE THE
+EIGHTH CANDIDATE AND ALSO NOT ONE**, and it is the case that shows the rule
+read backwards a second time. Every page in `/admin` explains itself at length,
+which put the control somebody came for several screens down a wall of
+paragraphs; the fix is that prose longer than about a line is drawn as a
+`<details>` whose summary is its own opening sentence. The debugger's version
+of that is a checkbox and a listener — it has a collapse-all switch — and this
+console cannot have one. `<details>` needs no script at all, so the whole
+change leaves `script-src 'none'` untouched. What it costs is exactly that
+switch, which `admin-ui/CLAUDE.md` argues is affordable and says what was done
+instead. **Tooltips are the same change's other half** and carry the rule that
+nothing is ever said ONLY in a `title` attribute — see that file.
 
 ---
 
