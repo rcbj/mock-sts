@@ -97,9 +97,9 @@ before you build a test on it.
 | **The statistics and the audit log** | Including the audit sequence numbers, so one realm's rows are contiguous. |
 | **The six settings that are NAMES** | The SAML 2.0 entityID, the SAML 1.1 providerID, the WS-Federation entityID, the WS-Trust issuer, the SAML assertion issuer and the OpenID4VP verifier client id. A new realm is created with each suffixed with its id, because two realms carrying one entityID is two identity providers claiming one name. They are ordinary settings — change them, or unset them to go back to sharing the process's name. |
 
-### Separated — the embedded directory, as a subtree
+### Separated — the embedded directory, one per realm
 
-Each realm owns a subtree of the one naming context:
+Each realm has a directory of its own behind the one socket, named by its base:
 
 ```
 dc=example,dc=com                 the DEFAULT realm  (ldap.baseDn itself)
@@ -121,7 +121,7 @@ own. LDAP answers on a socket with no path to put a segment in — a search arri
 carrying a base DN and nothing else — so a **name** is the only thing a client
 could ever use to say which realm it means.
 
-**A subtree search is scoped to the realm whose base it started from.**
+**Every operation is answered from the directory its DN names.**
 `ldapsearch -b "dc=example,dc=com"` is the default realm's directory;
 `ldapsearch -b "dc=acme,dc=example,dc=com"` is acme's; an entry belonging to
 another realm is filtered out of a search based above it, and the number
@@ -130,10 +130,16 @@ filtered is logged rather than dropped silently. The root DSE publishes one
 others are there.
 
 An operation that names **one DN** — an add, a modify, a delete, a compare, or a
-base-scope search of a single entry — is answered wherever that DN is. Spelling
+base-scope search of a single entry — is answered in that DN's realm. Spelling
 out `…,dc=acme,dc=example,dc=com` is how a client says which realm it means on a
 socket that has nowhere else to put one, so refusing it would make a realm
 unreachable rather than isolated.
+
+The one operation that carries **two** DNs is a rename, and a rename may not
+cross a realm: `modifyDN` from one realm's subtree into another is refused with
+`LDAP_AFFECTS_MULTIPLE_DSAS` (71), which is what a directory answers when a
+rename would move an entry out of the server holding it. Two realms here are two
+directories, so that is the truth rather than a borrowed error code.
 
 With no realms defined there is one naming context and one container, and every
 byte of every answer is what it was before realms existed.

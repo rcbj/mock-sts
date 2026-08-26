@@ -81,11 +81,14 @@ Two rules that are not optional here:
   against two — the identity register put back to a plain `Map`, and one
   shared revocation `Set` behind the same call shape — caught by five
   assertions and by three. `realm_directory_lookups.js` was checked against
-  four — `readGroupEntry()`, `deleteGroupEntry()` and the console's
-  `groupsFor()` each put back to a bare `getEntry()`, and `inRealm()`
-  stripped of the default realm's carve-out — caught by two, three, one and
-  one. The two one-assertion mutants are why both DIRECTIONS are written
-  out: each is the only check in the file that could have seen its mutant.
+  four while the guards were per-lookup — each of the three group doors put
+  back to a bare `getEntry()`, and `inRealm()` stripped of the default realm's
+  carve-out — and against two more after the store was split per realm, which
+  is what those guards became: a `getEntry()` that reaches into every realm's
+  store (5 assertions red) and an `eachEntryInRealm()` that walks them all (1).
+  **The file did not change between the two rounds**, which is the argument for
+  asserting behaviour rather than mechanism: the mechanism was replaced and the
+  test still guarded the thing that matters.
 * **CLEAN UP THE PROCESS-WIDE STATE YOU TOUCH.** The realm table and
   `process.env` are shared by every test in the run and this service persists
   nothing, so a realm left behind changes what a later test resolves. Use the

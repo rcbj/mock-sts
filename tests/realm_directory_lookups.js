@@ -28,17 +28,20 @@
 // bug, and it is why this file asserts the person and application halves too:
 // they are correct today, and nothing was stopping them from drifting.
 //
-// The fix is one predicate, `inRealm()`, and one accessor, `realmEntry()`, in
-// `ldap/ldap_server.js`.
+// THE FIX WENT THROUGH TWO STAGES AND THIS FILE OUTLIVED THE FIRST. Each
+// lookup was guarded by hand (`inRealm()`, `realmEntry()`); then the STORE was
+// split — `const entries = realms.map()` — and the guards became unnecessary,
+// because `getEntry()` reads the ambient realm's Map and another realm's entry
+// is not in it. Both functions are gone. What this file asserts is the
+// BEHAVIOUR both stages aimed at, which is why it survived the second one
+// unchanged: it never named the mechanism.
 //
 // THE SOCKET HALF IS NOT ASSERTED HERE AND THAT IS THE ONE GAP WORTH KNOWING.
-// A subtree search on 389 is scoped too, as of the same day: the handler takes
-// the realm from the base the client searched and filters on the same rule.
-// Testing it needs the listener, and tests/CLAUDE.md says a test that needs one
-// belongs in the parent project's suite — so that half was verified by hand
-// with an ldapjs client and is described in `ldap/CLAUDE.md`. What IS asserted
-// below is the rule both halves share, which is the part a refactor would
-// break.
+// On 389 the realm comes from the DN in the request and every handler is
+// wrapped in `realms.run()` at registration. Testing that needs the listener,
+// and tests/CLAUDE.md says a test that needs one belongs in the parent
+// project's suite — so it was verified by hand with an ldapjs client and
+// `ldap/CLAUDE.md` records what was checked.
 //
 // WHY IN PROCESS. Two of the four assertions below cannot be made over HTTP
 // without leaving the damage behind — "the cross-realm DELETE was refused AND

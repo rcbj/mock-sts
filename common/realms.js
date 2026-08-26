@@ -613,14 +613,16 @@ function onRemove(fn) {
 // is almost all of them, which is why this hook did not exist until the
 // embedded directory needed one.
 //
-// The directory is the case `keyed()` cannot answer. It is ONE tree in one Map
-// keyed by DN, served by ONE socket that has no path to put a realm segment in,
-// and a realm's isolation is a SUBTREE of it (`dc=acme,dc=example,dc=com`).
-// Nothing "touches the acme partition" — an `ldapsearch` arrives on 389 with no
-// realm ambient at all and simply asks for a base DN, and if that subtree was
-// never built the honest answer is LDAP_NO_SUCH_OBJECT. So the subtree has to
-// exist from the moment the realm does, which means a hook that fires on
-// CREATE.
+// The directory is the case `keyed()` cannot answer, and it is worth being
+// precise about why, because it IS a `map()` now. Each realm has a store of its
+// own — `map()` would have made one lazily — but it is served by a SOCKET that
+// has no realm on it: an `ldapsearch` arrives on 389 asking for a base DN, and
+// "first touch" for a directory can be a client asking for a subtree that has
+// never been written. A lazily-built store would answer that with an empty
+// directory rather than the seeded one every other realm has, and an empty
+// directory and LDAP_NO_SUCH_OBJECT are both wrong answers to "show me acme".
+// So the realm's directory has to be BUILT from the moment the realm exists,
+// which means a hook that fires on CREATE.
 //
 // A listener that throws does not stop the realm being created — the registry
 // row is already written by then, exactly as `onRemove()`'s purges run after
@@ -918,9 +920,11 @@ function realmSupport() {
             'you switched to, /oauth2/authorize and the SAML and ' +
             'WS-Federation endpoints see none.' },
     { family: 'LDAP (389 / 636)', state: 'full', by: 'dn',
-      note: 'A SUBTREE PER REALM, inside one naming context: the default ' +
-            'realm is ldap.baseDn itself (dc=example,dc=com) and every other ' +
-            'realm is dc=<id> beneath it. So ou=users, ou=groups, ' +
+      note: 'A DIRECTORY PER REALM behind one socket — a separate store, not ' +
+            'a subtree of a shared one, since 2026-08-25. The DN layout is ' +
+            'what a client sees: the default realm is ldap.baseDn itself ' +
+            '(dc=example,dc=com) and every other realm is dc=<id> beneath it. ' +
+            'So ou=users, ou=groups, ' +
             'ou=applications, ou=federations and the two SPIFFE containers ' +
             'exist once per realm and share nothing — this row read `none` ' +
             'and said every realm saw the same people until 2026-08-25. The ' +
@@ -928,19 +932,22 @@ function realmSupport() {
             'socket has no path to put a segment in: an ldapsearch arrives ' +
             'with a base DN and nothing else, so `-b dc=acme,dc=example,dc=com` ' +
             'is the only way a client could ever name a realm, and it works. ' +
-            'A SUBTREE SEARCH IS SCOPED TO THE REALM ITS BASE NAMES, since ' +
-            '2026-08-25 and at rcbj\'s request — this line said the opposite ' +
-            'until then, on the argument that a naming context IS the whole ' +
-            'tree. It left port 389 as the one door through which a realm ' +
-            'could see another realm\'s people, groups and applications, ' +
-            'while the console, /scim/v2 and the group claim showed each ' +
-            'realm only its own. So `-b dc=example,dc=com` is the default ' +
-            'realm\'s directory, `-b dc=acme,dc=example,dc=com` is acme\'s, ' +
-            'and the root DSE publishes one namingContexts value per realm so ' +
-            'that a client can still discover them. An operation naming ONE ' +
-            'DN — add, modify, delete, compare, a base-scope search — is ' +
-            'answered wherever that DN is, because spelling the DN out is how ' +
-            'a client names a realm here.' },
+            'EVERY OPERATION IS ANSWERED FROM THE STORE THE DN NAMES, since ' +
+            '2026-08-25 and at rcbj\'s request — this line said a subtree ' +
+            'search from the naming context returns every realm\'s entries, ' +
+            'on the argument that a naming context IS the whole tree. It left ' +
+            'port 389 as the one door through which a realm could see another ' +
+            'realm\'s people, groups and applications, while the console, ' +
+            '/scim/v2 and the group claim showed each realm only its own. So ' +
+            '`-b dc=example,dc=com` is the default realm\'s directory, ' +
+            '`-b dc=acme,dc=example,dc=com` is acme\'s, and the root DSE ' +
+            'publishes one namingContexts value per realm so that a client ' +
+            'can discover them. An add, modify, delete, compare or base-scope ' +
+            'search is answered in the realm its DN names, because spelling ' +
+            'the DN out is how a client names a realm on a socket with ' +
+            'nowhere else to put one; a modifyDN that would cross a realm is ' +
+            'refused with LDAP_AFFECTS_MULTIPLE_DSAS (71), two realms here ' +
+            'being two directories.' },
     { family: 'Kerberos v5', state: 'none', by: 'shared',
       note: 'One KDC, one principal database and one Kerberos realm name for ' +
             'the whole process — over raw UDP/TCP 88 AND over MS-KKDCP, ' +

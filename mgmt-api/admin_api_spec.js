@@ -1132,7 +1132,19 @@ const SCHEMAS = {
           'null only where no directory is loaded in this process, in which ' +
           'case there is no registry at all), `dnLabel` (the RDN, which is a ' +
           'digest of the identifier when that is too long to read), `name`, ' +
-          '`kinds`, `protocols`, `registered`, `firstSeen`, `lastSeen`, ' +
+          '`kinds`, `protocols` (DERIVED — the protocol families it has actually ' +
+          'appeared in, as the prose labels /admin/users spells protocols with), ' +
+          '`allowedProtocols` (DECLARED — the families somebody said it is FOR, as ' +
+          'ids from the closed vocabulary GET /admin-api/applications/new ' +
+          'publishes; nothing in this service reads it, so it grants and refuses ' +
+          'nothing), `recordedProtocols` (the same vocabulary again, worked out ' +
+          'from this entry\'s KINDS — which is what makes the two comparable, since ' +
+          'the labels in `protocols` and the ids in `allowedProtocols` are different ' +
+          'alphabets and matching on the labels would read every OAuth client as a ' +
+          'federation partner. It is NOT "has authenticated": a create takes a kind ' +
+          'too, so a hand-made entry can be recorded in a family it has never ' +
+          'connected in, and `authentications` is the figure that answers that), ' +
+          '`registered`, `firstSeen`, `lastSeen`, ' +
           '`authentications`, `sessions`, `users`, `descriptions`, `origin`, ' +
           '`createdAt` and `modifiedAt` (the ENTRY\'s own, which an ldapmodify ' +
           'moves and firstSeen/lastSeen do not), `operational` (which of the ' +
@@ -1165,6 +1177,85 @@ const SCHEMAS = {
     }, PAGING_PROPERTIES, {
       matched: { type: 'integer', description: 'How many the filter matched.' }
     })),
+
+  // WHAT A CREATE MAY SAY, answered by the service rather than described in
+  // this document. The two vocabularies below are the closed lists
+  // createApplication() validates against, so a caller that reads this cannot
+  // construct a create the service will refuse — the property
+  // editableAttributes() gives the console's two selects, reached over HTTP.
+  NewApplicationForm: openObject(
+    'The vocabulary a new application entry may be created with, and where it ' +
+    'would land. Mirrors GET /admin/applications/new, which is the console page ' +
+    'built from exactly these lists. It creates nothing itself: the create is ' +
+    'POST /admin-api/applications/create.',
+    {
+      directory: {
+        type: 'boolean',
+        description: 'FALSE when no directory is loaded in this process, in ' +
+                     'which case there is no ou=applications container and a ' +
+                     'create would be refused. The call still answers 200: the ' +
+                     'operation exists and the store does not, and those are ' +
+                     'different facts.'
+      },
+      container: { type: 'string',
+                   description: 'The DN a new entry would be created under, IN ' +
+                                'THE REALM THIS CALL ARRIVED IN. The directory ' +
+                                'is per realm, so /realm/acme/admin-api/... ' +
+                                'answers with acme\'s container and an entry ' +
+                                'created there is invisible to every other realm.' },
+      max: { type: 'integer',
+             description: 'How many entries that container will hold ' +
+                          '(applications.max). Past it a create is REFUSED ' +
+                          'rather than an old entry evicted.' },
+      applicationCount: { type: 'integer',
+                          description: 'How many it holds now.' },
+      realm: openObject('The trust realm this call arrived in: `id` and `name`.', {}),
+      kinds: {
+        type: 'array',
+        description: 'The eight kinds, each `{kind, label, what}`. A create ' +
+                     'takes AT MOST ONE, and a value that is not one of these ' +
+                     'is refused rather than recorded.',
+        items: openObject('One kind.', {})
+      },
+      protocols: {
+        type: 'array',
+        description: 'THE CLOSED PROTOCOL VOCABULARY: one row per family an ' +
+                     'application may be DECLARED for, each `{id, label, kind, ' +
+                     'kinds, what}`. `id` is what a create sends and what lands ' +
+                     'on `appAllowedProtocol`; `kind` is what the registry would ' +
+                     'record the application as when a protocol of that family ' +
+                     'finally recognises it; `kinds` is every kind that COUNTS ' +
+                     'as a sighting of the family, which is how ' +
+                     '`recordedProtocols` on an application is worked out — ' +
+                     'usually the same one ' +
+                     'value, except OAuth 2.0, which also counts the OpenID ' +
+                     'Connect kind because a relying party IS an OAuth client. ' +
+                     'BOTH ARE EMPTY for a family in which this service records ' +
+                     'no application identifier at all (LDAP, SCIM, SPIFFE, ' +
+                     'mutual TLS, OpenID4VCI): nothing will ever record one of ' +
+                     'those, which is a different fact from "it has not ' +
+                     'happened yet". The match is on kinds and NOT on the protocol ' +
+                     'labels in `protocols`, because a federation partner is ' +
+                     'recorded under the protocol its relationship speaks and ' +
+                     'by label is indistinguishable from an ordinary client. ' +
+                     '**DECLARING GRANTS AND REFUSES NOTHING**: no endpoint ' +
+                     'reads this attribute, and an application declared for one ' +
+                     'family may still use every other, because a mock that ' +
+                     'refused a protocol would remove a test case rather than ' +
+                     'add one.',
+        items: openObject('One protocol family.', {})
+      },
+      editable: {
+        type: 'array',
+        description: 'What comes NEXT: the attributes a create cannot take and ' +
+                     'POST /admin-api/applications/set, /add and /remove can, ' +
+                     'each `{name, mode, sensitive}` where `mode` is `set` for ' +
+                     'a single-valued attribute and `multi` for a list. This is ' +
+                     'where the configuration RFC 9700 mode actually reads goes ' +
+                     '— the redirect URIs, the grant types, the secret.',
+        items: openObject('One editable attribute.', {})
+      }
+    }),
 
   GroupList: openObject(
     'Every group in the embedded LDAP directory. A group is an entry under ' +

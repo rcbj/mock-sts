@@ -90,6 +90,46 @@ about that line had to change.
    is the thing this whole arrangement exists to prevent.
 
 
+### `/admin-api/applications/new` is a GET WITH NO POST BESIDE IT, and that is rule 7 read exactly
+
+`/admin/applications/new` arrived on 2026-08-25 — a console page whose one
+control is a create with a checkbox column of protocol families. It gained
+`GET /admin-api/applications/new` and NOTHING ELSE, and the reason is the
+sentence rule 7 actually contains rather than the shape it usually takes.
+
+**The rule is about CONTROLS.** That page's form posts `action=create` to
+`/admin/applications`, which is the handler `POST
+/admin-api/applications/create` already mirrors — the same function, reached
+from a second door. A `POST /admin-api/applications/new` would be two operations
+over one function, which is the thing this parity exists to PREVENT: a caller
+handed two creates has to work out which one the service believes, and the
+answer would be "both, they are the same one". So the parity here is satisfied
+by an operation that already existed, plus the GET every page gets.
+
+**The GET earns its place beyond the parity, which is worth saying because a
+page-mirroring GET usually does not.** What it answers is the two CLOSED
+VOCABULARIES `createApplication()` validates against — the eight kinds and the
+fourteen protocol families, each with what it means — and the container DN a new
+entry would land in. That is the property `editableAttributes()` gives the
+console's two selects (a form cannot offer what the action would refuse),
+reached over HTTP: a caller that reads this cannot construct a create the
+service will refuse. Compare the alternative, which is the enum written out in
+this file's document and in the console's markup and kept in step by hand.
+
+**The container it names is THIS REALM'S**, because the embedded directory is
+per realm. `/realm/acme/admin-api/applications/new` answers with acme's
+`ou=applications`, and an application created there is invisible to every other
+realm — including to an `ldapsearch`, which reaches it only under that realm's
+base DN. That is the ordinary rule for this API (see *This whole API is
+realm-scoped* below) and it is stated on this operation because "where would it
+land" is the question the operation exists to answer.
+
+**One trap it shares with the claim sets.** The declared families arrive as
+`protocol` repeated or as one `protocols` array, read through `namesOf()` — not
+off `body`. `helpers.parseBody()` cannot see a repeated field, so a form-encoded
+body copied from the console's checkbox column would otherwise create the
+application with one family out of five and answer 200.
+
 ### `/admin-api/federation` is where rule 7 pays MOST, and the honest sentence is sharper here
 
 `/admin/federation` arrived with `GET /admin-api/federation` and `POST

@@ -229,13 +229,17 @@ reader derives from four directory files. The short version:
   pre-authorized codes, presentation transactions, SAML request state and
   artifacts, the claim selections, the verifier's request, the statistics and
   the audit log.
-* **THE DIRECTORY IS SEPARATED TOO, AS A SUBTREE, AND THIS BULLET SAID THE
-  OPPOSITE UNTIL 2026-08-25.** Each realm owns `dc=<id>` beneath `ldap.baseDn`
+* **THE DIRECTORY IS SEPARATED TOO — A STORE PER REALM BEHIND ONE SOCKET — AND
+  THIS BULLET SAID THE OPPOSITE UNTIL 2026-08-25.** Each realm's directory is
+  its own `realms.map()` partition, named by `dc=<id>` beneath `ldap.baseDn`,
   with its own `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and
-  SPIFFE containers, so OAuth client registrations, SAML service provider
+  SPIFFE containers — so OAuth client registrations, SAML service provider
   entries and the SPIFFE registry are a realm's own. The realm is in the DN
-  because the socket has no path to put a segment in; `../ldap/CLAUDE.md` argues
-  it. **The TWO ADMIN CONSOLE ROLES are the exception and are pinned to the
+  because the socket has no path to put a segment in, and the DN is therefore
+  also how the socket picks which store to answer from. It was a subtree of one
+  shared Map for two days, and `../ldap/CLAUDE.md` argues why that was one day
+  too many: the isolation was a rule every reader had to remember, and two
+  readers did not. **The TWO ADMIN CONSOLE ROLES are the exception and are pinned to the
   DEFAULT realm's `ou=groups`** — one roster for the process, on purpose, since
   a per-realm roster would let anybody who can create a realm administer the
   service. **The console's SIGN-ON follows the roster**: its gate is
@@ -925,6 +929,42 @@ find module` naming a file the operator never mentioned.
    preventing it. The console's selects are built from the same table the
    actions validate against, so a form cannot offer a field the action refuses.
 
+   **`appAllowedProtocol` IS THE DECLARED TWIN OF `appProtocol`, AND IT IS THE
+   ONE PLACE IN THIS MODULE WHERE TWO ATTRIBUTES HOLD ONE NOUN ON PURPOSE.**
+   Added 2026-08-25 with `/admin/applications/new`. `appProtocol` is DERIVED —
+   the families this application has appeared in, accumulated by `seen()` — and
+   `appAllowedProtocol` is DECLARED: the families somebody ticked on that page
+   before it had connected to anything. It is editable and the other is not,
+   which is the `EDITABLE` line above applied to a pair that would otherwise
+   look like a duplicate to anybody tidying up.
+
+   **DECLARING A FAMILY GRANTS AND REFUSES NOTHING, and the sentence to change
+   if that ever stops being true is the one in `PROTOCOLS`'s header rather than
+   a page's.** No endpoint reads the attribute: an application declared for
+   `saml2` alone is still issued an access token, because a mock that refused a
+   protocol would remove a test case rather than add one. It is a record of
+   intent, exactly as being in this registry at all is — the same claim
+   `/admin/applications`'s caveat already makes about the whole entry.
+
+   **THE VOCABULARY IS CLOSED AND VALIDATED IN TWO PLACES BECAUSE THERE ARE TWO
+   DOORS.** `createApplication()` refuses an unknown family, and
+   `updateApplication()` refuses one on an `add` — but NOT on a `remove`,
+   deliberately: a remove names a value that is already on the entry and
+   `ldapmodify` can have put anything there, so refusing it would shut the one
+   door that could tidy that up.
+
+   **THE MATCH BETWEEN THE TWO LISTS IS ON KINDS AND NOT ON PROTOCOL LABELS**,
+   and that is the one thing here that was wrong first and is worth keeping
+   written down. `view()` answers `recordedProtocols` beside `allowedProtocols`
+   so a page can read them against each other; the first attempt derived it from
+   `appProtocol`'s prose labels, and a FEDERATION partner's sighting is recorded
+   under whichever protocol its relationship speaks — so every ordinary OAuth
+   client read as a federation partner, because both write `OAuth 2.0`. The
+   kinds are a closed vocabulary and `federation-identity-provider` is a thing
+   an application IS. One consequence is stated on the page rather than hidden:
+   a kind can also be given at CREATE time, so `recordedProtocols` is not
+   "has authenticated" and `appAuthentications` is the figure that is.
+
    **`clientConfigOf()` IS WHAT THE SECURITY CHECKS READ, NOT `registrationOf()`.**
    The two answer different questions — "what may this client do" versus "what
    did it register" — and they stopped coinciding the moment the console could
@@ -1111,3 +1151,6 @@ find module` naming a file the operator never mentioned.
   `/admin-api/applications/{action}`, which are the same functions — changes what
   the protocol endpoints do. What those two will NOT change is the derived half:
   the counters and the sightings are what happened, and only LDAP reaches them.
+  Since 2026-08-25 there is a THIRD door onto the create, `/admin/applications/new`,
+  and it is not a third store either: it posts `action=create` to the same
+  endpoint the list page's own row does.

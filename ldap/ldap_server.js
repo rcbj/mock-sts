@@ -441,8 +441,39 @@ let boundTlsPort = LDAPS_PORT;
 // ---------------------------------------------------------------------------
 // The store.
 //
-// One Map keyed by the NORMALISED DN, holding the DN exactly as it was written
-// and the attributes. Attribute names are stored in lower case because that is
+// A Map keyed by the NORMALISED DN, holding the DN exactly as it was written
+// and the attributes.
+//
+// **ONE PER TRUST REALM, since 2026-08-25, and it was one Map for the whole
+// process for the two days before that.** Each realm has an embedded directory
+// of its own behind the one socket: `entries.get()` in `acme` cannot return
+// the default realm's entry, because it is not in the Map it is reading.
+//
+// WHY THAT MATTERS MORE THAN IT SOUNDS. With one Map the isolation was a RULE —
+// every reader had to remember to ask whether the DN it found belonged to the
+// realm it was answering for — and a rule that must be remembered at fifty call
+// sites is a rule that will be missed. It was missed twice in one day: the
+// enumerators were scoped and every lookup BY DN was not, so
+// `/realm/acme/admin/groups?group=<a default-realm DN>` rendered that group in
+// full and `DELETE /realm/acme/scim/v2/Groups/<same DN>` removed it. Splitting
+// the store turns the rule into an invariant that cannot be forgotten, because
+// there is nothing to forget: the wrong entry is not reachable from here.
+//
+// WHAT PAYS FOR IT. The socket has no realm on it, so each handler resolves one
+// from the DN in the request — `realmFor()` below — and runs its body inside
+// `realms.run()`, after which every helper in this file is that realm's. The
+// ceiling stays process-wide: `ldap.maxEntries` is checked against
+// `totalEntries()`, which sums the stores, because the cap is about the memory
+// this process occupies and n realms holding n times the ceiling was never the
+// intention.
+//
+// The alternative shapes, and why not: a LISTENER per realm works (node binds a
+// port whenever it likes — the claim that this would make realms restart-only
+// was simply wrong) but it makes a realm reachable by PORT, which is a second
+// discriminator beside the DN and one more thing every client has to be told.
+// An ldapjs `Server` per realm behind one socket does not work at all: the
+// discriminator lives inside the protocol, per operation, and a Server owns its
+// net.Server. Attribute names are stored in lower case because that is
 // what arrives — @ldapjs/attribute lower-cases a type on the way in, so an entry
 // added as `objectClass` comes back as `objectclass` — and because LDAP
 // attribute descriptions are case-insensitive anyway. What is lost by that is
@@ -450,7 +481,53 @@ let boundTlsPort = LDAPS_PORT;
 // showing `givenname` where every schema document says `givenName` reads as a
 // bug in the debugger.
 // ---------------------------------------------------------------------------
-const entries = new Map();
+const entries = realms.map();
+
+// EVERY REALM'S STORE, ADDED UP. The one number that is still about the process
+// rather than about a realm, and it exists for exactly one purpose: the
+// `ldap.maxEntries` ceiling. See the block above — the cap is on what this
+// process holds in memory, so it has to see all of it.
+function totalEntries() {
+  let n = 0;
+  realms.list().forEach(function (realm) {
+    n += entries.realmMap(realm.id).size;
+  });
+  return n;
+}
+
+// WHICH REALM A DN BELONGS TO, decided by the DN alone. It is what lets the
+// SOCKET pick a store: an LDAP request arrives with no realm on it, and the DN
+// it carries — a base to search from, or the entry to add, modify, delete or
+// compare — is the only thing in the protocol that can name one.
+//
+// The closest containing base wins. `dc=acme,dc=example,dc=com` and everything
+// beneath it answer the realm `acme`; everything else, including a DN under a
+// segment no realm claims, answers the default realm. A DN outside the naming
+// context never reaches here — the handlers refuse it first.
+function realmFor(dn) {
+  let best = realms.DEFAULT_REALM;
+  let bestLength = ROOT_DN.length;
+  if (!realms.active()) {
+    return best;
+  }
+  realms.list().forEach(function (realm) {
+    const candidate = realmBaseDn(realm.id);
+    // Longer is deeper, and length is a fair proxy here because every one of
+    // these bases is built by the same function from the same root.
+    if (isUnder(dn, candidate) && candidate.length > bestLength) {
+      best = realm;
+      bestLength = candidate.length;
+    }
+  });
+  return best;
+}
+
+// Run `fn` in the realm the DN names, which is what every LDAP handler does
+// with the DN it was given. One function so that "which store does this
+// operation touch" has one answer and one place to read it.
+function inRealmOf(dn, fn) {
+  return realms.run(realmFor(dn), fn);
+}
 
 // ---------------------------------------------------------------------------
 // A COUNTER THAT SAYS "SOMETHING IN HERE CHANGED", and the one rule that comes
@@ -485,103 +562,35 @@ function touchDirectory() {
 }
 
 // ---------------------------------------------------------------------------
-// EVERY WALK OF THIS TREE THAT MEANS "WHAT IS IN THIS REALM" GOES THROUGH HERE.
+// WALKING THIS REALM'S DIRECTORY.
 //
-// One Map holds every realm's subtree (see the naming-context block above), so
-// `entries.forEach()` means "every entry in the process" and almost nothing here
-// wants that. It wanted it before realms had directories of their own, when the
-// two were the same thing — which is exactly why this is a function with a name
-// rather than a filter copied into twenty callers: the ones that were written
-// when there was nothing to distinguish read as though they had considered it.
+// `entries` is the AMBIENT REALM'S store (see the block above it), so
+// `entries.forEach()` already means "every entry in this realm" and this
+// function is a one-line wrapper over it. It is kept, with its name, for two
+// reasons rather than out of sentiment: twenty-four callers say what they mean
+// by calling it, and the name is where the reader is told that a walk here is
+// realm-scoped without having to go and look at the declaration.
 //
-// **THE LEAK THIS FIXES WAS NOT HYPOTHETICAL.** `allGroupEntries()` walked the
-// whole Map and asked `groupRuleFor()` about each entry, and that predicate
-// answers `'objectClass'` for anything carrying a group class WHEREVER it sits —
-// a deliberate rule, so that a group somebody put outside `ou=groups` still
-// counts. With one tree that was generous; with a tree per realm it meant the
-// default realm listing `acme`'s groups as its own. The fix is not to tighten
-// `groupRuleFor()` — its rule is still right INSIDE a realm — it is to stop
-// showing it entries that belong to somebody else.
-//
-// `entries.forEach()` survives at the sites that are about the WHOLE tree and
-// are correct that way: the LDAP handlers, which serve a socket that has no
-// realm on it — the SEARCH handler walks the whole Map and then filters on the
-// realm its base names, which is the same rule reached by the only route a
-// socket has; `hasChildren()`, which is a question about one DN; and the purge,
-// which is deleting a realm.
+// **IT USED TO BE THE WHOLE ISOLATION MECHANISM AND IT IS WORTH KNOWING WHY IT
+// IS NOT ANY MORE.** With one Map for the process this function carried a
+// containment test — "under my base, minus every realm's subtree inside it" —
+// and every reader that did NOT go through it was a leak waiting to be found.
+// Two were found: `allGroupEntries()` listing another realm's groups (fixed by
+// scoping the walk) and every lookup BY DN answering about the whole tree
+// (fixed by scoping each one, then made structural by splitting the store).
+// The lesson is in the store's own comment: a scoped walk is not a scoped
+// lookup, and only the split makes both true by construction.
 // ---------------------------------------------------------------------------
-// THE DEFAULT REALM IS THE ONE THAT NEEDS THE SECOND HALF OF THIS, and missing
-// it is the bug this function was written twice for.
-//
-// Every other realm's base is a SIBLING — `dc=acme,…` and `dc=beta,…` contain
-// nothing of each other's, so "under my base" is the whole test. The default
-// realm's base is ROOT_DN, and every realm's subtree is UNDER it, because that
-// is what makes `ldapsearch -b "dc=example,dc=com"` return the whole naming
-// context the way LDAP says it should. So "under my base" listed `acme`'s
-// groups as the default realm's own, and the first run after the enumerators
-// were scoped still showed four groups where there are two.
-//
-// The default realm is therefore the root MINUS every other realm's subtree.
-// Written as a carve-out rather than by moving the default realm down to
-// `dc=default,dc=example,dc=com`, which would have been symmetrical and is the
-// one thing that cannot be done: it renames every entry this service has ever
-// had, and it breaks the property the whole realm design rests on — that a
-// service with no realms defined behaves exactly as it did. With none defined
-// this list is empty and the loop below never runs.
-//
-// IT IS APPLIED TO AN LDAP SEARCH TOO, SINCE 2026-08-25, AND THIS PARAGRAPH
-// SAID THE OPPOSITE UNTIL THEN. The old rule was that a subtree search based at
-// `dc=example,dc=com` returns every realm's entries — that being what a naming
-// context IS, and a directory that hid part of its own tree from a client that
-// asked for it being a directory that lies about the one thing LDAP exists to
-// answer. It is a good argument and it lost to a better one: it left port 389
-// as the single door through which one realm's people, groups and applications
-// were visible from another, while the console, `/scim/v2`, the group claim and
-// every enumerator in this file showed a realm only its own. A naming context
-// narrower than the store is a smaller surprise than that.
-//
-// So the SEARCH HANDLER derives the realm from the base it was given and
-// filters on this same rule — see the block inside it, which is where the
-// consequences are written down. What is isolated is still the CONTAINER:
-// `ou=users,dc=example,dc=com` holds no `acme` person, and an operation naming
-// ONE DN is still answered wherever that DN is, because spelling out
-// `…,dc=acme,dc=example,dc=com` is how a client names a realm on a socket that
-// has no other place to put one.
-// It answers with the bases that lie STRICTLY INSIDE this realm's, which is the
-// rule rather than "every realm but me" — and the difference is not pedantry.
-// `realms.list()` includes the default realm, whose base is ROOT_DN, so
-// "every realm but me" carved the ROOT out of `acme` and left `acme` reporting
-// an empty directory. Asking about containment instead is right in both
-// directions and needs no special case for either: nothing is inside a
-// non-default realm's base, so the loop below does nothing there, and every
-// realm is inside the default one's, which is exactly what has to be removed.
-function containedRealmBasesUnder(base) {
-  if (!realms.active()) {
-    return [];
-  }
-  return realms.list()
-    .map(function (realm) { return realmBaseDn(realm.id); })
-    .filter(function (other) {
-      return normalizeDn(other) !== normalizeDn(base) && isUnder(other, base);
-    });
+function eachEntryInRealm(fn) {
+  entries.forEach(fn);
 }
 
-function containedRealmBases() {
-  return containedRealmBasesUnder(baseDn());
-}
-
-// WHICH REALM'S CONTAINER A DN BELONGS TO, decided by the DN alone and not by
-// anything ambient. It is what lets the SOCKET scope an answer: an LDAP request
-// arrives with no realm on it, and the base a client searched from is the only
-// thing in the protocol that can name one.
-//
-// The closest containing base wins, which for the default realm means "the root
-// and nothing more specific matched". `dc=acme,dc=example,dc=com` and every DN
-// beneath it answer `acme`; everything else answers ROOT_DN.
 // THE NAMING CONTEXTS THIS SOCKET SERVES: the root, and one per defined realm.
-// A list rather than a single value since 2026-08-25, when a search from the
-// root stopped answering about every realm — see the search handler. With no
-// realms defined it is one value and the root DSE is byte-for-byte what it was.
+// A list rather than a single value since 2026-08-25 — each realm's directory
+// is a separate store reached by naming its base, so publishing only the root
+// would leave a client no way to discover that the others are there, and
+// discovery is the one job the root DSE has. With no realms defined this is a
+// single-valued attribute holding exactly what it always held.
 function namingContexts() {
   const out = [ROOT_DN];
   if (!realms.active()) {
@@ -596,91 +605,15 @@ function namingContexts() {
   return out;
 }
 
-function realmBaseForDn(dn) {
-  let best = ROOT_DN;
-  if (!realms.active()) {
-    return best;
-  }
-  realms.list().forEach(function (realm) {
-    const candidate = realmBaseDn(realm.id);
-    if (!isUnder(dn, candidate)) {
-      return;
-    }
-    // Longer is deeper, and a DN's length is a fair proxy for depth here
-    // because every one of these bases is built by the same function.
-    if (candidate.length > best.length) {
-      best = candidate;
-    }
-  });
-  return best;
-}
-
-// THE RULE ITSELF, ONCE, so that the walk below and the single-DN form under it
-// cannot come to disagree — which is exactly what happened on 2026-08-25: the
-// enumerators were scoped to the realm and every LOOKUP BY DN was left reading
-// the whole tree, so a realm's console and its /scim/v2/Groups answered about
-// another realm's objects while the list beside them showed only its own.
-//
-// `base` and `carved` are arguments rather than read here because the walk
-// hoists them out of a loop over the whole store; `inRealm()` is the version
-// for a caller holding one DN.
-function insideRealmContainer(dn, base, carved) {
-  if (!isUnder(dn, base)) {
-    return false;
-  }
-  for (let i = 0; i < carved.length; i++) {
-    if (isUnder(dn, carved[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// IS THIS DN ONE OF THIS REALM'S? The question every by-DN reader has to ask
-// before it answers, and the answer a realm may give about a DN that is not is
-// "there is nothing there" — indistinguishable from an entry that never
-// existed, because anything else tells a caller in `acme` what the default
-// realm holds.
-//
-// The LDAP handlers do not call THIS function, because there is no ambient
-// realm on a socket: the search handler asks `realmBaseForDn()` which realm the
-// client's base names and applies `insideRealmContainer()` with that instead.
-// Same rule, different way of finding out whose realm it is. An add, modify,
-// delete or compare names one DN and is answered wherever that DN is.
-function inRealm(dn) {
-  return insideRealmContainer(dn, baseDn(), containedRealmBases());
-}
-
-function eachEntryInRealm(fn) {
-  const base = baseDn();
-  const carved = containedRealmBases();
-  entries.forEach(function (stored) {
-    if (insideRealmContainer(stored.dn, base, carved)) {
-      fn(stored);
-    }
-  });
-}
-
-// The realm's own entry at a DN, for a reader that is not the socket: getEntry()
-// with the question above asked first. Every console and SCIM lookup by DN goes
-// through this rather than through getEntry() directly.
-function realmEntry(dn) {
-  const stored = getEntry(dn);
-  if (!stored || !inRealm(stored.dn)) {
-    return null;
-  }
-  return stored;
-}
-
-// How many entries THIS REALM holds. `entries.size` is the whole Map — one tree
-// with every realm's subtree in it — and every page that shows this number is a
-// page about one realm. The `ldap.maxEntries` cap is deliberately NOT computed
-// from this: the cap is on the Map, because the Map is what occupies memory, and
-// a per-realm cap would let n realms hold n times the ceiling somebody set.
+// How many entries THIS REALM holds, which is `entries.size` now that the store
+// is per realm — a function because two dozen callers already ask this way, and
+// because the sentence "this realm's directory" is worth saying at the call
+// site. `totalEntries()` up beside the store is the process-wide one, and the
+// `ldap.maxEntries` ceiling is checked against THAT: the cap is on the memory
+// this process occupies, and a per-realm ceiling would let n realms hold n
+// times the number somebody set.
 function realmEntryCount() {
-  let n = 0;
-  eachEntryInRealm(function () { n++; });
-  return n;
+  return entries.size;
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,10 +1276,11 @@ function seed() {
     description: 'A second group, so a search for groups returns more than one.',
     member: ['uid=carol,' + usersDn()]
   }, { origin: 'seed' });
-  // COUNTED UNDER THIS BASE rather than `entries.size`, which is the whole Map
-  // — one tree holding every realm's subtree. Reporting the total here would
-  // have said "seeded 33 entries under dc=acme,…" the moment a second realm
-  // existed, which is the kind of number somebody checks a directory against.
+  // This realm's own count. It reads `entries.size` through
+  // realmEntryCount()'s walk either way now that the store is per realm, and
+  // the walk is kept because the sentence it produces — "seeded N entries under
+  // dc=acme,…" — is about a base rather than about a store, and that is the
+  // number somebody checks a directory against.
   let seeded = 0;
   eachEntryInRealm(function () { seeded++; });
   log.info('ldap: seeded ' + seeded + ' entries under ' + baseDn() + '.');
@@ -1422,28 +1356,27 @@ realms.onCreate(function (id) {
 // ---------------------------------------------------------------------------
 realms.onRemove(function (id) {
   log.debug('Entering the realm directory purge. id=' + id);
-  const base = realmBaseDn(id);
-  if (base === ROOT_DN) {
-    // Defensive: the default realm cannot be removed (realms.js refuses to
-    // define it in the first place), and if that ever changed this must not be
-    // the line that empties the whole directory.
-    log.warn('ldap: refusing to purge the root naming context for realm "' +
-             id + '".');
-    log.debug('Leaving the realm directory purge. Refused.');
-    return;
-  }
-  let removed = 0;
-  Array.from(entries.keys()).forEach(function (dn) {
-    if (isUnder(dn, base)) {
-      entries.delete(dn);
-      removed++;
-    }
-  });
-  if (removed) {
-    touchDirectory();
-  }
-  log.info('ldap: purged ' + removed + ' entry/entries under ' + base +
-           ' with the "' + id + '" realm.');
+  // **THIS NO LONGER DELETES ANYTHING, AND THE HANDLER IS KEPT ANYWAY.** It
+  // used to walk the one shared Map deleting every DN under the realm's base;
+  // the store is `realms.map()` now, which registers its own purge, so the
+  // realm's whole directory is dropped in one reference. There is nothing left
+  // behind to find: the realm's root entry, its six containers and everything
+  // written into them lived in that store and nowhere else.
+  //
+  // It stays because this is where a reader looks for the answer to "what
+  // happens to the directory when a realm goes", and finding an empty file
+  // there would read as the question never having been asked. The log line is
+  // the other half — a realm's directory vanishing silently is the kind of
+  // thing somebody notices an hour later.
+  //
+  // ORDERING, since it is the only reason a count is not reported: realms.js
+  // runs purges in REGISTRATION order, and `realms.map()`'s purge was
+  // registered when `entries` was created near the top of this file — long
+  // before this handler. So by the time this runs the Map is already gone, and
+  // any number it printed would be zero.
+  touchDirectory();
+  log.info('ldap: the "' + id + '" realm\'s directory at ' + realmBaseDn(id) +
+           ' went with the realm; its store is dropped whole.');
   log.debug('Leaving the realm directory purge.');
 });
 
@@ -2834,7 +2767,7 @@ function autoCreateUser(detail) {
     log.debug('Leaving autoCreateUser(). The entry already existed.');
     return existing;
   }
-  if (entries.size >= maxEntries()) {
+  if (totalEntries() >= maxEntries()) {
     // Reported rather than thrown: the authentication itself succeeded and must
     // not be failed by a directory that is full.
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum ' +
@@ -2885,7 +2818,7 @@ function autoCreateUser(detail) {
               protocol: detail.protocol || '',
               method: detail.method || '',
               attributes: Object.keys(created.attributes).join(', '),
-              entriesNow: entries.size,
+              entriesNow: totalEntries(),
               note: 'created by this service, not by an LDAP client; ' +
                     'ldap.autocreateUsers is on' }
   });
@@ -3011,7 +2944,7 @@ function createUser(name, options) {
                       'happens to be named by.'],
              existing: { dn: clash.dn, origin: clash.origin || '' } };
   }
-  if (entries.size >= maxEntries()) {
+  if (totalEntries() >= maxEntries()) {
     log.debug('Leaving createUser(). The directory is full.');
     return { ok: false, errors: ['This directory holds its maximum of ' +
                                  maxEntries() + ' entries.'] };
@@ -3040,7 +2973,7 @@ function createUser(name, options) {
     summary: 'created ' + created.dn + ' on request; ' + note,
     detail: { reason: note,
               attributes: Object.keys(created.attributes).join(', '),
-              entriesNow: entries.size,
+              entriesNow: totalEntries(),
               note: 'created by hand through the console or the management ' +
                     'API, not by an LDAP client and not by an authentication' }
   });
@@ -3286,13 +3219,12 @@ function vcAttributesFor(key) {
 function locateEntry(key) {
   log.debug('Entering locateEntry(). key=' + key);
   if (DN_SHAPED.test(key)) {
-    // realmEntry(), because a DN is the one identity shape a caller can hand
-    // this function that names a place rather than a person: an entry in
-    // another realm's subtree is not this realm's, and answering with it would
-    // let a reader in one realm read — and a writer in one realm WRITE ONTO —
-    // an object belonging to another. The three shapes below were already
-    // scoped, because each of them scans with eachEntryInRealm().
-    const direct = realmEntry(key);
+    // A DN is the one identity shape a caller can hand this function that names
+    // a PLACE rather than a person, so it was the one that could reach out of
+    // the realm — for two days, while the store was shared, this line needed a
+    // containment check of its own. The store is per realm now, so `getEntry()`
+    // cannot see another realm's entry and the check is the store's job.
+    const direct = getEntry(key);
     if (direct) {
       log.debug('Leaving locateEntry(). The DN names an entry in this realm directly.');
       return { dn: direct.dn, stored: direct };
@@ -3415,7 +3347,7 @@ function objectFor(name) {
     // Not `entryCount >= maxEntries` computed by the caller: the cap is this
     // module's and a second copy of the comparison is a second thing to keep
     // right.
-    full: entries.size >= maxEntries()
+    full: totalEntries() >= maxEntries()
   };
   if (stored) {
     // Canonically spelled, and OPERATIONAL ATTRIBUTES INCLUDED. A search would
@@ -3547,14 +3479,13 @@ function resolveMember(value, attribute) {
   const raw = String(value == null ? '' : value);
   const holds = attribute.holds;
   const dn = holds === 'uid' ? 'uid=' + raw + ',' + usersDn() : raw;
-  // realmEntry(), so a member value naming an entry in ANOTHER realm's subtree
-  // resolves to nothing and is shown as dangling. The value itself is still
-  // printed — it is this group's own attribute and hiding it would be a
-  // different lie — but the realm does not confirm what another realm holds,
-  // and "present" on this page has always meant "this container holds it".
-  // A memberUid never reaches the question: its DN is built from the ambient
-  // realm's usersDn() on the line above.
-  const stored = realmEntry(dn);
+  // A member value naming an entry in ANOTHER realm resolves to nothing and is
+  // shown as DANGLING, which falls out of the store being per realm rather than
+  // being decided here. The value itself is still printed — it is this group's
+  // own attribute and hiding it would be a different lie — but "present" on
+  // this page has always meant "this directory holds it", and this realm's
+  // directory does not.
+  const stored = getEntry(dn);
   const rule = stored ? groupRuleFor(stored) : '';
   log.debug('Leaving resolveMember().');
   return {
@@ -3706,13 +3637,12 @@ function groupsFor(dn) {
     return out;
   }
 
-  // realmEntry() and not getEntry(): `wanted` comes off a query string, so
-  // without the realm check the console under /realm/acme rendered a group in
-  // the DEFAULT realm's ou=groups in full — members, attributes and all —
-  // directly beside a `groupsDn` saying acme's, and the list above it showing
-  // only acme's groups. The two rules of groupRuleFor() are still what decides
-  // whether it IS a group; where it sits is what decides whose it is.
-  const stored = realmEntry(wanted);
+  // `wanted` comes off a query string, and this is the lookup that rendered the
+  // DEFAULT realm's group in full under /realm/acme — members, attributes and
+  // all, beside a `groupsDn` saying acme's — for as long as one Map held every
+  // realm. It reads the realm's own store now. groupRuleFor() still decides
+  // whether it IS a group; the store decides whose it is.
+  const stored = getEntry(wanted);
   if (!stored) {
     log.debug('Leaving groupsFor(). There is no entry at ' + wanted + ' in this realm.');
     return out;
@@ -3859,11 +3789,12 @@ function groupsFor(dn) {
 // because they are one cache: a version that outlived its index would rebuild
 // nothing and answer from a stale one.
 //
-// `size` is still compared against `entries.size`, the WHOLE Map, and that is
-// deliberate. It is the net described above touchDirectory() — a second line of
-// defence against a writer that forgot to bump the version — and a net that
-// fires slightly too often costs a rebuild, while one scoped to the realm would
-// miss the case where another realm's write is the only thing that changed.
+// `size` is compared against `entries.size`, which is THIS REALM'S store since
+// the split — and that is now a tighter net than it was, not a looser one. It
+// is the second line of defence described above touchDirectory(), against a
+// writer that forgot to bump the version; while one Map held every realm it
+// also fired on another realm's writes, costing a rebuild for a change that
+// could not have affected this index. Same net, no false positives.
 // ---------------------------------------------------------------------------
 const groupIndexes = realms.keyed(function () {
   return { index: null, version: -1, size: -1, builds: 0 };
@@ -4300,10 +4231,54 @@ const servers = secureServer ? [plainServer, secureServer] : [plainServer];
 const OPERATIONS = ['bind', 'unbind', 'add', 'del', 'modify', 'modifyDN',
                     'compare', 'search'];
 
+// ---------------------------------------------------------------------------
+// AND THE ONE PLACE THAT DECIDES WHICH REALM'S DIRECTORY AN OPERATION TOUCHES.
+//
+// Every store in this service is per trust realm and the realm is AMBIENT — an
+// AsyncLocalStorage that `app.js`'s first middleware enters on an HTTP request.
+// **THERE IS NO HTTP REQUEST HERE.** A connection to 389 carries no path, no
+// header and no realm; what it carries is a DN, and since the directory is a
+// subtree per realm that DN NAMES ONE. So every handler below is wrapped, once,
+// at registration: `realmFor(req.dn)` picks the realm and `realms.run()` enters
+// it, after which `entries` inside the handler is that realm's store and every
+// helper this file has is that realm's too. Not one of the eight handlers
+// mentions a realm, and none of them should have to.
+//
+// WHY WRAPPED HERE RATHER THAN IN EACH HANDLER. Eight bodies each remembering
+// to enter a realm is eight chances to forget, and the thing forgotten would be
+// invisible: the operation would succeed against the DEFAULT realm's store and
+// answer "no such object" for an entry that plainly exists. This is the same
+// argument the store's own comment makes one level down — make it structural,
+// not remembered.
+//
+// `unbind` has no DN and needs no realm: it ends a connection. It is left
+// unwrapped rather than wrapped with a default, so that a reader wondering
+// whether it was forgotten finds the answer here.
+//
+// A DN outside the naming context resolves to the default realm and is then
+// refused by the handler's own `isUnder(dn, ROOT_DN)` check, exactly as before.
+// ---------------------------------------------------------------------------
+const REALMLESS_OPERATIONS = ['unbind'];
+
+function inRealmOfRequest(handler) {
+  return function (req, res, next) {
+    const dn = req && req.dn ? req.dn.toString() : '';
+    return inRealmOf(dn, function () {
+      return handler(req, res, next);
+    });
+  };
+}
+
 const server = {};
 OPERATIONS.forEach(function (operation) {
   server[operation] = function () {
     const args = Array.prototype.slice.call(arguments);
+    if (REALMLESS_OPERATIONS.indexOf(operation) < 0) {
+      // The handler is the LAST argument — ldapjs takes (dn, [middleware…],
+      // handler) — and only it is wrapped, so a route registered with
+      // middleware would keep its shape.
+      args[args.length - 1] = inRealmOfRequest(args[args.length - 1]);
+    }
     servers.forEach(function (one) {
       one[operation].apply(one, args);
     });
@@ -4679,7 +4654,7 @@ server.add('', function (req, res, next) {
     log.debug('Leaving the LDAP add handler. The parent is missing.');
     return next(new ldap.NoSuchObjectError(parent));
   }
-  if (entries.size >= maxEntries()) {
+  if (totalEntries() >= maxEntries()) {
     log.debug('Leaving the LDAP add handler. The directory is full.');
     return next(new ldap.AdminLimitExceededError(
       'this directory holds its maximum of ' + maxEntries() + ' entries'));
@@ -4708,7 +4683,7 @@ server.add('', function (req, res, next) {
               attributeCount: Object.keys(attributes).length,
               objectClass: (attributes.objectClass || attributes.objectclass ||
                             []).join(', '),
-              entriesNow: entries.size }
+              entriesNow: totalEntries() }
   });
   res.end();
   log.debug('Leaving the LDAP add handler. The entry was added.');
@@ -4755,7 +4730,7 @@ server.del('', function (req, res, next) {
     summary: 'deleted ' + dn,
     detail: { attributeCount: Object.keys(stored.attributes).length,
               danglingLeft: dangling,
-              entriesNow: entries.size,
+              entriesNow: totalEntries(),
               note: 'any group listing this DN as a member still does; this ' +
                     'directory does not do referential integrity' }
   });
@@ -4890,16 +4865,31 @@ server.modifyDN('', function (req, res, next) {
     log.debug('Leaving the LDAP modifyDN handler. The target exists.');
     return next(new ldap.EntryAlreadyExistsError(target));
   }
-  // ROOT_DN, not baseDn(): THIS IS THE SOCKET, and the socket has no realm.
-  // An LDAP client operating on `dc=acme,dc=example,dc=com` arrives with no
-  // ambient realm at all, so asking whether its DN is under the DEFAULT realm's
-  // base would refuse every realm's subtree — which is the one thing putting the
-  // realm in the DN exists to make possible. The naming context this server
-  // holds is the whole tree; which realm a DN belongs to is decided by where it
-  // sits in that tree, and nothing here has to know.
+  // ROOT_DN, not baseDn(): THIS IS THE SOCKET, and the socket has no realm of
+  // its own. An LDAP client operating on `dc=acme,dc=example,dc=com` arrives
+  // with nothing ambient, so asking whether its DN is under the DEFAULT realm's
+  // base would refuse every realm's subtree — the one thing putting the realm
+  // in the DN exists to make possible. Which realm a DN belongs to is decided
+  // by where it sits, and `realmFor()` did that before this handler ran.
   if (!isUnder(target, ROOT_DN)) {
     log.debug('Leaving the LDAP modifyDN handler. Outside the naming context.');
     return next(new ldap.NoSuchObjectError(ROOT_DN));
+  }
+  // A RENAME MAY NOT CROSS A REALM, and this is the one operation that could
+  // try. Every handler runs in the realm of the DN it was GIVEN, so a modifyDN
+  // whose target is in another realm would delete the entry from this store and
+  // write it back into this same store under a DN that names somebody else's —
+  // an entry filed in the wrong directory, which is the one state the split is
+  // supposed to make unreachable. Refused with LDAP_AFFECTS_MULTIPLE_DSAS,
+  // which is what a real directory answers when a modifyDN would move an entry
+  // out of the DSA that holds it: two realms here are two directories, and this
+  // is that error being true rather than borrowed.
+  if (realmFor(target).id !== realmFor(dn).id) {
+    log.info('ldap: refusing to rename ' + dn + ' into the "' +
+             realmFor(target).id + '" realm; a rename may not cross a trust ' +
+             'realm, because each realm is a separate directory.');
+    log.debug('Leaving the LDAP modifyDN handler. It would cross a realm.');
+    return next(new ldap.AffectsMultipleDsasError(target));
   }
   entries.delete(normalizeDn(dn));
   stored.dn = target;
@@ -5054,49 +5044,32 @@ server.search('', function (req, res, next) {
     return next(new ldap.NoSuchObjectError(base));
   }
   // ---------------------------------------------------------------------
-  // WHICH REALM THIS SEARCH IS IN, AND WHY THE SOCKET SCOPES AT ALL.
+  // WHICH REALM THIS SEARCH IS IN was decided before this handler ran: every
+  // operation is wrapped in `realms.run(realmFor(req.dn))` at registration, so
+  // `entries` below is the store of the realm the BASE names and there is
+  // nothing here to filter. `-b "dc=example,dc=com"` is the default realm's
+  // directory; `-b "dc=acme,dc=example,dc=com"` is acme's; the root DSE
+  // publishes both so a client can find them.
   //
-  // This block said the opposite until 2026-08-25, and the change was asked
-  // for rather than discovered. The old rule was that a subtree search based
-  // at the naming context returns EVERY realm's entries, because that is what
-  // a naming context is and a directory that hid part of its own tree would be
-  // lying about the one thing LDAP exists to answer. True — and it made
-  // `ldapsearch -b "dc=example,dc=com"` the one door in this service through
-  // which a realm's people, groups and applications were visible from outside
-  // it, while every HTTP surface, the console, SCIM and the group claim showed
-  // only the realm's own. One door disagreeing with all of them is worse than
-  // a naming context that is narrower than the tree.
+  // THIS BLOCK ARGUED THE OPPOSITE UNTIL 2026-08-25. The rule was that a
+  // subtree search from the naming context returns EVERY realm's entries,
+  // because that is what a naming context is and a directory that hid part of
+  // its own tree would be lying about the one thing LDAP exists to answer. It
+  // is a good argument and it lost to a better one: it left port 389 as the
+  // single door through which one realm's people, groups and applications were
+  // visible from another, while the console, `/scim/v2`, the group claim and
+  // every enumerator in this file showed a realm only its own. A naming context
+  // narrower than the process is a smaller surprise than that.
   //
-  // So the realm is taken from the BASE the client searched, which is the only
-  // thing in an LDAP request that can name one, and entries outside that
-  // realm's container are filtered out. Two consequences worth stating:
-  //
-  //   * `-b "dc=example,dc=com"` is the DEFAULT realm's directory and no
-  //     longer the whole store. `-b "dc=acme,dc=example,dc=com"` is acme's,
-  //     exactly as before.
-  //   * WITH NO REALMS DEFINED THE CARVE-OUT IS EMPTY and every byte of this
-  //     answer is what it always was, which is the property the whole realm
-  //     design rests on.
-  //
-  // The operations that name ONE DN — add, modify, delete, compare, and a
-  // base-scope search of a single entry — are deliberately left alone: a
-  // client that spells out `cn=x,ou=groups,dc=acme,dc=example,dc=com` has
-  // named the realm as surely as a path segment does, and refusing it would
-  // make the realm unreachable from 389 rather than isolated.
-  const searchRealmBase = realmBaseForDn(base);
-  const searchCarved = containedRealmBasesUnder(searchRealmBase);
+  // WITH NO REALMS DEFINED there is one store and one context, and every byte
+  // of this answer is what it always was.
+  // ---------------------------------------------------------------------
   const clientLimit = parseInt(req.sizeLimit, 10) || 0;
   const limit = clientLimit > 0
     ? Math.min(clientLimit, maxSearchResults())
     : maxSearchResults();
   let sent = 0;
   let considered = 0;
-  // Entries that were in scope by DN and belong to another realm. Counted and
-  // logged rather than silently dropped, because a search that quietly returns
-  // fewer entries than the tree holds is the shape of problem that costs an
-  // afternoon — and because it is how somebody discovers that the realm they
-  // want is a base DN away.
-  let otherRealms = 0;
   // How many of the entries that went back were PEOPLE. It is what decides
   // whether this row reads as `user.query` or as `directory.search`, and the
   // decision is made on what was RETURNED rather than on the base the client
@@ -5110,12 +5083,6 @@ server.search('', function (req, res, next) {
     const depth = depthUnder(stored.dn, base);
     if (scope === 'base' && depth !== 0) continue;
     if (scope === 'one' && depth !== 1) continue;
-    // Another realm's entry, reached because its subtree sits inside this
-    // base. Not counted as considered: it was never a candidate.
-    if (!insideRealmContainer(stored.dn, searchRealmBase, searchCarved)) {
-      otherRealms++;
-      continue;
-    }
     considered++;
     let matches = false;
     try {
@@ -5167,12 +5134,21 @@ server.search('', function (req, res, next) {
       usersSent++;
     }
   }
+  // The other naming contexts are NAMED on a search that found nothing useful
+  // in this one, rather than left for somebody to deduce. A client searching
+  // `dc=example,dc=com` for a person who is in `acme` gets an empty answer that
+  // is correct and unhelpful; this is the line that says where to look. It is
+  // logged rather than returned, because LDAP has no field for "try over
+  // there" — the root DSE is where a client is supposed to read it.
+  const otherContexts = namingContexts().filter(function (context) {
+    return normalizeDn(context) !== normalizeDn(realmBaseDn(realms.currentId()));
+  });
   log.info('ldap: the search considered ' + considered + ' entry/entries in ' +
            'scope and returned ' + sent + '.' +
-           (otherRealms
-             ? ' ' + otherRealms + ' entry/entries under ' + base + ' belong to ' +
-               'another trust realm and were filtered out; search from that ' +
-               'realm\'s own base DN to see them.'
+           (otherContexts.length
+             ? ' This is the "' + realms.currentId() + '" realm\'s directory; ' +
+               otherContexts.length + ' other naming context(s) exist (' +
+               otherContexts.join(', ') + ') and hold their own entries.'
              : ''));
   // A search that returned nothing is still a search and still gets a row. That
   // is not completeness for its own sake: a filter this store cannot evaluate,
@@ -5375,7 +5351,10 @@ function description(req) {
     limits: {
       maxEntries: maxEntries(),
       maxSearchResults: maxSearchResults(),
-      currentEntries: entries.size
+      currentEntries: entries.size,
+      // The cap is on the PROCESS and `currentEntries` is this realm's, so the
+      // two would look like a contradiction on a page that showed only them.
+      currentEntriesEverywhere: totalEntries()
     },
     operations: ['bind', 'unbind', 'add', 'delete', 'modify', 'modifyDN',
                  'compare', 'search'],
@@ -5723,7 +5702,7 @@ function writeApplication(identifier, attributes) {
     log.debug('Leaving writeApplication(). The container is full.');
     return false;
   }
-  if (entries.size >= maxEntries() && !existing) {
+  if (totalEntries() >= maxEntries() && !existing) {
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
              maxEntries() + ' entries.');
     log.debug('Leaving writeApplication(). The directory is full.');
@@ -5888,7 +5867,7 @@ function writeFederation(id, attributes) {
     log.debug('Leaving writeFederation(). The container is full.');
     return false;
   }
-  if (entries.size >= maxEntries() && !existing) {
+  if (totalEntries() >= maxEntries() && !existing) {
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
              maxEntries() + ' entries.');
     log.debug('Leaving writeFederation(). The directory is full.');
@@ -6053,7 +6032,7 @@ function spiffeWrite(containerDn, attributeName, identifier, attributes, originL
   const dn = existing ? existing.dn
     : (containerDn === spiffeEntriesDn() ? spiffeEntryDn(identifier)
                                          : spiffeAgentDn(identifier));
-  if (!existing && entries.size >= maxEntries()) {
+  if (!existing && totalEntries() >= maxEntries()) {
     // Warned rather than thrown, as a full directory always is here: whatever
     // the caller was doing succeeded, and a registry that could fail an SVID
     // request would be the tail wagging the dog.
@@ -6264,7 +6243,7 @@ function writePerson(dn, attributes) {
     log.debug('Leaving writePerson(). ' + dn + ' is not under ' + usersDn() + '.');
     return { ok: false, reason: 'notAPerson', dn: dn };
   }
-  if (!existing && entries.size >= maxEntries()) {
+  if (!existing && totalEntries() >= maxEntries()) {
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
              maxEntries() + ' entries (ldap.maxEntries).');
     log.debug('Leaving writePerson(). The directory is full.');
@@ -6334,19 +6313,20 @@ function allGroupEntries() {
   return out;
 }
 
-// realmEntry() in all three of the doors below, and it is the fix for a
-// CROSS-REALM WRITE rather than only a leak. `/scim/v2` answers under every
-// realm prefix and a SCIM id here IS a DN, so before this the realm's endpoint
-// could read, rewrite and — verified — DELETE a group in the default realm's
-// ou=groups: `DELETE /realm/acme/scim/v2/Groups/cn=x,ou=groups,dc=example,dc=com`
+// THE THREE DOORS BELOW WERE A CROSS-REALM WRITE, and the record is worth
+// keeping because the shape recurs. `/scim/v2` answers under every realm prefix
+// and a SCIM id here IS a DN, so while one Map held every realm's entries the
+// realm's endpoint could read, rewrite and — verified — DELETE a group in the
+// default realm: `DELETE /realm/acme/scim/v2/Groups/cn=x,ou=groups,dc=example,dc=com`
 // answered 204 and the group was gone. The person half never had the hole,
-// because isPersonEntry() tests placement under the AMBIENT realm's usersDn()
-// and an entry in another realm's subtree fails it; groupRuleFor() answers
-// "this is a group" wherever it sits, on purpose, so the realm test has to be
-// made separately here.
+// because isPersonEntry() tests placement under the AMBIENT realm's usersDn();
+// groupRuleFor() answers "this is a group" wherever it sits, on purpose, so
+// nothing about a group's own definition could have caught it. Each door was
+// guarded by hand first and the store split made the guard structural — these
+// now read the realm's own store and could not reach another's if they tried.
 function readGroupEntry(dn) {
   log.debug('Entering readGroupEntry(). dn=' + dn);
-  const stored = realmEntry(dn);
+  const stored = getEntry(dn);
   if (!stored || !groupRuleFor(stored)) {
     log.debug('Leaving readGroupEntry(). ' +
               (stored ? 'It is an entry and not a group.' : 'Nothing there.'));
@@ -6376,23 +6356,22 @@ function groupDnFor(displayName) {
 // call site that predates the parameter says exactly what it always meant.
 function writeGroupEntry(dn, attributes, origin) {
   log.debug('Entering writeGroupEntry(). dn=' + dn + ', origin=' + (origin || 'scim'));
-  // Not this realm's, so not writable from it. It falls through to the parent
-  // check below, which refuses with `noParent` — the DN's parent is another
-  // realm's ou=groups and realmEntry() will not find that either — so a
-  // cross-realm PUT is answered the way a PUT to a container that does not
-  // exist is answered, which is what it is from in here.
-  const existing = realmEntry(dn);
+  // A DN in another realm is simply not here, and neither is its parent, so a
+  // cross-realm PUT falls through to the parent check below and is answered
+  // `noParent` — a write into a container this directory does not have, which
+  // is exactly what it is from in here.
+  const existing = getEntry(dn);
   if (existing && !groupRuleFor(existing)) {
     log.debug('Leaving writeGroupEntry(). ' + dn + ' is an entry and not a group.');
     return { ok: false, reason: 'notAGroup', dn: dn };
   }
-  if (!existing && entries.size >= maxEntries()) {
+  if (!existing && totalEntries() >= maxEntries()) {
     log.warn('ldap: not creating ' + dn + '; the directory holds its maximum of ' +
              maxEntries() + ' entries (ldap.maxEntries).');
     log.debug('Leaving writeGroupEntry(). The directory is full.');
     return { ok: false, reason: 'full', dn: dn };
   }
-  if (!realmEntry(parentDn(dn))) {
+  if (!getEntry(parentDn(dn))) {
     log.debug('Leaving writeGroupEntry(). There is no ' + parentDn(dn) + ' in this realm.');
     return { ok: false, reason: 'noParent', dn: dn, parent: parentDn(dn) };
   }
@@ -6408,7 +6387,7 @@ function writeGroupEntry(dn, attributes, origin) {
 
 function deleteGroupEntry(dn) {
   log.debug('Entering deleteGroupEntry(). dn=' + dn);
-  const stored = realmEntry(dn);
+  const stored = getEntry(dn);
   if (!stored || !groupRuleFor(stored)) {
     log.debug('Leaving deleteGroupEntry(). It was not a group here.');
     return { ok: false, reason: 'notFound', dn: dn };
@@ -6793,8 +6772,9 @@ function listen() {
       // ROOT_DN: what this SOCKET serves. A realm's subtree is under it and
       // is reported per realm on GET /ldap, which does have a realm.
       log.info('ldap: listening on TCP ' + boundPort + ' with base DN ' +
-               ROOT_DN + '; ' + entries.size +
-               ' entry/entries; GET /ldap describes it.');
+               ROOT_DN + '; ' + totalEntries() +
+               ' entry/entries across ' + realms.count() + ' trust realm(s), ' +
+               'each with a directory of its own; GET /ldap describes it.');
       resolve({ port: boundPort, baseDn: ROOT_DN });
     });
     plainServer.once('error', function (err) {
