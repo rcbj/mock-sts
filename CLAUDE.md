@@ -316,9 +316,12 @@ reaches outside that file:
    `new Map()` today needs an argument that does not rest on the directory —
    `tests/realm_isolation.js` is the guard, and `common/CLAUDE.md` carries the
    reasoning.
-3. **THE EMBEDDED DIRECTORY IS PER REALM TOO, AS A SUBTREE — and this paragraph
-   said the opposite until 2026-08-25.** The default realm is `ldap.baseDn`
-   itself (`dc=example,dc=com`) and every other realm is `dc=<id>` beneath it, so
+3. **THE EMBEDDED DIRECTORY IS PER REALM TOO — A STORE OF ITS OWN BEHIND THE
+   ONE SOCKET, and this paragraph said the opposite until 2026-08-25.** It was
+   a subtree of one shared Map for two days; it is `realms.map()` now, so a
+   lookup in one realm cannot reach another's entry rather than merely being
+   asked not to. The DN layout below is unchanged and is what a client sees.
+   The default realm is `ldap.baseDn` itself (`dc=example,dc=com`) and every other realm is `dc=<id>` beneath it, so
    `ou=users`, `ou=groups`, `ou=applications`, `ou=federations` and the two
    SPIFFE containers exist once per realm and **share nothing**: OAuth client
    registrations, SAML service provider entries and the SPIFFE registry are a
@@ -332,9 +335,12 @@ reaches outside that file:
    reverses the original decision, which was that a naming context IS the whole
    tree: it left 389 as the one door through which a realm could read another
    realm's entries while every other surface showed it only its own. An
-   operation that names ONE DN is still answered wherever that DN is. `ldap/CLAUDE.md`
-   argues the shape, the choke point every enumerator goes through, and the
-   carve-out the default realm needs because its base contains the others'.
+   operation that names ONE DN is answered in the realm that DN names, and a
+   modifyDN that would cross a realm is refused with `LDAP_AFFECTS_MULTIPLE_DSAS`
+   — two realms here are two directories. `ldap/CLAUDE.md` argues the shape, the
+   choke point every enumerator goes through, how the socket picks a store, and
+   the two alternative shapes (a listener per realm, an ldapjs `Server` per
+   realm) with the reason each was not taken.
 4. **THE TWO ADMIN CONSOLE ROLES ARE THE ONE THING DELIBERATELY NOT SEPARATED,
    and the console's sign-on follows them.** They are groups in the **default
    realm's** `ou=groups`, read there whichever realm the console is reached in,

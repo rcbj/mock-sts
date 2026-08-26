@@ -224,6 +224,72 @@ the browser's default chrome.
 
 ---
 
+## `/admin/applications/new` IS A SECOND FORM OVER ONE FUNCTION, AND THAT NEEDED THE SAME ARGUMENT `/admin/token-lifetimes` MADE
+
+Added 2026-08-25. It creates an application entry in the embedded directory of
+the realm the console is showing, and it is the first page here whose main
+control is a set of CHECKBOXES: fourteen protocol families, from
+`applications.js`'s `PROTOCOLS` table, landing on the entry's
+`appAllowedProtocol`.
+
+**The Applications list already had an *Add an application* row, and it stays.**
+Both post `action=create` to `/admin/applications`, both reach
+`applications.createApplication()`, and there is one store behind them — so this
+is the case the token-lifetimes header settles rather than a new question:
+**two forms over one function are two doors; what breaks the one-store rule is
+a second PLACE THE VALUE LIVES**, and there is none. Four doors onto one group
+membership (rule 8a) is the same shape at twice the count.
+
+What is different is the READER'S TASK, which is the test that header sets:
+
+* **The families do not fit in a `.formrow`.** Fourteen choices with a sentence
+  each is a table, and a table at the foot of the applications list would have
+  had to become a link to somewhere anyway.
+* **Creating one is a different errand from reading the list.** The inline form
+  sits BELOW the paging, so on a service with forty applications the one control
+  somebody came for is off the bottom of the page.
+
+**THE DECLARATION GRANTS NOTHING AND THE PAGE SAYS SO THREE TIMES.** Nothing in
+this service reads `appAllowedProtocol`: an application declared for SAML 2.0
+alone is still issued an access token at `/oauth2/token`. That is the same
+sentence `APPLICATIONS_CAVEAT` already makes about the entry as a whole, and it
+is repeated here because a page of checkboxes headed *protocol families it is
+declared for* is the single most likely thing in this console to be read as a
+permission. The argument for it not being one is `applications.js`'s: a mock
+that refused a protocol would remove a test case rather than add one.
+
+Three things about it are decisions rather than mechanics:
+
+* **A create now lands on the entry it made.** Every other action on
+  `/admin/applications` names its application in `application`, and `create`
+  cannot — its field is `identifier`, because the entry does not exist yet — so
+  a create went back to the top of the list. That was survivable while the form
+  was ON the list; from a page of its own it left the reader with nothing to
+  look at. The redirect takes the identifier off the RESULT, so it cannot point
+  at an entry that was refused.
+* **The checkbox column goes through `listField()`, not `parseBody()`.**
+  `helpers.parseBody()` builds a plain object, so a repeated field arrives as
+  whichever value came last and every other one is silently gone — the create
+  would have recorded one family out of five and looked like it worked. That is
+  why `applicationsAction()` takes the list as a SECOND ARGUMENT, exactly as
+  `claimsAction()` does, and why `admin_api.js` computes it the same way.
+* **The drill-down grew a *Protocol families* section, and it matches on KINDS.**
+  It reads the declared list against what the entry has been recorded as. The
+  first version matched on the protocol LABELS in `appProtocol` and was wrong in
+  a way that looked right: a federation partner's sighting is written under the
+  protocol its relationship speaks, so every ordinary OAuth client read as a
+  federation partner. The column is called *Recorded* rather than *Seen*
+  because a create takes a kind too — the Authentications tile is the figure
+  that answers whether anything has actually happened.
+
+**No new POST, and that is rule 7 read exactly.** The rule is about CONTROLS:
+this page's one control posts to a handler that already has its operation
+(`createApplication`), so what `/admin-api` gained is the GET —
+`/admin-api/applications/new`, which answers the two closed vocabularies the
+create validates against. See `../mgmt-api/CLAUDE.md`.
+
+---
+
 ## `/admin`'s OWN LIST OF THE PAGES IS DERIVED NOW, AND THE BUG IT FIXES IS THE ONE THIS REPOSITORY WARNS ABOUT EVERYWHERE ELSE
 
 *What this console is* on the Overview page was a hand-written `<ul>` in the

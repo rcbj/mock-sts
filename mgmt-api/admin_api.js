@@ -97,6 +97,12 @@ const rbac = require('../admin-ui/admin_rbac');
 // taking the ids from it moves no route and cannot let this document offer a
 // set the service does not have.
 const stats = require('../common/admin_stats');
+// The applications registry, for the `enum` of protocol family ids on the
+// create body. A library too — it registers nothing and admin.js required it
+// long before this line — so this moves no route, and taking the ids from the
+// table the create VALIDATES against is what stops this document offering a
+// family that call would refuse.
+const applications = require('../common/applications');
 const spec = require('./admin_api_spec');
 const docs = require('./admin_api_docs');
 // The trust realm this call arrived in — for the explorer, which is the one
@@ -2884,12 +2890,68 @@ const ROUTES = [
       log.debug("Leaving the management API applications endpoint.");
     } },
 
+  // WHAT A CREATE MAY SAY, read off the service. Rule 7 asks for an operation
+  // per console page and this is /admin/applications/new's — but it earns its
+  // place beyond the parity, because what it answers is the two CLOSED
+  // VOCABULARIES `create` validates against: the eight kinds and the fourteen
+  // protocol families, each with what it means. A caller that reads this cannot
+  // construct a create the service will refuse, which is the property
+  // editableAttributes() gives the console's two selects and this gives an API
+  // client.
+  //
+  // THERE IS NO POST BESIDE IT, and that is rule 7 read exactly rather than by
+  // shape. The rule is about CONTROLS: that page's one control posts
+  // `action=create` to /admin/applications, so the operation mirroring it is
+  // `createApplication` below and already exists. A second create here would be
+  // two operations over one function, which is the thing the parity rule is
+  // trying to prevent rather than an instance of it.
+  { method: 'GET', path: BASE + '/applications/new', tag: 'Applications',
+    operationId: 'getNewApplicationForm',
+    summary: 'The vocabulary a new application may be created with, and where it would land',
+    description: 'The eight KINDS and the fourteen PROTOCOL FAMILIES a create ' +
+                 'takes, each with what it means, plus the container DN a new ' +
+                 'entry would be created under and how many that container will ' +
+                 'hold.\n\n**It creates nothing** — the create is `POST ' +
+                 '/admin-api/applications/create`. This is the list that call ' +
+                 'validates against, published so that a caller learns what it ' +
+                 'may send from the service rather than from a copy of the list ' +
+                 'in a document.\n\n**The container is THIS REALM\'S.** The ' +
+                 'embedded directory is per trust realm, so `/realm/acme/' +
+                 'admin-api/applications/new` answers with acme\'s ' +
+                 '`ou=applications` and an application created there is ' +
+                 'invisible to every other realm — including in an `ldapsearch`, ' +
+                 'which reaches it only under that realm\'s base DN.\n\n' +
+                 '**Declaring a protocol family grants and refuses nothing.** No ' +
+                 'endpoint in this service reads `appAllowedProtocol`: an ' +
+                 'application declared for SAML 2.0 alone is still issued an ' +
+                 'access token. It is a record of intent on the entry, and it is ' +
+                 'deliberately not a permission — a mock that refused a protocol ' +
+                 'would remove a test case rather than add one. The ' +
+                 'configuration that DOES take effect is in `editable`.',
+    mirrors: 'GET /admin/applications/new',
+    responseDescription: 'The two vocabularies, the container and the realm.',
+    responseSchema: { $ref: '#/components/schemas/NewApplicationForm' },
+    handler: function (req, res) {
+      log.debug("Entering the management API new-application endpoint.");
+      sendJson(res, 200, admin.newApplicationView(req).json);
+      log.debug("Leaving the management API new-application endpoint.");
+    } },
+
   { method: 'POST', route: BASE + '/applications/:action', tag: 'Applications',
     mirrors: 'POST /admin/applications',
     handler: function (req, res) {
       log.debug("Entering the management API applications action endpoint.");
       const body = parseBody(req);
-      const result = admin.applicationsAction(withAction(req, body));
+      // The declared protocol families, in the two spellings the console takes
+      // them in — `protocol` repeated, as a checkbox column posts it, and one
+      // `protocols` array, as a JSON body carries it. Read through listField()
+      // rather than off `body` for the reason namesOf() exists at all:
+      // helpers.parseBody() builds a plain object, so a repeated field arrives
+      // as whichever value came last and every other one is silently gone.
+      // Ignored by every action but `create`, which is where the vocabulary is
+      // validated.
+      const protocols = namesOf(req, body, 'protocol', 'protocols');
+      const result = admin.applicationsAction(withAction(req, body), protocols);
       sendJson(res, result.ok ? 200 : 400, result);
       log.debug("Leaving the management API applications action endpoint.");
     },
@@ -2922,11 +2984,34 @@ const ROUTES = [
                     description: 'Optional, one of the eight. It is a claim ' +
                                  'about what this application IS, which is ' +
                                  'why a value the registry does not know is ' +
-                                 'refused rather than recorded.' }
+                                 'refused rather than recorded.' },
+            protocols: {
+              type: 'array', items: { type: 'string', enum: applications.PROTOCOL_IDS },
+              description: 'THE PROTOCOL FAMILIES THIS APPLICATION IS DECLARED ' +
+                           'FOR, as ids from the closed vocabulary GET ' +
+                           '/admin-api/applications/new publishes. They land on ' +
+                           '`appAllowedProtocol`, and one that is not in that ' +
+                           'list is REFUSED rather than recorded — a typo that ' +
+                           'silently became a new family is how one application ' +
+                           'comes to be declared for two spellings of one ' +
+                           'thing.\n\n**IT GRANTS AND REFUSES NOTHING.** ' +
+                           'Nothing in this service reads the attribute: an ' +
+                           'application declared for `saml2` alone is still ' +
+                           'issued an access token at /oauth2/token, and one ' +
+                           'declared for nothing is treated exactly as it would ' +
+                           'have been. It is a record of INTENT, kept apart from ' +
+                           '`appProtocol` — which is what has actually happened ' +
+                           'and is not editable — so the two lists on an entry ' +
+                           'can be read against each other.\n\nA ' +
+                           'form-encoded body may repeat `protocol` instead, ' +
+                           'which is how the console\'s checkbox column posts ' +
+                           'it, and a single string may carry several separated ' +
+                           'by spaces or commas.' }
           },
           required: ['identifier'],
           examples: [{ identifier: 'urn:example:crm', name: 'CRM',
-                       kind: 'wsfed-relying-party' }],
+                       kind: 'wsfed-relying-party',
+                       protocols: ['wsfed', 'saml11'] }],
           additionalProperties: false
         },
         responseDescription: 'The application as it now stands, in `application`.' },

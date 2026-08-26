@@ -189,6 +189,219 @@ const KINDS = [
 const KIND_IDS = KINDS.map(function (one) { return one.kind; });
 
 // ---------------------------------------------------------------------------
+// THE PROTOCOL FAMILIES AN APPLICATION MAY BE DECLARED FOR.
+//
+// A DIFFERENT TABLE FROM KINDS ABOVE, feeding a DIFFERENT ATTRIBUTE FROM
+// `appProtocol`, and both of those distinctions are the whole reason it exists.
+//
+//   * `appProtocol` is DERIVED — the families this application has actually
+//     appeared in, accumulated by seen() as each one happens. Nothing may edit
+//     it, for the reason EDITABLE's header gives at length.
+//   * `appAllowedProtocol` is DECLARED — the families somebody has said this
+//     application is FOR, ticked on /admin/applications/new before it has ever
+//     connected to anything. It is configuration, like the redirect URIs beside
+//     it, and it is editable.
+//
+// A KIND is what an application IS in one protocol's own vocabulary: an
+// `oauth2-client` is a client_id, a `saml2-service-provider` is an entityID.
+// A FAMILY is coarser and is CHOSEN rather than observed, which is why one row
+// here can cover two kinds, and why this list runs past the families that have
+// a kind at all — an application may be declared for LDAP, SCIM or SPIFFE,
+// where this service has no application identifier to record and therefore
+// nothing to give it a kind from.
+//
+// **DECLARING A FAMILY GRANTS AND REFUSES NOTHING**, and this is the sentence
+// to change if that ever stops being true rather than a page's. No endpoint in
+// this service reads this attribute: an application declared for SAML 2.0 alone
+// is still issued an access token at /oauth2/token, because that is what this
+// service is for and a mock that refused would remove a test case rather than
+// add one. It is a record of INTENT, which is the same claim the applications
+// page already makes about the entry as a whole ("an entry here grants
+// nothing") narrowed to one attribute.
+//
+// `kinds` IS WHAT MAKES THE DECLARATION COMPARABLE WITH WHAT HAPPENED, and it
+// is deliberately the kinds rather than the protocol LABELS on `appProtocol`.
+// That was the first attempt and it was wrong in a way worth recording, because
+// it looked right: `appProtocol` holds prose — 'OAuth 2.0 / OIDC', 'SAML 1.1',
+// 'WS-Federation 1.2' — written by whichever module called seen(), and a
+// FEDERATION sighting is recorded under the protocol the RELATIONSHIP speaks.
+// So matching on labels made every ordinary OAuth client read as a federation
+// partner, since both write 'OAuth 2.0'. The kinds do not have that problem:
+// they are a closed vocabulary seen() warns about, and `federation-identity-
+// provider` is a thing an application IS rather than a protocol it spoke.
+//
+// A row's `kind` is the ONE kind this family would be recorded as, which is
+// what the pages show; `kinds` is every kind that COUNTS as a sighting of it,
+// which is usually the same one list. The exception is OAuth 2.0, whose list
+// carries the OpenID Connect kind as well — a relying party IS an OAuth client,
+// and a request carrying the openid scope is filed under the narrower kind
+// only, so an OAuth row that ignored it would report "never seen" about a
+// client signing somebody in every minute.
+//
+// **A row may have NO kind at all**, and those rows are the reason this is
+// stated rather than left to be inferred: LDAP, SCIM, SPIFFE, mutual TLS and
+// OpenID4VCI record no application identifier anywhere in this service, so
+// nothing will EVER mark them seen. That is a different fact from "it has not
+// happened yet", and the pages say so rather than showing a bare no.
+// ---------------------------------------------------------------------------
+const PROTOCOLS = [
+  { id: 'oauth2', label: 'OAuth 2.0', kind: 'oauth2-client',
+    kinds: ['oauth2-client', 'oidc-relying-party'],
+    what: 'A client_id at the authorization and token endpoints.' },
+  { id: 'oidc', label: 'OpenID Connect', kind: 'oidc-relying-party',
+    kinds: ['oidc-relying-party'],
+    what: 'The same client_id asking for the openid scope, and therefore for an ID Token. ' +
+          'A relying party IS an OAuth client, so these two are usually ticked together; ' +
+          'ticking this one alone is legal and says the entry is for an OIDC flow.' },
+  { id: 'saml2', label: 'SAML 2.0', kind: 'saml2-service-provider',
+    kinds: ['saml2-service-provider'],
+    what: 'A service provider entityID in the Web Browser SSO profile at /saml2, or the ' +
+          'audience of a SAML 2.0 assertion issued anywhere else here.' },
+  { id: 'saml11', label: 'SAML 1.1', kind: 'saml11-relying-party',
+    kinds: ['saml11-relying-party'],
+    what: 'A relying party of the two browser profiles at /saml11 — and what a ' +
+          'WS-Federation application is handed by default, which is why these two are ' +
+          'commonly ticked together.' },
+  { id: 'wsfed', label: 'WS-Federation', kind: 'wsfed-relying-party',
+    kinds: ['wsfed-relying-party'],
+    what: 'A wtrealm in a wsignin1.0 request (section 13.2.1).' },
+  { id: 'wstrust', label: 'WS-Trust', kind: 'wstrust-relying-party',
+    kinds: ['wstrust-relying-party'],
+    what: 'An AppliesTo in a RequestSecurityToken — the service the token is issued FOR.' },
+  { id: 'krb5', label: 'Kerberos v5', kind: 'kerberos-service',
+    kinds: ['kerberos-service'],
+    what: 'A service principal name a ticket may be issued for, or that the acceptor may be ' +
+          'asked to be.' },
+  { id: 'oid4vci', label: 'OpenID4VCI', kind: '',
+    kinds: [],
+    what: 'A wallet collecting a verifiable credential from the issuer. The wallet presents ' +
+          'no application identifier of its own on that flow — it authenticates as an OAuth ' +
+          'client and is recorded as one — so this family has no kind and nothing will ever ' +
+          'mark it seen.' },
+  { id: 'oid4vp', label: 'OpenID4VP', kind: 'oid4vp-verifier',
+    kinds: ['oid4vp-verifier'],
+    what: 'A verifier client_id in an Authorization Request asking for a presentation.' },
+  { id: 'federation', label: 'Federation', kind: 'federation-identity-provider',
+    kinds: ['federation-identity-provider'],
+    what: 'A FOREIGN identity service on the other side of a federation relationship. It is ' +
+          'the one thing in this registry that is not a client of this service — it ' +
+          'authenticates people TO it. Its SIGHTING is recorded under whichever protocol the ' +
+          'relationship speaks, so the protocol label on such an entry is indistinguishable ' +
+          'from an ordinary client\'s and the KIND is the only thing that tells them apart — ' +
+          'which is the whole reason this table matches on kinds. The relationship itself ' +
+          'lives under ou=federations; see federation/CLAUDE.md.' },
+  { id: 'ldap', label: 'LDAP', kind: '',
+    kinds: [],
+    what: 'A directory client binding on 389 or LDAPS 636. EVERY BIND HERE SUCCEEDS and none ' +
+          'of them names an application, so nothing will ever record a sighting for this ' +
+          'family — ticking it says what the entry is for and nothing more.' },
+  { id: 'scim', label: 'SCIM 2.0', kind: '',
+    kinds: [],
+    what: 'A provisioning client at /scim/v2. That surface authenticates its CALLER — in any ' +
+          'of the six schemes RFC 7644 section 2 names — rather than an application ' +
+          'identifier, so, as with LDAP, nothing writes this family into appProtocol.' },
+  { id: 'spiffe', label: 'SPIFFE', kind: '',
+    kinds: [],
+    what: 'A workload on the Workload API, or an agent or admin on the SPIRE Server API. A ' +
+          'SPIFFE identity gets an entry of its own under ou=spiffe rather than one here ' +
+          '(see spiffe/CLAUDE.md), so this is a declaration and never a record.' },
+  { id: 'mtls', label: 'TLS / mutual TLS', kind: '',
+    kinds: [],
+    what: 'A client presenting a certificate on 8443 or 9443, or authenticating to the token ' +
+          'endpoint under RFC 8705. The two attributes that make the second REAL are on this ' +
+          'entry and are genuinely read — oauthTlsClientAuthSubjectDn for section 2.1 and ' +
+          'oauthTlsClientCertificateThumbprint for section 2.2 — so ticking this box is the ' +
+          'note to self, and those two are the configuration.' }
+];
+
+const PROTOCOL_IDS = PROTOCOLS.map(function (one) { return one.id; });
+
+const PROTOCOL_BY_ID = {};
+PROTOCOLS.forEach(function (row) { PROTOCOL_BY_ID[row.id] = row; });
+
+// Which declared families a KIND counts as a sighting of — the inverse of the
+// `kinds` member, built once rather than searched per row per page. The value
+// is a LIST because one kind can belong to two families: `oidc-relying-party`
+// is a sighting of OpenID Connect AND of OAuth 2.0, since a relying party is an
+// OAuth client. Dropping one of them would leave a page reporting that an
+// application signing somebody in every minute had never been seen.
+const PROTOCOLS_BY_KIND = {};
+PROTOCOLS.forEach(function (row) {
+  row.kinds.forEach(function (kind) {
+    if (!PROTOCOLS_BY_KIND[kind]) PROTOCOLS_BY_KIND[kind] = [];
+    if (PROTOCOLS_BY_KIND[kind].indexOf(row.id) < 0) PROTOCOLS_BY_KIND[kind].push(row.id);
+  });
+});
+
+function protocolRow(id) {
+  return PROTOCOL_BY_ID[String(id || '')] || null;
+}
+
+// The declared families a record's KINDS amount to a sighting of. Used by the
+// pages to mark a declared family that has actually turned up, and to notice
+// one that turned up without ever being declared. A kind this table has no row
+// for maps onto nothing rather than throwing: seen() warns about an unknown
+// kind and records it anyway, so a record can carry one, and this function is
+// not its validator.
+function protocolIdsForKinds(kinds) {
+  const out = [];
+  (kinds || []).forEach(function (kind) {
+    (PROTOCOLS_BY_KIND[String(kind)] || []).forEach(function (id) {
+      if (out.indexOf(id) < 0) out.push(id);
+    });
+  });
+  // Table order, for the reason normaliseProtocols() puts a declaration back
+  // into it: two lists in the same order can be read against each other.
+  return PROTOCOL_IDS.filter(function (id) { return out.indexOf(id) >= 0; });
+}
+
+// A declared list as it arrives from a form's checkboxes or an API body, made
+// into a validated list of ids or into the one refusal this vocabulary makes.
+//
+// It is REFUSED rather than recorded when a value is not in the table, which is
+// the same decision createApplication() makes about `kind` and for the same
+// reason: a typo that silently became a new protocol family is how one
+// application comes to be declared for `saml2` and `saml-2` and read as two
+// different things by whatever comes to read this attribute later. Duplicates
+// and blanks are dropped rather than refused — a form that posts one box twice
+// is a browser doing something odd, not a caller asking for something wrong.
+function normaliseProtocols(value) {
+  log.debug("Entering normaliseProtocols().");
+  const asked = (Array.isArray(value) ? value : [value])
+    .filter(function (one) { return one !== undefined && one !== null; })
+    // A single string may carry several, because a JSON caller writing this by
+    // hand will send "oauth2 oidc" or "oauth2,oidc" at least as often as an
+    // array, and the checkbox form sends one value per field either way.
+    .reduce(function (all, one) { return all.concat(String(one).split(/[\s,]+/)); }, [])
+    .map(function (one) { return one.trim(); })
+    .filter(Boolean);
+  const chosen = [];
+  const unknown = [];
+  asked.forEach(function (one) {
+    if (PROTOCOL_IDS.indexOf(one) < 0) {
+      if (unknown.indexOf(one) < 0) unknown.push(one);
+      return;
+    }
+    if (chosen.indexOf(one) < 0) chosen.push(one);
+  });
+  if (unknown.length) {
+    log.debug("Leaving normaliseProtocols(). " + unknown.length + " unknown.");
+    return { ok: false, protocols: [],
+             errors: [unknown.map(function (one) { return '"' + one + '"'; }).join(', ') +
+                      (unknown.length > 1 ? ' are not protocol families' : ' is not a protocol family') +
+                      ' this registry knows. The ' + PROTOCOL_IDS.length + ' are: ' +
+                      PROTOCOL_IDS.join(', ') + '.'] };
+  }
+  // Back into TABLE ORDER rather than the order they were ticked in. The table
+  // is ordered by how a reader thinks about the families, and an entry whose
+  // attribute order depends on which box somebody clicked first would make two
+  // identical declarations look different in an ldapsearch.
+  const ordered = PROTOCOL_IDS.filter(function (id) { return chosen.indexOf(id) >= 0; });
+  log.debug("Leaving normaliseProtocols(). " + ordered.length + " family/families.");
+  return { ok: true, protocols: ordered, errors: [] };
+}
+
+// ---------------------------------------------------------------------------
 // THE SCHEMA.
 //
 // One row per attribute, and the row is the whole definition: `GET
@@ -240,6 +453,17 @@ const SCHEMA = {
             'openid scope is also a relying party.' },
     { name: 'appProtocol', kind: 'multi', from: 'every protocol',
       what: 'The protocol families it has appeared in, accumulated.' },
+    { name: 'appAllowedProtocol', kind: 'multi',
+      from: 'the console, the management API, or by hand',
+      what: 'THE PROTOCOL FAMILIES THIS APPLICATION IS DECLARED FOR, one value per family, ' +
+            'from the closed table PROTOCOLS publishes. It is the DECLARED twin of ' +
+            'appProtocol above and the two must not be read as one thing: that attribute is ' +
+            'what has happened and cannot be edited, this one is what somebody said the ' +
+            'application is for and is ticked on /admin/applications/new before it has ever ' +
+            'connected. NOTHING IN THIS SERVICE READS IT — an application declared for SAML ' +
+            '2.0 alone is still issued an access token, because a mock that refused would ' +
+            'remove a test case rather than add one — so it grants nothing and refuses ' +
+            'nothing, exactly as being in this registry at all does.' },
     { name: 'appAuthorizationServer', kind: 'multi', from: 'OAuth 2.0 / OIDC',
       what: 'WHICH AUTHORIZATION SERVERS this client has used, by the name in their paths — ' +
             'one value per server it has been seen at. This process publishes several, each ' +
@@ -471,6 +695,10 @@ const SCHEMA = {
 // ---------------------------------------------------------------------------
 const EDITABLE = {
   appName: 'set',
+  // DECLARED, which is the whole of why it is here and `appProtocol` is not.
+  // See the PROTOCOLS table above: one of those two attributes is what somebody
+  // said this application is for and the other is what happened to it.
+  appAllowedProtocol: 'multi',
   oauthClientId: 'set',
   oauthClientSecret: 'set',
   oauthTokenEndpointAuthMethod: 'set',
@@ -1388,12 +1616,33 @@ function createApplication(detail) {
     return { ok: false, errors: ['"' + kind + '" is not one of the kinds this registry knows. ' +
                                  'The eight are: ' + KIND_IDS.join(', ') + '.'] };
   }
+  // THE DECLARED PROTOCOL FAMILIES, validated before anything is written, for
+  // the reason the kind above is: a create that half-succeeded — the entry
+  // there, one of the ticked boxes silently dropped — is worse than a refusal,
+  // because the entry then reads as a complete declaration.
+  const asked = normaliseProtocols(info.protocols === undefined ? [] : info.protocols);
+  if (!asked.ok) {
+    log.debug("Leaving createApplication(). Unknown protocol family.");
+    log.debug("Leaving createApplication().");
+    return { ok: false, errors: asked.errors };
+  }
   const record = loaded.record;
   const now = Date.now();
   record.firstAt = now;
   record.lastAt = now;
   if (info.name) record.name = String(info.name);
   if (kind) addTo(record.kinds, kind);
+  // The declaration goes on `appAllowedProtocol` and DELIBERATELY NOT on
+  // `appKind` or `appProtocol`, even though every row of the PROTOCOLS table
+  // names the kind its family would produce. Ticking SAML 2.0 is a statement
+  // about what this application is FOR; writing `saml2-service-provider` into
+  // its kinds would be this registry claiming it has SEEN one, which is the
+  // derived-versus-declared line EDITABLE's header draws, and the kinds are on
+  // the wrong side of it. So the page shows what the kind WOULD be and the
+  // entry says nothing until a protocol actually recognises the identifier.
+  if (asked.protocols.length) {
+    setField(record, 'appAllowedProtocol', asked.protocols);
+  }
   // WHERE IT CAME FROM, said on the entry itself. An application created here
   // has never authenticated anything and its counters are zero; without this
   // line a reader would have to infer that from the zeros, and "created by hand"
@@ -1410,10 +1659,12 @@ function createApplication(detail) {
     channel: 'internal', target: identifier,
     summary: 'Application "' + identifier + '" was created from the console' +
              (kind ? ' (' + kind + ')' : ''),
-    detail: { identifier: identifier, kind: kind || '', createdByHand: true }
+    detail: { identifier: identifier, kind: kind || '', createdByHand: true,
+              protocols: asked.protocols.join(', ') }
   });
-  log.info('applications: "' + identifier + '" was created by hand. ' + count() +
-           ' application(s) in the directory.');
+  log.info('applications: "' + identifier + '" was created by hand' +
+           (asked.protocols.length ? ', declared for ' + asked.protocols.join(', ') : '') +
+           '. ' + count() + ' application(s) in the directory.');
   log.debug("Leaving createApplication(). Created.");
   log.debug("Leaving createApplication().");
   return { ok: true, application: viewAfterWrite(identifier, record) };
@@ -1487,6 +1738,23 @@ function updateApplication(identifier, change) {
   if (mode !== 'set' && !value) {
     log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['A value is required to ' + mode + '.'] };
+  }
+  // THE ONE EDITABLE ATTRIBUTE WITH A CLOSED VOCABULARY, checked here so that
+  // this edit and the create form cannot disagree about what a protocol family
+  // is — a `create` that refuses "saml-2" beside an `add` that records it would
+  // leave the registry holding two spellings of one family, which is the exact
+  // failure the KINDS table's comment describes.
+  //
+  // ONLY AN ADD IS CHECKED, deliberately. A remove has to name a value that is
+  // ALREADY on the entry, and `ldapmodify` reaches this attribute like every
+  // other — so refusing to remove a value this table does not recognise would
+  // shut the one door that could tidy up what LDAP had put there.
+  if (attribute === 'appAllowedProtocol' && mode === 'add') {
+    const known = normaliseProtocols(value);
+    if (!known.ok) {
+      log.debug("Leaving updateApplication(). Unknown protocol family.");
+      return { ok: false, errors: known.errors };
+    }
   }
   const record = loaded.record;
   let changed = false;
@@ -1654,6 +1922,24 @@ function view(record, entry) {
     name: record.name,
     kinds: record.kinds.slice(0),
     protocols: record.protocols.slice(0),
+    // The DECLARED families, beside the observed ones above. It is lifted out
+    // of `fields` — where it also still appears, because every schema attribute
+    // does — so that a caller reading this shape does not have to know that one
+    // of the two protocol lists is a top-level member and the other is not.
+    // `recordedProtocols` is the same vocabulary again, worked out from the
+    // KINDS this record carries rather than from `protocols` — see the
+    // PROTOCOLS table's header, where matching on the protocol LABELS is
+    // recorded as the wrong answer and why: a federation partner's sighting is
+    // written under the protocol its relationship speaks, so by label every
+    // OAuth client read as a federation partner.
+    //
+    // IT IS NOT "HAS AUTHENTICATED", and the name says so. A kind is usually
+    // written when a protocol recognises the identifier, but createApplication()
+    // takes one as well — so a hand-made entry can be recorded in a family it
+    // has never connected in, and `authentications` is the number that answers
+    // whether anything has actually happened.
+    allowedProtocols: valuesOf(record.fields.appAllowedProtocol),
+    recordedProtocols: protocolIdsForKinds(record.kinds),
     registered: record.registered,
     firstSeen: record.firstAt ? new Date(record.firstAt).toISOString() : '',
     lastSeen: record.lastAt ? new Date(record.lastAt).toISOString() : '',
@@ -1930,6 +2216,19 @@ function seedInternalApplications() {
 module.exports = {
   KINDS: KINDS,
   KIND_IDS: KIND_IDS,
+  // The DECLARED protocol vocabulary, exported whole rather than as a list of
+  // ids: the console draws a checkbox per row from the label and the prose, the
+  // management API turns the ids into an `enum` in its document, and both read
+  // one table — which is what stops a form offering a family the create would
+  // refuse, the same property editableAttributes() gives the two edit selects.
+  PROTOCOLS: PROTOCOLS,
+  PROTOCOL_IDS: PROTOCOL_IDS,
+  protocolRow: protocolRow,
+  // The kind-to-family translation, exported because the pages compare the
+  // declared list with what happened and a second copy of that map would be a
+  // second answer to "has this family ever been seen".
+  protocolIdsForKinds: protocolIdsForKinds,
+  normaliseProtocols: normaliseProtocols,
   SCHEMA: SCHEMA,
   seen: seen,
   register: register,

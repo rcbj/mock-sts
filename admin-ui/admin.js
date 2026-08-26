@@ -703,7 +703,20 @@ const SECTIONS = [
                'judge a client against its own redirect URIs rather than ' +
                'against a setting. A hand-made entry records that it was ' +
                'made by hand, so it cannot be mistaken for one that turned ' +
-               'up once and never came back.' }
+               'up once and never came back.' },
+      { path: '/admin/applications/new', label: 'New application',
+        blurb: 'The form for the sentence above, on a page of its own: name a '
+               + '<code>client_id</code>, <code>wtrealm</code>, entityID or '
+               + 'SPN that has never connected and put an entry in this '
+               + 'realm\'s directory for it, with the PROTOCOL FAMILIES it is '
+               + 'declared for ticked from a closed list. The declaration is a '
+               + 'RECORD OF INTENT and nothing reads it &mdash; an application '
+               + 'declared for SAML 2.0 alone is still issued an access token, '
+               + 'because refusing would remove a test case rather than add '
+               + 'one. What DOES take effect is the configuration underneath: '
+               + 'give the entry its redirect URIs and its secret from '
+               + '<a href="/admin/applications">Applications</a> and RFC 9700 '
+               + 'mode judges the next request against them.' }
     ] },
   { title: 'Monitoring',
     what: 'What this service has done: how much of it, what came out, and ' +
@@ -8084,7 +8097,7 @@ function kindCells(kinds) {
 // the point. This handler renders and decides nothing: it validates that an
 // action exists and hands the rest over, exactly as the console does for groups.
 // ---------------------------------------------------------------------------
-function applicationsAction(body) {
+function applicationsAction(body, protocols) {
   log.debug("Entering applicationsAction(). action=" + (body.action || '(none)'));
   const action = String(body.action || '');
   const identifier = String(body.application || '').trim();
@@ -8097,18 +8110,42 @@ function applicationsAction(body) {
   }
 
   if (action === 'create') {
+    // THE DECLARED PROTOCOL FAMILIES ARRIVE AS A SECOND ARGUMENT rather than
+    // off `body`, and that is not ceremony — it is the same arrangement
+    // claimsAction() has and it exists for the same reason. A checkbox column
+    // is ONE FIELD REPEATED, and helpers.parseBody() builds a plain object, so
+    // `body.protocol` is whichever box happened to be ticked last and every
+    // other one is silently gone. listField() re-reads the raw body with
+    // getAll(); the two routes that reach this function both call it, so the
+    // console's form and a JSON body land here as the same list.
+    //
+    // The fallback to `body.protocols` is for a caller that did not go through
+    // either route — a test requiring this module — and it is what keeps the
+    // one-argument signature this function used to have working.
+    const asked = protocols === undefined
+      ? (body.protocols === undefined ? [] : body.protocols)
+      : protocols;
     const result = applications.createApplication({
       identifier: String(body.identifier || body.application || ''),
       name: String(body.name || ''),
-      kind: String(body.kind || '')
+      kind: String(body.kind || ''),
+      protocols: asked
     });
     log.debug("Leaving applicationsAction(). create " + (result.ok ? 'ok' : 'refused') + ".");
     if (!result.ok) return result;
+    const declared = result.application.allowedProtocols || [];
     return { ok: true, application: result.application,
              message: '"' + result.application.identifier + '" is in the registry. It has ' +
                       'authenticated nothing yet — the counters are zero and the entry says ' +
                       'it was created by hand, so it cannot be mistaken for one that turned ' +
-                      'up once. Give it the redirect URIs and grant types it is allowed, and ' +
+                      'up once. ' +
+                      (declared.length
+                        ? 'It is DECLARED for ' + declared.join(', ') + ', which is a note on ' +
+                          'the entry and not a permission: nothing in this service reads it, ' +
+                          'and this application can still reach every other protocol here. '
+                        : 'No protocol family was declared for it, which changes nothing about ' +
+                          'what it may reach — the declaration is a record of intent. ') +
+                      'Give it the redirect URIs and grant types it is allowed, and ' +
                       'RFC 9700 mode will judge it against them.' };
   }
 
@@ -8163,7 +8200,14 @@ function applicationsAction(body) {
 app.post('/admin/applications', function (req, res) {
   log.debug("Entering the admin applications action endpoint.");
   const body = parseBody(req);
-  const result = applicationsAction(body);
+  // TWO SPELLINGS OF THE DECLARED PROTOCOL LIST, joined, exactly as
+  // /admin/claims takes its two and for the same reason: the create form's
+  // checkbox column is one `protocol` field repeated, and a JSON body carries
+  // one `protocols` array. helpers.parseBody() cannot see a repeat — it builds
+  // a plain object, so the last box ticked would be the only one to arrive —
+  // which is what listField() exists for.
+  const protocols = listField(req, body, 'protocol').concat(listField(req, body, 'protocols'));
+  const result = applicationsAction(body, protocols);
   // Back to the drill-down the form was posted from, when there was one, so a
   // reader who has just added a redirect URI is looking at the entry that now
   // carries it rather than at the top of the list — and carrying the list state
@@ -8171,9 +8215,23 @@ app.post('/admin/applications', function (req, res) {
   // page they land on still offers the filter and page they came from. Without
   // that, editing an application silently costs the reader their place in the
   // list, which is exactly what the trail exists to keep.
+  //
+  // `create` IS THE ONE ACTION THAT CANNOT NAME ITS APPLICATION IN THE BODY:
+  // its field is `identifier`, because the entry does not exist yet. So a
+  // create went to the top of the list and left the reader hunting for the row
+  // they had just described — which /admin/applications/new made worse, since
+  // that page has nothing else on it to go back to. The identifier is taken off
+  // the RESULT rather than off the body, so this cannot point at an entry that
+  // was refused, and `forget` still lands where it always did (on a drill-down
+  // that says the application is gone, which is the honest answer to "what did
+  // that do").
   const listView = listViewFromBack('/admin/applications', body.back);
-  const back = String(body.application || '').trim() && result.ok !== false
-    ? '/admin/applications' + queryWith(listView, { application: String(body.application).trim() })
+  const made = result.ok && result.application
+    ? String(result.application.identifier || '') : '';
+  const named = made ||
+    (result.ok !== false ? String(body.application || '').trim() : '');
+  const back = named
+    ? '/admin/applications' + queryWith(listView, { application: named })
     : '/admin/applications' + queryWith(listView, {});
   respondToAction(req, res, back, result);
   log.debug("Leaving the admin applications action endpoint.");
@@ -8295,7 +8353,22 @@ function applicationsListPage(req) {
           '<code>cn</code> is a digest of it') + '</div>' : '') +
       '</td><td>' + esc(row.name) + '</td>' +
       '<td>' + kindCells(row.kinds) + '</td>' +
-      '<td>' + esc(row.protocols.join(', ')) + '</td>' +
+      // BOTH PROTOCOL LISTS IN ONE CELL, and the declared half is labelled
+      // rather than run in with the other. An application created by hand has
+      // no observed protocols at all — it has never connected — so this cell
+      // was blank on exactly the entries somebody had just finished
+      // describing, which reads as the create having lost what was ticked. The
+      // two are not the same claim, so they are not the same line: the labels
+      // are what HAPPENED and the ids under them are what was DECLARED.
+      '<td>' + (row.protocols.length
+        ? esc(row.protocols.join(', '))
+        : '<span class="state-none">none recorded</span>') +
+      ((row.allowedProtocols || []).length
+        // codeList() rather than a join with the markup in it, for the reason
+        // that function was written: escaping the joined string escapes the
+        // tags too, and the cell then shows them.
+        ? '<div class="sub">declared: ' + codeList(row.allowedProtocols) + '</div>'
+        : '') + '</td>' +
       '<td>' + (row.registered
         ? '<span class="state-valid">yes</span>'
         : '<span class="state-none">no</span>') + '</td>' +
@@ -8351,6 +8424,10 @@ function applicationsListPage(req) {
     '</table>' +
     nav +
     '<h2>Add an application</h2>' +
+    '<p class="sub"><a href="/admin/applications/new">The fuller form is on New ' +
+    'application</a> &mdash; the same action, with the PROTOCOL FAMILIES this application ' +
+    'is declared for and a sentence about each. This row is the short way in for somebody ' +
+    'already looking at the list; both post to this page and reach one function.</p>' +
     '<p class="note">For a relying party that has not connected yet. An entry usually appears ' +
     'because an identifier was ACCEPTED — a client_id at the token endpoint, a wtrealm on a ' +
     'sign-in response — and this is how to get one in ahead of that, which is what RFC 9700 ' +
@@ -8402,6 +8479,89 @@ function applicationsListPage(req) {
       applications: paged.shown
     }
   };
+}
+
+// THE TWO PROTOCOL LISTS AN APPLICATION ENTRY CARRIES, SIDE BY SIDE.
+//
+// `appAllowedProtocol` is DECLARED — ticked on /admin/applications/new, or
+// added here — and what the entry has been RECORDED as is derived from its
+// KINDS. Both are in
+// the attribute table below like everything else; this section exists because
+// comparing them is the whole question a reader has, and the comparison cannot
+// be made by eye: one list holds ids (`oauth2`) and the entry's own `Protocols`
+// row holds the prose labels /admin/users spells protocols with (`OAuth 2.0 /
+// OIDC`).
+//
+// **THE MATCH IS ON KINDS AND NOT ON THOSE LABELS**, which is the one thing to
+// know before editing this. Matching on labels is what this was written as and
+// it was wrong: a FEDERATION partner's sighting is recorded under whichever
+// protocol its relationship speaks, so by label every ordinary OAuth client
+// read as a federation partner. applications.js's `protocolIdsForKinds()` is
+// the translation and its header carries the argument; a second copy of that
+// map in this file would be a second answer to "has this family been seen".
+//
+// **A family with no kind at all is marked**, and that is the row this section
+// is really for. LDAP, SCIM, SPIFFE, mutual TLS and OpenID4VCI record no
+// application identifier anywhere in this service, so nothing will EVER record
+// one — a bare "no" beside them would read as an application that has not been
+// used, when it means the question cannot be answered here.
+//
+// **"Recorded" IS NOT "HAS AUTHENTICATED"**, and the column is named for what
+// it actually reads. A kind is usually written when a protocol recognises the
+// identifier, but createApplication() takes one, so a hand-made entry can carry
+// a kind and no authentications at all. The page says so rather than letting a
+// reader take the column for evidence of traffic; the Authentications tile is
+// the figure that is.
+//
+// Only the families that are declared or recorded are listed. Fourteen rows of
+// "no, no" on every drill-down would be a table nobody reads, and the ones that
+// say nothing are exactly the ones with nothing to say.
+function protocolFamilySection(row) {
+  log.debug("Entering protocolFamilySection().");
+  const declared = row.allowedProtocols || [];
+  const seen = row.recordedProtocols || [];
+  const shown = applications.PROTOCOL_IDS.filter(function (id) {
+    return declared.indexOf(id) >= 0 || seen.indexOf(id) >= 0;
+  });
+
+  const rows = shown.map(function (id) {
+    const meta = applications.protocolRow(id) || { label: id, kinds: [], kind: '' };
+    const isDeclared = declared.indexOf(id) >= 0;
+    const isSeen = seen.indexOf(id) >= 0;
+    const seenCell = isSeen
+      ? '<span class="state-valid">yes</span>'
+      : ((meta.kinds || []).length
+          ? '<span class="state-none">no</span>'
+          : '<span class="state-none" title="This service records no application identifier ' +
+            'in that family, so no entry will ever carry a kind for it.">never recorded ' +
+            'here</span>');
+    return '<tr><td>' + esc(meta.label) + '</td><td><code>' + esc(id) + '</code></td>' +
+      '<td>' + (isDeclared ? '<span class="state-valid">yes</span>'
+                           : '<span class="state-none">no</span>') + '</td>' +
+      '<td>' + seenCell + '</td></tr>';
+  }).join('');
+
+  log.debug("Leaving protocolFamilySection(). " + shown.length + " row(s).");
+  return '<h2>Protocol families</h2>' +
+    '<p class="note"><strong>Declared</strong> is <code>appAllowedProtocol</code> &mdash; what ' +
+    'somebody said this application is FOR, on <a href="/admin/applications/new">New ' +
+    'application</a> or through the Add and Remove forms below. <strong>Recorded</strong> is ' +
+    'read off the KINDS in the table above, and not off the protocol labels beside them, ' +
+    'because a federation partner is recorded under the protocol its relationship speaks and ' +
+    'by label would be indistinguishable from an ordinary client.</p>' +
+    '<p class="note"><strong>Recorded is not the same as "has authenticated".</strong> A kind ' +
+    'is usually written when a protocol recognises the identifier &mdash; but a create takes ' +
+    'one too, so an entry made by hand can be recorded in a family it has never connected in. ' +
+    'The <em>Authentications</em> count above is the figure that answers whether anything has ' +
+    'actually happened. <strong>And neither column grants anything:</strong> a family declared ' +
+    'and not recorded is usually an application that has not connected yet, one recorded and ' +
+    'never declared is the ordinary case, and nothing asks a protocol to check either &mdash; ' +
+    'a mock that refused a protocol would remove a test case rather than add one.</p>' +
+    '<table><tr><th>Family</th><th>Value</th><th>Declared</th><th>Recorded</th></tr>' +
+    (rows || '<tr><td colspan="4">Neither list has anything on it. Nothing has been declared ' +
+             'for this application and it carries no kind &mdash; which for an entry created ' +
+             'by hand with no kind chosen is the state it is created in.</td></tr>') +
+    '</table>';
 }
 
 // The drill-down. Its one list is the ATTRIBUTE table, which is paged under a
@@ -8499,6 +8659,7 @@ function applicationDetailPage(req, identifier) {
       ? row.descriptions.map(function (d) { return esc(d); }).join('<br>')
       : '<span class="state-none">nothing recorded</span>') + '</td></tr>' +
     '</table>' +
+    protocolFamilySection(row) +
     '<h2>Its directory entry</h2>' +
     '<p class="sub">Every attribute the entry carries &mdash; the operational ones and ' +
     '<code>entryDN</code> included, which a SEARCH would return only when asked for by ' +
@@ -8629,6 +8790,224 @@ app.get('/admin/applications', function (req, res) {
   const view = applicationsView(req);
   respond(req, res, view.json, view.title, '/admin/applications', view.inner, view.up);
   log.debug("Leaving the admin applications page. " + view.title + ".");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/applications/new — CREATE ONE, ON A PAGE OF ITS OWN.
+//
+// The Applications list has carried an *Add an application* form since it grew
+// its six actions, and this page does not replace it or duplicate it: BOTH POST
+// TO `/admin/applications` WITH `action=create`, both reach
+// `applications.createApplication()`, and there is exactly one store behind
+// them. That is the same arrangement four doors onto one group membership have
+// (rule 8a) and the same one `/admin/token-lifetimes` argues for four settings
+// that `/admin/config` can already write: **two forms over one function are two
+// doors; what breaks the one-store rule is a second PLACE THE VALUE LIVES**,
+// and there is none here.
+//
+// So the question this page has to answer is the one that file's header asks —
+// what is different about the READER'S TASK — and there are two answers:
+//
+//   * **THE PROTOCOL FAMILIES.** Fourteen checkboxes with a sentence each do
+//     not fit in a `.formrow` at the foot of a table of every application this
+//     service has ever seen; they are a table of their own, and the row on the
+//     list page would have had to become a link to somewhere anyway.
+//   * **Creating one is a DIFFERENT ERRAND from reading the list.** Somebody
+//     configuring a relying party before it connects has not come to look at
+//     what has already connected, and on the list page that form is below the
+//     paging — so on a service with forty applications it is off the bottom of
+//     the screen, and the one control a person came for is the one they have to
+//     hunt for.
+//
+// The inline form STAYS, for the same reason the sign-out page did not remove
+// `/oauth2/logout`: it is where somebody already looking at the list will
+// reach for, and it is one line of markup pointing at the same function.
+//
+// **WHAT LANDS IS AN ORDINARY DIRECTORY ENTRY IN THE REALM THE CONSOLE IS
+// SHOWING.** Nothing on this page knows that — the realm is ambient (rule 3m)
+// and `ou=applications` is resolved by `ldap_server.js` under whichever realm
+// this request arrived in — which is why the container DN is printed rather
+// than described: it is the answer this process gives, not one this page
+// works out, and on `/realm/acme/admin/applications/new` it says `acme`'s.
+// ---------------------------------------------------------------------------
+
+// One protocol family as a row of the checkbox table. `kind` is what the
+// registry WOULD record this application as when a protocol of that family
+// finally recognises the identifier — shown rather than written, because a
+// declaration is not a sighting (see createApplication()) — and a family with
+// no kind at all is marked, because the alternative is a reader wondering for
+// the third time why the LDAP row never fills that column in.
+function protocolChoiceRow(row) {
+  const kindCell = row.kind
+    ? '<code>' + esc(row.kind) + '</code>'
+    : '<span class="state-none">none &mdash; this service records no application ' +
+      'identifier in that family</span>';
+  return '<tr><td><input type="checkbox" id="proto-' + esc(row.id) + '" name="protocol" ' +
+    'value="' + esc(row.id) + '"></td>' +
+    '<td><label for="proto-' + esc(row.id) + '">' + esc(row.label) + '</label></td>' +
+    '<td><code>' + esc(row.id) + '</code></td>' +
+    '<td>' + kindCell + '</td>' +
+    '<td class="why">' + esc(row.what) + '</td></tr>';
+}
+
+const NEW_APPLICATION_NOTES =
+  '<p class="note"><strong>Declaring a protocol family grants nothing and refuses ' +
+  'nothing.</strong> No endpoint in this service reads <code>appAllowedProtocol</code>: an ' +
+  'application declared for SAML 2.0 alone is still issued an access token at ' +
+  '<code>/oauth2/token</code>, and one declared for nothing at all is treated exactly as it ' +
+  'would have been. It is a RECORD OF INTENT on the entry &mdash; what this application is ' +
+  'FOR, said before it has connected &mdash; and it is deliberately not a permission, because ' +
+  'a mock that refused a protocol would remove a test case rather than add one. The ' +
+  'configuration that DOES take effect is the attributes underneath: give the entry its ' +
+  'redirect URIs, its grant types and its secret from ' +
+  '<a href="/admin/applications">Applications</a>, and RFC 9700 mode judges the next request ' +
+  'against them.</p>' +
+  '<p class="note"><strong>The families are DECLARED; <code>appProtocol</code> is what ' +
+  'HAPPENED.</strong> Those two attributes sit next to each other on the entry and must not be ' +
+  'read as one thing. This form writes the first; the second is accumulated by the protocol ' +
+  'endpoints as they accept this identifier and is not editable here, for the reason every ' +
+  'derived attribute on that page is not &mdash; a form that could rewrite it would make this ' +
+  'console lie about the service\'s own behaviour, in a way indistinguishable from the ' +
+  'recording being broken. The Applications drill-down shows both side by side, and says ' +
+  'which of the declared families the entry has actually been recorded in.</p>' +
+  '<p class="note"><strong>One entry per identifier, whatever protocol brought it.</strong> The ' +
+  'key is the identifier exactly as it arrives &mdash; not lower-cased and not namespaced by ' +
+  'protocol &mdash; so this is refused if the registry already holds one under that name, and ' +
+  'an application that appears under one name in two protocols is one entry with two kinds. ' +
+  'Change what an existing one holds rather than creating it again.</p>' +
+  '<p class="note"><strong>Nothing here is persisted.</strong> This service holds everything in ' +
+  'memory: the entry is gone on restart, along with every other application, person and group ' +
+  'in the directory. That is a property of the whole service and not of this page.</p>';
+
+function newApplicationPage(req) {
+  log.debug("Entering newApplicationPage().");
+  const container = applications.containerDn ? applications.containerDn() : null;
+  const max = applications.maxApplications ? applications.maxApplications() : null;
+  const held = applications.count();
+  const realm = realms.current();
+
+  // NO DIRECTORY IN THIS PROCESS. The form is left OUT rather than drawn and
+  // refused: `createApplication()` would answer with exactly this sentence, and
+  // a form whose only possible outcome is that message is a control that lies
+  // about what it does. It is the shape the groups page's own no-directory
+  // branch has, and for the same reason — the page exists, the directory does
+  // not, and those are different facts about this process.
+  if (!container) {
+    log.debug("Leaving newApplicationPage(). There is no directory.");
+    return {
+      inner: messagesOf(req) +
+        '<p class="warn"><strong>There is no embedded directory loaded in this process</strong>, ' +
+        'so there is no <code>ou=applications</code> container to create an entry in and this ' +
+        'form is not drawn. The applications registry has no store of its own on purpose &mdash; ' +
+        'the directory IS the registry &mdash; so this is a build without ' +
+        '<code>ldap/ldap_server.js</code> rather than a fault.</p>' + APPLICATIONS_LINKS,
+      json: { directory: false, container: null, max: null, applicationCount: held,
+              realm: { id: realms.currentId(), name: realm ? realm.name : '' },
+              kinds: applications.KINDS, protocols: applications.PROTOCOLS }
+    };
+  }
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(held, 'In the registry') +
+    tile(applications.PROTOCOLS.length, 'Protocol families') +
+    tile(applications.KINDS.length, 'Kinds') +
+    '</div>' +
+    '<p class="note"><strong>The entry lands in this realm\'s directory, at <code>' +
+    esc(container) + '</code></strong>' + (max ? ', which holds at most ' + esc(String(max)) +
+    ' application(s)' : '') + '. The console shows one trust realm at a time and this form ' +
+    'writes the one it is showing &mdash; <strong>' + esc(realm ? realm.name : 'Default') +
+    '</strong> &mdash; because the realm is taken from the path this request arrived on. ' +
+    'Applications are NOT shared between realms: an <code>ldapsearch</code> with that base DN ' +
+    'is the same entry this creates, and another realm\'s registry has never heard of it.</p>' +
+    '<p class="note"><strong>This is not a second door onto the registry.</strong> The form ' +
+    'below posts to <code>/admin/applications</code> with <code>action=create</code> &mdash; ' +
+    'the same action the list page\'s own <em>Add an application</em> row posts, calling the ' +
+    'same function in <code>applications.js</code> that a protocol endpoint and an ' +
+    '<code>ldapmodify</code> reach. Two forms over one function are two doors; there is one ' +
+    'store behind them and nothing caches it.</p>' +
+
+    '<form method="post" action="/admin/applications">' +
+    '<input type="hidden" name="action" value="create">' +
+    '<h2>What it is called</h2>' +
+    '<div class="formrow">' +
+    '<label for="identifier">Identifier</label>' +
+    '<input type="text" id="identifier" name="identifier" size="42" required ' +
+    'placeholder="client_id, wtrealm, AppliesTo, entityID or SPN">' +
+    '</div>' +
+    '<p class="note">THE KEY, exactly as the protocol will present it. At most 512 characters, ' +
+    'and no line break: an entry whose <code>cn</code> would be longer than 64 characters is ' +
+    'filed under <code>app-&lt;12 hex&gt;</code> instead, and <code>appIdentifier</code> is the ' +
+    'attribute to search on either way.</p>' +
+    '<div class="formrow">' +
+    '<label for="newname">Name</label>' +
+    '<input type="text" id="newname" name="name" size="24" placeholder="optional">' +
+    '<label for="newkind">Kind</label>' +
+    '<select id="newkind" name="kind">' +
+    '<option value="">unstated</option>' +
+    applications.KINDS.map(function (one) {
+      return '<option value="' + esc(one.kind) + '">' + esc(one.label) + '</option>';
+    }).join('') +
+    '</select>' +
+    '</div>' +
+    '<p class="note">The name is what pages call it; with none given the identifier is the ' +
+    'name, because inventing a friendly name for an opaque id would be inventing a fact. The ' +
+    'kind is optional and is a claim about what this application IS &mdash; a record ' +
+    'ACCUMULATES kinds as protocols recognise it, so the one chosen here is a starting point ' +
+    'and not the whole answer.</p>' +
+
+    '<h2>Protocol families it is declared for</h2>' +
+    '<p class="note">Tick as many as apply. The list is CLOSED &mdash; a value that is not one ' +
+    'of these is refused rather than recorded, because a typo that silently became a new ' +
+    'family is how one application comes to be declared for two spellings of one thing.</p>' +
+    '<table><tr><th>For</th><th>Family</th><th>Value</th>' +
+    '<th>Recorded as, when it turns up</th><th>What it means</th></tr>' +
+    applications.PROTOCOLS.map(protocolChoiceRow).join('') +
+    '</table>' +
+    '<div class="formrow"><button type="submit">Create the application</button>' +
+    '<span class="note">It is created with zero counters and a description saying it was made ' +
+    'by hand, so it cannot be mistaken for one that turned up once and never came back. You ' +
+    'land on its entry.</span></div>' +
+    '</form>' +
+
+    NEW_APPLICATION_NOTES + APPLICATIONS_CAVEAT + APPLICATIONS_LINKS;
+
+  log.debug("Leaving newApplicationPage(). " + applications.PROTOCOLS.length +
+            " protocol family/families offered.");
+  return {
+    inner: inner,
+    json: {
+      directory: true,
+      container: container,
+      max: max,
+      applicationCount: held,
+      realm: { id: realms.currentId(), name: realm ? realm.name : '' },
+      // The two vocabularies this form is built from, published rather than
+      // described: a caller of POST /admin-api/applications/create reads these
+      // to learn what it may send, which is what stops a document and a form
+      // offering different sets. The `editable` list is what comes NEXT — the
+      // attributes a create cannot take and `set`/`add` can.
+      kinds: applications.KINDS,
+      protocols: applications.PROTOCOLS,
+      editable: applications.editableAttributes().map(function (row) {
+        return { name: row.name, mode: row.editable, sensitive: !!row.sensitive };
+      })
+    }
+  };
+}
+
+function newApplicationView(req) {
+  log.debug("Entering newApplicationView().");
+  const built = newApplicationPage(req);
+  log.debug("Leaving newApplicationView().");
+  return { json: built.json, inner: built.inner, title: 'New application' };
+}
+
+app.get('/admin/applications/new', function (req, res) {
+  log.debug("Entering the admin new-application page.");
+  const view = newApplicationView(req);
+  respond(req, res, view.json, view.title, '/admin/applications/new', view.inner);
+  log.debug("Leaving the admin new-application page.");
 });
 
 // ---------------------------------------------------------------------------
@@ -15265,6 +15644,16 @@ module.exports = {
   usersView: usersView,
   groupsView: groupsView,
   applicationsView: applicationsView,
+  // The create page's own view, for GET /admin-api/applications/new. Rule 7:
+  // every page of this console has an operation, and this one is worth more
+  // than most as an API — what it answers is the two CLOSED VOCABULARIES the
+  // create takes (the kinds and the protocol families), so a caller learns what
+  // it may send from the service rather than from a copy in a document. There
+  // is no `newApplicationAction` beside it on purpose: this page's form posts
+  // `action=create` to /admin/applications, so the operation that mirrors its
+  // control already exists and a second one would be a second door onto one
+  // function pretending to be two.
+  newApplicationView: newApplicationView,
   applicationsAction: applicationsAction,
   // The three SPIFFE views and their three action handlers. admin_api.js calls
   // exactly these — rule 7 again: the API decides nothing the console does not,

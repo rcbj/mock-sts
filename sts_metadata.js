@@ -1430,6 +1430,30 @@ const ENDPOINTS = [
           'same functions a protocol path and an LDAP modify call, so they are not a third ' +
           'store. Two attributes hold credentials in the clear, marked as such, for the reason ' +
           '/krb5/principals prints the Kerberos passwords. Add ?format=json.' },
+  { path: '/admin/applications/new', group: 'Admin', name: 'New application',
+    // The same three as the page above it, for the same three reasons: rfc4511
+    // because what it writes is a directory entry, rfc4519 because
+    // applicationProcess is that specification's, rfc7591 because the entry it
+    // creates is the shape a dynamic client registration lands in.
+    specs: ['rfc4511', 'rfc4519', 'rfc7591'],
+    what: 'NON-SPEC console page. THE CREATE FORM for /admin/applications, on a page of its ' +
+          'own: name a client_id, wtrealm, AppliesTo, entityID or service principal name that ' +
+          'has never connected, optionally a kind, and TICK THE PROTOCOL FAMILIES the ' +
+          'application is DECLARED for from a closed list of fourteen. The entry lands in the ' +
+          'ou=applications container OF THE TRUST REALM THIS PAGE WAS REACHED IN — the ' +
+          'directory is per realm — and it is an ordinary directory entry, so an ldapsearch ' +
+          'under that realm\'s base DN sees exactly what this created. IT IS NOT A SECOND ' +
+          'DOOR: the form posts action=create to /admin/applications, which is the same ' +
+          'action the list page\'s own inline row posts and the same function a protocol ' +
+          'endpoint reaches, so there is one store behind all three. THE DECLARATION GRANTS ' +
+          'AND REFUSES NOTHING — nothing in this service reads appAllowedProtocol, and an ' +
+          'application declared for SAML 2.0 alone is still issued an access token, because a ' +
+          'mock that refused a protocol would remove a test case rather than add one; it is ' +
+          'kept apart from appProtocol, which is what HAPPENED, so the two can be read against ' +
+          'each other on the drill-down. What DOES take effect is the configuration underneath ' +
+          '— the redirect URIs, the grant types and the secret, which RFC 9700 mode reads and ' +
+          'which are set from the Applications page. Add ?format=json for the two vocabularies ' +
+          'and the container DN.' },
   { path: '/admin/spiffe', group: 'Admin', name: 'SPIFFE',
     specs: ['spiffe-id', 'spiffe-bundle', 'spiffe-x509-svid', 'spiffe-jwt-svid'],
     what: 'THE TRUST DOMAIN this service is the issuing authority for: its X.509 and ' +
@@ -2076,6 +2100,18 @@ const ENDPOINTS = [
           'which is refused with a list of what is editable. Note that ?kind= does not ' +
           'partition the list, since a record commonly carries two. Mirrors ' +
           'GET and POST /admin/applications.' },
+  { path: '/admin-api/applications/new', group: 'Management API',
+    name: 'New application form', specs: ['rfc4511', 'rfc7591'],
+    what: 'NON-SPEC. THE TWO CLOSED VOCABULARIES A CREATE TAKES, as JSON: the eight kinds and ' +
+          'the fourteen protocol families an application may be DECLARED for, each with what ' +
+          'it means, plus the ou=applications container a new entry would land in — THIS ' +
+          'REALM\'S, because the directory is per realm — how many it will hold, and the ' +
+          'attributes a create cannot take but set/add/remove can. IT CREATES NOTHING: the ' +
+          'create is POST /admin-api/applications/create, and this is the list that call ' +
+          'validates against, published so a caller learns what it may send from the service ' +
+          'rather than from a copy in a document. Declaring a family grants and refuses ' +
+          'nothing — no endpoint reads appAllowedProtocol. Mirrors GET ' +
+          '/admin/applications/new.' },
   { path: '/admin-api/authorization-servers', group: 'Management API',
     name: 'Authorization servers', specs: ['rfc8414', 'oidc-discovery', 'rfc9700'],
     what: 'NON-SPEC. Every authorization server profile as JSON, paged, each with its ' +
