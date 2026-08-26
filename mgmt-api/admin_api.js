@@ -3363,7 +3363,14 @@ const ROUTES = [
                  'application an act named in WHATEVER ROLE it played (the ' +
                  'console draws one of them in full at ' +
                  '/admin/delegation/application) — and `policy`, which is who ' +
-                 'may delegate to whom before anybody has tried.\n\nWALK IT BY ' +
+                 'may delegate to whom before anybody has tried.\n\n**THIS IS ' +
+                 'THE DELEGATION REGISTER AND NOT EVERYTHING A PERSON WAS ' +
+                 'ISSUED.** An ordinary grant is not a delegation act and is ' +
+                 'not here: for one identity END TO END — every credential ' +
+                 'with the exact grant or flow that produced it, beside the ' +
+                 'acts naming them — the console unions this register with the ' +
+                 'issued one at /admin/delegation/user?user=…&format=json, and ' +
+                 'the tokens alone are in GET /admin-api/users.\n\nWALK IT BY ' +
                  '`seq`: monotonic and never reused, including across a drop.',
     mirrors: 'GET /admin/delegation',
     parameters: [

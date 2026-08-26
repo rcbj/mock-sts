@@ -552,6 +552,21 @@ application, always, and the actor named in the `actor_token` is the identity,
 which only a delegation has. An impersonation therefore draws a chain whose
 middle is an application and nobody, which is exactly what happened.
 
+**THE TARGET IS RESOLVED THROUGH THE APPLICATIONS REGISTRY, and it is the one
+place in this service that reads `oauthAudience`.** An `audience` names a
+RESOURCE — `https://esb1.example.com` — and that registry is keyed by the
+identifier an application PRESENTS, which for an OAuth client is its client_id.
+Filing the act under the raw audience therefore draws a box on
+`/admin/delegation/map` that nothing else in the picture mentions, and a
+two-hop chain through a middle tier comes out as two unconnected halves: the URL
+the first hop reached and the client_id the second hop exchanged AS are one
+application under two names. So `applications.forAudience()` is asked first and
+the application's own identifier is what the row carries, with the audience that
+was actually requested kept in the sentence beside it — the raw string is a fact
+about the request and must not be lost to a resolution. **Nothing is refused:**
+an audience nobody has registered resolves to null and is recorded verbatim,
+exactly as it was before this existed.
+
 **Nothing authorizes either of them here**, and the row says so where a Kerberos
 row names an attribute. `may_act` is the claim a real deployment would use for
 it; this service neither issues nor reads one.

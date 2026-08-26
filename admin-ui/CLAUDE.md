@@ -6,7 +6,7 @@ The admin console at `/admin`. Three files now:
 |---|---|
 | `admin.js` | Every page, every form, the shell they are drawn in, and the GATE in front of all of them. The largest file in the repository, because every page's HTML and every page's JSON view are built in the same function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives. |
 | `admin_rbac.js` | **Who may use it.** Two roles, held as two ordinary groups in the embedded directory. A library (rule 3): it registers nothing. |
-| `delegation_map.js` | **The delegation picture**, at `/admin/delegation/map`. Layout with `@dagrejs/dagre`, every shape its own SVG. A library (rule 3): it registers nothing, requires nothing in this service but `helpers.js`, and is HANDED what each box is. |
+| `delegation_map.js` | **The delegation picture**, at `/admin/delegation/map` — and, since 2026-08-26, one person's whole picture at `/admin/delegation/user`, which is the same renderer over a graph carrying two more kinds of line. Layout with `@dagrejs/dagre`, every shape its own SVG. A library (rule 3): it registers nothing, requires nothing in this service but `helpers.js`, and is HANDED what each box is. |
 
 **It IS protected now, and it holds nothing on disk.** It is also the one surface
 that can CHANGE what the protocol endpoints do, which is why it is the one that
@@ -489,6 +489,89 @@ path.
 *Every page here shows ONE trust realm* below, because it is the second half of
 that same decision.
 
+### PROSE LONGER THAN A LINE IS COLLAPSED, AND THREE FUNCTIONS DECIDE IT
+
+Added 2026-08-26. `note()`, `warn()` and `bullet()` in `admin.js` take a
+fragment of prose and hand back either the paragraph it always was or a
+`<details>` whose `<summary>` is that paragraph's own opening sentence.
+`tip()` beside them returns a `title` attribute. Every page here goes through
+them: about 340 notes, 30 warning boxes, 20 prose bullets, the config table's
+152 descriptions and the endpoint table's ~250 on `/admin/sts-metadata`.
+
+**What it fixes was never that the prose was wrong.** The reasoning IS the
+point of a mock — it is the half a person cannot read off a protocol trace, and
+this file argues everywhere else that it should be written down rather than
+trimmed. What it cost was the other half: on most pages here the control
+somebody came for sat several screens down a wall of paragraphs, and the page
+read as documentation with a form hidden in it. `/admin/config` was the extreme
+case — 152 settings, a median description of 384 characters, so about forty
+screens of prose with 112 inputs buried in them. The folds took the visible
+text of that page down by 71% and of `/admin` by 76% WITHOUT DELETING A WORD,
+which is the property to keep if any of this is reworked.
+
+Six things about it are decisions rather than mechanics.
+
+* **IT IS NATIVE `<details>` AND NOTHING ELSE COULD BE.** This console is
+  served under `script-src 'none'`, so the debugger's collapse-all switch — a
+  checkbox and a listener — has no equivalent here, and the whole change adds
+  no seventh exception to the rule in `../CLAUDE.md`. What that costs is the
+  *expand everything* control, which is why every summary is a full sentence:
+  a reader skimming for one paragraph has to be able to find it without opening
+  all of them.
+* **THE SUMMARY IS DERIVED, NOT WRITTEN BESIDE THE PROSE.** A hand-written
+  label over a paragraph is a second copy of that paragraph's point, and the
+  two drift — the bug the section on `consoleGuide()` above describes, where
+  the one page whose job is listing the others described seven of twenty-five.
+  So the label is the note's own opening: the bolded headline if it has one,
+  else the first sentence, else a truncation of it. A caller MAY pass a label
+  and two do, both for the same reason: the text is a value out of another
+  module (`config.describe()`'s `label`) rather than prose written here.
+* **THE TEST IS ON THE RENDERED TEXT, NOT ON THE CALLER'S JUDGEMENT.** A caller
+  deciding "this one is short enough" decides it once, against a paragraph that
+  then grows. So a note added to this console tomorrow starts folding itself
+  when it passes about a line, with no edit anywhere — which is the same
+  property `consoleGuide()` and `sts_metadata.js` have and for the same reason.
+* **A LIST ITEM THAT OPENS WITH A LINK IS NEVER FOLDED, AND ONE THAT OPENS WITH
+  A CODE PATH KEEPS IT IN THE SUMMARY.** `bullet()` enforces both. The Overview
+  page's index and the machine-readable lists are rows whose POINT is the link
+  or the URL; folding one puts the only control in the row behind a summary
+  made of text. It is also why `guideItem()` composes its row by hand — link on
+  the row, `note(blurb)` under it — rather than handing the whole thing to
+  `bullet()`.
+* **A FOLDED WARNING KEEPS ITS BOX.** `warn()` returns
+  `<details class="warn fold">`, so a page with a caveat on it still looks like
+  one when the caveat is closed. Folding a warning into something that looked
+  like body text would be the one place this change hid a fact rather than
+  tidying one. `sts_metadata.js`'s drift report is not folded at all, and says
+  in a comment why: it appears only when that page disagrees with the router,
+  and a report that has to be opened is one somebody can close and forget.
+* **NOTHING IS EVER SAID ONLY IN A TOOLTIP.** A `title` is unreachable from a
+  keyboard, invisible on a touch screen and unread by most screen readers, so
+  everything `tip()` carries is also on the page — usually in the fold directly
+  under the control. `label[title]` gets a dotted underline and a help cursor
+  from an ATTRIBUTE SELECTOR in `page()`, so a caller that adds a tooltip
+  cannot forget to add the sign that there is one. `shortened()` set the
+  precedent long before this and set it the right way round: the full value in
+  the title, the truncation on the page.
+
+**The one place the two are used oppositely is worth knowing before adding a
+third.** `/admin/config` folds each setting's description and puts its short
+label in the summary; `/admin/token-lifetimes` puts the same description in a
+tooltip and folds nothing. The pages have different jobs — one is the whole
+table of 152 settings, the other is four rows somebody sets a number in
+repeatedly — and that is the test to apply, not which page came first.
+
+**Two mechanical traps, both of which bit.** The constants the folds are
+measured against are declared at the TOP of `admin.js`, not beside `note()`,
+because several of this file's module-level constants are built by calling
+`note()` at require time and a `const` in its temporal dead zone throws while
+the module is still loading — which takes the whole service down rather than
+one page. And **a summary is emitted UNESCAPED on purpose**: what goes into one
+is text taken out of markup the caller already built, so escaping it again
+turned `&apos;` into `&amp;apos;` and printed the entity. `tip()` is the
+exception and resolves entities instead, because a `title` is text rather than
+markup. The rule is in the comment above `plainTextOf()`.
+
 ## Four reader slots and two writer slots point INTO this module
 
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,
@@ -740,7 +823,7 @@ spellings in two columns where seeing them is the point.
 
 ---
 
-## TWO MORE DRILL-DOWNS UNDER `/admin/delegation`, AND THEY ASK DIFFERENT QUESTIONS
+## THREE MORE DRILL-DOWNS UNDER `/admin/delegation`, AND THEY ASK DIFFERENT QUESTIONS
 
 `/admin/delegation/chain` and `/admin/delegation/application` joined the map on
 2026-08-25. Both hang under the delegation page exactly as the map does — no
@@ -807,6 +890,108 @@ server is seeing tokens it did not expect.
 * **What an application IS lives in `../common/delegation.js`**, not here — it is
   keyed on the IDENTIFIER rather than on a box in the picture, and that file
   argues why. This one only draws it.
+
+**`/admin/delegation/user?user=…` is the FOURTH, it arrived on 2026-08-26, and it
+is THE ONLY PICTURE IN THIS CONSOLE DRAWN FROM MORE THAN THE DELEGATION
+REGISTER.** That sentence is the whole of why it needed a page rather than a
+parameter, and it is the first thing to check any change to it against.
+
+* **Most of what happens in somebody's name is not a delegation.** An
+  authorization code grant is not an act; nor is an AS-REQ, nor a SAML
+  assertion. So *what has this service done in alice's name* — the question
+  somebody actually arrives with — cannot be answered by narrowing these acts:
+  narrowed to a person who merely signed in and holds twenty tokens, the picture
+  is EMPTY. It is a union of the delegation register and the issued one, and
+  **the union is in `../common/user_graph.js`** (rule 3p), not here, for the
+  reason every other view function is down there: what counts as one credential
+  seen twice is a statement about the stores.
+* **It is the same renderer, the same shapes and the same tables.** `graphFor()`
+  hands back `delegation.graph()`'s shape with three fields added, so
+  `delegationLooks()`, `delegationDrawing()`, `sendDelegationSvg()` and
+  `delegationMapKey()` serve it unchanged — a fourth caller of the four
+  functions the chain page extracted. What this page adds is `userNodeRow()` and
+  `userEdgeRow()`, and they exist because ACTS AND CREDENTIALS ARE DIFFERENT
+  UNITS: a box that received four tokens and took part in no delegation would be
+  a row of zeroes under the map's columns, with the interesting number nowhere
+  on it.
+* **TWO NEW KINDS OF LINE, in `delegation_map.js`** — `signed-in` (dotted, into
+  the hexagon, one per protocol family) and `issued-for` (solid indigo, labelled
+  with the exact grant). Neither takes a MODE colour, deliberately: amber and
+  green are this console's judgement about impersonation versus delegation and an
+  ordinary grant makes neither claim. **`delegationMapKey()` takes
+  `{ issuance: true }`** to add their two rows and the other three picture pages
+  do not pass it — a legend must describe the diagram BESIDE it, and a key
+  listing a line the page never draws teaches a reader to stop trusting it.
+* **`issued-for` runs from the person where somebody else holds the credential
+  and FROM THE HEXAGON where nobody does.** `client_credentials` is the case
+  that settled it: the token is about the client itself, so the subject and the
+  holder are one box, there is no person-to-application line to label, and the
+  grey `issued to` line alone left the picture of a client credentials grant
+  silent about which grant it was — on the page whose whole ask is that the
+  grant be named. An X509-SVID with no audience is the same shape.
+* **A `client_credentials` subject is drawn as an APPLICATION**, and only where
+  neither store has an opinion. `delegationNodeLook()`'s fallback is the shape
+  the ROLE implies and the subject of this page is an initial identity, so a
+  client came out as a stick figure; the route corrects the FALLBACK in its own
+  look pass and leaves the directory's and the registry's answers alone.
+* **The chooser's list includes people nothing was ever issued to**, which is
+  the half worth keeping: an S4U2Self subject who has never been near this
+  service is exactly the row worth opening. Everything else about it follows the
+  application chooser's rules — a `<select>`, drawn in three places by one
+  function, a bare page that is the chooser rather than a 404 — with ONE
+  departure argued at the function: **the option's value is the NORMALISED KEY
+  and not a spelling**, because a person has no identifier of their own and every
+  other link in this console files them under that key.
+* **`/admin/users?user=…` links to it and the link says which question the other
+  page answers.** That page is the LEDGER — every token with its state and its
+  revoke button, grouped by session — and this is the RELATIONSHIPS. Neither is
+  the other's summary, and **this page changes nothing**: it has no form, so no
+  operation on `/admin-api`, exactly as the three drill-downs beside it satisfy
+  rule 7.
+
+---
+
+## `/admin/tokens/credential?id=…` IS THE TOKENS PAGE'S FIRST DRILL-DOWN, AND IT IS THE DELEGATION PICTURE ASKED BACKWARDS
+
+Added 2026-08-26. Every identifier in the tokens table's last column is now a
+link to it, and it draws ONE credential: who held it, in whose name, to reach
+what — and, when it came out of a token exchange, the credential handed in to get
+it, and the one behind that, back to the issuance the whole line rests on.
+
+* **THE MODEL IS `../common/credential_graph.js` AND THE DRAWING IS EVERYBODY
+  ELSE'S** (rule 3l, the division `/admin/delegation/map` already lives on). That
+  file returns a graph in `delegation.graph()`'s shape, so `delegation_map.js`
+  draws it, the party table is `delegationNodeRow()` and the line table is
+  `userEdgeRow()` — the one written for `/admin/delegation/user`, which already
+  knows the two relations an ISSUANCE uses. **This route draws nothing of its
+  own**, which is what keeps a party on this page the same party, drawn the same
+  way, as on the five pages that had it first.
+* **IT HANGS UNDER `/admin/tokens`, WHICH MEANT GIVING THAT PAGE A `LIST_PARAMS`
+  ROW.** No `NAV` entry, `active` is `/admin/tokens`, `up` is
+  `upTo('/admin/tokens', 'One credential', …)` — the arrangement the three
+  delegation drill-downs have. The list row (`family`, `kind`, `state`, `per`,
+  `page`) is new: without it the way back landed on page 1 of an unfiltered list
+  of everything this service has ever issued, rather than on the row the reader
+  clicked.
+* **THE COMMON ANSWER IS "NOTHING IS BEHIND IT", AND THAT IS NOT AN EMPTY
+  PAGE.** Most credentials were issued directly: one generation, three boxes and
+  the grant that produced them. The page leads with which of the two states it
+  is in, because a picture of a chain and a picture of a single issuance look
+  alike at a glance and mean opposite things.
+* **A ROW WITH NO IDENTIFIER HAS NO LINK, and the cell already had to say so.**
+  A Kerberos ticket carries no `jti` and no `ID` — the protocol has none — so
+  there is nothing to look a lineage up BY, and offering a link that could only
+  answer "nothing is known" would be worse than the dash that is there. The
+  signed UserInfo response and the WS-Trust JWT are the same case for a different
+  reason, and the tooltip names it.
+* **A CREDENTIAL THIS SERVICE NO LONGER HOLDS IS NOT A 404.** Both registers
+  behind the page are capped and drop the oldest, and they are capped
+  SEPARATELY — so a lineage can know an identifier existed, because an act names
+  it, and nothing else about it. The page says which of those two states each
+  generation is in rather than leaving a blank row to be read as a bug.
+* **No form, so no operation on `/admin-api`** — rule 7, satisfied exactly as the
+  drill-downs above satisfy it. `?format=json` is the lineage and the graph;
+  `?format=svg` is the document alone.
 
 ---
 

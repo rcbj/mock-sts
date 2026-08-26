@@ -986,6 +986,165 @@ function actsOfChain(rows, chainKey) {
 }
 
 // ---------------------------------------------------------------------------
+// THE IDENTITIES THAT APPEAR IN A DELEGATION, IN WHATEVER ROLE.
+//
+// The mirror of the three functions above, keyed on the PARTY rather than on
+// the application it acted through, and it is here for the same reason they
+// are: what counts as one party is a statement about this store, and a second
+// opinion about it in a renderer is the drift this file's headers keep warning
+// about.
+//
+// **THE KEY IS `nodeIdOf()`'s ANSWER AND DELIBERATELY NOT `applicationKeyOf()`'s**,
+// which is the same distinction those three make read the other way round. An
+// application is keyed on the identifier a protocol NAMED — the `client_id`, the
+// `AppliesTo`, the SPN — because "everything delegated through this client" is a
+// question about the client. A person is keyed on the identity they PRESENTED,
+// normalised by `identityKeyOf()`, because `alice`, `alice@STS.MOCK` and
+// `urn:sts-mock:user:alice` are one person and the console files them under one
+// row on /admin/users. Using one key for both would lose exactly the case each
+// is for: an RFC 8693 exchange's intermediary is an ACTOR (a party) beside a
+// `client_id` (an application), and they are two different strings naming two
+// different things in one column.
+//
+// So this key is the same one `/admin/users` uses, which is what lets a link
+// from that page reach this store and get the acts naming that person — in any
+// of the three roles, because the whole point is that somebody's name appears
+// in a delegation they were never present for.
+// ---------------------------------------------------------------------------
+
+// Which roles this identity played in this ONE act, and it can genuinely be two
+// — a forwarded ticket-granting ticket names the client as the initial identity
+// and this service was never told who it was handed to, and an S4U2Self names
+// its requester as the intermediary and as the target. An array for that reason
+// and not for symmetry with applicationRolesIn().
+function identityRolesIn(row, key) {
+  log.debug("Entering identityRolesIn().");
+  const wanted = String(key == null ? '' : key);
+  const out = [];
+  if (!wanted) {
+    log.debug("Leaving identityRolesIn().");
+    return out;
+  }
+  ROLE_IDS.forEach(function (role) {
+    const party = row[role];
+    if (party && nodeIdOf(party) === wanted) {
+      out.push(role);
+    }
+  });
+  log.debug("Leaving identityRolesIn().");
+  return out;
+}
+
+// Every act this identity took part in, whatever role it played. The filter is
+// `identityRolesIn()` rather than a comparison of its own, for the reason
+// `actsForApplication()` gives: the page that says which role somebody played
+// and the page that decides whether to show the act cannot come to disagree.
+function actsForIdentity(rows, key) {
+  const wanted = String(key == null ? '' : key);
+  if (!wanted) {
+    return [];
+  }
+  return (rows || list()).filter(function (row) {
+    return identityRolesIn(row, wanted).length > 0;
+  });
+}
+
+// Every distinct identity among these acts, with what it did. It is what the
+// PERSON chooser is built from, the way `applicationList()` is what the
+// application chooser is built from — and the counts are why it is a list
+// rather than a set of names.
+//
+// **AN IDENTITY HERE IS NOT NECESSARILY ONE `/admin/users` HAS A ROW FOR, and
+// that is the interesting half rather than an edge case.** A delegation names
+// somebody who was not present and proved nothing — that is what S4U2Self and
+// OnBehalfOf ARE — so a refused S4U2Self for a person who has never been near
+// this service puts their name here and nowhere else. The console unions this
+// list with the identity register for exactly that reason and marks which side
+// each name came from.
+function identityList(rows) {
+  log.debug("Entering identityList().");
+  const source = rows || list();
+  const byKey = new Map();
+  source.forEach(function (row) {
+    ROLE_IDS.forEach(function (role) {
+      const party = row[role];
+      const key = party ? nodeIdOf(party) : '';
+      if (!key) {
+        return;
+      }
+      let entry = byKey.get(key);
+      if (!entry) {
+        entry = {
+          key: key,
+          // The first spelling seen, which — `source` being newest first — is
+          // the most recent one. Every other spelling is beside it, for the
+          // reason applicationList() keeps them: a collapse is something a
+          // reader has to be able to SEE rather than take on trust.
+          presented: party.presented || party.application || key,
+          spellings: [],
+          roles: { initial: 0, intermediary: 0, target: 0 },
+          protocols: [],
+          chainKeys: [],
+          acts: 0, issued: 0, refused: 0, credentials: 0,
+          firstAt: 0, lastAt: 0,
+          // Set when this party ALSO named an application — the middle tier
+          // that is a person and an application at once. It is what tells the
+          // console to draw the second link.
+          application: ''
+        };
+        byKey.set(key, entry);
+      }
+      const spelling = party.presented || party.application;
+      if (spelling && entry.spellings.indexOf(spelling) < 0) {
+        entry.spellings.push(spelling);
+      }
+      if (!entry.application && party.application) {
+        entry.application = party.application;
+      }
+      entry.roles[role]++;
+      if (entry.chainKeys.indexOf(row.chainKey) < 0) {
+        entry.chainKeys.push(row.chainKey);
+      }
+      if (row.protocol && entry.protocols.indexOf(row.protocol) < 0) {
+        entry.protocols.push(row.protocol);
+      }
+    });
+    // The act's OWN counters once per identity rather than once per role, for
+    // applicationList()'s reason: an S4U2Self names its requester twice, and
+    // counting it twice would leave the total under the chooser disagreeing
+    // with the number of acts on the page above it.
+    const seen = {};
+    ROLE_IDS.forEach(function (role) {
+      const party = row[role];
+      const key = party ? nodeIdOf(party) : '';
+      if (!key || seen[key]) {
+        return;
+      }
+      seen[key] = true;
+      const entry = byKey.get(key);
+      entry.acts++;
+      if (row.outcome === 'issued') {
+        entry.issued++;
+        entry.credentials += (row.produced || []).length;
+      } else {
+        entry.refused++;
+      }
+      entry.firstAt = entry.firstAt ? Math.min(entry.firstAt, row.at) : row.at;
+      entry.lastAt = Math.max(entry.lastAt, row.at);
+    });
+  });
+  const out = Array.from(byKey.values()).map(function (entry) {
+    entry.chains = entry.chainKeys.length;
+    delete entry.chainKeys;
+    return entry;
+  }).sort(function (a, b) {
+    return b.acts - a.acts || a.key.localeCompare(b.key);
+  });
+  log.debug("Leaving identityList(). " + out.length + " identity/identities.");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // THE APPLICATIONS THAT APPEAR IN A DELEGATION, IN WHATEVER ROLE.
 //
 // **THE KEY IS THE APPLICATION IDENTIFIER AND DELIBERATELY NOT THE NODE ID.**
@@ -1172,6 +1331,16 @@ module.exports = {
   applicationRolesIn: applicationRolesIn,
   actsForApplication: actsForApplication,
   applicationList: applicationList,
+  // And the three that mirror them for a PARTY rather than an application, plus
+  // the function that decides what one IS. `nodeIdOf()` is exported because the
+  // picture of one person (common/user_graph.js) draws boxes for parties this
+  // store has never seen — an OAuth client a token names, a SAML audience — and
+  // has to key them the same way this file does, or the two halves of one
+  // diagram would put the same party in two boxes.
+  nodeIdOf: nodeIdOf,
+  identityRolesIn: identityRolesIn,
+  actsForIdentity: actsForIdentity,
+  identityList: identityList,
   graph: graph,
   summary: summary,
   maxRecords: maxRecords

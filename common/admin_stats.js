@@ -277,6 +277,17 @@ function recordJwt(payload, signed, context) {
     // that read only one of them would show a dash for every ID Token.
     username: payload.username || payload.preferred_username || '',
     client_id: payload.client_id || payload.azp || payload.aud || '',
+    // WHAT THIS TOKEN IS ADDRESSED TO, as its own fact. `client_id` above falls
+    // back to the `aud` when nothing better names the client, which is right for
+    // the tokens page's one party column and loses the audience entirely on
+    // every token that DOES name its client — which is every token an RFC 8693
+    // exchange issues, where the audience is the whole point. `credential_graph.js`
+    // draws the resource a credential was issued to reach, so it needs the
+    // audience whether or not a client_id sits beside it. An array is joined
+    // rather than kept: `aud` may be one or several (RFC 7519 section 4.1.3) and
+    // one string is what every reader of this record already expects.
+    audience: Array.isArray(payload.aud) ? payload.aud.join(' ')
+                                         : String(payload.aud || ''),
     scope: payload.scope || '',
     // jkt rather than the whole cnf: the thumbprint is the binding, and it is what
     // makes a row on the page say "DPoP" honestly rather than by guessing.
@@ -1826,6 +1837,37 @@ function issuedList() {
 }
 
 // ---------------------------------------------------------------------------
+// ONE ROW OF THAT LIST, BY THE IDENTIFIER THE PROTOCOL GAVE IT.
+//
+// The lookup `credential_graph.js` needs, and the reason it is here rather than
+// a `filter()` over there: `issuedList()`'s row shape is this file's — the
+// merged `family`, `identifier` and `expiresAtMs` members exist because the
+// tokens page needed one table over four registers — and a caller doing its own
+// walk would be a second place that decides a token's identifier is its `jti`
+// and an artifact's is its `id`.
+//
+// It walks rather than indexing, and that is a deliberate non-optimisation: both
+// stores are capped (`MAX_TOKENS`, `MAX_ARTIFACTS`) and an index would be a
+// second copy of a key that is already the only thing joining these records to
+// the delegation register. Null for an identifier neither store holds, which is
+// the ORDINARY answer for anything old enough to have been dropped to a cap —
+// the caller says so rather than treating it as a mistake.
+// ---------------------------------------------------------------------------
+function issuedById(identifier) {
+  log.debug("Entering issuedById(). identifier=" + identifier);
+  const wanted = String(identifier == null ? '' : identifier).trim();
+  if (!wanted) {
+    log.debug("Leaving issuedById(). Nothing was asked for.");
+    return null;
+  }
+  const found = issuedList().filter(function (row) {
+    return String(row.identifier || '') === wanted;
+  });
+  log.debug("Leaving issuedById(). " + found.length + " row(s) hold it.");
+  return found.length ? found[0] : null;
+}
+
+// ---------------------------------------------------------------------------
 // Reading the users back.
 //
 // The list is built from THREE sources and not one, which is the part worth
@@ -2186,5 +2228,6 @@ module.exports = {
   tokenList: tokenList,
   artifactList: artifactList,
   issuedList: issuedList,
+  issuedById: issuedById,
   snapshot: snapshot
 };
