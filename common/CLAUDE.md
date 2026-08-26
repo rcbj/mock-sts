@@ -946,6 +946,61 @@ find module` naming a file the operator never mentioned.
    intent, exactly as being in this registry at all is — the same claim
    `/admin/applications`'s caveat already makes about the whole entry.
 
+   **EVERY PROTOCOL FAMILY NOW NAMES THE ATTRIBUTES ITS CONFIGURATION LANDS
+   ON**, and that is what removed the KIND select from the create form rather
+   than a second table being added beside it. A `PROTOCOLS` row carries
+   `identifierAttribute` and `redirectAttribute`; `declarationAttributes()`
+   walks them, DEDUPES BY ATTRIBUTE, and is what `/admin/applications/new` draws
+   its fields from and `GET /admin-api/applications/new` publishes as
+   `declarations`. Several families naming one attribute is the point rather
+   than a shortcut: OAuth 2.0, OpenID Connect and OpenID4VCI all name
+   `oauthClientId` because a relying party IS an OAuth client and a wallet
+   authenticates as one, and both SAML profiles name `samlEntityId` — the
+   specifications share the identifier, so two attributes would be two spellings
+   of one fact that disagree the first time either is edited.
+
+   **THEY ARE ALL `multi` BAR ONE, AND THE EXCEPTION IS THE ONE SOMETHING
+   ENFORCES.** `oauthClientId`, `samlEntityId`, `wsfedRealm`,
+   `wstrustAppliesTo`, `krb5ServicePrincipalName` and `oid4vpClientId` were
+   `single` until 2026-08-25 and now accumulate, because one application
+   legitimately answers to two client_ids or two SPNs. `oauthTlsClientAuthSubjectDn`
+   stays `single`: `client_auth.js` compares it to a certificate's subject by
+   exact string equality for RFC 8705 section 2.1, so a list would stringify to
+   `dn1,dn2` and match nothing — widening it means first deciding what "any of
+   these" should mean to a security check, which is a different change from
+   giving a form a field. **Flipping a row's `kind` also means flipping its
+   `EDITABLE` mode**, `set` to `multi`, or the console offers a `set` the action
+   refuses.
+
+   **FOUR ATTRIBUTES HERE ARE DECLARATION AND NOTHING EVER WRITES THEM** —
+   `federationPartnerId`, `ldapBindDn`, `scimClientId`, `spiffeWorkloadId` —
+   because those surfaces authenticate the CALLER rather than an application
+   (LDAP, SCIM), file the identity in a container of their own (SPIFFE), or keep
+   the arrangement under `ou=federations` (Federation). They are the same claim
+   `appAllowedProtocol` is, narrowed to a name: a fact an operator has, in the
+   place the rest of what that application is already lives. Do not "fix" one by
+   wiring a protocol module to write it — check first that the module has an
+   application identifier at all, which is what the empty `kinds` on those
+   `PROTOCOLS` rows records.
+
+   **`wsfedReplyUrl` SPLIT OFF `samlAssertionConsumerService` ON 2026-08-25**,
+   and the reason is worth keeping: that attribute is READ. `/admin/saml2` and
+   `/admin/saml11` take the last value on it as the assertion consumer service
+   and as the Single Logout fallback, and `wsfed.js` had been writing its
+   `wreply` into it — so a WS-Federation application appeared to have named a
+   SAML ACS it had never heard of, and a LogoutResponse could have been handed to
+   a WS-Federation endpoint. One attribute per fact.
+
+   **`createApplication()` TAKES `fields`, AND IT WAS IGNORING THEM.** The
+   member had been in the argument since `saml2Action()` and `saml11Action()`
+   were written — both pass `fields: { samlEntityId: identifier }` — and nothing
+   read it, so *Register* on either SAML page produced an entry with no entityID
+   until a real request arrived and `seen()` wrote one. Nothing failed, which is
+   why it survived. `normaliseFields()` is now the one gate: an attribute has to
+   be in the schema AND `editable`, so a create cannot assert a counter or a
+   sighting, and a `single` attribute given several values is REFUSED rather than
+   truncated to the first.
+
    **THE VOCABULARY IS CLOSED AND VALIDATED IN TWO PLACES BECAUSE THERE ARE TWO
    DOORS.** `createApplication()` refuses an unknown family, and
    `updateApplication()` refuses one on an `add` — but NOT on a `remove`,

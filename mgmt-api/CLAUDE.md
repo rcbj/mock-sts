@@ -109,12 +109,32 @@ by an operation that already existed, plus the GET every page gets.
 **The GET earns its place beyond the parity, which is worth saying because a
 page-mirroring GET usually does not.** What it answers is the two CLOSED
 VOCABULARIES `createApplication()` validates against — the eight kinds and the
-fourteen protocol families, each with what it means — and the container DN a new
-entry would land in. That is the property `editableAttributes()` gives the
+fourteen protocol families, each with what it means — the container DN a new
+entry would land in, and, since the create form grew its fields,
+`declarations`: one row per ATTRIBUTE a family names as its identifier or as
+where its responses go back to, with the families each serves and whether it
+holds a list. That is the property `editableAttributes()` gives the
 console's two selects (a form cannot offer what the action would refuse),
 reached over HTTP: a caller that reads this cannot construct a create the
 service will refuse. Compare the alternative, which is the enum written out in
 this file's document and in the console's markup and kept in step by hand.
+
+**`createApplication`'s `fields` MEMBER IS WHERE THAT LIST IS SPENT.** A create
+takes the per-protocol identifiers and the redirect URIs as an object keyed by
+attribute name — the console's form posts one flat `field.<attribute>` per box
+and `applicationFieldsFrom()` in `admin.js` folds both spellings into the same
+object, which is `listField()`'s arrangement for the checkbox column one field
+up. A derived attribute is REFUSED by name rather than written, and so is a
+single-valued one given several values.
+
+**THE `set` AND `add` DESCRIPTIONS NAME THEIR ATTRIBUTES FROM
+`editableAttributes()` NOW, AND THEY WERE TYPED OUT BEFORE.** That is a small
+change with the same lesson as everything else here: making six identifier
+attributes multi-valued moved six names from one sentence to the other, and
+neither sentence noticed. A hand-written list of what an operation accepts is a
+second definition of the `EDITABLE` table, and it goes stale in the document a
+caller trusts most — the same reason the enum above is read off the service
+rather than written here.
 
 **The container it names is THIS REALM'S**, because the embedded directory is
 per realm. `/realm/acme/admin-api/applications/new` answers with acme's

@@ -243,46 +243,110 @@ const KIND_IDS = KINDS.map(function (one) { return one.kind; });
 // OpenID4VCI record no application identifier anywhere in this service, so
 // nothing will EVER mark them seen. That is a different fact from "it has not
 // happened yet", and the pages say so rather than showing a bare no.
+//
+// ---------------------------------------------------------------------------
+// `identifierAttribute` AND `redirectAttribute`: WHERE A FAMILY'S OWN NAMES GO.
+//
+// Added 2026-08-25, and they are the reason the create form no longer asks for
+// a KIND. That select and this table were two vocabularies for one question —
+// "what is this application?" — and a reader had to choose in both, from lists
+// that did not line up: eight kinds against fourteen families, with five
+// families having no kind at all. The families won because they are the coarser
+// and the honest one, and because THEY are what an operator is actually
+// declaring. The kind is still accumulated by `seen()` when a protocol
+// recognises the identifier, which is where a derived attribute belongs.
+//
+// So a family row now carries the two attributes that family's CONFIGURATION
+// lands on:
+//
+//   * `identifierAttribute` — the attribute holding the name this application
+//     answers to in that family. A client_id, an entityID, a wtrealm, an
+//     AppliesTo, an SPN, a SPIFFE ID, a bind DN.
+//   * `redirectAttribute` — where a response goes back to, for the three
+//     families that send one through a browser. Empty everywhere else, because
+//     inventing a redirect URI for LDAP would be inventing a fact.
+//
+// **SEVERAL FAMILIES MAY NAME ONE ATTRIBUTE, AND THAT IS THE POINT rather than
+// a shortcut.** OAuth 2.0, OpenID Connect and OpenID4VCI all name
+// `oauthClientId` because a relying party IS an OAuth client and a wallet
+// collecting a credential authenticates as one — the specifications share the
+// identifier, so two attributes would be two spellings of one fact and would
+// disagree the first time somebody edited one. SAML 2.0 and SAML 1.1 share
+// `samlEntityId` and `samlAssertionConsumerService` for the same reason. The
+// console walks this table, DEDUPES BY ATTRIBUTE and draws one field per
+// attribute, listing the families it serves — so the form has eleven identifier
+// fields for fourteen families and says why.
+//
+// **EVERY ONE OF THEM IS MULTI-VALUED BAR ONE.** An application legitimately
+// answers to two client_ids, two entityIDs or two SPNs here — one per
+// environment being exercised — so these accumulate like the redirect URIs
+// beside them. The exception is `oauthTlsClientAuthSubjectDn`, which mutual TLS
+// names: it is SINGLE-valued because `client_auth.js` compares it to the
+// certificate's subject by exact string equality for RFC 8705 section 2.1, and
+// a list arriving there would stringify to `dn1,dn2` and match nothing. It is
+// the one attribute in this group that something ENFORCES, which is exactly why
+// it is the one that cannot be widened without deciding what "any of these"
+// means to a security check. Stated here and on the form rather than left as an
+// inconsistency somebody re-derives.
+//
+// **DECLARING ONE STILL GRANTS NOTHING**, the same as ticking the family does.
+// The five families this service records no identifier for — LDAP, SCIM,
+// SPIFFE, OpenID4VCI, mutual TLS — get a field anyway, because "what is this
+// application called when it talks LDAP to us" is a fact an operator has and
+// this registry had nowhere to put. Nothing will ever write those attributes on
+// its own, so they read as declaration and only ever as declaration.
 // ---------------------------------------------------------------------------
 const PROTOCOLS = [
   { id: 'oauth2', label: 'OAuth 2.0', kind: 'oauth2-client',
     kinds: ['oauth2-client', 'oidc-relying-party'],
+    identifierAttribute: 'oauthClientId', redirectAttribute: 'oauthRedirectUri',
     what: 'A client_id at the authorization and token endpoints.' },
   { id: 'oidc', label: 'OpenID Connect', kind: 'oidc-relying-party',
     kinds: ['oidc-relying-party'],
+    identifierAttribute: 'oauthClientId', redirectAttribute: 'oauthRedirectUri',
     what: 'The same client_id asking for the openid scope, and therefore for an ID Token. ' +
           'A relying party IS an OAuth client, so these two are usually ticked together; ' +
           'ticking this one alone is legal and says the entry is for an OIDC flow.' },
   { id: 'saml2', label: 'SAML 2.0', kind: 'saml2-service-provider',
     kinds: ['saml2-service-provider'],
+    identifierAttribute: 'samlEntityId',
+    redirectAttribute: 'samlAssertionConsumerService',
     what: 'A service provider entityID in the Web Browser SSO profile at /saml2, or the ' +
           'audience of a SAML 2.0 assertion issued anywhere else here.' },
   { id: 'saml11', label: 'SAML 1.1', kind: 'saml11-relying-party',
     kinds: ['saml11-relying-party'],
+    identifierAttribute: 'samlEntityId',
+    redirectAttribute: 'samlAssertionConsumerService',
     what: 'A relying party of the two browser profiles at /saml11 — and what a ' +
           'WS-Federation application is handed by default, which is why these two are ' +
           'commonly ticked together.' },
   { id: 'wsfed', label: 'WS-Federation', kind: 'wsfed-relying-party',
     kinds: ['wsfed-relying-party'],
+    identifierAttribute: 'wsfedRealm', redirectAttribute: 'wsfedReplyUrl',
     what: 'A wtrealm in a wsignin1.0 request (section 13.2.1).' },
   { id: 'wstrust', label: 'WS-Trust', kind: 'wstrust-relying-party',
     kinds: ['wstrust-relying-party'],
+    identifierAttribute: 'wstrustAppliesTo', redirectAttribute: '',
     what: 'An AppliesTo in a RequestSecurityToken — the service the token is issued FOR.' },
   { id: 'krb5', label: 'Kerberos v5', kind: 'kerberos-service',
     kinds: ['kerberos-service'],
+    identifierAttribute: 'krb5ServicePrincipalName', redirectAttribute: '',
     what: 'A service principal name a ticket may be issued for, or that the acceptor may be ' +
           'asked to be.' },
   { id: 'oid4vci', label: 'OpenID4VCI', kind: '',
     kinds: [],
+    identifierAttribute: 'oauthClientId', redirectAttribute: 'oauthRedirectUri',
     what: 'A wallet collecting a verifiable credential from the issuer. The wallet presents ' +
           'no application identifier of its own on that flow — it authenticates as an OAuth ' +
           'client and is recorded as one — so this family has no kind and nothing will ever ' +
           'mark it seen.' },
   { id: 'oid4vp', label: 'OpenID4VP', kind: 'oid4vp-verifier',
     kinds: ['oid4vp-verifier'],
+    identifierAttribute: 'oid4vpClientId', redirectAttribute: '',
     what: 'A verifier client_id in an Authorization Request asking for a presentation.' },
   { id: 'federation', label: 'Federation', kind: 'federation-identity-provider',
     kinds: ['federation-identity-provider'],
+    identifierAttribute: 'federationPartnerId', redirectAttribute: '',
     what: 'A FOREIGN identity service on the other side of a federation relationship. It is ' +
           'the one thing in this registry that is not a client of this service — it ' +
           'authenticates people TO it. Its SIGHTING is recorded under whichever protocol the ' +
@@ -292,21 +356,25 @@ const PROTOCOLS = [
           'lives under ou=federations; see federation/CLAUDE.md.' },
   { id: 'ldap', label: 'LDAP', kind: '',
     kinds: [],
+    identifierAttribute: 'ldapBindDn', redirectAttribute: '',
     what: 'A directory client binding on 389 or LDAPS 636. EVERY BIND HERE SUCCEEDS and none ' +
           'of them names an application, so nothing will ever record a sighting for this ' +
           'family — ticking it says what the entry is for and nothing more.' },
   { id: 'scim', label: 'SCIM 2.0', kind: '',
     kinds: [],
+    identifierAttribute: 'scimClientId', redirectAttribute: '',
     what: 'A provisioning client at /scim/v2. That surface authenticates its CALLER — in any ' +
           'of the six schemes RFC 7644 section 2 names — rather than an application ' +
           'identifier, so, as with LDAP, nothing writes this family into appProtocol.' },
   { id: 'spiffe', label: 'SPIFFE', kind: '',
     kinds: [],
+    identifierAttribute: 'spiffeWorkloadId', redirectAttribute: '',
     what: 'A workload on the Workload API, or an agent or admin on the SPIRE Server API. A ' +
           'SPIFFE identity gets an entry of its own under ou=spiffe rather than one here ' +
           '(see spiffe/CLAUDE.md), so this is a declaration and never a record.' },
   { id: 'mtls', label: 'TLS / mutual TLS', kind: '',
     kinds: [],
+    identifierAttribute: 'oauthTlsClientAuthSubjectDn', redirectAttribute: '',
     what: 'A client presenting a certificate on 8443 or 9443, or authenticating to the token ' +
           'endpoint under RFC 8705. The two attributes that make the second REAL are on this ' +
           'entry and are genuinely read — oauthTlsClientAuthSubjectDn for section 2.1 and ' +
@@ -511,9 +579,16 @@ const SCHEMA = {
             'RFC 9700 mode reads: a registered client is judged against its OWN redirect ' +
             'URIs and can be confidential, and an unregistered one is judged against the ' +
             'oauth2.redirectUris setting and is treated as public.' },
-    { name: 'oauthClientId', kind: 'single', from: 'OAuth 2.0 / OIDC',
-      what: 'The client_id. Equal to appIdentifier for an OAuth application; absent on a ' +
-            'SAML or Kerberos one.' },
+    { name: 'oauthClientId', kind: 'multi', from: 'OAuth 2.0 / OIDC / OpenID4VCI',
+      identifier: true,
+      what: 'THE CLIENT_ID, and the identifier attribute of three families: an OpenID ' +
+            'Connect relying party IS an OAuth client, and a wallet collecting a ' +
+            'credential at the OpenID4VCI issuer authenticates as one, so all three ' +
+            'declare their name here rather than in three attributes that would be three ' +
+            'spellings of one fact. Usually equal to appIdentifier, which is what a ' +
+            'protocol sighting writes; a SECOND value is a client_id this application also ' +
+            'answers to — a per-environment id — and is why this accumulates rather than ' +
+            'being assigned. Absent on an entry no OAuth family has been declared for.' },
     { name: 'oauthClientSecret', kind: 'single', from: 'POST /oauth2/register',
       sensitive: true,
       what: 'THE SECRET THIS SERVICE MINTED, in the clear, in a directory where every ' +
@@ -579,10 +654,18 @@ const SCHEMA = {
             'registers only this is told to register `jwks` instead, by name, when it tries to ' +
             'authenticate.' },
     { name: 'oauthTlsClientAuthSubjectDn', kind: 'single', from: 'by hand',
+      identifier: true,
       what: 'RFC 8705 section 2.1.2 `tls_client_auth_subject_dn`: the subject DN of the PKI ' +
             'certificate this client authenticates with, in RFC 4514 form — the same spelling ' +
             '/admin/users files a verified certificate under, so one DN has one spelling across ' +
-            'this service.' },
+            'this service. IT IS ALSO THE IDENTIFIER ATTRIBUTE OF THE `mtls` FAMILY, and it is ' +
+            'THE ONE THAT IS STILL SINGLE-VALUED while every other identifier here ' +
+            'accumulates. The reason is that something ENFORCES it: client_auth.js compares ' +
+            'this string to the certificate\'s subject by exact equality, so a second value ' +
+            'would stringify to "dn1,dn2" and match nothing — widening it means first deciding ' +
+            'what "any of these" should mean to a security check, which is a different change ' +
+            'from giving a form a field. Said here and on /admin/applications/new rather than ' +
+            'left as an inconsistency somebody re-derives.' },
     { name: 'oauthTlsClientCertificateThumbprint', kind: 'single', from: 'by hand',
       what: 'For RFC 8705 section 2.2 self_signed_tls_client_auth: the base64url SHA-256 of the ' +
             'DER of the certificate this client authenticates with. THIS SERVICE\'S OWN NAME — ' +
@@ -596,10 +679,23 @@ const SCHEMA = {
             'here so the answer can be read rather than inferred.' },
 
     // --- SAML, WS-Federation, WS-Trust ------------------------------------
-    { name: 'samlEntityId', kind: 'single', from: 'SAML 2.0 / SAML 1.1',
-      what: 'The service provider\'s entityID — the assertion audience.' },
-    { name: 'samlAssertionConsumerService', kind: 'multi', from: 'SAML / WS-Federation',
-      what: 'Where a response is posted back to: an ACS URL, or WS-Federation\'s wreply.' },
+    { name: 'samlEntityId', kind: 'multi', from: 'SAML 2.0 / SAML 1.1',
+      identifier: true,
+      what: 'THE SERVICE PROVIDER\'S ENTITYID — the assertion audience, and the identifier ' +
+            'attribute of BOTH SAML families. SAML 1.1 has no entityID of its own in the ' +
+            'protocol (there is no request message for one to travel in) and what stands in ' +
+            'for it — Shibboleth\'s providerId, the path segment, or the TARGET\'s origin — ' +
+            'names the same party, so one attribute holds it rather than two that would ' +
+            'disagree the first time an application was declared for both. Accumulates: an ' +
+            'application answering to two entityIDs is one application.' },
+    { name: 'samlAssertionConsumerService', kind: 'multi', from: 'SAML 2.0 / SAML 1.1',
+      what: 'THE ASSERTION CONSUMER SERVICE URL — where a SAML response is posted back to, ' +
+            'and the redirect URI of both SAML families. It held WS-Federation\'s `wreply` ' +
+            'as well until 2026-08-25; that moved to wsfedReplyUrl, because the SAML pages ' +
+            'read this attribute for the Single Logout fallback and a wreply arriving in it ' +
+            'made a WS-Federation application look as though it had named a SAML ACS. ' +
+            'RECORDED AND NOT CHECKED: a response goes wherever the request asked, and a ' +
+            'URL that is not on this list is not refused.' },
     { name: 'samlSingleLogoutService', kind: 'multi', from: 'by hand',
       what: 'WHERE A <samlp:LogoutResponse> IS SENT for this service provider, and where a ' +
             'LogoutRequest goes when this identity provider starts the logout. DECLARED, ' +
@@ -631,16 +727,37 @@ const SCHEMA = {
             'section 3.4.4.1 on the Redirect binding. ASSIGNED rather than accumulated, ' +
             'because it is a fact about the last request and a history of booleans would ' +
             'say nothing.' },
-    { name: 'wsfedRealm', kind: 'single', from: 'WS-Federation',
-      what: 'The wtrealm from a wsignin1.0 request.' },
-    { name: 'wstrustAppliesTo', kind: 'single', from: 'WS-Trust',
-      what: 'The AppliesTo address from a RequestSecurityToken.' },
+    { name: 'wsfedRealm', kind: 'multi', from: 'WS-Federation',
+      identifier: true,
+      what: 'THE WTREALM from a wsignin1.0 request (section 13.2.1) — WS-Federation\'s ' +
+            'identifier attribute. Accumulates, for the reason every identifier here does.' },
+    { name: 'wsfedReplyUrl', kind: 'multi',
+      from: 'WS-Federation, the console, or by hand',
+      what: 'WHERE A SIGN-IN RESPONSE IS POSTED BACK TO for this application: the `wreply` ' +
+            'of section 13.2.1, WS-Federation\'s redirect URI. It was written into ' +
+            'samlAssertionConsumerService until 2026-08-25, which put a wreply in the ' +
+            'attribute the SAML pages read for an assertion consumer service and for the ' +
+            'Single Logout fallback — one attribute holding two protocols\' return ' +
+            'addresses, so a WS-Federation application appeared to have a SAML ACS it had ' +
+            'never named. Two facts, two attributes. Like the SAML one beside it this is ' +
+            'RECORDED AND NOT CHECKED: nothing here refuses a wreply that is not on the ' +
+            'list, because a mock that refused would remove a test case rather than add ' +
+            'one.' },
+    { name: 'wstrustAppliesTo', kind: 'multi', from: 'WS-Trust',
+      identifier: true,
+      what: 'THE APPLIESTO ADDRESS from a RequestSecurityToken — the service the token is ' +
+            'issued FOR, and WS-Trust\'s identifier attribute. Accumulates.' },
 
     // --- Kerberos and OID4VP ----------------------------------------------
-    { name: 'krb5ServicePrincipalName', kind: 'single', from: 'Kerberos v5',
-      what: 'The SPN, e.g. HTTP/sts@EXAMPLE.COM. A Kerberos service is an application ' +
-            'like the others here, and it is the one whose identifier this service may ' +
-            'have created on demand (KRB5_SERVICE_DOMAINS).' },
+    { name: 'krb5ServicePrincipalName', kind: 'multi', from: 'Kerberos v5',
+      identifier: true,
+      what: 'THE SPN, e.g. HTTP/sts@EXAMPLE.COM — Kerberos v5\'s identifier attribute. A ' +
+            'Kerberos service is an application like the others here, and it is the one ' +
+            'whose identifier this service may have created on demand ' +
+            '(KRB5_SERVICE_DOMAINS). It accumulates, and here that is the ordinary case ' +
+            'rather than the unusual one: one service commonly answers to several SPNs — ' +
+            'HTTP/host and HTTP/host.example.com — and a real KDC holds them all against ' +
+            'one account.' },
     { name: 'appRegistrationJson', kind: 'single', from: 'POST /oauth2/register',
       what: 'THE RFC 7591 REGISTRATION VERBATIM, as JSON on one attribute. It is here ' +
             'because RFC 7591 lets a client register arbitrary metadata and RFC 7592\'s read ' +
@@ -655,10 +772,57 @@ const SCHEMA = {
       what: 'The RFC 7592 registration access token, which is what guards the read, update ' +
             'and delete operations on this client. In the clear for the same stated reason ' +
             'oauthClientSecret is, and never written to the audit log.' },
-    { name: 'oid4vpClientId', kind: 'single', from: 'OpenID4VP',
-      what: 'The client_id the mock Verifier presents. It is configuration ' +
-            '(oid4vp.clientId) rather than something a caller supplies, so this record ' +
-            'appears the first time a presentation is verified.' }
+    { name: 'oid4vpClientId', kind: 'multi', from: 'OpenID4VP',
+      identifier: true,
+      what: 'THE VERIFIER\'S CLIENT_ID in an Authorization Request asking for a ' +
+            'presentation — OpenID4VP\'s identifier attribute. This service\'s own mock ' +
+            'Verifier takes its from configuration (oid4vp.clientId) rather than from a ' +
+            'caller, so that record appears the first time a presentation is verified; a ' +
+            'value declared here is a FOREIGN verifier somebody is configuring.' },
+
+    // --- THE FOUR FAMILIES THAT ONLY EVER DECLARE ------------------------
+    // Nothing in this service writes any of these four. That is the whole
+    // point of them rather than a gap: LDAP, SCIM, SPIFFE and Federation
+    // either authenticate the CALLER rather than an application (the first
+    // two), file the identity in a container of its own (the third), or keep
+    // the arrangement under ou=federations (the fourth) — so the registry had
+    // nowhere to put "what is this application called when it talks to us that
+    // way", which is a fact an operator has before anything connects. They are
+    // declaration and only ever declaration, exactly as appAllowedProtocol is,
+    // and like it they grant and refuse nothing.
+    { name: 'federationPartnerId', kind: 'multi', from: 'the console, or by hand',
+      identifier: true,
+      what: 'WHAT A FEDERATION PARTNER CALLS ITSELF — a foreign identity provider\'s ' +
+            'entityID, or its issuer identifier where the relationship speaks OpenID ' +
+            'Connect. THE RELATIONSHIP IS NOT HERE: the endpoints, the certificate and the ' +
+            'attribute mapping live under ou=federations and are what /federation/acs/{id} ' +
+            'actually verifies against (see federation/CLAUDE.md). This entry is the ' +
+            'partner as a PARTY, and this attribute is the name it goes by — so a value ' +
+            'here federates with nobody, which is the one place in this service where that ' +
+            'sentence has teeth.' },
+    { name: 'ldapBindDn', kind: 'multi', from: 'the console, or by hand',
+      identifier: true,
+      what: 'THE DN A DIRECTORY CLIENT BINDS AS on 389 or LDAPS 636. EVERY BIND HERE ' +
+            'SUCCEEDS — any DN, any password, anonymous — so nothing will ever write this ' +
+            'and nothing will ever read it; it is where an operator records which ' +
+            'credential an application is expected to use, beside the rest of what that ' +
+            'application is.' },
+    { name: 'scimClientId', kind: 'multi', from: 'the console, or by hand',
+      identifier: true,
+      what: 'WHAT A PROVISIONING CLIENT AT /scim/v2 IS CALLED — the OAuth client_id it ' +
+            'presents a token from, or the username it sends in Basic. That surface ' +
+            'authenticates its CALLER in any of the six schemes RFC 7644 section 2 names ' +
+            'rather than an application identifier, so it writes nothing here; the value is ' +
+            'a declaration, and scim.authRequired is what decides whether a credential is ' +
+            'demanded at all.' },
+    { name: 'spiffeWorkloadId', kind: 'multi', from: 'the console, or by hand',
+      identifier: true,
+      what: 'A SPIFFE ID this application is expected to hold — spiffe://<trust ' +
+            'domain>/<path>. A SPIFFE identity gets an entry of its OWN under ou=spiffe ' +
+            '(see spiffe/CLAUDE.md) and the registry there is what an SVID is actually ' +
+            'issued against, so this writes nothing and reads nothing: it is the link ' +
+            'between an application in this registry and an identity in that one, said by ' +
+            'hand because no protocol says it.' }
   ]
 };
 
@@ -699,7 +863,12 @@ const EDITABLE = {
   // See the PROTOCOLS table above: one of those two attributes is what somebody
   // said this application is for and the other is what happened to it.
   appAllowedProtocol: 'multi',
-  oauthClientId: 'set',
+  // THE IDENTIFIER ATTRIBUTES, one per protocol family (see the PROTOCOLS
+  // table). Every one of them is `multi` bar oauthTlsClientAuthSubjectDn below,
+  // whose own row says why — an application answering to two client_ids or two
+  // SPNs is one application, and a `set` here would replace the list with one
+  // value and read afterwards as the others having been forgotten.
+  oauthClientId: 'multi',
   oauthClientSecret: 'set',
   oauthTokenEndpointAuthMethod: 'set',
   oauthJwks: 'set',
@@ -708,7 +877,7 @@ const EDITABLE = {
   oauthTlsClientCertificateThumbprint: 'set',
   oauthConfidential: 'set',
   appRegistrationAccessToken: 'set',
-  samlEntityId: 'set',
+  samlEntityId: 'multi',
   // DECLARED, both of them, which is why they are here and the four SAML
   // attributes beside them are not: where a LogoutResponse goes and which
   // certificate the service provider signs with are configuration, and the
@@ -716,10 +885,15 @@ const EDITABLE = {
   // are what HAPPENED.
   samlSigningCertificate: 'set',
   samlSingleLogoutService: 'multi',
-  wsfedRealm: 'set',
-  wstrustAppliesTo: 'set',
-  krb5ServicePrincipalName: 'set',
-  oid4vpClientId: 'set',
+  wsfedRealm: 'multi',
+  wstrustAppliesTo: 'multi',
+  krb5ServicePrincipalName: 'multi',
+  oid4vpClientId: 'multi',
+  // The four that are ONLY ever declared — nothing in this service writes them.
+  federationPartnerId: 'multi',
+  ldapBindDn: 'multi',
+  scimClientId: 'multi',
+  spiffeWorkloadId: 'multi',
   oauthRedirectUri: 'multi',
   oauthPostLogoutRedirectUri: 'multi',
   oauthFrontchannelLogoutUri: 'set',
@@ -728,6 +902,9 @@ const EDITABLE = {
   oauthResponseType: 'multi',
   oauthScope: 'multi',
   samlAssertionConsumerService: 'multi',
+  // WS-Federation's return address, which used to be recorded in the attribute
+  // above. Its own row says why the two were split.
+  wsfedReplyUrl: 'multi',
   description: 'multi'
 };
 
@@ -746,6 +923,139 @@ function editableAttributes(mode) {
   return SCHEMA.attributes.filter(function (row) {
     return mode ? row.editable === mode : !!row.editable;
   });
+}
+
+// ---------------------------------------------------------------------------
+// THE ATTRIBUTES A DECLARATION IS MADE OF, ONE ROW PER ATTRIBUTE AND NOT ONE
+// PER FAMILY.
+//
+// `/admin/applications/new` draws a field for each of these and `GET
+// /admin-api/applications/new` publishes them, so the form and the document a
+// caller reads to learn what it may send come off ONE walk of the PROTOCOLS
+// table. Building the list in the console instead was the obvious thing and it
+// is exactly the drift this module exists to prevent: the page would have had
+// its own idea of which attribute a family's identifier goes in, and
+// `createApplication()` would have had another.
+//
+// **IT IS DEDUPED BY ATTRIBUTE**, which is what makes it fourteen rows for
+// fourteen families rather than fourteen for fourteen by coincidence. Three
+// families name `oauthClientId` and two name `samlEntityId`, because the
+// specifications genuinely share those identifiers — see the PROTOCOLS header —
+// so a row carries the LIST of families it serves and the form says so under
+// the field. Two inputs writing one attribute would be a form that silently
+// dropped whichever the reader filled in second.
+//
+// The order is first appearance in the PROTOCOLS table, with a family's
+// identifier ahead of its redirect URI, so the fields read in the order the
+// checkboxes above them do.
+// ---------------------------------------------------------------------------
+function declarationAttributes() {
+  log.debug("Entering declarationAttributes().");
+  const rows = [];
+  const byAttribute = {};
+  function note(attribute, role, family) {
+    if (!attribute) {
+      return;
+    }
+    const schemaRow = ATTRIBUTE_BY_NAME[attribute];
+    if (!schemaRow) {
+      // A family naming an attribute the schema does not have. It cannot be
+      // written — setField() refuses it — so drawing a field for it would be
+      // offering a control whose only outcome is a silent no. Warned rather
+      // than thrown for the reason setField() warns: this is a table somebody
+      // edited, and the service starting is more useful than it not.
+      log.warn('applications: the protocol table names "' + attribute + '" as an ' +
+               'attribute and SCHEMA.attributes has no such row. No field is offered for ' +
+               'it. Add the row rather than removing the reference.');
+      return;
+    }
+    if (!byAttribute[attribute]) {
+      byAttribute[attribute] = {
+        attribute: attribute,
+        role: role,
+        kind: schemaRow.kind,
+        editable: schemaRow.editable,
+        sensitive: !!schemaRow.sensitive,
+        what: schemaRow.what,
+        families: []
+      };
+      rows.push(byAttribute[attribute]);
+    }
+    byAttribute[attribute].families.push({ id: family.id, label: family.label });
+  }
+  PROTOCOLS.forEach(function (family) {
+    note(family.identifierAttribute, 'identifier', family);
+    note(family.redirectAttribute, 'redirect', family);
+  });
+  log.debug("Leaving declarationAttributes(). " + rows.length + " attribute(s) for " +
+            PROTOCOLS.length + " family/families.");
+  return rows;
+}
+
+const DECLARATION_ATTRIBUTE_NAMES = declarationAttributes().map(function (row) {
+  return row.attribute;
+});
+
+// ---------------------------------------------------------------------------
+// THE VALUES A CREATE MAY CARRY, validated whole before anything is written.
+//
+// Same rule the protocol families go through one function above and for the
+// same reason: a create that half-succeeded — the entry there, one field
+// silently dropped — is worse than a refusal, because what is left reads as a
+// complete declaration of what somebody typed.
+//
+// **THE GATE IS `EDITABLE`, NOT THE SCHEMA.** An attribute has to be in the
+// table AND declared rather than derived: a create that could set
+// `appAuthentications` or `appProtocol` would let a form assert that things had
+// happened, which is the line this module's EDITABLE header draws and the one
+// `updateApplication()` already refuses at. So this refuses the derived ones by
+// name and says which they are, rather than writing them and leaving the page
+// to lie.
+//
+// A `single` attribute given several values is REFUSED rather than truncated.
+// Taking the first would be a form quietly keeping one of two things a person
+// typed, and the only single-valued identifier here is the one an RFC 8705
+// check compares by exact string — where quietly keeping one is precisely the
+// wrong answer.
+// ---------------------------------------------------------------------------
+function normaliseFields(value) {
+  log.debug("Entering normaliseFields().");
+  const asked = (value && typeof value === 'object') ? value : {};
+  const errors = [];
+  const fields = {};
+  Object.keys(asked).forEach(function (name) {
+    const values = valuesOf(asked[name]);
+    if (!values.length) {
+      // An empty box is not a value and is not an error either. Every field on
+      // the create form is optional, so most of them arrive empty on every
+      // post.
+      return;
+    }
+    const row = ATTRIBUTE_BY_NAME[name];
+    if (!row) {
+      errors.push('"' + name + '" is not in the published schema. GET /ldap/applications ' +
+                  'lists every attribute an entry may carry; adding one that is not there ' +
+                  'means adding a row to SCHEMA.attributes, not writing it through this.');
+      return;
+    }
+    if (!row.editable) {
+      errors.push('"' + name + '" cannot be given here. It is DERIVED — what has happened ' +
+                  'to this application rather than what it may do — and an entry created ' +
+                  'with one would be asserting a past it does not have. It is accumulated ' +
+                  'by the protocol endpoints as they accept this identifier.');
+      return;
+    }
+    if (row.kind !== 'multi' && values.length > 1) {
+      errors.push('"' + name + '" holds ONE value and ' + values.length + ' were given. ' +
+                  'It is single-valued in the published schema, so the alternative to ' +
+                  'refusing this is keeping one of them and discarding the rest silently.');
+      return;
+    }
+    fields[name] = row.kind === 'multi' ? values : values[0];
+  });
+  log.debug("Leaving normaliseFields(). " + Object.keys(fields).length + " field(s), " +
+            errors.length + " error(s).");
+  return { ok: !errors.length, fields: fields, errors: errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1936,24 @@ function createApplication(detail) {
     log.debug("Leaving createApplication().");
     return { ok: false, errors: asked.errors };
   }
+  // THE ATTRIBUTES THE CREATE CARRIES — the per-family identifiers and the
+  // redirect URIs the form asks for, and anything else editable a caller sends.
+  // Validated before the entry exists, for the reason the families above are:
+  // an entry created with a client_id and without the redirect URI somebody
+  // typed beside it is an entry that reads as finished.
+  //
+  // THIS PARAMETER WAS BEING IGNORED. `saml2Action()` and `saml11Action()` in
+  // admin.js have passed `fields: { samlEntityId: identifier }` since they were
+  // written and it went nowhere — so registering a service provider from the
+  // console produced an entry with no entityID on it, and the attribute only
+  // appeared later when a real AuthnRequest arrived and seen() wrote it. Both
+  // now work, which is a change in what those two buttons produce.
+  const given = normaliseFields(info.fields);
+  if (!given.ok) {
+    log.debug("Leaving createApplication(). " + given.errors.length + " bad field(s).");
+    log.debug("Leaving createApplication().");
+    return { ok: false, errors: given.errors };
+  }
   const record = loaded.record;
   const now = Date.now();
   record.firstAt = now;
@@ -1643,6 +1971,15 @@ function createApplication(detail) {
   if (asked.protocols.length) {
     setField(record, 'appAllowedProtocol', asked.protocols);
   }
+  // Through setField(), so a `multi` attribute accumulates and a `single` one is
+  // assigned exactly as they would on any other write. The record is blank here
+  // so nothing can be accumulated ONTO — but going round setField() would be a
+  // second place that decision is made, and the first time the two disagreed
+  // would be the first time somebody created an application over one that had
+  // just been deleted.
+  Object.keys(given.fields).forEach(function (name) {
+    setField(record, name, given.fields[name]);
+  });
   // WHERE IT CAME FROM, said on the entry itself. An application created here
   // has never authenticated anything and its counters are zero; without this
   // line a reader would have to infer that from the zeros, and "created by hand"
@@ -1660,7 +1997,11 @@ function createApplication(detail) {
     summary: 'Application "' + identifier + '" was created from the console' +
              (kind ? ' (' + kind + ')' : ''),
     detail: { identifier: identifier, kind: kind || '', createdByHand: true,
-              protocols: asked.protocols.join(', ') }
+              protocols: asked.protocols.join(', '),
+              // The NAMES only. One of the editable attributes a create can
+              // carry is oauthClientSecret, and audit.js's no-credential rule
+              // is not something this caller gets to make an exception to.
+              attributes: Object.keys(given.fields).join(', ') }
   });
   log.info('applications: "' + identifier + '" was created by hand' +
            (asked.protocols.length ? ', declared for ' + asked.protocols.join(', ') : '') +
@@ -2229,6 +2570,13 @@ module.exports = {
   // second answer to "has this family ever been seen".
   protocolIdsForKinds: protocolIdsForKinds,
   normaliseProtocols: normaliseProtocols,
+  // The identifier and redirect-URI attributes the create form is built from,
+  // deduped by attribute and carrying the families each one serves. One walk of
+  // the PROTOCOLS table serves the console's fields and the management API's
+  // document, so neither can offer a field the other has never heard of.
+  declarationAttributes: declarationAttributes,
+  DECLARATION_ATTRIBUTE_NAMES: DECLARATION_ATTRIBUTE_NAMES,
+  normaliseFields: normaliseFields,
   SCHEMA: SCHEMA,
   seen: seen,
   register: register,

@@ -8097,6 +8097,59 @@ function kindCells(kinds) {
 // the point. This handler renders and decides nothing: it validates that an
 // action exists and hands the rest over, exactly as the console does for groups.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE ATTRIBUTE VALUES A CREATE CARRIES, IN THE TWO SPELLINGS THIS FUNCTION IS
+// REACHED IN.
+//
+// The console's form posts one flat field per attribute, named
+// `field.<attribute>`, with a multi-valued one holding its values on separate
+// lines in a textarea. A JSON caller of POST /admin-api/applications/create
+// sends one `fields` object instead, whose members are strings or arrays. Both
+// land here as the same object and `applications.normaliseFields()` is the one
+// place either is validated — the same arrangement `listField()` gives the
+// protocol checkboxes one field up, and for the same reason: two doors onto one
+// action must not be two readings of what was sent.
+//
+// **THE SPLIT IS ON NEWLINES AND DELIBERATELY NOT ON COMMAS OR SPACES.** A
+// redirect URI may legally contain both and may not contain a newline, so
+// splitting on anything else would cut one URI into two that each fail to match
+// — silently, and only in RFC 9700 mode, which is the worst possible place for
+// it to surface. `protocols` splits on spaces and commas because a family id is
+// a short lower-case word; these are URLs, DNs and URNs.
+//
+// The prefix is stripped rather than the whole body being scanned for schema
+// names, so a future field called `name` or `action` cannot be mistaken for an
+// attribute.
+// ---------------------------------------------------------------------------
+const FIELD_PREFIX = 'field.';
+
+function applicationFieldsFrom(body) {
+  log.debug("Entering applicationFieldsFrom().");
+  const fields = {};
+  // A JSON body's own `fields` object first, so a caller sending both gets the
+  // flat fields merged over it rather than one of the two silently winning.
+  const given = (body && typeof body.fields === 'object' && body.fields) || {};
+  Object.keys(given).forEach(function (name) { fields[name] = given[name]; });
+  Object.keys(body || {}).forEach(function (key) {
+    if (key.indexOf(FIELD_PREFIX) !== 0) {
+      return;
+    }
+    const name = key.slice(FIELD_PREFIX.length);
+    if (!name) {
+      return;
+    }
+    const values = String(body[key] === undefined ? '' : body[key])
+      .split(/\r?\n/)
+      .map(function (one) { return one.trim(); })
+      .filter(function (one) { return one !== ''; });
+    if (values.length) {
+      fields[name] = values;
+    }
+  });
+  log.debug("Leaving applicationFieldsFrom(). " + Object.keys(fields).length + " field(s).");
+  return fields;
+}
+
 function applicationsAction(body, protocols) {
   log.debug("Entering applicationsAction(). action=" + (body.action || '(none)'));
   const action = String(body.action || '');
@@ -8128,8 +8181,12 @@ function applicationsAction(body, protocols) {
     const result = applications.createApplication({
       identifier: String(body.identifier || body.application || ''),
       name: String(body.name || ''),
+      // STILL TAKEN, though no form offers it any more: saml2Action() and
+      // saml11Action() pass one when they register a service provider, and a
+      // JSON caller may. What went was the select that asked a person to guess.
       kind: String(body.kind || ''),
-      protocols: asked
+      protocols: asked,
+      fields: applicationFieldsFrom(body)
     });
     log.debug("Leaving applicationsAction(). create " + (result.ok ? 'ok' : 'refused') + ".");
     if (!result.ok) return result;
@@ -8145,8 +8202,15 @@ function applicationsAction(body, protocols) {
                           'and this application can still reach every other protocol here. '
                         : 'No protocol family was declared for it, which changes nothing about ' +
                           'what it may reach — the declaration is a record of intent. ') +
-                      'Give it the redirect URIs and grant types it is allowed, and ' +
-                      'RFC 9700 mode will judge it against them.' };
+                      (Object.keys(applicationFieldsFrom(body)).length
+                        ? 'The attributes given with it are on the entry now: a redirect URI ' +
+                          'among them is what RFC 9700 mode matches the next authorization ' +
+                          'request against, by exact string comparison, and the rest are ' +
+                          'recorded rather than checked.'
+                        : 'It carries no identifier and no redirect URI yet. Give it the ones ' +
+                          'it is allowed and RFC 9700 mode will judge it against them; without ' +
+                          'them a redirect_uri is judged against the oauth2.redirectUris ' +
+                          'setting instead.') };
   }
 
   if (action === 'set' || action === 'add' || action === 'remove') {
@@ -8441,15 +8505,16 @@ function applicationsListPage(req) {
     'placeholder="client_id, wtrealm, entityID or SPN">' +
     '<label for="newname">Name</label>' +
     '<input type="text" id="newname" name="name" size="18" placeholder="optional">' +
-    '<label for="newkind">Kind</label>' +
-    '<select id="newkind" name="kind">' +
-    '<option value="">unstated</option>' +
-    applications.KINDS.map(function (one) {
-      return '<option value="' + esc(one.kind) + '">' + esc(one.label) + '</option>';
-    }).join('') +
-    '</select>' +
     '<button type="submit">Add</button>' +
     '</div></form>' +
+    '<p class="note">This row takes the identifier and a name and nothing else &mdash; it is ' +
+    'the short way in for somebody already looking at the list. The <em>Kind</em> select that ' +
+    'used to sit in it is gone for the reason <a href="/admin/applications/new">New ' +
+    'application</a> gives at length: it asked the same question the protocol families do, in ' +
+    'a vocabulary that does not line up with theirs, and it is DERIVED rather than declared ' +
+    '&mdash; a kind is written when a protocol actually recognises the identifier. The fuller ' +
+    'form is where the families, the per-protocol identifiers and the redirect URIs are, and ' +
+    'an entry made here can be given all of them afterwards from its own page.</p>' +
     '<p class="note"><strong>One entry per identifier, whatever protocol brought it.</strong> ' +
     'The key is the identifier exactly as it arrived &mdash; not lower-cased and not ' +
     'namespaced by protocol &mdash; so an application appearing under one name in two ' +
@@ -8806,18 +8871,40 @@ app.get('/admin/applications', function (req, res) {
 // and there is none here.
 //
 // So the question this page has to answer is the one that file's header asks —
-// what is different about the READER'S TASK — and there are two answers:
+// what is different about the READER'S TASK — and there are three answers:
 //
 //   * **THE PROTOCOL FAMILIES.** Fourteen checkboxes with a sentence each do
 //     not fit in a `.formrow` at the foot of a table of every application this
 //     service has ever seen; they are a table of their own, and the row on the
 //     list page would have had to become a link to somewhere anyway.
+//   * **THE IDENTIFIERS AND THE REDIRECT URIS.** Fourteen more fields, which is
+//     the 2026-08-25 change and the reason this page is now the only place a
+//     whole application can be configured in one post. Before it, a create took
+//     an identifier and a name and nothing else: every attribute that actually
+//     CONFIGURES the application — the client_id RFC 9700 mode reads, the
+//     redirect URIs it matches against, the entityID, the wtrealm — had to be
+//     added afterwards, one `add` at a time, from a different page.
 //   * **Creating one is a DIFFERENT ERRAND from reading the list.** Somebody
 //     configuring a relying party before it connects has not come to look at
 //     what has already connected, and on the list page that form is below the
 //     paging — so on a service with forty applications it is off the bottom of
 //     the screen, and the one control a person came for is the one they have to
 //     hunt for.
+//
+// **THE KIND SELECT IS GONE, AND ITS ABSENCE IS THE POINT RATHER THAN A
+// TIDY-UP.** This page used to ask for a KIND as well as for the families, and
+// they were two vocabularies for one question that did not line up: eight kinds
+// against fourteen families, five of those families having no kind at all, and
+// a reader made to choose in both. Worse, the two are on opposite sides of the
+// line `applications.js`'s EDITABLE header draws — a family is DECLARED and a
+// kind is DERIVED, written by `seen()` when a protocol actually recognises the
+// identifier — so the select let a form assert a sighting that had not
+// happened, and `view()`'s `recordedProtocols` had to carry a paragraph saying
+// it was not evidence of traffic. The families won because they are what an
+// operator is actually declaring. `createApplication()` still TAKES a kind,
+// because `saml2Action()` and `saml11Action()` pass one when they register a
+// service provider from its own page, and that is a protocol module's statement
+// rather than a person's guess in a select.
 //
 // The inline form STAYS, for the same reason the sign-out page did not remove
 // `/oauth2/logout`: it is where somebody already looking at the list will
@@ -8849,6 +8936,122 @@ function protocolChoiceRow(row) {
     '<td>' + kindCell + '</td>' +
     '<td class="why">' + esc(row.what) + '</td></tr>';
 }
+
+// ---------------------------------------------------------------------------
+// ONE DECLARED ATTRIBUTE AS A ROW OF THE IDENTIFIERS OR REDIRECT URIS TABLE.
+//
+// The rows come from `applications.declarationAttributes()`, which walks the
+// PROTOCOLS table and dedupes by ATTRIBUTE — so this renders fourteen fields
+// for fourteen families rather than one per family, and names the families each
+// field serves underneath it. Building that list here instead was the obvious
+// thing and would have been a second opinion about which attribute a family's
+// identifier goes in; `createApplication()` has the first.
+//
+// **THE FIELD NAME IS `field.<attribute>` AND THE ATTRIBUTE IS THE SCHEMA'S OWN
+// NAME**, not a friendly one. Two reasons, and the second is the load-bearing
+// one: an `ldapsearch` on this entry shows exactly the name that was on the
+// form, and `POST /admin-api/applications/create` takes the same names in its
+// `fields` object — so the console and the management API are one vocabulary
+// and a person who learns the page can drive the API.
+//
+// A `multi` attribute gets a TEXTAREA, one value per line, and a `single` one
+// gets an input. Newline-separated rather than comma-separated because a
+// redirect URI may legally contain a comma and may not contain a newline;
+// splitting on commas would silently cut one URI into two that both fail to
+// match. There is exactly one single-valued field here — mutual TLS's
+// `oauthTlsClientAuthSubjectDn` — and the row says why rather than leaving a
+// reader to notice that one box is a different shape.
+// ---------------------------------------------------------------------------
+function declarationFieldRow(row) {
+  const families = row.families.map(function (one) {
+    return esc(one.label);
+  }).join(', ');
+  const control = row.kind === 'multi'
+    ? '<textarea id="field-' + esc(row.attribute) + '" name="field.' + esc(row.attribute) +
+      '" rows="3" cols="42" placeholder="one per line; leave empty for none"></textarea>'
+    : '<input type="text" id="field-' + esc(row.attribute) + '" name="field.' +
+      esc(row.attribute) + '" size="42" placeholder="optional">';
+  const shape = row.kind === 'multi'
+    ? '<span class="note">a list &mdash; one value per line</span>'
+    : '<span class="state-none">one value only &mdash; an RFC 8705 check compares this ' +
+      'string to a certificate\'s subject by exact equality, so it cannot hold a list ' +
+      'until somebody decides what &ldquo;any of these&rdquo; should mean to that check</span>';
+  return '<tr><td><label for="field-' + esc(row.attribute) + '"><code>' +
+    esc(row.attribute) + '</code></label></td>' +
+    '<td>' + families + '</td>' +
+    '<td>' + control + '<br>' + shape + '</td>' +
+    '<td class="why">' + esc(row.what) + '</td></tr>';
+}
+
+// The two tables, split by what the attribute IS rather than drawn as one list
+// of fourteen. A reader filling this in is answering two different questions —
+// "what is this application called" and "where does a response go back to" —
+// and the second only exists for the three families that send one through a
+// browser.
+function declarationFieldsSection(role, heading, intro) {
+  log.debug("Entering declarationFieldsSection(). role=" + role);
+  const rows = applications.declarationAttributes().filter(function (one) {
+    return one.role === role;
+  });
+  if (!rows.length) {
+    // Not reachable with the table as it stands, and drawn as nothing rather
+    // than as an empty table if a family is ever the last of its kind to be
+    // removed. An empty <table> with a header row reads as data having gone
+    // missing.
+    log.debug("Leaving declarationFieldsSection(). Nothing to offer.");
+    return '';
+  }
+  log.debug("Leaving declarationFieldsSection(). " + rows.length + " field(s).");
+  return '<h2>' + heading + '</h2>' + intro +
+    '<table><tr><th>Attribute</th><th>Families it serves</th><th>Value</th>' +
+    '<th>What it is</th></tr>' +
+    rows.map(declarationFieldRow).join('') +
+    '</table>';
+}
+
+const NEW_APPLICATION_IDENTIFIERS_INTRO =
+  '<p class="note">The name this application answers to in each family it speaks. They are ' +
+  'all optional and all independent of the <em>Identifier</em> above &mdash; that one is the ' +
+  'KEY this registry files the entry under, and these are what the protocols will present. ' +
+  'For an ordinary OAuth client the two are the same string, which is what a protocol sighting ' +
+  'writes anyway; they differ when one application answers to a client_id in one environment ' +
+  'and another in the next, or when it is a SAML service provider whose entityID is a URN and ' +
+  'whose entry you would rather file under a readable name.</p>' +
+  '<p class="note"><strong>Several families share a field where the specifications share the ' +
+  'identifier.</strong> An OpenID Connect relying party IS an OAuth client and an OpenID4VCI ' +
+  'wallet authenticates as one, so all three declare their name in ' +
+  '<code>oauthClientId</code>; both SAML profiles name the same party, so both use ' +
+  '<code>samlEntityId</code>. Two boxes writing one attribute would be a form that silently ' +
+  'kept whichever was filled in second.</p>' +
+  '<p class="note"><strong>Four of these are declaration and only ever declaration.</strong> ' +
+  'Nothing in this service writes <code>federationPartnerId</code>, <code>ldapBindDn</code>, ' +
+  '<code>scimClientId</code> or <code>spiffeWorkloadId</code>, because those surfaces either ' +
+  'authenticate the CALLER rather than an application, or file the identity in a container of ' +
+  'their own. The value is a note about what this application is, in the one place the rest of ' +
+  'what it is already lives &mdash; and, like every other field here, it grants nothing: a ' +
+  'federation partner declared here federates with nobody until a relationship under ' +
+  '<code>ou=federations</code> says so.</p>';
+
+const NEW_APPLICATION_REDIRECTS_INTRO =
+  '<p class="note">Where a response goes back to. Only three families send one through a ' +
+  'browser, which is why there are three of these and fourteen identifiers above.</p>' +
+  '<p class="note"><strong>Only the OAuth list is ever CHECKED, and only in RFC 9700 ' +
+  'mode.</strong> <code>oauthRedirectUri</code> is what section 2.1\'s exact string ' +
+  'comparison reads &mdash; give an application its redirect URIs here and the next ' +
+  'authorization request is judged against them rather than against the ' +
+  '<code>oauth2.redirectUris</code> setting, which is most of the reason to create an entry ' +
+  'before the application connects. <code>samlAssertionConsumerService</code> and ' +
+  '<code>wsfedReplyUrl</code> are RECORDED AND NOT CHECKED: a SAML response goes wherever the ' +
+  'AuthnRequest asked and a <code>wsignin1.0</code> response goes to whatever ' +
+  '<code>wreply</code> named, because a mock that refused would remove a test case rather than ' +
+  'add one. The SAML one is READ for something else &mdash; it is the fallback used when a ' +
+  'Single Logout has nowhere else to go, which is why WS-Federation\'s ' +
+  '<code>wreply</code> stopped being written into it on 2026-08-25 and has a field of its ' +
+  'own.</p>' +
+  '<p class="note"><strong>What a client has actually USED is a different attribute and is ' +
+  'not here.</strong> <code>appRedirectUriObserved</code> records a redirect_uri seen on a ' +
+  'request this service answered, it is not editable anywhere in this console, and RFC 9700 ' +
+  'section 2.1 is entirely about not confusing the two.</p>';
 
 const NEW_APPLICATION_NOTES =
   '<p class="note"><strong>Declaring a protocol family grants nothing and refuses ' +
@@ -8903,7 +9106,8 @@ function newApplicationPage(req) {
         '<code>ldap/ldap_server.js</code> rather than a fault.</p>' + APPLICATIONS_LINKS,
       json: { directory: false, container: null, max: null, applicationCount: held,
               realm: { id: realms.currentId(), name: realm ? realm.name : '' },
-              kinds: applications.KINDS, protocols: applications.PROTOCOLS }
+              kinds: applications.KINDS, protocols: applications.PROTOCOLS,
+              declarations: applications.declarationAttributes() }
     };
   }
 
@@ -8942,19 +9146,17 @@ function newApplicationPage(req) {
     '<div class="formrow">' +
     '<label for="newname">Name</label>' +
     '<input type="text" id="newname" name="name" size="24" placeholder="optional">' +
-    '<label for="newkind">Kind</label>' +
-    '<select id="newkind" name="kind">' +
-    '<option value="">unstated</option>' +
-    applications.KINDS.map(function (one) {
-      return '<option value="' + esc(one.kind) + '">' + esc(one.label) + '</option>';
-    }).join('') +
-    '</select>' +
     '</div>' +
     '<p class="note">The name is what pages call it; with none given the identifier is the ' +
-    'name, because inventing a friendly name for an opaque id would be inventing a fact. The ' +
-    'kind is optional and is a claim about what this application IS &mdash; a record ' +
-    'ACCUMULATES kinds as protocols recognise it, so the one chosen here is a starting point ' +
-    'and not the whole answer.</p>' +
+    'name, because inventing a friendly name for an opaque id would be inventing a fact.</p>' +
+    '<p class="note"><strong>There is no <em>Kind</em> to choose and that is deliberate.</strong> ' +
+    'It used to be a select here, and it asked the same question the protocol families below ' +
+    'do in a vocabulary that does not line up with theirs &mdash; eight kinds against fourteen ' +
+    'families, five of which have no kind at all. It is also the wrong side of the line this ' +
+    'registry draws: a family is DECLARED and a kind is DERIVED, written when a protocol ' +
+    'actually recognises the identifier, so choosing one here was a form asserting a sighting ' +
+    'that had not happened. Tick the families instead; the kinds fill themselves in as this ' +
+    'application is used.</p>' +
 
     '<h2>Protocol families it is declared for</h2>' +
     '<p class="note">Tick as many as apply. The list is CLOSED &mdash; a value that is not one ' +
@@ -8964,6 +9166,12 @@ function newApplicationPage(req) {
     '<th>Recorded as, when it turns up</th><th>What it means</th></tr>' +
     applications.PROTOCOLS.map(protocolChoiceRow).join('') +
     '</table>' +
+
+    declarationFieldsSection('identifier', 'What each protocol will call it',
+                             NEW_APPLICATION_IDENTIFIERS_INTRO) +
+    declarationFieldsSection('redirect', 'Where responses go back to',
+                             NEW_APPLICATION_REDIRECTS_INTRO) +
+
     '<div class="formrow"><button type="submit">Create the application</button>' +
     '<span class="note">It is created with zero counters and a description saying it was made ' +
     'by hand, so it cannot be mistaken for one that turned up once and never came back. You ' +
@@ -8987,8 +9195,20 @@ function newApplicationPage(req) {
       // to learn what it may send, which is what stops a document and a form
       // offering different sets. The `editable` list is what comes NEXT — the
       // attributes a create cannot take and `set`/`add` can.
+      // `kinds` is still published and the form no longer offers it, which is
+      // not a contradiction: `createApplication()` still TAKES a kind — the two
+      // SAML register buttons pass one — so a caller of POST
+      // /admin-api/applications/create may send one and needs the vocabulary to
+      // send it from. What was removed is a person being asked to guess.
       kinds: applications.KINDS,
       protocols: applications.PROTOCOLS,
+      // THE FIELDS THIS FORM DRAWS, in the order it draws them: the identifier
+      // and redirect-URI attributes, deduped by attribute, each carrying the
+      // families it serves and whether it holds a list. A caller reads this to
+      // learn what may go in `fields` on a create, which is the same walk of
+      // the PROTOCOLS table the page itself renders — so the document cannot
+      // offer a field the form has never heard of, nor the other way round.
+      declarations: applications.declarationAttributes(),
       editable: applications.editableAttributes().map(function (row) {
         return { name: row.name, mode: row.editable, sensitive: !!row.sensitive };
       })
