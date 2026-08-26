@@ -49,7 +49,6 @@ clean.sh
 # service, and the webapp has a separate build context of its own, so nothing
 # here needs it. Excluding it also keeps a change to the test from busting the
 # image layer cache.
-federation-e2e
 # The in-process contract tests, excluded for the same two reasons and a third.
 # They assert this repository's MODULE CONTRACTS by requiring the modules
 # directly, so they are a property of the source tree rather than of the running

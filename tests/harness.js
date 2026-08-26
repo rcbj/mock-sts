@@ -13,10 +13,12 @@
 // need a dependency to run they stop being cheaper than the parent project's
 // suite, which is where everything driven over HTTP already lives.
 //
-// The shape is `federation-e2e/drive.js`'s, on purpose: bunyan rather than
-// console so a run reads like the parent project's tests/*.js and can be
-// filtered by level, a tick or a cross per assertion, and the failures repeated
-// at the end so a long run does not have to be scrolled.
+// The shape is the parent project's `tests/*.js`, on purpose: bunyan rather than
+// console so a run reads the same way and can be filtered by level, a tick or a
+// cross per assertion, and the failures repeated at the end so a long run does
+// not have to be scrolled. It was copied from `federation-e2e/drive.js`, which
+// had the same shape for the same reason and was removed on 2026-08-26 when
+// trust realms made its three-container stack unnecessary.
 // ===========================================================================
 
 const bunyan = require('bunyan');

@@ -15,8 +15,15 @@ kinds:
 
 | Kind | Where | Why it cannot be in the parent suite |
 |---|---|---|
-| An INTEGRATION test that needs several copies of this service | `../federation-e2e/` | It brings up its own three-container stack |
 | An IN-PROCESS test of this repository's own MODULE CONTRACTS | here | It requires this repository's modules and `node_modules` directly, and some of what it asserts is invisible to any caller over HTTP |
+
+There was a second row until 2026-08-26 — *an INTEGRATION test that needs
+several copies of this service*, which was `../federation-e2e/` and its own
+three-container stack. **TRUST REALMS closed it.** A realm is a whole logical
+copy of this service on the same socket under a path prefix, so several copies
+is one process now and the parent suite can reach the whole topology over HTTP:
+that test is `tests/federation_sso.js` over there. Check whether realms already
+answer the question before re-opening that row.
 
 That second row is what this directory added on 2026-08-25, and the case for it
 is a specific one rather than a general preference. `config_realm_layer.js`

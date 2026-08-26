@@ -77,6 +77,14 @@ const stats = require('../common/admin_stats');
 // require back from here to that module would be a cycle. The register in the
 // middle is what both halves can safely reach.
 const federation = require('./../federation/federation');
+// The application registry, for the one attribute on an entry that decides
+// where that application's people are sent to sign in —
+// `appFederationRelationship`. Same shape of dependency as the register above
+// and it passes the same test: `common/applications.js` requires config.js,
+// helpers.js and audit.js and nothing else here, so there is no cycle to close,
+// and it registers no route, so requiring it moves nothing in the require
+// order.
+const applications = require('../common/applications');
 // For one thing only: whether the main port is an HTTPS listener, which decides
 // the Secure attribute on the session cookie below.
 const config = require('../common/config');
@@ -618,6 +626,104 @@ function endSession(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// WHERE THIS APPLICATION'S PEOPLE SIGN IN, if its entry says.
+//
+// An application entry may name a federation relationship
+// (`appFederationRelationship`), which is the registry answering a question it
+// could not answer before: a relationship under `ou=federations` says how to
+// talk to a foreign identity provider and nothing about WHO should be sent
+// there, and until this attribute existed the only answer was a person
+// choosing a button at the foot of the screen below — home realm discovery
+// performed by the user, once per sign-in.
+//
+// FOUR CHECKS, AND EACH OF THEM IS MADE HERE RATHER THAN AT THE WRITE.
+// The attribute is a string on a directory entry: `ldapmodify` reaches it, so
+// does the management API, and the relationship it names can be disabled or
+// deleted afterwards by somebody who never looked at this application. A check
+// made when it was written would therefore be a check about the past. The
+// relationship must exist IN THIS REALM (the register is per realm, so an id
+// from another realm names nothing here), must be service-provider-side (the
+// other direction is this service asserting TO that partner — there is nothing
+// to sign in to), must be enabled, and must be fully configured.
+//
+// A failure of any of them is REPORTED rather than swallowed, in `problem`,
+// and the caller shows it on the sign-in screen. The alternative — falling
+// silently back to the password box — is a federated application quietly
+// authenticating people locally, which looks exactly like it working.
+//
+// Returns null when there is nothing to say: no application named, no entry,
+// or no relationship on the entry. That is the ordinary case and it is the
+// first thing checked, because every sign-in in this service passes through
+// here.
+// ---------------------------------------------------------------------------
+function federationFor(applicationId) {
+  log.debug("Entering federationFor(). application=" +
+            (applicationId || '(none)'));
+  const wanted = String(applicationId || '').trim();
+  if (!wanted) {
+    log.debug("Leaving federationFor(). The caller named no application.");
+    return null;
+  }
+  let entry = null;
+  try {
+    entry = applications.get(wanted);
+  } catch (e) {
+    // Swallowed with a reason, and it is the same reason
+    // federatedOptionsHtml() below swallows the register's: this runs on the
+    // way to the sign-in screen, so a registry that throws must cost the
+    // shortcut and never the screen.
+    log.error('authn: the application registry threw while looking "' + wanted +
+              '" up on the way to the sign-in screen and was ignored; the ' +
+              'screen itself is unaffected: ' + e.message);
+    log.debug("Leaving federationFor(). The registry threw.");
+    return null;
+  }
+  const named = String(((entry || {}).fields ||
+                        {}).appFederationRelationship || '').trim();
+  if (!named) {
+    log.debug("Leaving federationFor(). That application names no partner.");
+    return null;
+  }
+  const auto = federation.boolOf(((entry || {}).fields ||
+                                  {}).appFederationAutoRedirect, true);
+  const record = federation.get(named);
+  if (!record) {
+    log.debug("Leaving federationFor(). No such relationship in this realm.");
+    return { id: named, relationship: null, auto: auto,
+             problem: 'This application is configured to authenticate through ' +
+                      'the federation relationship "' + named + '", and there ' +
+                      'is no such relationship in this trust realm.' };
+  }
+  if (record.fedRole !== 'service-provider') {
+    log.debug("Leaving federationFor(). It goes the other way.");
+    return { id: named, relationship: null, auto: auto,
+             problem: 'This application names the federation relationship "' +
+                      named + '", which is identity-provider-side: this ' +
+                      'service ASSERTS to that partner rather than consuming ' +
+                      'from it, so there is nothing to sign in to there.' };
+  }
+  if (!federation.isEnabled(record)) {
+    log.debug("Leaving federationFor(). It is disabled.");
+    return { id: named, relationship: null, auto: auto,
+             problem: 'This application authenticates through the federation ' +
+                      'relationship "' + named + '", which is DISABLED. Every ' +
+                      'relationship is created disabled deliberately; enable ' +
+                      'it on /admin/federation.' };
+  }
+  const readiness = federation.readinessOf(record);
+  if (!readiness.ready) {
+    log.debug("Leaving federationFor(). It is not fully configured.");
+    return { id: named, relationship: null, auto: auto,
+             problem: 'This application authenticates through the federation ' +
+                      'relationship "' + named + '", which is enabled and not ' +
+                      'fully configured: ' + readiness.missing.join(', ') +
+                      ' still to set.' };
+  }
+  log.debug("Leaving federationFor(). " + named + ", auto=" + auto + ".");
+  return { id: named, relationship: record, auto: auto, problem: '' };
+}
+
+// ---------------------------------------------------------------------------
 // THE ENTRY POINT A PROTOCOL MODULE CALLS.
 //
 //   returnTo   where to send the browser once they are signed in — a path on
@@ -633,10 +739,23 @@ function endSession(req, res) {
 //   protocol   what to record the sign-in AS, for the admin console — this
 //              service cannot tell, and "every sign-in is an OIDC one" is
 //              exactly the wrong answer once more than one protocol uses it.
+//   application the identifier the caller's own protocol presented — a
+//              client_id, an entityID, a relying party id. OPTIONAL, and every
+//              caller that has one passes it, because it is what decides
+//              whether this sign-in is federated: see federationFor() above.
+//              Nothing else is done with it, and an identifier this registry
+//              has never heard of is not an error.
 //
 // Returns the path to redirect to. A path rather than a full URL: the browser
 // is already on this origin, and building an absolute URL here would mean
-// guessing the base the caller was reached on.
+// guessing the base the caller was reached on. IT IS NOT ALWAYS THIS MODULE'S
+// SCREEN — an application whose entry names a usable federation relationship,
+// with the auto-redirect left on, is answered with the federated flow's own
+// entry point instead. The caller cannot tell the two apart and must not: what
+// it asked for is "get this person authenticated and bring them back to
+// returnTo", and which identity provider does the authenticating is not its
+// business. That is the same property the buttons at the foot of the screen
+// have had all along; what is new is that nobody has to press one.
 // ---------------------------------------------------------------------------
 function beginAuthentication(opts) {
   log.debug("Entering beginAuthentication(). protocol=" + (opts.protocol || '(unnamed)'));
@@ -648,6 +767,32 @@ function beginAuthentication(opts) {
     throw new Error('beginAuthentication() needs a path on this service to return to, not "' +
                     returnTo + '".');
   }
+  // ---------------------------------------------------------------------
+  // HOME REALM DISCOVERY BY CONFIGURATION, and it happens BEFORE a pending
+  // record is written because there is nothing pending: the browser is going
+  // to a foreign identity provider and comes back to `/federation/acs/{id}`,
+  // which finishes the sign-in through startSession() without this screen ever
+  // being drawn. A record minted here would be one nothing could ever spend.
+  //
+  // `returnTo` has already been checked to be a path on this service, and
+  // `federation_sp.js` checks it AGAIN on the way in — see decision 4 there.
+  // Two checks on one value is deliberate: this one catches a caller's bug and
+  // that one catches somebody handing the federated entry point a returnTo of
+  // their own.
+  // ---------------------------------------------------------------------
+  const home = federationFor(opts.application);
+  if (home && home.relationship && home.auto) {
+    const target = federation.PATHS.login + '/' +
+      encodeURIComponent(home.relationship.fedId) +
+      '?returnTo=' + encodeURIComponent(returnTo);
+    log.info('authn: "' + String(opts.application) + '" authenticates through ' +
+             'the federation relationship "' + home.relationship.fedId +
+             '", so this sign-in goes straight there rather than to the sign-in ' +
+             'screen.');
+    log.debug("Leaving beginAuthentication(). Federated to " +
+              home.relationship.fedId + ".");
+    return target;
+  }
   const record = {
     id: randomId(18),
     returnTo: returnTo,
@@ -655,6 +800,11 @@ function beginAuthentication(opts) {
     hint: String(opts.hint || ''),
     forceMfa: !!opts.forceMfa,
     protocol: opts.protocol || 'OAuth 2.0 / OIDC',
+    // Carried so the screen can offer the RIGHT partner rather than every
+    // usable one, and so that a relationship this application names and cannot
+    // use is reported instead of being replaced by a password box.
+    application: String(opts.application || ''),
+    federation: home,
     expires: Date.now() + AUTHN_TTL_MS
   };
   pending.set(record.id, record);
@@ -737,6 +887,37 @@ function pendingFor(id) {
 // than an empty section with a heading.
 function federatedOptionsHtml(record) {
   log.debug("Entering federatedOptionsHtml().");
+  // ---------------------------------------------------------------------
+  // THE APPLICATION'S OWN PARTNER FIRST, AND ON ITS OWN.
+  //
+  // An entry naming a relationship has answered the question this list is
+  // asking, so offering the other partners beside it would be putting the
+  // discovery step back one line below the configuration that removed it.
+  //
+  // IT IGNORES `federation.loginButtons`, which the generic list below
+  // respects, and the asymmetry is the point rather than an oversight: that
+  // setting exists so that a service with no federation configured has a
+  // sign-in screen byte for byte the one it always had, and an application
+  // whose entry names a partner IS federation configured. The auto-redirect
+  // above cannot consult a screen setting either — it never draws a screen —
+  // so honouring it here would make the same configuration behave two ways
+  // depending on one unrelated boolean.
+  // ---------------------------------------------------------------------
+  const home = record.federation;
+  if (home && home.relationship) {
+    const html = federatedButtons(record, [{
+      id: home.relationship.fedId,
+      label: home.relationship.fedName || home.relationship.fedId,
+      protocolLabel: (federation.protocolRow(home.relationship.fedProtocol) ||
+                      {}).label || home.relationship.fedProtocol,
+      peer: home.relationship.fedPeer
+    }], 'This application signs its users in at a federated identity ' +
+        'provider. No password is typed here and none is checked there ' +
+        'either as far as this service can tell — what it checks is the ' +
+        'partner\'s signature.');
+    log.debug("Leaving federatedOptionsHtml(). The application's own partner.");
+    return html;
+  }
   if (!config.value('federation.loginButtons')) {
     log.debug("Leaving federatedOptionsHtml(). federation.loginButtons is off.");
     return '';
@@ -757,20 +938,33 @@ function federatedOptionsHtml(record) {
     log.debug("Leaving federatedOptionsHtml(). No usable partner is configured.");
     return '';
   }
+  const html = federatedButtons(record, options,
+    'Or sign in with a federated identity provider. No password is typed here ' +
+    'and none is checked there either as far as this service can tell — what ' +
+    'it checks is the partner\'s signature.');
+  log.debug("Leaving federatedOptionsHtml(). " + options.length + " partner(s) offered.");
+  return html;
+}
+
+// The markup, once, for both of the lists above. One function because the two
+// differ only in WHICH partners and what the sentence over them says, and two
+// copies of an anchor carrying a returnTo is two chances to drop the returnTo
+// from one of them — which produces a federated sign-in that succeeds and lands
+// the person on a page nobody asked for.
+function federatedButtons(record, options, blurb) {
+  log.debug("Entering federatedButtons(). " + options.length + " option(s).");
   // The whole original request rides along, so that whatever brought the person
   // here resumes once the partner has answered. It is `record.returnTo`, which
   // beginAuthentication() has already checked is a path on this service.
   const back = encodeURIComponent(record.returnTo);
-  const html = '<div class="fed"><p>Or sign in with a federated identity provider. ' +
-    'No password is typed here and none is checked there either as far as this service ' +
-    'can tell — what it checks is the partner\'s signature.</p>' +
+  const html = '<div class="fed"><p>' + blurb + '</p>' +
     options.map(function (one) {
       return '<a class="fedbtn" href="/federation/login/' + encodeURIComponent(one.id) +
         '?returnTo=' + back + '">' + xmlEscape(one.label) +
         '<span>' + xmlEscape(one.protocolLabel) +
         (one.peer ? ' · ' + xmlEscape(one.peer) : '') + '</span></a>';
     }).join('') + '</div>';
-  log.debug("Leaving federatedOptionsHtml(). " + options.length + " partner(s) offered.");
+  log.debug("Leaving federatedButtons().");
   return html;
 }
 
@@ -876,8 +1070,14 @@ app.get(LOGIN_PATH, function (req, res) {
       'There is no sign-in waiting under that id, or it has expired. Start the request again ' +
       'from the application that sent you here.');
   }
-  sendLoginPage(res, loginPage(baseUrlOf(req), record, ''));
-  log.debug("Leaving the authentication screen. Showed the form for " + record.id + ".");
+  // A relationship this application NAMES and cannot use is shown here rather
+  // than being replaced silently by the password box below it. That fallback is
+  // the failure worth being loud about: a federated application authenticating
+  // people locally looks exactly like a federated application working.
+  const problem = ((record.federation || {}).problem) || '';
+  sendLoginPage(res, loginPage(baseUrlOf(req), record, problem));
+  log.debug("Leaving the authentication screen. Showed the form for " + record.id +
+            (problem ? ", with a federation problem." : "."));
 });
 
 // The form target. Everything that can go wrong here re-renders the screen with

@@ -47,7 +47,7 @@ the package root. **The files did not change; the paths did.**
 | `admin-ui/` · `mgmt-api/` | the console and the management API |
 | `home/` | the front door — `GET /`, and the one image this service serves |
 | `logout/` | the protocol-independent sign-out — one model of what a live session IS across every family, and the endpoint that ends it |
-| `federation-e2e/` | **the only test in this repository** — three containers, two identity services and a web application that has never heard of federation, and one sign-in driven across all three. Every other test of this service lives in the [OAuth2/OIDC Debugger](https://idptools.com) project's suite |
+| `tests/` | **the only test directory in this repository** — in-process assertions about its own module contracts, `npm test`, no port and no container. Every test that drives this service over HTTP lives in the [OAuth2/OIDC Debugger](https://idptools.com) project's suite, federation included |
 | `docs/` | the user-facing documentation, published as a GitHub Pages site |
 
 At the package root there are exactly two modules: **`server.js`**, the shell that
@@ -5077,9 +5077,12 @@ enforcement.
 `saml11_sso.js` is also the answer to "where does a new test go". It was written
 in a `tests/` directory in THIS repository on 2026-08-25 and moved to the parent
 suite the same day, because a second suite here would mean a second runner, a
-second report and a second place to forget. The one exception is
-`federation-e2e/`, which stays because it builds a topology out of several copies
-of this service rather than driving one.
+second report and a second place to forget. There was one exception —
+`federation-e2e/`, a three-container stack, which stayed because it built a
+topology out of several copies of this service rather than driving one — and it
+closed on 2026-08-26: trust realms make several copies of this service out of
+ONE process, so that test is `tests/federation_sso.js` in the parent suite now,
+driving two realms and letting the debugger be the application tier.
 
 The protocols added since then bring more of them into that category, and the Kerberos
 and WebAuthn ones are the interesting cases because of *how* they check rather than what:

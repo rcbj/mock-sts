@@ -17106,10 +17106,41 @@ function federationDetailPage(req, id) {
     };
   }
   const row = federationRow(record);
-  const base = 'http://' + String(req.get('host') || ('localhost:' + config.value('global.port')));
+  // ---------------------------------------------------------------------
+  // THE ADDRESSES TO GIVE THE PARTNER, and they are the whole point of this
+  // page: an operator copies them into somebody else's identity service, where
+  // being wrong is a federation that fails at the far end with nothing here to
+  // point at.
+  //
+  // `baseUrlOf(req)` is the ONLY way to build one. This was
+  // `'http://' + req.get('host')` until 2026-08-26 — the one place in this file
+  // that did not go through that helper — and it was wrong three ways at once,
+  // each of them invisible on a default deployment:
+  //
+  //   * NO REALM PREFIX. A relationship is an entry in one realm's own
+  //     register and its assertion consumer service answers only under that
+  //     realm's prefix, so the URL printed here named a path that 404s — while
+  //     the AuthnRequest this service actually sends carries the right one,
+  //     because federation_sp.js does use baseUrlOf(). The page and the wire
+  //     disagreed, and the page is the half a person reads.
+  //   * ALWAYS `http://`, on a service that binds TLS whenever `global.https`
+  //     is set — which every launcher in the parent project's suite does.
+  //   * NO FORWARDED HEADERS, so a deployment behind a proxy with
+  //     `global.trustProxy` on was told its own internal address.
+  // ---------------------------------------------------------------------
+  const base = baseUrlOf(req);
   const acs = base + federation.PATHS.acs + '/' + encodeURIComponent(row.id);
   const login = federation.PATHS.login + '/' + encodeURIComponent(row.id);
   const metadata = base + federation.PATHS.metadata + '/' + encodeURIComponent(row.id);
+  // AND THE SAME PATH AGAIN, PREFIXED, FOR THE JSON — which is not a
+  // duplicate. `login` above is used in an `href` on this page and must stay
+  // ROOT-RELATIVE, because app.js's realm middleware rewrites root-relative
+  // hrefs in an HTML response on the way out and its regex has no idempotence
+  // guard: a path prefixed here would leave the page carrying
+  // /realm/acme/realm/acme/federation/login/x. That rewrite runs on `text/html`
+  // ONLY, so the JSON reply is never touched and has to carry the prefix
+  // itself. `realms.href()` is the guarded version and is safe either way.
+  const loginPath = realms.href(login);
 
   const setFields = federation.fieldsForRole(row.role, 'set').filter(function (field) {
     // The four booleans get their own two-button control below, because a text
@@ -17296,7 +17327,7 @@ function federationDetailPage(req, id) {
   return {
     inner: inner,
     json: Object.assign({ found: true }, row, {
-      endpoints: { assertionConsumerService: acs, login: login,
+      endpoints: { assertionConsumerService: acs, login: loginPath,
                    metadata: (row.protocol === 'saml2' || row.protocol === 'saml11')
                      ? metadata : null },
       // The whole record, MINUS the one sensitive field. `fedClientSecret` is
