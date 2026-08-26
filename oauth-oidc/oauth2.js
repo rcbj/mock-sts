@@ -2130,7 +2130,13 @@ function authorizeEndpoint(req, res) {
   }
   res.redirect(302, authn.beginAuthentication({
     returnTo: returnTo, details: details, hint: q.login_hint || '',
-    forceMfa: forceMfa, protocol: 'OAuth 2.0 / OIDC'
+    forceMfa: forceMfa, protocol: 'OAuth 2.0 / OIDC',
+    // WHICH APPLICATION this is, so that an entry naming a federation
+    // relationship sends the person to that partner instead of to the sign-in
+    // screen. It is the raw client_id: the registry is keyed by the identifier
+    // exactly as a protocol presented it, and one this service has never heard
+    // of simply has no entry, which is not an error.
+    application: q.client_id || ''
   }));
   log.debug("Leaving the authorization endpoint. Sent to the authentication service first.");
 }

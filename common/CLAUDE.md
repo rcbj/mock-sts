@@ -1398,3 +1398,54 @@ find module` naming a file the operator never mentioned.
   Since 2026-08-25 there is a THIRD door onto the create, `/admin/applications/new`,
   and it is not a third store either: it posts `action=create` to the same
   endpoint the list page's own row does.
+
+## An application entry now says WHERE ITS PEOPLE SIGN IN, and that is the first thing on one anybody reads
+
+Every attribute on an application entry is one of two things, and the schema's
+own comments have said so for a while: it RECORDS what happened (the counters,
+the sightings, `appProtocol`, `appRedirectUriObserved`) or it DECLARES something
+— and of the declarations, `appAllowedProtocol` and the four per-family
+identifiers say in capitals that nothing in this service reads them.
+
+**`appFederationRelationship` is read.** It holds the `fedId` of a
+service-provider-side relationship in THIS realm, and `authn.js` consults it on
+the way to the sign-in screen: with one named and `appFederationAutoRedirect`
+left at its default, the browser is sent straight to that partner and the
+screen is never drawn. With the auto-redirect off, the screen appears and that
+partner is the ONLY one offered on it.
+
+**What it answers is a question this registry could not answer before.** A
+relationship under `ou=federations` says how to talk to a foreign identity
+provider and says nothing about WHO should be sent there; an application entry
+said what the application is and nothing about how its people sign in. So the
+only home realm discovery available was a person choosing a button at the foot
+of the screen, once per sign-in — which is not what a deployment with one
+federated identity provider does, and it meant every federated flow in this
+service began with a step no real user performs.
+
+**FOUR CHECKS, AND ALL FOUR ARE MADE WHEN IT IS READ.** The relationship must
+exist in this realm, be service-provider-side, be enabled, and be fully
+configured. None of them is made at the write, and that is deliberate rather
+than lax: the attribute is a string on a directory entry that `ldapmodify`
+reaches, and the relationship it names can be disabled or deleted afterwards by
+somebody who never looked at this application — so a check made at the write
+would be a check about the past.
+
+**A failure of any of them is SHOWN, on the sign-in screen, in the error banner
+the password step already had.** The alternative is the one that had to be
+avoided: falling silently back to the password box means a federated
+application quietly authenticating people locally, which looks exactly like it
+working.
+
+**It grants and refuses nothing**, which keeps it consistent with everything
+else here. Nothing stops a person reaching the screen by another route and
+typing a name; clearing the attribute takes the shortcut away rather than
+locking anybody out. What it changes is the DEFAULT ROUTE, and `federation/`
+still owns every decision about what is then accepted.
+
+**`appFederationAutoRedirect` defaults to TRUE once a relationship is named**,
+which is the opposite of RFC 7591 section 2's rule that an omitted boolean is
+FALSE. Both rules meet on one entry, so it is said out loud here and in the
+schema row: naming a partner and then having to press a button is the state
+nobody wants, and with no relationship named the attribute does nothing at all
+rather than being an error.

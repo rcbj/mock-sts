@@ -499,33 +499,55 @@ provider**, which is exactly the moment a deliberate click is worth having.
 
 ## Tests
 
-**THERE IS ONE NOW, AND IT IS THE INTEGRATION TEST OF THE TWO THIS REPOSITORY
-HOLDS** — a protocol test goes in the parent project's suite instead, which is
-where `tests/saml11_sso.js` went on the day it was written; this one stays
-because it builds a TOPOLOGY out of this service rather than driving one copy of
-it. The other is `tests/`, which asserts module contracts in process and drives
-nothing. The root `CLAUDE.md`'s *Tests* section draws both lines.
-`../federation-e2e/` is a three-container stack — two instances of this service
-and a web application that has never heard of federation — driven end to end
-with 56 assertions. `./run.sh` builds and runs it; `./run-host.sh` runs the same
-thing as three node processes for anybody who cannot reach a docker daemon.
+**IT IS IN THE PARENT PROJECT'S SUITE, and it used to be here.**
+`tests/federation_sso.js` over there drives a federated sign-in end to end: the
+debugger's OAuth2/OIDC workflow stands in for an application registered in the
+trust realm `federation-realm-1`, which is an OpenID Provider to it and the SAML
+2.0 SERVICE PROVIDER of a relationship with `federation-realm-2`, where a name
+is actually typed.
 
-**It is an INTEGRATION test and it covers exactly ONE of the refusals below.**
-What it proves is that the pieces fit — that a federated identity satisfies a
-flow the application started, that the ID Token the application verifies comes
-from the SERVICE PROVIDER rather than from the partner, that the directory
-entry, the counters, the per-partner attribute mapping and the applications
-registry all record what actually happened, and that an unsolicited callback is
-refused and recorded without counting as a sign-in.
+**It was `../federation-e2e/` until 2026-08-26 — three containers, two instances
+of this service and a web application written for the purpose — and TRUST REALMS
+are what made that unnecessary.** A realm is a whole logical copy of this
+service on the same socket under a path prefix, so ONE process is both identity
+services now; and the debugger is already a web application that has never heard
+of federation, which is exactly the third party the old stack had to build one
+to get. That leaves nothing in this repository that needs several copies of it,
+so the exception that kept a test here has closed and the rule in the root
+`CLAUDE.md`'s *Tests* section — a protocol test goes in the parent suite —
+applies to this feature like every other. `tests/` here is unaffected: it
+asserts module contracts in process and drives nothing.
 
-**It found a real defect on its first run**, which is the best argument for it:
-a foreign `sub` reached `startSession()` unnormalised, so `userFor()` applied
-this service's own subject prefix a second time and every downstream token
-carried `urn:sts-mock:user:urn:sts-mock:user:alice`. The doubling was the
-symptom; the bug was that the identity funnel normalises and the session did
-not, so `/admin/users` said `alice` while the tokens said something else. It
-would have happened with any partner whose subject carried an `@`. See
-`usernameFor()`, where the three steps and their order are now written down.
+**WHAT THE MOVE GAVE UP, said plainly.** The old stack had two DNS names and two
+origins, so it could prove the front-channel / back-channel distinction — a URL
+a BROWSER follows against a URL this SERVICE dials — which is the hard part of
+federating between containers and is the thing `federation_http.js` exists to
+get right. Two realms on one origin cannot make that distinction at all. What it
+bought is that the test now runs in the ordinary suite, on every stack, in about
+four seconds, instead of in a stack somebody has to remember to bring up.
+
+**It covers exactly ONE of the refusals below**, as its predecessor did. What it
+proves is that the pieces fit — that a federated identity satisfies a flow the
+application started, that the ID Token the application verifies comes from the
+SERVICE PROVIDER rather than from the partner and names the partner NOWHERE,
+that the directory entry and the counters record what actually happened, and
+that a forged, unsigned assertion naming the configured partner is refused 401
+on the signature, recorded, and does not count as a sign-in.
+
+**And it covers one thing the old one could not**: both realms are the same
+ORIGIN and the session cookie has one name, so a session minted at the identity
+provider is PRESENTED to the service provider and must not be honoured there.
+That is the per-realm session store being load-bearing rather than tidy.
+
+**The old test found a real defect on its first run**, which is worth keeping
+here because the fix is in this directory: a foreign `sub` reached
+`startSession()` unnormalised, so `userFor()` applied this service's own subject
+prefix a second time and every downstream token carried
+`urn:sts-mock:user:urn:sts-mock:user:alice`. The doubling was the symptom; the
+bug was that the identity funnel normalises and the session did not, so
+`/admin/users` said `alice` while the tokens said something else. It would have
+happened with any partner whose subject carried an `@`. See `usernameFor()`,
+where the three steps and their order are now written down.
 
 **What it does not cover is everything below**, and that list is still the gap:
 
@@ -583,3 +605,32 @@ than importing this one. If both ends of the exchange came from this
 implementation, a shared misunderstanding about, say, which element the
 signature covers would pass and interoperate with nobody — and on this surface
 that misunderstanding is not a fidelity problem, it is the hole.
+
+## HOME REALM DISCOVERY, and it is NOT in this directory
+
+Nothing here decides who gets sent to a partner. A relationship says how to
+talk to a foreign identity provider and, until 2026-08-26, the only thing that
+said WHO should go there was a person pressing one of the buttons
+`authn.js` draws at the foot of its sign-in screen — home realm discovery
+performed by the user, once per sign-in.
+
+The answer lives on the APPLICATION now: `appFederationRelationship` on an
+entry under `ou=applications`, with `appFederationAutoRedirect` beside it, both
+read by `authn.js`'s `federationFor()` and by nothing in this directory. See
+`common/CLAUDE.md` and `authn/CLAUDE.md`.
+
+**It is in that direction on purpose.** This module cannot require the
+registry: `federation.js` is a library that `authn.js` requires (see 4b), and
+the register has to stay reachable from both halves of the sign-in path. Put
+the other way round, the question "where do this application's people sign in?"
+is a fact about the application, and the entry that answers it is the one an
+operator is already looking at when they ask.
+
+**What it changes here is nothing.** A relationship is still created disabled,
+still refuses until it is fully configured, and still verifies every assertion
+against `fedSigningCertificate` and nothing else. An application naming a
+relationship that is disabled, half-configured, identity-provider-side or
+absent gets an error banner on the sign-in screen rather than a silent fallback
+to the password box — which is the failure worth being loud about, because a
+federated application authenticating people locally looks exactly like a
+federated application working.

@@ -1171,6 +1171,11 @@ function singleSignOn(req, res) {
     const where = beginAuthentication({
       returnTo: returnTo,
       hint: request.subjectHint,
+      // The service provider's entityID is its identifier in the application
+      // registry, so an entry naming a federation relationship federates a
+      // SAML 2.0 sign-in exactly as it federates an OAuth one. Nothing in this
+      // module knows that happened: what comes back is a session.
+      application: spEntityId,
       // A RequestedAuthnContext demanding more than one factor takes the
       // opt-out away rather than being refused — the opposite of what
       // WS-Federation's wauth does with the same demand, because THIS screen

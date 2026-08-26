@@ -845,7 +845,57 @@ const SCHEMA = {
             '(see spiffe/CLAUDE.md) and the registry there is what an SVID is actually ' +
             'issued against, so this writes nothing and reads nothing: it is the link ' +
             'between an application in this registry and an identity in that one, said by ' +
-            'hand because no protocol says it.' }
+            'hand because no protocol says it.' },
+
+    // --- AND THE ONE PAIR HERE THAT DOES DECIDE SOMETHING ----------------
+    //
+    // Every attribute above this line either records what happened or declares
+    // something nothing reads — `appAllowedProtocol` says so in capitals, and
+    // the four identifiers just above it are declaration and only declaration.
+    // These two are read, by `authn.js`, on the way to the sign-in screen.
+    //
+    // WHAT THEY ANSWER is a question this registry could not answer before:
+    // WHERE ARE THIS APPLICATION'S USERS AUTHENTICATED? A relationship under
+    // `ou=federations` says how to talk to a foreign identity provider and says
+    // nothing about who should be sent there, and an application entry said
+    // what the application is and nothing about how its people sign in. So a
+    // federated sign-in was something a PERSON chose, on a button at the foot
+    // of the sign-in screen, once per sign-in — which is the discovery step a
+    // real deployment does not make its users perform.
+    //
+    // THEY ARE NOT A PERMISSION, and that is the same posture the rest of this
+    // registry takes: nothing here refuses a local sign-in for an application
+    // that names a relationship, nothing refuses a person who reaches the
+    // screen by another route, and clearing them takes the shortcut away
+    // rather than locking anybody out. What they change is the DEFAULT ROUTE
+    // to the screen — see authn.js's federationFor().
+    { name: 'appFederationRelationship', kind: 'single',
+      from: 'the console, the management API, or by hand',
+      what: 'THE FEDERATION RELATIONSHIP THIS APPLICATION\'S USERS ARE AUTHENTICATED ' +
+            'THROUGH — the `fedId` of an entry under ou=federations, in THIS trust realm, ' +
+            'whose `fedRole` is service-provider. Both halves of that are checked when it ' +
+            'is read rather than when it is written: an identity-provider-side ' +
+            'relationship goes the other way (this service asserts to that partner, so ' +
+            'there is nothing to sign in to), and the register is per realm, so an id ' +
+            'that names a relationship in another realm names nothing here.\n\nIt is ' +
+            'WRITTEN BY NOBODY. No protocol presents it and no sighting derives it — an ' +
+            'application\'s home identity provider is an arrangement somebody made, not ' +
+            'something this service can observe — so it is editable and it starts empty.' },
+    { name: 'appFederationAutoRedirect', kind: 'single',
+      from: 'the console, the management API, or by hand',
+      what: 'TRUE if a person signing in to this application should be sent STRAIGHT to ' +
+            'the partner named above, without the sign-in screen in between. This is ' +
+            'home realm discovery done by configuration instead of by asking, which is ' +
+            'what a deployment with one federated identity provider actually does.\n\n' +
+            'It is TRUE BY DEFAULT once a relationship is named, because naming one and ' +
+            'then having to click a button is the state nobody wants; set it FALSE to ' +
+            'keep the screen, where the partner is then the only button offered. An ' +
+            'absent value therefore means "yes" here and not "unknown", which is the ' +
+            'opposite of what RFC 7591 section 2 makes an omitted boolean mean — said ' +
+            'out loud because the two rules meet on one entry.\n\nWith no relationship ' +
+            'named it does nothing at all, rather than being an error: the two are ' +
+            'edited separately and a value left behind by a relationship that was ' +
+            'cleared should not refuse the next write.' }
   ]
 };
 
@@ -922,6 +972,12 @@ const EDITABLE = {
   oid4vpClientId: 'multi',
   // The four that are ONLY ever declared — nothing in this service writes them.
   federationPartnerId: 'multi',
+  // And the pair that IS read, by authn.js, on the way to the sign-in screen.
+  // Editable for the reason the rest of the declared half is: nothing observes
+  // an application's home identity provider, so if this cannot be written here
+  // it cannot be written at all.
+  appFederationRelationship: 'set',
+  appFederationAutoRedirect: 'set',
   ldapBindDn: 'multi',
   scimClientId: 'multi',
   spiffeWorkloadId: 'multi',

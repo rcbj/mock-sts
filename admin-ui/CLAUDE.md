@@ -1269,6 +1269,38 @@ would cost an afternoon:
   a realm without one of them being edited, and both are exactly wrong for the
   one control whose job is to LEAVE the current realm. An absolute URL names a
   host, so it passes through both untouched.
+* **AN ABSOLUTE URL THIS CONSOLE PRINTS FOR SOMEBODY TO COPY IS BUILT WITH
+  `baseUrlOf(req)`, ALWAYS**, and that helper is the only thing that knows all
+  three of the parts: the scheme (`global.https`, and forwarded headers when
+  `global.trustProxy` is on), the host, and the ambient realm's prefix. The
+  rewrite in the bullets above does NOT cover this case — it touches
+  root-relative `href`/`action`/`src` in an HTML body, so an absolute URL, and
+  anything at all in a JSON reply, is on its own.
+
+  **`/admin/federation`'s detail page got this wrong until 2026-08-26**, and it
+  is worth reading because of WHICH URLs they were: the assertion consumer
+  service and the federation metadata address — the two strings whose entire
+  purpose is to be copied into somebody else's identity service. It built its
+  base as `'http://' + req.get('host')`, the one expression in this file not
+  going through the helper, and so was wrong three ways at once. No realm
+  prefix, so the URL named a path that 404s while the AuthnRequest this service
+  actually sends carried the right one (`federation_sp.js` does use
+  `baseUrlOf()`) — the page and the wire disagreed, and the page is the half a
+  person acts on. Always `http://`, on a service that binds TLS whenever
+  `global.https` is set, which every launcher in the parent project's suite
+  does. And no forwarded headers, so a deployment behind a proxy was handed its
+  own internal address. **None of the three is visible from this service**: each
+  fails at the far end, days later, as a partner that will not federate.
+  `tests/federation_sso.js` in the parent suite now compares the address this
+  page advertises against the one the flow actually uses, which is the only
+  check that can see it at all.
+
+  The one thing NOT to do while fixing such a case is to prefix a
+  root-relative link before rendering: `app.js`'s rewrite has no idempotence
+  guard, so a pre-prefixed `href` comes out as
+  `/realm/acme/realm/acme/…`. That page therefore keeps its sign-in link
+  root-relative for the HTML and passes it through `realms.href()` — which does
+  have the guard — for the JSON, and says so where the two are built.
 * **`GET /admin/realm-switch` BUILDS its target and never echoes one.** `to`
   arrives in a query string and ends up in a `Location` header, which is the
   shape of every open redirect there has ever been. It is accepted only as a

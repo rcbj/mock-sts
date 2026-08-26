@@ -1194,6 +1194,11 @@ function interSiteTransfer(req, res) {
     const where = beginAuthentication({
       returnTo: returnTo,
       protocol: 'SAML 1.1',
+      // The relying party id is this application's identifier in the registry;
+      // see the same line in saml2_sso.js. Note it may be GUESSED here — SAML
+      // 1.1 has no request message — and a guess that matches no entry simply
+      // federates nothing.
+      application: rpId,
       details: [
         { label: 'Relying party', value: rpId,
           note: who.guessed

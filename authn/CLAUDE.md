@@ -223,3 +223,51 @@ One password IS rejected, here and in three other places:
 * **One password is rejected** — the literal string `invalid` on the password grant,
   on WS-Trust and at the WS-Federation sign-in screen — so a negative test has
   something to fail on in every protocol here.
+
+## `beginAuthentication()` does not always answer with this module's screen
+
+Since 2026-08-26 it takes an `application` — the identifier the caller's own
+protocol presented, a `client_id` from `oauth2.js`, an entityID from
+`saml2_sso.js`, a relying party id from `saml11_sso.js` — and when that
+application's registry entry names a usable federation relationship with the
+auto-redirect on, what comes back is `/federation/login/{id}` rather than
+`/authn/login`.
+
+**The caller cannot tell the two apart and must not.** What a protocol module
+asked for is "get this person authenticated and bring them back to `returnTo`",
+and which identity provider does the authenticating is not its business — which
+is the property the partner buttons at the foot of the screen have had all
+along. What is new is that nobody has to press one. `federationFor()` is the
+whole of it, and its header carries the four checks and why each is made at the
+READ rather than at the write.
+
+**No pending record is written on that path**, and that is not an optimisation:
+the browser goes to a foreign identity provider and comes back to
+`/federation/acs/{id}`, which finishes the sign-in through `startSession()`
+without this screen ever being drawn. A record minted there would be one nothing
+could ever spend.
+
+**`returnTo` is checked twice, here and again in `federation_sp.js`**, which
+that module's decision 4 already argued for its own reasons. Two checks on one
+value is deliberate: this one catches a caller's bug and that one catches
+somebody handing the federated entry point a `returnTo` of their own.
+
+### The screen's partner list, and the one setting it deliberately ignores
+
+`federatedOptionsHtml()` has two halves now. An application that NAMES a
+relationship gets that partner and only that partner — offering the others
+beside it would put the discovery step back one line below the configuration
+that removed it — and that half **ignores `federation.loginButtons`**, which
+the generic list still respects.
+
+The asymmetry is the point rather than an oversight. That setting exists so
+that a service with no federation configured has a sign-in screen byte for byte
+the one it always had, and an application whose entry names a partner *is*
+federation configured. The auto-redirect above cannot consult a screen setting
+either — it never draws a screen — so honouring it here would make one
+configuration behave two ways depending on an unrelated boolean.
+
+`federatedButtons()` renders both lists, because two copies of an anchor
+carrying a `returnTo` is two chances to drop the `returnTo` from one of them,
+which produces a federated sign-in that succeeds and lands the person on a page
+nobody asked for.
