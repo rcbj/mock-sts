@@ -751,7 +751,7 @@ merely FILTERS a list is not a drill-down, and this is not a filter, it is a
 second VIEW of the same list. A nineteenth sidebar tab would have shown nothing
 the tab above it does not already hold.
 
-Six things about it are decisions rather than defaults.
+Seven things about it are decisions rather than defaults.
 
 * **THE MODEL IS IN `../common/delegation.js` AND THE DRAWING IS IN
   `delegation_map.js`, AND NEITHER KNOWS WHAT THE OTHER KNOWS.** `graph()` says
@@ -792,6 +792,34 @@ Six things about it are decisions rather than defaults.
   file it would be a link to somebody else's machine. That format gets the gate's
   302 rather than a 401, which is the gate's own rule (it looks for JSON to
   decide) and is right here: the link is clicked in a browser.
+
+* **IT IS TWO BANDS, AND THE ISSUER IS NOT IN THE LAYOUT AT ALL.** Until
+  2026-08-26 the hexagon was one node among the others and dagre gave it a rank
+  of its own, so it sat IN the flow: a person on the left, this service in the
+  second column, and the applications strung out to the right of it. Two things
+  were wrong with that and only one was ever going to be noticed by eye. The
+  parties of one delegation came out at four different heights, because the
+  issuer's own edges were competing with the chain for the ranking — a staircase
+  where the thing being drawn is a line. And the hexagon, the box every single
+  line touches, was in the middle of the picture rather than over it. So the
+  parties are laid out by dagre ALONE and the issuer is put back above them,
+  centred, with its lines drawn as straight segments by hand. What that buys is
+  that every application is on one plane, so a reader compares them by looking
+  along a line; and that the dashed issuer lines all run the same way, so they
+  read as one statement rather than as a relationship competing with the ones
+  that matter.
+
+  What it COST is the label placement dagre used to do for those lines, and it
+  is the fiddly half of the change. Every one of them starts at the same point,
+  so two labels at one fraction along are only as far apart as their boxes are —
+  the first version of the band wrote `signed in` across `issued to`. They are
+  given ROWS in the gap instead, a label drawn where its own line crosses its
+  row: two in one row are separated horizontally by construction, two in
+  different rows cannot touch, and the gap is made as deep as the number of rows
+  actually needed. A picture whose lines fan out widely comes back with one row
+  and a gap no deeper than it ever was. `tests/delegation_map_bands.js` guards
+  all of it — the bands, the one plane, the centring, and that no two label
+  panels overlap — because none of it fails loudly.
 
 * **THE DEPENDENCY WAS WEIGHED, in `delegation_map.js`'s own header, the way
   `scimmy` and `swagger-ui-dist` were.** `@dagrejs/dagre` is 1.4 MB unpacked with
@@ -919,9 +947,26 @@ parameter, and it is the first thing to check any change to it against.
   with the exact grant). Neither takes a MODE colour, deliberately: amber and
   green are this console's judgement about impersonation versus delegation and an
   ordinary grant makes neither claim. **`delegationMapKey()` takes
-  `{ issuance: true }`** to add their two rows and the other three picture pages
+  `{ issuance: true }`** to add their rows and the other three picture pages
   do not pass it — a legend must describe the diagram BESIDE it, and a key
   listing a line the page never draws teaches a reader to stop trusting it.
+* **AND A THIRD SOLID INDIGO LINE, WHICH IS `reaches` AND NOT A THIRD
+  RELATION.** What a credential is ADDRESSED to is a relationship this service
+  granted — an access token issued to a web front end and carrying `aud:
+  https://apigw1.example.com` says the front end may reach the API gateway in
+  that person's name — and until 2026-08-26 it was drawn only where a token
+  EXCHANGE had produced it, so the first hop of every chain was missing from
+  this page. `user_graph.js` emits it with the delegation half's own `relation`
+  and the grant on the label (rule 3p), which is why nothing in this file
+  changed for it beyond the key's third row and the sentence above the picture.
+  Two things about it belong here rather than there. The tooltip names the
+  AUDIENCE the token carries whenever the box is not called that — the box is
+  the application that registered the audience, so without it nothing on the
+  page connects `apigw1` to the URL — and `edgeTitle()` no longer prints
+  `0 act(s): 0 issued, 0 refused` under a line that carries credentials and no
+  acts, which read as a delegation that was tried and came to nothing. That
+  second one was already wrong on the grey `issued to` line and nobody had said
+  so.
 * **`issued-for` runs from the person where somebody else holds the credential
   and FROM THE HEXAGON where nobody does.** `client_credentials` is the case
   that settled it: the token is about the client itself, so the subject and the

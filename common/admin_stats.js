@@ -271,6 +271,17 @@ function recordJwt(payload, signed, context) {
     typ: payload.typ || '',
     revocable: !!payload.jti && REVOCABLE_KINDS.indexOf(kind) >= 0,
     sub: payload.sub || '',
+    // WHO SAID IT, which is this service under whichever base URL the request
+    // arrived on — `oauth2.issuer` is empty by default precisely so that one
+    // process answers correctly as localhost, as `sts` on a compose network and
+    // through a published port. It is kept because it is the only thing in this
+    // record that can tell an audience naming a PARTY from one naming this
+    // service itself: a refresh token is addressed to the token endpoint and an
+    // access token nobody named a resource for carries `<base>/resource`, and
+    // `user_graph.js` would otherwise draw a box for each of them. Nothing can
+    // be derived here instead — the base is a property of the REQUEST, and by
+    // the time a page reads this record there is no request to ask.
+    iss: payload.iss || '',
     // `username` on an access or refresh token, `preferred_username` on an ID
     // Token: the two carry the same person under different names because that is
     // what their respective specifications call the claim, and a console column

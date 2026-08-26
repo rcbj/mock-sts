@@ -240,6 +240,59 @@ const EDGE_SEP = 18;
 const MARGIN = 18;
 
 // ---------------------------------------------------------------------------
+// THE TWO BANDS, AND WHY THE ISSUER IS NOT IN THE LAYOUT AT ALL.
+//
+// Until 2026-08-26 the hexagon was one node among the others and dagre gave it a
+// rank of its own, so it sat in the FLOW: a person on the left, the issuer in
+// the second column, and the applications strung out to the right of it. That
+// puts the one box every line touches in the middle of the chain and makes the
+// picture a staircase — the parties of one delegation ended up on four
+// different vertical positions because the issuer's own edges were competing
+// with the chain for the ranking.
+//
+// So the picture is now two bands. The parties — the person AND every
+// application — are laid out by dagre ALONE, which for a chain is the single
+// horizontal line it always should have been. The issuer goes above them,
+// centred, in a band of its own, and its edges are drawn straight down from it.
+// Two things fall out of that and both are the point: every application is on
+// one plane, so a reader compares them by looking along a line rather than
+// hunting; and the dashed issuer lines all run the same way, so they read as
+// one statement — *this service handed those parties something* — rather than
+// as a relationship competing with the ones that matter.
+//
+// `STS_BAND_SEP` is the gap between the bands and it is `RANK_SEP` for the
+// reason `RANK_SEP` is generous: an edge label lives in it.
+// ---------------------------------------------------------------------------
+const STS_BAND_SEP = RANK_SEP;
+
+// ---------------------------------------------------------------------------
+// WHERE THE ISSUER'S LABELS GO, WHICH IS THE ONE HARD PART OF DRAWING THE BAND.
+//
+// Every one of those lines starts at the SAME point. Put their labels all at one
+// fraction along and they are only as far apart as their boxes are — which on a
+// picture with four applications in a row is not far enough, and the first
+// version of this band had `signed in` written across `issued to`.
+//
+// So the labels are given ROWS in the gap, and a line's label is drawn where
+// that line crosses its row. Two in one row are separated horizontally by
+// construction and two in different rows cannot touch at all, so the only thing
+// left to decide is how many rows there are: they are assigned greedily by
+// x-overlap, fewest first, and the gap is made tall enough to hold however many
+// were needed. A picture whose lines fan out widely — the common one — comes
+// back with a single row and a gap no deeper than it ever was.
+//
+// `MAX_LABEL_ROWS` is a giving-up point rather than a judgement. Past it the
+// labels are allowed to overlap, because the alternative is a band taller than
+// the picture under it: an issuer with thirty lines out of it is a busy diagram
+// however it is drawn, and the tooltip and the tables under it still say
+// everything the label does.
+// ---------------------------------------------------------------------------
+const LABEL_ROW_H = 46;
+const LABEL_ROW_PAD = 10;
+const LABEL_GUTTER = 10;
+const MAX_LABEL_ROWS = 5;
+
+// ---------------------------------------------------------------------------
 // WHAT A BOX LOOKS LIKE, AND HOW BIG IT IS.
 //
 // One function answers both, because they are the same question asked twice and
@@ -338,6 +391,29 @@ function hexPath(x, y, w, h) {
 
 function round(n) {
   return Math.round(n * 10) / 10;
+}
+
+// WHERE A LINE LEAVES A BOX. The point at which the segment from that box's
+// centre towards `towards` crosses the box's own edge, so an arrowhead sits on
+// the boundary rather than under the label in the middle. dagre does this for
+// the lines it routes; these are the ones it never saw.
+function boundaryPoint(at, size, towards) {
+  log.debug("Entering boundaryPoint().");
+  const dx = towards.x - at.x;
+  const dy = towards.y - at.y;
+  if (!dx && !dy) {
+    // Two boxes on top of each other, which nothing here produces — but a
+    // divide by zero would put NaN in an SVG path, and a path with NaN in it
+    // draws NOTHING at all rather than drawing something visibly wrong.
+    log.debug("Leaving boundaryPoint(). The two boxes share a centre.");
+    return { x: at.x, y: at.y };
+  }
+  const hw = size.width / 2;
+  const hh = size.height / 2;
+  const scale = Math.min(dx ? hw / Math.abs(dx) : Infinity,
+                         dy ? hh / Math.abs(dy) : Infinity);
+  log.debug("Leaving boundaryPoint().");
+  return { x: at.x + dx * scale, y: at.y + dy * scale };
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +681,22 @@ function renderUnguarded(graph, options) {
   const nodes = graph.nodes || [];
   const edges = graph.edges || [];
 
+  // THE ISSUER IS DRAWN, NOT LAID OUT — see the note on STS_BAND_SEP. It comes
+  // out of the graph handed to dagre along with every line that touches it, and
+  // is put back afterwards in a band of its own above everything else.
+  const stsNode = nodes.filter(function (one) { return one.kind === 'sts'; })[0] || null;
+  const isSts = function (id) { return !!stsNode && id === stsNode.id; };
+  const partyNodes = nodes.filter(function (one) { return one !== stsNode; });
+  const partyEdges = edges.filter(function (one) {
+    return !isSts(one.from) && !isSts(one.to);
+  });
+  const stsEdges = edges.filter(function (one) {
+    // A line with the hexagon at BOTH ends cannot exist — `delegation.js` never
+    // makes one — and would be drawn as a point if it did, so it is dropped
+    // here rather than divided by zero below.
+    return (isSts(one.from) || isSts(one.to)) && one.from !== one.to;
+  });
+
   // `multigraph` because two chains between the same pair of boxes are two
   // lines: `alice -> frontend` by classic constrained delegation and the same
   // pair by RBCD are two arrangements, and dagre without this would keep one.
@@ -621,19 +713,28 @@ function renderUnguarded(graph, options) {
     const look = resolve(node) || defaultResolve(node);
     const size = measure(node, look);
     drawn[node.id] = { node: node, look: look, size: size };
-    g.setNode(node.id, { width: size.width, height: size.height });
+  });
+  partyNodes.forEach(function (node) {
+    g.setNode(node.id, { width: drawn[node.id].size.width,
+                         height: drawn[node.id].size.height });
   });
 
   const edgeLabels = {};
-  edges.forEach(function (edge, index) {
+  edges.forEach(function (edge) {
+    if (!drawn[edge.from] || !drawn[edge.to]) {
+      return;
+    }
+    edgeLabels[edge.id] = edgeLabelLines(edge, nameOf);
+  });
+
+  partyEdges.forEach(function (edge, index) {
     // An edge to or from a box that is not in the picture cannot be drawn and
     // must not be silently dropped into dagre either — it would invent the
     // missing node as a zero-sized one and the line would run to a point.
     if (!drawn[edge.from] || !drawn[edge.to]) {
       return;
     }
-    const lines = edgeLabelLines(edge, nameOf);
-    edgeLabels[edge.id] = lines;
+    const lines = edgeLabels[edge.id] || [];
     let width = 0;
     lines.forEach(function (one) {
       width = Math.max(width, textWidth(one, EDGE_SIZE));
@@ -642,10 +743,11 @@ function renderUnguarded(graph, options) {
       width: Math.ceil(width) + 10,
       height: lines.length * (LINE_HEIGHT - 2) + 6,
       labelpos: 'c',
-      // The issuer's lines are the ones a reader should be able to ignore, so
-      // they are given the least weight and dagre pulls the delegation
-      // relationships straight in preference to them.
-      weight: edge.relation === 'issued' ? 1 : 3,
+      // Every line dagre sees now is a relationship — the issuer's are drawn by
+      // hand below — so there is no longer a class of them to give less weight
+      // to. The `issued` case this used to name is the whole of what was taken
+      // out of the layout.
+      weight: 3,
       // A minimum length of 1 everywhere: the picture's ranks are the three
       // LAYERS of the model, and a longer minlen on any one of them would open a
       // gap that says something the model does not.
@@ -655,9 +757,190 @@ function renderUnguarded(graph, options) {
 
   dagre.layout(g);
 
-  const size = g.graph();
-  const width = Math.max(1, Math.ceil(size.width || 0));
-  const height = Math.max(1, Math.ceil(size.height || 0));
+  // WHERE EVERY BOX ENDED UP, and where every line runs. Two maps rather than
+  // dagre's own graph, because half of what is in them did not come from dagre:
+  // the hexagon's position and its lines are computed below, and the renderer
+  // must not be able to tell which half it is drawing.
+  const placed = {};
+  const routed = {};
+  const laidOut = g.graph();
+  let partyW = Math.max(1, Math.ceil(laidOut.width || 0));
+  let partyH = Math.max(1, Math.ceil(laidOut.height || 0));
+  if (!partyNodes.length) {
+    // Nothing but the issuer, which is what an empty register draws. dagre is
+    // asked for the size of a graph with no nodes and answers with the margins
+    // only, which would leave the hexagon with nothing to be centred over.
+    partyW = MARGIN * 2;
+    partyH = 0;
+  }
+
+  const stsSize = stsNode ? drawn[stsNode.id].size : null;
+  const width = Math.max(partyW, stsNode ? Math.ceil(stsSize.width) + MARGIN * 2 : 0);
+  // Centred over the parties when they are wider than the hexagon, and the
+  // parties centred under IT when they are not — which is what a picture of one
+  // application looks like.
+  const shiftX = (width - partyW) / 2;
+
+  // WHERE THE HEXAGON GOES, as ONE expression. `fitLabels()` below puts each
+  // issuer label where that line crosses its row, which means solving for a
+  // point on a segment that starts here — so a second spelling of this would
+  // not draw the hexagon in the wrong place, it would draw every label BESIDE
+  // its own line, which is the sort of wrong that looks like a rounding error.
+  const stsAt = stsNode
+    ? { x: width / 2, y: MARGIN + stsSize.height / 2 }
+    : null;
+
+  // THE ISSUER'S LINES, AND HOW DEEP THE GAP ABOVE THE PARTIES HAS TO BE. See
+  // the note on LABEL_ROW_H: the answer is decided by the labels rather than by
+  // a constant, so it is settled before anything is positioned.
+  const stsLabelled = stsEdges.filter(function (edge) {
+    return placedFor(edge) && (edgeLabels[edge.id] || []).length;
+  }).map(function (edge) {
+    const partyId = isSts(edge.from) ? edge.to : edge.from;
+    const lines = edgeLabels[edge.id];
+    let labelW = 0;
+    lines.forEach(function (one) {
+      labelW = Math.max(labelW, textWidth(one, EDGE_SIZE));
+    });
+    return {
+      edge: edge, partyId: partyId,
+      width: Math.ceil(labelW) + 10,
+      height: lines.length * (LINE_HEIGHT - 2) + 6,
+      // Sorted on where the line ENDS, so the rows are filled left to right and
+      // a reader following the fan outwards meets them in order.
+      partyX: g.node(partyId).x + shiftX
+    };
+  }).sort(function (a, b) { return a.partyX - b.partyX; });
+
+  function placedFor(edge) {
+    return !!(drawn[edge.from] && drawn[edge.to]);
+  }
+
+  // One attempt at fitting every issuer label into `rows` rows. Returns the
+  // assignment, or null when two of them would still overlap — the caller tries
+  // again with one more row. Greedy and first-fit, which is enough: the labels
+  // are sorted by where their lines end, so a row is filled left to right and a
+  // clash is always with the one immediately before it.
+  function fitLabels(rows) {
+    log.debug("Entering fitLabels(). rows=" + rows);
+    const gap = Math.max(STS_BAND_SEP, rows * LABEL_ROW_H + LABEL_ROW_PAD * 2);
+    const bandTop = MARGIN + (stsSize ? stsSize.height : 0);
+    const stsCentre = stsAt || { x: width / 2, y: 0 };
+    const taken = [];
+    const out = {};
+    for (let i = 0; i < rows; i++) {
+      taken.push([]);
+    }
+    for (let i = 0; i < stsLabelled.length; i++) {
+      const one = stsLabelled[i];
+      const partyAt = g.node(one.partyId);
+      let put = false;
+      for (let r = 0; r < rows && !put; r++) {
+        const y = bandTop + LABEL_ROW_PAD + r * LABEL_ROW_H + LABEL_ROW_H / 2;
+        // Where this line is when it crosses that row. The party's centre is
+        // below the whole band, so the denominator cannot be zero.
+        const span = (partyAt.y + (stsSize ? stsSize.height : 0) + gap) - stsCentre.y;
+        const x = stsCentre.x + (one.partyX - stsCentre.x) * ((y - stsCentre.y) / span);
+        const left = x - one.width / 2;
+        const right = x + one.width / 2;
+        const clash = taken[r].filter(function (held) {
+          return left < held.right + LABEL_GUTTER && right > held.left - LABEL_GUTTER;
+        }).length > 0;
+        if (!clash) {
+          taken[r].push({ left: left, right: right });
+          out[one.edge.id] = { x: x, y: y };
+          put = true;
+        }
+      }
+      if (!put) {
+        log.debug("Leaving fitLabels(). " + rows + " row(s) is not enough.");
+        return null;
+      }
+    }
+    log.debug("Leaving fitLabels(). " + stsLabelled.length + " label(s) in " +
+              rows + " row(s).");
+    return { gap: gap, at: out };
+  }
+
+  let fitted = null;
+  for (let rows = 1; rows <= MAX_LABEL_ROWS && !fitted; rows++) {
+    fitted = fitLabels(rows);
+  }
+  if (!fitted) {
+    // Past the giving-up point. Everything goes in the last row it was offered
+    // and some of them will overlap, which is the honest outcome rather than a
+    // band taller than the diagram — see the note on MAX_LABEL_ROWS.
+    log.warn('delegation_map: ' + stsLabelled.length + ' lines out of the ' +
+             'issuer could not be labelled in ' + MAX_LABEL_ROWS + ' rows ' +
+             'without overlapping. They are drawn anyway; the tooltip and the ' +
+             'relationship table under the picture carry the same words.');
+    fitted = fitLabels(MAX_LABEL_ROWS) || { gap: STS_BAND_SEP, at: {} };
+  }
+
+  // The gap exists to hold the issuer's labels and to separate two bands, so a
+  // picture with only the hexagon in it has neither and gets neither: an empty
+  // register draws one shape and 78 pixels of nothing under it otherwise.
+  const bandH = !stsNode ? 0
+              : partyNodes.length ? (stsSize.height + fitted.gap)
+                                  : (stsSize.height + MARGIN);
+  const height = Math.max(1, partyH + bandH);
+
+  partyNodes.forEach(function (node) {
+    const at = g.node(node.id);
+    if (!at) {
+      return;
+    }
+    placed[node.id] = { x: at.x + shiftX, y: at.y + bandH };
+  });
+  partyEdges.forEach(function (edge) {
+    if (!placedFor(edge)) {
+      return;
+    }
+    const laid = g.edge(edge.from, edge.to, edge.id);
+    if (!laid) {
+      return;
+    }
+    routed[edge.id] = {
+      points: (laid.points || []).map(function (one) {
+        return { x: one.x + shiftX, y: one.y + bandH };
+      }),
+      x: (laid.x || 0) + shiftX, y: (laid.y || 0) + bandH,
+      width: laid.width || 0, height: laid.height || 0
+    };
+  });
+
+  if (stsNode) {
+    placed[stsNode.id] = stsAt;
+    stsEdges.forEach(function (edge) {
+      if (!placed[edge.from] || !placed[edge.to]) {
+        return;
+      }
+      // A STRAIGHT LINE, clipped to both boxes so the arrowhead lands on the
+      // edge of one rather than in the middle of its label. The hexagon is
+      // clipped as a RECTANGLE, which is exact along its flat top and bottom —
+      // where all but the outermost of these lines leave it — and a few pixels
+      // generous at the two slanted ends. An arrow starting a little inside the
+      // shape it is leaving is invisible; the alternative is intersecting a
+      // six-sided path, for that.
+      const from = boundaryPoint(placed[edge.from], drawn[edge.from].size, placed[edge.to]);
+      const to = boundaryPoint(placed[edge.to], drawn[edge.to].size, placed[edge.from]);
+      const lines = edgeLabels[edge.id] || [];
+      const seat = fitted.at[edge.id];
+      let labelW = 0;
+      lines.forEach(function (one) {
+        labelW = Math.max(labelW, textWidth(one, EDGE_SIZE));
+      });
+      routed[edge.id] = {
+        points: [from, to],
+        // Halfway along when there is no label to seat, which is where nothing
+        // is drawn anyway.
+        x: seat ? seat.x : (from.x + to.x) / 2,
+        y: seat ? seat.y : (from.y + to.y) / 2,
+        width: Math.ceil(labelW) + 10,
+        height: lines.length * (LINE_HEIGHT - 2) + 6
+      };
+    });
+  }
 
   const defs = '<defs>' + ARROW_COLOURS.map(function (colour) {
     return '<marker id="' + prefix + '-' + markerId(colour) + '" viewBox="0 0 10 10" ' +
@@ -673,7 +956,7 @@ function renderUnguarded(graph, options) {
     if (!drawn[edge.from] || !drawn[edge.to]) {
       return '';
     }
-    const laid = g.edge(edge.from, edge.to, edge.id);
+    const laid = routed[edge.id];
     if (!laid) {
       return '';
     }
@@ -712,7 +995,7 @@ function renderUnguarded(graph, options) {
   }).join('');
 
   const nodeMarkup = nodes.map(function (node) {
-    const at = g.node(node.id);
+    const at = placed[node.id];
     if (!at) {
       return '';
     }
@@ -755,6 +1038,19 @@ function edgeTitle(edge) {
   } else {
     parts.push('Reaches' + (edge.subject ? ' as ' + edge.subject : '') +
                ' — what the credential is FOR.');
+    // WHICH AUDIENCE, WHEN THE BOX IS NOT NAMED AFTER IT. A token addressed to
+    // `https://apigw1.example.com` is drawn as the application that registered
+    // that URI, and without this line there is nothing anywhere on the page
+    // connecting the two — the label says who the credential is for and the box
+    // says a name the token never mentions. Said only where they DIFFER: on a
+    // line whose box IS the audience it would be the same string twice.
+    if (edge.audience && edge.audience !== edge.to) {
+      parts.push('Addressed to ' + edge.audience +
+                 (edge.audienceRegistered
+                   ? ', which this party has registered on oauthAudience.'
+                   : ', which no application here has registered — so it is ' +
+                     'drawn as itself.'));
+    }
   }
   if (edge.typeLabel) {
     parts.push(edge.protocol + ' — ' + edge.typeLabel +
@@ -776,12 +1072,21 @@ function edgeTitle(edge) {
   } else if (edge.relation === 'signed-in') {
     parts.push(edge.acts + ' authentication(s), all of them accepted — this ' +
                'service checks no password in any family.');
-  } else {
+  } else if (edge.acts) {
     parts.push(edge.acts + ' act(s): ' + edge.issued + ' issued, ' +
                edge.refused + ' refused.');
     if (edge.credentials) {
       parts.push(edge.credentials + ' credential(s) from the issued register.');
     }
+  } else {
+    // NO ACTS AT ALL, which is what every line the person's picture adds looks
+    // like: a credential was issued and nothing was delegated. `0 act(s): 0
+    // issued, 0 refused` was printed here until 2026-08-26 and reads as a
+    // delegation that was tried and came to nothing, which is the opposite of
+    // what happened — see common/user_graph.js. The count of credentials is the
+    // whole of what such a line has to report.
+    parts.push(edge.credentials + ' credential(s) from the issued register, ' +
+               'and no delegation act: nothing was exchanged to get them.');
   }
   (edge.produced || []).forEach(function (one) {
     parts.push('Produced ' + one.count + ' × ' + one.kind +

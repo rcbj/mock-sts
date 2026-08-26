@@ -89,6 +89,15 @@ Two rules that are not optional here:
   **The file did not change between the two rounds**, which is the argument for
   asserting behaviour rather than mechanism: the mechanism was replaced and the
   test still guarded the thing that matters.
+  `delegation_map_bands.js` was checked against four — the issuer put back into
+  the dagre layout (5 assertions red), the label rows' overlap check removed so
+  every label lands in one row (1), the hexagon placed at the left instead of
+  centred (2), and the empty-picture case padded with the band it does not need
+  (1). The third of those found a real coupling while it was being written: the
+  hexagon's position was written out twice, once where it is placed and once
+  where a label's line is solved for, and moving one drew every label a few
+  pixels BESIDE its own line rather than drawing the hexagon in the wrong
+  place. It is one `stsAt` now.
 * **CLEAN UP THE PROCESS-WIDE STATE YOU TOUCH.** The realm table and
   `process.env` are shared by every test in the run and this service persists
   nothing, so a realm left behind changes what a later test resolves. Use the
@@ -102,6 +111,7 @@ Two rules that are not optional here:
 | `config_realm_layer.js` | what a trust realm may and may not carry, at the writing end and at the reading end |
 | `realm_isolation.js` | that a realm's identity register and its revocation set are its own, in both directions, and that removing a realm takes them with it |
 | `realm_directory_lookups.js` | that a lookup BY DN answers about one realm — groups, people and applications — including that a refused cross-realm delete leaves the entry where it was |
+| `delegation_map_bands.js` | that the delegation picture is TWO BANDS — the issuer above, centred, every party on one plane — and that no two edge labels are drawn on top of each other |
 
 Both realm files bend the rule at the top of this file, and each says so in
 its own header rather than leaving a reader to catch it.
@@ -110,6 +120,20 @@ half of the same fix — a subtree search is scoped to the realm its base
 names — needs a listener to test, so by this file's own rule it is not
 asserted here. It was verified by hand, and `ldap/CLAUDE.md` records what
 was checked.
+
+`delegation_map_bands.js` passes the rule at the top of this file on a
+different clause from the realm files': `render()` is a pure function from a
+graph to an SVG document — no store, no config, no request — so the cases worth
+asserting are ones the running service cannot be made to produce on demand. A
+graph whose issuer lines all end within a few pixels of each other, or an
+issuer with nothing attached to it at all, would mean driving protocol traffic
+until the register happened to hold the right shape. The geometry would have to
+be parsed back out of the answer either way; what cannot be done from over
+there is CHOOSING the graph. What it does NOT assert is the model half of the
+same change — that an access token's audience becomes a line at all — because
+that one IS drivable over HTTP and belongs in the parent suite by the rule
+above. It was verified by hand against a four-tier chain; `common/CLAUDE.md`
+rule 3p records what the rule is.
 
 `realm_isolation.js` is the one closest to the line: the leak it guards IS
 observable over HTTP. It is here because the parent project's
