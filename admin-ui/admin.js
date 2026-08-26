@@ -17159,9 +17159,32 @@ function federationDetailPage(req, id) {
       '<input type="hidden" name="action" value="set">' +
       '<input type="hidden" name="id" value="' + esc(row.id) + '">' +
       '<input type="hidden" name="field" value="' + esc(field.name) + '">' +
-      '<input type="text" name="value" size="42"' + tip(field.what) + ' value="' +
-      esc(field.sensitive && value ? '' : value) + '"' +
-      (field.sensitive ? ' placeholder="set — not shown"' : '') + '>' +
+      // A FIELD WITH A FIXED SET OF VALUES GETS A SELECT, and the list comes
+      // off the schema row rather than being typed here — the same reason the
+      // form itself is built from fieldsForRole(): a page offering a value the
+      // action refuses is a page that cannot be trusted about the ones it
+      // accepts. It matters most on fedAuthnMechanism, where a typo does not
+      // fail loudly: the relationship simply says nothing this service
+      // recognises and the sign-in falls through to a password box, which is
+      // indistinguishable from the feature not being configured at all.
+      //
+      // The blank option is FIRST and is not a value — it clears the
+      // attribute, which for this field is meaningfully different from
+      // `password`: empty means "this relationship says nothing" and falls
+      // through to the application entry.
+      (Array.isArray(field.enum) && field.enum.length
+        ? '<select name="value"' + tip(field.what) + '>' +
+          '<option value=""' + (value ? '' : ' selected') + '>' +
+          '(not set — this relationship says nothing)</option>' +
+          field.enum.map(function (one) {
+            const row = federation.mechanismRow(one);
+            return '<option value="' + esc(one) + '"' +
+              (String(value) === one ? ' selected' : '') + '>' + esc(one) +
+              (row ? ' — ' + esc(row.label) : '') + '</option>';
+          }).join('') + '</select>'
+        : '<input type="text" name="value" size="42"' + tip(field.what) +
+          ' value="' + esc(field.sensitive && value ? '' : value) + '"' +
+          (field.sensitive ? ' placeholder="set — not shown"' : '') + '>') +
       '<button type="submit">Set</button></div></form></td>' +
       '<td class="sub">' + note(esc(field.what) +
         (field.sensitive

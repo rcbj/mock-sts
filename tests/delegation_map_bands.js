@@ -90,6 +90,10 @@ function rects(svg) {
   while (m) {
     out.push({ x: Number(m[1]), y: Number(m[2]),
                top: Number(m[2]), bottom: Number(m[2]) + Number(m[4]),
+               // The horizontal extent as well, for the assertion that one
+               // plane is a ROW: two boxes at the same height and the same x
+               // are one box as far as a reader is concerned.
+               left: Number(m[1]), right: Number(m[1]) + Number(m[3]),
                width: Number(m[3]), height: Number(m[4]) });
     m = re.exec(svg);
   }
@@ -249,6 +253,49 @@ function run(t) {
           'and they run left to right in the order of the chain',
           order.map(function (x) { return x.toFixed(0); }).join(' < '));
 
+  const fan = map.render(FAN, { id: 'fan', label: 'fan' });
+
+  // -----------------------------------------------------------------------
+  t.log.info('every party of a FAN is on one plane too, and none of them share a seat');
+  // -----------------------------------------------------------------------
+  // THE CASE THE CHAIN ABOVE CANNOT SEE, and the one that was broken on
+  // 2026-08-26 by the first attempt at this. In `rankdir: 'LR'` the RANK is the
+  // x, so dagre gives every node on one rank the SAME x and tells them apart by
+  // the y alone — which is the coordinate the row throws away. A chain has one
+  // node per rank and comes out perfect either way; this fixture's four
+  // applications are all on rank 1, and flattening the y without also owning the
+  // x drew all four of them exactly on top of each other. Nothing in the file
+  // failed: the label panels did not clash, the bands were still bands, and the
+  // picture was four boxes in one place.
+  //
+  // So both halves are asserted, and the second is the one that matters: they
+  // share a plane, AND no two of them overlap. `spread` alone is satisfied by
+  // the bug.
+  const fanRects = rects(fan.svg);
+  const fanParties = fanRects.concat(figures(fan.svg));
+  t.equal(fanParties.length, 5, 'the fan draws a box for each party');
+  const fanCentres = fanParties.map(function (one) { return (one.top + one.bottom) / 2; });
+  t.check(Math.max.apply(null, fanCentres) - Math.min.apply(null, fanCentres) <= 30,
+          'THE FAN\'S PARTIES SHARE ONE PLANE, within half a box',
+          'centres ' + fanCentres.map(function (c) { return c.toFixed(0); }).join(', '));
+  // On the RECTS alone, which is the four applications — the stick figure is
+  // drawn as a glyph and the markup carries no width for it, so an extent read
+  // off the document would be invented. It is the four that shared a rank and
+  // therefore the four that piled up; the person was on a rank of its own and
+  // could not have.
+  const stacked = [];
+  fanRects.forEach(function (one, i) {
+    fanRects.slice(i + 1).forEach(function (other) {
+      if (one.left < other.right && one.right > other.left) {
+        stacked.push('(' + one.left.toFixed(0) + '-' + one.right.toFixed(0) + ') and (' +
+                     other.left.toFixed(0) + '-' + other.right.toFixed(0) + ')');
+      }
+    });
+  });
+  t.check(stacked.length === 0,
+          'AND NO TWO OF THEM OVERLAP — one plane is a row, not a pile',
+          stacked.length ? stacked.join('; ') : fanRects.length + ' box(es), none overlapping');
+
   // -----------------------------------------------------------------------
   t.log.info('no two edge labels are drawn on top of each other');
   // -----------------------------------------------------------------------
@@ -257,7 +304,6 @@ function run(t) {
   // other way. Every label is checked against every other rather than only the
   // issuer's — a band deep enough to separate these must not have pushed one of
   // them onto a line dagre placed.
-  const fan = map.render(FAN, { id: 'fan', label: 'fan' });
   const fanPanels = panels(fan.svg);
   t.check(fanPanels.length >= 9, 'every line in the fan is labelled',
           fanPanels.length + ' label(s)');

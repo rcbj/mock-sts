@@ -39,7 +39,7 @@ which is why the fix is a mutation of `process.env` rather than fourteen edits.
 
 ## `helpers.js` holds what more than one protocol needs
 
-`userFor`, `parseBody`, `oauthError`, `vciError`, `signJwt` and
+`userFor`, `parseBody`, `bodyValues`, `oauthError`, `vciError`, `signJwt` and
 `firstByLocal`/`textByLocal` are in `helpers.js` because more than one protocol needs
 them, not because they are especially general. The last two are read by three parsers
 — the WS-Trust RST, WS-Federation's `wreq`, and the `wresult` the mock relying party
@@ -47,7 +47,24 @@ is POSTed — and they match on **local name with the namespace ignored** becaus
 trust namespace alone has four versions in use. That is what lets one parser answer
 WS-Trust 1.0 through 1.4 instead of four.
 
-**`dnRfc4514()` IS THE NEWEST OF THEM AND IT MOVED HERE RATHER THAN BEING WRITTEN
+**`bodyValues()` IS THE NEWEST OF THEM AND IT EXISTS BECAUSE `parseBody()` IS NOT
+GOING TO CHANGE.** That function builds a PLAIN OBJECT, so a repeated field keeps
+only its last value: `resource=a&resource=b` on a Token Request arrived as `b`
+and the first was silently gone. Two specifications say the parameter may repeat
+— RFC 8707 section 2's `resource` and RFC 8693 section 2.1's `audience` — so
+until 2026-08-26 neither could actually be repeated here whatever the RFC said.
+The fix is a second reader beside the first rather than a new shape for it:
+sixty-odd call sites across fourteen modules read that object with
+`String(body.x)`, and giving them an array for a repeat would change what every
+one of them sees to serve two parameters. **The authorization endpoint needs none
+of it** — it reads `req.query`, and express gives an array for a repeat already,
+which is worth knowing before somebody looks for the same bug there.
+`admin-ui/admin.js`'s `listField()` is the same function, written first, for the
+console's checkbox columns; neither calls the other because that module requires
+`oauth2.js` (rule 5) and nothing below it can require back. The shapes are
+deliberately identical, so folding them is a one-line delegation in THAT file.
+
+**`dnRfc4514()` MOVED HERE RATHER THAN BEING WRITTEN
 TWICE.** It renders a certificate subject the way LDAP and RFC 4514 write one —
 leaf first, no spaces after the commas, values escaped — which is a DIFFERENT
 string from the most-significant-first form node and `openssl x509 -subject`
@@ -993,6 +1010,16 @@ find module` naming a file the operator never mentioned.
    `audience=https://esb1.example.com` indistinguishable in the one place the
    difference is the point.
 
+   **`forClientId()` IS THE SECOND LOOKUP THAT IS NOT BY IDENTIFIER, added
+   2026-08-26 beside it, and the paragraph above is exactly why it is a separate
+   function.** It matches `oauthClientId`, and `oauth-oidc/oauth2.js`'s
+   `audienceScopes()` is its one caller: a scope value that names another
+   application becomes that access token's audience, and a scope is a BARE NAME
+   where an `aud` from RFC 8707 is a URI. Folding the two into one lookup would
+   be the fallback the paragraph above refuses, one function along — the caller
+   knows which question it is asking, so it asks it. Same three properties as
+   its neighbour: not a permission, not case-folded, a walk rather than an index.
+
    **FOUR ATTRIBUTES HERE ARE DECLARATION AND NOTHING EVER WRITES THEM** —
    `federationPartnerId`, `ldapBindDn`, `scimClientId`, `spiffeWorkloadId` —
    because those surfaces authenticate the CALLER rather than an application
@@ -1274,6 +1301,12 @@ find module` naming a file the operator never mentioned.
    (`audienceParties()`, exported for `credential_graph.js`, which had a copy of
    it), so a token addressed to `https://apigw1.example.com` lands on the BOX
    for apigw1 — the failure the exchange's own lookup already exists to prevent.
+   **It is TWO lookups since 2026-08-26** — `forAudience()` then
+   `forClientId()` — because an audience here is as often a bare NAME as a URI:
+   that is what `oauth2.js`'s `audienceScopes()` writes when a client names the
+   API it wants in its scope list instead of through RFC 8707, and `apigw1` and
+   `https://apigw1.example.com` have to land on ONE box or this console has
+   invented a party.
    An `aud` naming SEVERAL resources draws several lines, because RFC 7519
    section 4.1.3 allows a list and RFC 8707 section 2.3 is how one gets here,
    and `recordJwt()` joins them with a space: a single lookup of the joined

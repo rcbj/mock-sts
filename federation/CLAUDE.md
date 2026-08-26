@@ -4,7 +4,7 @@ Federation relationships: this service as either end of one, in five protocols.
 
 | File | What it is |
 |---|---|
-| `federation.js` | **The register.** The schema, the two conversions, the CRUD, the counters, and the release filter. A library (rule 3): it registers nothing. Directory-backed — `ou=federations` IS the store. |
+| `federation.js` | **The register.** The schema, the two conversions, the CRUD, the counters, the release filter, and the broker resolver (`identityProviderFor()` / `authenticationFor()` / `usableServiceProvider()`). A library (rule 3): it registers nothing. Directory-backed — `ou=federations` IS the store. |
 | `federation_map.js` | What a foreign identity provider SAID, turned into directory attributes. The default mapping table and the username rule. A library. |
 | `federation_http.js` | **The only outbound request in this repository.** A library, and the narrowest one here. |
 | `federation_sp.js` | The four endpoints. The service-provider half — the one place this service CONSUMES what somebody else issued. |
@@ -218,6 +218,125 @@ touching this one.
 
 ---
 
+## HOW THIS SERVICE AUTHENTICATES FOR A PARTNER — `fedAuthnMechanism`, AND THE N-LAYER CHAIN IT MAKES POSSIBLE
+
+The identity-provider half above says it stores a POINTER and nothing else, and
+until 2026-08-26 that was the whole of it. Two attributes have joined
+`fedApplication`, and they answer a question no other attribute here could:
+
+> When this partner asks this service to authenticate somebody, **what does it
+> actually do?**
+
+Before them the answer was always the same one and nothing could change it:
+`authn.js`'s sign-in screen. `appFederationRelationship` on an APPLICATION
+entry could redirect a sign-in to a partner — but it answers a DIFFERENT
+question ("where do this application's people sign in?"), it lives on an entry
+somebody registering a relying party owns, and it cannot say anything about the
+other three ways this service can check a person.
+
+| Value | What the person meets |
+|---|---|
+| `password` | the sign-in screen, as always |
+| `password-mfa` | the same screen with the second-factor box **ticked and locked**, so the WebAuthn ceremony runs after the password step: `amr ["pwd","hwk"]`, `acr "mfa"` |
+| `webauthn` | the same screen with the **passwordless** box ticked and locked: a security key alone, `amr ["hwk"]`, ONE factor |
+| `federation` | **the broker case.** `fedAuthnRelationship` names a SERVICE-PROVIDER-side relationship in this same realm and the person goes THERE |
+
+**The fourth is the one with a name of its own.** A relationship that answers a
+SAML 2.0 partner by consuming somebody else's WS-Federation token makes this
+realm an **identity bridge**: it authenticates nobody, checks nothing about the
+person, and re-asserts what it was handed under its own signature and in a
+protocol the party above it does not implement. Nothing bounds the depth —
+the realm at the far end can broker again — and nothing in the chain but the
+last hop ever draws a password field.
+
+### AN EMPTY MECHANISM IS NOT `password`
+
+It is "this relationship says nothing", which is what every relationship
+created before the attribute existed holds. It falls through to the application
+entry and then to the screen, so a service upgraded to this build behaves
+EXACTLY as it did. Treating empty as `password` would have silently switched
+off every `appFederationRelationship` in the field, which is a federated
+application quietly authenticating people locally — the failure this directory
+is most careful about everywhere else.
+
+### THE TWO SOURCES, AND THE ORDER IS WRITTEN DOWN IN ONE PLACE
+
+There are now two attributes that can redirect a sign-in, and pretending
+otherwise would be worse than the cost of saying so. `authn.js`'s
+`mechanismFor()` is the ONLY function that reads both, and it reads them in
+this order:
+
+1. **the identity-provider-side relationship naming this application**, if one
+   is enabled and declares a mechanism. It wins because it is the more specific
+   statement: an application entry can be a federation partner AND an ordinary
+   OAuth client, registered by two different people, and only one of those
+   facts is about the exchange in progress.
+2. **`appFederationRelationship` on the application entry** — home realm
+   discovery by configuration, unchanged.
+3. the sign-in screen.
+
+`federation.js` supplies the pieces (`identityProviderFor()`,
+`authenticationFor()`) and makes no decision; `authn.js` composes them. That
+split is 4b's constraint again — this module must not require the sign-in path
+— rather than a preference.
+
+### THREE THINGS THAT COST A RUN IF THEY ARE GOT WRONG
+
+* **`identityProviderFor()` walks the register and skips DISABLED entries**,
+  which CHANGES WHAT A DISABLED IDENTITY-PROVIDER-SIDE RELATIONSHIP MEANS. It
+  used to mean almost nothing — every protocol endpoint here answers a partner
+  whether or not a relationship names it, so the flag governed only the release
+  list. It now also governs the mechanism, and skipping is the safe direction:
+  falling through to the password screen is what this service did before
+  anybody configured any of it.
+* **A half-configured broker is a MISSING FIELD, not a guess.** `federation`
+  with no `fedAuthnRelationship` is named by `readinessOf()` exactly as a SAML
+  relationship with no certificate is. The alternative — quietly asking for a
+  password — is a broker that has stopped brokering looking precisely like one
+  that is working, which is the single most expensive failure this attribute
+  could have.
+* **`forceMfa` beats `webauthn`, loudly.** `opts.forceMfa` does not come from
+  this register: it comes from the request a protocol module is answering (a
+  `RequestedAuthnContext`, a `wauth`), and a caller told two factors are
+  required does not get a one-factor answer because a relationship preferred
+  one. Passwordless WebAuthn is ONE factor however phishing-resistant it is.
+  `beginAuthentication()` resolves that and says so in the log.
+
+### THE ENFORCEMENT IS ON THE RECORD, NOT IN THE MARKUP
+
+The screen renders a hidden `webauthn_only` when the mechanism demands one, and
+a hidden input is a suggestion: anybody with the developer tools open deletes
+it, and the POST that arrives then looks exactly like an ordinary password
+sign-in. So `handleLogin()` reads `record.forcePasswordless` as well. **A
+configured mechanism a client can opt out of is not a mechanism.**
+
+### WHAT IT DELIBERATELY DOES NOT DO
+
+**It does not touch the counters.** `fedAuthentications` on an
+identity-provider-side relationship has always read zero and still does —
+nothing increments it, because what it counts is assertions CONSUMED and this
+side issues them. Honouring a mechanism is not an authentication and filing it
+as one would make the number mean two things. The evidence that a bridge
+brokered is the chain reaching the far realm, which is what
+`tests/federation_chain_sso.js` in the parent project asserts, and the mutation
+test beside it. Giving this side counters of its own is a separate change with
+its own argument.
+
+### Tests
+
+`tests/federation_chain_sso.js` **in the parent project**, beside
+`federation_sso.js` and for the same reasons: an OIDC application in
+`federation-realm-3`, SAML 2.0 on to `federation-realm-4`, WS-Federation on to
+`federation-realm-5`, where the only password field in the whole chain is
+drawn. It covers all four mechanisms — the three that draw a screen are
+asserted by WHICH BOX the screen locks — plus the half-configured refusal, a
+mechanism pointing at a disabled relationship, and a value that is not one of
+the four. Its realms are deliberately not `federation_sso.js`'s: that test
+asserts its relationship counted EXACTLY ONE sign-in, and sharing a realm
+between two jobs in a pool is a flake rather than a failure.
+
+---
+
 ## `federation_http.js`: THE ONLY OUTBOUND REQUEST, AND HOW THE OLD POSITION SURVIVES
 
 Nothing else in this repository has ever dialled anything, and that was a
@@ -356,7 +475,9 @@ token issued.
 ### What it deliberately does NOT store
 
 An identity-provider-side relationship names an application (`fedApplication`)
-and stops. That partner's entityID, its assertion consumer service, its redirect
+and stops — plus, since 2026-08-26, the two attributes that say HOW this
+service authenticates for that partner; see `fedAuthnMechanism` below, which is
+the one thing on this side that is not a pointer and not a filter. That partner's entityID, its assertion consumer service, its redirect
 URIs and its signing certificate are on the `ou=applications` entry, where every
 protocol module already reads them. **Copying any of them here would be the
 two-stores failure this repository is arranged to avoid, and the copy would be
@@ -618,6 +739,13 @@ The answer lives on the APPLICATION now: `appFederationRelationship` on an
 entry under `ou=applications`, with `appFederationAutoRedirect` beside it, both
 read by `authn.js`'s `federationFor()` and by nothing in this directory. See
 `common/CLAUDE.md` and `authn/CLAUDE.md`.
+
+**There is a SECOND answer since 2026-08-26 and it is in this directory after
+all** — `fedAuthnMechanism`, above — but it is not home realm discovery and
+saying so matters. That attribute does not decide who gets sent to a partner;
+it decides what this service does when a partner has ALREADY sent somebody
+here. The two never compete for the same sign-in on their own terms, and
+`authn.js`'s `mechanismFor()` is the one place their order is written down.
 
 **It is in that direction on purpose.** This module cannot require the
 registry: `federation.js` is a library that `authn.js` requires (see 4b), and

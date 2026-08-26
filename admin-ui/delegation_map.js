@@ -266,6 +266,66 @@ const MARGIN = 18;
 const STS_BAND_SEP = RANK_SEP;
 
 // ---------------------------------------------------------------------------
+// THE PARTIES ARE ONE ROW, AND THE LINES THAT CANNOT FIT IN IT GO UNDER IT.
+//
+// The band above bought half of what it was for. Taking the issuer out of the
+// layout stopped the hexagon competing with the chain for a rank, and a picture
+// of ONE chain came out as the single horizontal line it always should have
+// been — but the moment the graph BRANCHES it stops being a chain, and dagre
+// goes back to spreading the parties vertically because that is what a layered
+// layout is for. `bob_end_user`'s picture is the ordinary case: a person who
+// signed in at one application and was delegated through two others is four
+// boxes at four different heights, and a reader comparing them is hunting up
+// and down a staircase for boxes that are all the same KIND of thing.
+//
+// So the y is taken away from dagre as well. Every party — the person and every
+// application — is put on ONE CENTRELINE, and dagre keeps only what it is
+// actually good at here: the ORDER of the boxes along it, which is the rank
+// assignment and the crossing minimisation, and which is the whole reason the
+// library is still worth 1.4 MB. What is thrown away is the coordinate pass,
+// and it is thrown away deliberately rather than tuned: `align`, `ranker` and
+// `nodesep` can all move the staircase around and none of them can flatten it,
+// because a layered layout that put every node on one rank-perpendicular line
+// would have nothing left to minimise crossings WITH.
+//
+// **WHICH IS THE COST, AND IT IS PAID IN THE LINES INSTEAD.** Crossings do not
+// disappear because the boxes lined up; a line from the person to the third
+// application has to get past the two in between. So a party line is drawn one
+// of two ways:
+//
+//   * STRAIGHT, along the row, when the two boxes are neighbours on it and the
+//     gap between them holds the label. That is the common case and it is the
+//     one that reads best — a chain becomes a row of boxes joined left to right.
+//   * AN ARC UNDER THE ROW otherwise: when a box sits between the two ends,
+//     when the pair already has a straight line (two mechanisms between one pair
+//     are two lines, and `multigraph` is why they both exist), or when the label
+//     is wider than the gap it would have to sit in. It leaves the bottom of one
+//     box and enters the bottom of the other, and its label sits at the apex.
+//
+// The arcs get LANES, assigned exactly the way the issuer's labels above are:
+// greedily by x-overlap, fewest first. Two arcs in one lane cannot overlap
+// horizontally, so they cannot cross each other; two in different lanes are
+// separated vertically. It is the same problem as the labels and the same
+// answer, which is why it is the same shape of code.
+//
+// **UNDER rather than over**, and that is not arbitrary: over is where the
+// issuer's band is, and an arc that reached into it would cross seven dashed
+// lines and land among their labels. Under the row there is nothing.
+// ---------------------------------------------------------------------------
+const ARC_LANE_H = 34;
+const ARC_GUTTER = 14;
+const ARC_PAD = 12;
+
+// The gap between two boxes on the row: `GAP_PAD` of air on each side of the
+// label that lies in it, and `GAP_MIN` where no line lies in it at all. The
+// minimum is the one that needs a number rather than a measurement — two boxes
+// nothing joins still have to read as two boxes, and `NODE_SEP` alone (which is
+// what dagre separated a RANK's members by, in the other direction) is tight
+// enough to look like a drawing error.
+const GAP_MIN = 46;
+const GAP_PAD = 20;
+
+// ---------------------------------------------------------------------------
 // WHERE THE ISSUER'S LABELS GO, WHICH IS THE ONE HARD PART OF DRAWING THE BAND.
 //
 // Every one of those lines starts at the SAME point. Put their labels all at one
@@ -757,15 +817,200 @@ function renderUnguarded(graph, options) {
 
   dagre.layout(g);
 
+  // ---------------------------------------------------------------------------
+  // ONE CENTRELINE FOR THE PARTIES — see the note on ARC_LANE_H. dagre's ranking
+  // and its ordering are kept; its coordinate pass is overwritten, which is done
+  // by writing back into dagre's OWN nodes rather than into a map beside them so
+  // that everything downstream — the label fitting, the placement loop, the
+  // routing — reads one answer. A second copy of a node's position is how a
+  // picture comes to have a line that ends slightly beside its own box.
+  // ---------------------------------------------------------------------------
+  let rowH = 0;
+  partyNodes.forEach(function (node) {
+    rowH = Math.max(rowH, drawn[node.id].size.height);
+  });
+  const rowCentre = MARGIN + rowH / 2;
+  partyNodes.forEach(function (node) {
+    const at = g.node(node.id);
+    if (at) {
+      at.y = rowCentre;
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // THE ORDER ALONG THE ROW, AND WHY THE X IS TAKEN AWAY FROM DAGRE TOO.
+  //
+  // Flattening the y alone was not enough and the way it failed is worth
+  // recording, because it looks correct on a chain and is catastrophic on
+  // anything else. In a `rankdir: 'LR'` layout the RANK is the x, so every node
+  // dagre puts on one rank has the SAME x and is told apart only by the y —
+  // which is the coordinate that was just thrown away. A chain has one node per
+  // rank and came out perfect; a FAN — one person, four applications, which is
+  // the ordinary shape of a busy person's picture — came out as four boxes drawn
+  // exactly on top of each other. `tests/delegation_map_bands.js` had that
+  // fixture already and caught it.
+  //
+  // So the row owns both coordinates and dagre is left with the ONE thing it is
+  // being kept for: the ORDER. Its rank assignment is the depth of the chain and
+  // its ordering pass is the arrangement within a rank that crosses fewest
+  // lines, so sorting by (x, then y) is that whole result read off as a
+  // sequence — rank by rank, and inside a rank in the order it chose.
+  //
+  // Then the boxes are packed left to right along it, and the GAP between two of
+  // them is the label of the line that will lie between them. That inverts what
+  // dagre was doing: `ranksep` reserved a rank for an edge label and hoped it
+  // fitted, and this measures the label and leaves exactly that much. It is also
+  // what makes the straight-line rule below decidable at all — "are these two
+  // neighbours" is a question about a sequence, not about geometry.
+  // ---------------------------------------------------------------------------
+  const order = partyNodes.filter(function (node) { return !!g.node(node.id); })
+    .slice(0).sort(function (a, b) {
+      const at = g.node(a.id);
+      const bt = g.node(b.id);
+      return at.x - bt.x || at.y - bt.y;
+    });
+  const seat = {};
+  order.forEach(function (node, index) {
+    seat[node.id] = index;
+  });
+
+  // How wide a line's label is, which is what decides both the gap it sits in
+  // and the room an arc's lane has to hold.
+  function labelWidthOf(edge) {
+    let widest = 0;
+    (edgeLabels[edge.id] || []).forEach(function (one) {
+      widest = Math.max(widest, textWidth(one, EDGE_SIZE));
+    });
+    return widest;
+  }
+
+  // WHICH LINE LIES ALONG THE ROW. One per NEIGHBOURING PAIR: a second line
+  // between the same two boxes is a second mechanism — `multigraph` is why they
+  // both exist — and drawing both along the row would draw them on top of each
+  // other. Everything else arcs under it.
+  const straightAt = {};
+  const route = {};
+  partyEdges.forEach(function (edge) {
+    if (!placedFor(edge) || edge.from === edge.to ||
+        seat[edge.from] === undefined || seat[edge.to] === undefined) {
+      return;
+    }
+    const width = labelWidthOf(edge);
+    const lines = edgeLabels[edge.id] || [];
+    const gapAt = Math.min(seat[edge.from], seat[edge.to]);
+    const neighbours = Math.abs(seat[edge.from] - seat[edge.to]) === 1;
+    if (neighbours && straightAt[gapAt] === undefined) {
+      straightAt[gapAt] = width;
+      route[edge.id] = { straight: true, labelWidth: width,
+                         labelHeight: lines.length * (LINE_HEIGHT - 2) + 6 };
+      return;
+    }
+    route[edge.id] = { straight: false, labelWidth: width,
+                       labelHeight: lines.length * (LINE_HEIGHT - 2) + 6 };
+  });
+
+  // PACKED. The gap holds the straight line's label with air on both sides, or
+  // is `GAP_MIN` where no line lies in it — two boxes that nothing joins still
+  // have to look like two boxes.
+  let cursor = MARGIN;
+  order.forEach(function (node, index) {
+    const size = drawn[node.id].size;
+    if (index) {
+      cursor += straightAt[index - 1] !== undefined
+        ? Math.max(GAP_MIN, straightAt[index - 1] + GAP_PAD * 2) : GAP_MIN;
+    }
+    g.node(node.id).x = cursor + size.width / 2;
+    cursor += size.width;
+  });
+  const packedW = cursor + MARGIN;
+
+  // WHERE EACH ARC GOES, now that the boxes have their final x. A lane is the
+  // first one nothing else in it overlaps — the same greedy first-fit the
+  // issuer's labels get above, and enough for the same reason: there is no
+  // arrangement a smarter one would find that this misses often enough to be
+  // worth a reader having to understand it.
+  const arcLanes = [];
+  partyEdges.forEach(function (edge) {
+    const how = route[edge.id];
+    if (!how || how.straight) {
+      return;
+    }
+    const a = g.node(edge.from);
+    const b = g.node(edge.to);
+    const widest = Math.max(drawn[edge.from].size.width, drawn[edge.to].size.width);
+    const left = Math.min(a.x, b.x) - widest / 2;
+    const right = Math.max(a.x, b.x) + widest / 2;
+    // The label sits at the apex, so it is part of what the lane has to hold.
+    const need = Math.max(right - left, how.labelWidth + GAP_PAD * 2);
+    const middle = (left + right) / 2;
+    const claim = { left: middle - need / 2, right: middle + need / 2 };
+    let lane = 0;
+    while (arcLanes[lane] && arcLanes[lane].filter(function (held) {
+      return claim.left < held.right + ARC_GUTTER && claim.right > held.left - ARC_GUTTER;
+    }).length) {
+      lane++;
+    }
+    if (!arcLanes[lane]) {
+      arcLanes[lane] = [];
+    }
+    arcLanes[lane].push(claim);
+    how.lane = lane;
+  });
+
+  // ---------------------------------------------------------------------------
+  // HOW DEEP EACH LANE IS, which is decided by the LABELS in it and not by a
+  // constant — the same answer `fitLabels()` reaches above and for the same
+  // reason. An arc's label sits at its apex, so two lanes a fixed distance apart
+  // have their labels a fixed distance apart, and three lines of text at
+  // `LINE_HEIGHT` do not fit in `ARC_LANE_H`. The first version of this used the
+  // constant and the picture came back with `acts for / Token exchange / 1
+  // issued` written across the arc under it — which is the failure the issuer's
+  // label rows were invented to fix, one band lower.
+  //
+  // In the party band's OWN coordinates: `bandH` is not known yet, because how
+  // deep the issuer's band is depends on how ITS labels fit and that is settled
+  // below. The routing adds it, which is what the placement loop does to every
+  // node position anyway.
+  // ---------------------------------------------------------------------------
+  const laneApex = [];
+  const rowBottomRel = MARGIN + rowH;
+  for (let lane = 0; lane < arcLanes.length; lane++) {
+    let tallest = 0;
+    Object.keys(route).forEach(function (id) {
+      if (route[id].lane === lane) {
+        tallest = Math.max(tallest, route[id].labelHeight || 0);
+      }
+    });
+    const previous = laneApex[lane - 1];
+    const clear = previous
+      ? previous.y + previous.height / 2 + tallest / 2 + ARC_GUTTER
+      : rowBottomRel + ARC_PAD + tallest / 2;
+    laneApex.push({
+      // The floor: an arc is its own line even with nothing written on it.
+      y: Math.max(clear, (previous ? previous.y : rowBottomRel) + ARC_LANE_H),
+      height: tallest
+    });
+  }
+
+  const arcDepth = arcLanes.length
+    ? (laneApex[laneApex.length - 1].y - rowBottomRel) +
+      laneApex[laneApex.length - 1].height / 2 + ARC_PAD
+    : 0;
+
+
   // WHERE EVERY BOX ENDED UP, and where every line runs. Two maps rather than
   // dagre's own graph, because half of what is in them did not come from dagre:
   // the hexagon's position and its lines are computed below, and the renderer
   // must not be able to tell which half it is drawing.
   const placed = {};
   const routed = {};
-  const laidOut = g.graph();
-  let partyW = Math.max(1, Math.ceil(laidOut.width || 0));
-  let partyH = Math.max(1, Math.ceil(laidOut.height || 0));
+  // NOT dagre's width either: the boxes were repacked along the row above, so
+  // the only thing that knows how wide the picture is is the packing.
+  let partyW = Math.max(1, Math.ceil(packedW));
+  // NOT dagre's height, which describes the staircase that was just flattened.
+  // The row is as tall as its tallest box, and under it whatever the arcs
+  // needed — nothing at all where every line lies along the row.
+  let partyH = Math.max(1, Math.ceil(MARGIN + rowH + arcDepth + MARGIN));
   if (!partyNodes.length) {
     // Nothing but the issuer, which is what an empty register draws. dagre is
     // asked for the size of a graph with no nodes and answers with the margins
@@ -892,20 +1137,76 @@ function renderUnguarded(graph, options) {
     }
     placed[node.id] = { x: at.x + shiftX, y: at.y + bandH };
   });
+  // ---------------------------------------------------------------------------
+  // THE PARTY LINES, drawn from the decision made above rather than from what
+  // dagre routed. Its routes described the staircase and every one of them would
+  // now leave its box sideways into empty space.
+  //
+  // A straight line is clipped to both boxes so the arrowhead lands on an edge,
+  // which is `boundaryPoint()`'s whole job. An arc is a cubic that leaves the
+  // BOTTOM of one box and enters the bottom of the other, with both controls on
+  // its lane — which is the one shape that comes back to the row at both ends
+  // without a corner, and whose deepest point is three quarters of the way down
+  // to the controls. That fraction is why the apex is computed and not assumed:
+  // the label goes there, and a label at the control depth would sit clear of
+  // the line it belongs to.
+  // ---------------------------------------------------------------------------
   partyEdges.forEach(function (edge) {
-    if (!placedFor(edge)) {
+    const how = route[edge.id];
+    if (!how || !placed[edge.from] || !placed[edge.to]) {
       return;
     }
-    const laid = g.edge(edge.from, edge.to, edge.id);
-    if (!laid) {
+    const lines = edgeLabels[edge.id] || [];
+    const box = {
+      width: Math.ceil(how.labelWidth) + 10,
+      height: lines.length * (LINE_HEIGHT - 2) + 6
+    };
+    if (how.straight) {
+      const from = boundaryPoint(placed[edge.from], drawn[edge.from].size, placed[edge.to]);
+      const to = boundaryPoint(placed[edge.to], drawn[edge.to].size, placed[edge.from]);
+      routed[edge.id] = {
+        points: [from, to],
+        x: (from.x + to.x) / 2, y: (from.y + to.y) / 2,
+        width: box.width, height: box.height
+      };
       return;
     }
+    const a = placed[edge.from];
+    const b = placed[edge.to];
+    const aSize = drawn[edge.from].size;
+    const bSize = drawn[edge.to].size;
+    // A third of the way in from the centre, towards the far box: it leaves the
+    // bottom edge rather than the corner, so two arcs off one box do not start
+    // at the same point, and it is inside the box's own width so the start is
+    // hidden under it the way `boundaryPoint()`'s is.
+    const lean = function (at, size, towards) {
+      const dx = towards.x - at.x;
+      const step = Math.min(size.width / 3, Math.abs(dx) / 3);
+      return { x: at.x + (dx < 0 ? -step : step), y: at.y + size.height / 2 };
+    };
+    const from = lean(a, aSize, b);
+    const to = lean(b, bSize, a);
+    // WHERE THE CURVE ACTUALLY DIPS TO, solved for rather than assumed. A cubic
+    // whose two controls share a y is at ((y0 + y1) / 8) + (3 / 4)c when it is
+    // halfway along, which is where its lowest point is when the ends are level
+    // — and they are NOT always level here, because two boxes on one centreline
+    // have different heights when one of their labels wrapped. So the control is
+    // computed from the lane's apex instead of the apex from the control: the
+    // label goes at the apex, and a label a box-height away from its own line is
+    // a label belonging to nothing.
+    const apex = bandH + laneApex[how.lane].y;
+    const control = (apex - (from.y + to.y) / 8) / 0.75;
     routed[edge.id] = {
-      points: (laid.points || []).map(function (one) {
-        return { x: one.x + shiftX, y: one.y + bandH };
-      }),
-      x: (laid.x || 0) + shiftX, y: (laid.y || 0) + bandH,
-      width: laid.width || 0, height: laid.height || 0
+      points: [from, to],
+      // The exact curve, handed over rather than approximated through
+      // `edgePath()`'s smoothing — which is built for a polyline with corners in
+      // it and would round this one away from its own lane.
+      path: 'M' + round(from.x) + ' ' + round(from.y) +
+            'C' + round(from.x) + ' ' + round(control) + ' ' +
+            round(to.x) + ' ' + round(control) + ' ' +
+            round(to.x) + ' ' + round(to.y),
+      x: (from.x + to.x) / 2, y: apex,
+      width: box.width, height: box.height
     };
   });
 
@@ -961,7 +1262,10 @@ function renderUnguarded(graph, options) {
       return '';
     }
     const look = edgeLook(edge);
-    const d = edgePath(laid.points);
+    // An arc hands over its own path — see the routing above. Everything else
+    // is a polyline to be smoothed, which is the issuer's two-point lines and
+    // the party lines that lie along the row.
+    const d = laid.path || edgePath(laid.points);
     if (!d) {
       return '';
     }

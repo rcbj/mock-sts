@@ -406,10 +406,13 @@ function holderOf(record) {
 // **THE LOOKUP IS THE REGISTRY'S, and it is a lookup rather than a permission.**
 // `applications.forAudience()` is the same call the token exchange makes when it
 // records an act, so an audience some application registered on `oauthAudience`
-// resolves to that application and the picture has ONE box for it. An audience
-// nobody registered comes back as ITSELF, which is the honest answer and is what
-// a real resource server looks like on this service: it is drawn, named after
-// the URI, and `registered` says which of the two happened.
+// resolves to that application and the picture has ONE box for it. Beside it
+// `applications.forClientId()`, because an audience here is as often a bare NAME
+// as a URI — that is what oauth2.js's `audienceScopes()` writes when a client
+// names the API it wants in its scope list — and the two must land on one box.
+// An audience neither of them knows comes back as ITSELF, which is the honest
+// answer and is what a real resource server looks like on this service: it is
+// drawn, named after the URI, and `registered` says which of the two happened.
 //
 // **AN AUDIENCE THAT IS THIS SERVICE'S OWN IS NOT A PARTY, and it is the one
 // thing dropped here.** Two of them arrive on ordinary tokens and NEITHER is a
@@ -448,7 +451,19 @@ function audienceParties(audience, issuer) {
       return;
     }
     seen[one] = true;
-    const application = applications.forAudience(one);
+    // TWO LOOKUPS, IN THIS ORDER, AND THEY ANSWER DIFFERENT QUESTIONS. An
+    // audience that is a URI was registered on `oauthAudience` and is found by
+    // the first; an audience that is a bare NAME is a client_id and is found by
+    // the second — which is the shape oauth2.js's `audienceScopes()` produces
+    // when a client names the API it wants in its scope list rather than through
+    // RFC 8707. Both resolve to the SAME box, which is the point: `apigw1` and
+    // `https://apigw1.example.com` are one application, and a picture with a
+    // box for each would be this console inventing a party.
+    //
+    // The order is the narrower question first. It matters only for an entry
+    // that registered one application's client_id as its own audience, which is
+    // a configuration mistake either way — and `forAudience()` warns about it.
+    const application = applications.forAudience(one) || applications.forClientId(one);
     if (!application && sameOrigin(one, issuer)) {
       log.debug("audienceParties(): \"" + one + "\" is on this service's own " +
                 "origin and no application has registered it, so it names this " +

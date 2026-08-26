@@ -281,6 +281,77 @@ function roleRow(id) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// HOW A PERSON PROVES WHO THEY ARE WHEN THIS SERVICE IS THE IDENTITY PROVIDER.
+//
+// `fedAuthnMechanism` on an identity-provider-side relationship, and it is the
+// attribute that makes this service an identity BROKER rather than an identity
+// provider with partners: the fourth value sends the person on to ANOTHER
+// relationship — one where this service is the service provider — so a
+// SAML 2.0 partner can be authenticated over WS-Federation by somebody else
+// again, and that partner over something else again, to any depth.
+//
+// WHY IT IS HERE AND NOT ON THE APPLICATION ENTRY, which is where
+// `appFederationRelationship` lives and is a fair question. That attribute
+// answers "where do THIS APPLICATION's people sign in" — a fact about a
+// relying party, set by whoever registered it. This one answers "what does
+// this service DO when that partner asks it to authenticate somebody", which
+// is a fact about the RELATIONSHIP: the same directory entry may be a partner
+// of one federation and an ordinary OAuth client besides, and the two answers
+// need not agree. So the register carries it and the application entry keeps
+// what it had.
+//
+// The cost of that choice is stated rather than hidden: there are now TWO
+// places a sign-in can be redirected from, and `authn.js`'s resolver reads
+// them in ONE order, written down at `mechanismFor()` — the relationship
+// first, because it is the more specific statement, and the application entry
+// only when no enabled relationship names that application. Nothing that
+// worked before this attribute existed changes: a relationship that declares
+// no mechanism falls through to exactly the path it always took.
+//
+// AN EMPTY VALUE IS NOT `password`. It is "this relationship says nothing",
+// which is what every relationship created before this attribute existed
+// holds, and it has to fall through to the application entry rather than
+// overriding it — otherwise adding this feature would have silently switched
+// off every `appFederationRelationship` in the field.
+// ---------------------------------------------------------------------------
+const MECHANISMS = [
+  { mechanism: 'password', label: 'Username and password',
+    what: 'This service\'s own sign-in screen, which checks no password. The ' +
+          'ordinary case, and what an unset mechanism falls through to once ' +
+          'nothing else has an opinion.' },
+  { mechanism: 'password-mfa', label: 'Username and password, with MFA',
+    what: 'The same screen with the second-factor box ticked and locked, so ' +
+          'the WebAuthn ceremony runs after the password step and the ' +
+          'session records amr ["pwd","hwk"] and acr "mfa". It is the same ' +
+          'demand a RequestedAuthnContext can make; a protocol asking for it ' +
+          'and a relationship configuring it produce one screen, not two.' },
+  { mechanism: 'webauthn', label: 'WebAuthn, passwordless',
+    what: 'A security key ALONE — no password is presented, so the session ' +
+          'records amr ["hwk"] and ONE factor. That is why it cannot satisfy ' +
+          'a caller that demanded a second factor: see forceMfa in authn.js, ' +
+          'which wins over this and says so in the log.' },
+  { mechanism: 'federation', label: 'Another federation relationship',
+    what: 'THE BROKER CASE. `fedAuthnRelationship` names a ' +
+          'SERVICE-PROVIDER-side relationship in this same realm and the ' +
+          'person is sent there, so this service consumes somebody else\'s ' +
+          'assertion and then issues its own to the partner that asked. The ' +
+          'two protocols need not match and usually do not — that is the ' +
+          'whole of what an identity bridge is.' }
+];
+
+const MECHANISM_IDS = MECHANISMS.map(function (one) {
+  return one.mechanism;
+});
+
+function mechanismRow(id) {
+  const wanted = String(id || '');
+  for (let i = 0; i < MECHANISMS.length; i++) {
+    if (MECHANISMS[i].mechanism === wanted) return MECHANISMS[i];
+  }
+  return null;
+}
+
 // Which protocol family a relationship belongs to, for the audit log and for
 // the application record an identity-provider-side relationship points at. One
 // function so the four spellings cannot drift.
@@ -482,6 +553,27 @@ const SCHEMA = {
             'its certificate live THERE, where every protocol module already ' +
             'reads them. Copying any of them here would be the two-stores ' +
             'failure this repository is arranged to avoid.' },
+    { name: 'fedAuthnMechanism', kind: 'single', role: 'identity-provider',
+      from: 'this register', enum: MECHANISM_IDS,
+      what: 'HOW THIS SERVICE AUTHENTICATES THE PERSON when this partner ' +
+            'asks it to: password, password-mfa, webauthn, or federation — ' +
+            'which sends them on to another relationship and is what makes ' +
+            'this service an identity BRIDGE between two protocols. EMPTY ' +
+            'MEANS THIS RELATIONSHIP SAYS NOTHING, which is not the same as ' +
+            'password: it falls through to appFederationRelationship on the ' +
+            'application entry and then to the sign-in screen, which is ' +
+            'exactly what every relationship did before this attribute ' +
+            'existed.' },
+    { name: 'fedAuthnRelationship', kind: 'single',
+      role: 'identity-provider', from: 'this register',
+      what: 'WHICH RELATIONSHIP THE PERSON IS SENT TO, when the mechanism is ' +
+            '`federation`. It names a SERVICE-PROVIDER-side relationship in ' +
+            'THIS realm — the register is per realm, so an id from another ' +
+            'one names nothing here — and it is checked when it is USED ' +
+            'rather than when it is written, because the relationship it ' +
+            'names can be disabled or deleted afterwards by somebody who ' +
+            'never looked at this entry. Ignored by every other mechanism, ' +
+            'and required by this one: readinessOf() names it.' },
     { name: 'fedRelease', kind: 'multi', role: 'identity-provider',
       from: 'this register',
       what: 'WHICH ATTRIBUTES ARE RELEASED TO THIS PARTNER, by claim or ' +
@@ -569,6 +661,8 @@ const EDITABLE = {
   fedAutocreateUsers: 'set',
   fedAllowUnsolicited: 'set',
   fedApplication: 'set',
+  fedAuthnMechanism: 'set',
+  fedAuthnRelationship: 'set',
   fedAttributeMap: 'multi',
   fedRelease: 'multi',
   description: 'multi'
@@ -873,9 +967,24 @@ function readinessOf(record) {
       missing.push('fedUserinfoUrl (or fedJwks / fedJwksUri, if the access token is a JWT)');
     }
   }
-  if (record.fedRole === 'identity-provider' &&
-      !String(record.fedApplication || '').trim()) {
-    missing.push('fedApplication');
+  if (record.fedRole === 'identity-provider') {
+    if (!String(record.fedApplication || '').trim()) {
+      missing.push('fedApplication');
+    }
+    // The mechanism is OPTIONAL — an empty one means this relationship says
+    // nothing and the sign-in falls through exactly as it always did — but a
+    // mechanism of `federation` with nowhere to send anybody is the
+    // half-configured state this register refuses on principle, so it is
+    // named here rather than discovered at the sign-in screen.
+    const mechanism = String(record.fedAuthnMechanism || '').trim();
+    if (mechanism && !mechanismRow(mechanism)) {
+      missing.push('fedAuthnMechanism ("' + mechanism + '" is not one of ' +
+                   MECHANISM_IDS.join(', ') + ')');
+    }
+    if (mechanism === 'federation' &&
+        !String(record.fedAuthnRelationship || '').trim()) {
+      missing.push('fedAuthnRelationship');
+    }
   }
   log.debug('Leaving readinessOf(). ' + (missing.length ? missing.length + ' field(s) missing.'
                                                         : 'Ready.'));
@@ -916,6 +1025,186 @@ function signInOptions() {
   });
   log.debug('Leaving signInOptions(). ' + rows.length + ' partner(s) to offer.');
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// A SERVICE-PROVIDER-SIDE RELATIONSHIP THAT WOULD ACTUALLY WORK, and the four
+// checks that decide it.
+//
+// TWO CALLERS AND ONE IMPLEMENTATION, which is the whole reason this is here
+// rather than in either of them. `authn.js`'s federationFor() asks it of the
+// id on an APPLICATION entry (`appFederationRelationship`) and
+// authenticationFor() below asks it of the id on a RELATIONSHIP
+// (`fedAuthnRelationship`). Both are a string somebody typed into a directory
+// attribute, both name a relationship that can be disabled or deleted
+// afterwards by somebody who never looked at the entry pointing at it, and
+// both must refuse LOUDLY rather than fall back to a password box — a
+// federated application authenticating people locally looks exactly like a
+// federated application working.
+//
+// EVERY CHECK IS MADE HERE RATHER THAN AT THE WRITE, for that reason: a check
+// made when the pointer was written would be a check about the past.
+//
+// `subject` is how the caller says what is doing the naming, because the
+// operator reading the message needs to know WHICH entry to go and fix and
+// the two callers are looking at different pages. It is interpolated into
+// every message and nothing else is.
+// ---------------------------------------------------------------------------
+function usableServiceProvider(id, subject) {
+  log.debug('Entering usableServiceProvider(). id=' + (id || '(none)'));
+  const named = String(id || '').trim();
+  const who = String(subject || 'Something here');
+  if (!named) {
+    log.debug('Leaving usableServiceProvider(). Nothing is named.');
+    return { id: '', relationship: null, problem: '' };
+  }
+  const record = get(named);
+  if (!record) {
+    log.debug('Leaving usableServiceProvider(). No such relationship.');
+    return { id: named, relationship: null,
+             problem: who + ' is configured to authenticate through the ' +
+                      'federation relationship "' + named + '", and there is ' +
+                      'no such relationship in this trust realm.' };
+  }
+  if (record.fedRole !== 'service-provider') {
+    log.debug('Leaving usableServiceProvider(). It goes the other way.');
+    return { id: named, relationship: null,
+             problem: who + ' names the federation relationship "' + named +
+                      '", which is identity-provider-side: this service ' +
+                      'ASSERTS to that partner rather than consuming from ' +
+                      'it, so there is nothing to sign in to there.' };
+  }
+  if (!isEnabled(record)) {
+    log.debug('Leaving usableServiceProvider(). It is disabled.');
+    return { id: named, relationship: null,
+             problem: who + ' authenticates through the federation ' +
+                      'relationship "' + named + '", which is DISABLED. ' +
+                      'Every relationship is created disabled deliberately; ' +
+                      'enable it on /admin/federation.' };
+  }
+  const readiness = readinessOf(record);
+  if (!readiness.ready) {
+    log.debug('Leaving usableServiceProvider(). Not fully configured.');
+    return { id: named, relationship: null,
+             problem: who + ' authenticates through the federation ' +
+                      'relationship "' + named + '", which is enabled and ' +
+                      'not fully configured: ' + readiness.missing.join(', ') +
+                      ' still to set.' };
+  }
+  log.debug('Leaving usableServiceProvider(). ' + named + ' is usable.');
+  return { id: named, relationship: record, problem: '' };
+}
+
+// ---------------------------------------------------------------------------
+// THE IDENTITY-PROVIDER-SIDE RELATIONSHIP NAMING AN APPLICATION, or null.
+//
+// A LINEAR WALK AND NOT AN INDEX, deliberately, and the reason is the one
+// releaseIndexNow() gives for rebuilding rather than maintaining: there are
+// four doors onto these entries — this module, the console, the management
+// API and an ldapmodify — and an index this module kept up to date would be
+// wrong exactly when somebody had just edited the entry by hand. This runs
+// once per sign-in over a register an operator configured by hand, which is
+// tens of rows and not thousands; the release filter is the one that runs per
+// TOKEN, and that one is indexed.
+//
+// FIRST MATCH WINS, and two relationships naming one application is a
+// misconfiguration this cannot resolve — so it is LOGGED at warn rather than
+// picked over silently. `fedApplication` is one direction of a pointer and
+// nothing enforces uniqueness on it: the identity-provider half deliberately
+// stores nothing but that string.
+//
+// A DISABLED RELATIONSHIP IS SKIPPED, which is a change in what a disabled
+// identity-provider-side relationship MEANS and is worth saying out loud.
+// Until this attribute existed it meant nothing at all — every protocol
+// endpoint here answers a partner whether or not a relationship names it, so
+// the flag governed only the release list. It now also governs the mechanism,
+// and skipping is the safe direction: falling through to the password screen
+// is what the service did before anybody configured this.
+// ---------------------------------------------------------------------------
+function identityProviderFor(applicationId) {
+  log.debug('Entering identityProviderFor(). application=' +
+            (applicationId || '(none)'));
+  const wanted = String(applicationId || '').trim();
+  if (!wanted) {
+    log.debug('Leaving identityProviderFor(). No application was named.');
+    return null;
+  }
+  const rows = inRole('identity-provider').filter(function (record) {
+    return String(record.fedApplication || '').trim() === wanted &&
+           isEnabled(record);
+  });
+  if (!rows.length) {
+    log.debug('Leaving identityProviderFor(). Nothing names it.');
+    return null;
+  }
+  if (rows.length > 1) {
+    log.warn('federation: ' + rows.length + ' enabled identity-provider-side ' +
+             'relationships name the application "' + wanted + '" (' +
+             rows.map(function (r) { return r.fedId; }).join(', ') + '). ' +
+             'Nothing enforces one, so the FIRST is used and the rest are ' +
+             'ignored — which is a configuration to fix rather than a rule ' +
+             'this service applies.');
+  }
+  log.debug('Leaving identityProviderFor(). ' + rows[0].fedId + '.');
+  return rows[0];
+}
+
+// ---------------------------------------------------------------------------
+// WHAT AN IDENTITY-PROVIDER-SIDE RELATIONSHIP SAYS TO DO, resolved.
+//
+// Returns null when it says nothing, which is the ordinary case and the one
+// every relationship created before `fedAuthnMechanism` existed is in. A
+// caller that gets null must behave exactly as it did before this function —
+// see mechanismFor() in authn.js, which is the only caller.
+//
+// A PROBLEM IS RETURNED RATHER THAN THROWN AND RATHER THAN SWALLOWED. This
+// runs on the way to a sign-in screen, so it must not be able to cost the
+// screen; and a relationship configured to broker to a partner that is
+// disabled must say so on that screen rather than quietly asking for a
+// password, which is the same argument federationFor() makes at length.
+// ---------------------------------------------------------------------------
+function authenticationFor(record) {
+  log.debug('Entering authenticationFor(). id=' +
+            ((record && record.fedId) || '(none)'));
+  if (!record) {
+    log.debug('Leaving authenticationFor(). There is no relationship.');
+    return null;
+  }
+  const mechanism = String(record.fedAuthnMechanism || '').trim();
+  if (!mechanism) {
+    log.debug('Leaving authenticationFor(). It declares no mechanism.');
+    return null;
+  }
+  const row = mechanismRow(mechanism);
+  if (!row) {
+    log.debug('Leaving authenticationFor(). The mechanism is not one of ours.');
+    return { via: record.fedId, mechanism: '', label: '', relationship: null,
+             problem: 'The federation relationship "' + record.fedId +
+                      '" configures the authentication mechanism "' +
+                      mechanism + '", which is not one this service has: the ' +
+                      'four are ' + MECHANISM_IDS.join(', ') + '.' };
+  }
+  if (mechanism !== 'federation') {
+    log.debug('Leaving authenticationFor(). ' + mechanism + '.');
+    return { via: record.fedId, mechanism: mechanism, label: row.label,
+             relationship: null, problem: '' };
+  }
+  const onward = usableServiceProvider(
+    record.fedAuthnRelationship,
+    'The federation relationship "' + record.fedId + '"');
+  if (!onward.id) {
+    log.debug('Leaving authenticationFor(). No onward relationship is named.');
+    return { via: record.fedId, mechanism: mechanism, label: row.label,
+             relationship: null,
+             problem: 'The federation relationship "' + record.fedId +
+                      '" authenticates through another federation ' +
+                      'relationship and names none. Set ' +
+                      'fedAuthnRelationship on it.' };
+  }
+  log.debug('Leaving authenticationFor(). federation via ' + onward.id + '.');
+  return { via: record.fedId, mechanism: mechanism, label: row.label,
+           onward: onward.id, relationship: onward.relationship,
+           problem: onward.problem };
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,8 +1689,11 @@ module.exports = {
   ROLE_IDS: ROLE_IDS,
   PROTOCOLS: PROTOCOLS,
   PROTOCOL_IDS: PROTOCOL_IDS,
+  MECHANISMS: MECHANISMS,
+  MECHANISM_IDS: MECHANISM_IDS,
   SCHEMA: SCHEMA,
   protocolRow: protocolRow,
+  mechanismRow: mechanismRow,
   roleRow: roleRow,
   familyOf: familyOf,
   setDirectory: setDirectory,
@@ -1422,6 +1714,15 @@ module.exports = {
   isEnabled: isEnabled,
   isUsable: isUsable,
   signInOptions: signInOptions,
+  // THE BROKER HALF. `identityProviderFor()` finds the relationship a partner
+  // asking this service to authenticate somebody is registered under,
+  // `authenticationFor()` says what that relationship wants done about it, and
+  // `usableServiceProvider()` is the four checks both this module and
+  // authn.js's federationFor() make on a relationship id somebody typed. All
+  // three are read by authn.js's mechanismFor() and by nothing else.
+  usableServiceProvider: usableServiceProvider,
+  identityProviderFor: identityProviderFor,
+  authenticationFor: authenticationFor,
   // The identity-provider half, and the one function on the ISSUING path. See
   // the header: it is consulted by admin_stats.js at its two existing funnels
   // and by nothing else.

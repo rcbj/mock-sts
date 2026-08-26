@@ -271,3 +271,80 @@ configuration behave two ways depending on an unrelated boolean.
 carrying a `returnTo` is two chances to drop the `returnTo` from one of them,
 which produces a federated sign-in that succeeds and lands the person on a page
 nobody asked for.
+
+## `mechanismFor()` — the TWO places a sign-in can be redirected from, and the one order
+
+`federationFor()` above is no longer the only thing consulted, and the honest
+way to describe the change is that this module now has to arbitrate. Since
+2026-08-26 an identity-provider-side federation relationship may carry
+`fedAuthnMechanism` — `password`, `password-mfa`, `webauthn` or `federation` —
+which says what this service does when THAT PARTNER asks it to authenticate
+somebody. See `federation/CLAUDE.md`, where the attribute is argued.
+
+The two answer different questions, which is why both exist:
+
+* a **relationship** answers "a partner has sent somebody here; what do I do?"
+* an **application entry** answers "where do this application's people sign
+  in?"
+
+`mechanismFor()` is the ONLY function that reads both, and it reads them in one
+order: **the relationship first** (it is the more specific statement — an entry
+under `ou=applications` may be a federation partner AND an ordinary OAuth
+client, registered by two different people), the application entry second, the
+screen last. Nothing else in this service may consult either directly, because
+two orders is no order.
+
+**An empty mechanism is not `password`.** `authenticationFor()` returns `null`
+for a relationship that declares none — which is every relationship created
+before the attribute existed — and this function then behaves exactly as it did
+when `federationFor()` was the whole of it. That is the entire compatibility
+argument, and it is why the empty case returns null rather than a default.
+
+### `forcePasswordless`, and why nothing a caller passes can set it
+
+`forceMfa` is a demand the CALLING PROTOCOL made — a `RequestedAuthnContext`, a
+`wauth` — and it arrives in `opts`. `forcePasswordless` is a mechanism an
+OPERATOR configured, and it arrives from the register; there is deliberately no
+`opts.forcePasswordless`, because a caller asking for a passwordless sign-in is
+a caller choosing somebody else's authenticator for them, which is a deployment
+decision and not a request parameter.
+
+**When both would be on, `forceMfa` wins and says so at INFO.** Passwordless
+WebAuthn is `amr ["hwk"]` and ONE factor, however phishing-resistant it is, and
+one factor does not answer a request for two. They cannot both be on from the
+register — one enum value, one mechanism — so the collision is always
+protocol-versus-configuration, which is exactly the case where the protocol's
+demand is the one that must not be quietly downgraded.
+
+### The hidden input is not the enforcement
+
+`loginPage()` renders a hidden `webauthn_only` when the mechanism demands one,
+and `use_webauthn`/`webauthn_only` are drawn `checked disabled` so a person can
+see what has been decided for them. **None of that is a control.** A disabled
+checkbox posts nothing and a hidden one is deleted by anybody with the
+developer tools open, and the POST that arrives then looks exactly like an
+ordinary password sign-in — so `handleLogin()` reads `record.forcePasswordless`
+as well and the record wins. A configured mechanism a client can opt out of is
+not a mechanism.
+
+### `record.mechanismProblem`, beside `record.federation`
+
+Both sources report an unusable relationship as a `problem` string, and the
+screen prints it rather than falling silently back to the password box. They
+fail DIFFERENTLY, though, and that is why the problem is carried on the record
+and not only inside `federation`: an application entry naming an unusable
+relationship still produces a `federation` object to hang it on, while a
+BROKERING relationship whose onward partner is disabled produces no such object
+at all — there is nothing usable to describe. Reading it from one place is what
+stops the second case being the silent fallback the first was made loud to
+prevent.
+
+### `usableServiceProvider()` is federation.js's, and used to be written out here
+
+The four checks `federationFor()` makes on a relationship id — it exists in
+this realm, it is service-provider-side, it is enabled, it is fully configured
+— are now one function in `federation/federation.js`, because
+`fedAuthnRelationship` gave them a second caller. A relationship id on an
+application entry and one on another relationship are the same string,
+checkable the same four ways, and two implementations of "would this actually
+work" would answer differently the first time one of them learned a fifth.
