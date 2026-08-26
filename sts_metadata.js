@@ -1586,6 +1586,45 @@ const ENDPOINTS = [
           'can undo a revocation, and it is here so that getting back to a working token does not ' +
           'mean restarting the service. OID4VCI credentials are counted on /admin/metrics and are ' +
           'not in this table.' },
+  { path: '/admin/tokens/credential', group: 'Admin',
+    name: 'One credential, and every generation behind it',
+    // rfc8693 is what a generation IS — every row above the last one is an
+    // exchange — and rfc6749 and oidc are what the last one is labelled with,
+    // because the bottom of every line is an ordinary grant rather than an
+    // act. rfc4120 and ws-trust are cited for the WALLS rather than for
+    // anything drawn: they are the two families that consume or produce a
+    // credential this register cannot name, and the page says which it hit.
+    specs: ['rfc8693', 'rfc6749', 'oidc', 'rfc4120', 'ws-trust'],
+    what: 'NON-SPEC PAGE OVER FIVE SPECIFICATIONS, and the FIRST drill-down ' +
+          '/admin/tokens has had: every identifier in that table links here. ' +
+          'It answers where ONE credential came from, keyed on the ' +
+          'identifier the protocol itself gave it (a jti, an AssertionID), ' +
+          'which is the only thing the issued register and the delegation ' +
+          'register both hold about the same object — and is why a Kerberos ' +
+          'ticket has no link from that table: that protocol has no ' +
+          'identifier to quote. THE ANSWER IS USUALLY "NOTHING WAS ' +
+          'EXCHANGED", which is not an empty page: most credentials were ' +
+          'issued directly, and the page leads with that and names the grant ' +
+          'or flow that produced them. The other case is the one worth ' +
+          'opening — an RFC 8693 exchange whose subject token came out of ' +
+          'another, back to a browser sign-in three tiers away — and it is ' +
+          'ONE generations table, newest first, with the origin as the last ' +
+          'row, plus the acts, the parties and every line in words. THE ' +
+          'PICTURE IS THE DELEGATION MAP ASKED A DIFFERENT QUESTION: ' +
+          'common/credential_graph.js returns a graph in ' +
+          'delegation.graph()\'s shape, so the same code draws it and a ' +
+          'party here is the same party, drawn the same way, as on the four ' +
+          'pages that had it first. A CREDENTIAL THIS SERVICE NO LONGER ' +
+          'HOLDS IS NOT A 404: both registers are capped and drop the oldest ' +
+          'SEPARATELY, so a lineage can know an identifier existed and ' +
+          'nothing else about it, and the page says which of the two states ' +
+          'it is in. A line longer than the walk limit is truncated and says ' +
+          'so, because a lineage that stops quietly reads as an issuance ' +
+          'that never happened. No credential is ever shown, only its kind ' +
+          'and identifier. Naming nothing gets the chooser rather than a ' +
+          '404, and there is no form, so nothing on /admin-api answers for ' +
+          'it. ?format=json is the lineage and the graph; ?format=svg is the ' +
+          'drawing alone.' },
   { path: '/admin/delegation', group: 'Admin', name: 'Delegation',
     // Four specifications because this page is the one place all four are read
     // against each other: [MS-SFU] for the three Kerberos S4U mechanisms,

@@ -14,9 +14,11 @@
 // renders it at /admin/tokens/credential; this file holds the model and none of
 // the HTML.
 //
-// It requires `helpers.js`, `admin_stats.js`, `delegation.js`, `user_graph.js`
-// and `applications.js`, and nothing requires IT except the console — so it
-// cannot join a cycle and it cannot move a route. Rule 3e's test is not reached.
+// It requires `helpers.js`, `admin_stats.js`, `delegation.js` and
+// `user_graph.js`, and nothing requires IT except the console — so it cannot
+// join a cycle and it cannot move a route. Rule 3e's test is not reached. It
+// required `applications.js` too until 2026-08-26, for one lookup that now
+// lives in `user_graph.js` where the person's picture can share it.
 //
 // ---------------------------------------------------------------------------
 // WHY IT IS A FILE, AND WHY IT IS NOT A FILTER ON THE PERSON'S PICTURE.
@@ -73,7 +75,11 @@
 // for one party — the failure the exchange's own lookup exists to prevent. So
 // the same lookup is asked here, the box is the application, and the URI is on
 // the line. An audience nobody registered is drawn as itself, which is the
-// honest answer and is what a real resource server looks like here.
+// honest answer and is what a real resource server looks like here. Since
+// 2026-08-26 the lookup is `user_graph.js`'s `audienceParties()` rather than a
+// copy of it here, and it also answers the two questions this copy got wrong:
+// several audiences are several parties, and an audience that is this SERVICE'S
+// own is not a party at all.
 //
 // **IT WALKS BACKWARDS ONLY.** *Where did this come from* is the question a row
 // on the tokens page raises; *what was later made from it* is a different one and
@@ -88,7 +94,6 @@ const { log } = require('./helpers');
 const stats = require('./admin_stats');
 const delegation = require('./delegation');
 const userGraph = require('./user_graph');
-const applications = require('./applications');
 
 // How many generations to follow. Nothing here can produce a cycle — an
 // identifier is produced once and the walk marks what it has seen — so this is
@@ -165,26 +170,16 @@ function subjectOf(record) {
   return String(named);
 }
 
-// WHAT A TOKEN IS ADDRESSED TO, as the party it means rather than as the string
-// it says. See the fourth decision in the header. Returns the identifier of the
-// application that registered this audience, or the audience itself.
-function audienceParty(audience) {
-  log.debug("Entering audienceParty(). audience=" + audience);
-  const wanted = String(audience || '');
-  if (!wanted) {
-    log.debug("Leaving audienceParty(). None stated.");
-    return { identifier: '', audience: '', registered: false };
-  }
-  const application = applications.forAudience(wanted);
-  log.debug("Leaving audienceParty(). " +
-            (application ? "registered to " + application.identifier
-                         : "nobody has registered it"));
-  return {
-    identifier: application ? application.identifier : wanted,
-    audience: wanted,
-    registered: !!application
-  };
-}
+// WHAT A TOKEN IS ADDRESSED TO is `user_graph.js`'s `audienceParties()`, and it
+// was a copy of it here until 2026-08-26. Same argument as `holderOf()` and
+// `detailOf()`: that file draws the same resource at the end of the same line on
+// the person's picture, and two answers to *what is this token for* would be two
+// pictures of one issuance on two pages of one console. The move brought two
+// things this copy did not have — an `aud` naming SEVERAL resources comes back
+// as several parties rather than as one box named after a joined string, and an
+// audience that is this service's OWN (a refresh token's, or the `<base>/resource`
+// stand-in an access token carries when nobody named a resource) is not drawn as
+// a party at all.
 
 // ---------------------------------------------------------------------------
 // THE WALK. One credential in, every generation behind it out, newest first.
@@ -384,12 +379,16 @@ function graphOf(trail) {
     const holder = userGraph.holderOf(credential);
     const holderId = holder ? stats.identityKeyOf(holder) : '';
     const personId = subject ? stats.identityKeyOf(subject) : '';
-    const addressed = audienceParty(credential.audience);
-    const audienceId = addressed.identifier
-      ? stats.identityKeyOf(addressed.identifier) : '';
+    const addressed = userGraph.audienceParties(credential.audience, credential.iss);
     issuances.push({
       identifier: row.identifier, credential: credential, flow: flow,
-      subject: subject, holder: holder, audience: addressed
+      subject: subject, holder: holder,
+      // A LIST, because `aud` is allowed to be one. `audience` stays beside it
+      // carrying the first, so `?format=json` answers the shape it always did
+      // for the ordinary single-audience token rather than changing under a
+      // reader who never asked for several.
+      audience: addressed[0] || { identifier: '', audience: '', registered: false },
+      audiences: addressed
     });
 
     // THE PERSON, when there is one. A client_credentials token names no
@@ -473,14 +472,18 @@ function graphOf(trail) {
       sts.credentials = (sts.credentials || 0) + 1;
     }
 
-    // WHAT IT IS ADDRESSED TO. Only for the issuance at the head of the line:
-    // every credential below it was produced by an act, and that act already
-    // says where it went — drawing the audience again would put two boxes on
-    // this picture for one party, which is the failure the exchange's own
-    // audience lookup exists to prevent.
-    if (audienceId && held && audienceId !== held.id) {
+    // WHAT IT IS ADDRESSED TO — one line per audience. Only for the issuance at
+    // the head of the line: every credential below it was produced by an act,
+    // and that act already says where it went, so drawing the audience again
+    // would put two boxes on this picture for one party — the failure the
+    // exchange's own audience lookup exists to prevent.
+    addressed.forEach(function (one) {
+      const audienceId = stats.identityKeyOf(one.identifier);
+      if (!audienceId || !held || audienceId === held.id) {
+        return;
+      }
       const resource = nodeFor(audienceId, {
-        application: addressed.identifier, chiefRole: 'target'
+        application: one.identifier, chiefRole: 'target'
       });
       resource.lastAt = Math.max(resource.lastAt, credential.issuedAt || 0);
       const reachEdge = edgeFor('addressed | ' + row.identifier + ' | ' +
@@ -494,9 +497,9 @@ function graphOf(trail) {
         subject: person ? person.id : '', actor: held.id,
         // The string the token actually carries, which is not always the name of
         // the box it points at: an audience the applications registry knows is
-        // drawn as that application. See audienceParty().
-        audience: addressed.audience,
-        audienceRegistered: addressed.registered
+        // drawn as that application. See audienceParties().
+        audience: one.audience,
+        audienceRegistered: one.registered
       });
       reachEdge.credentials++;
       reachEdge.lastAt = Math.max(reachEdge.lastAt, credential.issuedAt || 0);
@@ -504,7 +507,7 @@ function graphOf(trail) {
         ? Math.min(reachEdge.firstAt, credential.issuedAt || 0)
         : (credential.issuedAt || 0);
       foldOnto(reachEdge, credential.kind, row.identifier);
-    }
+    });
   });
 
   graph.nodes = Array.from(nodes.values());

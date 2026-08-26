@@ -1255,6 +1255,38 @@ find module` naming a file the operator never mentioned.
    ordinary grant claims neither, so colouring one green would tell a reader who
    learnt the pairing from the table something false.
 
+   **AND SINCE 2026-08-26 A THIRD LINE, WHICH IS NOT A THIRD RELATION.** An
+   access token issued to `webapp1` and addressed to `apigw1` is this service
+   saying that webapp1 may reach apigw1 in that person's name — which is exactly
+   what a token exchange's `reaches` line says, with no exchange in it. It was
+   drawn only where an exchange had happened until then, so the FIRST HOP of
+   every chain was missing: the picture showed `apigw1 → esb1` and `esb1 → sp1`
+   and nothing at all about how apigw1 came to hold a token. So the audience of
+   every credential drawn here gets a `reaches` line from whoever HOLDS it,
+   keyed on the grant the way the `issued-for` line is, carrying the SAME
+   relation value the delegation half emits rather than a fifth one — the fact
+   being stated is identical, and the mechanism on the label is what tells them
+   apart. A second relation would have been a second colour and a second row in
+   the legend for one idea.
+
+   Three consequences, and each is a place this could have gone wrong quietly.
+   The audience is resolved through the applications registry
+   (`audienceParties()`, exported for `credential_graph.js`, which had a copy of
+   it), so a token addressed to `https://apigw1.example.com` lands on the BOX
+   for apigw1 — the failure the exchange's own lookup already exists to prevent.
+   An `aud` naming SEVERAL resources draws several lines, because RFC 7519
+   section 4.1.3 allows a list and RFC 8707 section 2.3 is how one gets here,
+   and `recordJwt()` joins them with a space: a single lookup of the joined
+   string finds nothing and draws one box named after two URLs. And an audience
+   that is **this service's own** is not a party and is dropped — a refresh
+   token is addressed to the token endpoint and an access token nobody named a
+   resource for carries `<base>/resource`, so without that rule every plain
+   sign-in gained a box called `http://localhost:8081/resource`. That last check
+   is why `recordJwt()` keeps `iss`: `oauth2.issuer` is empty by default so one
+   process answers correctly under every name it is reached by, which makes the
+   base a property of the REQUEST — by the time a page reads the record there is
+   no request to ask, so the token has to have remembered it.
+
    **`FLOWS` IS KEYED ON THE STRING `oauth2.js` ALREADY RECORDS, VERBATIM.**
    `issuanceContext()` over there puts a `grant` on every signed JWT and
    `recordJwt()` keeps it; those strings are the ids here rather than a tidier
@@ -1336,7 +1368,15 @@ find module` naming a file the operator never mentioned.
    for `esb1` would be two parties for one, which is the failure that lookup
    exists to prevent. And the audience is drawn ONLY for the credential at the
    head of the line: everything below it was produced by an act, and the act
-   already says where it went.
+   already says where it went. **The lookup itself moved to `user_graph.js` on
+   2026-08-26** — `audienceParties()`, required from here the way `holderOf()`
+   and `detailOf()` already are — because the person's picture draws the same
+   resource at the end of the same line, and two answers to *what is this token
+   for* would be two pictures of one issuance on two pages of one console. This
+   file's own copy had two bugs the shared one does not: an `aud` naming several
+   resources came back as one box named after a joined string, and an audience
+   that is this service's own was drawn as a party. `applications.js` is no
+   longer required here at all.
 
    **IT WALKS BACKWARDS ONLY.** *What was later made from this* is a tree rather
    than a line — one subject token can be exchanged by any number of clients —

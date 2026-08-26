@@ -45,7 +45,7 @@
 // console renders what it is handed.
 //
 // ---------------------------------------------------------------------------
-// FIVE DECISIONS ARE JUDGEMENTS RATHER THAN MECHANICS.
+// SIX DECISIONS ARE JUDGEMENTS RATHER THAN MECHANICS.
 //
 // **THE GRAPH IS `delegation.graph()`'s SHAPE, EXTENDED — NOT A SECOND SHAPE.**
 // Every node and every edge here carries the fields that file's do, so
@@ -99,11 +99,40 @@
 // marks which side each name came from — because "there is no such person" and
 // "somebody was impersonated who has never signed in" are opposite answers to
 // the same question, and the second is the one worth finding.
+//
+// **AN AUDIENCE IS A RELATIONSHIP, AND IT IS DRAWN WHETHER OR NOT ANYTHING WAS
+// EXCHANGED.** An access token issued to `webapp1` and addressed to `apigw1` is
+// this service saying that webapp1 may reach apigw1 in that person's name — the
+// same sentence a token exchange's `reaches` line says, with no exchange in it.
+// Until 2026-08-26 it was drawn only where an exchange had happened, so the
+// first hop of every chain was MISSING: a picture that showed `apigw1 → esb1`
+// and `esb1 → sp1` and nothing at all about how apigw1 came to hold a token in
+// the first place. So the audience of every credential drawn here gets a
+// `reaches` line from whoever HOLDS it, keyed on the grant, and it is the SAME
+// relation the delegation half emits rather than a fifth one: the fact being
+// stated is identical, and what tells them apart is the mechanism on the label
+// — `Authorization Code grant` against `Token exchange`. A second relation
+// would have meant a second colour and a second row in the legend for one idea.
+//
+// Two things fall out of it and both are deliberate. The audience is resolved
+// through the applications registry (`audienceParties()`), so a token addressed
+// to `https://apigw1.example.com` lands on the BOX for apigw1 rather than on a
+// second box named after a URL — which is the failure the token exchange's own
+// lookup already exists to prevent. And an `aud` naming SEVERAL resources draws
+// several lines, because RFC 7519 section 4.1.3 allows a list and RFC 8707
+// section 2.3 is how one gets here: one line per resource is what the token
+// actually says, where a single lookup of the joined string would find nothing
+// and draw a box whose name is two URLs with a space in it.
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
 const stats = require('./admin_stats');
 const delegation = require('./delegation');
+// THE REGISTRY, for `audienceParties()` alone — see the sixth decision in the
+// header. It requires `helpers.js`, `config.js` and `audit.js` and nothing here,
+// so this is a plain require in the ordinary direction: no cycle to close, and
+// it registers no route so there is none to move. Rule 3e's test is not reached.
+const applications = require('./applications');
 
 // ---------------------------------------------------------------------------
 // THE GRANTS AND THE FLOWS, WHICH ARE THE ANSWER TO *WHAT WAS THIS TOKEN
@@ -353,6 +382,114 @@ function holderOf(record) {
   return String(record.audience || '');
 }
 
+// ---------------------------------------------------------------------------
+// WHAT A CREDENTIAL IS ADDRESSED TO, as the parties it means rather than as the
+// string it says.
+//
+// `holderOf()` above answers *who was given this*; this answers *what it is
+// FOR*, and on an OAuth access token those are two different applications — the
+// client that redeemed the code, and the resource server named by RFC 8707's
+// `resource` parameter. Everywhere else in this console they collapse: a SAML
+// assertion's audience IS its relying party, and `holderOf()` already returns
+// it, so a line drawn from this would be a box pointing at itself. The caller
+// therefore compares the two and draws nothing where they agree.
+//
+// **IT RETURNS A LIST BECAUSE `aud` IS ALLOWED TO BE ONE.** RFC 7519 section
+// 4.1.3 lets the claim be an array and RFC 8707 section 2.3's "small set" of
+// resources is how a client asks for one here; `recordJwt()` joins them with a
+// space, because one string is what every other reader of that record expects.
+// Splitting it back is this function's job and not the caller's: a single
+// lookup of `"https://a.example.com https://b.example.com"` finds no
+// application and draws ONE box named after two URLs, which is a party that
+// does not exist.
+//
+// **THE LOOKUP IS THE REGISTRY'S, and it is a lookup rather than a permission.**
+// `applications.forAudience()` is the same call the token exchange makes when it
+// records an act, so an audience some application registered on `oauthAudience`
+// resolves to that application and the picture has ONE box for it. An audience
+// nobody registered comes back as ITSELF, which is the honest answer and is what
+// a real resource server looks like on this service: it is drawn, named after
+// the URI, and `registered` says which of the two happened.
+//
+// **AN AUDIENCE THAT IS THIS SERVICE'S OWN IS NOT A PARTY, and it is the one
+// thing dropped here.** Two of them arrive on ordinary tokens and NEITHER is a
+// relationship with anybody: a refresh token is addressed to the token endpoint
+// (`aud` is the base URL), and an access token nobody asked a resource for
+// carries `<base>/resource`, which is `oauth2.js`'s stand-in for a resource that
+// was never named. Drawn, they put a box called `http://localhost:8081/resource`
+// beside every plain sign-in — a party that does not exist, on the line that is
+// supposed to say which party a client may reach. So an audience on the ISSUER's
+// own origin is skipped, and the hexagon carries what this service issued the
+// way it always has.
+//
+// The skip is narrowed by the registry rather than applied to the origin flatly:
+// an audience somebody REGISTERED on an application is drawn wherever it points,
+// because registering it is a person saying that this is an application. And the
+// issuer has to be quoted from the credential — `oauth2.issuer` is empty by
+// default so that one process answers correctly as localhost, as `sts` on a
+// compose network and through a published port, which means the base is a
+// property of the request and only the token remembers it. With no issuer known
+// nothing is dropped: under-drawing a relationship is worse than a placeholder
+// box, and this only ever happens for a token recorded before that field existed.
+// ---------------------------------------------------------------------------
+function audienceParties(audience, issuer) {
+  log.debug("Entering audienceParties(). audience=" + audience);
+  const wanted = String(audience == null ? '' : audience).trim();
+  if (!wanted) {
+    log.debug("Leaving audienceParties(). None stated.");
+    return [];
+  }
+  const seen = {};
+  const out = [];
+  wanted.split(/\s+/).forEach(function (one) {
+    if (!one || seen[one]) {
+      // The same audience twice in one `aud` is one relationship, not two. A
+      // duplicate is not worth a warning — it says nothing about this service.
+      return;
+    }
+    seen[one] = true;
+    const application = applications.forAudience(one);
+    if (!application && sameOrigin(one, issuer)) {
+      log.debug("audienceParties(): \"" + one + "\" is on this service's own " +
+                "origin and no application has registered it, so it names this " +
+                "service rather than a party.");
+      return;
+    }
+    out.push({
+      identifier: application ? application.identifier : one,
+      audience: one,
+      registered: !!application
+    });
+  });
+  log.debug("Leaving audienceParties(). " + out.length + " party/parties.");
+  return out;
+}
+
+// Whether two URLs are the same scheme, host and port. `false` for anything that
+// is not a URL at all, which is most of what arrives here: an `aud` may be any
+// string, and a SAML entityID or a `wtrealm` that happens not to parse is a
+// party this service knows nothing about rather than one of its own endpoints.
+function sameOrigin(one, other) {
+  log.debug("Entering sameOrigin().");
+  if (!one || !other) {
+    log.debug("Leaving sameOrigin(). One of them is empty.");
+    return false;
+  }
+  let a = null;
+  let b = null;
+  try {
+    a = new URL(String(one));
+    b = new URL(String(other));
+  } catch (err) {
+    // Not a URL, so the question does not arise. `aud` is an arbitrary string
+    // by RFC 7519 section 4.1.3 and a urn: is the ordinary case here.
+    log.debug("Leaving sameOrigin(). Not a URL.");
+    return false;
+  }
+  log.debug("Leaving sameOrigin().");
+  return a.origin === b.origin && a.origin !== 'null';
+}
+
 // One line of detail worth reading beside a credential, in the vocabulary its
 // own family uses. It is one column rather than five mostly-empty ones, which is
 // the argument `userArtifactTable()` in admin.js already makes about the same
@@ -405,6 +542,15 @@ function credentialsFor(detail, skipIdentifiers) {
       flow: flow.flow, flowLabel: flow.label, flowProtocol: flow.protocol,
       flowSpec: flow.spec, flowOidc: flow.oidc, flowStated: !!record.grant,
       holder: String(record.client_id || ''),
+      // WHAT IT IS ADDRESSED TO, which on a token is a different application
+      // from the one holding it — see `audienceParties()`. It is carried only
+      // for this family: the other four keep their audience in the field
+      // `holderOf()` already reads, so passing it here would draw every SAML
+      // assertion and every JWT-SVID as a line from a box to itself.
+      audience: String(record.audience || ''),
+      // WHO ISSUED IT, which is how `audienceParties()` tells an audience that
+      // names a party from one that names this service. See that function.
+      issuer: String(record.iss || ''),
       state: record.state,
       sessionId: record.sessionId || '',
       revocable: !!record.revocable,
@@ -430,6 +576,10 @@ function credentialsFor(detail, skipIdentifiers) {
       flow: '', flowLabel: flow.label, flowProtocol: flow.protocol,
       flowSpec: flow.spec, flowOidc: '', flowStated: false,
       holder: holderOf(Object.assign({ family: family }, record)),
+      // Deliberately empty, and the line above is why: for an assertion, a
+      // JWT-SVID and a ticket the audience IS the holder. See the note on the
+      // token rows.
+      audience: '', issuer: '',
       state: record.state,
       sessionId: '',
       revocable: false,
@@ -774,6 +924,70 @@ function graphFor(key) {
     }
 
     if (holder) {
+      // AND WHAT IT IS ADDRESSED TO — the first hop of every chain, and the one
+      // that used to be missing. See the sixth decision in the header. One line
+      // per audience, from the party HOLDING the credential to the party the
+      // registry says that audience is; nothing at all where the two are the
+      // same box, which is what an ID Token addressed to its own client looks
+      // like and what every assertion looks like.
+      audienceParties(credential.audience, credential.issuer).forEach(function (addressed) {
+        const audienceId = stats.identityKeyOf(addressed.identifier);
+        if (!audienceId || audienceId === holder.id || audienceId === person.id) {
+          return;
+        }
+        const resource = nodeFor(audienceId, { application: addressed.identifier });
+        if (!resource.chiefRole) {
+          // The same fallback the holder gets, for the same reason: a box that
+          // is only ever REACHED is a target, and a target is drawn as an
+          // application. It matters more here than there — a resource server
+          // that has never asked this service for anything has no row in either
+          // register to say what it is, and this line is the whole of what is
+          // known about it.
+          resource.chiefRole = 'target';
+        }
+        if (credential.flowProtocol &&
+            resource.protocols.indexOf(credential.flowProtocol) < 0) {
+          resource.protocols.push(credential.flowProtocol);
+        }
+        resource.lastAt = Math.max(resource.lastAt, credential.at);
+        resource.firstAt = resource.firstAt ? Math.min(resource.firstAt, credential.at)
+                                            : credential.at;
+        // KEYED ON THE GRANT, exactly as the person-to-application line above
+        // is: a client that was authorized to reach one resource by the
+        // authorization code grant and then refreshed draws TWO lines, which is
+        // the fact worth seeing. It is NOT keyed on the credential — three
+        // tokens out of one grant are one relationship, and three lines saying
+        // so would be the picture reporting the token endpoint's arithmetic.
+        const reach = edgeFor('addressed | ' + flowKey + ' | ' +
+                              holder.id + ' > ' + audienceId, {
+          from: holder.id, to: audienceId,
+          fromRole: 'holder', toRole: 'target',
+          relation: 'reaches',
+          type: credential.flow, typeLabel: credential.flowLabel,
+          protocol: credential.flowProtocol, spec: credential.flowSpec,
+          // Empty for the reason the grant line's is: impersonation and
+          // delegation are properties of a DELEGATION mechanism, and an
+          // ordinary grant claims neither. It is also what keeps this line the
+          // console's neutral indigo instead of amber.
+          mode: '', policed: false,
+          subject: person.id, actor: holder.id,
+          // The string the token actually carries, which is not always the name
+          // of the box it points at. `audienceRegistered` says which.
+          audience: addressed.audience,
+          audienceRegistered: addressed.registered
+        });
+        reach.credentials++;
+        reach.lastAt = Math.max(reach.lastAt, credential.at);
+        reach.firstAt = reach.firstAt ? Math.min(reach.firstAt, credential.at)
+                                      : credential.at;
+        foldOnto(reach, credential);
+        if (credential.flowProtocol && reach.protocols.indexOf(credential.flowProtocol) < 0) {
+          reach.protocols.push(credential.flowProtocol);
+        }
+      });
+    }
+
+    if (holder) {
       // AND THE LINE FROM THIS SERVICE, to whoever HOLDS the credential — the
       // same rule delegation.js follows for its own dashed grey line, and
       // DELIBERATELY THE SAME EDGE ID, so an application that both delegated
@@ -921,6 +1135,12 @@ module.exports = {
   // from two parties that really are different.
   holderOf: holderOf,
   detailOf: detailOf,
+  // WHAT A CREDENTIAL IS ADDRESSED TO. Exported for `credential_graph.js` for
+  // the same reason `holderOf()` is: that file draws one credential's ancestry
+  // and puts the resource at the end of the same line this one does, and two
+  // answers to "what is this token for" would be two pictures of one issuance
+  // on two pages of one console.
+  audienceParties: audienceParties,
   userList: userList,
   graphFor: graphFor,
   activityFor: activityFor

@@ -4219,8 +4219,14 @@ app.get('/admin/tokens/credential', function (req, res) {
     'credential naming that person — and it is the console\'s neutral indigo, ' +
     'because an authorization code grant claims neither impersonation nor ' +
     'delegation. <em>acts for</em> and <em>reaches</em> are the delegation ' +
-    'picture\'s own two claims and are coloured by mode, exactly as they are on ' +
-    '<a href="/admin/delegation/map">the map</a>.') +
+    'picture\'s own two claims and are coloured by mode where a delegation is ' +
+    'what produced them, exactly as they are on ' +
+    '<a href="/admin/delegation/map">the map</a>. A <em>reaches</em> line out ' +
+    'of an ordinary grant takes no mode and stays indigo, for the reason the ' +
+    '<em>issued for</em> line beside it does: what a token is ADDRESSED to is ' +
+    'a relationship this service granted, and nothing was impersonated to get ' +
+    'it. The audience the token carries is in that line\'s tooltip, because ' +
+    'the box is named after whichever application registered it.') +
     picture.html +
 
     '<h2>The parties</h2>' +
@@ -6072,7 +6078,19 @@ function delegationMapKey(options) {
               'holder are one box and there is one line rather than two. It ' +
               'takes no amber or green, because impersonation and delegation ' +
               'are properties of a delegation mechanism and a grant claims ' +
-              'neither.' });
+              'neither.' },
+      { art: swatch(line(C.indigo, ''), 64),
+        what: '<strong>Solid indigo out of an APPLICATION is that same ' +
+              'relationship one step further on: what the credential it holds ' +
+              'is ADDRESSED to.</strong> It is the <em>reaches</em> line above, ' +
+              'said about an ordinary grant instead of about a delegation — an ' +
+              'access token issued to a web front end and addressed to an API ' +
+              'gateway is this service saying the first may reach the second ' +
+              'in this person\'s name, with nothing exchanged to get there. ' +
+              'The mechanism on the label is what tells the two apart: a ' +
+              'grant, or <code>Token exchange</code>. The audience the token ' +
+              'actually carries is in the tooltip, because the box is named ' +
+              'after whichever application registered that audience.' });
   }
   return '<table class="key"><tr><th>Shape</th><th>What it means</th></tr>' +
     items.map(function (one) {
@@ -7821,7 +7839,8 @@ app.get('/admin/delegation/user', function (req, res) {
     'hexagon is them SIGNING IN, and it is why anything else here was allowed. ' +
     'Every solid indigo line is a credential issued NAMING them, labelled with ' +
     'the exact grant or flow that produced it: out of THEM it went to that ' +
-    'application, and out of the HEXAGON nobody else holds it — a ' +
+    'application, out of an APPLICATION it is the resource that application ' +
+    'may reach with it, and out of the HEXAGON nobody else holds it — a ' +
     '<code>client_credentials</code> token is about the client itself and an ' +
     'X509-SVID has no audience. The amber and green lines, where there are any, are ' +
     'delegations — somebody acting on their behalf — and they are the only ' +
@@ -7833,7 +7852,7 @@ app.get('/admin/delegation/user', function (req, res) {
     '<h2>The key</h2>' +
     note('The shapes are drawn by the same functions the picture ' +
     'uses, so a legend cannot come to describe a diagram this service no longer ' +
-    'draws. The last two rows are this page\'s own — no other picture in this ' +
+    'draws. The last three rows are this page\'s own — no other picture in this ' +
     'console has a line for an ordinary grant, because no other picture is ' +
     'drawn from anything but the delegation register.') +
     delegationMapKey({ issuance: true }) +
