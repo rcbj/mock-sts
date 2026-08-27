@@ -844,36 +844,91 @@ function graphFor(key) {
     person.chiefRole = 'initial';
   }
 
-  // HOW THEY AUTHENTICATED, one line per protocol family. It is per FAMILY and
-  // not per method deliberately: the families are what a reader is looking for
-  // (`she signed in over Kerberos and over the browser`), and a line per method
-  // would put four parallel arrows between the same two boxes for four spellings
-  // of one login screen. The methods are on the line's label and in its tooltip.
-  if (detail) {
+  // ---------------------------------------------------------------------------
+  // HOW THEY AUTHENTICATED: ONE LINE, CARRYING THE LIST.
+  //
+  // It was one line per protocol FAMILY until 2026-08-26, on the argument that
+  // the families are what a reader looks for (`she signed in over Kerberos and
+  // over the browser`) and that a line per method would draw four arrows
+  // between the same two boxes for four spellings of one login screen. The
+  // second half of that is right and the first half was not, because those
+  // lines JOIN THE SAME TWO BOXES: two segments between one pair are the same
+  // segment computed twice, drawn one over the other, and `delegation_map.js`
+  // seats their labels in separate rows precisely so that labels do not
+  // collide. What came out was ONE visible line saying `signed in / OAuth 2.0 /
+  // OIDC / 1 time` in one place and `signed in / OAuth 2.0 / 2 times` in
+  // another — one relationship contradicting itself, where the truth is that
+  // `bob_end_user` signed in once at the screen and was named in two RFC 8693
+  // exchanges.
+  //
+  // So there is ONE line — the person authenticated to this service, which is
+  // the single fact everything else on the picture rests on — and what varies
+  // goes on it as a LIST, one entry per (family, method) pair with its own
+  // count: `1 × OAuth 2.0 / OIDC (sign-in screen)`, `2 × OAuth 2.0 (token
+  // exchange)`. Per METHOD rather than per family because the family alone is
+  // what misled: `OAuth 2.0 ×2` is a true sentence that reads as two sign-ins,
+  // and the mechanism is the word that stops it.
+  //
+  // `authentications` is the list, in the order the label should draw it;
+  // `typeLabel` is the same thing as one string, for the MECHANISM column of
+  // every table on this page and for the tooltip. `protocol` is deliberately
+  // EMPTY: a line that carries several cannot answer with one, and a reader who
+  // saw the first of them there would take it for the whole.
+  // ---------------------------------------------------------------------------
+  if (detail && detail.user.protocols.length) {
+    const authentications = [];
+    let signIns = 0;
     detail.user.protocols.forEach(function (family) {
-      const edge = edgeFor('signed-in | ' + family.protocol, {
-        from: person.id, to: sts.id,
-        fromRole: 'subject', toRole: 'issuer',
-        relation: 'signed-in',
-        protocol: family.protocol,
-        // The MECHANISM column of every table on this page reads `typeLabel`,
-        // so the methods go there — that column asks "what was this, exactly",
-        // and for an authentication the answer is the method.
-        typeLabel: family.methods.map(function (one) {
-          return one.method + ' ×' + one.count;
-        }).join('; '),
-        methods: family.methods,
-        subject: person.id, actor: person.id
+      signIns += family.count;
+      family.methods.forEach(function (one) {
+        authentications.push({ protocol: family.protocol, method: one.method,
+                               count: one.count, at: family.firstAt || 0,
+                               lastAt: family.lastAt || 0 });
       });
-      edge.acts += family.count;
-      edge.issued += family.count;
-      edge.lastAt = Math.max(edge.lastAt, family.lastAt);
-      edge.firstAt = edge.firstAt ? Math.min(edge.firstAt, family.lastAt) : family.lastAt;
-      person.authentications += family.count;
       if (person.protocols.indexOf(family.protocol) < 0) {
         person.protocols.push(family.protocol);
       }
     });
+    // IN THE ORDER THE FAMILIES STARTED — `firstAt`, which `admin_stats.js`
+    // has always kept per family and began handing out for this. The sign-in
+    // at the screen comes before the exchanges that quote it, which is the
+    // order it happened in and the order it reads in; ordering by `lastAt`
+    // instead would open the list with whichever family was busiest most
+    // recently and bury the authentication everything else rests on.
+    //
+    // The rest of the comparison is there so that one picture drawn twice
+    // reads the same way round rather than for its own sake: two families
+    // registered in the same millisecond have nothing to tell them apart, and
+    // the methods inside a family carry no time at all.
+    authentications.sort(function (a, b) {
+      return (a.at || 0) - (b.at || 0) ||
+             (a.lastAt || 0) - (b.lastAt || 0) ||
+             String(a.protocol).localeCompare(String(b.protocol)) ||
+             b.count - a.count ||
+             String(a.method).localeCompare(String(b.method));
+    });
+    const edge = edgeFor('signed-in', {
+      from: person.id, to: sts.id,
+      fromRole: 'subject', toRole: 'issuer',
+      relation: 'signed-in',
+      protocol: '',
+      typeLabel: authentications.map(function (one) {
+        return one.protocol + ' — ' + one.method + ' ×' + one.count;
+      }).join('; '),
+      authentications: authentications,
+      subject: person.id, actor: person.id
+    });
+    edge.acts += signIns;
+    edge.issued += signIns;
+    detail.user.protocols.forEach(function (family) {
+      edge.lastAt = Math.max(edge.lastAt, family.lastAt);
+      edge.firstAt = edge.firstAt ? Math.min(edge.firstAt, family.lastAt)
+                                  : family.lastAt;
+      if (edge.protocols.indexOf(family.protocol) < 0) {
+        edge.protocols.push(family.protocol);
+      }
+    });
+    person.authentications += signIns;
   }
 
   // EVERY CREDENTIAL, AS A LINE TO WHOEVER GOT IT.

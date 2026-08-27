@@ -40,6 +40,36 @@ the `AppliesTo`, which is the TARGET of the chain. A request carrying BOTH
 elements is attributed to `OnBehalfOf`, the order the `||` always had, and the
 row says so rather than choosing silently.
 
+## The act names APPLICATIONS, not URLs, and it names what it was delegated WITH
+
+Two things were added to that record on 2026-08-27 and both exist to make a
+CHAIN of these hops readable — a person signs in to a web application over SAML
+2.0, the application exchanges the assertion for one addressed to an ESB, and
+the ESB exchanges that for one addressed to a back end. Neither changes what is
+issued; both change what the console can draw.
+
+* **The `AppliesTo` is resolved through the registry.** `applications`
+  `.forAppliesTo()` reads `wstrustAppliesTo` and then `samlEntityId`, and the
+  act is filed against whichever application registered the address, with the
+  address itself kept in the sentence beside it. Without it the target of hop
+  one is a box called `https://esb.example.com` and the intermediary of hop two
+  is a box called `esb`, so a chain draws as two unconnected halves. This is
+  `oauth2.js`'s `forAudience()` lookup arriving through a second protocol, and
+  it has the same three properties: it is a lookup and not a permission, it is
+  not case-folded, and it does not fall back to the identifier.
+* **The token inside `<wst:OnBehalfOf>` is recorded as CONSUMED**, by its
+  `ID` / `AssertionID` (or the `KeyIdentifier` that references it).
+  `/admin/tokens/credential` joins what one act produced to what the next
+  consumed, on the identifier and on nothing else — so until this was read,
+  every WS-Trust lineage stopped one generation in, at the requester's
+  WS-Security credential, which this service never issued and cannot name. That
+  wall is still recorded beside the followable one, because "it began somewhere
+  this register cannot name" and "this is where it began" are different answers.
+
+The requester also carries an `application` where this registry already holds an
+entry under the name it authenticated as. It stays a LOOKUP: an unknown name
+leaves the slot empty and the party is drawn from `presented`, as before.
+
 **Neither is authorized by anything here, and the row says that too**, in the
 same field where a Kerberos row names an attribute on an account. Do not tidy
 that sentence into an em dash: the asymmetry between a policed family and an

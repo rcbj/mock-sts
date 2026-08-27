@@ -189,14 +189,15 @@ function detailPagingParameters(lists) {
 // ---------------------------------------------------------------------------
 // THE SEVEN ACTIONS OF A CLAIM SET, FOR WHICHEVER FAMILY OF SETS ASKED.
 //
-// The console has TWO pages onto one store since 2026-08-24 — /admin/claims for
-// the two JWT sets and /admin/saml-attributes for the two SAML ones — so this
-// API has two action resources, and rule 7 means each needs an operation per
-// action. That is fourteen operations describing seven behaviours, and the one
-// thing that must not happen is fourteen DESCRIPTIONS: the copy that is not
-// edited beside the other is the one a caller believes, and a document that
-// disagreed with itself about whether an empty `attributes` clears a set would
-// be worse than one that said nothing.
+// The console has THREE pages onto one store since 2026-08-26 — /admin/claims
+// for the two JWT sets, /admin/userinfo-claims for the UserInfo one and
+// /admin/saml-attributes for the two SAML ones — so this API has three action
+// resources, and rule 7 means each needs an operation per action. That is
+// twenty-one operations describing seven behaviours, and the one thing that
+// must not happen is twenty-one DESCRIPTIONS: the copy that is not edited
+// beside the others is the one a caller believes, and a document that disagreed
+// with itself about whether an empty `attributes` clears a set would be worse
+// than one that said nothing.
 //
 // So the rows are built once, here, and the family is what varies:
 //
@@ -225,6 +226,32 @@ const JWT_CLAIM_FAMILY = {
   ids: { add: 'addClaim', remove: 'removeClaim', clear: 'clearClaims',
          replace: 'replaceClaims', attributes: 'setClaimAttributes',
          all: 'selectAllClaimAttributes', none: 'clearClaimAttributes' }
+};
+
+// The third family, and the one that made the two above it a PATTERN rather
+// than a pair. Nothing in claimSetActions() changed to add it — which is the
+// test that the parameterisation was real: `sets`, `noun`, `carrier`, `example`,
+// `reserved` and the operationIds were the whole of what varied between the
+// first two, and they were the whole of what varied for the third.
+//
+// `reserved: true` is the one row a reader coming from SAML_CLAIM_FAMILY would
+// get wrong. The reserved list is not a JWT rule with a JWT exception — it is
+// the rule "this artefact has names this service sets itself", and a UserInfo
+// response has them: `sub` is required by OIDC Core 5.3.2 and a client MUST
+// check it against the ID Token's, and the SIGNED form of the same response is
+// a JWT carrying `iss`, `aud` and `exp`. admin_stats.js's reservedNames() is
+// where that is decided, once, for every door onto the store.
+const USERINFO_CLAIM_FAMILY = {
+  sets: stats.USERINFO_CLAIM_SET_IDS,
+  noun: 'claim',
+  carrier: 'UserInfo response',
+  example: 'userinfo',
+  reserved: true,
+  ids: { add: 'addUserInfoClaim', remove: 'removeUserInfoClaim',
+         clear: 'clearUserInfoClaims', replace: 'replaceUserInfoClaims',
+         attributes: 'setUserInfoClaimAttributes',
+         all: 'selectAllUserInfoClaimAttributes',
+         none: 'clearUserInfoClaimAttributes' }
 };
 
 const SAML_CLAIM_FAMILY = {
@@ -1772,6 +1799,100 @@ const ROUTES = [
       log.debug("Leaving the management API claims action endpoint.");
     },
     actions: claimSetActions(JWT_CLAIM_FAMILY) },
+
+  // -------------------------------------------------------------------------
+  // THE USERINFO HALF OF THE SAME STORE, and the half a client can add to.
+  //
+  // Its own resource for the reason the SAML one has its own: rule 7 is about
+  // the CONTROL, and /admin/userinfo-claims is its own page with its own forms.
+  // But it carries something neither of the others does — the OIDC Core section
+  // 5.5 vocabulary, in `claimsRequest` — because that is the half of this
+  // endpoint's behaviour an administrator does NOT decide, and a caller with no
+  // browser has no other way to learn what a claims request may name.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/userinfo-claims', tag: 'UserInfo claims',
+    operationId: 'getUserInfoClaims',
+    summary: 'What every UserInfo response will carry, and what a client may ' +
+             'ask it for',
+    description: 'The `userinfo` claim set — the fifth of the five, and the ' +
+                 'only one whose subject is not something this service ' +
+                 'ISSUES.\n\n**A UserInfo response is built on EVERY call.** ' +
+                 'An access token, an ID Token and both SAML assertions are ' +
+                 'signed documents: a claim added to one of those sets reaches ' +
+                 'a client at its next sign-in and never reaches what it ' +
+                 'already holds. A claim added here reaches the next ' +
+                 '`GET /oauth2/userinfo` from a client that signed in an hour ' +
+                 'ago and has done nothing since. That is the whole reason it ' +
+                 'is configured separately from the ID Token set rather than ' +
+                 'being the same list under two names.\n\nThe set has the same ' +
+                 'TWO HALVES as every other and they are configured by ' +
+                 'different operations. `claims` are TYPED: a name and a value ' +
+                 'somebody wrote, the same for everybody except where a ' +
+                 '${placeholder} carries the sign-in. `attributes` are LDAP ' +
+                 'ATTRIBUTE TYPES chosen from `attributeCatalogue`, whose ' +
+                 'value is read off that person\'s entry under ou=users — so ' +
+                 'an `ldapmodify` changes the next response, with no new ' +
+                 'sign-in at all.\n\n`reservedJwtClaims` IS here, unlike ' +
+                 'GET /admin-api/saml-attributes, and the reason is worth ' +
+                 'reading before assuming it is a copy-paste: `sub` is ' +
+                 'REQUIRED in this response (OIDC Core 5.3.2, and a client ' +
+                 'MUST check it against the ID Token\'s), and when a client ' +
+                 'has registered a `userinfo_signed_response_alg` the whole ' +
+                 'response is a JWT carrying `iss`, `aud` and `exp`.\n\n' +
+                 '`claimsRequest` is the half no operation here sets: OIDC ' +
+                 'Core section 5.5 lets a CLIENT name individual claims in the ' +
+                 '`claims` request parameter, and this service answers them ' +
+                 'off the same catalogue. It lists every name a request may ' +
+                 'use, the four layers of precedence, what is carried and NOT ' +
+                 'enforced (`essential`, `value`, `values`), and the non-spec ' +
+                 'way to send one straight to the endpoint.',
+    mirrors: 'GET /admin/userinfo-claims',
+    parameters: [
+      { name: 'user', in: 'query', required: false,
+        schema: { type: 'string', default: 'alice' },
+        description: 'Whose attribute values to preview. The same parameter, ' +
+                     'the same cap and the same default GET /admin-api/claims ' +
+                     'takes, deliberately: the three replies preview one ' +
+                     'person unless asked otherwise. `preview.entryFound` says ' +
+                     'whether the directory holds them or the values were ' +
+                     'invented from the username.' },
+      { name: 'request', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'A section 5.5 claims request, as the JSON a client would ' +
+                     'send — for example ' +
+                     '`{"userinfo":{"birthdate":null,"address":null}}`. The ' +
+                     'reply\'s `claimsRequest.preview` then says exactly what ' +
+                     'that request would return for `user`, computed by the ' +
+                     'two functions the UserInfo endpoint itself calls. A ' +
+                     'MALFORMED one is reported in `claimsRequest.preview.' +
+                     'error` and does NOT fail this call: what it shows is the ' +
+                     '`invalid_request` a client would be given, which is the ' +
+                     'thing a caller is asking about.' }
+    ],
+    responseDescription: 'The UserInfo set, the attribute catalogue, the ' +
+                         'preview and the section 5.5 vocabulary.',
+    responseSchema: { $ref: '#/components/schemas/UserInfoClaimSets' },
+    handler: function (req, res) {
+      log.debug("Entering the management API UserInfo claims endpoint.");
+      sendJson(res, 200,
+               admin.userinfoClaimsJson(admin.claimsPreviewUser(req.query),
+                                        admin.claimsRequestParameter(req.query)));
+      log.debug("Leaving the management API UserInfo claims endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/userinfo-claims/:action',
+    tag: 'UserInfo claims',
+    mirrors: 'POST /admin/userinfo-claims',
+    handler: function (req, res) {
+      log.debug("Entering the management API UserInfo claims action endpoint.");
+      const body = parseBody(req);
+      const names = namesOf(req, body, 'attribute', 'attributes');
+      const result = admin.claimsAction(withAction(req, body), names,
+                                        stats.USERINFO_CLAIM_SET_IDS);
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API UserInfo claims action endpoint.");
+    },
+    actions: claimSetActions(USERINFO_CLAIM_FAMILY) },
 
   // -------------------------------------------------------------------------
   // THE SAML HALF OF THE SAME STORE, mirroring the console page that carries

@@ -1,8 +1,8 @@
 # kerberos/
 
 Kerberos v5 — a KDC on raw TCP and UDP 88 and over MS-KKDCP, a Kerberos-protected
-service, and the same acceptor over HTTP as SPNEGO (RFC 4559/4178). Twelve files,
-and they divide into three groups.
+service, the same acceptor over HTTP as SPNEGO (RFC 4559/4178), and **a way of
+signing in with it**. Fourteen files, and they divide into three groups.
 
 **The codec**, which knows nothing about this service: `krb5_primitives.js`,
 `krb5_asn1.js`, `krb5_crypto.js`, `krb5_messages.js`, `krb5_ndr.js`,
@@ -51,6 +51,124 @@ installation. Note the naming: `krb5_spnego.js` beside it is the VENDORED RFC 41
 codec (a byte-identical copy of the parent project's `common/krb5/krb5_spnego.js`,
 kept honest by `tests/krb5_codec_sync.js` there), and `spnego.js` is this repo's own.
 Do not merge the two — one of them is somebody else's file.
+
+---
+
+## SPNEGO IS THREE FILES SINCE 2026-08-26, BECAUSE THERE ARE TWO DOORS
+
+`spnego.js` used to be the whole of it: the negotiation, the HTML and the one
+endpoint. It is now the last of four layers, and each adds exactly one thing.
+
+| File | What it adds | Registers |
+|---|---|---|
+| `krb5_service.js` | the AP-REQ. Every Kerberos check, over any transport. | `/krb5/service` |
+| `spnego_exchange.js` | RFC 4178 and the RFC 4559 header. No Kerberos code, no HTML, no session. **A LIBRARY** — rule 3, so its position is not a position. | nothing |
+| `spnego.js` | a page that explains what happened. | `/spnego`, `/spnego/protected` |
+| `spnego_authn.js` | **a session, and the identity that goes in it.** | `/authn/spnego` |
+
+**The split was forced by the second door and it is not tidiness.**
+`/spnego/protected` documents a handshake; `/authn/spnego` performs the same
+handshake and mints the browser session sixteen protocol families read. Those
+two have to be IDENTICAL rather than similar, because one of them is the
+documentation of the other — a second copy of the negotiation would be a page
+describing a check the sign-in does not make, with nothing anywhere to fail.
+This is the promise `krb5_service.js`'s own header made when `spnego.js` was
+written (*"the acceptor logic here is written as its own function so that phase
+adds a transport and no protocol code"*), kept a second time one layer up.
+
+**`negotiate()` RETURNS A VERDICT AND NEVER A RESPONSE.** It does not take a
+`res`. Fifteen outcomes, named in that module's `OUTCOMES` table, each carrying
+the HTTP status and the complete `WWW-Authenticate` value — because that header
+is the part the PROTOCOL specifies and two spellings of it would be two
+acceptors. Both doors are renderers over it. A branch added to `spnego.js` that
+DECIDES something rather than describing it belongs one file over.
+
+### `spnego_authn.js`: the one sign-in here that checks a real credential
+
+Everywhere else in this service the username typed IS the identity. Kerberos
+cannot work that way — the password there is the key — so this door verifies a
+service ticket against a real long-term key, refuses a replay, and gives the
+principal inside a session. The KDC behind it stays as permissive as the
+protocol allows (see the section below); **the verification is real and the
+account policy is not**, and those are two different sentences.
+
+Five things about it are load-bearing:
+
+* **IT NEEDS NO INVERTED HOOK, and rule 3e's list is six slots long so a
+  seventh is the obvious move.** `authn.js` has to know two things about this
+  door: the PATH, which is in the `/authn/*` space that module already owns, so
+  it declares the constant and this file imports it; and whether the door is
+  open, which is `krb5.spnegoAuthentication` and is read from `config.js` by
+  both. Rule 3e's test is whether a require would close a cycle or move a
+  route — here nothing has to point anywhere.
+* **The require goes ONE WAY**: this file requires `authn/authn.js` for
+  `startSession()`, `pendingFor()` and `completeAuthentication()`, and that
+  module requires nothing in this directory and must not. `authn.js` is #8,
+  ahead of `oauth2.js` which reads the session it owns; a require in the other
+  direction would drag the KDC's routes to the front of the router.
+* **The acceptor does not record the authentication for this caller.**
+  `accept()` takes `record: false`, which has exactly one call site. The act
+  here is a ticket accepted AND a session minted, `startSession()` is the funnel
+  that records exactly that with the `sessionId` on it, and two records would
+  make `/admin/users` count one sign-in twice — the defect federation shipped
+  with and fixed the same way. Everything else (the raw socket,
+  `/spnego/protected`, the parent project's real-DC jobs) still records in the
+  acceptor.
+* **THE REALM IS STRIPPED FROM THE PRINCIPAL, AND ONLY THE LOCAL ONE.**
+  `alice@EXAMPLE.COM` becomes a session for `alice`, because the session's
+  username becomes `sub: urn:sts-mock:user:<name>` in every token that follows
+  and leaving the realm on would make a typed sign-in and a ticket sign-in two
+  subjects for one person. A FOREIGN realm is kept whole — `bob@PARTNER.COM` is
+  not this service's `bob` — and the asymmetry is deliberate:
+  `admin_stats.js`'s `identityOf()` folds them onto one DIRECTORY entry anyway,
+  so the directory answers "which human" while the token answers "who am I
+  asserting", and they are allowed to differ.
+* **`amr` AND `acr` ARE READ OFF THE TICKET'S OWN FLAGS**, which is the only
+  place in this service where they are derived from something a credential
+  actually says. `pre-authent` → `pwd` (RFC 4120 section 2.1: the KDC verified
+  PA-ENC-TIMESTAMP, a timestamp under a key derived from a password);
+  `hw-authent` → `hwk`; both → `acr "mfa"`; **neither → an EMPTY `amr` and
+  `acr "0"`**, because filling in `pwd` there would be telling a relying party
+  a password was checked when nothing knows whether one was. `initial` is
+  reported on the page and used for nothing — it says where the credential was
+  minted, not what was checked.
+
+### It is available to every application, three ways, and none of them is registration
+
+1. **A BUTTON ON `/authn/login`** (`krb5.spnegoLoginButton`), for whatever flow
+   is already in progress — the same argument `federation.loginButtons` makes,
+   and it lands harder here: whether somebody can use a ticket is a fact about
+   THEIR MACHINE and not about the relying party.
+2. **`appAuthnMechanism: spnego`** on an application entry — that application's
+   people never see the screen.
+3. **`fedAuthnMechanism: spnego`** on an identity-provider-side federation
+   relationship — a foreign partner that has never heard of Kerberos is
+   satisfied by a ticket.
+
+**The button is WITHHELD from a request that demanded two factors, and says
+so**, exactly as `beginAuthentication()` refuses a configured `spnego`
+mechanism under `forceMfa`. A ticket claims what its own flags claim, which is
+usually one factor, and by the time the flags are readable the ticket has been
+accepted — so the only honest place to refuse is before the offer.
+
+**Every refusal draws a page with the sign-in screen linked from it.** A bare
+`401 WWW-Authenticate: Negotiate` is a dead end in every browser not configured
+for this host (Chrome's `--auth-server-allowlist`, Firefox's
+`network.negotiate-auth.trusted-uris`, plus a credential cache in the realm), and
+somebody meeting that on the way into an application would be stuck. That is
+why the door takes an `?authn=` and carries it through rather than spending it
+on arrival — and why it takes **no `returnTo` of its own**: the return address
+is on the pending record, so there is no open-redirect surface here at all.
+(`/federation/login/{id}` does take one and has to; the browser leaves this
+origin there and comes back to a different endpoint. This one never leaves.)
+
+**The pending map for `request-mic` continuations is keyed by DOOR as well as
+by remote address.** That stand-in for connection identity was only ever a
+diagnostic while one door used it; with a sign-in door on the same map, a
+continuation arriving at `/authn/spnego` could otherwise be matched against a
+half-finished exchange begun at `/spnego/protected` by anybody sharing the
+address — a NAT, a proxy, a container network — and the accepted client on that
+entry is what the session would be minted for.
 
 ---
 

@@ -114,6 +114,28 @@ const LOGIN_PATH = '/authn/login';
 // reached only with an `?authn=` id, exactly as the screen is, because what it
 // needs is the pending record and not a partner list somebody could compose.
 const SELECT_IDP_PATH = '/authn/select-idp';
+// ---------------------------------------------------------------------------
+// WHERE A PERSON SIGNS IN WITH A KERBEROS TICKET, and the reason the constant
+// is HERE while the endpoint is in `kerberos/spnego_authn.js`.
+//
+// This module owns `/authn/*` and it is the module that has to point at that
+// door: `beginAuthentication()` redirects to it, and the sign-in screen draws a
+// button linking to it. The endpoint itself cannot live here — every Kerberos
+// module is at #15 and below in the require order, this one is at #8 because
+// `oauth2.js` reads the session it owns, and a require in that direction would
+// drag the KDC's routes to the front of the router AND close a cycle, since
+// that module needs `startSession()`.
+//
+// **AND IT DOES NOT NEED AN INVERTED HOOK EITHER**, which is worth saying
+// because rule 3e's list is six slots long and a seventh is the obvious move.
+// The only two things this module needs to know are the PATH — a path in the
+// space it already owns, so it declares it and the Kerberos module imports it —
+// and whether the door is open, which is `krb5.spnegoAuthentication` in
+// `config.js` and is read from both files. Rule 3e's test is whether a require
+// would close a cycle or move a route; here nothing has to point anywhere at
+// all.
+// ---------------------------------------------------------------------------
+const SPNEGO_PATH = '/authn/spnego';
 
 const SESSION_COOKIE = 'sts_mock_session';
 
@@ -795,6 +817,94 @@ function federationFor(applicationId) {
 // working, and a BROKER that has quietly stopped brokering looks exactly like
 // one that is.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// WHAT AN APPLICATION ENTRY DECLARES ABOUT HOW ITS PEOPLE AUTHENTICATE.
+//
+// `appAuthnMechanism`, a single value from the SAME closed table
+// `fedAuthnMechanism` uses — `federation.MECHANISM_IDS`. One table for both
+// because they answer the same question from two sides, and two tables would
+// have drifted the first time either grew a value: this one says "where do THIS
+// APPLICATION's people sign in", and the relationship's says "what do I do when
+// THAT PARTNER asks me to authenticate somebody".
+//
+// IT IS THE GENERALISATION OF `appFederationRelationship`, and it was added on
+// 2026-08-26 with the SPNEGO sign-in — the first mechanism this service has
+// that is neither the screen nor a partner, and therefore the first one an
+// application had no way to ask for. The pair that existed could say "send my
+// people to a federated identity provider" and could not say "my people are on
+// domain-joined machines and hold Kerberos tickets", which is the commonest
+// integrated-authentication deployment there is.
+//
+// AN EMPTY VALUE IS NOT `password` — it is "this entry says nothing" — and that
+// is the whole compatibility argument. Every application entry in the field
+// holds an empty one, so this function must return exactly what
+// `federationFor()` alone used to decide for all of them: the relationships if
+// any are named, and the screen otherwise. Reading an absent value as an
+// explicit "use the password screen" would have switched off every
+// `appFederationRelationship` in existence in one commit.
+//
+// `federation` HERE MEANS "the relationships on this entry" and is therefore
+// the one value that changes nothing: it is what naming a relationship already
+// implied, said out loud. It is accepted because a closed table that silently
+// refused one of its own values would be a worse surprise than a redundant one,
+// and because declaring it and naming NO usable relationship is a state worth
+// REPORTING rather than falling quietly back to a password box — the same
+// argument federationFor() makes about a disabled relationship.
+//
+// THE CHECKS ARE MADE HERE RATHER THAN AT THE WRITE, for federationFor()'s
+// reason exactly: the attribute is a string on a directory entry that
+// `ldapmodify`, the console and the management API can all reach, and the
+// SETTING that decides whether `spnego` will work is settable at runtime. A
+// check made when it was written would be a check about the past.
+// ---------------------------------------------------------------------------
+function declaredMechanismFor(applicationId) {
+  log.debug("Entering declaredMechanismFor(). application=" +
+            (applicationId || '(none)'));
+  let entry = null;
+  try {
+    entry = applications.get(String(applicationId || ''));
+  } catch (e) {
+    // Swallowed for federationFor()'s reason and no other: this runs on the
+    // way to the sign-in screen, so a registry that throws must cost the
+    // shortcut and never the screen.
+    log.error('authn: the application registry threw while reading ' +
+              'appAuthnMechanism for "' + applicationId + '" and was ignored; ' +
+              'the sign-in screen itself is unaffected: ' + e.message);
+    log.debug("Leaving declaredMechanismFor(). The registry threw.");
+    return { mechanism: '', problem: '' };
+  }
+  const declared = String((((entry || {}).fields || {}).appAuthnMechanism) || '')
+    .trim();
+  if (!declared) {
+    log.debug("Leaving declaredMechanismFor(). That entry declares nothing.");
+    return { mechanism: '', problem: '' };
+  }
+  if (federation.MECHANISM_IDS.indexOf(declared) === -1) {
+    log.debug("Leaving declaredMechanismFor(). Not one of ours.");
+    return { mechanism: '', problem: 'The application "' + applicationId +
+             '" declares the authentication mechanism "' + declared +
+             '", which is not one this service has: they are ' +
+             federation.MECHANISM_IDS.join(', ') + '.' };
+  }
+  // THE ONE MECHANISM THAT CAN BE TURNED OFF SERVICE-WIDE. A relationship or an
+  // application entry naming `spnego` while `krb5.spnegoAuthentication` is
+  // false is configuration pointing at a door that is shut, and the person
+  // meets it as a 403 halfway through a sign-in unless it is said here. The
+  // other four cannot be switched off: the screen is always there, and a
+  // federation relationship's own `fedEnabled` is checked by
+  // usableServiceProviders().
+  if (declared === 'spnego' && !config.value('krb5.spnegoAuthentication')) {
+    log.debug("Leaving declaredMechanismFor(). SPNEGO is configured and off.");
+    return { mechanism: '', problem: 'The application "' + applicationId +
+             '" authenticates its users with a Kerberos ticket over SPNEGO, ' +
+             'and krb5.spnegoAuthentication is off on this service, so that ' +
+             'door will not sign anybody in. The sign-in screen is being ' +
+             'shown instead.' };
+  }
+  log.debug("Leaving declaredMechanismFor(). " + declared + ".");
+  return { mechanism: declared, problem: '' };
+}
+
 function mechanismFor(applicationId) {
   log.debug("Entering mechanismFor(). application=" +
             (applicationId || '(none)'));
@@ -849,11 +959,58 @@ function mechanismFor(applicationId) {
              source: 'relationship', federation: home, via: broker.via,
              problem: broker.problem };
   }
+  // ---------------------------------------------------------------------
+  // THE APPLICATION'S OWN DECLARATION, WHICH IS READ BEFORE ITS RELATIONSHIPS
+  // AND FALLS THROUGH TO THEM.
+  //
+  // `appAuthnMechanism` is the explicit statement and `appFederationRelationship`
+  // is an implicit one — naming a partner has always MEANT "authenticate my
+  // people there" — so the explicit one is read first. It falls through in
+  // exactly two cases and both are deliberate:
+  //
+  //   * it says `federation`, which IS the implicit statement said out loud,
+  //     so the list below decides as it always did; and
+  //   * it says nothing, which every entry in the field says.
+  //
+  // A DECLARATION THIS SERVICE CANNOT HONOUR does not fall through silently.
+  // It carries its sentence onto the record as `mechanismProblem`, the screen
+  // prints it, and the password box underneath is then a fallback somebody was
+  // TOLD about rather than a federated application quietly authenticating
+  // people locally — which looks exactly like it working.
+  // ---------------------------------------------------------------------
+  const declared = declaredMechanismFor(wanted);
+  if (declared.mechanism && declared.mechanism !== 'federation') {
+    log.info('authn: "' + wanted + '" declares the authentication mechanism "' +
+             declared.mechanism + '" on its entry under ou=applications, so ' +
+             'that is what this sign-in does.');
+    log.debug("Leaving mechanismFor(). The application entry declared it.");
+    return { mechanism: declared.mechanism, source: 'application',
+             federation: null, via: '', problem: '' };
+  }
   const home = federationFor(wanted);
   if (home) {
     log.debug("Leaving mechanismFor(). The application entry decided it.");
     return { mechanism: 'federation', source: 'application', federation: home,
-             via: '', problem: home.problem };
+             via: '', problem: home.problem || declared.problem };
+  }
+  // DECLARED `federation` AND NAMING NOTHING USABLE. federationFor() returned
+  // null, which means the entry names no relationship at all or the registry
+  // could not be read — and an entry that says its people are federated while
+  // naming nobody is exactly the half-configured state this whole function is
+  // careful to report rather than swallow.
+  if (declared.mechanism === 'federation') {
+    log.debug("Leaving mechanismFor(). Declared federation and named nobody.");
+    return { mechanism: 'password', source: 'application', federation: null,
+             via: '',
+             problem: 'The application "' + wanted + '" authenticates its ' +
+                      'users through a federation relationship and its entry ' +
+                      'names none that this service can use. Set ' +
+                      'appFederationRelationship on it.' };
+  }
+  if (declared.problem) {
+    log.debug("Leaving mechanismFor(). A declaration this service cannot honour.");
+    return { mechanism: 'password', source: 'application', federation: null,
+             via: '', problem: declared.problem };
   }
   log.debug("Leaving mechanismFor(). Nothing configured; the screen it is.");
   return { mechanism: 'password', source: 'default', federation: null,
@@ -886,15 +1043,18 @@ function mechanismFor(applicationId) {
 // Returns the path to redirect to. A path rather than a full URL: the browser
 // is already on this origin, and building an absolute URL here would mean
 // guessing the base the caller was reached on. IT IS NOT ALWAYS THIS MODULE'S
-// SCREEN, and there are now THREE things it can be:
+// SCREEN, and there are now FOUR things it can be:
 //
 //   * the federated flow's own entry point, when the application names exactly
 //     ONE usable relationship and the auto-redirect is left on;
 //   * the CHOOSER at /authn/select-idp, when it names more than one — a page
 //     with one button per partner and no password field;
+//   * the KERBEROS DOOR at /authn/spnego, when the mechanism resolved to
+//     `spnego` — integrated authentication, where the person types nothing and
+//     the credential is a service ticket;
 //   * the sign-in screen, for everything else.
 //
-// The caller cannot tell the three apart and must not: what it asked for is
+// The caller cannot tell the four apart and must not: what it asked for is
 // "get this person authenticated and bring them back to returnTo", and which
 // identity provider does the authenticating — or whether the person was asked
 // — is not its business. That is the same property the buttons at the foot of
@@ -930,7 +1090,18 @@ function beginAuthentication(opts) {
   if (home && home.relationship && home.auto) {
     const target = federation.PATHS.login + '/' +
       encodeURIComponent(home.relationship.fedId) +
-      '?returnTo=' + encodeURIComponent(returnTo);
+      '?returnTo=' + encodeURIComponent(returnTo) +
+      // WHICH APPLICATION THIS SIGN-IN IS FOR, carried onward so that the
+      // relationship's per-application counts can be moved when it completes.
+      // This service knows the pair HERE and only here — the assertion comes
+      // back to /federation/acs/{id}, which is handed a signed document about a
+      // person and nothing at all about what they were signing in to.
+      //
+      // IT IS A HINT AND NOT AN AUTHORITY, which federation.js says at length
+      // where it is spent: the parameter rides on an endpoint anybody can
+      // reach, so what makes it safe to write down is that recordUse() checks
+      // the pair against the live register rather than believing this.
+      '&application=' + encodeURIComponent(String(opts.application || ''));
     log.info('authn: "' + String(opts.application) + '" authenticates through ' +
              'the federation relationship "' + home.relationship.fedId +
              '"' + (chosen.source === 'relationship'
@@ -1001,6 +1172,12 @@ function beginAuthentication(opts) {
   // demanding two factors produce ONE screen and not two code paths that
   // could come to differ.
   //
+  // `spnego` IS THE FOURTH AND IT DRAWS NO SCREEN, which is why it is resolved
+  // here beside them and spent below the record rather than folded into what
+  // the screen offers: it is a redirect, like the federated branch above, and
+  // the only thing it has in common with these three is that it loses to
+  // forceMfa. That collision is argued where it is made.
+  //
   // forceMfa WINS OVER forcePasswordless and says so in the log. They are
   // mutually exclusive by construction — one enum value, one mechanism — but
   // `opts.forceMfa` does not come from the register at all: it comes from the
@@ -1011,6 +1188,34 @@ function beginAuthentication(opts) {
   // ---------------------------------------------------------------------
   const forceMfa = !!opts.forceMfa || chosen.mechanism === 'password-mfa';
   let forcePasswordless = chosen.mechanism === 'webauthn';
+  // ---------------------------------------------------------------------
+  // AND THE SAME COLLISION A THIRD TIME, for the mechanism added on
+  // 2026-08-26. A Kerberos ticket claims whatever its own flags claim — one
+  // factor for `pre-authent`, two only where `hw-authent` is there beside it
+  // (see `factorsFor()` in kerberos/spnego_authn.js) — so it cannot be
+  // PROMISED to answer a caller that demanded two. The demand wins, exactly as
+  // it wins over passwordless WebAuthn and for the identical reason: a request
+  // for two factors answered with one is the fake `acr_values` and `wauth`
+  // exist to prevent.
+  //
+  // What that costs is worth stating, because it is not nothing: somebody at a
+  // domain-joined machine holding a perfectly good hardware-backed ticket is
+  // sent to a password box. The alternative is to send them to the SPNEGO door
+  // and find out — and the door cannot refuse them at that point, because by
+  // the time the flags are readable the ticket has been accepted and the only
+  // options left are to mint a session claiming one factor or to throw away a
+  // successful authentication. Refusing to promise is the honest half of that.
+  // ---------------------------------------------------------------------
+  let integrated = chosen.mechanism === 'spnego';
+  if (integrated && forceMfa) {
+    log.info('authn: the configured mechanism for "' +
+             String(opts.application || '(none)') + '" is a Kerberos ticket ' +
+             'over SPNEGO, and this request demands two factors, so the ' +
+             'demand wins: the screen asks for a password and a key. A ticket ' +
+             'claims what its own flags claim and this service cannot promise ' +
+             'in advance that they will claim two.');
+    integrated = false;
+  }
   if (forcePasswordless && forceMfa) {
     log.info('authn: the configured mechanism for "' +
              String(opts.application || '(none)') + '" is a passwordless ' +
@@ -1031,6 +1236,13 @@ function beginAuthentication(opts) {
     // sign-in is a caller choosing somebody else's authenticator for them,
     // which is a deployment decision and not a request parameter.
     forcePasswordless: forcePasswordless,
+    // Set only by a mechanism of `spnego` that survived the collision above.
+    // It is on the RECORD rather than re-derived at the screen for the reason
+    // `forcePasswordless` is: what the screen offers has to be what
+    // beginAuthentication() decided, and re-deriving it from a config read at
+    // render time would quietly drop a demand a protocol module made minutes
+    // ago.
+    integrated: integrated,
     mechanism: chosen.mechanism,
     mechanismSource: chosen.source,
     mechanismVia: chosen.via,
@@ -1076,6 +1288,42 @@ function beginAuthentication(opts) {
               " goes to the chooser and will return to " + returnTo + ".");
     return SELECT_IDP_PATH + '?authn=' + encodeURIComponent(record.id);
   }
+  // ---------------------------------------------------------------------
+  // INTEGRATED AUTHENTICATION: STRAIGHT TO THE KERBEROS DOOR.
+  //
+  // A FOURTH thing this function can answer with, and it is the federation
+  // auto-redirect's sibling — home realm discovery by configuration, for a
+  // home realm that is a Kerberos realm rather than a foreign identity
+  // provider. The caller still cannot tell: what it asked for is "get this
+  // person authenticated and bring them back to returnTo".
+  //
+  // IT SPENDS A PENDING RECORD, WHERE THE FEDERATION BRANCH DOES NOT, and the
+  // difference is worth knowing rather than looking like an inconsistency.
+  // A federated sign-in LEAVES this origin and comes back to
+  // `/federation/acs/{id}`, an endpoint that finishes the whole thing through
+  // startSession() and never draws this module's screen — so a record minted
+  // for it would be one nothing could spend. `/authn/spnego` never leaves:
+  // the 401 and the token are the same URL fetched twice, the record is what
+  // carries `returnTo` across those two fetches, and it is ALSO what the
+  // fallback link on every page of that door points back into. That is the
+  // whole reason the door takes an `?authn=` and no `returnTo` of its own —
+  // there is no open-redirect surface on it at all.
+  // ---------------------------------------------------------------------
+  if (record.integrated) {
+    log.info('authn: "' + String(opts.application || '(none)') + '" ' +
+             'authenticates with a Kerberos ticket over SPNEGO' +
+             (chosen.source === 'relationship'
+                ? ', because the identity-provider-side relationship "' +
+                  chosen.via + '" says so'
+                : ', because its entry under ou=applications declares it') +
+             ', so this sign-in goes straight to ' + SPNEGO_PATH +
+             ' rather than to the sign-in screen. A client with no ticket ' +
+             'meets a 401 there and a link back to this screen; nothing is ' +
+             'lost, because the request is on the pending record either way.');
+    log.debug("Leaving beginAuthentication(). " + record.id +
+              " goes to the Kerberos door and will return to " + returnTo + ".");
+    return SPNEGO_PATH + '?authn=' + encodeURIComponent(record.id);
+  }
   log.debug("Leaving beginAuthentication(). " + record.id + " will return to " + returnTo + ".");
   return LOGIN_PATH + '?authn=' + encodeURIComponent(record.id);
 }
@@ -1120,6 +1368,33 @@ function returnToCaller(res, record, error, description) {
   // ---------------------------------------------------------------------
   res.redirect(303, target);
   log.debug("Leaving returnToCaller(). Sent the browser to " + target + " with a 303.");
+}
+
+// ---------------------------------------------------------------------------
+// SPEND THE RECORD AND GO BACK. The two lines every successful sign-in in this
+// module already runs, as one function, so that a sign-in performed SOMEWHERE
+// ELSE runs the same two.
+//
+// The password path, the WebAuthn path and the SPNEGO door all end with a
+// pending record that has been used and a browser that has to be sent back to
+// what it interrupted. Doing that in three places would be three chances to
+// leave the record behind — which is a sign-in form that still works after
+// somebody has signed in with it — and three places for the 303 to become a
+// 302 or, worse, a 307.
+//
+// It takes no error parameter, and that is deliberate rather than an omission:
+// `returnToCaller()` is still the function for a refusal, and the one caller
+// outside this module has nothing to refuse WITH. A Kerberos sign-in that
+// fails draws a page with the password screen on it, because the person can
+// still sign in — telling the calling protocol `access_denied` would end a
+// flow that has not failed.
+// ---------------------------------------------------------------------------
+function completeAuthentication(res, record) {
+  log.debug("Entering completeAuthentication(). id=" + record.id);
+  pending.delete(record.id);
+  returnToCaller(res, record, null, null);
+  log.debug("Leaving completeAuthentication(). Sent them back to " +
+            record.returnTo + ".");
 }
 
 // The record a request names, or null — expired ones are dropped on the way
@@ -1211,6 +1486,11 @@ function federatedOptionsHtml(record) {
   const home = record.federation;
   if (home && home.usable && home.usable.length) {
     const many = home.usable.length > 1;
+    // THE APPLICATION'S OWN PARTNERS, so the pair is named on every href — see
+    // federatedButtons(). This is the branch where naming it is correct: every
+    // option here came off this application's entry or off the relationship
+    // brokering for it, which is exactly the pair federation.js will agree to
+    // record.
     const html = federatedButtons(record,
       home.usable.map(function (one) { return one.option; }),
       'This application signs its users in at ' +
@@ -1244,6 +1524,12 @@ function federatedOptionsHtml(record) {
     log.debug("Leaving federatedOptionsHtml(). No usable partner is configured.");
     return '';
   }
+  // EVERY USABLE RELATIONSHIP IN THE REGISTER, WHICH IS NOT THIS APPLICATION'S
+  // LIST — so no application is named on these hrefs, deliberately. Somebody who
+  // picks one off here has signed in through a partner nothing configured for
+  // this application, and counting that as a use of the pair would put a number
+  // on /admin/federation/map that means something other than what the page says
+  // it means.
   const html = federatedButtons(record, options,
     'Or sign in with a federated identity provider. No password is typed here ' +
     'and none is checked there either as far as this service can tell — what ' +
@@ -1257,20 +1543,92 @@ function federatedOptionsHtml(record) {
 // copies of an anchor carrying a returnTo is two chances to drop the returnTo
 // from one of them — which produces a federated sign-in that succeeds and lands
 // the person on a page nobody asked for.
-function federatedButtons(record, options, blurb) {
+//
+// `application` IS PASSED RATHER THAN READ OFF THE RECORD, and that is the one
+// thing about this function worth a second look. `record.application` is set on
+// every pending sign-in — it is what the calling protocol was for — but only
+// SOME of these buttons are that application's OWN partners. The generic list at
+// the foot of the screen (`federation.loginButtons`) offers every usable
+// relationship in the register, and a person who picks one off it has not used a
+// partner the application is configured for; naming the application on those
+// hrefs would ask federation.js to record a pair it is right to refuse, once per
+// click, and fill the log with a warning about a state nothing is wrong with.
+//
+// So the caller says which kind of list it is drawing, because the caller is the
+// only thing that knows.
+function federatedButtons(record, options, blurb, application) {
   log.debug("Entering federatedButtons(). " + options.length + " option(s).");
   // The whole original request rides along, so that whatever brought the person
   // here resumes once the partner has answered. It is `record.returnTo`, which
   // beginAuthentication() has already checked is a path on this service.
   const back = encodeURIComponent(record.returnTo);
+  const forApplication = String(application || '')
+    ? '&application=' + encodeURIComponent(String(application))
+    : '';
   const html = '<div class="fed"><p>' + blurb + '</p>' +
     options.map(function (one) {
       return '<a class="fedbtn" href="/federation/login/' + encodeURIComponent(one.id) +
-        '?returnTo=' + back + '">' + xmlEscape(one.label) +
+        '?returnTo=' + back + forApplication + '">' + xmlEscape(one.label) +
         '<span>' + xmlEscape(one.protocolLabel) +
         (one.peer ? ' · ' + xmlEscape(one.peer) : '') + '</span></a>';
     }).join('') + '</div>';
   log.debug("Leaving federatedButtons().");
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// THE KERBEROS BUTTON, AND WHY IT IS OFFERED TO EVERY APPLICATION WITHOUT
+// ANYTHING BEING CONFIGURED.
+//
+// This is the same argument `federation.loginButtons` makes and it lands
+// harder here. A person standing at this screen is in the middle of SOMETHING
+// — an authorization request, a `wsignin1.0`, an `AuthnRequest`, the console —
+// and `record.returnTo` is that something, whole. A button that hands the
+// record to `/authn/spnego` therefore makes integrated Kerberos able to
+// satisfy every protocol this service speaks, for every application, with no
+// registration anywhere: the mechanism is a property of the PERSON's machine
+// rather than of the relying party, which is exactly what "integrated
+// authentication" has always meant in a Windows deployment.
+//
+// It is a LINK and not a form control, for `federatedButtons()`' reason: a
+// control in this form would post to the handler that signs somebody in on a
+// typed name, and this has to leave for an endpoint that will not.
+//
+// **IT IS WITHHELD UNDER `forceMfa`.** A ticket claims what its own flags
+// claim, which is usually one factor, and a caller that demanded two must not
+// be handed a session claiming one — the same refusal `beginAuthentication()`
+// makes to a CONFIGURED `spnego` mechanism, made again here because a button
+// is an offer and this offer could not be honoured. It says so rather than
+// vanishing, because a button that is there for everybody else and missing
+// here reads as a broken page.
+//
+// TWO SETTINGS, and they are not one. `krb5.spnegoAuthentication` is whether
+// the DOOR will sign anybody in; `krb5.spnegoLoginButton` is whether this
+// screen advertises it. A deployment that wants the door for a scripted client
+// and not for people at a browser sets the second false, and a screen offering
+// a button to a closed door is what the first check prevents.
+// ---------------------------------------------------------------------------
+function integratedOptionHtml(record) {
+  log.debug("Entering integratedOptionHtml().");
+  if (!config.value('krb5.spnegoAuthentication') ||
+      !config.value('krb5.spnegoLoginButton')) {
+    log.debug("Leaving integratedOptionHtml(). Not offered.");
+    return '';
+  }
+  if (record.forceMfa) {
+    log.debug("Leaving integratedOptionHtml(). Withheld: two factors were demanded.");
+    return '<div class="fed"><p>Integrated Kerberos sign-in is not offered for ' +
+      'this request: it demands two factors, and a ticket claims whatever its ' +
+      'own flags claim &mdash; usually one.</p></div>';
+  }
+  const html = '<div class="fed"><p>Or sign in with a Kerberos ticket, if this ' +
+    'machine holds one. Nothing is typed and this service checks the ticket ' +
+    'rather than a name &mdash; the only sign-in here that rests on a ' +
+    'credential it genuinely verified.</p>' +
+    '<a class="fedbtn" href="' + SPNEGO_PATH + '?authn=' +
+    encodeURIComponent(record.id) + '">Sign in with Kerberos' +
+    '<span>SPNEGO &middot; RFC 4559</span></a></div>';
+  log.debug("Leaving integratedOptionHtml(). Offered.");
   return html;
 }
 
@@ -1356,6 +1714,11 @@ function loginPage(base, record, error) {
     // else entirely, and a GET is what leaving looks like.
     // ---------------------------------------------------------------------
     federatedOptionsHtml(record) +
+    // AND THE KERBEROS DOOR, under the partners. Under rather than over,
+    // because the partners are what an application was CONFIGURED with and
+    // this is offered to everybody — a configured route belongs above an
+    // ambient one.
+    integratedOptionHtml(record) +
     '<div class="meta">' +
     '<div>No password is checked. The username you enter is the identity the issued tokens describe.</div>' +
     '<div>Passwordless: the password field is not read at all, and the security key becomes the ' +
@@ -1430,7 +1793,13 @@ function selectIdpPage(base, record) {
       'one of these federated identity providers. Pick the one you have an ' +
       'account at. No password is typed here and none is checked there either ' +
       'as far as this service can tell — what it checks is the partner\'s ' +
-      'signature.') +
+      'signature.',
+      // THIS APPLICATION'S OWN PARTNERS BY CONSTRUCTION — the page is not drawn
+      // at all for any other list — so the pair is named on every href. It is
+      // the same argument the sign-in screen's first branch makes, and it holds
+      // here with less to check: `usable` came from federationFor() against this
+      // record's application and from nowhere else.
+      record.application) +
     '<div class="meta">' +
     '<div>These are the relationships named on this application\'s entry under ' +
     '<code>ou=applications</code>, in <code>appFederationRelationship</code> — ' +
@@ -2065,5 +2434,35 @@ module.exports = {
   sessionById: sessionById,
   endSessionById: endSessionById,
   clearSessionCookie: clearSessionCookie,
-  beginAuthentication: beginAuthentication
+  beginAuthentication: beginAuthentication,
+  // ---------------------------------------------------------------------
+  // THE THREE THE SPNEGO SIGN-IN DOOR NEEDS, and the reason each is here
+  // rather than reimplemented in `kerberos/spnego_authn.js`.
+  //
+  // That module is a fourth thing beginAuthentication() can send a browser to
+  // (see its own header, and the branch above). It is not a protocol module
+  // borrowing the screen — it REPLACES the screen for one sign-in — so it
+  // needs exactly what the screen's own POST handler needs: the pending
+  // record, and the way back out of it.
+  //
+  //   SPNEGO_PATH            the path, declared here because this module owns
+  //                          `/authn/*` and builds two links to it. The
+  //                          endpoint is over there because of the require
+  //                          order; see the constant.
+  //   pendingFor             READ-ONLY. It sweeps an expired record on the way
+  //                          past, exactly as it does for the screen, so a
+  //                          door reached ten minutes late behaves the same
+  //                          way the screen would.
+  //   completeAuthentication the way OUT: spend the record and 303 back to
+  //                          whatever was interrupted. It is one function
+  //                          rather than an exported `pending` and an exported
+  //                          `returnToCaller()` because the two acts are one
+  //                          act — a record left behind is one somebody can
+  //                          spend twice, and a redirect written at a second
+  //                          call site is a second place for RFC 9700 section
+  //                          4.12's 303-not-307 to be got wrong.
+  // ---------------------------------------------------------------------
+  SPNEGO_PATH: SPNEGO_PATH,
+  pendingFor: pendingFor,
+  completeAuthentication: completeAuthentication
 };

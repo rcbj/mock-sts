@@ -158,6 +158,25 @@ const crypto = require('crypto');
 const config = require('./../common/config');
 const { log, nowSec, randomId } = require('./../common/helpers');
 const audit = require('./../common/audit');
+// ---------------------------------------------------------------------------
+// THE APPLICATIONS REGISTRY, AND WHY THIS MODULE MAY REQUIRE IT (rule 3o, read
+// the other way round).
+//
+// Rule 3o is about who may require THIS file. This is the one require going the
+// other way, and it is a plain one in the ordinary direction rather than a slot:
+// `applications.js` registers no route, and it requires only `config.js`,
+// `helpers.js` and `audit.js` — none of which reaches back here — so nothing
+// about requiring it can close a cycle or move a route. Rule 3e's test is not
+// reached, and a slot would have cost a reader an indirection for nothing. It is
+// the same argument `admin_stats.js` makes above its own require of that file.
+//
+// WHAT IT IS FOR IS ONE QUESTION AND ONLY ONE: *is this application actually
+// configured to authenticate through this relationship, right now?* — asked at
+// the moment a use is recorded, so that `fedApplicationUse` below cannot be
+// grown by anybody who can reach `/federation/login/{id}` with an `application`
+// of their choosing. See applicationConfiguredFor().
+// ---------------------------------------------------------------------------
+const applications = require('./../common/applications');
 
 // ---------------------------------------------------------------------------
 // THE TWO ROLES. Which end of the relationship THIS SERVICE is.
@@ -337,7 +356,28 @@ const MECHANISMS = [
           'person is sent there, so this service consumes somebody else\'s ' +
           'assertion and then issues its own to the partner that asked. The ' +
           'two protocols need not match and usually do not — that is the ' +
-          'whole of what an identity bridge is.' }
+          'whole of what an identity bridge is.' },
+  // THE FIFTH, ADDED 2026-08-26, AND IT IS THE FIRST ONE THAT IS NEITHER THIS
+  // SERVICE'S SCREEN NOR SOMEBODY ELSE'S. The other four are a page here or a
+  // redirect to a partner; this one is a CREDENTIAL THE BROWSER ALREADY HOLDS,
+  // which is what "integrated authentication" has always meant. It is also the
+  // only value in this table that can be switched off service-wide — see
+  // authn.js's declaredMechanismFor(), which reports a relationship or an
+  // application naming it while krb5.spnegoAuthentication is false rather than
+  // letting somebody meet a 403 halfway through a sign-in.
+  { mechanism: 'spnego', label: 'Kerberos ticket (SPNEGO)',
+    what: 'INTEGRATED AUTHENTICATION. The person is sent to /authn/spnego, ' +
+          'which answers 401 with WWW-Authenticate: Negotiate and signs them ' +
+          'in on the service ticket their client sends back (RFC 4559 over ' +
+          'RFC 4178 over RFC 4121). Nothing is typed and no screen is drawn. ' +
+          'It is the one mechanism here that rests on a credential this ' +
+          'service genuinely verifies — every other sign-in takes the name it ' +
+          'is given — and what the session then claims is read off the ' +
+          'TICKET\'s own flags: amr ["pwd"] for pre-authent, ["hwk"] for ' +
+          'hw-authent, both for both, and NOTHING at all for a ticket that ' +
+          'claims neither. A client that cannot get a ticket meets a page with ' +
+          'the sign-in screen linked from it, because a bare 401 Negotiate is ' +
+          'a dead end in every browser that is not configured for this host.' }
 ];
 
 const MECHANISM_IDS = MECHANISMS.map(function (one) {
@@ -556,7 +596,9 @@ const SCHEMA = {
     { name: 'fedAuthnMechanism', kind: 'single', role: 'identity-provider',
       from: 'this register', enum: MECHANISM_IDS,
       what: 'HOW THIS SERVICE AUTHENTICATES THE PERSON when this partner ' +
-            'asks it to: password, password-mfa, webauthn, or federation — ' +
+            'asks it to: password, password-mfa, webauthn, spnego — a ' +
+            'Kerberos ticket the browser already holds, with no screen at ' +
+            'all — or federation, ' +
             'which sends them on to another relationship and is what makes ' +
             'this service an identity BRIDGE between two protocols. EMPTY ' +
             'MEANS THIS RELATIONSHIP SAYS NOTHING, which is not the same as ' +
@@ -605,6 +647,34 @@ const SCHEMA = {
     { name: 'fedLastUser', kind: 'single', role: 'both', from: 'this register',
       what: 'The most recent identity. On the entry rather than in memory ' +
             'because the entry is the store.' },
+    { name: 'fedApplicationUse', kind: 'multi', role: 'service-provider',
+      from: 'this register',
+      what: 'THE SAME TWO COUNTS, SPLIT BY THE APPLICATION THE SIGN-IN WAS ' +
+            'FOR — one value per application, packed as ' +
+            '`application|authentications|users|lastUser|lastSeen`. It exists ' +
+            'because fedAuthentications answers "how much has crossed this ' +
+            'relationship" and the map at /admin/federation/map has to answer ' +
+            '"how much has crossed it FOR EACH of the applications configured ' +
+            'to use it", which is a different question the moment a second ' +
+            'application names the same partner.\n\nIT IS SERVICE-PROVIDER ' +
+            'SIDE ONLY, and that is not an omission. An identity-provider-side ' +
+            'relationship names exactly ONE application (fedApplication), so ' +
+            'its per-application count IS fedAuthentications and a second ' +
+            'attribute holding the same number under another name is the copy ' +
+            'that comes to disagree.\n\nA VALUE IS WRITTEN ONLY FOR A PAIR ' +
+            'THIS SERVICE IS CONFIGURED FOR, checked against the live ' +
+            'configuration at the moment of the write rather than trusted from ' +
+            'the request — see applicationConfiguredFor(). Without that check ' +
+            'this attribute would be an unbounded list of strings anybody who ' +
+            'can reach /federation/login/{id} chose, on the one entry in this ' +
+            'directory whose contents decide whether an assertion is ' +
+            'refused.\n\n`|` IN EITHER FREE-TEXT FIELD IS REPLACED BY `~` ON ' +
+            'THE WAY IN, which is the trade this format makes and it is stated ' +
+            'rather than discovered: this is a packed counter drawn on a ' +
+            'picture, not an identifier anything joins on. The application a ' +
+            'row is FILED under is compared in the same packed spelling ' +
+            'throughout, so a pair round-trips to itself whatever it is ' +
+            'called.' },
     { name: 'fedLastError', kind: 'single', role: 'both', from: 'this register',
       what: 'WHY THE LAST ATTEMPT FAILED, in this service\'s own words. It is ' +
             'the most useful attribute here and it is why refusals are ' +
@@ -1249,8 +1319,8 @@ function authenticationFor(record) {
     return { via: record.fedId, mechanism: '', label: '', relationship: null,
              problem: 'The federation relationship "' + record.fedId +
                       '" configures the authentication mechanism "' +
-                      mechanism + '", which is not one this service has: the ' +
-                      'four are ' + MECHANISM_IDS.join(', ') + '.' };
+                      mechanism + '", which is not one this service has: they ' +
+                      'are ' + MECHANISM_IDS.join(', ') + '.' };
   }
   if (mechanism !== 'federation') {
     log.debug('Leaving authenticationFor(). ' + mechanism + '.');
@@ -1673,6 +1743,265 @@ function remove(id) {
 }
 
 // ---------------------------------------------------------------------------
+// THE PER-APPLICATION COUNTS, AND THE CHECK THAT BOUNDS THEM.
+//
+// `fedAuthentications` says how much has crossed a relationship;
+// `/admin/federation/map` has to say how much has crossed it FOR EACH
+// application configured to use it, which is a different number the moment a
+// second application names the same partner. Hence one packed value per
+// application under `fedApplicationUse`.
+//
+// **THE APPLICATION IS NOT TRUSTED FROM THE REQUEST, AND THIS IS THE WHOLE
+// REASON THE CHECK IS A FUNCTION.** The id reaches `recordUse()` from a query
+// parameter on `/federation/login/{id}`, which — unlike the rest of the feature
+// — needs no configuration at all to reach. So an unchecked write would let
+// anybody who can reach this port put a string of their choosing onto the entry
+// whose contents decide whether an assertion is refused, as many times as they
+// liked. What bounds it is that a value is written ONLY for a pair this service
+// is genuinely configured for, and "configured" is read from the live register
+// at the moment of the write rather than from whatever asked.
+//
+// THERE ARE EXACTLY TWO WAYS TO BE CONFIGURED FOR ONE, and they are
+// `authn.js`'s `mechanismFor()`'s two sources rather than a third opinion about
+// them:
+//
+//   1. THE APPLICATION ENTRY NAMES IT. `appFederationRelationship` holds a list
+//      of service-provider-side relationship ids, and this is the ordinary case
+//      — the application's users are authenticated at that partner.
+//   2. AN IDENTITY-PROVIDER-SIDE RELATIONSHIP BROKERS TO IT. The broker case:
+//      an enabled relationship names this application in `fedApplication`,
+//      declares `fedAuthnMechanism: federation`, and points
+//      `fedAuthnRelationship` at this one. The application entry says nothing at
+//      all in that arrangement, which is why checking only (1) would silently
+//      record nothing for every brokered sign-in — the case the identity broker
+//      exists for.
+//
+// It answers WHICH of the two rather than a boolean, because the map draws them
+// as different lines and the log line is worth the distinction.
+// ---------------------------------------------------------------------------
+function applicationConfiguredFor(applicationId, relationshipId) {
+  log.debug('Entering applicationConfiguredFor(). application=' +
+            (applicationId || '(none)') + ', relationship=' + (relationshipId || '(none)'));
+  const wantedApp = String(applicationId || '').trim();
+  const wantedFed = String(relationshipId || '').trim();
+  if (!wantedApp || !wantedFed) {
+    log.debug('Leaving applicationConfiguredFor(). Nothing was named.');
+    return { configured: false, source: '' };
+  }
+  // 1. THE APPLICATION ENTRY. Wrapped, and swallowed with a reason: this runs
+  // on the way out of a sign-in that has already succeeded, so a registry that
+  // throws must cost the counter and never the session.
+  try {
+    const entry = applications.get(wantedApp);
+    const named = ((entry || {}).fields || {}).appFederationRelationship;
+    const ids = (Array.isArray(named) ? named : (named ? [named] : []))
+      .map(function (one) { return String(one).trim(); });
+    if (ids.indexOf(wantedFed) >= 0) {
+      log.debug('Leaving applicationConfiguredFor(). The application entry names it.');
+      return { configured: true, source: 'application' };
+    }
+  } catch (e) {
+    log.error('federation: the applications registry threw while checking whether "' +
+              wantedApp + '" is configured for "' + wantedFed + '"; the per-application ' +
+              'count is skipped and the sign-in itself stands: ' + e.message);
+    log.debug('Leaving applicationConfiguredFor(). The registry threw.');
+    return { configured: false, source: '' };
+  }
+  // 2. THE BROKER. An enabled identity-provider-side relationship naming this
+  // application and pointing at this one. `identityProviderFor()` already
+  // applies the enabled-and-first-match rule and warns about a second, so it is
+  // asked rather than the register being walked again here.
+  const broker = identityProviderFor(wantedApp);
+  if (broker &&
+      String(broker.fedAuthnMechanism || '').trim() === 'federation' &&
+      String(broker.fedAuthnRelationship || '').trim() === wantedFed) {
+    log.debug('Leaving applicationConfiguredFor(). ' + broker.fedId + ' brokers it.');
+    return { configured: true, source: 'broker', via: broker.fedId };
+  }
+  log.debug('Leaving applicationConfiguredFor(). Not configured for that pair.');
+  return { configured: false, source: '' };
+}
+
+// The delimiter, and the one character neither free-text field may contain. See
+// the schema row: a packed counter drawn on a picture is not an identifier
+// anything joins on, so the substitution is stated rather than refused — a pair
+// whose application id carries a pipe still gets counted, under a name spelled
+// with a tilde, which is a better answer than a number that is quietly wrong.
+const USE_SEPARATOR = '|';
+
+function packField(value) {
+  return String(value == null ? '' : value).split(USE_SEPARATOR).join('~');
+}
+
+// One packed value -> the row it means, or null. A value this cannot read is
+// DROPPED rather than guessed at: `ldapmodify` is a door onto this entry like
+// any other, and half-parsing somebody's hand-written value would put a
+// nonsense count on a page that is meant to be read.
+function parseApplicationUse(value) {
+  const parts = String(value == null ? '' : value).split(USE_SEPARATOR);
+  if (parts.length < 2) {
+    return null;
+  }
+  const application = parts[0].trim();
+  if (!application) {
+    return null;
+  }
+  return {
+    application: application,
+    authentications: parseInt(parts[1], 10) || 0,
+    users: parseInt(parts[2], 10) || 0,
+    lastUser: (parts[3] || '').trim(),
+    lastSeen: (parts[4] || '').trim()
+  };
+}
+
+function packApplicationUse(row) {
+  return [packField(row.application), String(row.authentications || 0),
+          String(row.users || 0), packField(row.lastUser),
+          packField(row.lastSeen)].join(USE_SEPARATOR);
+}
+
+// EVERY PER-APPLICATION ROW ON A RELATIONSHIP, parsed, busiest first. The
+// console and the map both read it, so the ordering is decided here rather than
+// twice: a picture whose boxes moved because two applications drew level would
+// be a picture nobody could compare with itself.
+function applicationUse(record) {
+  log.debug('Entering applicationUse(). id=' + ((record && record.fedId) || '(none)'));
+  const rows = ((record || {}).fedApplicationUse || [])
+    .map(parseApplicationUse)
+    .filter(function (one) { return !!one; });
+  rows.sort(function (a, b) {
+    if (b.authentications !== a.authentications) {
+      return b.authentications - a.authentications;
+    }
+    return a.application < b.application ? -1 : a.application > b.application ? 1 : 0;
+  });
+  log.debug('Leaving applicationUse(). ' + rows.length + ' application(s).');
+  return rows;
+}
+
+// THE CAP, and it is here for the reason MAX_CONTEXTS is there. The check above
+// already means only a CONFIGURED pair is ever written, so this cannot be
+// reached by anybody but an operator — but `appFederationRelationship` is a
+// list somebody can put five hundred values in through four different doors,
+// and an entry carrying five hundred packed counters is one nothing can draw
+// and `ldapsearch` cannot read. Past it the busiest rows are kept and the rest
+// are dropped, which is stated on the page rather than left to be inferred from
+// a number that stopped moving.
+const MAX_APPLICATION_USE = 64;
+
+// WHICH APPLICATIONS ARE CONFIGURED TO USE THIS RELATIONSHIP, which is a
+// question about CONFIGURATION and not about what has happened — so it is
+// answered from the two registers rather than from the counters above. An
+// application that names a partner and has never been used is exactly the state
+// the map has to be able to show: it is what "configured and never exercised"
+// looks like, and reading it off `fedApplicationUse` would draw nothing at all.
+//
+// A LINEAR WALK, for identityProviderFor()'s reason: there are four doors onto
+// these entries and an index this module kept would be wrong exactly when
+// somebody had just edited one by hand. It runs when a page is drawn, over a
+// register an operator configured, and not on any issuing path.
+function applicationsUsing(relationshipId) {
+  log.debug('Entering applicationsUsing(). id=' + (relationshipId || '(none)'));
+  const wanted = String(relationshipId || '').trim();
+  const out = [];
+  const seen = Object.create(null);
+  const add = function (id, source, via) {
+    const name = String(id || '').trim();
+    if (!name || seen[name]) return;
+    seen[name] = true;
+    out.push({ application: name, source: source, via: via || '' });
+  };
+  if (!wanted) {
+    log.debug('Leaving applicationsUsing(). Nothing was named.');
+    return out;
+  }
+  try {
+    applications.list().forEach(function (entry) {
+      const named = ((entry || {}).fields || {}).appFederationRelationship;
+      const ids = (Array.isArray(named) ? named : (named ? [named] : []))
+        .map(function (one) { return String(one).trim(); });
+      if (ids.indexOf(wanted) >= 0) {
+        add(entry.identifier, 'application');
+      }
+    });
+  } catch (e) {
+    // Swallowed with a reason: this builds a picture on a console page, and a
+    // registry that throws must cost the picture's completeness rather than the
+    // page. The brokered half below is still worth having.
+    log.error('federation: the applications registry threw while listing what uses "' +
+              wanted + '"; the map is drawn without that half: ' + e.message);
+  }
+  inRole('identity-provider').forEach(function (record) {
+    if (!isEnabled(record)) return;
+    if (String(record.fedAuthnMechanism || '').trim() !== 'federation') return;
+    if (String(record.fedAuthnRelationship || '').trim() !== wanted) return;
+    add(record.fedApplication, 'broker', record.fedId);
+  });
+  log.debug('Leaving applicationsUsing(). ' + out.length + ' application(s).');
+  return out;
+}
+
+// ONE PAIR'S COUNTS, MOVED. It mutates the record the caller is about to
+// persist rather than persisting itself, so that a federated sign-in is ONE
+// write to the directory and not two — and so that a failure to write leaves
+// the relationship's own counts and the per-application ones agreeing, rather
+// than one of them ahead.
+//
+// `users` is counted against the row's OWN lastUser and not the
+// relationship's, which is the whole reason the field is repeated per row: two
+// applications used alternately by one person would otherwise each see a
+// "change of user" on every arrival and count them as many people. It is the
+// same approximation `appLastUser` makes and it is stated in the same place —
+// a change of user rather than a distinct set, right for the ordinary case and
+// an undercount for somebody alternating between two partners.
+function recordApplicationUse(record, application, user, now, how) {
+  log.debug('Entering recordApplicationUse(). application=' + application);
+  const key = packField(application);
+  const rows = applicationUse(record);
+  let row = null;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].application === key) { row = rows[i]; break; }
+  }
+  if (!row) {
+    if (rows.length >= MAX_APPLICATION_USE) {
+      // The busiest are kept. See MAX_APPLICATION_USE: past the cap this stops
+      // being a picture and becomes an entry nothing can read, and dropping the
+      // quietest row is the one choice that leaves the picture saying the same
+      // thing it said before.
+      log.warn('federation: ' + record.fedId + ' already carries ' + rows.length +
+               ' per-application counts, which is the cap (' + MAX_APPLICATION_USE +
+               '), so "' + application + '" is not being counted separately. The ' +
+               'relationship\'s own totals still include it.');
+      log.debug('Leaving recordApplicationUse(). At the cap.');
+      return;
+    }
+    row = { application: key, authentications: 0, users: 0, lastUser: '', lastSeen: '' };
+    rows.push(row);
+    log.info('federation: "' + application + '" signed somebody in through ' +
+             record.fedId + ' for the first time' +
+             (how && how.source === 'broker'
+                ? ', brokered by the identity-provider-side relationship "' +
+                  how.via + '"'
+                : ', which its own entry names') + '.');
+  }
+  row.authentications++;
+  const packedUser = packField(user);
+  if (packedUser && packedUser !== row.lastUser) {
+    row.users++;
+    row.lastUser = packedUser;
+  }
+  row.lastSeen = now;
+  // ASSIGNED WHOLE. `fedApplicationUse` is multi-valued, and a multi-valued
+  // attribute ACCUMULATES — see the schema's own note about getting single and
+  // multi backwards on a counter. Writing the changed row alone would leave the
+  // entry carrying every generation of every count.
+  record.fedApplicationUse = rows.map(packApplicationUse);
+  log.debug('Leaving recordApplicationUse(). ' + row.authentications +
+            ' for that pair, ' + rows.length + ' application(s) on the entry.');
+}
+
+// ---------------------------------------------------------------------------
 // THE COUNTERS.
 //
 // Called from `federation_sp.js` when a credential is ACCEPTED, and from
@@ -1700,6 +2029,38 @@ function recordUse(id, detail) {
     if (user && user !== record.fedLastUser) {
       record.fedUsers = String((parseInt(record.fedUsers, 10) || 0) + 1);
       record.fedLastUser = user;
+    }
+    // ---------------------------------------------------------------------
+    // AND THE SAME PAIR OF COUNTS FOR THE APPLICATION THIS SIGN-IN WAS FOR.
+    //
+    // Only when the caller named one, only on the SERVICE-PROVIDER side (see
+    // the schema row — an identity-provider-side relationship names one
+    // application, so its per-application count is the one above), and only
+    // when this service is actually configured for the pair. The check is not a
+    // formality: `application` arrives from a query parameter on an endpoint
+    // that needs no configuration to reach.
+    //
+    // A NAMED-BUT-UNCONFIGURED PAIR IS LOGGED RATHER THAN COUNTED OR IGNORED.
+    // It is the shape a mistake takes — an application whose
+    // appFederationRelationship was edited after the flow began, a
+    // hand-composed login URL — and a count that silently did not move is
+    // exactly the thing nobody can find afterwards.
+    // ---------------------------------------------------------------------
+    const application = String(info.application || '').trim();
+    if (application && record.fedRole === 'service-provider') {
+      const how = applicationConfiguredFor(application, record.fedId);
+      if (how.configured) {
+        recordApplicationUse(record, application, user, now, how);
+      } else {
+        log.warn('federation: a sign-in through ' + record.fedId + ' named the ' +
+                 'application "' + application + '", which is NOT configured to ' +
+                 'authenticate through it — neither its entry\'s ' +
+                 'appFederationRelationship nor any enabled identity-provider-side ' +
+                 'relationship brokering to this one names the pair. The sign-in ' +
+                 'stands and the relationship\'s own counts moved; no ' +
+                 'per-application count was recorded, because this attribute is ' +
+                 'not a list of whatever asked.');
+      }
     }
     // A success CLEARS the last error, and that is worth the line: an error
     // left standing beside a rising success count is the state that sends
@@ -1807,5 +2168,18 @@ module.exports = {
   update: update,
   remove: remove,
   recordUse: recordUse,
-  recordFailure: recordFailure
+  recordFailure: recordFailure,
+  // THE PER-APPLICATION HALF, read by `/admin/federation` and by the map beside
+  // it. `applicationUse()` is what HAS happened, parsed off the entry;
+  // `applicationsUsing()` is what is CONFIGURED to happen, read off the two
+  // registers — and the map needs both, because an application configured for a
+  // partner and never used is a state only the second one can show.
+  applicationUse: applicationUse,
+  applicationsUsing: applicationsUsing,
+  // Exported for the same reason `usableServiceProvider()` is: `authn.js`
+  // decides the pair and this decides whether it may be recorded, and a second
+  // implementation of "is this application configured for that relationship"
+  // would be the one that disagreed on the broker case.
+  applicationConfiguredFor: applicationConfiguredFor,
+  MAX_APPLICATION_USE: MAX_APPLICATION_USE
 };

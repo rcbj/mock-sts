@@ -79,7 +79,7 @@
 // ---------------------------------------------------------------------------
 
 const app = require('../common/app');
-const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode,
+const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode, userFor,
         // ONE named realm's signing key, for /admin/realms — which lists every
         // realm's `kid` and is therefore the one page here that needs a key
         // belonging to a realm other than the one it is being read in.
@@ -239,6 +239,19 @@ const authorizationServers = require('../oauth-oidc/authorization_servers');
 // and that router cannot come to name different paths. See that constant's
 // header, where the failure it prevents is spelt out.
 const federation = require('../federation/federation');
+// ---------------------------------------------------------------------------
+// THE FEDERATION PICTURE, in the two halves everything else in this console
+// draws a diagram in: a MODEL that knows the register and no geometry, and a
+// RENDERER that knows the geometry and nothing about federation. It is the same
+// split as `common/delegation.js` / `./delegation_map.js` next door and it is
+// the same reason — the code that decides what a box IS must not be able to
+// reach the code that decides where a box GOES.
+//
+// Both are libraries and neither registers a route, so neither can be the reason
+// one is missing and their position here does not matter.
+// ---------------------------------------------------------------------------
+const federationGraph = require('../federation/federation_graph');
+const federationDiagram = require('./federation_diagram');
 // The two SPIFFE LIBRARIES, and only those two. `spiffe_ca.js` holds the trust
 // domain's authorities and `spiffe_registry.js` the registration entries and
 // agents; both register nothing, so requiring them here moves no route and
@@ -547,7 +560,19 @@ const SECTIONS = [
                    '<code>exp</code> settable from a web form would produce ' +
                    'tokens that fail to verify with nothing pointing back at ' +
                    'the page. Nothing already issued changes — a token is a ' +
-                   'signed document and this page cannot reach inside one.' }
+                   'signed document and this page cannot reach inside one.' },
+          { path: '/admin/userinfo-claims', label: 'UserInfo claims',
+            blurb: 'The same two halves for the <strong>UserInfo ' +
+                   'response</strong>, and the one claims page here with no ' +
+                   '"nothing already issued changes" warning on it — which is ' +
+                   'the point of it being a page of its own. That response is ' +
+                   'built on EVERY call, so a claim added here reaches a ' +
+                   'client that signed in an hour ago and has done nothing ' +
+                   'since. It is also the one claim set a CLIENT can add to: ' +
+                   'OpenID Connect Core section 5.5\'s <code>claims</code> ' +
+                   'request parameter names individual claims, and they are ' +
+                   'answered off that person\'s entry under ' +
+                   '<code>ou=users</code>.' }
         ] },
       { title: 'SAML',
         what: 'BOTH identity providers — SAML 2.0\'s Web Browser SSO profile ' +
@@ -13069,8 +13094,13 @@ function claimSetSection(setId, previewUser, values, pageUrl) {
   const isSaml2 = setId === 'saml2';
   const isSaml11 = setId === 'saml11';
   const isSaml = isSaml2 || isSaml11;
+  const isUserinfo = setId === 'userinfo';
   const noun = isSaml ? 'attribute' : 'claim';
-  const carrier = isSaml ? 'assertions' : 'tokens';
+  // Three carriers now, and the third is the one that is not ISSUED: a
+  // UserInfo response is built on every call, so the sentence this word ends up
+  // in ("these tokens carry only what the protocol puts in them") has to say
+  // `responses` or it will be describing a signed document that does not exist.
+  const carrier = isSaml ? 'assertions' : (isUserinfo ? 'UserInfo responses' : 'tokens');
   const extraHeader = isSaml2 ? '<th>NameFormat</th>' : (isSaml11 ? '<th>AttributeNamespace</th>' : '');
 
   const rows = claims.map(function (claim) {
@@ -13235,7 +13265,7 @@ function claimSetsJson(ids, previewUser) {
     placeholders: stats.PLACEHOLDERS,
     // The catalogue every set chooses from, so a caller can discover the legal
     // values of `attributes` without reading this service's source or guessing
-    // at LDAP spellings. `sets` says which of the FOUR carries each — all four,
+    // at LDAP spellings. `sets` says which of the FIVE carries each — all five,
     // not only the ones in this reply, because the catalogue is one list and a
     // per-page view of it would answer "which sets carry mail" with half the
     // truth.
@@ -13266,8 +13296,8 @@ function claimSetsJson(ids, previewUser) {
     // directory".
     preview: Object.assign({ user: user }, claimAttributes.catalogueValuesFor(user)),
     // The groups claim, which is the one thing here that is not chosen per set:
-    // all four carry it or none does — which is also why it is reported by BOTH
-    // pages' replies rather than by the one it was written on. Its settings are
+    // all five carry it or none does — which is also why it is reported by ALL
+    // THREE pages' replies rather than by the one it was written on. Its settings are
     // config.js's, so this is a report and there is no operation beside it —
     // POST /admin-api/config/set is the door, and a second one would be a
     // second store for one setting.
@@ -13331,7 +13361,8 @@ function samlAttributesJson(previewUser) {
 // ---------------------------------------------------------------------------
 function claimHalvesNote(family) {
   const noun = family === 'saml' ? 'attribute' : 'claim';
-  const carrier = family === 'saml' ? 'assertion' : 'token';
+  const carrier = family === 'saml' ? 'assertion'
+                : (family === 'userinfo' ? 'UserInfo response' : 'token');
   return note('Each set has <strong>two halves</strong>. A <em>typed ' + noun +
     '</em> is a name and a value somebody wrote here, the same for everybody except where it ' +
     'carries a <code>${placeholder}</code>. A <em>directory attribute</em> is ticked from the ' +
@@ -13360,10 +13391,28 @@ function claimPreviewForm(path, previewUser, values) {
 
 function attributeCatalogueNotes(family) {
   const saml = family === 'saml';
-  const otherPage = saml
-    ? '<a href="/admin/claims">the custom claims page</a>'
-    : '<a href="/admin/saml-attributes">the SAML attributes page</a>';
-  const otherThing = saml ? 'an access token or an ID Token carries' : 'an assertion carries';
+  // THE OTHER PAGES, AS A LIST, because there are three of them now and there
+  // were two when this was written. It said "the other page" and named one,
+  // which was a sentence that could only ever be right while the number was
+  // two — and the day a third arrived it would have gone on reading correctly
+  // while telling a reader that one of the two places their selection does NOT
+  // apply is the only one. Derived from `family` in one place so that a fourth
+  // page is one entry rather than three sentences to find.
+  const OTHER_PAGES = {
+    jwt: ['<a href="/admin/userinfo-claims">the UserInfo claims page</a>',
+          '<a href="/admin/saml-attributes">the SAML attributes page</a>'],
+    userinfo: ['<a href="/admin/claims">the custom claims page</a>',
+               '<a href="/admin/saml-attributes">the SAML attributes page</a>'],
+    saml: ['<a href="/admin/claims">the custom claims page</a>',
+           '<a href="/admin/userinfo-claims">the UserInfo claims page</a>']
+  };
+  const OTHER_THINGS = {
+    jwt: 'a UserInfo response or an assertion carries',
+    userinfo: 'an access token, an ID Token or an assertion carries',
+    saml: 'an access token, an ID Token or a UserInfo response carries'
+  };
+  const otherPage = (OTHER_PAGES[family] || OTHER_PAGES.jwt).join(' and ');
+  const otherThing = OTHER_THINGS[family] || OTHER_THINGS.jwt;
   return '<h2>Where a directory attribute comes from, and what it does not do</h2>' +
     note('The catalogue is of <strong>LDAP attribute types</strong> and not of ' +
     (saml ? 'attribute names' : 'claim names') + ', and it is the same catalogue ' +
@@ -13374,10 +13423,10 @@ function attributeCatalogueNotes(family) {
     'same invented person every time, across restarts, in obviously fictional ranges. Three rows ' +
     'are not RFC 4519/4524/2798: there is no standard attribute type for a birthdate or a ' +
     'nationality, so the SCHAC schema\'s names are borrowed rather than invented.') +
-    note('The <strong>four selections are independent</strong>, and that is the point ' +
-    'of having four: an access token carrying <code>employee_number</code> and a SAML 2.0 ' +
+    note('The <strong>five selections are independent</strong>, and that is the point ' +
+    'of having five: an access token carrying <code>employee_number</code> and a SAML 2.0 ' +
     'assertion carrying <code>email</code> is a normal arrangement and a single list could not ' +
-    'express it. The two on this page are independent of what ' + otherThing + ' — ticked on ' +
+    'express it. What is on this page is independent of what ' + otherThing + ' — ticked on ' +
     otherPage + ' — and of what a <a href="/admin/vc">credential</a> carries and what the ' +
     '<a href="/admin/vc-verifier-config">Verifier asks for</a>, deliberately: that is what keeps ' +
     '"issue a credential carrying a claim the access token does not" reachable.') +
@@ -13469,7 +13518,8 @@ function claimValueNotes(family) {
         'in a JWT, where it would arrive as a boolean and an object. That difference is worth ' +
         'knowing rather than discovering: a client library that parses an assertion attribute ' +
         'into a boolean is doing that on its own.')
-      : note('A JWT claim value is typed: text that unambiguously looks like JSON — an ' +
+      : note('A ' + (family === 'userinfo' ? 'UserInfo' : 'JWT') + ' claim value is typed: ' +
+        'text that unambiguously looks like JSON — an ' +
         'object, an array, a bare <code>true</code>/<code>false</code>/<code>null</code>, or a ' +
         'number — is used as that JSON, and anything else is a string. One consequence, stated ' +
         'rather than left to be discovered: a claim whose value is genuinely the four characters ' +
@@ -13520,11 +13570,15 @@ app.get('/admin/claims', function (req, res) {
     'different readers: one to a resource server and one to a client, and the interesting ' +
     'configuration is usually the one where they DIFFER.') +
 
-    note('The other two sets are next door. <strong>SAML 2.0 and SAML 1.1 assertions ' +
-    'are configured on <a href="/admin/saml-attributes">Custom SAML attributes</a></strong>, ' +
-    'under SAML, because those two spell an attribute differently enough from a JWT claim — and ' +
-    'from each other — that one page had to explain three vocabularies before a reader could ' +
-    'change one. The store is the same one either way, and so is the audit row.') +
+    note('The other three sets are next door. <strong>The UserInfo response is ' +
+    'configured on <a href="/admin/userinfo-claims">UserInfo claims</a></strong>, beside this ' +
+    'page — separate because that response is rebuilt on every call rather than issued once, so ' +
+    'a change there reaches a client that is already holding its tokens. <strong>SAML 2.0 and ' +
+    'SAML 1.1 assertions are on <a href="/admin/saml-attributes">Custom SAML attributes</a>' +
+    '</strong>, under SAML, because those two spell an attribute differently enough from a JWT ' +
+    'claim — and from each other — that one page had to explain three vocabularies before a ' +
+    'reader could change one. The store is the same one whichever page is used, and so is the ' +
+    'audit row.') +
 
     claimHalvesNote('jwt') +
 
@@ -13598,9 +13652,10 @@ app.get('/admin/saml-attributes', function (req, res) {
     'browser: the 2.0 set is exercised by a WS-Trust client.') +
 
     note('Tokens are next door. <strong>The OAuth 2.0 access token and the OIDC ID ' +
-    'Token are configured on <a href="/admin/claims">Custom claims</a></strong>, under OAuth2 / ' +
-    'OIDC. The store behind both pages is one store — the same four sets, the same ' +
-    '<code>ldapmodify</code>-visible directory attributes, and one row in ' +
+    'Token are configured on <a href="/admin/claims">Custom claims</a></strong>, and the ' +
+    '<strong>UserInfo response on <a href="/admin/userinfo-claims">UserInfo claims</a></strong>, ' +
+    'both under OAuth2 / OIDC. The store behind all three pages is one store — the same five ' +
+    'sets, the same <code>ldapmodify</code>-visible directory attributes, and one row in ' +
     '<a href="/admin/audit">the audit log</a> per change whichever page made it.') +
 
     claimHalvesNote('saml') +
@@ -13641,6 +13696,417 @@ app.get('/admin/saml-attributes', function (req, res) {
   respond(req, res, samlAttributesJson(previewUser), 'Custom SAML attributes',
           '/admin/saml-attributes', inner);
   log.debug("Leaving the admin SAML attributes page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/userinfo-claims, POST /admin/userinfo-claims
+//
+// THE THIRD PAGE ONTO THE ONE CLAIM-SET STORE, added 2026-08-26, and the first
+// one whose subject is not something this service ISSUES.
+//
+// Everything structural about it is /admin/claims: the same two halves (a typed
+// claim and a ticked directory attribute), the same claimsAction() with an
+// `allowed` list, the same setClaimSet() and the same audit row. What it does
+// NOT share with that page is the sentence that page is built around —
+// "nothing already issued changes" — and that difference is the whole argument
+// for it being a page rather than a third section over there.
+//
+// **A UserInfo response is BUILT ON EVERY CALL.** An access token, an ID Token
+// and both assertions are signed documents: a claim added to one of those sets
+// reaches a client at its next sign-in and never reaches the tokens it already
+// holds. A claim added HERE reaches the very next `GET /oauth2/userinfo` from a
+// client that signed in an hour ago and has done nothing since. That is a
+// different thing to be able to demonstrate, and a reader who came to this
+// console to demonstrate it should not have to infer it from a page whose every
+// warning says the opposite.
+//
+// **AND IT IS THE ONE CLAIM SET A CLIENT CAN ADD TO.** OpenID Connect Core
+// section 5.5 lets a client name individual claims in the `userinfo` member of
+// the `claims` request parameter, and this service answers them off the same
+// LDAP catalogue this page ticks from. So this page has a section no other
+// claims page has: what a client may ask for, what the four layers of
+// precedence are, and a PREVIEW of what a given request would return for a
+// given person — built by the functions oauth2.js's UserInfo endpoint itself
+// calls, for the reason every preview here is built that way.
+//
+// THE RESERVED LIST APPLIES HERE and does not apply to the SAML page, which is
+// the one rule a reader coming from /admin/saml-attributes will get wrong:
+// `sub` is required in this response by section 5.3.2 and a client MUST check
+// it against the ID Token's, and the SIGNED form of this response (a client
+// that registered `userinfo_signed_response_alg`) is a JWT carrying `iss`,
+// `aud` and `exp`. admin_stats.js's reservedNames() is where that is decided.
+// ---------------------------------------------------------------------------
+
+// The page's own URL with the preview user and any claims request on it, for
+// the same reason claimsPageUrl() carries the user: every form here posts to
+// THIS, so the 303 after an action lands back on what the reader was looking
+// at. Dropping the request would answer "what did that do?" with a page that
+// had forgotten the question.
+function userinfoClaimsPageUrl(query) {
+  const request = claimsRequestParameter(query);
+  return '/admin/userinfo-claims?user=' + encodeURIComponent(claimsPreviewUser(query)) +
+    (request ? '&request=' + encodeURIComponent(request) : '');
+}
+
+// The claims request being previewed, as the characters somebody typed. Capped
+// because it is echoed and because it is parsed — and the cap is larger than
+// the other echoed fields on this console for one reason: this one is a JSON
+// document rather than a name, and a cap that truncated a legitimate request
+// would produce a parse error that pointed at this service instead of at the
+// request.
+function claimsRequestParameter(query) {
+  const asked = String((query && query.request) || '').trim();
+  return asked.slice(0, 2048);
+}
+
+app.post('/admin/userinfo-claims', function (req, res) {
+  log.debug("Entering the admin UserInfo claims action endpoint.");
+  const body = parseBody(req);
+  // Both spellings of the list, exactly as the two pages next door take them
+  // and for the same reason: a checkbox column is one `attribute` repeated and
+  // a JSON body carries one `attributes` array.
+  const names = listField(req, body, 'attribute').concat(listField(req, body, 'attributes'));
+  const result = claimsAction(body, names, stats.USERINFO_CLAIM_SET_IDS);
+  respondToAction(req, res, userinfoClaimsPageUrl(req.query), result);
+  log.debug("Leaving the admin UserInfo claims action endpoint.");
+});
+
+// ---------------------------------------------------------------------------
+// WHAT A CLAIMS REQUEST WOULD RETURN, for the person being previewed.
+//
+// Built by oauth2.js's parseClaimsRequest() and requestedClaimsOf() — the two
+// functions the UserInfo endpoint itself calls — rather than by a second reader
+// of section 5.5 written for this page. The rule is claim_attributes.js's and
+// is not new here: a preview that agreed with the page and disagreed with the
+// endpoint would be worse than no preview at all, and section 5.5 is exactly
+// the kind of thing two implementations would come to disagree about (is `{}`
+// the same as `null`? does an unknown top-level member refuse?).
+//
+// A MALFORMED REQUEST IS SHOWN AS AN ERROR AND IS NOT AN ERROR ON THE PAGE. The
+// endpoint answers `invalid_request` for the same string, so what this shows is
+// the refusal a client would get — which is the thing somebody is here to see.
+// ---------------------------------------------------------------------------
+function claimsRequestPreview(previewUser, raw) {
+  log.debug("Entering claimsRequestPreview(). user=" + previewUser);
+  if (!raw) {
+    log.debug("Leaving claimsRequestPreview(). Nothing was asked for.");
+    return { asked: false };
+  }
+  const parsed = oauth2.parseClaimsRequest(raw);
+  if (parsed.error) {
+    log.debug("Leaving claimsRequestPreview(). " + parsed.error);
+    return { asked: true, ok: false, error: parsed.error, request: raw };
+  }
+  const answer = oauth2.requestedClaimsOf(parsed.claims, 'userinfo', previewUser,
+                                          userFor(previewUser));
+  log.debug("Leaving claimsRequestPreview(). " + answer.report.length + " claim(s) resolved.");
+  return { asked: true, ok: true, request: raw, parsed: parsed.claims,
+           ignoredMembers: parsed.ignored || [],
+           idTokenNames: oauth2.requestedClaimNames(parsed.claims, 'id_token'),
+           claims: answer.claims, report: answer.report, unresolvable: answer.unknown,
+           essentialAndAbsent: answer.missingEssential, valueMismatches: answer.mismatched,
+           entryFound: answer.entryFound };
+}
+
+// The section 5.5 half of the page, and of the API's reply. It is one builder
+// for both, for the reason claimSetsJson() is: the vocabulary a client may ask
+// for is the thing a caller with no browser most needs, and a list published by
+// the page that the API answered differently would be two answers to one
+// question.
+function claimsRequestJson(previewUser, raw) {
+  log.debug("Entering claimsRequestJson().");
+  const json = {
+    supported: true,
+    members: oauth2.CLAIMS_REQUEST_MEMBERS.slice(0),
+    maxClaims: oauth2.MAX_REQUESTED_CLAIMS,
+    // Every name a request may use, in the two spellings the resolver indexes:
+    // the flat claim name of each catalogue row, and the top-level name of a
+    // nested one (`address`), which is the spelling section 5.5.1's own example
+    // uses and which returns the whole Address Claim of OIDC Core 5.1.1.
+    requestable: claimAttributes.requestableClaims(),
+    // The six this service invents from the username rather than reading off an
+    // entry. They are answerable too, and they are listed separately because
+    // the DIFFERENCE is the interesting part: an `ldapmodify` moves everything
+    // in `requestable` and moves none of these.
+    fromTheSignIn: oauth2.PERSONA_CLAIMS.slice(0),
+    precedence: [
+      'the configured UserInfo set on this page (typed claims, ticked directory ' +
+        'attributes, the groups claim)',
+      'OIDC Core 5.4\'s scope-driven claims (profile, email)',
+      'OIDC Core 5.5\'s individually requested claims, read off ou=users',
+      'sub, which no layer may displace (OIDC Core 5.3.2)'
+    ],
+    notEnforced: [
+      '`essential` is carried and is a hint: section 5.5.1 says a server MUST NOT ' +
+        'error because a requested claim is unavailable, so an essential claim ' +
+        'this service cannot produce is simply absent and is logged.',
+      '`value` and `values` are CHECKED and not honoured. This service could echo ' +
+        'back whatever a client asked it to assert and deliberately does not — ' +
+        'everything it says about a person comes from the directory or from the ' +
+        'invented persona, and a mock that agreed with the request could not be ' +
+        'used to test anything. A mismatch is reported in the log and in the ' +
+        'response\'s artifact.',
+      'A claims request IS filtered by the federation release policy, exactly as a ' +
+        'custom claim set is. The list is about what an audience may see rather ' +
+        'than about which mechanism produced the value, so a partner released ' +
+        '`email` alone cannot ASK for `birthdate` and be given it — which is ' +
+        'precisely the hole a release list exists to close.'
+    ],
+    // NON-SPEC, and labelled in the reply rather than only on the page: a caller
+    // reading this document is exactly the caller who would otherwise have to
+    // run a browser flow per variation.
+    directParameter: {
+      note: 'NON-SPEC. The UserInfo endpoint also accepts a claims request on ' +
+            'the request itself, which section 5.3.1 does not define — it takes ' +
+            'an access token and nothing else. It exists because exercising ' +
+            'section 5.5 through the specified route means a whole authorization ' +
+            'flow per variation. It is a UNION with what the access token ' +
+            'carries and can never take a claim away from it.',
+      spellings: ['GET /oauth2/userinfo?claims={"userinfo":{"birthdate":null}}',
+                  'GET /oauth2/userinfo?claim=birthdate&claim=address',
+                  'POST /oauth2/userinfo with the same two, form-encoded'],
+      malformedIsRefused: 'invalid_request, with the reason. Ignoring a ' +
+                          'debugging parameter that was typed wrong would ' +
+                          'produce the same response as one never sent.'
+    },
+    preview: claimsRequestPreview(previewUser, raw)
+  };
+  log.debug("Leaving claimsRequestJson().");
+  return json;
+}
+
+// The one UserInfo set, the rules that are its own, and the section 5.5 half.
+// `reservedJwtClaims` IS here, unlike the SAML page's reply, and the reason is
+// in the page header: every name on that list is load-bearing in at least one
+// of this response's two shapes.
+function userinfoClaimsJson(previewUser, raw) {
+  log.debug("Entering userinfoClaimsJson(). previewUser=" + previewUser);
+  const json = Object.assign(
+    { reservedJwtClaims: stats.RESERVED_JWT_CLAIMS,
+      claimsRequest: claimsRequestJson(previewUser, raw) },
+    claimSetsJson(stats.USERINFO_CLAIM_SET_IDS, previewUser));
+  log.debug("Leaving userinfoClaimsJson(). " + json.sets.length + " set(s).");
+  return json;
+}
+
+// The "what would this request return" form and its answer. A GET form onto the
+// page's own path, exactly as the preview-user form is and for the same reason:
+// the request survives in the URL, so every action form on the page carries it
+// into its redirect and a reader who ticks a box does not lose what they typed.
+function claimsRequestSection(previewUser, raw, preview) {
+  log.debug("Entering claimsRequestSection().");
+  const form = '<form method="get" action="/admin/userinfo-claims">' +
+    '<input type="hidden" name="user" value="' + esc(previewUser) + '">' +
+    '<div class="formrow"><label for="request">A claims request</label>' +
+    '<input type="text" id="request" name="request" size="72" spellcheck="false" value="' +
+    esc(raw) + '" placeholder=\'{"userinfo":{"birthdate":null,"address":null}}\'>' +
+    '<button class="secondary">Show what it returns</button></div></form>';
+
+  if (!preview.asked) {
+    log.debug("Leaving claimsRequestSection(). Nothing asked for.");
+    return form + note('Nothing asked for yet. Paste the <code>claims</code> ' +
+      'parameter a client would send &mdash; the whole section 5.5 object, ' +
+      '<code>userinfo</code> member and all &mdash; and this shows what ' +
+      esc(previewUser) + ' would get back, computed by the same two functions the ' +
+      '<code>/oauth2/userinfo</code> endpoint calls.');
+  }
+  if (!preview.ok) {
+    log.debug("Leaving claimsRequestSection(). The request was refused.");
+    return form + warn('<strong>This request would be refused</strong> at the ' +
+      'authorization endpoint with <code>invalid_request</code>, and the client would be told: ' +
+      esc(preview.error) + ' That is the answer a client gets, shown here rather than ' +
+      'corrected &mdash; a console that quietly fixed a malformed request would be the one ' +
+      'place this mistake is invisible.');
+  }
+
+  const rows = preview.report.map(function (item) {
+    return '<tr><td><code>' + esc(item.requested) + '</code></td>' +
+      '<td><code>' + esc(item.claim) + '</code></td>' +
+      '<td>' + (item.ldap ? '<code>' + esc(item.ldap) + '</code>' : '&mdash;') + '</td>' +
+      '<td><code>' + esc(item.value) + '</code></td>' +
+      '<td>' + esc(item.source) + '</td></tr>';
+  }).join('');
+
+  log.debug("Leaving claimsRequestSection(). " + preview.report.length + " row(s).");
+  return form +
+    (preview.ignoredMembers.length
+      ? warn('This request carries the top-level member(s) ' + codeList(preview.ignoredMembers) +
+        ', which section 5.5 does not define. They are <strong>ignored and not refused</strong>: ' +
+        'the section says other members MAY be defined, so one this service has never heard of ' +
+        'is a client that knows something this one does not. The two acted on are ' +
+        codeList(oauth2.CLAIMS_REQUEST_MEMBERS) + '.')
+      : '') +
+    (preview.idTokenNames.length
+      ? note('The <code>id_token</code> member asks for ' + codeList(preview.idTokenNames) +
+        '. Those are answered where the ID Token is built and are not part of the table below, ' +
+        'which is the <code>userinfo</code> member alone.')
+      : '') +
+    (rows
+      ? '<table><tr><th>Asked for</th><th>Claim returned</th><th>From attribute</th>' +
+        '<th>Value for ' + esc(previewUser) + '</th><th>Source</th></tr>' + rows + '</table>'
+      : note('Nothing in this request resolves to a claim this service can produce.')) +
+    (preview.unresolvable.length
+      ? note('<strong>Absent, and not an error.</strong> ' +
+        codeList(preview.unresolvable) + ' &mdash; neither the attribute catalogue nor the ' +
+        'sign-in can produce ' + (preview.unresolvable.length > 1 ? 'those' : 'that') + '. ' +
+        'Section 5.5.1 says a server MUST NOT return an error because a requested claim is ' +
+        'unavailable, so the response simply lacks it and the log says so.')
+      : '') +
+    (preview.essentialAndAbsent.length
+      ? warn('<strong>Marked essential and still absent:</strong> ' +
+        codeList(preview.essentialAndAbsent) + '. That is still not an error &mdash; ' +
+        '<code>essential</code> is a statement about what the CLIENT will do without the claim, ' +
+        'not an instruction to this server. It is logged at warn level so it can be found.')
+      : '') +
+    (preview.valueMismatches.length
+      ? warn('<strong>A value was asked for and a different one is held:</strong> ' +
+        esc(preview.valueMismatches.join('; ')) + '. The value HELD is what is returned. This ' +
+        'service could echo back whatever a request asked it to assert and deliberately does ' +
+        'not: everything it says about a person comes from the directory or the invented ' +
+        'persona, and a mock that agreed with the request could not be used to test anything.')
+      : '') +
+    note((preview.entryFound
+      ? esc(previewUser) + ' has an entry under <code>ou=users</code>, so a value marked ' +
+        '<em>directory</em> is what an <code>ldapsearch</code> reads.'
+      : esc(previewUser) + ' has no entry in the directory, so every value above is invented ' +
+        'from the username &mdash; the same invented person every time, across restarts.'));
+}
+
+// The vocabulary table: every name a client may put in a claims request.
+function requestableClaimsSection() {
+  log.debug("Entering requestableClaimsSection().");
+  const rows = claimAttributes.requestableClaims().map(function (row) {
+    return '<tr><td><code>' + esc(row.claim) + '</code></td>' +
+      '<td>' + (row.grouped ? '<em>the whole claim</em>' : esc(row.label)) + '</td>' +
+      '<td><code>' + esc(row.ldap) + '</code></td></tr>';
+  }).join('');
+  const persona = oauth2.PERSONA_CLAIMS.map(function (name) {
+    return '<tr><td><code>' + esc(name) + '</code></td>' +
+      '<td>Invented from the username at sign-in</td><td><span class="state-none">&mdash;</span></td></tr>';
+  }).join('');
+  log.debug("Leaving requestableClaimsSection().");
+  return '<h3>What a client may ask for</h3>' +
+    note('A request may name a claim by its <strong>flat name</strong> ' +
+    '(<code>birthdate</code>, <code>address.locality</code>) or, for a nested one, by its ' +
+    '<strong>top-level name</strong> alone (<code>address</code>) &mdash; which is the spelling ' +
+    'section 5.5.1\'s own example uses and which returns the whole Address Claim of OIDC Core ' +
+    '5.1.1 as one object. A <strong>language tag</strong> is part of the name (Core 5.2): ' +
+    '<code>family_name#ja-Kana-JP</code> is answered under exactly that name, with the value ' +
+    'this service holds &mdash; it keeps one value per attribute, so the tag changes the ' +
+    'spelling of the member and not the content.') +
+    '<table><tr><th>Claim</th><th>What it is</th><th>From attribute</th></tr>' +
+    rows + persona + '</table>';
+}
+
+app.get('/admin/userinfo-claims', function (req, res) {
+  log.debug("Entering the admin UserInfo claims page.");
+  const previewUser = claimsPreviewUser(req.query);
+  const raw = claimsRequestParameter(req.query);
+  const pageUrl = userinfoClaimsPageUrl(req.query);
+  // ONE read of the directory for the whole page, exactly as /admin/claims
+  // does: the set's table and the request preview describe the same person, and
+  // two reads of one entry could answer one page with two versions of them.
+  const values = claimAttributes.catalogueValuesFor(previewUser);
+  const preview = claimsRequestPreview(previewUser, raw);
+
+  const inner = messagesOf(req) +
+    note('What to put in every <strong>UserInfo response</strong> this service ' +
+    'returns. <strong>This is the one claims page with no &ldquo;nothing already issued ' +
+    'changes&rdquo; warning on it, and that is the point of it existing.</strong> An access ' +
+    'token, an ID Token and both assertions are signed documents: a claim added to one of those ' +
+    'sets reaches a client at its next sign-in and never reaches what it already holds. This ' +
+    'response is built on <em>every call</em>, so a claim added here reaches the next ' +
+    '<code>GET /oauth2/userinfo</code> from a client that signed in an hour ago and has done ' +
+    'nothing since.') +
+
+    note('Tokens and assertions are next door. The OAuth 2.0 access token and the ' +
+    'OIDC ID Token are on <a href="/admin/claims">Custom claims</a>; SAML 2.0 and SAML 1.1 are ' +
+    'on <a href="/admin/saml-attributes">Custom SAML attributes</a>. <strong>The store behind ' +
+    'all three pages is one store</strong> &mdash; the same five sets, the same ' +
+    '<code>ldapmodify</code>-visible directory attributes, and one row in ' +
+    '<a href="/admin/audit">the audit log</a> per change whichever page made it.') +
+
+    claimHalvesNote('userinfo') +
+
+    claimPreviewForm('/admin/userinfo-claims', previewUser, values) +
+
+    warn('<strong>Custom claims are additive here too.</strong> A configured claim is ' +
+    'added to what OpenID Connect Core section 5.4 already puts in the response for the scopes ' +
+    'the token carries, and never replaces one. The names this service sets itself are refused ' +
+    'rather than silently ignored: ' + codeList(stats.RESERVED_JWT_CLAIMS) + '. That list is the ' +
+    'same one <a href="/admin/claims">the claims page</a> enforces and it applies HERE for a ' +
+    'reason worth stating, because <a href="/admin/saml-attributes">the SAML page</a> does not ' +
+    'enforce it: <code>sub</code> is REQUIRED in this response (Core 5.3.2, and a client MUST ' +
+    'check it against the ID Token\'s), and when a client has registered a ' +
+    '<code>userinfo_signed_response_alg</code> the whole response is a JWT carrying ' +
+    '<code>iss</code>, <code>aud</code> and <code>exp</code>. Every name on that list is ' +
+    'load-bearing in at least one of those two shapes.') +
+
+    '<h2>The UserInfo claim set</h2>' +
+    stats.USERINFO_CLAIM_SET_IDS.map(function (id) {
+      return claimSetSection(id, previewUser, values, pageUrl);
+    }).join('') +
+
+    groupClaimSection(previewUser) +
+
+    '<h2>What a client can ask for &mdash; OpenID Connect Core section 5.5</h2>' +
+    note('<strong>This is the one claim set a CLIENT can add to.</strong> Section 5.5 ' +
+    'lets a client send a <code>claims</code> request parameter at the authorization endpoint ' +
+    'naming individual claims it wants back from this endpoint, and since 2026-08-26 this ' +
+    'service parses it, refuses a malformed one by name, carries it on the authorization code ' +
+    'and <em>inside the access token</em>, and answers it by reading the named claims off that ' +
+    'person\'s entry under <code>ou=users</code>. <code>claims_parameter_supported</code> in ' +
+    '<a href="/.well-known/openid-configuration">the discovery document</a> said ' +
+    '<code>false</code> until that day.') +
+
+    note('<strong>Four layers, and the last one wins.</strong> (1) the set configured ' +
+    'on this page, which is what everybody gets; (2) section 5.4\'s scope-driven claims &mdash; ' +
+    '<code>profile</code> and <code>email</code>, the one place in this service where a scope ' +
+    'genuinely changes an answer; (3) the claims a client asked for BY NAME, read off the ' +
+    'directory; (4) <code>sub</code>, which nothing may displace. <strong>Layer 3 beating layer ' +
+    '2 is the one choice here that is not obvious</strong>, so it is said out loud: a scope asks ' +
+    'for a category and a request names a claim, and answering ' +
+    '<code>{"email":null}</code> with the invented <code>' +
+    esc(userFor(previewUser).email) + '</code> while the entry holds a real <code>mail</code> ' +
+    'would defeat the only reason the feature is worth having.') +
+
+    requestableClaimsSection() +
+
+    '<h3>Try one</h3>' +
+    claimsRequestSection(previewUser, raw, preview) +
+
+    tip('<strong>NON-SPEC: this endpoint also takes a claims request directly.</strong> ' +
+    'Section 5.3.1 defines no request parameters at all &mdash; an access token and nothing ' +
+    'else &mdash; and <code>/oauth2/userinfo</code> accepts one anyway, because exercising ' +
+    'section 5.5 through the specified route means running a whole authorization flow per ' +
+    'variation. Two spellings: <code>?claims={"userinfo":{"birthdate":null}}</code>, the section ' +
+    '5.5 structure whole, and <code>?claim=birthdate&amp;claim=address</code>, one name each. ' +
+    'Both work on GET and on a form-encoded POST. It is a <strong>union</strong> with what the ' +
+    'access token carries and can never take a claim away from it &mdash; what the client was ' +
+    'authorized for is what the token says. A malformed one is refused ' +
+    '<code>invalid_request</code>, because ignoring a debugging parameter that was typed wrong ' +
+    'produces the same response as one that was never sent.') +
+
+    warn('<strong><code>essential</code>, <code>value</code> and <code>values</code> ' +
+    'are carried and not enforced</strong>, and that is the honest reading of section 5.5.1 ' +
+    'rather than a shortfall. An <em>essential</em> claim is a statement about what the CLIENT ' +
+    'will do without it, and the same section says a server MUST NOT return an error because a ' +
+    'requested claim is unavailable &mdash; so an essential claim this service cannot produce is ' +
+    'absent and logged. <em>value</em> and <em>values</em> ask for a claim to come back with a ' +
+    'particular value, which this service could satisfy by echoing it and deliberately does ' +
+    'not: everything it says about a person comes from the directory or the invented persona, ' +
+    'and a UserInfo response that agreed with whatever a client asked it to say would be the one ' +
+    'surface here that cannot be used to test anything. The mismatch is reported instead.') +
+
+    attributeCatalogueNotes('userinfo') +
+
+    claimValueNotes('userinfo') +
+
+    replaceSetForm(stats.USERINFO_CLAIM_SET_IDS, pageUrl, 'userinfo');
+
+  respond(req, res, userinfoClaimsJson(previewUser, raw), 'UserInfo claims',
+          '/admin/userinfo-claims', inner);
+  log.debug("Leaving the admin UserInfo claims page.");
 });
 
 // ---------------------------------------------------------------------------
@@ -17160,7 +17626,8 @@ const FEDERATION_CAVEAT =
   'nothing about the person is checked, and a directory entry is created for them.');
 
 const FEDERATION_LINKS =
-  '<p class="sub"><a href="' + federation.PATHS.base + '">the federation index</a> &middot; ' +
+  '<p class="sub"><a href="/admin/federation/map">the picture</a> &middot; ' +
+  '<a href="' + federation.PATHS.base + '">the federation index</a> &middot; ' +
   '<a href="/admin/applications">the applications registry</a> &middot; ' +
   '<a href="/admin/users">who has signed in</a> &middot; ' +
   '<a href="/ldap/federations">the register as the directory sees it</a></p>';
@@ -17261,6 +17728,20 @@ function federationListPage(req) {
          'Federated sign-ins') +
     '</div>' +
     FEDERATION_CAVEAT +
+    // THE PICTURE, pointed at from the page it drills down from. This table has
+    // one row per relationship and no row can say anything about another, so
+    // three questions an operator arrives with have no cell here: how many
+    // applications are behind a partner, how many people have come through it
+    // FOR EACH of them, and what an arriving foreign service provider actually
+    // meets. All three are facts about two registers at once.
+    note('<a href="/admin/federation/map">The picture</a> draws this register ' +
+    'as a diagram, laid out on the server. It adds the three things a table of ' +
+    'relationships has nowhere to put: how many applications are configured to ' +
+    'use each partner, how many people have signed in through each ' +
+    '<em>application and relationship</em> pair, and what the ' +
+    'identity-provider side is configured to do about authenticating somebody ' +
+    '— including where one relationship brokers to another, which is what ' +
+    'makes this service an identity bridge and is invisible in any single row.') +
     '<form method="get" action="/admin/federation"><div class="formrow">' +
     '<label for="q">Relationship</label>' +
     '<input type="text" id="q" name="q" value="' + esc(String(req.query.q || '')) +
@@ -17760,6 +18241,544 @@ app.post('/admin/federation', function (req, res) {
   log.debug("Leaving the admin federation action endpoint.");
 });
 
+// ---------------------------------------------------------------------------
+// GET /admin/federation/map — THE SAME REGISTER, AS A PICTURE.
+//
+// `/admin/federation` above is a table: one row per relationship, each row a
+// complete description of one arrangement and none of them saying anything about
+// the others. That is the right shape for CONFIGURING a partner and the wrong
+// shape for three questions an operator actually arrives with, all of which are
+// facts about two registers at once and none of which a row has anywhere to put:
+//
+//   * HOW MANY APPLICATIONS ARE BEHIND THIS PARTNER, and which. It is
+//     `appFederationRelationship` on entries under `ou=applications` pointing
+//     BACK at a relationship, so the relationship's own entry has never known.
+//   * HOW MANY PEOPLE HAVE ACTUALLY COME THROUGH IT, PER APPLICATION.
+//     `fedAuthentications` has always answered the first half; the split by
+//     application is `fedApplicationUse`, which exists because a partner shared
+//     by two applications makes one number into two different questions.
+//   * WHAT HAPPENS TO SOMEBODY WHO ARRIVES AT THE IDENTITY-PROVIDER SIDE —
+//     `fedAuthnMechanism`, and the onward relationship when it says `federation`.
+//     A table can print the attribute; only a picture can show that the onward
+//     relationship is the one two rows down and that the two together are a
+//     BRIDGE.
+//
+// THE PICTURE IS OF ONE TRUST REALM, which is the console's rule everywhere and
+// is a real constraint here rather than a convention followed for tidiness: the
+// register is per realm, an id that names a relationship in another realm names
+// nothing here, and the realm switcher at the top of the page is how you get to
+// the other one. The hexagon carries the realm for the same reason — a saved
+// `?format=svg` document with no realm on it is a picture of somewhere.
+//
+// IT IS DRAWN ON THE SERVER, and that is the root CLAUDE.md's second CSP rule
+// being honoured rather than argued again: `federation_diagram.js`'s header
+// makes the case in full. Nothing here relaxes `script-src 'none'`, which is why
+// the picture does not pan or zoom — the page says so out loud below rather than
+// leaving somebody to wonder why dragging does nothing, and `?format=svg` hands
+// over a document for something that does zoom.
+// ---------------------------------------------------------------------------
+
+// What every box is called, where it links, and nothing about its shape — the
+// shape is `federation_diagram.js`'s and is decided from the node's kind, which
+// is the one thing a caller must not be able to override. See lookOf() there.
+function federationMapLooks(graph) {
+  log.debug("Entering federationMapLooks().");
+  const looks = {};
+  graph.nodes.forEach(function (node) {
+    if (node.kind === 'sts') {
+      looks[node.id] = {};
+      return;
+    }
+    if (node.kind === 'application') {
+      // An application box goes to the APPLICATIONS registry and not to the
+      // relationship, because the thing somebody clicks it to change is
+      // `appFederationRelationship`, which lives on that entry. The relationship
+      // is one click away on the line's own label.
+      looks[node.id] = {
+        href: '/admin/applications' + queryWith({}, { application: node.label })
+      };
+      return;
+    }
+    // BOTH PARTNER SHAPES GO TO THE RELATIONSHIP, and where a partner has more
+    // than one they go to the FIRST — which is a real limitation rather than a
+    // choice, and it is the delegation picture's own: an SVG anchor wraps one
+    // shape and can have one href. The table under the picture lists every
+    // relationship a partner has, which is where a reader with two goes.
+    looks[node.id] = {
+      href: '/admin/federation' + queryWith({}, { relationship: node.relationships[0] || '' })
+    };
+  });
+  log.debug("Leaving federationMapLooks(). " + graph.nodes.length + " box(es).");
+  return {
+    looks: looks,
+    resolve: function (node) { return looks[node.id]; }
+  };
+}
+
+// The drawing and the two links under it, and `?format=svg`'s answer — the same
+// pair of functions `/admin/delegation/map` has, for the same reason. The
+// standalone document is rendered a SECOND time with `links: false` rather than
+// the page's markup being reused, and that is not waste: it carries no links
+// deliberately, because `app.js` rewrites root-relative hrefs into the current
+// realm on the way out of a `text/html` response ONLY — so a link inside an
+// `image/svg+xml` body would silently leave the realm, and in a saved file it
+// would point at somebody's own machine.
+function federationDrawing(graph, look, params, label) {
+  log.debug("Entering federationDrawing().");
+  const drawn = federationDiagram.render(graph, {
+    resolve: look.resolve, links: true, id: 'fedmap', label: label
+  });
+  const html = '<div class="diagram">' + drawn.svg + '</div>' +
+    note(drawn.width + '&times;' + drawn.height + ' &mdash; ' +
+    '<a href="' + esc('/admin/federation/map' + queryWith(params, { format: 'svg' })) +
+    '">the document on its own</a> (SVG, no links in it), or ' +
+    '<a href="' + esc('/admin/federation/map' + queryWith(params, { format: 'json' })) +
+    '">the graph as JSON</a>. It does not pan or zoom: it is generated on the ' +
+    'server and arrives as markup, which is what keeps this console free of ' +
+    'scripts. The SVG document does zoom.' +
+    (drawn.failed ? ' <span class="state-revoked">The layout failed: ' +
+      esc(drawn.failed) + '</span>' : ''));
+  log.debug("Leaving federationDrawing(). " + drawn.width + "x" + drawn.height + ".");
+  return { drawn: drawn, html: html };
+}
+
+// THE KEY, drawn by the same render() the picture is, so that a legend cannot
+// come to describe a diagram this service no longer draws. Every swatch is a
+// one-node, one-edge graph put through the real code path — which is the
+// delegation page's rule and is worth the few extra bytes: a legend hand-drawn
+// out of the same colour constants would still go stale the day a shape changed.
+function federationMapKey() {
+  log.debug("Entering federationMapKey().");
+  const shapes = [
+    { kind: 'sts', label: 'This service',
+      realm: 'default', realmName: 'this realm',
+      what: 'The trust realm you are looking at. Every line on the picture ' +
+            'starts or ends here, because every relationship is between this ' +
+            'realm and somebody else.' },
+    { kind: 'application', label: 'an application',
+      what: 'An application registered HERE whose people are authenticated ' +
+            'somewhere else. What points it at a partner is ' +
+            '<code>appFederationRelationship</code> on its entry under ' +
+            '<code>ou=applications</code>.' },
+    { kind: 'partner-sp', label: 'a partner',
+      what: 'A FOREIGN SERVICE PROVIDER. It asks this service to authenticate ' +
+            'somebody. Dashed, because it is not this service and nothing here ' +
+            'can see inside it.' },
+    { kind: 'partner-idp', label: 'a partner',
+      what: 'A FOREIGN IDENTITY PROVIDER. It authenticates the person and this ' +
+            'service consumes what it issues. Dashed for the same reason — ' +
+            'and a hexagon rather than a rectangle because it is an identity ' +
+            'service, which is what this service is too.' }
+  ];
+  const shapeRows = shapes.map(function (one) {
+    const drawn = federationDiagram.render(
+      { nodes: [Object.assign({ id: 'k', relationships: [] }, one)], edges: [] },
+      { links: false, id: 'key-' + one.kind, label: one.label });
+    return '<tr><td>' + drawn.svg + '</td><td>' + one.what + '</td></tr>';
+  }).join('');
+
+  // THE LINES, AND THE FOUR STATES ARE THE LIST PAGE'S FOUR. Each is drawn by
+  // handing render() a relationship in that state, so the colour in the key is
+  // the colour edgeLook() will actually choose rather than a second opinion
+  // about it.
+  const states = [
+    { what: '<strong>Ready</strong> — enabled and fully configured. It will work.',
+      row: { id: 'ready', protocolLabel: 'SAML 2.0', enabled: true, ready: true,
+             usable: true, missing: [], applicationCount: 0, authentications: 0,
+             users: 0, releases: [], lastError: '', mechanismLabel: '' } },
+    { what: '<strong>Disabled</strong> — which is how every relationship ' +
+            'starts. This is the ordinary state of something somebody has not ' +
+            'finished setting up, not a fault.',
+      row: { id: 'disabled', protocolLabel: 'SAML 2.0', enabled: false, ready: true,
+             usable: false, missing: [], applicationCount: 0, authentications: 0,
+             users: 0, releases: [], lastError: '', mechanismLabel: '' } },
+    { what: '<strong>Enabled and NOT configured</strong> — the loud one, ' +
+            'and it earns being the only red on this page: it will REFUSE at ' +
+            'the moment somebody tries to use it, and it looks finished from ' +
+            'every angle except this one.',
+      row: { id: 'half', protocolLabel: 'SAML 2.0', enabled: true, ready: false,
+             usable: false, missing: ['fedSigningCertificate'],
+             applicationCount: 0, authentications: 0, users: 0, releases: [],
+             lastError: '', mechanismLabel: '' } },
+    { what: '<strong>A broker that cannot broker</strong> — the ' +
+            'relationship is fine and the relationship it authenticates ' +
+            'THROUGH is not, so the person meets the sign-in screen instead of ' +
+            'the partner. That screen checks no password, which is why this is ' +
+            'worth a colour of its own: it is the only failure here that ' +
+            'produces a working sign-in.',
+      row: { id: 'broker', protocolLabel: 'OpenID Connect', enabled: true,
+             ready: true, usable: true, missing: [], applicationCount: 0,
+             authentications: 0, users: 0, releases: [], lastError: '',
+             mechanismLabel: 'Another federation relationship',
+             brokersTo: 'somewhere', brokerUsable: false,
+             brokerProblem: 'it is disabled' } }
+  ];
+  const stateRows = states.map(function (one, i) {
+    const drawn = federationDiagram.render({
+      nodes: [{ id: 'a', kind: 'application', label: 'from', relationships: [] },
+              { id: 'b', kind: 'sts', label: 'to', realm: '', realmName: '' }],
+      edges: [{ id: 'e', from: 'a', to: 'b',
+                relation: one.row.brokersTo ? 'asks' : 'signs-in',
+                relationship: one.row.id, row: one.row, use: null }]
+    }, { links: false, id: 'key-state-' + i, label: 'a line' });
+    // Only the line is wanted, not the two boxes it needs in order to exist, so
+    // the swatch is the label panel's own words. It is drawn rather than written
+    // because these four colours are the whole content of the key.
+    return '<tr><td><svg xmlns="http://www.w3.org/2000/svg" width="120" ' +
+      'height="26" viewBox="0 0 120 26" role="img"><title>' +
+      esc(plainTextOf(one.what)) + '</title>' +
+      drawn.svg.replace(/^[\s\S]*?<defs>/, '<defs>')
+               .replace(/<rect[\s\S]*$/, '') +
+      '</svg></td><td>' + one.what + '</td></tr>';
+  }).join('');
+
+  log.debug("Leaving federationMapKey().");
+  return '<h3>The boxes</h3>' +
+    '<table><tr><th>Drawn as</th><th>What it is</th></tr>' + shapeRows + '</table>' +
+    '<h3>The lines</h3>' +
+    note('<strong>An arrow is a REQUEST and not an assertion</strong>, which is ' +
+    'the one thing about this picture that looks backwards until it is said. ' +
+    'Everything on the left arrives wanting somebody signed in; everything on ' +
+    'the right is asked to do the signing in. So an identity-provider-side ' +
+    'relationship — where this service ASSERTS to the partner — points ' +
+    'INWARD, because what the partner did was ask. Drawn the other way an ' +
+    'identity broker is two arrows leaving the same box with nothing joining ' +
+    'them; drawn this way it is one straight line through the middle, which is ' +
+    'what a bridge is.') +
+    '<table><tr><th>Colour</th><th>What it means</th></tr>' + stateRows + '</table>';
+}
+
+// ---------------------------------------------------------------------------
+// THE VIEW. The page and `?format=json` are built from ONE call to
+// `federationGraph.graph()`, so the picture, the tables under it and the API
+// answer cannot come to disagree about what is in it — `delegationView()`'s rule
+// one section up, and the failure it prevents is the quiet one: a filter that
+// narrowed the drawing and left the rows standing looks exactly like a filter
+// working.
+// ---------------------------------------------------------------------------
+function federationMapView(req) {
+  log.debug("Entering federationMapView().");
+  const wanted = {
+    role: String(req.query.role || '').trim(),
+    protocol: String(req.query.protocol || '').trim(),
+    q: String(req.query.q || '').trim()
+  };
+  const graph = federationGraph.graph(wanted);
+  log.debug("Leaving federationMapView(). " + graph.relationships.length +
+            " relationship(s).");
+  return { wanted: wanted, graph: graph };
+}
+
+// One relationship's row in the table under the picture. It carries the two
+// numbers the picture was asked for and the ones a label had no room for, and
+// its first cell links back to the drill-down that configures it.
+function federationMapRow(row) {
+  const state = row.usable
+    ? '<span class="ok">ready</span>'
+    : !row.enabled
+        ? '<span class="off">disabled</span>'
+        : '<span class="bad">ENABLED, not configured</span>';
+  return '<tr><td><a href="' +
+    esc('/admin/federation' + queryWith({}, { relationship: row.id })) + '">' +
+    esc(row.id) + '</a>' +
+    (row.name !== row.id ? '<span class="sub">' + esc(row.name) + '</span>' : '') +
+    '</td>' +
+    '<td>' + esc(row.roleLabel) + '</td>' +
+    '<td>' + esc(row.protocolLabel) + '</td>' +
+    '<td class="who">' + esc(row.peer || row.application || '') +
+      (!row.peer && !row.application
+        ? '<span class="sub">nothing named yet</span>' : '') + '</td>' +
+    '<td>' + state + '</td>' +
+    // THE ANSWER TO "HOW MANY APPLICATIONS", and a dash where the question does
+    // not apply rather than a zero: an identity-provider-side relationship names
+    // exactly one application by construction, so `0` there would be false and
+    // `1` would be a number nobody needs.
+    '<td class="num">' + (row.role === 'service-provider'
+      ? row.applicationCount
+      : '<span class="state-none" title="An identity-provider-side ' +
+        'relationship names exactly one application, in fedApplication. There ' +
+        'is no count to make.">&mdash;</span>') + '</td>' +
+    // ---------------------------------------------------------------------
+    // THE TWO COUNTS, AND A BARE `0` IS REFUSED ON THE IDENTITY-PROVIDER SIDE.
+    //
+    // `fedAuthentications` there is not a number that happens to be low: it is
+    // a number NOTHING WRITES. What it counts is assertions CONSUMED and that
+    // side issues them, which `federation/CLAUDE.md` states as a deliberate
+    // non-goal. So printing it would assert that nobody has ever signed in for
+    // this partner, in the same column that means exactly that two rows up.
+    //
+    // Where the relationship BROKERS, there is a real number and it belongs to
+    // the pair — the sign-ins happened and were counted against the
+    // relationship they went through — so `brokeredUse` is printed instead,
+    // marked as belonging to the onward relationship rather than to this one.
+    // ---------------------------------------------------------------------
+    (row.role === 'identity-provider'
+      ? (row.brokeredUse
+          ? '<td class="num">' + row.brokeredUse.users +
+            '<span class="sub">via ' + esc(row.brokersTo) + '</span></td>' +
+            '<td class="num">' + row.brokeredUse.authentications +
+            '<span class="sub">via ' + esc(row.brokersTo) + '</span></td>'
+          : '<td class="num"><span class="state-none" title="Nothing counts ' +
+            'sign-ins on this side. What fedAuthentications counts is ' +
+            'assertions CONSUMED, and an identity-provider-side relationship ' +
+            'issues them — so the figure would be zero however busy the ' +
+            'partner was.">&mdash;</span></td>' +
+            '<td class="num"><span class="state-none" title="Nothing counts ' +
+            'sign-ins on this side. What fedAuthentications counts is ' +
+            'assertions CONSUMED, and an identity-provider-side relationship ' +
+            'issues them — so the figure would be zero however busy the ' +
+            'partner was.">&mdash;</span></td>')
+      : '<td class="num">' + row.users + '</td>' +
+        '<td class="num">' + row.authentications + '</td>') +
+    // THE AUTHENTICATION METHOD, WHICH IS THE IDENTITY-PROVIDER SIDE'S COLUMN.
+    // An unset mechanism is printed as what it MEANS rather than left blank:
+    // it is the sign-in screen, which is a decision and the commonest one.
+    '<td>' + (row.role === 'identity-provider'
+      ? (row.brokersTo
+          ? 'through <a href="' +
+            esc('/admin/federation' + queryWith({}, { relationship: row.brokersTo })) +
+            '">' + esc(row.brokersTo) + '</a>' +
+            (row.brokerUsable ? ''
+              : '<span class="sub bad">' + esc(row.brokerProblem ||
+                  'that relationship is not usable, so the sign-in screen is ' +
+                  'drawn instead') + '</span>')
+          : esc(row.mechanismLabel) +
+            (row.mechanismKnown ? ''
+              : '<span class="sub bad">not a mechanism this service has</span>'))
+      : '<span class="state-none" title="The authentication happens at the ' +
+        'PARTNER on a service-provider-side relationship, so there is nothing ' +
+        'here to configure.">&mdash;</span>') + '</td>' +
+    '</tr>';
+}
+
+app.get('/admin/federation/map', function (req, res) {
+  log.debug("Entering the admin federation map page.");
+  const view = federationMapView(req);
+  const graph = view.graph;
+  const look = federationMapLooks(graph);
+  const drawingLabel = 'Federation relationships in the trust realm "' +
+    graph.realm.id + '", as a diagram';
+
+  if (String(req.query.format || '') === 'svg') {
+    // The document alone, for saving or embedding. No links (see
+    // federationDrawing()) and `no-store` like every other page here, because it
+    // describes live state.
+    const bare = federationDiagram.render(graph, {
+      resolve: look.resolve, links: false, id: 'fedmap', label: drawingLabel
+    });
+    res.set('Cache-Control', 'no-store').type('image/svg+xml').send(bare.svg);
+    log.debug("Leaving the admin federation map page. Answered SVG.");
+    return;
+  }
+
+  const filterParams = { role: view.wanted.role, protocol: view.wanted.protocol,
+                         q: view.wanted.q };
+  const picture = federationDrawing(graph, look, filterParams, drawingLabel);
+  const filtering = !!(view.wanted.role || view.wanted.protocol || view.wanted.q);
+
+  // The filter, and it is the list page's own plus a protocol select — because
+  // narrowing the picture and narrowing the table under it has to be ONE
+  // control. It carries no `page`: this view has no paging, and a page number
+  // carried into a view with none is a parameter that does nothing and comes
+  // back with the reader on the next hop.
+  const roleOptions = ['<option value="">any role</option>'].concat(
+    federation.ROLES.map(function (one) {
+      return '<option value="' + esc(one.role) + '"' +
+        (one.role === view.wanted.role ? ' selected' : '') + '>' +
+        esc(one.short) + '</option>';
+    })).join('');
+  const protocolOptions = ['<option value="">any protocol</option>'].concat(
+    federation.PROTOCOLS.map(function (one) {
+      return '<option value="' + esc(one.protocol) + '"' +
+        (one.protocol === view.wanted.protocol ? ' selected' : '') + '>' +
+        esc(one.label) + '</option>';
+    })).join('');
+
+  // Every application on the picture, once, with which relationships it uses and
+  // what has crossed each. It is the per-application half laid out flat, because
+  // the picture can carry three lines on a label and this is the place the
+  // fourth fact goes.
+  const useRows = [];
+  graph.relationships.forEach(function (row) {
+    row.applications.forEach(function (use) {
+      useRows.push({ row: row, use: use });
+    });
+  });
+  useRows.sort(function (a, b) {
+    if (b.use.authentications !== a.use.authentications) {
+      return b.use.authentications - a.use.authentications;
+    }
+    return a.use.application < b.use.application ? -1
+         : a.use.application > b.use.application ? 1 : 0;
+  });
+
+  const inner = messagesOf(req) +
+    '<div class="tiles">' +
+    tile(graph.counts.relationships, 'Relationships drawn') +
+    tile(graph.counts.applications, 'Applications behind them') +
+    tile(graph.counts.partners, 'Foreign partners') +
+    tile(graph.counts.authentications, 'Federated sign-ins') +
+    '</div>' +
+
+    note('<strong>This is one trust realm.</strong> The federation register is ' +
+    'per realm — an id that names a relationship in another realm names ' +
+    'nothing here — so this picture is of <code>' + esc(graph.realm.id) +
+    '</code> and of nothing else. The realm switcher at the top of the page is ' +
+    'how you get to another one, and the realm is drawn on the hexagon so that ' +
+    'a saved copy of this document still says which realm it is of.') +
+
+    note('<strong>Left asks, right authenticates.</strong> Everything on the ' +
+    'left of the hexagon arrives wanting somebody signed in — an ' +
+    'application here, or a foreign service provider. Everything on the right ' +
+    'is a party this service asks to do the signing in. An identity-provider-' +
+    'side relationship therefore points INWARD even though this service asserts ' +
+    'outward, because the arrow is the request; and an identity BROKER, which is ' +
+    'both at once, is then a single straight line through the middle instead of ' +
+    'two arrows leaving the same box.') +
+
+    '<form method="get" action="/admin/federation/map"><div class="formrow">' +
+    '<label for="q">Relationship</label>' +
+    '<input type="text" id="q" name="q" value="' + esc(view.wanted.q) +
+    '" size="24" placeholder="id, name, partner or application">' +
+    '<label for="role">Role</label><select id="role" name="role">' +
+    roleOptions + '</select>' +
+    '<label for="protocol">Protocol</label><select id="protocol" name="protocol">' +
+    protocolOptions + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (filtering ? ' <a href="/admin/federation/map">clear</a>' : '') +
+    '</div></form>' +
+
+    (graph.relationships.length
+      ? picture.html
+      : note(graph.empty
+          ? '<strong>This realm federates with nobody, so there is nothing to ' +
+            'draw.</strong> A relationship is created on <a ' +
+            'href="/admin/federation">the federation page</a> and does nothing ' +
+            'until it is enabled, which is a second deliberate act. Federation ' +
+            'is the one feature in this service that must be configured before ' +
+            'it will do anything at all.'
+          : '<strong>No relationship matches this filter.</strong> The register ' +
+            'is not empty — <a href="/admin/federation/map">clear the ' +
+            'filter</a> to see the rest.')) +
+
+    '<h2>The relationships</h2>' +
+    note('The same rows <a href="/admin/federation">the list page</a> shows, ' +
+    'plus the two columns that are facts about TWO registers rather than about ' +
+    'one entry: how many applications are configured to use a partner, and what ' +
+    'the identity-provider side does about authenticating somebody. Neither has ' +
+    'anywhere to live on a relationship\'s own entry.') +
+    '<table><tr><th>Relationship</th><th>This service is</th><th>Protocol</th>' +
+    '<th>Partner</th><th>State</th><th class="num">Applications</th>' +
+    '<th class="num">People</th><th class="num">Sign-ins</th>' +
+    '<th>Authentication method</th></tr>' +
+    (graph.relationships.map(federationMapRow).join('') ||
+      '<tr><td colspan="9">Nothing to show.</td></tr>') +
+    '</table>' +
+
+    '<h2>Applications, per relationship</h2>' +
+    note('<strong>One row per application and relationship, which is the pair ' +
+    'the counts on this page are of.</strong> <code>fedAuthentications</code> on ' +
+    'a relationship answers "how much has crossed this partner"; this answers ' +
+    '"how much has crossed it for each of the applications behind it", which is ' +
+    'a different question the moment a second application names the same ' +
+    'partner. A pair is counted only where this service is CONFIGURED for it — ' +
+    'the application entry names the relationship, or an identity-provider-side ' +
+    'relationship brokers to it — and the check is made against the live ' +
+    'register when the sign-in completes rather than trusted from the request ' +
+    'that started it.') +
+    '<table><tr><th>Application</th><th>Relationship</th><th>Partner</th>' +
+    '<th class="num">People</th><th class="num">Sign-ins</th>' +
+    '<th>Configured by</th><th>Last</th></tr>' +
+    (useRows.map(function (one) {
+      const use = one.use;
+      const row = one.row;
+      return '<tr><td><a href="' +
+        esc('/admin/applications' + queryWith({}, { application: use.application })) +
+        '">' + esc(use.application) + '</a></td>' +
+        '<td><a href="' +
+        esc('/admin/federation' + queryWith({}, { relationship: row.id })) + '">' +
+        esc(row.id) + '</a></td>' +
+        '<td class="who">' + esc(row.peer || '') + '</td>' +
+        '<td class="num">' + use.users + '</td>' +
+        '<td class="num">' + use.authentications + '</td>' +
+        '<td>' + (use.configured
+          ? (use.source === 'broker'
+              ? 'the relationship <a href="' +
+                esc('/admin/federation' + queryWith({}, { relationship: use.via })) +
+                '">' + esc(use.via) + '</a>, which brokers to it'
+              : 'its own <code>appFederationRelationship</code>')
+          : '<span class="bad">nothing, any more</span>' +
+            '<span class="sub">These sign-ins happened and are kept rather ' +
+            'than dropped, so the relationship\'s own totals still add up. ' +
+            'Something named this pair when they happened and no longer ' +
+            'does.</span>') + '</td>' +
+        '<td>' + (use.lastSeen
+          ? esc(use.lastSeen) +
+            (use.lastUser ? '<span class="sub">' + esc(use.lastUser) + '</span>' : '')
+          : '<span class="state-none">never used</span>') + '</td></tr>';
+    }).join('') ||
+      '<tr><td colspan="7">No application is configured to authenticate through ' +
+      'any relationship in this realm, and none has ever done so. That is ' +
+      '<code>appFederationRelationship</code> on an entry under ' +
+      '<code>ou=applications</code>, which is written by nobody — no ' +
+      'protocol presents it and no sighting derives it.</td></tr>') +
+    (graph.relationships.filter(function (r) { return r.unattributed; }).length
+      ? note('<strong>Some sign-ins belong to no row above, and that is not a ' +
+        'fault.</strong> A relationship\'s own total counts every credential ' +
+        'that crossed it; the rows above count only the ones that named an ' +
+        'application this service is configured for. Three ordinary things make ' +
+        'the difference: the partner buttons at the foot of the sign-in screen ' +
+        'belong to no application, <code>/federation/login/{id}</code> needs no ' +
+        'configuration at all to reach, and a sign-in naming an application ' +
+        'that does not point here is refused a row and logged. The difference ' +
+        'is named rather than left to be noticed — this is a page about ' +
+        'counting, and a column that does not add up is worse than one that ' +
+        'explains itself.') +
+        '<table><tr><th>Relationship</th><th class="num">Sign-ins</th>' +
+        '<th class="num">Attributed</th>' +
+        '<th class="num">Belonging to no application</th></tr>' +
+        graph.relationships.filter(function (r) { return r.unattributed; })
+          .map(function (r) {
+            return '<tr><td><a href="' +
+              esc('/admin/federation' + queryWith({}, { relationship: r.id })) +
+              '">' + esc(r.id) + '</a></td>' +
+              '<td class="num">' + r.authentications + '</td>' +
+              '<td class="num">' + r.attributed + '</td>' +
+              '<td class="num">' + r.unattributed + '</td></tr>';
+          }).join('') + '</table>'
+      : '') +
+
+    '<h2>The key</h2>' +
+    note('The shapes and the colours are drawn by the same <code>render()</code> ' +
+    'the picture is, so a legend cannot come to describe a diagram this service ' +
+    'no longer draws.') +
+    federationMapKey();
+
+  respond(req, res,
+          { realm: graph.realm, counts: graph.counts, filter: view.wanted,
+            empty: graph.empty, filtered: graph.filtered,
+            relationships: graph.relationships,
+            nodes: graph.nodes.map(function (node) {
+              return { id: node.id, kind: node.kind, label: node.label,
+                       relationships: node.relationships || [] };
+            }),
+            // The EDGES without their `row`, which is the whole relationship and
+            // is already in `relationships` above. A caller joins on
+            // `relationship`; repeating it here would make the document several
+            // times larger and give two copies of every state to disagree.
+            edges: graph.edges.map(function (edge) {
+              return { id: edge.id, from: edge.from, to: edge.to,
+                       relation: edge.relation, relationship: edge.relationship,
+                       brokeredTo: edge.brokeredTo || '',
+                       use: edge.use || null };
+            }) },
+          'Federation — the picture', '/admin/federation', inner,
+          upTo('/admin/federation', 'The picture',
+               listViewOf('/admin/federation', req.query)));
+  log.debug("Leaving the admin federation map page. " +
+            graph.relationships.length + " relationship(s) drawn.");
+});
+
 module.exports = {
   // THE SHELL, for the one module outside this file that draws a console page:
   // `../sts_metadata.js`, which builds `/admin/sts-metadata` from the live
@@ -17895,6 +18914,16 @@ module.exports = {
   // are claimSetsJson() with a different list of set ids and the one rule that
   // is theirs alone.
   samlAttributesJson: samlAttributesJson,
+  // The third view onto the same store, for GET /admin-api/userinfo-claims.
+  // Same reasoning as the line above it: it is its own page, so it is its own
+  // operation, and underneath the three of them is one claimSetsJson() with a
+  // different list of set ids and the one rule that is each family's alone.
+  userinfoClaimsJson: userinfoClaimsJson,
+  // The `request` query parameter /admin/userinfo-claims previews a claims
+  // request from. Exported for the reason claimsPreviewUser is: the API takes
+  // the same parameter, and a second reader of that query string would be a
+  // second cap.
+  claimsRequestParameter: claimsRequestParameter,
   // Which person the claims page shows attribute values for. Exported for the
   // same reason vcPreviewUser is: GET /admin-api/claims takes the same `user`
   // parameter, and a second reader of that query string would be a second cap

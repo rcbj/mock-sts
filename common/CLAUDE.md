@@ -17,7 +17,7 @@ more than one family needs it, not because it felt general.
 | `user_graph.js` | ONE PERSON, END TO END: that register UNIONED with the issued one, so a picture can show every grant, flow, assertion, ticket and SVID in somebody's name beside every delegation naming them. |
 | `credential_graph.js` | ONE CREDENTIAL, END TO END: where it came from — who held it, in whose name, to reach what — and every generation of exchange behind it, back to the issuance the line rests on. |
 | `claim_attributes.js` | Which LDAP attributes a token or an assertion carries, per claim set. |
-| `group_claims.js` | The groups claim, in all four claim sets at once. |
+| `group_claims.js` | The groups claim, in all five claim sets at once. |
 | `vendored/` | Byte-identical copies of the parent project's files. **Do not edit them here** — see `common/vendored/CLAUDE.md`. |
 
 **`config_file.js` is new with the 2026-08-23 reorganisation and it exists
@@ -693,10 +693,13 @@ find module` naming a file the operator never mentioned.
    and it is a library like the other two.** `vc_claims.js` says what an issued
    CREDENTIAL carries and `vc_verifier_config.js` says what the mock Verifier
    ASKS FOR; this says which LDAP attributes a TOKEN or an ASSERTION carries,
-   per claim set, and it is the second half of BOTH claim-set pages —
-   `/admin/claims` for the two JWT sets and `/admin/saml-attributes` for the two
-   SAML ones, which is a split of the CONSOLE and not of anything here: this
-   file still holds one selection per set and answers both pages through it. It
+   per claim set, and it is the second half of ALL THREE claim-set pages —
+   `/admin/claims` for the two JWT sets, `/admin/userinfo-claims` for the
+   UserInfo one and `/admin/saml-attributes` for the two SAML ones, which is a
+   split of the CONSOLE and not of anything here: this file still holds one
+   selection per set and answers all three pages through it. **Adding the fifth
+   set on 2026-08-26 edited nothing in this module**, which is what `SET_IDS`
+   being read off `admin_stats.js` rather than written out again is for. It
    registers no
    route and requires `helpers.js`, `admin_stats.js`, `vc_claims.js` and
    `audit.js`, none of which requires it back.
@@ -721,13 +724,13 @@ find module` naming a file the operator never mentioned.
    tokens issued without their configured attributes and `admin.js` requiring it
    would only make that true by accident.
 
-   **Nothing is selected on a fresh start, in any of the four sets.** Unlike
+   **Nothing is selected on a fresh start, in any of the five sets.** Unlike
    `/admin/vc`'s ten defaults — which reproduce what that issuer already carried
    — this page changes what every client of this service receives, so it does
    nothing until it is asked to.
 
-   **Precedence is three deep and two of the three are only visible in a
-   collision**: the protocol's own claim wins (an ID Token always carries
+   **Precedence is three deep — four at the UserInfo endpoint — and most of it
+   is only visible in a collision**: the protocol's own claim wins (an ID Token always carries
    `name`, `given_name`, `family_name`, `preferred_username` and `email`, so
    ticking `cn`, `givenName`, `sn`, `uid` or `mail` on THAT set changes nothing
    a client sees), then a typed claim of the same name, then the attribute. In
@@ -737,6 +740,21 @@ find module` naming a file the operator never mentioned.
    a relying party reading whichever was emitted first. SAML 1.1 filters on
    NAMESPACE AND NAME together, since that profile splits a claim URI into the
    two.
+
+   **THE USERINFO ENDPOINT HAS A FOURTH LAYER ABOVE ALL THREE, and it is the
+   only one a CLIENT controls.** OpenID Connect Core section 5.5's claims
+   request names individual claims, and `requestedClaimsFor()` in this module
+   resolves them off the same catalogue — indexed the other way round, by claim
+   name rather than by LDAP attribute type, including the top-level name of a
+   nested claim (`address` returns the whole Address Claim of Core 5.1.1) and a
+   language tag as part of the name (Core 5.2). It wins over the three above it
+   BY DESIGN and the reason is written at the merge in `oauth-oidc/oauth2.js`: a
+   scope asks for a category and a request names a claim, so answering
+   `{"email":null}` with the invented persona value while the entry holds a real
+   `mail` would defeat the only reason the feature exists. Nothing it can
+   resolve is a structural claim — every name comes from this catalogue or from
+   `PERSONA_CLAIMS` — so `sub`, `iss` and `exp` are out of its reach by
+   construction rather than by a guard.
 
 
 3d-ii. **`group_claims.js` is the FOURTH library over that catalogue's
@@ -748,16 +766,16 @@ find module` naming a file the operator never mentioned.
    and `admin_stats.js`, none of which requires it back.
 
    **IT IS AUTOMATIC AND THEREFORE NOT A SELECTION.** There is nothing to tick
-   per user and nothing to tick per set — with `groups.claim` on, all four
-   carry it — which is also why it is REPORTED by both claim-set pages and
-   owned by neither. That is the deliberate opposite of `/admin/claims`'s three
-   selections, and it is why the control is a `config.js` ROW rather than a
+   per user and nothing to tick per set — with `groups.claim` on, all five
+   carry it — which is also why it is REPORTED by all three claim-set pages and
+   owned by none of them. That is the deliberate opposite of `/admin/claims`'s
+   three selections, and it is why the control is a `config.js` ROW rather than a
    form: four settings on `/admin/config`, which already has a page and already
    has `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
-   satisfied by there being no new control. **A second form on `/admin/claims`
-   or on `/admin/saml-attributes` would be a second door to one setting** —
-   three doors now that there are two pages — which is the two-stores mistake
-   rule 5 exists for.
+   satisfied by there being no new control. **A second form on `/admin/claims`,
+   `/admin/userinfo-claims` or `/admin/saml-attributes` would be a second door
+   to one setting** — four doors now that there are three pages — which is the
+   two-stores mistake rule 5 exists for.
 
    **ON BY DEFAULT IS DEFENSIBLE ONLY BECAUSE THE CLAIM IS OMITTED FOR SOMEBODY
    IN NO GROUP** — absent, not an empty array. On a fresh start the only people
@@ -1507,3 +1525,45 @@ FALSE. Both rules meet on one entry, so it is said out loud here and in the
 schema row: naming a partner and then having to press a button is the state
 nobody wants, and with no relationship named the attribute does nothing at all
 rather than being an error.
+
+### `appAuthnMechanism` — the THIRD of that group, and the generalisation of the other two
+
+Added 2026-08-26. The pair above can say "send my people to a federated identity
+provider" and can say nothing else, because until then there was nothing else to
+say: every way of authenticating somebody here was either this service's own
+screen or somebody else's service. **The SPNEGO sign-in is neither** — it is a
+credential the browser already holds — so an application had no way of asking
+for the commonest integrated-authentication deployment there is.
+
+It is a single value from the SAME closed vocabulary `fedAuthnMechanism` uses:
+`password`, `password-mfa`, `webauthn`, `spnego`, `federation`. **One table for
+both**, because the two attributes answer the same question from two sides —
+this one says where THIS APPLICATION's people sign in, that one says what to do
+when THAT PARTNER asks — and two tables would have drifted the first time either
+grew a value. **The list is deliberately NOT imported into `applications.js`**:
+`federation.js` requires that file, so a require back would close a cycle. It is
+checked where it is READ, in `authn.js`'s `declaredMechanismFor()`, which is
+where `appFederationRelationship`'s four checks are made too and for the same
+reason.
+
+Three properties are load-bearing and each is the same rule the pair above
+follows:
+
+* **An empty value is not `password`** — it is "this entry says nothing". Every
+  entry in the field holds an empty one, so reading it as an explicit "use the
+  screen" would have switched off every `appFederationRelationship` in existence
+  in one commit.
+* **`federation` falls through to the list below it**, because that is what
+  naming a relationship already implied, said out loud — so it changes nothing.
+  Declaring it while naming nothing usable is REPORTED on the screen rather than
+  falling quietly back to a password box.
+* **A value this service cannot honour is REPORTED, not dropped** — a mechanism
+  it does not have, or `spnego` while `krb5.spnegoAuthentication` is off. The
+  second is why the setting is checked at the read rather than the write: it is
+  settable at runtime, and without the check somebody meets a 403 halfway
+  through a sign-in.
+
+**It grants and refuses nothing either.** The Kerberos button is on the sign-in
+screen for every application whether or not one declares this, so what the
+attribute changes is the DEFAULT ROUTE and nothing about what is then
+accepted — exactly what `appFederationRelationship` changes.

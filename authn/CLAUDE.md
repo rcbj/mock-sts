@@ -9,6 +9,34 @@ than living under `oauth-oidc/` where the screen used to be rendered.
 | `authn.js` | The sign-in screen, the session store, and the pending-authentication record. |
 | `webauthn.js` | The relying party's half of WebAuthn Level 3. |
 
+**A THIRD ENDPOINT LIVES IN `/authn/*` AND IS NOT IN THIS DIRECTORY.**
+`/authn/spnego` — sign in with a Kerberos ticket — is
+`kerberos/spnego_authn.js`, and the split is a dependency rather than a filing
+mistake. This module is #8 in the require order because `oauth2.js` reads the
+session it owns; every Kerberos module is #15 and below so that the KDC's routes
+are not dragged to the front of the router. A require from here to there would do
+exactly that AND close a cycle, since that module needs `startSession()`.
+
+**It needed no inverted hook either**, which is worth saying because rule 3e's
+list is six slots long and a seventh is the obvious move. The only two things
+this module needs to know are the PATH — declared here, as `SPNEGO_PATH`, in a
+space this module already owns — and whether the door is open, which is
+`krb5.spnegoAuthentication` and is read from `config.js` by both files. Rule
+3e's test is whether a require would close a cycle or move a route; here nothing
+has to point anywhere.
+
+**Three exports exist for it and for nothing else**: `SPNEGO_PATH`,
+`pendingFor()` (read-only, and it sweeps an expired record on the way past
+exactly as it does for the screen) and `completeAuthentication()`. The last is
+one function rather than an exported `pending` and an exported
+`returnToCaller()` because the two acts are one act — a record left behind is
+one somebody can spend twice, and a redirect written at a second call site is a
+second place for RFC 9700 section 4.12's 303-not-307 to be got wrong. It takes
+no error parameter, deliberately: a Kerberos sign-in that fails draws a page
+with the password screen linked from it, because the person can still sign in,
+and telling the calling protocol `access_denied` would end a flow that has not
+failed.
+
 **`webauthn.js` is here and not in a directory of its own** even though WebAuthn
 is one of the sixteen protocol families, because it is the other half of ONE act
 of authentication: it shares the pending record, the choice between its two roles
@@ -231,15 +259,16 @@ One password IS rejected, here and in three other places:
 Since 2026-08-26 it takes an `application` — the identifier the caller's own
 protocol presented, a `client_id` from `oauth2.js`, an entityID from
 `saml2_sso.js`, a relying party id from `saml11_sso.js` — and what comes back
-is now one of THREE things:
+is now one of FOUR things:
 
 | What the entry names | What comes back |
 |---|---|
 | ONE usable relationship, auto-redirect on | `/federation/login/{id}` — the partner, directly |
 | SEVERAL usable, auto-redirect on | `/authn/select-idp?authn={id}` — the CHOOSER |
+| the mechanism `spnego` | `/authn/spnego?authn={id}` — the KERBEROS DOOR |
 | anything else | `/authn/login?authn={id}` — this module's screen |
 
-**The caller cannot tell the three apart and must not.** What a protocol module
+**The caller cannot tell them apart and must not.** What a protocol module
 asked for is "get this person authenticated and bring them back to `returnTo`",
 and which identity provider does the authenticating — or whether the person was
 asked which — is not its business. That is the property the partner buttons at
@@ -256,6 +285,62 @@ without this screen ever being drawn. A record minted there would be one nothing
 could ever spend. The CHOOSER is the opposite case — it draws a page, so it
 needs the record, and it reads the same one the screen would have, out of the
 same store and with the same ten-minute expiry.
+
+**THE KERBEROS DOOR IS ALSO THE OPPOSITE CASE, and for a different reason worth
+knowing rather than looking like an inconsistency.** `/authn/spnego` never
+LEAVES this origin: the 401 and the token are one URL fetched twice, the record
+is what carries `returnTo` across those two fetches, and it is also what the
+fallback link on every page of that door points back into. That is why the door
+takes an `?authn=` and no `returnTo` of its own — there is no open-redirect
+surface on it at all.
+
+### The Kerberos branch, and what it loses to `forceMfa`
+
+`mechanismFor()` can now resolve to `spnego`, from either source, and
+`beginAuthentication()` then redirects to `/authn/spnego?authn={id}` instead of
+drawing anything. **It loses to `forceMfa` and says so at INFO**, exactly as
+`forcePasswordless` does and for the identical reason: a ticket claims whatever
+its own flags claim — `amr ["pwd"]` for `pre-authent`, `["hwk"]` for
+`hw-authent`, both for both, nothing for neither — so it cannot be PROMISED to
+answer a caller that demanded two factors.
+
+What that costs is not nothing and is worth stating: somebody at a domain-joined
+machine holding a perfectly good hardware-backed ticket is sent to a password
+box. The alternative is to send them to the door and find out — and the door
+cannot refuse at that point, because by the time the flags are readable the
+ticket has been accepted and the only options left are to mint a session
+claiming one factor or to throw away a successful authentication. Refusing to
+PROMISE is the honest half of that, and the button on the screen is withheld
+under `forceMfa` for the same reason.
+
+### `appAuthnMechanism` — the generalisation of `appFederationRelationship`
+
+An application entry may now DECLARE how its people authenticate, from the same
+closed vocabulary `fedAuthnMechanism` uses (`federation.MECHANISM_IDS`). One
+table for both, because they answer the same question from two sides, and two
+tables would have drifted the first time either grew a value.
+
+It exists because `spnego` had no way of being asked for: the pair beside it can
+say "send my people to a federated identity provider" and cannot say "my people
+hold Kerberos tickets", which is the commonest integrated-authentication
+deployment there is.
+
+`declaredMechanismFor()` reads it, and three properties are load-bearing:
+
+* **An empty value is not `password`** — it is "this entry says nothing". Every
+  entry in the field holds an empty one, so reading it as an explicit "use the
+  screen" would have switched off every `appFederationRelationship` in existence
+  in one commit.
+* **`federation` falls through to the list**, because it IS what naming a
+  relationship already implied, said out loud. Declaring it while naming nothing
+  usable is REPORTED rather than falling quietly back to a password box.
+* **The checks are made at the READ**, for `federationFor()`'s reason exactly:
+  it is a string on a directory entry that `ldapmodify`, the console and the
+  management API can all reach, and the setting that decides whether `spnego`
+  will work is settable at runtime. A check made at the write would be a check
+  about the past — and `spnego` declared while `krb5.spnegoAuthentication` is
+  off is exactly the state that would otherwise put somebody in front of a 403
+  halfway through a sign-in.
 
 ### `/authn/select-idp`: the chooser, and why it is not the screen with its form hidden
 
@@ -347,7 +432,8 @@ nobody asked for.
 `federationFor()` above is no longer the only thing consulted, and the honest
 way to describe the change is that this module now has to arbitrate. Since
 2026-08-26 an identity-provider-side federation relationship may carry
-`fedAuthnMechanism` — `password`, `password-mfa`, `webauthn` or `federation` —
+`fedAuthnMechanism` — `password`, `password-mfa`, `webauthn`, `spnego` or
+`federation` —
 which says what this service does when THAT PARTNER asks it to authenticate
 somebody. See `federation/CLAUDE.md`, where the attribute is argued.
 
@@ -355,13 +441,14 @@ The two answer different questions, which is why both exist:
 
 * a **relationship** answers "a partner has sent somebody here; what do I do?"
 * an **application entry** answers "where do this application's people sign
-  in?"
+  in?" — in TWO attributes since 2026-08-26, `appAuthnMechanism` (the explicit
+  statement) read before `appFederationRelationship` (the implicit one)
 
 `mechanismFor()` is the ONLY function that reads both, and it reads them in one
 order: **the relationship first** (it is the more specific statement — an entry
 under `ou=applications` may be a federation partner AND an ordinary OAuth
-client, registered by two different people), the application entry second, the
-screen last. Nothing else in this service may consult either directly, because
+client, registered by two different people), then the application entry's
+`appAuthnMechanism`, then its `appFederationRelationship`, and the screen last. Nothing else in this service may consult either directly, because
 two orders is no order.
 
 **An empty mechanism is not `password`.** `authenticationFor()` returns `null`

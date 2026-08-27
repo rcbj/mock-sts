@@ -294,6 +294,46 @@ function requesterCredential(doc) {
 // A request carrying BOTH takes OnBehalfOf, which is the order the `||` always
 // had; the row says which one it attributed the act to, so the choice is
 // visible rather than silently made.
+//
+// AND THE IDENTIFIER OF THE TOKEN THAT WAS HANDED IN, which is the one thing
+// here that /admin/tokens/credential cannot do without. That page walks a
+// lineage by joining what an act PRODUCED to what the next act CONSUMED, on the
+// identifier and on nothing else (see credential_graph.js). A chain of
+// OnBehalfOf hops — the assertion one call issues is the assertion the next call
+// delegates with — is exactly the shape it exists to draw, and it was invisible
+// to it until this was read: the act's `consumed` named the requester's
+// WS-Security credential, which this service never issued and cannot name, so
+// every trail stopped one generation in at a wall.
+//
+// Three spellings, because three things can legitimately be inside one of these
+// elements: a SAML 2.0 assertion (`ID`), a SAML 1.1 one (`AssertionID`), and a
+// <wsse:SecurityTokenReference> naming a token by KeyIdentifier rather than
+// carrying it. An element holding none of them yields '', which is not an error
+// — it is the honest "this act consumed something this register cannot name",
+// and the lineage page prints that as a reason rather than as an origin.
+function delegatedTokenId(element) {
+  log.debug("Entering delegatedTokenId().");
+  const assertion = firstByLocal(element, 'Assertion');
+  if (assertion) {
+    const id = assertion.getAttribute('ID') ||
+      assertion.getAttribute('AssertionID') || '';
+    if (String(id).trim()) {
+      log.debug("Leaving delegatedTokenId(). An assertion, " + id + ".");
+      return String(id).trim();
+    }
+  }
+  const keyIdentifier = firstByLocal(element, 'KeyIdentifier');
+  if (keyIdentifier) {
+    const named = (keyIdentifier.textContent || '').trim();
+    if (named) {
+      log.debug("Leaving delegatedTokenId(). A reference to " + named + ".");
+      return named;
+    }
+  }
+  log.debug("Leaving delegatedTokenId(). Nothing here carries an identifier.");
+  return '';
+}
+
 function delegatedSubject(doc) {
   log.debug("Entering delegatedSubject().");
   const oboEl = firstByLocal(doc, 'OnBehalfOf');
@@ -301,15 +341,17 @@ function delegatedSubject(doc) {
   const obo = oboEl || actAsEl;
   if (!obo) {
     log.debug("Leaving delegatedSubject(). Nothing is delegated.");
-    return { subject: '', element: '' };
+    return { subject: '', element: '', tokenId: '' };
   }
   const element = oboEl ? 'OnBehalfOf' : 'ActAs';
   const nameId = firstByLocal(obo, 'NameID') ||
     firstByLocal(obo, 'NameIdentifier');
   const named = (nameId && (nameId.textContent || '').trim()) ||
     'delegated-subject';
+  const tokenId = delegatedTokenId(obo);
   log.debug("Leaving delegatedSubject(). " + named + " via " + element + ".");
-  return { subject: named, element: element, both: !!(oboEl && actAsEl) };
+  return { subject: named, element: element, both: !!(oboEl && actAsEl),
+           tokenId: tokenId };
 }
 
 // Who this request is from, who the token it asks for is about, and whether the
@@ -369,7 +411,12 @@ function authenticate(doc) {
         element: delegatedBy.element,
         both: !!delegatedBy.both,
         requester: credential ? credential.subject : '',
-        requesterMethod: credential ? credential.method : ''
+        requesterMethod: credential ? credential.method : '',
+        // The identifier of the token that was delegated WITH, where it carried
+        // one. handleRst() records it as what the act consumed, which is what
+        // lets /admin/tokens/credential walk a chain of these hops back to the
+        // sign-in that started it. See delegatedTokenId().
+        tokenId: delegatedBy.tokenId || ''
       }
     };
   }
@@ -546,6 +593,43 @@ function handleRst(rawBody, contentType, options) {
   // ---------------------------------------------------------------------------
   if (auth.delegation) {
     const via = auth.delegation.element;
+    // -----------------------------------------------------------------------
+    // WHICH APPLICATION THE AppliesTo IS, when one has registered it.
+    //
+    // The same resolution the token endpoint performs for an RFC 8693
+    // `audience`, arriving through a different protocol, and it is here for the
+    // same reason: this string names a SERVICE — `https://esb.example.com` —
+    // and the register is keyed by the identifier an application PRESENTS. An
+    // act filed under the URI draws a box on /admin/delegation/map that nothing
+    // else in the picture mentions, so a two-hop chain through a middle tier
+    // comes out as two unconnected halves: the AppliesTo the first hop asked
+    // for and the name the second hop authenticated AS are one application
+    // under two names.
+    //
+    // NOTHING IS REFUSED. An AppliesTo nobody registered resolves to null and
+    // is recorded verbatim, exactly as it was before this existed — and the
+    // raw string stays in the sentence beside the target either way, because
+    // what was asked for is a fact about the request and must not be lost to a
+    // resolution. See applications.forAppliesTo().
+    // -----------------------------------------------------------------------
+    const targetApplication = audience ? applications.forAppliesTo(audience)
+                                       : null;
+    if (targetApplication) {
+      log.debug('the AppliesTo "' + audience + '" is registered to ' +
+                'application "' + targetApplication.identifier + '" on ' +
+                targetApplication.matchedAttribute + ', so the delegation is ' +
+                'recorded against that application rather than against the URI.');
+    }
+    // AND WHETHER THE REQUESTER IS ONE TOO. The middle tier of a WS-Trust chain
+    // authenticates with a credential rather than by naming an application, so
+    // `presented` is where it belongs and is what the picture keys the box on.
+    // But an ESB asking for a token to reach a back end IS an application, and
+    // where this registry already holds an entry under that name the act says
+    // so: the box then links to the entry and is drawn as a service rather than
+    // as a person. A LOOKUP and not a claim — an unknown name leaves the slot
+    // empty, exactly as before.
+    const requesterApplication = auth.delegation.requester
+      ? applications.get(auth.delegation.requester) : null;
     delegation.record({
       protocol: 'WS-Trust',
       type: via === 'ActAs' ? 'wstrust-actas' : 'wstrust-onbehalfof',
@@ -560,15 +644,26 @@ function handleRst(rawBody, contentType, options) {
         // token about somebody else and got one. The page draws that as a gap
         // in the chain rather than as a missing value.
         presented: auth.delegation.requester,
+        application: requesterApplication ? requesterApplication.identifier : '',
         what: auth.delegation.requester
-          ? 'the requester, authenticated by ' + auth.delegation.requesterMethod
+          ? 'the requester, authenticated by ' + auth.delegation.requesterMethod +
+            (requesterApplication
+              ? ', and an application in this registry'
+              : '')
           : 'nobody — the request presented no credential of its own, and this ' +
             'service issued the token anyway'
       },
       target: {
-        application: audience,
+        application: targetApplication ? targetApplication.identifier : audience,
         what: audience
-          ? 'the AppliesTo, which is also the assertion\'s audience'
+          ? (targetApplication
+              ? 'the application registered for the AppliesTo "' + audience +
+                '" on ' + targetApplication.matchedAttribute + ', which is ' +
+                'also the assertion\'s audience. The request named the ' +
+                'service; this registry named the application'
+              : 'the AppliesTo, which is also the assertion\'s audience. No ' +
+                'application here has registered it, so it is recorded ' +
+                'exactly as it was asked for')
           : 'unstated — the RST carried no AppliesTo, so the token issued has ' +
             'no audience restriction at all'
       },
@@ -576,10 +671,17 @@ function handleRst(rawBody, contentType, options) {
                     '<wst:' + via + '> and this service adds none: any ' +
                     'requester may ask for a token about anybody. A real STS ' +
                     'decides this from policy that has no place in the message.',
-      consumed: auth.delegation.requester
+      consumed: (auth.delegation.requester
         ? [{ kind: 'WS-Security credential',
              note: auth.delegation.requesterMethod }]
-        : [],
+        : []).concat(auth.delegation.tokenId
+        ? [{ kind: 'delegated token',
+             identifier: auth.delegation.tokenId,
+             note: 'the token inside <wst:' + via + '>, which is what this ' +
+                   'request is delegating WITH. Its signature and Conditions ' +
+                   'are not checked; the identifier is read so that the ' +
+                   'lineage of what came out can be followed back through it' }]
+        : []),
       produced: [{
         kind: tok.tokenType === SAML2_TOKEN_TYPE ? 'SAML 2.0 assertion' : 'JWT',
         identifier: tok.id || '',

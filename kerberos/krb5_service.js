@@ -321,13 +321,45 @@ async function accept(tokenBytes, opts) {
   // decrypted under the ticket's session key, both name the same client, the clock
   // holds and it is not a replay. Nine checks, and the console records what they
   // amount to rather than that a request arrived.
-  stats.recordAuthentication({
-    presented: clientName, protocol: 'Kerberos v5', method: via,
-    note: 'The ticket was for ' + wanted + ' and decrypted under this service\'s own key ' +
-          '(' + ticketProfile.name + ').' +
-          (mutualWanted ? '' : ' Mutual authentication was not requested, so the client has no ' +
-                               'proof it reached the real service.')
-  });
+  //
+  // ---------------------------------------------------------------------
+  // UNLESS THE CALLER IS GOING TO RECORD THE WHOLE ACT ITSELF, which is
+  // `opts.record === false` and has exactly one caller: the SPNEGO SIGN-IN
+  // door at /authn/spnego.
+  //
+  // The rule this bends is written three paragraphs down and still holds
+  // everywhere else — *one acceptor is one recording site, and a second call
+  // over there would count one ticket twice*. What that rule assumed is that
+  // accepting a ticket is the whole act. At the sign-in door it is not: the
+  // act is a ticket accepted AND a browser session minted for the principal
+  // inside it, and `authn.startSession()` is the funnel every other sign-in
+  // in this service goes through — the one place an authentication is
+  // recorded with its `sessionId` on it, and the only route the identity
+  // funnel takes to the directory.
+  //
+  // So the choice was between two rows on /admin/users for one sign-in — one
+  // naming a ticket with no session and one naming a session — or one row
+  // that says both. Federation faced the identical question and answered it
+  // the same way; `startSession()`'s sixth argument exists because the
+  // two-call version was written first and made the console count every
+  // federated arrival twice. See authn.js, where that is argued at length.
+  //
+  // A caller that passes nothing gets what every caller has always got. The
+  // raw socket, /spnego/protected and the parent project's real-DC jobs are
+  // all still recorded here.
+  // ---------------------------------------------------------------------
+  if (!opts || opts.record !== false) {
+    stats.recordAuthentication({
+      presented: clientName, protocol: 'Kerberos v5', method: via,
+      note: 'The ticket was for ' + wanted + ' and decrypted under this service\'s own key ' +
+            '(' + ticketProfile.name + ').' +
+            (mutualWanted ? '' : ' Mutual authentication was not requested, so the client has no ' +
+                                 'proof it reached the real service.')
+    });
+  } else {
+    log.debug('krb5-service: the caller records this authentication itself, so ' +
+      'the acceptor does not — ' + clientName + ' for ' + wanted + '.');
+  }
   // THE SERVICE, which is the application half of this exchange and was missing
   // until now. The KDC records an SPN when it ISSUES a service ticket
   // (krb5_kdc.js's TGS handler), and that covered the ordinary case so

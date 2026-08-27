@@ -5,7 +5,8 @@ Federation relationships: this service as either end of one, in five protocols.
 | File | What it is |
 |---|---|
 | `federation.js` | **The register.** The schema, the two conversions, the CRUD, the counters, the release filter, and the broker resolver (`identityProviderFor()` / `authenticationFor()` / `usableServiceProvider()`). A library (rule 3): it registers nothing. Directory-backed — `ou=federations` IS the store. |
-| `federation_map.js` | What a foreign identity provider SAID, turned into directory attributes. The default mapping table and the username rule. A library. |
+| `federation_map.js` | What a foreign identity provider SAID, turned into directory attributes. The default mapping table and the username rule. A library. **Not to be confused with `../admin-ui/federation_diagram.js`**, which draws the picture — the near-collision is why that file is not called `federation_map.js` too. |
+| `federation_graph.js` | **This realm's register as a GRAPH**, for `/admin/federation/map`. Three bands, and the bands are a claim about direction. A library: it registers nothing, and nothing here requires it back. |
 | `federation_http.js` | **The only outbound request in this repository.** A library, and the narrowest one here. |
 | `federation_sp.js` | The four endpoints. The service-provider half — the one place this service CONSUMES what somebody else issued. |
 
@@ -59,11 +60,10 @@ Nothing about the person is checked. A directory entry is created for them.
 
 ## 3o. `federation.js` IS A LIBRARY (rule 3) AND ITS DIRECTORY HALF IS INVERTED (rule 6)
 
-It registers no route and requires only `config.js`, `helpers.js` and
-`audit.js` — nothing in this repository requires it back — so it cannot join a
-cycle and its position in the require order is not a position at all. That
-property is load-bearing rather than incidental: **four modules reach it, and
-two of them could not reach anything heavier.**
+It registers no route, so it cannot join a cycle and its position in the require
+order is not a position at all. That property is load-bearing rather than
+incidental: **five modules reach it, and two of them could not reach anything
+heavier.**
 
 | Who requires it | Why | Rule 3e's test |
 |---|---|---|
@@ -71,6 +71,26 @@ two of them could not reach anything heavier.**
 | `authn/authn.js` | the partner buttons on the sign-in screen | same, and see below |
 | `admin-ui/admin.js` | `/admin/federation` | same |
 | `ldap/ldap_server.js` | fills `setDirectory()` at its own require time | the ordinary direction, exactly as `applications.js` |
+| `federation/federation_graph.js` | the graph `/admin/federation/map` is drawn from | the easiest of the five: it registers no route itself, and there is nothing in it this module wants |
+
+### AND IT REQUIRES ONE THING BACK — `common/applications.js`, since 2026-08-26
+
+This paragraph used to say the module requires only `config.js`, `helpers.js`
+and `audit.js`. It requires the applications registry as well now, and the
+direction is worth stating because rule 3o is otherwise entirely about who
+requires THIS.
+
+It is a plain require in the ordinary direction rather than a slot, and rule
+3e's test is not reached in either direction: `applications.js` registers no
+route, and it requires only `config.js`, `helpers.js` and `audit.js` — none of
+which reaches back here — so nothing about requiring it can close a cycle or
+move a route. A slot would have cost a reader an indirection for nothing. It is
+the same argument `admin_stats.js` makes above its own require of that file.
+
+**What it is for is ONE question and only one**: *is this application actually
+configured to authenticate through this relationship, right now?* — asked at the
+moment a per-application use is recorded. See `fedApplicationUse` below, where
+the reason it has to be asked at all is the interesting half.
 
 **`authn.js` requires this and NOT `federation_sp.js`, and that direction is the
 arrangement rather than an accident.** `federation_sp.js` requires `authn.js` —
@@ -232,22 +252,50 @@ Before them the answer was always the same one and nothing could change it:
 entry could redirect a sign-in to a partner — but it answers a DIFFERENT
 question ("where do this application's people sign in?"), it lives on an entry
 somebody registering a relying party owns, and it cannot say anything about the
-other three ways this service can check a person.
+other four ways this service can check a person.
 
 | Value | What the person meets |
 |---|---|
 | `password` | the sign-in screen, as always |
 | `password-mfa` | the same screen with the second-factor box **ticked and locked**, so the WebAuthn ceremony runs after the password step: `amr ["pwd","hwk"]`, `acr "mfa"` |
 | `webauthn` | the same screen with the **passwordless** box ticked and locked: a security key alone, `amr ["hwk"]`, ONE factor |
+| `spnego` | **integrated authentication.** `/authn/spnego` — a Kerberos ticket the browser already holds, no screen and nothing typed. What the session claims is read off the TICKET's flags: `amr ["pwd"]` for `pre-authent`, `["hwk"]` for `hw-authent`, both for both, and **nothing at all** for a ticket claiming neither |
 | `federation` | **the broker case.** `fedAuthnRelationship` names a SERVICE-PROVIDER-side relationship in this same realm and the person goes THERE |
 
-**The fourth is the one with a name of its own.** A relationship that answers a
+**The fifth is the one with a name of its own.** A relationship that answers a
 SAML 2.0 partner by consuming somebody else's WS-Federation token makes this
 realm an **identity bridge**: it authenticates nobody, checks nothing about the
 person, and re-asserts what it was handed under its own signature and in a
 protocol the party above it does not implement. Nothing bounds the depth —
 the realm at the far end can broker again — and nothing in the chain but the
 last hop ever draws a password field.
+
+### `spnego` IS THE ONE THAT IS NEITHER THIS SERVICE'S SCREEN NOR SOMEBODY ELSE'S
+
+Added 2026-08-26 with `kerberos/spnego_authn.js`, and it is worth its own note
+because it breaks the shape the other four share. Three of them are a page
+here; the fourth is a redirect to a partner. This one is a **credential the
+browser already holds** — so a SAML 2.0 partner asking this service to
+authenticate somebody can be answered by a Kerberos ticket, and the partner
+never learns that Kerberos was involved. That is the same trick the broker case
+plays one layer down, with a KDC in the place of a foreign identity provider.
+
+**It is also the only value here that can be switched off service-wide.**
+`krb5.spnegoAuthentication` closes that door, and a relationship declaring
+`spnego` while it is closed would otherwise send somebody to a 403 in the middle
+of a sign-in. `authn.js`'s `declaredMechanismFor()` therefore checks the setting
+when the value is READ and reports it on the screen — the same rule
+`usableServiceProvider()` follows about a disabled relationship, applied to a
+setting instead of an entry. The other four cannot be switched off: the screen
+is always there.
+
+**And it is the one mechanism resting on a credential this service genuinely
+verifies.** Every other sign-in here takes the name it is given;
+`krb5_service.js` decrypts a real ticket under a real long-term key and refuses
+a replay. The KDC behind it stays as permissive as Kerberos allows — one
+password shared by every user account, an account created for any name on first
+sight — so nothing about the mock's posture changes. The VERIFICATION is real
+and the account policy is not, and those are two different sentences.
 
 ### AN EMPTY MECHANISM IS NOT `password`
 
@@ -271,11 +319,19 @@ this order:
    statement: an application entry can be a federation partner AND an ordinary
    OAuth client, registered by two different people, and only one of those
    facts is about the exchange in progress.
-2. **`appFederationRelationship` on the application entry** — home realm
+2. **`appAuthnMechanism` on the application entry** — the SAME closed
+   vocabulary, said by whoever registered the relying party rather than by
+   whoever configured the partnership. It is the generalisation of the
+   attribute below it and it exists because `spnego` had no way of being asked
+   for otherwise: the pair below can say "send my people to a federated
+   identity provider" and cannot say "my people hold Kerberos tickets". A value
+   of `federation` here means the list below, said out loud, and falls through
+   to it.
+3. **`appFederationRelationship` on the application entry** — home realm
    discovery by configuration. It holds a LIST since 2026-08-26, so this step
    can produce a partner, or a QUESTION: several usable values draw the chooser
    at `/authn/select-idp` rather than redirecting anywhere.
-3. the sign-in screen.
+4. the sign-in screen.
 
 `federation.js` supplies the pieces (`identityProviderFor()`,
 `authenticationFor()`) and makes no decision; `authn.js` composes them. That
@@ -312,9 +368,201 @@ it, and the POST that arrives then looks exactly like an ordinary password
 sign-in. So `handleLogin()` reads `record.forcePasswordless` as well. **A
 configured mechanism a client can opt out of is not a mechanism.**
 
+---
+
+## `fedApplicationUse`: THE SAME COUNTS, SPLIT BY THE APPLICATION THE SIGN-IN WAS FOR
+
+Added 2026-08-26, for `/admin/federation/map`. One value per application on a
+SERVICE-PROVIDER-side relationship, packed as
+`application|authentications|users|lastUser|lastSeen`.
+
+**Why it had to exist rather than be derived.** `fedAuthentications` answers
+*how much has crossed this partner*, and that was the only question worth asking
+while one application sat behind one relationship. `appFederationRelationship`
+holds a LIST now and a partner is routinely shared, at which point the same
+number is two different questions and the register could answer neither: the
+relationship's entry has never known which application a sign-in was for, and
+the application's entry has never known how many of its sign-ins went through
+which partner.
+
+**Nothing else in the process knew the pair either, which is the part worth
+following.** A federated sign-in arrives at `/federation/acs/{id}` as a signed
+document about a PERSON — it names the partner, the subject and the attributes,
+and there is no field in any of the five protocols for the application at THIS
+end. `authn.js` knows the pair at the moment it sends the browser away and never
+again. So the application id rides on the request context beside `returnTo`
+(`federation_sp.js`'s decision 3, one more field), and `completeSignIn()` spends
+it. **Both halves are one function now** — `fromContext()` — because five call
+sites build the result `completeSignIn()` is handed and five copies of
+`returnTo: (context && context.returnTo) || ''` is five places to remember and
+one to forget. A dropped `returnTo` is a sign-in that lands somebody on a page
+nobody asked for; a dropped `application` is a count that is quietly short.
+
+### THE APPLICATION IS NOT TRUSTED FROM THE REQUEST, AND THAT IS THE WHOLE DESIGN
+
+`/federation/login/{id}` is — alone in that module — reachable with **no
+configuration at all**. So the `application` parameter is a string anybody who
+can reach this port chose, and an unchecked write would let them grow an
+unbounded list of values of their choosing on **the one entry in this directory
+whose contents decide whether an assertion is refused**. That is a smaller
+problem than the one at the top of this file and it is the same shape of
+problem, which is why it gets the same treatment rather than a shrug.
+
+`recordUse()` therefore writes a value only for a pair this service is
+**genuinely configured for**, and configured is read from the LIVE register at
+the moment of the write rather than from whatever asked. There are exactly two
+ways to be configured for one, and they are `authn.js`'s `mechanismFor()`'s two
+sources rather than a third opinion about them:
+
+1. **the application entry names it** — `appFederationRelationship`, the
+   ordinary case;
+2. **an identity-provider-side relationship brokers to it** — enabled, naming
+   this application in `fedApplication`, declaring `fedAuthnMechanism:
+   federation`, and pointing `fedAuthnRelationship` here.
+
+**Checking only (1) would have recorded nothing for every brokered sign-in**,
+which is the case the identity broker exists for — the application entry says
+nothing at all in that arrangement. `applicationConfiguredFor()` answers WHICH
+of the two rather than a boolean, because the picture draws them as different
+lines.
+
+A pair that is named and not configured is **logged at warn and not counted**.
+That is deliberately not silence: it is the shape a mistake takes — an entry
+edited after a flow began, a hand-composed login URL — and a count that silently
+did not move is the thing nobody can find afterwards.
+
+### THREE SMALLER DECISIONS, EACH OF WHICH IS A TRADE RATHER THAN A MECHANISM
+
+* **`|` IN EITHER FREE-TEXT FIELD BECOMES `~`.** This is a packed counter drawn
+  on a picture, not an identifier anything joins on, and the application a row
+  is filed under is compared in the same packed spelling throughout — so a pair
+  round-trips to itself whatever it is called. Stated rather than discovered,
+  which is `appLastUser`'s rule about its own approximation.
+* **`users` IS COUNTED AGAINST THE ROW'S OWN `lastUser`, not the
+  relationship's.** That is the whole reason the field is repeated per row: two
+  applications used alternately by one person would otherwise each see a change
+  of user on every arrival and count them as many people. It is still `appLastUser`'s
+  approximation — a CHANGE of user rather than a distinct set — and it still
+  undercounts somebody alternating between two applications.
+* **IT IS SERVICE-PROVIDER SIDE ONLY.** An identity-provider-side relationship
+  names exactly one application, so its per-application count IS
+  `fedAuthentications` — and a second attribute holding the same number under
+  another name is the copy that comes to disagree. See the next section for what
+  that means for the picture, where it is NOT a shrug.
+
+### THE COUNTS DO NOT HAVE TO ADD UP, AND THE DIFFERENCE IS A FIGURE WITH A NAME
+
+`fedAuthentications` counts every credential that crossed the relationship;
+`fedApplicationUse` counts only the ones that named a configured application. So
+the per-application rows sum to LESS, and there are three ordinary reasons:
+somebody used the generic partner buttons at the foot of the sign-in screen,
+which belong to no application; somebody reached `/federation/login/{id}`
+directly; or a sign-in named an application that is not configured for this
+relationship and was refused a row.
+
+None of those is a fault, and every one of them makes a column of numbers fail
+to add up on a page about counting. `federation_graph.js` therefore reports
+`attributed` and `unattributed` beside the total, and `/admin/federation/map`
+prints the remainder rather than leaving a reader to spot it. **Clamped at
+zero**, because `ldapmodify` is a door onto these attributes like any other and
+a negative remainder would be a second wrong number reported as confidently as
+the first.
+
+---
+
+## `/admin/federation/map`: THE REGISTER AS A PICTURE, AND THE ARROW IS THE REQUEST
+
+`federation_graph.js` builds the model and `../admin-ui/federation_diagram.js`
+draws it; `admin.js` registers the route. The split is `delegation.js` /
+`delegation_map.js`'s exactly, and for the same reason: what a box IS belongs to
+whoever knows the registers, and it is the one question a layout engine has no
+business answering.
+
+**THREE BANDS, AND THE BANDS ARE A CLAIM ABOUT DIRECTION.** Everything on the
+LEFT of the hexagon arrives wanting somebody signed in — an application here, or
+a foreign service provider. The hexagon is this trust realm. Everything on the
+RIGHT is a party this service asks to do the signing in.
+
+**So an identity-provider-side relationship is drawn pointing INTO the hexagon,
+which is the one thing about this picture that looks backwards.** This service
+ASSERTS to that partner, so the arrow "ought" to leave. It points in because
+**the arrow is the REQUEST and not the assertion** — and once it is, the
+identity broker draws itself: a foreign service provider asking this realm to
+authenticate somebody, and this realm consuming a foreign identity provider's
+assertion in order to do it, is ONE straight left-to-right line through the
+hexagon. Drawn the other way it is two arrows leaving the same box in the same
+direction with nothing joining them, which is a picture of a bridge that does
+not show the bridging.
+
+**A PARTNER IS KEYED BY ROLE AND PEER**, which is neither of the two obvious
+answers. By RELATIONSHIP would draw two boxes for one partner the moment
+somebody registers two relationships to it — the ordinary way to point two
+applications at one identity provider under two release policies. By PEER ALONE
+is worse and is not obvious until it is drawn: this file is emphatic that a
+partner this service both consumes from and asserts to is TWO relationships, and
+collapsing those onto one box puts a party in both bands at once, which dagre
+resolves by breaking the cycle somewhere arbitrary — so the picture silently
+stops being left-to-right and nothing says it has.
+
+**A BROKERED APPLICATION IS DRAWN ONCE.** `applicationsUsing()` reports it as an
+application of the ONWARD relationship as well, correctly — its people really
+are authenticated there — so the identity-provider side is built FIRST and the
+service-provider loop skips the pairs it covered, carrying the counts onto the
+arrow that was drawn rather than losing them. Two arrows between one pair of
+boxes saying two true things is what a reader reads as one thing said twice.
+
+**THE IDENTITY-PROVIDER SIDE'S OWN COUNTERS ARE NEVER PRINTED AS NUMBERS**, and
+that is this file's own non-goal being honoured rather than worked around.
+`fedAuthentications` there is not a figure that happens to be low, it is a
+figure NOTHING WRITES — so the table shows an em dash with the reason in a
+tooltip, and where the relationship BROKERS it shows the pair's counts instead,
+marked as belonging to the onward relationship. A bare `0` in that column would
+assert that nobody has ever signed in for the partner, in the same column that
+means exactly that two rows up.
+
+**IT ADDS NO SCRIPT**, and the argument is made again from scratch in
+`../admin-ui/federation_diagram.js` rather than cited from the delegation
+picture — the root `CLAUDE.md`'s rule about the seventh candidate is exactly
+that "the same as the page next door" is not an argument.
+
+### Tests
+
+`tests/federation_map_bands.js` **in this repository**, which is the exception
+this repo's `tests/CLAUDE.md` describes rather than a departure from the rule at
+the top of that file. Two halves and two reasons: the DRAWING is a pure function
+from a graph to an SVG document, so the cases worth asserting — four
+relationship states at once, a broker whose onward partner is disabled, a pair
+counted and then un-configured — are ones the running service cannot be made to
+produce on demand; and the arithmetic above is a statement about two registers
+that a page rounds off, so seeing it over HTTP means having already trusted the
+number being checked.
+
+It was mutation-tested against six mutants before it was committed, each caught:
+the `asks` arrow reversed, the broker dedupe removed, the layout direction
+flipped, a partner shape dropped, `applicationConfiguredFor()` replaced with
+"believe the request", and the unattributed remainder stopped being reported.
+
+**What it does NOT cover is the SIGN-IN PATH that fills the attribute** — that
+the login endpoint carries the application across the round trip, and that the
+five `completeSignIn()` call sites all pass it. That is drivable over HTTP and
+belongs in the parent suite by the rule at the top of this file; it was verified
+by hand against five real federated sign-ins through a SAML 2.0 partner, and the
+counts, the refusal of an unconfigured pair and the resulting remainder are what
+this section describes.
+
+---
+
 ### WHAT IT DELIBERATELY DOES NOT DO
 
-**It does not touch the counters.** `fedAuthentications` on an
+**It does not touch the counters, and `/admin/federation/map` does not quietly
+give it some.** The picture reports the BROKERED PAIR's counts beside an
+identity-provider-side relationship — which are `fedApplicationUse` rows on the
+ONWARD service-provider-side relationship, recorded where the assertion was
+actually consumed, and labelled as belonging to it. Nothing new is written on
+this side and this non-goal is unchanged; what changed is that a page stopped
+printing a zero as though it meant something.
+
+`fedAuthentications` on an
 identity-provider-side relationship has always read zero and still does —
 nothing increments it, because what it counts is assertions CONSUMED and this
 side issues them. Honouring a mechanism is not an authentication and filing it

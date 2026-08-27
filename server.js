@@ -207,6 +207,25 @@ const krb5Service = require('./kerberos/krb5_service');
 // above it starts nothing: it is HTTP all the way down, so requiring it is the
 // whole of its installation.
 require('./kerberos/spnego');
+// ---------------------------------------------------------------------------
+// AND THE SAME HANDSHAKE AS A SIGN-IN: /authn/spnego, which turns a Kerberos
+// ticket into the browser session every protocol family here reads.
+//
+// TWO constraints, and both are dependencies rather than preferences. It must
+// come AFTER `spnego.js`, whose page shell and check table it draws with and
+// whose `spnego_exchange.js` performs the negotiation; and it must come AFTER
+// `authn/authn.js`, which is at #8, because it calls that module's
+// `startSession()` and reads its pending records. The second is why the
+// endpoint is HERE and not over there: `authn.js` is required before
+// `oauth2.js`, which reads the session it owns, so a require in the other
+// direction would drag the KDC's routes to the front of the router and close a
+// cycle besides. What `authn.js` needs to know about this door is a path it
+// declares itself and one setting they both read — no inverted hook, and its
+// own header says why one would have been the wrong answer.
+//
+// It starts nothing, exactly as `spnego.js` starts nothing.
+// ---------------------------------------------------------------------------
+require('./kerberos/spnego_authn');
 // The admin console. It must come AFTER oauth2.js and, like wsfed.js, the order is a
 // dependency rather than a preference: its metrics page reports the browser sign-on
 // sessions oauth2.js owns, read through the `sessions` map that module exports. The
