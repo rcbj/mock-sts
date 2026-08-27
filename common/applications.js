@@ -2877,7 +2877,17 @@ function maxApplications() {
 // SEEDED ONLY WHERE THE IDENTIFIER IS FREE, which is `spiffe_registry.js`'s
 // seeding rule and is here for its reason: an operator who deleted one of these
 // meant it, and re-creating it would make the delete button appear not to work.
-// Nothing here is persisted, so the next restart does seed them again.
+//
+// **WHAT A RESTART DOES WITH THAT DEPENDS ON persistence.mode SINCE 2026-08-27,
+// AND BOTH ANSWERS ARE THE RIGHT ONE.** In the default `memory` mode nothing is
+// written down, so the next start seeds them again — a delete lasts for the life
+// of the process, which is what it always did. With a store on, the seeding
+// still runs (it happens as `ldap_server.js` fills the directory slot, at
+// require time) and is then REPLACED: `persistence.start()` runs after every
+// require and swaps each realm's directory for what was written down, so an
+// entry deleted in the last run stays deleted. That is the seeding rule getting
+// what it always wanted rather than a change to it — "an operator who deleted
+// one of these meant it" is more true when it survives a restart, not less.
 //
 // `applications.seedInternal` turns the whole of this off. It is restart-only
 // because it runs once, as `ldap_server.js` fills the directory slot above.

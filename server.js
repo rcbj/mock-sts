@@ -99,6 +99,37 @@ const app = require('./common/app');
 const { log, PORT, HOST } = require('./common/helpers');
 const config = require('./common/config');
 
+// ---------------------------------------------------------------------------
+// WHERE THIS SERVICE WRITES ITSELF DOWN — #4a, AND THE FIRST TIME IT EVER HAS.
+//
+// A LIBRARY, rule 3's shape: it registers no route, so this line adds nothing
+// to /admin/sts-metadata and its position in the ROUTE order is not a position
+// at all. Its position in the REQUIRE order is one, for two reasons:
+//
+//   * Requiring it is what fills `config.js`'s override-store slot (rule 3q),
+//     so a setting changed through the console before this line ran would be
+//     changed and not written down. Nothing changes a setting during module
+//     load, so this is true on purpose rather than by luck — the same argument
+//     claim_attributes.js's line below makes for its own slot.
+//   * It subscribes to `realms.onChange()`, and a realm defined by an
+//     appconfig file during the load of a module below this one would
+//     otherwise not be written down.
+//
+// **IT DOES NOT OPEN ANYTHING HERE.** Opening a Postgres pool is asynchronous
+// and a `require` cannot wait, so the store is opened and READ from
+// `persistence.start()` at the foot of this file — before the HTTP listener
+// binds and before the four socket families start. That makes it the fifth
+// module whose real work happens outside require time, and the only one of the
+// five that must go FIRST among them: what it restores is what the other four
+// are about to serve.
+//
+// In the default memory mode all of that is a no-op and this service behaves
+// exactly as it did before 2026-08-27, which is the whole compatibility story
+// and is why no job in the parent project's test suite had to be told about
+// any of this.
+// ---------------------------------------------------------------------------
+const persistence = require('./persistence/persistence');
+
 // Which LDAP attributes the four claim sets carry. A LIBRARY — it registers no
 // route, so this line adds nothing to /admin/sts-metadata and its position in
 // the route order is not a position at all. It is required HERE, ahead of the
@@ -516,9 +547,106 @@ function announce() {
   log.debug('Leaving announce().');
 }
 
+// ---------------------------------------------------------------------------
+// SHUTTING DOWN, WHICH BEFORE 2026-08-27 THIS SERVICE DID NOT HAVE TO DO.
+//
+// It held nothing worth keeping, so a `docker stop` or a Ctrl-C could simply
+// end the process and did. Now the directory, the realm registry and the
+// runtime appconfig overrides may be on their way to a disk or a database, so
+// there is a last flush to perform — and in ldif mode a change made in the last
+// `persistence.writeDelay` milliseconds is only in memory until it happens.
+//
+// SIGTERM is what `docker stop`, Kubernetes and systemd send; SIGINT is Ctrl-C.
+// `kill -9` sends SIGKILL, which cannot be trapped by anything, and what that
+// costs is stated in `persistence.writeDelay`'s own description rather than
+// hidden.
+//
+// The handler is installed ONCE for both signals and is idempotent: a second
+// signal while the flush is in flight must not start a second one, which is
+// what `stopping` is for. A person pressing Ctrl-C twice because the first
+// press seemed not to work is the ordinary case, not the exotic one.
+// ---------------------------------------------------------------------------
+let stopping = false;
+
+function shutdown(signal) {
+  log.debug('Entering shutdown(). signal=' + signal);
+  if (stopping) {
+    log.info('sts: a second ' + signal + ' arrived while shutting down; ' +
+             'still finishing the last write.');
+    log.debug('Leaving shutdown(). Already stopping.');
+    return;
+  }
+  stopping = true;
+  log.info('sts: ' + signal + ' received. Flushing anything not yet written ' +
+           'down, then exiting. Sessions, tokens, codes, artifacts and ' +
+           'tickets are not persisted and are going with this process, which ' +
+           'is what they have always done.');
+  persistence.stop().then(function () {
+    log.info('sts: stopped.');
+    process.exit(0);
+  }).catch(function (err) {
+    // stop() already logs its own failure and does not reject in the ordinary
+    // case; this exists so that an unexpected one still ends the process
+    // rather than leaving it hanging with no listener and no explanation.
+    log.error('sts: the shutdown flush failed: ' + err.message);
+    process.exit(1);
+  });
+  log.debug('Leaving shutdown().');
+}
+
+process.on('SIGTERM', function () { shutdown('SIGTERM'); });
+process.on('SIGINT', function () { shutdown('SIGINT'); });
+
+// ---------------------------------------------------------------------------
+// AND THE ORDER OF THE LAST TWO THINGS THIS FILE DOES, WHICH IS A DEPENDENCY.
+//
+// `persistence.start()` opens the store, applies any saved runtime appconfig
+// overrides, re-creates the trust realms that were defined last time, and
+// replaces each realm's seeded directory with what was written down. THEN the
+// listener binds.
+//
+// It has to be that way round, and not for tidiness: between binding and
+// restoring, this service would answer `/oauth2/authorize` out of a seeded
+// directory, `/admin/applications` out of an empty registry and
+// `/federation/acs/{id}` out of a register with no relationships in it — and
+// that last one is a security surface, where "the relationship is not
+// configured yet" and "the relationship is disabled" are the same refusal for a
+// caller and very different facts. A restore that lands halfway through a
+// federated sign-in is not a race anybody should have to think about, so there
+// is no window in which it can happen.
+//
+// **A STORE THAT CANNOT BE OPENED OR READ DOES NOT STOP THE SERVICE.**
+// start() catches its own failures, logs them, falls back to memory mode and
+// resolves — so a Postgres container that is not up yet leaves a mock identity
+// service running with its seeded directory rather than a container that
+// exits. The whole point of this service is that a client has something to talk
+// to; refusing to start because a database blinked would be the one failure
+// mode a mock must not have. `/admin/persistence` and `GET /ldap` both report
+// that it fell back, so it is loud without being fatal.
+// ---------------------------------------------------------------------------
+persistence.start().then(function (started) {
+  if (started.mode !== 'memory') {
+    log.info('sts: persistence is ' + started.mode + '. The embedded ' +
+             'directory, the trust realm registry and any runtime setting ' +
+             'changes are written down and were restored at startup. ' +
+             'NOTHING THIS SERVICE MINTS is persisted in any mode — the ' +
+             'signing key is regenerated on every start, so a token that ' +
+             'outlived it would verify against nothing.');
+  }
+  bind();
+}).catch(function (err) {
+  // start() is written not to reject. This is the net under that claim: a
+  // programming error in the restore path must not leave a process with no
+  // listener and no message.
+  log.error('sts: persistence could not start (' + err.message + '). ' +
+            'Starting anyway with nothing persisted.');
+  bind();
+});
+
 // Built rather than started above, because the two shapes differ only in this
 // one expression and writing the whole announcement twice is how the two
 // versions of it come to say different things.
+function bind() {
 if (useHttps) {
   const serverCert = tlsServer.serverCertificate();
   https.createServer({
@@ -540,4 +668,5 @@ if (useHttps) {
   }, app).listen(PORT, HOST, announce);
 } else {
   app.listen(PORT, HOST, announce);
+}
 }

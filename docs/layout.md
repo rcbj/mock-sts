@@ -1,6 +1,6 @@
 ---
 title: Repository layout
-nav_order: 8
+nav_order: 9
 ---
 
 # Repository layout
@@ -25,6 +25,8 @@ ws-trust/            WS-Trust 1.0-1.4
 ws-federation/       WS-Federation 1.2 and the mock relying party
 kerberos/            the KDC, the acceptor, SPNEGO, and the codec
 ldap/                the embedded directory
+persistence/         the only place this service writes anything down:
+                     memory | ldif (RFC 2849) | postgres
 scim/                /scim/v2, its authentication, its attribute mapping
 spiffe/              six libraries, one server module, the vendored protos
 tls/                 the 8443 and 9443 listeners

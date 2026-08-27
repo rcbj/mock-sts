@@ -597,9 +597,21 @@ The section under the list is the second half of the same edit and the
 distinction is worth keeping when adding to it: the root `CLAUDE.md` carries a
 table of what this SERVICE does not do, and this section is what an operator
 standing in the console will look for a control for and not find. The overlap
-is real and deliberate — persistence, the password nobody checks, the workload
-nobody attests — but the sentence has to be about the console for the entry to
-belong here. "This service checks no password" belongs in the root table; "the
+is real and deliberate — the password nobody checks, the workload nobody
+attests — but the sentence has to be about the console for the entry to
+belong here.
+
+**PERSISTENCE USED TO BE ON THAT LIST OF OVERLAPS AND IS NOW A WORKED EXAMPLE OF
+WHY THE DISTINCTION MATTERS.** Since 2026-08-27 this service can write three
+things down (`persistence/CLAUDE.md`), so the SERVICE sentence changed — the
+root table's "persist anything at all" row became "persist anything it MINTS" —
+and the CONSOLE sentence changed differently: what an operator standing here
+needs is *whether the change I am about to make will still be here tomorrow*,
+which is a per-process, per-setting answer rather than a property of the
+service. That is why `/admin/persistence` exists as a page and why
+`configFormsFor()`'s footer is computed rather than asserted: the same edit
+that made the service sentence conditional made the console's sentence
+conditional in a different way, and one sentence could not have carried both. "This service checks no password" belongs in the root table; "the
 gate proves that somebody typed a name that holds a role, and `/admin-api` is
 not gated at all" belongs on the page, because it is the thing a person
 locked out of the console needs and the thing somebody about to expose the port

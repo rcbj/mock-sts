@@ -1,6 +1,6 @@
 ---
 title: Parent project migration
-nav_order: 9
+nav_order: 10
 ---
 
 # What `../oauth2-oidc-debugger` needs when the `sts/` pin is bumped

@@ -44,6 +44,7 @@ the package root. **The files did not change; the paths did.**
 | `federation/` | **federation relationships** — the register, the attribute mapping, the four endpoints, and the only outbound request this service makes |
 | `kerberos/` | the KDC, the acceptor, SPNEGO in three layers — the negotiation, the page that explains it, and the sign-in that turns a ticket into a session — and the codec |
 | `ldap/` · `scim/` · `tls/` · `spiffe/` · `oid4vc/` | one family each |
+| `persistence/` | **the only place this service writes anything down** — three modes (`memory`, `ldif`, `postgres`) behind one driver interface, and the RFC 2849 codec under the middle one |
 | `admin-ui/` · `mgmt-api/` | the console and the management API |
 | `home/` | the front door — `GET /`, and the one image this service serves |
 | `logout/` | the protocol-independent sign-out — one model of what a live session IS across every family, and the endpoint that ends it |
@@ -190,7 +191,7 @@ Highest wins:
 
 | | Where | Survives a restart? |
 |---|---|---|
-| 1 | a **runtime override** — set on the console page for that setting's protocol, or through `POST /admin-api/config/set` | no, in memory only |
+| 1 | a **runtime override** — set on the console page for that setting's protocol, or through `POST /admin-api/config/set` | only with a persistent store — see below |
 | 2 | the setting's **environment variable** — `STS_PORT`, `KRB5_REALM`, … | yes |
 | 3 | its **legacy** environment variable, where it has one — only `STS_ISSUER` does | yes |
 | 4 | the **appconfig file** `CONFIG_FILE` names, e.g. `env/local.js` | yes |
@@ -246,14 +247,29 @@ neighbour, so a literal in a file would freeze the derivation at whatever it
 evaluated to the day the file was written. Each still has its own environment
 variable and its own appconfig key, and setting either replaces the derivation.
 
-**Runtime overrides are in memory and are gone on restart.** Layer 1 is the
-admin console and the management API, and **nothing here ever writes to an
-appconfig file** — an edit lasts for the life of the process, the same
-arrangement as the custom claims and the credential claims. `POST
-/admin-api/config/reset-all` is what a test should call to put the service back;
-a restart does the same thing. A setting the table marks restart-only is
-**refused** with the reason rather than accepted and ignored, because an
-accepted change that does nothing reads as having worked.
+**Whether a runtime override survives a restart is `persistence.appconfig`.**
+Layer 1 is the admin console and the management API. In the default
+`persistence.mode=memory` an edit lasts for the life of the process and no
+longer, which is what this service did until 2026-08-27; with a store turned on
+it is written down and applied again at the next start — through the same
+`setOverride()` a caller uses, so **this adds no sixth layer** and the ordering
+above is unchanged. A *reset* is written down too, which is the half that is
+easy to miss: a reset that did not survive would be worse than no reset.
+
+**Nothing here ever writes to an appconfig FILE**, in either mode, and that is
+deliberate rather than unfinished: a service that edited a file checked into a
+repository would leave a test's forgotten change behind permanently. The durable
+copy goes to the persistent store, which is not a place anything is checked in
+from. So the file is what a person EDITS and the store is what the console
+WRITES, and neither overwrites the other.
+
+`POST /admin-api/config/reset-all` is what a test should call to put the service
+back; in memory mode a restart does the same thing. A setting the table marks
+restart-only is **refused** with the reason rather than accepted and ignored,
+because an accepted change that does nothing reads as having worked — which is
+also why restoring saved overrides after every module has loaded is safe: only a
+runtime-changeable setting can be saved, and a runtime setting is by definition
+one that is read per call rather than captured at startup.
 
 `common/config.js` is the table, and it is the one place that says, for each
 setting, what it does, what its environment variable is, what the default is and
@@ -684,6 +700,12 @@ ordinary case, and one `entityId` between them would make that unexpressible.
 | `spiffe.serverSocketEnabled` | `STS_SPIFFE_SERVER_SOCKET_ENABLED` | `false` | **restart** — the listener is bound when the process starts | Whether the SPIRE Server API is also served on a Unix socket, which is where a real spire-server keeps its administrative API. |
 | `spiffe.serverSocket` | `STS_SPIFFE_SERVER_SOCKET` | `/tmp/spire-server/private/api.sock` | **restart** — the listener is bound when the process starts | Where that socket lives when it is on. SPIRE's own default path, for the same reason the Workload API's is. |
 | `spiffe.grpcHost` | `STS_SPIFFE_GRPC_HOST` | `0.0.0.0` | **restart** — the listeners are bound when the process starts | The address both TCP gRPC listeners bind. 0.0.0.0 is every interface, which is what a container needs; 127.0.0.1 confines them to the machine this runs on. |
+| `persistence.mode` | `STS_PERSISTENCE_MODE` | `memory` | **restart** — the store is opened and READ before the HTTP listener binds, so a mode changed at runtime would leave a service whose directory came from one place and whose writes went to another | Where the embedded directory, the trust realm registry and the runtime setting changes are written down. `memory` writes nothing and is what this service did until 2026-08-27. `ldif` writes an RFC 2849 file per realm plus two JSON files into `dataDir` and needs no database. `postgres` writes three tables. NOTHING THIS SERVICE MINTS is persisted in any mode — see *Persistence* above. |
+| `persistence.dataDir` | `STS_PERSISTENCE_DATA_DIR` | `./data` | **restart** — same reason | Where `ldif` mode writes. A relative path resolves against the package root rather than the working directory, for the reason `CONFIG_FILE` does. Ignored in the other two modes. In a container this is what a volume mounts over. |
+| `persistence.databaseUrl` | `STS_DATABASE_URL` | `postgres://sts:sts@localhost:5432/sts` | **restart** — the connection pool is opened before the listener binds | The connection string `postgres` mode dials. The default is a LOCAL DEVELOPMENT one matching the Postgres service in this repository's `docker-compose.yml` (user, password and database all `sts`), so turning persistence on against a local database is one setting rather than two. **It is never dialled unless `persistence.mode` is `postgres`**, which is not the default, so it is inert on an ordinary run. The compose stack sets this variable itself with `postgres` as the host, that being the service name on its network. It carries a password, so this service never echoes it back — `/admin/persistence` reports the host, port, database and user parsed out of it. |
+| `persistence.writeDelay` | `STS_PERSISTENCE_WRITE_DELAY` | `1500` | yes | How long a change waits before the `ldif` files are rewritten, so a burst — a realm build writes thirteen entries — costs one file write. What it risks is that many milliseconds of writes on a `kill -9`, which no process can trap; SIGTERM and SIGINT flush first. **Postgres ignores it** and uses 0: the unit of writing there is a transaction, so every change made while handling one request commits as one transaction the moment that request is done. |
+| `persistence.realms` | `STS_PERSISTENCE_REALMS` | `true` | **restart** — the realm rows are restored before the listener binds | Whether trust realm definitions — names, descriptions and per-realm settings — are written down beside the directory. Turning it off is a half-persisted service rather than a smaller one: a realm holds its own directory, so its entries would be stored with no realm to restore them into, and the next run's first write would remove them. |
+| `persistence.appconfig` | `STS_PERSISTENCE_APPCONFIG` | `true` | **restart** — the saved overrides are applied before the listener binds | Whether a setting changed through the console or the management API survives a restart. It adds NO LAYER: the saved values are re-applied at startup through the same `setOverride()` a caller uses, so the five layers above are unchanged and a runtime override is simply durable. Only a runtime-changeable setting can be saved, because only one can be set — which is what makes applying them after every module has loaded safe. |
 
 ## How it is put together
 
@@ -776,9 +798,15 @@ curl -X POST http://localhost:8081/admin-api/realms/create \
 ```
 
 or on `/admin/realms` in the console, which is also where a realm's settings,
-its endpoints and its signing key identifier are. Realms are held in memory like
-everything else here and die with the process, so a stack that wants them back
-after a restart creates them from that call.
+its endpoints and its signing key identifier are.
+
+**A realm ROW survives a restart when `persistence.realms` has a store under it**
+— its name, its description, its per-realm settings and its own directory all
+come back. In the default `persistence.mode=memory` it does not, and a stack
+that wants its realms back creates them from that call. **The KEYS never come
+back either way**: every realm's signing key is regenerated on every start,
+exactly like the default realm's, so a token minted in a realm today verifies
+against nothing tomorrow.
 
 The id becomes a path segment: lower-case letters, digits and hyphens, starting
 with a letter or a digit. It may not be `default`, and it may not be the first
@@ -921,6 +949,117 @@ cached copy outlives the key it describes.
 
 All tokens are RS256 JWTs signed with that key, so they verify against the advertised
 JWKS.
+
+### Persistence — three things survive a restart, and nothing this service mints does
+
+Until 2026-08-27 this service persisted nothing at all, and every document in
+this repository said so. That is no longer true, and the replacement sentence
+has to be exact, because a half-remembered version of it is worse than either
+version.
+
+**Three things persist when a store is configured:**
+
+* **The embedded LDAP directory** — every entry under every realm's base. In
+  this service that is also the applications registry, the federation register,
+  the SPIFFE registry and the group roster, because those *are* directory
+  entries and are not copies of anything kept elsewhere.
+* **The trust realm registry** — the rows, their names, descriptions and
+  per-realm settings.
+* **The runtime appconfig overrides** — what the console and
+  `POST /admin-api/config/set` write.
+
+**Nothing this service MINTS ever persists, in any mode.** Sessions, access
+tokens, ID Tokens, refresh tokens, authorization codes, pre-authorized codes,
+SAML artifacts, Kerberos tickets, the replay caches, the statistics and the audit
+log are all still in memory and still gone with the process.
+
+That is deliberate, and the section immediately above is the reason: **the
+signing key is regenerated on every start.** A token restored from a disk would
+verify against nothing, and a statistics file that outlived the key that signed
+the tokens it described would be worse than none. So the rule is *what persists
+is what somebody typed, and what resets is what this process minted or counted*.
+
+#### Three modes
+
+| `persistence.mode` | What it does |
+|---|---|
+| `memory` | Writes nothing. **The default**, so a run that says nothing about persistence behaves exactly as every run before this existed — which is why no test in the parent project's suite had to be told about it. |
+| `ldif` | Local development, no database. One RFC 2849 LDIF file per trust realm in `persistence.dataDir`, plus `realms.json` and `appconfig.json`. |
+| `postgres` | The shared store: three tables, one transaction per flush, `persistence.databaseUrl` to reach it. |
+
+**LDIF rather than a JSON dump of our own**, because a directory has an
+interchange format that predates this service by thirty years: the file is
+something `ldapadd -f`, `slapadd` and a reviewer can all read, so the answer to
+"how do I get this into a real directory" is *you already have it*. The one
+thing LDIF has no home for is this service's `origin` marker, which rides as a
+`# sts-origin:` comment that every other reader ignores — an invented attribute
+would have been real on reload, searchable, and matchable by a filter.
+
+**There is no persistence option in node-ldapjs, and there could not be.**
+`ldapjs` is a protocol library — a BER codec, a client, and a `Server` that
+routes a parsed operation to a handler you wrote — and it ships no storage of any
+kind. (`lib/persistent_search.js` is the LDAP *persistent search* change-
+notification control; the name is a trap.) The store here is ours and always
+was. Proxying to a real OpenLDAP instead would have given persistence for free
+and ended the service: this directory is schemaless on purpose, accepts any bind,
+creates a person on first sight of any name in any protocol, and is written into
+directly by six other modules as ordinary function calls.
+
+#### Getting it running
+
+```bash
+# No database. One file per realm, and a directory you can read with an editor.
+STS_PERSISTENCE_MODE=ldif STS_PERSISTENCE_DATA_DIR=./data node server.js
+
+# The shared store.
+STS_PERSISTENCE_MODE=postgres \
+  STS_DATABASE_URL=postgres://sts:sts@localhost:5432/sts node server.js
+```
+
+`docker compose up` does the second for you — the compose file brings up a
+Postgres container beside this service, with a named volume under each and the
+`env/` directory bind-mounted so the appconfig files are editable from the host.
+`docker compose down` keeps the volumes; `down -v` removes them.
+
+#### The parts worth knowing before you turn it on
+
+**A failed write is logged and never thrown.** If the database goes away, the
+operation that triggered the write still succeeds, this service keeps answering
+out of memory, and `/admin/persistence` and `GET /ldap` both carry the error. The
+next change recomputes the same difference and tries again, so nothing is lost by
+a failure. A database outage taking down sixteen protocol families that do not
+need a database is the one failure mode a mock must not have.
+
+**The whole write path is one function.** Every writer in the directory already
+had to call `touchDirectory()` — a rule that predates this and exists for a group
+index — so persistence hangs off that single choke point and computes a diff
+against a shadow of what it last wrote. A new writer that forgets it produces a
+stale groups claim; a new writer that forgot a separate `persist()` call would
+produce an entry that exists until the process restarts and then does not.
+
+**A restored person shows on `/admin/users` as *restored*, not as having
+authenticated.** They exist — an entry, searchable over 389, readable over SCIM
+— and they have not signed in during *this* process, so they are not counted
+among the sign-ins. The counts and the per-person event list are statistics and
+start at zero with everything else.
+
+**Restoring settings after every module has loaded is safe**, and not by luck:
+only a runtime-changeable setting can be overridden at all, and a runtime setting
+is by definition one that is read per call rather than captured at startup. No
+saved value can reach `global.https`, `oauth2.rfc9700` or a bound port.
+
+**Persistence is not coordination.** Two processes pointed at one Postgres
+database each hold their own copy of the directory in memory: each writes its own
+changes down, and neither sees the other's until it restarts. Running several
+copies against one store is **not** yet a way to scale this service — it is a way
+to have several services quietly overwrite each other. One process per store.
+`status.coordinates` is `false` and says so; `persistence/CLAUDE.md` carries the
+checklist for closing it.
+
+`/admin/persistence` in the console and `GET /admin-api/persistence` report which
+mode is in force, whether it fell back to memory because the store could not be
+opened, how much it holds, when it last wrote and what went wrong if that failed.
+`GET /ldap` carries the same object and is not behind the console gate.
 
 ### The JSON-LD contexts are not optional
 
@@ -1726,7 +1865,7 @@ One property is a fact about the mock rather than the model, and the page says s
 **every authorization server here signs with the same key**. They are separate issuers
 sharing one keypair, which a real deployment would not do.
 
-The profiles live in memory, gone on restart, in the same family as the custom claim
+The profiles live in memory, gone on restart — they are not one of the three things *Persistence* above can keep — in the same family as the custom claim
 sets and the verifier's request — not in the directory. `ou=applications` holds
 applications because a relying party is a thing in the world that other systems have
 opinions about; an authorization server profile is this service's own configuration.
@@ -3492,7 +3631,7 @@ Every act names the three **layers of the architecture** — the *initial identi
 
 A second table is **configuration rather than history**: who MAY delegate to whom, out of `msDS-AllowedToDelegateTo` on the front-end account and `msDS-AllowedToActOnBehalfOfOtherIdentity` on the back-end account, with the flags that stop delegation (`NOT_DELEGATED`) or enable protocol transition (`TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION`) beside them. It answers *why would this be refused* before anybody has tried — including the expensive case that is invisible everywhere else: a front end allowed to delegate but not trusted for protocol transition gets a ticket out of S4U2Self that is simply not forwardable, so classic S4U2Proxy then fails complaining about the evidence, two steps from the attribute that caused it. **It is Kerberos only, and that is not an omission**: Kerberos is the only family here that polices delegation at all. WS-Trust puts no authorization on either element and this service adds none; RFC 8693 leaves the policy to the authorization server and this one has none, so any client may exchange any token for a token about anybody. Every act says which of the two it was, in the same column — the same picture, policed at one end and not at the other.
 
-It has no form and no clear control: everything on it either happened or is somebody else's configuration. The same data is at `GET /admin-api/delegation`, with the acts, the distinct *chains* among them (one per edge of the picture) and the policy. It is in memory, capped by `delegation.maxRecords`, and gone on restart like everything else here.
+It has no form and no clear control: everything on it either happened or is somebody else's configuration. The same data is at `GET /admin-api/delegation`, with the acts, the distinct *chains* among them (one per edge of the picture) and the policy. It is in memory, capped by `delegation.maxRecords`, and gone on restart — like everything else this service RECORDS or MINTS. (The directory, the trust realms and the runtime settings can be kept; see *Persistence* above. A delegation record is not one of them: it is a statistic about a process.)
 
 **`/admin/delegation/map` draws it.** The same acts as a diagram, generated on the server and reached from a link at the top of the table. It is **two bands**: the parties on one plane, in the order of the chain, and this service in a band of its own above them, centred, with its lines dropping onto whoever it issued to. That is why it reads as a line rather than a staircase — the issuer touches every line in the picture, so leaving it in the flow put the one box nothing is about in the middle of everything that is. **The plane is a real one**: every party, the person included, is on a single centreline whatever shape the graph is, which is not what a layered layout does on its own — it spreads a branch out vertically, and one person with three applications came out as four boxes at four heights. So the row owns the layout and the library is kept for the ORDER alone. A line whose two boxes are **neighbours** on the row lies along it, and everything else — a box in between, a second mechanism between the same pair — **arcs under it** in a lane of its own, which is where the crossings a flat row cannot avoid are paid for. On the parties' band there is a **stick figure** for every party with an entry under `ou=users`, a **rectangle** for every one with an entry under `ou=applications`, a **rectangle with a figure inside it** for the middle tier that is routinely both, and a **hexagon** for this service, carrying the trust realm the picture is of. Two kinds of line, because a chain makes two different claims: *acts for* is the delegation relationship — who is acting on whose behalf, coloured amber for an impersonation and green for a delegation, the pairing the table already uses — and *reaches* is the **trust** relationship, what the credential was FOR, which is *what is this token's audience* asked as a picture. A dashed grey line from the hexagon is this service having issued to whoever asked. A **broken** line jumps a party nobody named, which is what a forwarded ticket-granting ticket is: no intermediary, and none possible. **Red is a chain nothing was ever issued on**, and a party neither store has heard of is drawn dashed in the shape its role implies rather than as a registered one. A party that reached *itself* — S4U2Self asks for a ticket to yourself — is marked on the box rather than drawn as a loop on it, because an arrow leaving a box and coming back is a drawing of nothing.
 

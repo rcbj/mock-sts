@@ -999,6 +999,62 @@ function userRecord(identity) {
   return record;
 }
 
+// ---------------------------------------------------------------------------
+// SOMEBODY WHO EXISTS AND HAS NOT AUTHENTICATED HERE, ADDED 2026-08-27 FOR
+// PERSISTENCE, AND THE DISTINCTION IT DRAWS IS THE WHOLE POINT OF IT.
+//
+// Until the directory could be written down, everybody in this register got
+// here by authenticating, and `/admin/users` could say "these are the people
+// this service knows" and "these are the people who signed in" with one list.
+// A RESTORED DIRECTORY BREAKS THAT. Its people exist — they are entries, they
+// are searchable over 389, SCIM will read them, a token issued to them carries
+// their attributes — and not one of them has authenticated in THIS process.
+//
+// The bug this fixes was found by restarting: the directory came back with
+// twenty entries and `/admin/users` reported `known: 0`, because that page has
+// never read the directory. It reads THIS register. So a restore has to fill
+// it, and the sentence it fills it with has to be the true one:
+//
+//   `authentications: 0`, `restored: true`, and `authenticated` FALSE on the
+//   row — which is what keeps `authenticatedHere` counting sign-ins rather
+//   than people.
+//
+// **THE COUNTS ARE DELIBERATELY NOT RESTORED**, and that is not an omission to
+// be tidied up later. How many times somebody signed in, when they first did,
+// which protocols they used and every event in their drill-down are STATISTICS
+// about a process, and this service's statistics have always been per process —
+// `/admin/metrics` starts at zero on every start and is documented as doing so.
+// What persists is what somebody typed; what resets is what this process
+// counted. Restoring the counts would make `/admin/metrics` disagree with
+// `/admin/users` about how many authentications this process has seen.
+// ---------------------------------------------------------------------------
+function noteKnownIdentity(name, how) {
+  log.debug("Entering noteKnownIdentity(). how=" + how);
+  const identity = identityOf(name);
+  if (!identity.key) {
+    log.debug("Leaving noteKnownIdentity(). There was no identity in it.");
+    return null;
+  }
+  if (users.has(identity.key)) {
+    // Already here, which means they have authenticated — during this
+    // process's startup, or just now. **THIS EARLY RETURN IS LOAD-BEARING ON
+    // THE AUTHENTICATION PATH**: `recordAuthentication()` builds the record before
+    // it calls the user observer, and that observer reaches `createUser()`,
+    // which calls this. Without the check, somebody signing in for the first
+    // time would be marked as not having signed in. The live record is always
+    // the better one and must never be overwritten with a blank.
+    log.debug("Leaving noteKnownIdentity(). Already known.");
+    return users.get(identity.key);
+  }
+  const record = userRecord(identity);
+  // WHY this record exists without a sign-in behind it: `restored` off a
+  // persistent store, `created` because somebody made the person by hand.
+  // userRows() reads it and nothing else does.
+  record.knownBy = how === 'restored' ? 'restored' : 'created';
+  log.debug("Leaving noteKnownIdentity().");
+  return record;
+}
+
 // One successful authentication. `detail` says what happened in the vocabulary the
 // page prints:
 //
@@ -2043,7 +2099,13 @@ function userRows() {
     row.firstAt = record.firstAt;
     row.lastAt = record.lastAt;
     row.isClient = record.isClient;
-    row.authenticated = true;
+    // FALSE for a record that got here WITHOUT a sign-in — restored from a
+    // persistent store, or created by hand — and true for every record that
+    // got here the way records always got here. See noteKnownIdentity() above:
+    // such a person EXISTS and has not signed in, and one flag saying both
+    // would make `authenticatedHere` count people rather than sign-ins.
+    row.authenticated = !record.knownBy;
+    row.knownBy = record.knownBy || 'authentication';
     // A copy: the page and the JSON reply both read this, and handing out the live
     // array would let a caller's sort or splice edit the registry.
     row.events = record.events.slice();
@@ -2313,6 +2375,7 @@ module.exports = {
   recordCall: recordCall,
   recordAuthentication: recordAuthentication,
   setUserObserver: setUserObserver,
+  noteKnownIdentity: noteKnownIdentity,
   identityOf: identityOf,
   identityKeyOf: identityKeyOf,
   userRows: userRows,

@@ -455,6 +455,9 @@ function create(spec) {
   // back through get() — and because a builder that throws must leave a realm
   // that exists rather than half of one. See onCreate() above.
   built(realm);
+  // And after the builders, so that a watcher writing the registry down does
+  // it once the realm is whole. See onChange() above.
+  changed(realm.id, 'create');
   log.debug("Leaving create().");
   return { ok: true, errors: [], realm: realm };
 }
@@ -482,6 +485,7 @@ function update(id, changes) {
     realm.description = String(spec.description).trim();
   }
   log.info('realms: "' + realm.id + '" updated.');
+  changed(realm.id, 'update');
   log.debug("Leaving update().");
   return { ok: true, errors: [], realm: realm };
 }
@@ -546,6 +550,7 @@ function setOverride(id, key, raw) {
   }
   realm.overrides[key] = raw;
   log.info('realms: "' + realm.id + '" sets ' + key + '.');
+  changed(realm.id, 'set-override');
   log.debug("Leaving setOverride().");
   return { ok: true, errors: [], key: key };
 }
@@ -565,6 +570,7 @@ function clearOverride(id, key) {
   }
   delete realm.overrides[key];
   log.info('realms: "' + realm.id + '" no longer sets ' + key + '.');
+  changed(realm.id, 'clear-override');
   log.debug("Leaving clearOverride().");
   return { ok: true, errors: [], key: key };
 }
@@ -587,6 +593,51 @@ function checkOverrides(overrides) {
     }
   });
   return errors;
+}
+
+// ---------------------------------------------------------------------------
+// "A REALM ROW CHANGED", ADDED 2026-08-27 FOR PERSISTENCE, AND IT IS AN EVENT
+// RATHER THAN A SLOT.
+//
+// `onCreate()` and `onRemove()` below already cover two of the five doors into
+// this registry. The other three — `update()`, `setOverride()` and
+// `clearOverride()` — had no hook at all, because until a realm could be
+// written down there was nothing that needed to know a name or an override had
+// changed. Now there is.
+//
+// **IT IS NOT ANOTHER INVERTED HOOK AND THE DISTINCTION IS WORTH KEEPING.**
+// Rule 3e's slots exist because a require in the obvious direction would close
+// a cycle or move a route, and the module on the far end fills a hole this one
+// left. This is the opposite shape: `persistence/persistence.js` REQUIRES this
+// file, in the ordinary direction, and subscribes. Nothing here knows what
+// persistence is or whether any exists, and a process that never loaded that
+// module has an empty listener list and behaves exactly as it did.
+//
+// It fires AFTER the change, for the reason `built()` runs after the registry
+// row is written: a listener that reads the registry back must see what the
+// caller just did. A listener that throws is logged and does not fail the
+// operation — the realm IS renamed, and a persistence layer that could not
+// write it down has not made that less true.
+// ---------------------------------------------------------------------------
+const watchers = [];
+
+function onChange(fn) {
+  watchers.push(fn);
+}
+
+function changed(id, what) {
+  log.debug("Entering changed(). id=" + id + ", what=" + what);
+  watchers.forEach(function (watcher) {
+    try {
+      watcher(id, what);
+    } catch (e) {
+      // Swallowed and named: a watcher that cannot do its job must not undo
+      // the caller's, and the caller's job here already succeeded.
+      log.warn('realms: a change watcher threw for "' + id + '" (' + what +
+               '): ' + e.message);
+    }
+  });
+  log.debug("Leaving changed(). " + watchers.length + " watcher(s).");
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +720,10 @@ function remove(id) {
     }
   });
   log.info('realms: "' + realm.id + '" removed, with everything it held.');
+  // AFTER the purges, and that ordering is the whole of what makes a removal
+  // persist correctly: a watcher fired before them would walk stores that
+  // still held the realm's entries and write them all back down.
+  changed(realm.id, 'remove');
   log.debug("Leaving remove(). " + purges.length + " store(s) purged.");
   return { ok: true, errors: [], realm: realm };
 }
@@ -1001,6 +1056,7 @@ module.exports = {
   matchPath: matchPath,
   onCreate: onCreate,
   onRemove: onRemove,
+  onChange: onChange,
   realmContext: realmContext,
   keyed: keyed,
   map: map,

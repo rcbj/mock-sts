@@ -13,8 +13,101 @@
 # has no `healthcheck` at all, still parses it. Docker Compose v2 and later print
 # "the attribute `version` is obsolete" and then ignore the line — that warning is
 # the whole cost, and it is not a reason to drop the v1 compatibility.
+#
+# ---------------------------------------------------------------------------
+# SINCE 2026-08-27 THIS FILE BRINGS UP TWO SERVICES AND THREE VOLUMES, BECAUSE
+# THIS SERVICE CAN NOW WRITE THINGS DOWN.
+#
+# What persists is the embedded LDAP directory — which is also where the
+# applications registry, the federation register and the SPIFFE registry live,
+# because in this service those ARE directory entries — the trust realm
+# registry, and the runtime setting changes made in the console. NOTHING THIS
+# SERVICE MINTS is persisted in any mode: sessions, access tokens, ID Tokens,
+# refresh tokens, authorization codes, SAML artifacts, Kerberos tickets, the
+# statistics and the audit log all go with the process. That is deliberate and
+# not a gap — the signing key is regenerated on every start, so a token that
+# outlived it would verify against nothing.
+#
+# THE PLAIN `docker compose up` RUNS AGAINST POSTGRES. That is the mode this
+# file configures because it is the one an operator keeping a mock around for a
+# week wants: one database container, a named volume under it, and a directory
+# that is still there on Monday. `persistence.mode=ldif` needs no database at
+# all and writes an RFC 2849 LDIF file per realm into the same data volume —
+# swap the two environment variables below to use it, and the postgres service
+# becomes dead weight rather than a requirement.
+#
+# THE TEST SUITE DOES NOT USE ANY OF THIS. The parent project's stack starts
+# this service with its own configuration and no persistence at all
+# (`persistence.mode` defaults to `memory`), which is what every job there has
+# always got and is why not one of them had to be changed. A test that persisted
+# would be a test whose second run started from the first run's leavings.
+#
+# THE THREE VOLUMES, and why the third is a bind mount rather than a named one:
+#
+#   sts-db     PostgreSQL's own data. Named, because nothing outside the
+#              database container has any business reading it.
+#   sts-data   /usr/src/sts/data — where ldif mode writes, and where nothing is
+#              written in postgres mode. It is mounted in BOTH modes anyway, so
+#              that switching the mode is one environment variable rather than
+#              an environment variable and a volume.
+#   ./env      A BIND MOUNT of this repository's appconfig directory, so that
+#              editing env/local.js on the host changes what the container reads
+#              on its next start without a rebuild. It is the appconfig half of
+#              what was asked for and it is deliberately NOT the same mechanism
+#              as the durable setting changes: those go into the store, because
+#              a service that rewrote a file checked into a repository would
+#              leave somebody's forgotten experiment behind permanently. So the
+#              file is what a person EDITS and the store is what the console
+#              WRITES, and neither overwrites the other — the store's values sit
+#              above the file's in the same five-layer order they always did.
+# ---------------------------------------------------------------------------
 version: '2.4'
 services:
+  # -------------------------------------------------------------------------
+  # THE STORE. Postgres 16 on alpine, which is the smallest official image that
+  # is still the real thing — this is a mock identity service's sidecar and not
+  # a production database, so what matters is that it starts in two seconds.
+  #
+  # ITS PORT IS NOT PUBLISHED, deliberately, and it is the same argument the
+  # directory's 389 and 636 make below: 5432 is the assigned Postgres port, so a
+  # host already running one — which is the host most likely to be running this
+  # — fails to start the stack with a binding error naming a service nobody was
+  # thinking about. Uncomment the mapping to look inside with psql.
+  #
+  # THE PASSWORD IS IN THIS FILE IN PLAIN TEXT and that is correct here: it
+  # guards a throwaway database of mock identities on a private compose network,
+  # this repository's whole premise is that nothing in it is a real credential,
+  # and an operator who needs a real one sets STS_DATABASE_URL themselves. What
+  # this service does NOT do is echo the connection string back — /admin/persistence
+  # and GET /admin-api/persistence report the host, port, database and user
+  # parsed out of it, because those two answers are one fetch away from a log.
+  # -------------------------------------------------------------------------
+  postgres:
+    container_name: sts-postgres
+    hostname: postgres
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=sts
+      - POSTGRES_PASSWORD=sts
+      - POSTGRES_DB=sts
+    volumes:
+      - sts-db:/var/lib/postgresql/data
+    # ports:
+    #   - "5432:5432"
+    # `pg_isready` rather than a psql query: it is what the image ships for
+    # exactly this, and the sts service below waits on it. Without the wait the
+    # STS starts first about half the time, fails to connect, LOGS THE FAILURE
+    # AND CARRIES ON with an empty in-memory directory — which is the right
+    # behaviour for a mock (a database outage must not take down sixteen
+    # protocol families) and the wrong way to start a stack, because the
+    # restored directory would silently not be there.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sts -d sts"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   sts:
     container_name: sts
     hostname: sts
@@ -58,11 +151,54 @@ services:
       # one fetch of GET /tls/server-certificate whichever of the three you use.
       # - "8443:8443"
       # - "9443:9443"
+    # The database must be ACCEPTING CONNECTIONS, not merely started — see the
+    # healthcheck above for what goes wrong otherwise. This is the one thing in
+    # this file that needs compose format 2.4's `condition:`, which is also the
+    # format the header at the top of this file explains keeping.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # WHERE THE ldif MODE WRITES. Mounted in postgres mode too, so that
+      # switching between them is one environment variable — see the header.
+      - sts-data:/usr/src/sts/data
+      # THE APPCONFIG FILES, bind-mounted from this repository so that editing
+      # env/local.js on the host is all it takes. Read-only from the
+      # container's side, and that is the point rather than caution: nothing in
+      # this service writes to an appconfig file, and mounting it `ro` is what
+      # makes that a property of the deployment instead of a promise in a
+      # comment. Durable SETTING CHANGES go to the store instead, above these
+      # files in the same five-layer order they always had.
+      #
+      # env/defaults.js is in here too and is GENERATED (`node
+      # env/generate_defaults.js`). Editing it by hand is how it comes to
+      # disagree with the table in common/config.js that generates it.
+      - ./env:/usr/src/sts/env:ro
     environment:
       # The log level, and nothing else. debug is the point of a mock: every
       # endpoint call, and every assertion, JWT and SD-JWT VC both before and
       # after signing. Swap to ./env/test.js for a quiet run.
       - CONFIG_FILE=./env/local.js
+      # ---------------------------------------------------------------------
+      # PERSISTENCE. The directory, the trust realms and the runtime setting
+      # changes survive `docker compose down` and come back on the next `up`.
+      # Everything this service MINTS does not, in any mode — see the header.
+      #
+      # `docker compose down -v` removes the volumes and is therefore the way
+      # to start clean; plain `down` keeps them.
+      #
+      # FOR ldif MODE INSTEAD — no database at all, one RFC 2849 file per realm
+      # in the data volume, and the postgres service above becomes unnecessary:
+      #   - STS_PERSISTENCE_MODE=ldif
+      # and drop STS_DATABASE_URL. Or set it to `memory` for the behaviour this
+      # service had before 2026-08-27, which is still the default when nothing
+      # says otherwise.
+      # ---------------------------------------------------------------------
+      - STS_PERSISTENCE_MODE=postgres
+      - STS_DATABASE_URL=postgres://sts:sts@postgres:5432/sts
+      # Where ldif mode would write. Set even in postgres mode so that the
+      # volume above has a meaning and switching modes changes one line.
+      - STS_PERSISTENCE_DATA_DIR=/usr/src/sts/data
       # The base URL the BROWSER uses for the wallet, not one this container
       # dials. The Credential Offer and presentation pages hand the End-User back
       # by appending /vc-issuance-1.html or /vc-presentation-1.html to it, so its
@@ -94,3 +230,23 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+# ---------------------------------------------------------------------------
+# NAMED VOLUMES. Both survive `docker compose down` and are removed by
+# `docker compose down -v`, which is the difference somebody wants to know
+# before running either.
+#
+# There is no volume for the appconfig files: those are a BIND MOUNT of ./env
+# in this repository, because the point of them is that a person edits them
+# with an editor. The header at the top argues the split.
+# ---------------------------------------------------------------------------
+volumes:
+  # PostgreSQL's own data directory. This is where the embedded LDAP directory,
+  # the trust realm registry and the durable setting changes actually live when
+  # persistence.mode is postgres.
+  sts-db:
+  # /usr/src/sts/data inside the STS container: where persistence.mode=ldif
+  # writes realm-<id>.ldif, realms.json and appconfig.json. Empty in postgres
+  # mode, and mounted anyway so that switching modes is one environment
+  # variable.
+  sts-data:

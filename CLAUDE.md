@@ -30,6 +30,7 @@ files did not change; the paths did.
 | `federation/` | **Federation relationships, in either direction, in five protocols.** The register (`ou=federations` IS the store), the attribute mapping, the four endpoints, the graph the console's picture is drawn from — and the ONLY OUTBOUND REQUEST in this repository, in a module of its own that will not take a URL from anywhere but a relationship entry. |
 | `kerberos/` | The KDC, the acceptor, SPNEGO in three layers — the negotiation, the page that explains it, and **the SIGN-IN that turns a ticket into this service's session** — and the eight codec modules they rest on, **all eight VENDORED from the parent project and not editable here**, despite not being under `common/vendored/`. See `kerberos/CLAUDE.md`. |
 | `ldap/` | The embedded directory. Also the STORE for people, groups, applications and the SPIFFE registry. |
+| `persistence/` | **THE ONE PLACE THIS SERVICE WRITES ANYTHING DOWN, since 2026-08-27, and the first time it ever has.** Three modes — `memory` (the default, and what this service always did), `ldif` (an RFC 2849 file per realm, no database) and `postgres` — behind one driver interface. THREE THINGS PERSIST: the embedded directory, the trust realm registry, and the runtime appconfig overrides. **NOTHING THIS SERVICE MINTS EVER DOES**, in any mode, because the signing key is regenerated on every start. It is PERSISTENCE and not COORDINATION, and `persistence/CLAUDE.md` says what the second one still needs. |
 | `scim/` | `/scim/v2`, its authentication, and its attribute mapping. |
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
@@ -407,6 +408,7 @@ require can see at a glance whether they are about to break one.
 | 2 | `common/app` | Before every protocol module — they register against it, and middleware only applies to routes added after it. Requiring it is also what installs the JWT recorder (rule 3e). | `common/CLAUDE.md` |
 | 2a | `common/realms` | Loaded BY `app` and by `helpers`, so it has no line of its own in `server.js` — but it is above every setting read and every store in this service, because requiring it is what fills `config.js`'s realm slot (rule 3m) and what installs the reserved-id provider. | `common/CLAUDE.md` |
 | 3–4 | `common/helpers`, `common/config` | `config.js` is below `helpers.js` and requires nothing here. | `common/CLAUDE.md` |
+| 4a | `persistence/persistence` | Below `config`, which it reads, and above everything else: requiring it fills `config.js`'s override-store slot (rule 3q) and subscribes to `realms.onChange()`. A LIBRARY — it registers no route, so its place in the ROUTE order is not a place. **It opens nothing here**: the store is opened and READ from `persistence.start()` in `server.js`, before the listener binds, because a `require` cannot await a connection pool. | `persistence/CLAUDE.md` |
 | 5 | `common/claim_attributes` | Ahead of everything that ISSUES, because requiring it fills `setAttributeResolver()`. An empty slot means tokens without their configured attributes. | `common/CLAUDE.md` |
 | 6 | `common/group_claims` | Same reason, for `setGroupResolver()`. | `common/CLAUDE.md` |
 | 6a | `home/home` | No constraint. Two EXACT paths (`/` and `/logo.png`) and nothing but the app behind them; first among the route modules so that the page a person meets first heads the list on `/admin/sts-metadata`. | `home/CLAUDE.md` |
@@ -454,6 +456,7 @@ in every file, including the ones in the source comments. This is the index.
 | 3p | `user_graph.js`, and why the union of two registers is a library rather than a page | `common/CLAUDE.md` |
 | 3o | `federation.js`, why four modules may require it, and why `PATHS` is not beside the routes | `federation/CLAUDE.md` |
 | 3m | `realms.js`, the realm slot in `config.js`, and why the realm is ambient | `common/CLAUDE.md` |
+| 3q | `persistence.js`, the override-store slot in `config.js`, the directory slot it offers, and why `realms.onChange()` is an event rather than a third slot | `persistence/CLAUDE.md` |
 | 3m | `logout/logout.js` holds no state, and the reading order is not the ending order | `logout/CLAUDE.md` |
 | 3n | `frontchannel_logout.js` | `oauth-oidc/CLAUDE.md` |
 | 3k | SPIFFE's six modules | `spiffe/CLAUDE.md` |
@@ -487,6 +490,28 @@ is otherwise no way to tell a running listener from one whose port was already t
 The fourth is `spiffe/spiffe_server.js`, with four sockets of its own.
 Each is reported SEPARATELY, because "389 is up and 636 is not" is the
 ordinary outcome of a host run and one flag could only report one of them.
+
+**THE FIFTH IS `persistence/persistence.js` AND IT BINDS NOTHING, WHICH IS WHY
+IT IS WORTH ADDING TO THIS LIST RATHER THAN A LIST OF ITS OWN.** It is here for
+the same shape of reason and a different specific one: opening a PostgreSQL
+connection pool is ASYNCHRONOUS, and a `require` cannot await. So the store is
+opened, and the directory, the realm registry and the saved appconfig overrides
+are read back, from `persistence.start()` — which `server.js` calls BEFORE the
+HTTP listener binds, and before the four socket families above start.
+
+**It goes first among the five, and that ordering is a dependency rather than
+tidiness.** Between binding and restoring, this service would answer
+`/oauth2/authorize` out of a seeded directory, `/admin/applications` out of an
+empty registry and `/federation/acs/{id}` out of a register with no
+relationships in it — and that last one is a SECURITY surface, where "not
+configured yet" and "disabled" are the same refusal to a caller and very
+different facts. There is no window in which that can happen.
+
+Like the four above it, a failure is RECORDED rather than thrown: a store that
+cannot be opened or read leaves this service running with its seeded directory
+and reports the fallback on `GET /ldap` and `/admin/persistence`. A mock that
+refused to start because a database blinked would be the one failure mode a mock
+must not have.
 
 ---
 
@@ -1015,7 +1040,8 @@ argument in two places is an argument that will disagree with itself.
 | Decide who may delegate to whom, in two of the three families that can — the KDC polices S4U, WS-Trust and RFC 8693 police nothing | `common/CLAUDE.md`, `kerberos/CLAUDE.md` |
 | Give a trust realm its own Kerberos KDC, TLS listeners or SPIFFE signing authority — those three socket families have no path to put a realm segment in and no name inside the protocol to put one in either. **The DIRECTORY is no longer on this list**: it is a subtree per realm since 2026-08-25, because a DN is a name a client can carry | `common/CLAUDE.md`, `ldap/CLAUDE.md` |
 | Give a trust realm its own administrator — the two console roles are groups in the DEFAULT realm's directory, read there from every realm, and the console's gate accepts that realm's session only. Deliberate: a per-realm roster would let anybody who can create a realm administer the whole service | `common/CLAUDE.md`, `admin-ui/CLAUDE.md`, `ldap/CLAUDE.md` |
-| Persist anything at all | `admin-ui/CLAUDE.md` |
+| Persist anything it MINTS — sessions, tokens, codes, artifacts, Kerberos tickets, the statistics, the audit log — in any mode, because the signing key is regenerated on every start and a token that outlived it would verify against nothing. **What it DOES persist since 2026-08-27, when a store is configured, is the three things somebody TYPED**: the embedded directory, the trust realm registry and the runtime appconfig overrides. This row said "persist anything at all" until that date | `persistence/CLAUDE.md`, `admin-ui/CLAUDE.md` |
+| COORDINATE several processes through that store — two copies pointed at one database each hold their own directory in memory and never see each other's writes. Persistence is not clustering, and the store's own status says so | `persistence/CLAUDE.md` |
 | Recall anything it has already ISSUED — a SAML assertion, a Kerberos service ticket, an X509-SVID. `/logout` lists them anyway, with the reason | `logout/CLAUDE.md` |
 | Perform back-channel logout. Front-channel IS implemented; the metadata says which | `oauth-oidc/CLAUDE.md` |
 | Fake WS-Federation's `wauth`, or dereference `wreqptr` | `ws-federation/CLAUDE.md` |

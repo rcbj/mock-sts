@@ -638,6 +638,97 @@ which is the thing somebody came to a mock directory to watch. This is not a
 time-based cache and has no staleness window: a bumped version rebuilds on the
 next read, before it answers.
 
+### AND SINCE 2026-08-27 IT IS ALSO WHAT MAKES THE DIRECTORY PERSIST
+
+`touchDirectory()` calls `persistence.directoryChanged()`. That is the whole
+integration on this side, and the choke point is why it was affordable to add to
+a file of 6,500 lines: there was already ONE function every writer had to call,
+already documented, already enforced by prose, and already the thing a new
+writer is told to call.
+
+The alternative was to instrument the fifteen-odd writers individually with a
+"this DN changed" call. It would be more precise and **it would be forgotten**,
+and the two failures are not equally bad: a writer that forgets
+`touchDirectory()` produces a stale groups claim, and a writer that forgot a
+separate `persist(dn)` would produce an entry that is in the directory until the
+process restarts and then is not.
+
+**What the choke point costs is that it does not say WHICH entry changed**, and
+`persistence.js` answers that with a diff against a shadow of what it last
+wrote. So the rule above is unchanged and now guards two things instead of one.
+In the default `memory` mode the added call returns immediately on a boolean.
+
+## THE DIRECTORY IS WRITTEN DOWN THROUGH A SLOT
+
+`persistence.setDirectory({realmEntries, replaceRealm})`, filled at this
+module's require time. It is a slot rather than a require in the other direction
+for a ROUTE-ORDER reason rather than a cycle one: `persistence.js` is required at
+#4a, far above `admin.js`, and a require from there to here would drag `/ldap`
+and `/ldap/directory` into the express router at that point — the exact failure
+rule 1 exists to prevent. The require in THIS direction is a plain one and closes
+nothing.
+
+Two things about the pair are worth knowing before changing either.
+
+**Neither enters the realm, and that is the opposite of what every LDAP handler
+here does.** A handler resolves a realm from the DN it was given and runs its
+body inside `realms.run()`, because everything below it reads `entries`
+ambiently. These two are handed a realm ID, and `entries.realmMap(id)` names a
+realm's store directly — so entering would buy nothing and would mean a restore
+of twelve realms doing twelve `AsyncLocalStorage` entries for no reason.
+
+**`replaceRealm()` does NOT go through `putEntry()`, and that is the point.**
+`putEntry()` stamps `createTimestamp` and `modifyTimestamp` with NOW, which is
+right for an entry being created and wrong for one being restored: every person
+in a restored directory would report having been created the moment the process
+started. The stored object is reconstructed as it was written, timestamps
+included. The DN is re-normalised through this file's `normalizeDn()` rather than
+trusting the key the store wrote, because that function is the one place in this
+service that decides two spellings are one entry, and a stored key from an older
+version of it must not be believed over the current one.
+
+**It clears rather than merges.** A restore is "this is the directory", not
+"these entries as well as the seed" — a merge would bring back an entry that was
+deleted in the last run and reseeded in this one, and the person who deleted it
+would find it back.
+
+**It also refills `admin_stats.js`'s identity register, and that was a real
+bug.** A restored directory came back with twenty entries — `ldapsearch` and
+`/ldap/directory` showed all of them — and `/admin/users` reported `known: 0`,
+because that page has never read this directory. It reads the identity register,
+which until 2026-08-27 could only be filled by somebody AUTHENTICATING; a
+restored directory is the first thing that ever put an entry under `ou=users`
+without a sign-in. They go in through `noteKnownIdentity()` and are marked
+RESTORED rather than authenticated, so `authenticatedHere` keeps counting
+sign-ins rather than people.
+
+**A SEEDED PERSON IS SKIPPED**, and that is what keeps a restored process's
+`/admin/users` identical to a fresh one's. alice, bob and carol are written by
+`seed()` on every start in every realm and have never been in that register —
+the page's own description is "every userid this service has been given as part
+of an interaction that SUCCEEDED", and being seeded is not an interaction.
+Registering them would mean a fresh service listed nobody and the same service
+after one restart listed three people who had still done nothing, which is a
+difference somebody would reasonably read as a bug. What is registered is what a
+fresh process would also have had: people somebody created, people an `ldapadd`
+wrote, and people who authenticated.
+
+**THE SAME GAP WAS ALREADY THERE ON THE CREATE PATH AND IS FIXED WITH IT.**
+`createUser()` — the console's door, `POST /admin-api/users/create` and a SCIM
+create, all three — wrote a directory entry and never touched the register, so a
+person created by hand appeared on `/admin/users` NOWHERE until they signed in,
+while that page's own blurb said "a person can be created here ahead of their
+first sign-in". It calls `noteKnownIdentity(name, 'created')` now. That call is
+safe on the authentication path because `recordAuthentication()` builds the
+record before it reaches the observer and `autoCreateUser()`, and
+`noteKnownIdentity()` returns early for a key it already has. **That pass is the one part of `replaceRealm()`
+that DOES enter the realm**, because `isPersonEntry()` compares against
+`usersDn()` and the register is itself a `realms.map()` — both ambient by
+construction.
+
+`persistence/CLAUDE.md` argues the rest, including why this is not a node-ldapjs
+feature and could not be.
+
 ## The library is NOT patched
 
 Everything in `ldap_server.js` is handlers

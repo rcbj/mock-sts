@@ -2573,7 +2573,144 @@ const SETTINGS = [
                  'domain. Its TCP port demands an X509-SVID and authorizes ' +
                  'every method while spiffe.authRequired is on, which is the ' +
                  'default; with it off, or on the Workload API port either ' +
-                 'way, anybody who can reach these addresses is answered.' }
+                 'way, anybody who can reach these addresses is answered.' },
+
+  // -------------------------------------------------------------------------
+  // PERSISTENCE. The newest group, 2026-08-27, and the one that reverses the
+  // oldest claim in this repository: that this service writes nothing down.
+  //
+  // FOUR OF THE FIVE ARE RESTART-ONLY, and it is the same reason each time
+  // rather than five: the store is chosen, opened and READ AT STARTUP, before
+  // the HTTP listener binds, and a mode changed at runtime would leave a
+  // service whose directory came from one place and whose writes went to
+  // another. `persistence.writeDelay` is the exception because it is read on
+  // the way in to each flush and changing it changes only when the next one
+  // happens.
+  //
+  // THE DEFAULT IS memory AND THAT IS THE WHOLE COMPATIBILITY STORY. A run
+  // that says nothing about persistence behaves exactly as every run before
+  // this group existed, which is why not one job in the parent project's test
+  // suite had to be told about any of it.
+  // -------------------------------------------------------------------------
+  { key: 'persistence.mode', group: 'Persistence', label: 'Persistence mode',
+    env: 'STS_PERSISTENCE_MODE', type: 'enum',
+    enumValues: ['memory', 'ldif', 'postgres'], dflt: 'memory',
+    runtime: false,
+    restartReason: 'the store is opened and read before the listener binds',
+    description: 'Where the embedded directory, the trust realm registry and ' +
+                 'the runtime appconfig overrides are written down. memory ' +
+                 'writes nothing and is what this service always did — ' +
+                 'everything is gone on restart. ldif writes an RFC 2849 file ' +
+                 'per realm plus two JSON files in persistence.dataDir, which ' +
+                 'is the local-development answer and needs no database. ' +
+                 'postgres writes three tables and is the shared store. ' +
+                 'NOTHING THIS SERVICE MINTS IS EVER PERSISTED in any mode: ' +
+                 'sessions, tokens, codes, artifacts, Kerberos tickets and ' +
+                 'the signing key are in memory always, because the key is ' +
+                 'regenerated on every start and a token that outlived it ' +
+                 'would verify against nothing.' },
+
+  { key: 'persistence.dataDir', group: 'Persistence', label: 'Data directory',
+    env: 'STS_PERSISTENCE_DATA_DIR', type: 'string', dflt: './data',
+    runtime: false,
+    restartReason: 'the store is opened and read before the listener binds',
+    description: 'Where persistence.mode=ldif writes. A relative path is ' +
+                 'resolved against this package root rather than the working ' +
+                 'directory, for the reason CONFIG_FILE is (common/' +
+                 'config_file.js): thirteen modules read it from thirteen ' +
+                 'different directories. Ignored in memory and postgres ' +
+                 'modes. In a container this is what a volume mounts over.' },
+
+  // ---------------------------------------------------------------------
+  // THIS ROW HAD NO DEFAULT UNTIL 2026-08-27 AND THE ARGUMENT FOR THAT WAS
+  // WRONG, WHICH IS WORTH RECORDING RATHER THAN QUIETLY CORRECTING.
+  //
+  // It shipped empty with the reasoning "a localhost guess would connect to
+  // whatever real database happened to be there". That reads as caution and is
+  // not: **this value is never dialled unless `persistence.mode` is
+  // `postgres`**, which is not the default and never has been. So the empty
+  // string protected nobody — the only run it could affect is one where
+  // somebody had already asked for Postgres — while costing every such run the
+  // step of looking up what to type.
+  //
+  // It is now the local development connection string, and it matches
+  // docker-compose.yml's Postgres service exactly (user `sts`, password `sts`,
+  // database `sts`) so that the two cannot drift into disagreeing about what a
+  // base configuration looks like. That stack sets STS_DATABASE_URL anyway —
+  // its host is `postgres`, the service name on the compose network — so the
+  // variable wins there and this value is what a HOST run gets.
+  //
+  // WHAT THE CHANGE COSTS is one clear error message: `persistence.mode=postgres`
+  // with nothing configured used to be refused by name ("set persistence.databaseUrl"),
+  // and now it attempts a connection to localhost and reports whatever that says.
+  // persistence.js puts the guidance back on that path — when a Postgres store
+  // cannot be opened AND the URL came from the defaults layer, it says so and
+  // names this setting. See its start().
+  //
+  // THE PASSWORD IS IN A FILE IN PLAIN TEXT and that is correct here for the
+  // reason docker-compose.yml gives: it guards a throwaway database of mock
+  // identities, and this repository's whole premise is that nothing in it is a
+  // real credential. An operator with a real one sets the environment variable.
+  // ---------------------------------------------------------------------
+  { key: 'persistence.databaseUrl', group: 'Persistence',
+    label: 'Database connection string',
+    env: 'STS_DATABASE_URL', type: 'string',
+    dflt: 'postgres://sts:sts@localhost:5432/sts', runtime: false,
+    restartReason: 'the connection pool is opened before the listener binds',
+    description: 'The PostgreSQL connection string persistence.mode=postgres ' +
+                 'dials — postgres://user:password@host:5432/database. The ' +
+                 'default is a LOCAL DEVELOPMENT one matching the Postgres ' +
+                 'service in this repository\'s docker-compose.yml (user, ' +
+                 'password and database all "sts"), so turning persistence on ' +
+                 'against a local database is one setting rather than two. It ' +
+                 'is never dialled unless persistence.mode is postgres, which ' +
+                 'is not the default — so this value is inert on an ordinary ' +
+                 'run. The compose stack sets STS_DATABASE_URL itself, with ' +
+                 '`postgres` as the host, because that is the service name on ' +
+                 'its network. IT CARRIES A PASSWORD, so /admin/persistence ' +
+                 'and GET /admin-api/persistence report the host, port, ' +
+                 'database and user parsed out of it and never the string ' +
+                 'itself.' },
+
+  { key: 'persistence.writeDelay', group: 'Persistence',
+    label: 'Write delay (ms)',
+    env: 'STS_PERSISTENCE_WRITE_DELAY', type: 'int', dflt: 1500,
+    runtime: true,
+    description: 'How long a change waits before the ldif store is rewritten, ' +
+                 'so that a burst — a realm build writes thirteen entries — ' +
+                 'costs one file write rather than thirteen. What it risks is ' +
+                 'this many milliseconds of writes on a kill -9, which no ' +
+                 'process can trap; SIGTERM and SIGINT flush first. POSTGRES ' +
+                 'IGNORES IT and uses 0, because the unit of writing there is ' +
+                 'a transaction rather than a file: every change made while ' +
+                 'handling one request commits as one transaction the moment ' +
+                 'that request is done.' },
+
+  { key: 'persistence.realms', group: 'Persistence',
+    label: 'Persist the realm registry',
+    env: 'STS_PERSISTENCE_REALMS', type: 'bool', dflt: true, runtime: false,
+    restartReason: 'the realm rows are restored before the listener binds',
+    description: 'Whether trust realm definitions — their names, ' +
+                 'descriptions and per-realm overrides — are written down ' +
+                 'beside the directory. ON, and turning it off is a ' +
+                 'half-persisted service rather than a smaller one: a realm ' +
+                 'holds its own directory, so its entries would be stored ' +
+                 'with no realm to restore them into, and the first write of ' +
+                 'the next run would remove them. The service says so at ' +
+                 'startup rather than letting it be discovered.' },
+
+  { key: 'persistence.appconfig', group: 'Persistence',
+    label: 'Persist runtime setting changes',
+    env: 'STS_PERSISTENCE_APPCONFIG', type: 'bool', dflt: true, runtime: false,
+    restartReason: 'the saved overrides are applied before the listener binds',
+    description: 'Whether a setting changed through the console or the ' +
+                 'management API survives a restart. ON. It adds no LAYER — ' +
+                 'the saved values are re-applied at startup through the same ' +
+                 'setOverride() a caller uses, so the five layers below are ' +
+                 'unchanged and a runtime override is simply durable now. ' +
+                 'Only a runtime-changeable setting can be saved, because ' +
+                 'only a runtime-changeable setting can be set: that is what ' +
+                 'makes applying them after every module has loaded safe.' }
 ];
 
 // Indexed once. A linear scan per read would be invisible on a mock and the
@@ -2591,6 +2728,55 @@ SETTINGS.forEach(function (setting) {
 // rather than parsed so that `text()` can show it back exactly as it was set
 // and the environment's string and the file's number stay interchangeable.
 const overrides = {};
+
+// ---------------------------------------------------------------------------
+// AND WHERE THAT MAP IS WRITTEN DOWN, SINCE 2026-08-27. Rule 3q.
+//
+// `persistence/persistence.js` fills this at ITS require time, and it is an
+// INVERTED HOOK rather than a require in the other direction for rule 3e's
+// reason — the same reason the realm slot above it is one, and it is worth
+// checking rather than assuming, because rule 3e says a sixth must not be
+// added by analogy. That module reads `persistence.mode` and four more
+// settings through `value()`, so it requires THIS file; a require back closes
+// the cycle, and node answers a cycle with a half-initialised module whose
+// exports are `undefined`. The symptom would arrive later as "notify is not a
+// function" from inside a console Save — which is to say, from the one place
+// nobody would look for a require-order problem.
+//
+// IT IS A NOTIFICATION AND NOT A STORE, which is why it takes a realm id and
+// returns nothing. This file does not know what persistence is, whether it is
+// on, or where it writes; it knows that something changed and in which realm,
+// because THAT is the thing only this file can say. A process-wide override
+// and a realm's override are written to different places by the module on the
+// other end, and deciding which is setOverride()'s job below — it already
+// makes exactly that decision for its own purposes.
+//
+// The slot is EMPTY in a process that never required that module, which is
+// every test that loads this file on its own, and an empty slot means the
+// overrides are what they always were: in memory, gone on restart.
+// ---------------------------------------------------------------------------
+let overrideStore = null;
+
+function setOverrideStore(fn) {
+  overrideStore = fn;
+}
+
+// Called after every successful write below. Wrapped, because a persistence
+// layer that throws must not turn a successful configuration change into a
+// failed one: the value IS set, the caller was right, and the only thing that
+// went wrong is that it will not survive a restart.
+function overridesChanged(realmId) {
+  if (!overrideStore) {
+    return;
+  }
+  try {
+    overrideStore(realmId || null);
+  } catch (err) {
+    log.error('config: the override could not be handed to persistence: ' +
+              err.message + '. The setting IS changed and is in force; it ' +
+              'may not survive a restart.');
+  }
+}
 
 // ---------------------------------------------------------------------------
 // LAYER 0: WHAT THE CURRENT TRUST REALM SETS. Rule 3m.
@@ -2930,6 +3116,9 @@ function setOverride(key, raw) {
   applyLogLevel();
   log.info('config: ' + key + ' is now ' + JSON.stringify(text(key)) +
            (realm ? ' in the "' + realm.id + '" realm.' : ' (runtime override).'));
+  // After the write and after the log line, so that a store which reads the
+  // value back reads the new one. See setOverrideStore() above.
+  overridesChanged(realm ? realm.id : null);
   log.debug("Leaving setOverride().");
   return { ok: true, errors: [], key: key, realm: realm ? realm.id : null };
 }
@@ -2959,6 +3148,11 @@ function clearOverride(key) {
   applyLogLevel();
   log.info('config: ' + key + ' is back to its ' + sourceOf(key) + ' value' +
            (realm ? ' in the "' + realm.id + '" realm.' : '.'));
+  // A RESET IS A CHANGE, and forgetting this is the subtle half of persisting
+  // configuration: the override is gone from memory, and a store that was only
+  // told about writes would still hold it and would put it back on the next
+  // start. A reset that does not survive a restart is worse than no reset.
+  overridesChanged(realm ? realm.id : null);
   log.debug("Leaving clearOverride().");
   return { ok: true, errors: [], key: key, realm: realm ? realm.id : null };
 }
@@ -2979,8 +3173,80 @@ function clearAllOverrides() {
   log.info('config: ' + keys.length +
            (realm ? ' setting(s) cleared in the "' + realm.id + '" realm.'
                   : ' runtime override(s) cleared.'));
+  // Unconditionally, even when `keys` is empty: the store's copy is the thing
+  // being brought into line, and "nothing was cleared here" is not evidence
+  // that nothing is written down over there.
+  overridesChanged(realm ? realm.id : null);
   log.debug("Leaving clearAllOverrides(). " + keys.length + " cleared.");
   return { ok: true, errors: [], cleared: keys, realm: realm ? realm.id : null };
+}
+
+// ---------------------------------------------------------------------------
+// THE PROCESS-WIDE OVERRIDES, TO BE WRITTEN DOWN AND READ BACK. Both halves are
+// here rather than in persistence.js, and it is the same argument twice: this
+// map is this file's, `overrides` is not exported and must not become so, and a
+// module that reached in to copy it would be a second thing that knows what an
+// override is.
+//
+// A REALM'S OVERRIDES ARE NOT HERE. They live on the realm row — `realm.overrides`
+// — and are written down with the realm registry, because that is where they
+// live in memory too. Copying them into this map would create the one thing the
+// realm layer exists to prevent: a realm's value in a process-wide place.
+// ---------------------------------------------------------------------------
+function persistableOverrides() {
+  const out = {};
+  Object.keys(overrides).forEach(function (key) { out[key] = overrides[key]; });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// PUTTING THEM BACK AT STARTUP, AND THE ONE PROPERTY THAT MAKES IT SAFE TO DO
+// IT THIS LATE.
+//
+// This runs from `persistence.start()`, which `server.js` calls after every
+// module has been required and before the HTTP listener binds. That is very
+// late to be changing configuration, and it is safe for a reason that is a
+// property of the table rather than of the ordering:
+//
+//   **ONLY A `runtime: true` SETTING CAN BE OVERRIDDEN AT ALL.** checkOverride()
+//   refuses every other by name and says why. And a runtime setting is BY
+//   DEFINITION one that is read per call rather than captured at require time —
+//   that is what the column means and what `restartReason` documents the
+//   absence of. So there is nothing in a saved override file that any module
+//   could already have read and cached.
+//
+// The corollary is the one worth stating: `global.https`, `oauth2.rfc9700`,
+// `ldap.port`, `ldap.baseDn` and every other restart-only setting are exactly
+// what the environment and the appconfig file said, and no persisted value can
+// reach them. A saved file cannot change the scheme this service answers on.
+//
+// EVERY VALUE IS RE-CHECKED rather than trusted. The file was written by this
+// service, but it was written by a possibly older version of it — a setting may
+// have been renamed, retyped, its enum narrowed, or turned restart-only since —
+// and a saved value that is no longer valid must be reported and skipped rather
+// than smuggled past the validation every other caller goes through.
+// ---------------------------------------------------------------------------
+function applyPersistedOverrides(saved) {
+  log.debug("Entering applyPersistedOverrides().");
+  const applied = [];
+  Object.keys(saved || {}).forEach(function (key) {
+    const problem = checkOverride(key, saved[key]);
+    if (problem) {
+      log.warn('config: the saved override for "' + key + '" was not ' +
+               'applied: ' + problem + ' It is left in the store; nothing is ' +
+               'deleted on the strength of one start refusing it.');
+      return;
+    }
+    overrides[key] = saved[key];
+    applied.push(key);
+  });
+  // Once, after all of them, rather than per setting: applyLogLevel() walks
+  // every registered logger, and doing that per key would be n times the work
+  // for the same answer.
+  applyLogLevel();
+  log.debug("Leaving applyPersistedOverrides(). " + applied.length +
+            " applied.");
+  return applied;
 }
 
 // ---------------------------------------------------------------------------
@@ -3284,6 +3550,9 @@ module.exports = {
   setOverride: setOverride,
   clearOverride: clearOverride,
   clearAllOverrides: clearAllOverrides,
+  setOverrideStore: setOverrideStore,
+  persistableOverrides: persistableOverrides,
+  applyPersistedOverrides: applyPersistedOverrides,
   describe: describe,
   groups: groups,
   snapshot: snapshot,

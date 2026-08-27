@@ -6,3 +6,11 @@ node_modules/
 # a fresh one both claiming the same kid over different keys).
 *.pem
 *.log
+
+# THE PERSISTENT STORE, since 2026-08-27. `persistence.mode=ldif` writes one
+# RFC 2849 LDIF file per trust realm here, plus realms.json and appconfig.json.
+# Never committed, and the reason is the same one that keeps the console from
+# rewriting env/*.js: a directory or a setting somebody changed while trying
+# something out would otherwise arrive in the repository and become everybody's
+# default. `persistence.dataDir` moves it; in a container it is a volume.
+data/
