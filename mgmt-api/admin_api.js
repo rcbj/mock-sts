@@ -582,6 +582,44 @@ const PROTOCOL_SETTINGS_OPERATIONS = [
                  'because a socket has no path to put a realm segment in and ' +
                  'a DN is the one name a client can carry. What is IN the ' +
                  'directory is `GET /users` and `GET /groups`.' },
+  // The newest of these, 2026-08-27, and the only one whose reply carries a
+  // `status` member: a persistence setting that is SET and a persistence store
+  // that is WORKING are two different facts, and the gap between them is the
+  // whole failure mode this feature has. See admin.js's persistenceStatusBlock().
+  { path: '/persistence', console: '/admin/persistence', tag: 'Persistence',
+    operationId: 'getPersistenceSettings',
+    summary: 'What survives a restart, where it is written, and whether that ' +
+             'is working',
+    description: 'The six `persistence.*` settings AND — unlike every other ' +
+                 'operation in this group — a `status` member saying what the ' +
+                 'store is actually doing: which mode is in force, whether it ' +
+                 'FELL BACK to memory because it could not be opened, where ' +
+                 'it writes, how many entries and realms it holds, when it ' +
+                 'last wrote, and the error if the last write failed.\n\n' +
+                 'THREE THINGS PERSIST when a store is on: the embedded LDAP ' +
+                 'directory (which is also the applications registry, the ' +
+                 'federation register and the SPIFFE registry — they are ' +
+                 'directory entries and nothing else), the trust realm ' +
+                 'registry, and the runtime appconfig overrides that ' +
+                 '`POST /admin-api/config/set` writes.\n\n' +
+                 'NOTHING THIS SERVICE MINTS EVER PERSISTS, in any mode: ' +
+                 'sessions, access tokens, ID Tokens, refresh tokens, ' +
+                 'authorization codes, pre-authorized codes, SAML artifacts, ' +
+                 'Kerberos tickets, the replay caches, the statistics and the ' +
+                 'audit log all go with the process. The signing key is ' +
+                 'regenerated on every start, so a token restored from a disk ' +
+                 'would verify against nothing.\n\n' +
+                 'PERSISTENCE IS NOT COORDINATION. Two processes pointed at ' +
+                 'one Postgres database each hold their own copy of the ' +
+                 'directory in memory and will not see each other\'s writes ' +
+                 'until they restart. `status.coordinates` is `false` and ' +
+                 'says so; running several copies against one store is not ' +
+                 'yet a way to scale this service.\n\n' +
+                 'FIVE OF THE SIX SETTINGS ARE RESTART-ONLY, because the ' +
+                 'store is opened and read before the HTTP listener binds. ' +
+                 '`persistence.databaseUrl` is never echoed back in `status` ' +
+                 '— it carries a password, so the host, port, database and ' +
+                 'user are parsed out of it and reported instead.' },
   { path: '/wstrust', console: '/admin/wstrust', tag: 'WS-Trust',
     operationId: 'getWsTrustSettings',
     summary: 'The security token service\'s own setting',
@@ -1431,10 +1469,15 @@ const ROUTES = [
   // `current`, which names the realm the CALL arrived in — and `remove` refuses
   // to remove that one, for the reason the console gives.
   //
-  // A realm is held in memory like everything else here and dies with the
-  // process. A stack that wants realms back after a restart creates them from
-  // these operations, which is why `create` is worth having rather than a
-  // config file entry: the thing that starts the stack already speaks this API.
+  // A realm's SIGNING KEY is held in memory like everything else this service
+  // MINTS, and dies with the process — so a token minted in a realm today
+  // verifies against nothing tomorrow, restart or no restart. THE REALM ROW
+  // ITSELF is written down since 2026-08-27 when `persistence.realms` has a
+  // store under it, along with that realm's own directory; see
+  // `GET /admin-api/persistence`. In the default memory mode it is not, and a
+  // stack that wants its realms back creates them from these operations —
+  // which is why `create` is worth having rather than a config file entry: the
+  // thing that starts the stack already speaks this API.
   // ---------------------------------------------------------------------
   { method: 'GET', path: BASE + '/realms', tag: 'Trust realms',
     operationId: 'getRealms',
@@ -1683,12 +1726,19 @@ const ROUTES = [
     actions: [
       { action: 'set', operationId: 'setSetting',
         summary: 'Change one setting',
-        description: 'IN MEMORY ONLY, and gone on restart — nothing here ' +
-                     'writes to the appconfig file. That is the same ' +
-                     'arrangement as the custom claims and the credential ' +
-                     'claims, and it is deliberate: a service that edited a ' +
-                     'file checked into a repository would leave a test\'s ' +
-                     'forgotten change behind permanently.\n\nThe change ' +
+        description: 'A RUNTIME OVERRIDE — the top of config.js\'s five ' +
+                     'layers. Whether it outlives the process is ' +
+                     '`persistence.appconfig`: in the default memory mode it ' +
+                     'is gone on restart, and with a store on it is written ' +
+                     'down and re-applied at the next start through this same ' +
+                     'function, which is why it adds no sixth layer. See ' +
+                     '`GET /admin-api/persistence`.\n\nNOTHING HERE WRITES ' +
+                     'TO THE APPCONFIG FILE in either mode, and that is ' +
+                     'deliberate rather than unfinished: a service that ' +
+                     'edited a file checked into a repository would leave a ' +
+                     'test\'s forgotten change behind permanently. The ' +
+                     'durable copy goes to the persistent store, which is not ' +
+                     'a place anything is checked in from.\n\nThe change ' +
                      'applies to the next token, assertion, ticket or search. ' +
                      'Nothing already issued changes, because a token is a ' +
                      'signed document.\n\nA setting whose `editable` is false ' +
@@ -1833,9 +1883,12 @@ const ROUTES = [
     actions: [
       { action: 'set', operationId: 'setTokenLifetimes',
         summary: 'Set one or more of the four',
-        description: 'IN MEMORY ONLY and gone on restart, like every other ' +
-                     'change made through this API — nothing writes to the ' +
-                     'appconfig file.\n\nName any of the four; the console ' +
+        description: 'A RUNTIME OVERRIDE, like every other change made ' +
+                     'through this API: gone on restart in the default ' +
+                     'memory mode, and written down and re-applied at the ' +
+                     'next start when `persistence.appconfig` has a store ' +
+                     'under it. Nothing writes to the appconfig file in ' +
+                     'either case.\n\nName any of the four; the console ' +
                      'form posts all four at once and a caller may post ' +
                      'one. ALL-OR-NOTHING: every value is checked before any ' +
                      'is written, so a body with one bad field changes ' +

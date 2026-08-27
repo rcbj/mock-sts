@@ -117,10 +117,20 @@ Two rules that are not optional here:
   and `hw-authent` is never set by anything here at all — a test over there
   would have exercised one branch of four and reported green over the rest.
 * **CLEAN UP THE PROCESS-WIDE STATE YOU TOUCH.** The realm table and
-  `process.env` are shared by every test in the run and this service persists
-  nothing, so a realm left behind changes what a later test resolves. Use the
-  `withEnv()` / `withRealm()` shape in `config_realm_layer.js`: save, act,
-  restore in a `finally`.
+  `process.env` are shared by every test in the run, so a realm left behind
+  changes what a later test resolves. Use the `withEnv()` / `withRealm()` shape
+  in `config_realm_layer.js`: save, act, restore in a `finally`.
+
+  **This rule used to be justified by "and this service persists nothing", and
+  that clause is gone as of 2026-08-27** — see `persistence/CLAUDE.md`. The rule
+  is unchanged and is now slightly more important rather than less: leftover
+  state was always visible to the rest of the run, and a test that reached a
+  persistent store could leave it visible to the next RUN as well. In practice
+  it cannot, because `persistence.mode` defaults to `memory` and every test here
+  deletes `CONFIG_FILE` before requiring anything — so nothing in this directory
+  opens a store. **A test that deliberately turned one on would be the first,
+  and it would have to clean up a directory or a database rather than a Map**;
+  the codec test avoids that by testing the codec rather than the driver.
 
 ## What is in here
 
@@ -132,6 +142,7 @@ Two rules that are not optional here:
 | `delegation_map_bands.js` | that the delegation picture is TWO BANDS — the issuer above, centred, every party on one plane — and that no two edge labels are drawn on top of each other |
 | `federation_map_bands.js` | that the federation picture is THREE BANDS — left asks, right authenticates — that the four relationship states are four distinguishable strokes, that a brokered partner is ONE arrow which keeps that pair's counts, and that the per-application counts either add up or report the difference |
 | `spnego_identity.js` | what a SPNEGO sign-in claims: which part of a Kerberos principal becomes the session's username, and the `amr`/`acr` read off the ticket's own flags |
+| `ldif_codec.js` | that every value this service can put in an attribute survives the RFC 2849 round trip `persistence.mode=ldif` writes — the base64 rules, the folding, `origin` riding as a comment, and a URL-valued attribute being refused rather than dereferenced |
 
 Both realm files bend the rule at the top of this file, and each says so in
 its own header rather than leaving a reader to catch it.
@@ -201,6 +212,31 @@ reorganised — so a guard written over there today does not run against this
 code — and because the purge half of it cannot be seen from outside at all,
 where "purged" and "never existed" look identical. If the pin is ever bumped
 the first reason goes away and the second one does not.
+
+`ldif_codec.js` passes the rule at the top of this file on the clearest clause
+any file here has had: **the failure is invisible until a restart, and it
+happens in a different process.** A value written wrongly — a leading space
+eaten, a folded line rejoined without its fold, UTF-8 mangled — is still in
+memory and still correct on every endpoint for the whole life of the process
+that wrote it. Nothing an HTTP client can ask shows it. The damage appears on
+the next start, as an attribute that is quietly not what it was, in a file that
+is still perfectly valid LDIF. The codec is also a pure function of a string, so
+a test that started a listener to reach it would be slower and no more
+convincing.
+
+**Its mutation record is the one to read before writing the next file here**,
+because one of its four mutants SURVIVED the first version and the reason is
+general. Three were caught immediately: dropping the trailing-space rule from
+`needsBase64()` (1 assertion red), folding one column too wide (3), and ignoring
+the `# sts-origin:` comment on the way in (2). The fourth — unfolding with
+`.trim()` instead of `.slice(1)`, which eats the value's own whitespace at a
+fold boundary — was caught by NOTHING, because every folded value the file tried
+was a run of one repeated letter and trimming removed nothing. The assertion
+that catches it had to be constructed: a value whose own space falls exactly on
+the fold boundary, so the continuation line begins with two spaces. **A round
+trip over convenient data is the shape that passes while proving nothing**, and
+the only reason that was found before it was committed is that the mutation
+round is mandatory here.
 
 ## What it does not do
 

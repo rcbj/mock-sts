@@ -55,7 +55,7 @@ const stats = require('../common/admin_stats');
 
 // ---------------------------------------------------------------------------
 // Create a realm, hand it to `fn`, and remove it however that goes. The realm
-// table is process-wide and this service persists nothing, so a realm left
+// table is process-wide, so a realm left
 // behind changes what a later test in the same run resolves. Same shape as
 // config_realm_layer.js's, deliberately — two spellings of "clean up after
 // yourself" is how one of them comes to be the one nobody follows.

@@ -385,6 +385,99 @@ var config = {
     // The address both TCP gRPC listeners bind.
     grpcHost: '0.0.0.0'
   },
+
+  // -------------------------------------------------------------------------
+  // PERSISTENCE, since 2026-08-27, and the one thing to know before changing
+  // it: THREE THINGS CAN SURVIVE A RESTART and nothing this service MINTS ever
+  // does. The embedded LDAP directory (which is also the applications
+  // registry, the federation register and the SPIFFE registry — they are
+  // directory entries and nothing else), the trust realm registry, and the
+  // runtime setting changes made in the console. Sessions, access tokens, ID
+  // Tokens, refresh tokens, authorization codes, SAML artifacts, Kerberos
+  // tickets, the statistics and the audit log go with the process in every
+  // mode, because the signing key is regenerated on every start and a token
+  // that outlived it would verify against nothing.
+  //
+  // OFF HERE, which is the default and is what this service did for its whole
+  // life until that date. docker-compose.yml turns it on with environment
+  // variables; a host run that wants it needs only `mode: 'ldif'`, which
+  // writes RFC 2849 files into `dataDir` and needs no database.
+  //
+  // ALL BUT writeDelay ARE RESTART-ONLY: the store is opened and READ before
+  // the HTTP listener binds, so a mode changed at runtime would leave a
+  // service whose directory came from one place and whose writes went to
+  // another.
+  // -------------------------------------------------------------------------
+  persistence: {
+    // ---------------------------------------------------------------------
+    // memory | ldif | postgres.
+    //
+    // memory writes NOTHING and is what this service did for its whole life
+    // until 2026-08-27. It is the value here so that a run with this file
+    // behaves exactly as one with the file that predated persistence — the
+    // rule this whole file follows.
+    //
+    // Change this ONE WORD to turn the base PostgreSQL configuration below
+    // on; `databaseUrl` is already filled in for a local database. Or set it
+    // to 'ldif', which needs no database at all and writes an RFC 2849 file
+    // per trust realm into `dataDir`.
+    // ---------------------------------------------------------------------
+    mode: 'memory',
+
+    // Where ldif mode writes. Relative paths resolve against the PACKAGE ROOT
+    // rather than the working directory, for the reason CONFIG_FILE does (see
+    // common/config_file.js): thirteen modules read it from thirteen different
+    // directories. In a container this is what a volume mounts over.
+    dataDir: './data',
+
+    // ---------------------------------------------------------------------
+    // THE BASE POSTGRESQL CONFIGURATION. Ready to use, and INERT until `mode`
+    // above is 'postgres' — nothing dials this on an ordinary run.
+    //
+    // It matches the Postgres service in this repository's docker-compose.yml
+    // exactly — user `sts`, password `sts`, database `sts` — so that the file
+    // and the compose stack cannot drift into disagreeing about what a base
+    // configuration looks like. Bring one up to match:
+    //
+    //   docker run -d --name sts-db -p 5432:5432 \
+    //     -e POSTGRES_USER=sts -e POSTGRES_PASSWORD=sts -e POSTGRES_DB=sts \
+    //     postgres:16-alpine
+    //
+    // THE HOST IS `localhost` BECAUSE THIS IS THE HOST-RUN VALUE. Inside the
+    // compose stack the database is reached as `postgres`, the service name on
+    // that network, and that stack sets STS_DATABASE_URL itself — an
+    // environment variable beats this file, so both work without either being
+    // wrong.
+    //
+    // The three tables are created on first connection. Nothing is migrated:
+    // if the schema ever changes, drop them.
+    //
+    // The password is here in plain text on purpose. It guards a throwaway
+    // database of MOCK identities, and nothing in this repository is a real
+    // credential; an operator with a real one sets STS_DATABASE_URL. This
+    // service never echoes the string back either — /admin/persistence and
+    // GET /admin-api/persistence report the host, port, database and user
+    // parsed out of it.
+    // ---------------------------------------------------------------------
+    databaseUrl: 'postgres://sts:sts@localhost:5432/sts',
+
+    // How long a change waits before the ldif store is rewritten, so a burst —
+    // a realm build writes thirteen entries — costs one file write. POSTGRES
+    // IGNORES IT and commits per request: the unit of writing there is a
+    // transaction rather than a file.
+    writeDelay: 1500,
+
+    // Write the trust realm registry down too. Off is a half-persisted service
+    // rather than a smaller one: a realm holds its own directory, so its
+    // entries would be stored with no realm to restore them into.
+    realms: true,
+
+    // Make a setting changed in the console or through the management API
+    // survive a restart. It adds NO LAYER — the saved values are re-applied at
+    // startup through the same setOverride() a caller uses, so the five layers
+    // are unchanged and a runtime override is simply durable.
+    appconfig: true
+  }
 };
 
 module.exports = config;

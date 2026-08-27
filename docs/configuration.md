@@ -198,6 +198,51 @@ Everything else about a relationship is not a setting at all: it is an entry
 under `ou=federations`, configured at `/admin/federation`, through `POST
 /admin-api/federation/*`, or with an `ldapmodify`.
 
+### Persistence
+
+Since 2026-08-27 three things can survive a restart. **Nothing this service
+mints ever does**, in any mode, and that is deliberate rather than unfinished:
+the signing key is regenerated on every start, so a token or an assertion that
+outlived it would verify against nothing.
+
+| Persists when a store is on | Never persists |
+|---|---|
+| the embedded LDAP directory — which is also the applications registry, the federation register and the SPIFFE registry, because in this service those *are* directory entries | sessions, access tokens, ID Tokens, refresh tokens |
+| the trust realm registry: names, descriptions, per-realm settings | authorization codes, pre-authorized codes, SAML artifacts |
+| runtime setting changes — what the console and `POST /admin-api/config/set` write | Kerberos tickets, the replay caches, the statistics, the audit log |
+
+| Setting | Default | What it does |
+|---|---|---|
+| `persistence.mode` | `memory` | `memory` writes nothing. `ldif` writes an RFC 2849 file per realm plus two JSON files in `dataDir`, and needs no database. `postgres` writes three tables. |
+| `persistence.dataDir` | `./data` | Where `ldif` writes. Relative paths resolve against the package root, not the working directory. |
+| `persistence.databaseUrl` | `postgres://sts:sts@localhost:5432/sts` | The connection string `postgres` mode dials. A local development default matching this repository's `docker-compose.yml`, so turning persistence on is one setting rather than two. Inert unless `mode` is `postgres`. |
+| `persistence.writeDelay` | `1500` | How long a change waits before the `ldif` files are rewritten. Postgres ignores it and commits per request. |
+| `persistence.realms` | `true` | Write the realm registry down too. |
+| `persistence.appconfig` | `true` | Make a setting changed at runtime survive a restart. |
+
+`memory` is the default, so a run that says nothing about persistence behaves
+exactly as every run before this existed — which is why no test in the suite had
+to be told about it.
+
+**All but `writeDelay` are restart-only**, because the store is opened and read
+before the HTTP listener binds. That ordering is also what makes restoring
+settings safe: only a runtime-changeable setting can be overridden at all, and a
+runtime setting is by definition one that is read per call rather than captured
+at startup — so nothing in a saved override file can reach `global.https`,
+`oauth2.rfc9700` or a bound port.
+
+**A failed write is logged and never thrown.** If the database goes away, the
+operation that triggered the write still succeeds, this service keeps answering
+out of memory, and `/admin/persistence` and `GET /ldap` both carry the error.
+The next change recomputes the same difference and tries again, so a failure
+loses nothing.
+
+**Persistence is not coordination.** Two processes pointed at one Postgres
+database each hold their own copy of the directory in memory: each writes its
+own changes down, and neither sees the other's until it restarts. Running
+several copies against one store is not yet a way to scale this service. One
+process per store.
+
 ### `oauth2.breakIdTokenNonce`
 
 Off. On, it puts a deliberately wrong `nonce` in every ID Token and logs that it
@@ -282,11 +327,22 @@ curl -s -X POST localhost:8081/admin-api/config/set \
 A restart-only key comes back refused, naming the reason. So does a value that
 does not fit the setting's type.
 
-**The change is in memory only and is gone on restart** — nothing here writes to
-the appconfig file, deliberately, because a service that edited a file checked
-into a repository would leave a test's forgotten change behind permanently. It
-applies to the next token, assertion, ticket or search; nothing already issued
-changes, because a token is a signed document.
+The change applies to the next token, assertion, ticket or search; nothing
+already issued changes, because a token is a signed document.
+
+**Whether it survives a restart is `persistence.appconfig`.** In the default
+`persistence.mode=memory` it does not — the override is in memory and is gone
+with the process, which is what this service did until 2026-08-27. With a store
+turned on it is written down and applied again at the next start, through the
+same `setOverride()` a caller uses, so nothing about the layering changes: it is
+still a runtime override sitting above the environment and the appconfig file,
+and a *reset* is written down too.
+
+**Nothing writes to the appconfig FILE in either mode**, deliberately, because a
+service that edited a file checked into a repository would leave a test's
+forgotten change behind permanently. The durable copy goes to the persistent
+store instead, which is not a place anything is checked in from. See
+[the persistence settings](#persistence) below.
 
 `POST /admin-api/config/set-many` changes a whole section at once and is
 all-or-nothing: every value is checked before any is written, so a body with one

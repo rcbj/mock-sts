@@ -62,3 +62,10 @@ tests
 docker-compose.yml
 Dockerfile
 .dockerignore
+
+# The persistent store — see .gitignore. A local `data/` directory from a host
+# run must not be baked into the image: the container mounts a VOLUME at
+# /usr/src/sts/data, and a copy inside the image would be shadowed by it on
+# every run but would still be there in `docker history` with whatever was in
+# the directory the day the image was built.
+data/

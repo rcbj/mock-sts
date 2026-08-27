@@ -322,6 +322,31 @@ subtree is recoverable, and a create that failed half way is not.
 **One caller.** Adding a second is the same test `keyed()` fails: it has to be
 something a request cannot build on demand.
 
+### `onChange()`: a realm row changed, and it is an EVENT rather than a slot
+
+Added 2026-08-27 for persistence. `onCreate()` and `onRemove()` already covered
+two of the five doors into this registry; the other three — `update()`,
+`setOverride()` and `clearOverride()` — had no hook at all, because until a realm
+could be written down nothing needed to know that a name or an override had
+changed.
+
+**It is not another inverted hook, and the distinction is worth keeping.** Rule
+3e's slots exist because a require in the obvious direction would close a cycle
+or move a route, and the module on the far end fills a hole this one left. This
+is the opposite shape: `persistence/persistence.js` REQUIRES this file, in the
+ordinary direction, and subscribes. Nothing here knows what persistence is or
+whether any exists, and a process that never loaded that module has an empty
+listener list and behaves exactly as it did.
+
+It fires AFTER the change, for the reason `built()` runs after the registry row
+is written — a listener that reads the registry back must see what the caller
+just did. **`remove()` fires it after the PURGES**, and that ordering is the
+whole of what makes a removal persist correctly: a listener fired before them
+would walk stores that still held the realm's entries and write them all back
+down. A listener that throws is logged and does not fail the operation: the realm
+IS renamed, and a persistence layer that could not write it down has not made
+that less true.
+
 ### Removing a realm takes its state with it
 
 Every store made here registers a purge and `remove()` calls them all. If removal
@@ -506,6 +531,49 @@ because regenerating the file is the one moment when an incomplete
 `env/defaults.js` is EXPECTED; the bypass is in the build tool and deliberately
 not a flag here, since a flag in the service is a flag somebody can leave on.
 
+**3q. THE RUNTIME OVERRIDE LAYER IS DURABLE SINCE 2026-08-27, AND IT IS STILL
+ONE LAYER.** `setOverrideStore()` is an inverted hook filled by
+`persistence/persistence.js`, and it passes rule 3e's test on the same clause the
+realm slot above it does: that module reads `persistence.mode` and four more
+settings through `value()`, so it requires this file, and a require back closes
+the cycle — node answers a cycle with a half-initialised module whose exports are
+`undefined`, and the symptom would arrive later as "notify is not a function"
+from inside a console Save.
+
+**IT IS A NOTIFICATION AND NOT A STORE**, which is why it takes a realm id and
+returns nothing. This file does not know what persistence is, whether it is on,
+or where it writes; it knows that something changed and IN WHICH REALM, because
+that is the thing only this file can say — a process-wide override and a realm's
+override are written to different places by the module on the far end, and
+`setOverride()` already makes exactly that decision for its own purposes.
+**`clearOverride()` and `clearAllOverrides()` fire it too**, and that is the half
+that is easy to miss: a store told only about writes would still hold a cleared
+override and would put it back on the next start, which is worse than no reset at
+all.
+
+**THERE IS STILL NO SIXTH LAYER**, and the reason is `applyPersistedOverrides()`:
+saved values are put back through the same `setOverride()` path a caller uses, so
+what comes out of the store is a layer-1 runtime override and nothing else. The
+ordering above is untouched, and an environment variable still does NOT beat a
+saved override — because a saved override is a runtime override, and layer 1 has
+always beaten layer 2.
+
+**RE-APPLYING THEM AFTER EVERY MODULE HAS LOADED IS SAFE, and it is a property of
+the table rather than of the ordering.** Only a `runtime: true` setting can be
+overridden at all — `checkOverride()` refuses every other by name — and a runtime
+setting is BY DEFINITION one that is read per call rather than captured at
+require time; that is what the column means and what `restartReason` documents
+the absence of. So nothing in a saved file can reach `global.https`,
+`oauth2.rfc9700`, `ldap.port` or `ldap.baseDn`, and **a saved file cannot change
+the scheme this service answers on**. Every value is re-checked on the way back
+in rather than trusted: the file was written by this service, but possibly by an
+older version of it, and a setting may have been renamed, retyped, had its enum
+narrowed or been made restart-only since.
+
+`persistence/CLAUDE.md` argues the rest. A REALM's overrides are not in this
+layer's file at all — they live on the realm row and are written down with the
+realm registry, because that is where they live in memory too.
+
 **`resolve()` READS THE TWO FILES SEPARATELY EVEN THOUGH THEY ARE UNIONED**, and
 that is not redundancy: `appconfig` is the union and is what the bootstrap logger
 reads, while `resolve()` digs the operator's file and then `env/defaults.js` so
@@ -689,8 +757,13 @@ find module` naming a file the operator never mentioned.
 
    **There is no clear operation and there must not be one.** An erase control
    on an unprotected console would make an audit log unable to answer the one
-   question it exists for. Restarting the service is how you get an empty one;
-   it is in memory and dies with the process like everything else here.
+   question it exists for. Restarting the service is how you get an empty one:
+   the ring is in memory and dies with the process, and **it stays that way now
+   that some things do not** — see `persistence/CLAUDE.md`. An audit log is
+   something this process RECORDED rather than something somebody TYPED, which
+   is the line that decides what is written down, and it is on the resetting
+   side of it. Persisting it would also make "restart to clear" stop being
+   true, which is the only clear operation there is.
 
 
 3d. **`claim_attributes.js` is the THIRD reader of `vc_claims.js`'s catalogue,

@@ -87,7 +87,7 @@ function withEnv(vars, fn) {
 
 // ---------------------------------------------------------------------------
 // Create a realm, hand it to `fn`, and remove it however that goes. The realm
-// table is process-wide and this service persists nothing, so a test that left
+// table is process-wide, so a test that left
 // one behind would change what a later test in the same run resolves.
 // ---------------------------------------------------------------------------
 function withRealm(t, id, overrides, fn) {

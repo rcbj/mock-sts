@@ -85,6 +85,13 @@ const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode, userFor,
         // belonging to a realm other than the one it is being read in.
         stsKeysFor } = require('../common/helpers');
 const config = require('../common/config');
+// What this service writes down, and whether it is working. A PLAIN REQUIRE in
+// the ordinary direction: that module is a library — it registers no route, so
+// this line moves nothing in the router — and it requires only `config.js` and
+// `realms.js`, neither of which reaches back here. Rule 3e's test therefore
+// asks for no slot, both ways round. `/admin/persistence` renders its
+// `status()` and `GET /ldap` publishes the same object.
+const persistence = require('../persistence/persistence');
 // TRUST REALMS: the registry behind /admin/realms, and the switcher this shell
 // draws on every page. It requires config.js and nothing else here, registers
 // no route, and is already loaded by helpers.js — so its position is not a
@@ -950,6 +957,20 @@ const SECTIONS = [
                'a value NOWHERE stops the service from starting rather than ' +
                'defaulting quietly. Like every writing page here, it writes ' +
                'the realm it is read IN.' },
+      { path: '/admin/persistence', label: 'Persistence',
+        blurb: 'Whether anything here survives a restart, and where it is ' +
+               'written. THREE things can be — the embedded directory (which ' +
+               'is also the applications registry, the federation register ' +
+               'and the SPIFFE registry), the trust realm registry, and the ' +
+               'runtime setting changes made on pages like Configuration. ' +
+               'NOTHING THIS SERVICE MINTS ever is: sessions, tokens, codes, ' +
+               'artifacts, tickets, the statistics and the audit log go with ' +
+               'the process, because the signing key is regenerated on every ' +
+               'start and a token that outlived it would verify against ' +
+               'nothing. Three modes: memory, which writes nothing and is the ' +
+               'default; ldif, a file per realm and no database; and ' +
+               'postgres. It is PERSISTENCE and not COORDINATION — one ' +
+               'process per store.' },
       { path: '/admin/rbac', label: 'Admin roles',
         blurb: 'Who holds the two roles that grant this console — Admin ' +
                'Read and Admin Write — granted and revoked here. They are ' +
@@ -1085,6 +1106,14 @@ const SETTING_HOMES = [
   { group: 'OID4VP', pages: ['/admin/oid4vp'] },
   { group: 'Kerberos', pages: ['/admin/kerberos'] },
   { group: 'LDAP', pages: ['/admin/ldap'] },
+  // A page of its own rather than a section of /admin/ldap, and the reason is
+  // that these six settings are not about the directory. They decide whether
+  // the TRUST REALM REGISTRY and the RUNTIME SETTING CHANGES are written down
+  // as well — two things that have nothing to do with LDAP — and one of the
+  // three modes involves no directory format at all. Putting them under
+  // LDAP / LDAPS would have told a reader looking for "does my realm survive a
+  // restart" to look at the wrong page.
+  { group: 'Persistence', pages: ['/admin/persistence'] },
   { group: 'SCIM', pages: ['/admin/scim'] },
   // The claim itself is an OAuth2/OIDC and SAML concern, but what it NAMES is a
   // directory group and what decides whether somebody is in one is the Groups
@@ -2180,9 +2209,23 @@ function page(title, active, inner, up, gate, req) {
     '<div class="pagehead"><h1>' + esc(title) + '</h1>' + refreshLink(req) + '</div>' +
     trailBar(active, up, title) + gateBanner(gate) + inner +
     '<div class="meta">' +
-    '<div>Everything on these pages is held in memory and dies with the process, like the signing ' +
-    'key this service regenerates on every start. There is nothing to persist and a statistics file ' +
-    'that outlived the key that signed the tokens it described would be worse than none.</div>' +
+    // The one sentence drawn at the foot of EVERY page in this console, which
+    // is why it is the sentence most worth keeping true. It said "everything
+    // here is held in memory" for the whole life of this service and that
+    // stopped being true on 2026-08-27 for exactly three things.
+    '<div>' + (persistence.status().enabled
+      ? 'The embedded directory, the trust realms and the settings changed here are written ' +
+        'down (<a href="/admin/persistence">persistence.mode=' +
+        esc(persistence.status().mode) + '</a>) and come back on the next start. Everything ' +
+        'this service MINTS is still held in memory and dies with the process — the sessions, ' +
+        'the tokens, the artifacts and the tickets — like the signing key it regenerates on ' +
+        'every start, because a token that outlived the key it was signed under would verify ' +
+        'against nothing.'
+      : 'Everything on these pages is held in memory and dies with the process, like the ' +
+        'signing key this service regenerates on every start. A statistics file that outlived ' +
+        'the key that signed the tokens it described would be worse than none — though the ' +
+        'directory, the trust realms and the settings changed here CAN be kept, which is ' +
+        '<a href="/admin/persistence">Persistence</a> and is off by default.') + '</div>' +
     '<div>Every page here also answers <code>?format=json</code>, and every form also accepts a ' +
     'JSON body, so a test can drive this console without a browser.</div>' +
     // FOUR closing divs now, not two: the .meta block, the .card it is inside,
@@ -3610,12 +3653,23 @@ app.get('/admin', function (req, res) {
     '<code>fedClientSecret</code> is this service\'s own credential AT a real foreign service, so ' +
     'it is never printed here and never reaches the audit log — an <code>ldapsearch</code> shows ' +
     'it anyway, and this console not being a second way to read it is not a security boundary.') +
-    bullet('<strong>It persists nothing, and a restart is not a reload.</strong> Every store behind ' +
-    'these pages is in memory — the counters, the token and artifact registries, the audit ring, ' +
-    'the sessions, the role roster, the embedded directory and every setting changed here — and ' +
-    'the signing key is REGENERATED on every start, so a token issued by the previous process no ' +
-    'longer verifies against the published JWKS. That is deliberate rather than a limitation: a ' +
-    'mock whose state survives is a mock a test has to clean up after.') +
+    bullet('<strong>NOTHING THIS SERVICE MINTS SURVIVES A RESTART, and a restart is not a ' +
+    'reload.</strong> The counters, the token and artifact registries, the audit ring, the ' +
+    'sessions, the authorization codes and the Kerberos tickets are all in memory, and the ' +
+    'signing key is REGENERATED on every start — so a token issued by the previous process no ' +
+    'longer verifies against the published JWKS. That is deliberate rather than a limitation, ' +
+    'and it is what makes the rest of it impossible: a statistics file, or a stored token, that ' +
+    'outlived the key it was signed under would be worse than none. ' +
+    (persistence.status().enabled
+      ? '<strong>THREE THINGS DO SURVIVE on this process</strong>, because ' +
+        '<code>persistence.mode</code> is <code>' + esc(persistence.status().mode) + '</code>: ' +
+        'the embedded directory — which is also the applications registry, the federation ' +
+        'register and the SPIFFE registry — the trust realm registry, and the settings changed ' +
+        'on these pages. Those are the things somebody TYPED. See ' +
+        '<a href="/admin/persistence">Persistence</a>.'
+      : 'THREE THINGS CAN BE MADE TO SURVIVE and are not on this process — the embedded ' +
+        'directory, the trust realms and the settings changed here. See ' +
+        '<a href="/admin/persistence">Persistence</a>, which is off by default.')) +
     bullet('<strong>It does not remember everything, either.</strong> The token, artifact and user ' +
     'registries and the audit ring are CAPPED and drop their oldest rows — and each says how many ' +
     'it dropped rather than pretending they were never there: <code>forgotten</code> on ' +
@@ -11518,9 +11572,22 @@ const NEW_APPLICATION_NOTES =
   'protocol &mdash; so this is refused if the registry already holds one under that name, and ' +
   'an application that appears under one name in two protocols is one entry with two kinds. ' +
   'Change what an existing one holds rather than creating it again.') +
-  note('<strong>Nothing here is persisted.</strong> This service holds everything in ' +
-  'memory: the entry is gone on restart, along with every other application, person and group ' +
-  'in the directory. That is a property of the whole service and not of this page.');
+  // WHETHER an application entry survives a restart is a property of the whole
+  // service rather than of this page, which is why this note is computed here
+  // rather than asserted: an application IS a directory entry, so it persists
+  // exactly when the directory does.
+  (persistence.status().persistsDirectory
+    ? '<div class="ok"><strong>This entry will survive a restart.</strong> An application here ' +
+      'is a directory entry under <code>ou=applications</code>, and this process is running ' +
+      'with <code>persistence.mode=' + esc(persistence.status().mode) + '</code> — so it is ' +
+      'written down along with every other application, person, group, federation relationship ' +
+      'and SPIFFE registration. That is a property of the whole service and not of this page; ' +
+      'see <a href="/admin/persistence">Persistence</a>.</div>'
+    : note('<strong>Nothing here is persisted on this process.</strong> The entry is gone on ' +
+      'restart, along with every other application, person and group in the directory. That is ' +
+      'a property of the whole service and not of this page, and it is changeable: ' +
+      '<a href="/admin/persistence">Persistence</a> writes the directory down, and is off by ' +
+      'default.'));
 
 function newApplicationPage(req) {
   log.debug("Entering newApplicationPage().");
@@ -15377,10 +15444,20 @@ const REALMS_CAVEAT =
   'entry, a client registered once can be used in both, and <strong>the two admin roles are ' +
   'held once</strong> — there is no per-realm administrator. The table at the foot of this page ' +
   'is the whole list of what is separated how.') +
-  note('<strong>Nothing here is persisted.</strong> Realms are held in memory like ' +
-  'everything else in this service and die with the process, along with the keys they signed ' +
-  'with. Define them from <code>POST /admin-api/realms</code> in whatever starts your stack if ' +
-  'you want them back.');
+  (persistence.status().persistsRealms
+    ? '<div class="ok"><strong>A realm defined here WILL come back.</strong> This process is ' +
+      'running with <code>persistence.mode=' + esc(persistence.status().mode) + '</code>, so ' +
+      'the realm rows — their names, descriptions and per-realm settings — and each realm\'s ' +
+      'own directory are written down and restored at the next start. WHAT DOES NOT COME BACK ' +
+      'IS THE KEYS: every realm\'s signing key is regenerated on every start, exactly like the ' +
+      'default realm\'s, so a token minted in this realm today verifies against nothing ' +
+      'tomorrow. See <a href="/admin/persistence">Persistence</a>.</div>'
+    : note('<strong>Nothing here is persisted on this process.</strong> Realms are held in ' +
+      'memory and die with it, along with the keys they signed with. Define them from ' +
+      '<code>POST /admin-api/realms</code> in whatever starts your stack if you want them ' +
+      'back — or turn on <a href="/admin/persistence">Persistence</a>, which writes the realm ' +
+      'registry and each realm\'s directory down. The KEYS are regenerated on every start ' +
+      'either way.'));
 
 // The base URL of this service WITHOUT any realm prefix. Every URL this page
 // prints is built from it, because a page read inside `acme` still has to be
@@ -16144,11 +16221,49 @@ function configFormsFor(path) {
 
     shared +
 
-    warn('<strong>Changes here are in memory and are gone on restart.</strong> ' +
-    'Nothing writes to the appconfig file, deliberately: a service that edited ' +
-    'a file checked into a repository would leave a test\'s forgotten change ' +
-    'behind permanently. To make something stick, put it in <code>' +
-    esc(configFile) + '</code> or in the setting\'s environment variable.') +
+    // ---------------------------------------------------------------------
+    // THIS PARAGRAPH USED TO BE ONE SENTENCE AND IT WAS TRUE FOR THE WHOLE
+    // LIFE OF THIS SERVICE UNTIL 2026-08-27.
+    //
+    // "Changes here are in memory and are gone on restart" is now true only
+    // in the default mode, and it is drawn on EVERY settings page in this
+    // console — so leaving it would have made the most-repeated sentence in
+    // the console the wrong one, on a service whose premise is that the prose
+    // is more trustworthy than the code.
+    //
+    // Both branches are written out rather than one being patched with a
+    // clause, because they are different advice: with no persistent store the
+    // reader is told to edit the appconfig file, and with one they are told
+    // that this IS the durable door and where the value went.
+    //
+    // WHAT DID NOT CHANGE is the reason nothing here rewrites the appconfig
+    // FILE, which is the same in both modes and is worth keeping said: a
+    // service that edited a file checked into a repository would leave a
+    // test's forgotten change behind permanently. The durable overrides go to
+    // the persistent store instead, which is a place nothing is checked in
+    // from.
+    // ---------------------------------------------------------------------
+    (persistence.status().persistsAppconfig
+      ? '<div class="ok"><strong>Changes here SURVIVE A RESTART.</strong> ' +
+        'This process is running with <code>persistence.mode=' +
+        esc(persistence.status().mode) + '</code>, so a value set here is ' +
+        'written to the persistent store and applied again the next time this ' +
+        'service starts. It is still a runtime override rather than a new ' +
+        'layer — the same setting, the same override map, put back through the ' +
+        'same function — so <em>Reset</em> still means "fall back to the file ' +
+        'or the environment variable", and the reset is written down too. ' +
+        'Nothing rewrites <code>' + esc(configFile) + '</code>, deliberately: ' +
+        'a service that edited a file checked into a repository would leave a ' +
+        'test\'s forgotten change behind permanently. See ' +
+        '<a href="/admin/persistence">Persistence</a>.</div>'
+      : warn('<strong>Changes here are in memory and are gone on ' +
+        'restart.</strong> Nothing writes to the appconfig file, ' +
+        'deliberately: a service that edited a file checked into a repository ' +
+        'would leave a test\'s forgotten change behind permanently. To make ' +
+        'something stick, put it in <code>' + esc(configFile) + '</code>, in ' +
+        'the setting\'s environment variable, or turn on a persistent store — ' +
+        'see <a href="/admin/persistence">Persistence</a>, which is off by ' +
+        'default.')) +
 
     (fixed
       ? warn('<strong>' + esc(String(fixed)) + ' of these ' +
@@ -17389,6 +17504,120 @@ app.get('/admin/config', function (req, res) {
 // catch, on a page that cannot be checked. The links below are to the
 // family's own surfaces — pages that explain themselves — and to the
 // service metadata for the rest.
+// ---------------------------------------------------------------------------
+// WHAT THE PERSISTENT STORE IS ACTUALLY DOING, as HTML and as JSON at once.
+//
+// ONE FUNCTION RETURNING BOTH, for the reason `config.describe()` is one shape:
+// a console and a management API that compute the same answer separately are a
+// console and an API that will one day disagree about whether the last write
+// worked, and that is the single worst thing either of them could disagree
+// about.
+//
+// **IT COMPUTES NOTHING.** Every number and every sentence comes out of
+// `persistence.status()`, which is that module's own account of itself and is
+// the same object `GET /ldap` publishes. This function chooses what to SHOW and
+// how to phrase it; it does not decide anything, so there is no second opinion
+// here to go stale.
+// ---------------------------------------------------------------------------
+function persistenceStatusBlock() {
+  log.debug("Entering persistenceStatusBlock().");
+  const info = persistence.status();
+  const off = info.mode === 'memory';
+
+  const rows = [
+    ['Mode', off
+      ? '<strong>memory</strong> — nothing is written down. This is what this ' +
+        'service did until 2026-08-27 and is still the default.'
+      : '<strong>' + esc(info.mode) + '</strong>' +
+        (info.configuredMode !== info.mode
+          ? ' — though <code>persistence.mode</code> is set to <code>' +
+            esc(info.configuredMode) + '</code>. IT FELL BACK, which means ' +
+            'the store could not be opened or read; the reason is below and ' +
+            'in the log. Nothing is being written down.'
+          : '')],
+    ['Where', off ? 'nowhere'
+      : info.mode === 'ldif'
+        ? '<code>' + esc(info.dataDir || '') + '</code> — one RFC 2849 LDIF ' +
+          'file per realm, plus <code>realms.json</code> and ' +
+          '<code>appconfig.json</code>'
+        : info.database
+          ? 'PostgreSQL <code>' + esc(String(info.database.host)) + ':' +
+            esc(String(info.database.port)) + '/' +
+            esc(String(info.database.database)) + '</code> as <code>' +
+            esc(String(info.database.user || 'the connection string\'s user')) +
+            '</code>. The connection string itself is never shown here: it ' +
+            'carries a password and this page is one fetch away from a log.'
+          : 'a PostgreSQL connection string'],
+    ['What is written', off ? 'nothing' : [
+        info.persistsDirectory ? 'the embedded directory' : null,
+        info.persistsRealms ? 'the trust realm registry' : null,
+        info.persistsAppconfig ? 'runtime setting changes' : null
+      ].filter(Boolean).join(', ')],
+    ['What is NEVER written',
+      'sessions, access tokens, ID Tokens, refresh tokens, authorization ' +
+      'codes, pre-authorized codes, SAML artifacts, Kerberos tickets, the ' +
+      'replay caches, the statistics, the audit log — and the signing key, ' +
+      'which is regenerated on every start and is why none of the rest could ' +
+      'usefully be kept.'],
+    ['When', off ? '—'
+      : info.writeDelayMs === 0
+        ? 'immediately — every change made while handling one request commits ' +
+          'as one transaction the moment that request is done, plus a final ' +
+          'flush on SIGTERM and SIGINT'
+        : esc(String(info.writeDelayMs)) + 'ms after a change, so a burst ' +
+          'costs one file write, plus a final flush on SIGTERM and SIGINT. A ' +
+          '<code>kill -9</code> cannot be trapped and would lose up to that ' +
+          'much.'],
+    ['Health', off ? '—'
+      : info.lastError
+        ? '<strong>THE LAST WRITE FAILED</strong> — ' + esc(info.lastError) +
+          '. This service is unaffected and is still answering everything out ' +
+          'of memory. The next change will recompute the same difference and ' +
+          'try again, so nothing has been lost yet.'
+        : 'writing normally'],
+    ['Written so far', off ? '—'
+      : esc(String(info.writes)) + ' flush(es), ' + esc(String(info.failures)) +
+        ' failure(s), ' + esc(String(info.entriesTracked)) + ' entry/entries ' +
+        'across ' + esc(String(info.realmsTracked)) + ' realm(s). Last write ' +
+        (info.lastWriteAt ? esc(info.lastWriteAt) : 'not yet') +
+        (info.pending ? '; a change is waiting to be written.' : '.')],
+    ['Restored at startup', off ? '—'
+      : info.restoredAt
+        ? esc(String(info.restored.entries)) + ' directory entry/entries, ' +
+          esc(String(info.restored.realms)) + ' trust realm(s) and ' +
+          esc(String(info.restored.overrides)) + ' setting override(s), at ' +
+          esc(info.restoredAt) + '. Zero across the board means this was the ' +
+          'first run against an empty store, which then had the seeded ' +
+          'directory written into it.'
+        : 'nothing was restored'],
+    ['Coordination', '<strong>NO.</strong> ' + esc(info.note)]
+  ];
+
+  const html = '<h2>Right now</h2>' +
+    (off
+      ? note('Nothing on this page is in force: <code>persistence.mode</code> ' +
+             'is <code>memory</code>, so this service is holding everything ' +
+             'in memory and will lose all of it when the process ends — ' +
+             'which is exactly what it has always done. The settings below ' +
+             'change that, and all but one of them are restart-only, because ' +
+             'the store is opened and READ before the listener binds.')
+      : (info.lastError
+          ? warn('<strong>The persistent store is not currently accepting ' +
+                 'writes.</strong> Everything below still describes what this ' +
+                 'service is trying to do; the Health row says what went ' +
+                 'wrong. Nothing has been lost — see the note above about a ' +
+                 'failed write.')
+          : '')) +
+    '<table class="key"><tr><th>What</th><th>Answer</th></tr>' +
+    rows.map(function (row) {
+      return '<tr><th>' + esc(row[0]) + '</th><td>' + row[1] + '</td></tr>';
+    }).join('') +
+    '</table>';
+
+  log.debug("Leaving persistenceStatusBlock(). mode=" + info.mode);
+  return { html: html, json: info };
+}
+
 const PROTOCOL_SETTINGS_PAGES = [
   { path: '/admin/oauth2', title: 'OAuth 2.0 / OIDC settings',
     lead: '<strong>The authorization server\'s own settings.</strong> ' +
@@ -17509,6 +17738,75 @@ const PROTOCOL_SETTINGS_PAGES = [
             ['/spnego', 'what SPNEGO is, for a person'],
             ['/authn/spnego', 'sign in with a ticket'],
             ['/admin/delegation', 'what S4U and a forwarded TGT did here']] },
+
+  // -------------------------------------------------------------------------
+  // /admin/persistence — THE PAGE THAT REVERSES THE OLDEST CLAIM IN THIS
+  // REPOSITORY.
+  //
+  // Every document here said this service persists nothing and that everything
+  // is gone on restart. Since 2026-08-27 three things are not: the embedded
+  // directory, the trust realm registry and the runtime appconfig overrides.
+  // Nothing else is, and the page says which is which rather than leaving a
+  // reader to infer a boundary — because "it persists now" is exactly the kind
+  // of half-sentence that gets somebody expecting their access token back.
+  //
+  // IT IS IN THIS TABLE RATHER THAN BEING A PAGE OF ITS OWN because it is
+  // overwhelmingly a settings page: six appconfig rows and the sentences that
+  // explain them, which is what every other row here is. What it has that they
+  // do not is a STATUS block, and that is one optional member on the row rather
+  // than a second kind of page — see protocolSettingsJson().
+  // -------------------------------------------------------------------------
+  { path: '/admin/persistence', title: 'Persistence',
+    lead: '<strong>Whether anything here survives a restart, and where it is ' +
+          'written.</strong> Three things can be: the embedded LDAP ' +
+          'directory — which is also where applications, federation ' +
+          'relationships and the SPIFFE registry live — the trust realm ' +
+          'registry, and the runtime setting changes made on pages like this ' +
+          'one. <code>persistence.mode</code> decides: <code>memory</code> ' +
+          'writes nothing and is what this service did until 2026-08-27, ' +
+          '<code>ldif</code> writes an RFC 2849 file per realm and needs no ' +
+          'database, <code>postgres</code> writes three tables.',
+    also: ['<strong>NOTHING THIS SERVICE MINTS IS EVER PERSISTED, in any ' +
+           'mode.</strong> Sessions, access tokens, ID Tokens, refresh ' +
+           'tokens, authorization codes, pre-authorized codes, SAML ' +
+           'artifacts, Kerberos tickets, the replay caches, ' +
+           '<a href="/admin/metrics">the statistics</a> and ' +
+           '<a href="/admin/audit">the audit log</a> are in memory and go ' +
+           'when the process does. That is not unfinished: <strong>the ' +
+           'signing key is regenerated on every start</strong>, so a token ' +
+           'that outlived it would verify against nothing and an assertion ' +
+           'restored from a disk would be a lie. What persists is what ' +
+           'somebody TYPED; what resets is what this process COUNTED.',
+           '<strong>Persistence is not coordination, and this is the ' +
+           'difference that will surprise somebody.</strong> Two processes ' +
+           'pointed at one Postgres database each hold their own copy of the ' +
+           'directory in memory: each writes its own changes down, and ' +
+           'neither sees the other\'s until it restarts. Running several ' +
+           'copies against one database is therefore NOT yet a way to scale ' +
+           'this service — it is a way to have several services quietly ' +
+           'overwrite each other. One process per database.',
+           '<strong>A restored person shows on ' +
+           '<a href="/admin/users">Users</a> as restored rather than as ' +
+           'having authenticated.</strong> They exist — an entry, searchable ' +
+           'over 389, readable over SCIM, and a token issued to them carries ' +
+           'their attributes — and they have not signed in during THIS ' +
+           'process, so they are not counted among the sign-ins. The counts, ' +
+           'the protocols and the per-person event list are statistics and ' +
+           'start at zero with everything else.',
+           '<strong>A write that fails is logged and never thrown.</strong> ' +
+           'If the database goes away, the LDAP operation that triggered the ' +
+           'write still succeeds, this service keeps answering out of memory, ' +
+           'and the status below turns red with the reason. Nothing is lost ' +
+           'by the failure: the next change recomputes the same difference ' +
+           'and writes it. A database outage taking down sixteen protocol ' +
+           'families that do not need a database is the one failure mode a ' +
+           'mock must not have.'],
+    status: persistenceStatusBlock,
+    links: [['/ldap', 'the directory, and this same status'],
+            ['/ldap/directory', 'every entry in it'],
+            ['/admin/realms', 'the realms that are written down with it'],
+            ['/admin/config', 'the whole settings table'],
+            ['/admin/users', 'the people, restored and otherwise']] },
 
   { path: '/admin/ldap', title: 'LDAP / LDAPS',
     lead: '<strong>The embedded directory: RFC 4511 on raw TCP 389, and the ' +
@@ -17639,6 +17937,17 @@ function protocolSettingsJson(row) {
     }),
     settings: configSettingsJson(row.path)
   };
+  // ONE OPTIONAL MEMBER, and only one page in the table has it. A settings
+  // page describes what this service is CONFIGURED to do; `/admin/persistence`
+  // also has to say what it is ACTUALLY doing right now — which store is open,
+  // whether the last write worked, how much is in it — because a persistence
+  // setting that is set and a persistence store that is working are two
+  // different facts and the gap between them is the whole failure mode. It is
+  // a function on the row rather than a second kind of page, so the JSON and
+  // the HTML stay one thing. See PERSISTENCE_PAGE below.
+  if (typeof row.status === 'function') {
+    json.status = row.status().json;
+  }
   log.debug("Leaving protocolSettingsJson(). " + json.settings.settingCount +
             " setting(s).");
   return json;
@@ -17651,6 +17960,11 @@ function protocolSettingsPage(req, row) {
   const inner = messagesOf(req) +
     note(row.lead) +
     (row.also || []).map(function (text) { return warn(text); }).join('') +
+    // ABOVE the settings forms, deliberately: what the store is doing right
+    // now is what somebody came to this page to find out, and the settings
+    // that produced it are the answer to the follow-up question. See the
+    // `status` member in protocolSettingsJson() above.
+    (typeof row.status === 'function' ? row.status().html : '') +
     configFormsFor(row.path) +
     // A `<p class="sub">` AND NOT A `note()`, which is the rule bullet() states
     // for a list item that opens with a link, applied one helper across. A row

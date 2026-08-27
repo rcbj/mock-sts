@@ -140,6 +140,22 @@ const config = require('../common/config');
 // realm. It requires only config.js, so it closes no cycle and moves no route
 // — the ordinary direction, no slot. See the naming-context block below.
 const realms = require('../common/realms');
+// ---------------------------------------------------------------------------
+// WHERE THIS DIRECTORY IS WRITTEN DOWN, SINCE 2026-08-27.
+//
+// A PLAIN REQUIRE, in the ordinary direction, and rule 3e's test is why rather
+// than habit: that module registers NO ROUTE at all — it is a library, rule 3's
+// shape — and it does not require this file, so requiring it here moves nothing
+// in the router and closes no cycle. It requires only `config.js` and
+// `realms.js`, both of which are already loaded by the two lines above.
+//
+// THE DEPENDENCY IN THE OTHER DIRECTION IS A SLOT, filled a few lines below,
+// and that one is not optional: that module has to READ this directory to write
+// it down and to REPLACE it at startup, and a require from there to here would
+// drag `/ldap` and `/ldap/directory` into the express router at position #4a —
+// far ahead of `admin.js`, and exactly the failure rule 1 exists to prevent.
+// ---------------------------------------------------------------------------
+const persistence = require('../persistence/persistence');
 const stats = require('../common/admin_stats');
 // The application registry. This module is its STORE — see the applications
 // section below — so the dependency runs both ways in the shape rule 6
@@ -559,6 +575,24 @@ let directoryVersion = 0;
 
 function touchDirectory() {
   directoryVersion++;
+  // ---------------------------------------------------------------------
+  // AND SINCE 2026-08-27 IT IS ALSO WHAT MAKES THE DIRECTORY PERSIST.
+  //
+  // This function was already the one thing every writer in this service was
+  // required to call — the rule is stated at length above, and it is enforced
+  // by prose rather than by the compiler — so it is where persistence hangs
+  // rather than at each of the fifteen writers. The argument is in
+  // persistence/persistence.js's header and it is worth reading before
+  // deciding this line belongs somewhere else: a new writer that forgets
+  // touchDirectory() produces a stale groups claim, and a new writer that
+  // forgot a separate persist() call would produce an entry that exists until
+  // the process restarts and then does not.
+  //
+  // In memory mode — the default, and every run before this existed — the call
+  // returns immediately on a boolean. It never writes anything synchronously
+  // in any mode: what it does is set a dirty bit and schedule.
+  // ---------------------------------------------------------------------
+  persistence.directoryChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1412,150 @@ realms.onRemove(function (id) {
   log.info('ldap: the "' + id + '" realm\'s directory at ' + realmBaseDn(id) +
            ' went with the realm; its store is dropped whole.');
   log.debug('Leaving the realm directory purge.');
+});
+
+// ---------------------------------------------------------------------------
+// AND THE DIRECTORY HANDS ITSELF TO PERSISTENCE.
+//
+// Two functions, installed WHOLE at require time. `persistence.js` validates
+// the pair when it is given them rather than testing for each at every call,
+// for `admin.js`'s logout-reader reason: a half-filled slot would leave that
+// module able to READ this directory and unable to restore it, which looks
+// exactly like an empty database and is the one failure mode that costs a day.
+//
+// **BOTH TAKE A REALM ID AND NEITHER ENTERS THE REALM**, which is deliberate
+// and is the opposite of what every LDAP handler in this file does. A handler
+// resolves a realm from the DN it was given and runs its body inside
+// `realms.run()`, because everything below it reads `entries` ambiently. These
+// two do not have a DN, they have a realm id, and `entries.realmMap(id)` names
+// a realm's store directly — so entering the realm would buy nothing and would
+// mean a restore of twelve realms did twelve `AsyncLocalStorage` entries for no
+// reason.
+//
+// **replaceRealm() DOES NOT GO THROUGH putEntry(), AND THAT IS THE POINT.**
+// putEntry() stamps `createTimestamp` and `modifyTimestamp` with NOW, which is
+// exactly right for an entry being created and exactly wrong for one being
+// restored: every person in a restored directory would report having been
+// created at the moment the process started. So the stored object is
+// reconstructed as it was written, timestamps included, and the two
+// operational attributes it carries are left alone. The DN is re-normalised
+// through this file's `normalizeDn()` rather than trusting the key the store
+// wrote, because that function is the one place in this service that decides
+// two spellings are one entry and a stored key from an older version of it must
+// not be believed over the current one.
+// ---------------------------------------------------------------------------
+persistence.setDirectory({
+  // Every entry in one realm, keyed the way the store keys it, for the diff
+  // that decides what to write.
+  realmEntries: function (realmId) {
+    const out = [];
+    entries.realmMap(realmId).forEach(function (entry, key) {
+      out.push({ key: key, entry: entry });
+    });
+    return out;
+  },
+
+  // One realm's whole directory, replaced by what was read back. Called only
+  // from persistence.start(), before the HTTP listener binds and before the
+  // LDAP socket is opened, so nothing can be reading this store while it is
+  // being swapped.
+  replaceRealm: function (realmId, list) {
+    log.debug('Entering replaceRealm(). realmId=' + realmId);
+    const store = entries.realmMap(realmId);
+    // CLEARED rather than merged. A restore is "this is the directory", not
+    // "these entries as well as the seed": a merge would leave behind an entry
+    // that was deleted in the last run and reseeded in this one, and the
+    // person who deleted it would find it back.
+    store.clear();
+    list.forEach(function (row) {
+      const stored = {
+        dn: String(row.dn),
+        attributes: row.attributes || {},
+        createdAt: row.createdAt || null,
+        modifiedAt: row.modifiedAt || row.createdAt || null
+      };
+      if (row.origin) {
+        stored.origin = String(row.origin);
+      }
+      store.set(normalizeDn(stored.dn), stored);
+    });
+    // The reverse group index describes a directory that is no longer there.
+    // This is the one call to touchDirectory() in this file that is NOT a
+    // write to be persisted — persistence.js ignores it, because it is
+    // restoring — and it is still required, for the index.
+    touchDirectory();
+
+    // -------------------------------------------------------------------
+    // AND THE PEOPLE ARE PUT BACK IN THE IDENTITY REGISTER, WHICH IS A
+    // SEPARATE STORE AND WAS THE FIRST BUG THIS FEATURE HAD.
+    //
+    // `/admin/users`, `/admin-api/users` and the user drill-down do not read
+    // this directory. They read `admin_stats.js`'s identity register, which
+    // until 2026-08-27 could only be filled by somebody AUTHENTICATING — and
+    // that was a complete account of how a person came to be known, because
+    // until then a person could only come to be known that way. A restored
+    // directory is the first thing that ever put an entry under `ou=users`
+    // without a sign-in, and the symptom was exact and misleading: twenty
+    // entries restored, `ldapsearch` and `/ldap/directory` showing all of
+    // them, `/admin/users` reporting `known: 0`. It reads as a failed
+    // restore and is a page reading a different store.
+    //
+    // They are registered as RESTORED rather than as authenticated —
+    // `noteRestoredIdentity()` argues the distinction and why the counts are
+    // deliberately not brought back with them.
+    //
+    // **THIS IS THE ONE PART OF replaceRealm() THAT ENTERS THE REALM**, and it
+    // is the exception the header above it warns is coming. Everything else
+    // here reaches the store through `entries.realmMap(id)`, which names a
+    // realm directly and needs no ambient one. These two do not have that
+    // shape: `isPersonEntry()` compares against `usersDn()`, and the identity
+    // register is itself a `realms.map()`. Both are ambient by construction,
+    // so this pass runs inside the realm and the rest does not.
+    // -------------------------------------------------------------------
+    realms.run(realms.get(realmId) || realms.DEFAULT_REALM, function () {
+      let people = 0;
+      store.forEach(function (stored) {
+        if (!isPersonEntry(stored)) {
+          return;
+        }
+        // ---------------------------------------------------------------
+        // A SEEDED PERSON IS SKIPPED, AND THAT IS WHAT KEEPS A RESTORED
+        // PROCESS'S /admin/users IDENTICAL TO A FRESH ONE'S.
+        //
+        // alice, bob and carol are written by seed() on every start, in every
+        // realm, and have never been in the identity register — that page's
+        // own description is "every userid this service has been given as part
+        // of an interaction that SUCCEEDED", and being seeded is not an
+        // interaction. Registering them here would mean a fresh service listed
+        // nobody and the same service after one restart listed three people
+        // who had still done nothing, which is a difference somebody would
+        // reasonably read as a bug.
+        //
+        // So what gets registered is what a fresh process would also have had:
+        // people somebody CREATED (`origin: 'console'`, and the SCIM and
+        // management API doors that share it), people an `ldapadd` wrote, and
+        // people who AUTHENTICATED — whose counts start at zero again either
+        // way, because those are statistics about a process.
+        // ---------------------------------------------------------------
+        if (stored.origin === 'seed') {
+          return;
+        }
+        // The `uid` if there is one, and the DN otherwise. A person written by
+        // any door in this service has a uid; one added by hand with ldapadd
+        // may not, and a person the console cannot name at all is worse than
+        // one it names by DN.
+        const uid = (stored.attributes.uid || [])[0];
+        if (stats.noteKnownIdentity(uid || stored.dn, 'restored')) {
+          people++;
+        }
+      });
+      log.info('ldap: ' + people + ' restored person/people in the "' +
+               realmId + '" realm are known to /admin/users, marked as ' +
+               'restored rather than as having authenticated here — they ' +
+               'have not, in this process.');
+    });
+    log.debug('Leaving replaceRealm(). ' + store.size + ' entry/entries.');
+  }
 });
 
 // An RFC 4514 DN split into its RDNs, leaf first. The split is on commas that
@@ -2959,6 +3137,28 @@ function createUser(name, options) {
   // LDAP client reads and the credential a wallet is handed have to say the
   // same thing about this person from the moment the entry exists.
   applyVcAttributes(created, wanted);
+  // ---------------------------------------------------------------------
+  // AND THE PERSON IS PUT IN THE IDENTITY REGISTER, WHICH IS WHAT MAKES THEM
+  // VISIBLE ON /admin/users. THIS WAS A PRE-EXISTING GAP, found while building
+  // persistence.
+  //
+  // `/admin/users`, `/admin-api/users` and the user drill-down do not read this
+  // directory — they read `admin_stats.js`'s register, which until 2026-08-27
+  // could only be filled by somebody AUTHENTICATING. So a person created
+  // through this function got a directory entry that `ldapsearch`,
+  // `/ldap/directory` and SCIM could all see, and appeared on the console's
+  // Users page NOWHERE until they signed in — while `/admin/users`'s own blurb
+  // said "a person can be created here ahead of their first sign-in". Three
+  // doors reach this function (the console, `POST /admin-api/users/create` and
+  // a SCIM create) and all three had it.
+  //
+  // They are registered as KNOWN WITHOUT A SIGN-IN — `authenticated` false on
+  // the row — so `authenticatedHere` keeps counting sign-ins rather than
+  // people. `noteKnownIdentity()` argues that distinction; its early return is
+  // also what keeps this call safe on the authentication path, where
+  // `recordAuthentication()` reaches `autoCreateUser()` and then here.
+  // ---------------------------------------------------------------------
+  stats.noteKnownIdentity(wanted, 'created');
   log.info('ldap: created ' + created.dn + ' because somebody asked for it.');
   audit.recordDirectory({
     action: 'user.create',
@@ -5264,6 +5464,22 @@ function description(req) {
       'against a syntax, so an entry may carry whatever attributes a client ' +
       'sends. A real directory would refuse most of that.',
     referentialIntegrity: false,
+    // ---------------------------------------------------------------------
+    // WHETHER THIS DIRECTORY SURVIVES A RESTART, AND IT DID NOT UNTIL
+    // 2026-08-27.
+    //
+    // Published HERE, on the page that describes the directory, rather than
+    // only on /admin/persistence, because this is the page somebody reads
+    // before they trust the thing with anything — and because /admin is gated
+    // and this is not, so a test driving the directory can see it. The answer
+    // is persistence.js's own status object verbatim rather than a summary of
+    // it: a second sentence about what is persisted is a second sentence that
+    // will disagree with the first.
+    //
+    // In the default memory mode it says `mode: "memory"`, which is what every
+    // reader of this page saw implicitly for the whole life of this service.
+    // ---------------------------------------------------------------------
+    persistence: persistence.status(),
     // This was `false` and it is now the whole answer, because one boolean had
     // to stand for three different facts and got at least one of them wrong for
     // any reader: LDAPS is here, StartTLS is not, and no CLIENT certificate is
@@ -5397,6 +5613,28 @@ app.get('/ldap', function (req, res) {
       'first byte — on ' + (info.tls.port || LDAPS_PORT) + '. There is no ' +
       'StartTLS: it is an extended operation and this library implements none.'],
     ['Entries right now', String(info.limits.currentEntries)],
+    // The one row on this page that answers "and will any of this still be
+    // here tomorrow". See description()'s `persistence` member.
+    ['Persistence', info.persistence.mode === 'memory'
+      ? 'NONE — this directory is in memory and goes when the process does, ' +
+        'which is what this service did until 2026-08-27. Set ' +
+        'persistence.mode to ldif (a file per realm, no database) or ' +
+        'postgres (a shared store) to change that.'
+      : info.persistence.mode + ' — ' +
+        (info.persistence.mode === 'ldif'
+          ? 'an RFC 2849 LDIF file per realm in ' + info.persistence.dataDir
+          : 'PostgreSQL at ' +
+            (info.persistence.database ? info.persistence.database.host + ':' +
+             info.persistence.database.port + '/' +
+             info.persistence.database.database : 'a connection string')) +
+        '. ' + info.persistence.entriesTracked + ' entry/entries written; ' +
+        (info.persistence.lastError
+          ? 'THE LAST WRITE FAILED (' + info.persistence.lastError + ') — the ' +
+            'directory is unaffected and is still answering from memory, and ' +
+            'the next change will try again'
+          : 'last write ' + (info.persistence.lastWriteAt || 'not yet')) +
+        '. Sessions, tokens, codes, artifacts and tickets are NEVER persisted ' +
+        'in any mode.'],
     ['Listener', info.listening
       ? 'up on TCP ' + info.port
       : 'DOWN — ' + (info.listenError || 'it never bound') +

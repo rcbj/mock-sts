@@ -380,6 +380,31 @@ const SPECS = [
               'device identifier — the did/didtype registration parameters are accepted ' +
               'and ignored.' },
 
+  { id: 'rfc2849', name: 'The LDAP Data Interchange Format (RFC 2849)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc2849',
+    coverage: 'partial, and in ONE PLACE ONLY: it is the on-disk format the ' +
+              'ldif persistence mode writes each trust realm\'s directory ' +
+              'in, so that the file is something ldapadd, slapadd and a ' +
+              'person can all read rather than a private JSON dump. NOT a ' +
+              'protocol surface — nothing here accepts LDIF over a socket or ' +
+              'over HTTP, and there is no import endpoint. What is ' +
+              'implemented is the content-record half of section 2: the ' +
+              'version header, one record per entry with dn first, plain and ' +
+              'base64 (::) attribute values with the SAFE-STRING rules ' +
+              'deciding which, line folding at 76 columns, comments, and ' +
+              'reading all of that back. What is NOT: change records ' +
+              '(section 3) in any form — no changetype, no add/delete/modrdn ' +
+              'record, so this is a snapshot format here and not a modification ' +
+              'one — no URL-valued attributes (a `:<` value is REFUSED rather ' +
+              'than dereferenced, because following a URL out of a data file ' +
+              'is reading something somebody else chose), and no control or ' +
+              'version other than 1. One thing is carried that the ' +
+              'specification has no home for — this service\'s own `origin` ' +
+              'marker, written as a `# sts-origin:` COMMENT above the record, ' +
+              'which every other reader ignores and this one reads back. See ' +
+              'persistence/persistence_ldif.js.',
+    what: 'The file format the ldif persistence mode writes and reads.' },
   { id: 'rfc4511', name: 'LDAP v3: the protocol (RFC 4511)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc4511',
@@ -2039,9 +2064,12 @@ const ENDPOINTS = [
           'was started with, or env/defaults.js under it — and there is no ' +
           'fifth, since a setting with a value in none of them stops this ' +
           'service from starting. A restart-only row is shown with its input ' +
-          'disabled and the reason beside it rather than hidden. Changes are ' +
-          'IN MEMORY and are gone on restart — nothing writes to the ' +
-          'appconfig file. Reset all is here and on no protocol page.' },
+          'disabled and the reason beside it rather than hidden. A change is a ' +
+          'RUNTIME OVERRIDE — the top of the five layers — and whether it ' +
+          'survives a restart is persistence.appconfig: with a store on it is ' +
+          'written down and re-applied at the next start, and with the default ' +
+          'memory mode it is gone. Nothing rewrites the appconfig FILE in ' +
+          'either case. Reset all is here and on no protocol page.' },
   // ---------------------------------------------------------------------------
   // THE EIGHT PROTOCOL SETTINGS PAGES, added 2026-08-27 when every family's
   // appconfig rows moved off /admin/config and onto the page for the family
@@ -2109,6 +2137,24 @@ const ENDPOINTS = [
           '/admin/groups and /ldap/directory; whether both sockets came up is ' +
           '/ldap. No setting here can make a bind be refused — none is ' +
           'missing, there is no such behaviour. Add ?format=json.' },
+  { path: '/admin/persistence', group: 'Admin', name: 'Persistence',
+    specs: ['rfc2849', 'rfc4511'],
+    effect: 'changes what survives a restart, and where it is written — on ' +
+            'the next start for five of the six settings',
+    what: 'NON-SPEC. The six persistence.* settings, plus a status block ' +
+          'saying what the store is actually DOING: the mode in force, ' +
+          'whether it fell back to memory because it could not be opened, ' +
+          'where it writes, how much it holds, when it last wrote and the ' +
+          'error if that failed. THREE THINGS PERSIST when a store is on — ' +
+          'the embedded directory (which is also the applications registry, ' +
+          'the federation register and the SPIFFE registry), the trust realm ' +
+          'registry, and the runtime appconfig overrides. NOTHING THIS ' +
+          'SERVICE MINTS EVER DOES, in any mode: sessions, tokens, codes, ' +
+          'artifacts, tickets, the statistics and the audit log go with the ' +
+          'process, because the signing key is regenerated on every start. ' +
+          'The ldif mode writes RFC 2849 LDIF, which is the only reason a ' +
+          'specification is named here at all. It is PERSISTENCE and not ' +
+          'COORDINATION — one process per store. Add ?format=json.' },
   { path: '/admin/wstrust', group: 'Admin', name: 'WS-Trust settings',
     specs: ['ws-trust', 'saml11', 'saml2', 'wss-username'],
     effect: 'changes who the token service says issued its tokens',
@@ -2496,10 +2542,12 @@ const ENDPOINTS = [
           'reset-all. set-many is ALL-OR-NOTHING, so a body with one bad ' +
           'field changes nothing and names it; a setting consumed at startup ' +
           'is refused with the reason rather than accepted, because an ' +
-          'accepted change that does nothing reads as having worked. Every ' +
-          'change is in memory and gone on restart, and reset-all is what a ' +
-          'test should call to put the service back. Mirrors POST ' +
-          '/admin/config.' },
+          'accepted change that does nothing reads as having worked. A change ' +
+          'is a runtime override, and whether it outlives the process is ' +
+          'persistence.appconfig — gone on restart in the default memory ' +
+          'mode, written down and re-applied with a store on. Reset-all is ' +
+          'what a test should call to put the service back either way, and a ' +
+          'reset is written down too. Mirrors POST /admin/config.' },
   // ---------------------------------------------------------------------------
   // THE EIGHT PROTOCOL SETTINGS RESOURCES, mirroring the eight console pages
   // added on 2026-08-27. Each is READ-ONLY and none has a POST beside it: every
@@ -2551,6 +2599,19 @@ const ENDPOINTS = [
           'ever refused and no setting is missing that would refuse one. What ' +
           'is IN the directory is /admin-api/users and /admin-api/groups. ' +
           'Read-only.' },
+  { path: '/admin-api/persistence', group: 'Management API',
+    name: 'Persistence',
+    specs: ['rfc2849', 'openapi'],
+    what: 'GET /admin/persistence over JSON: the six persistence.* settings ' +
+          'and — uniquely in this group — a `status` member saying whether ' +
+          'the store is open, healthy and writing, or whether it fell back to ' +
+          'memory. persistence.databaseUrl is never echoed back there: it ' +
+          'carries a password, so the host, port, database and user are ' +
+          'parsed out of it instead. `status.coordinates` is false and says ' +
+          'so — several processes on one store do not see each other. The ' +
+          'same object is on GET /ldap, which is not behind the console ' +
+          'gate. Read-only; the settings are written through POST ' +
+          '/admin-api/config/set-many like every other.' },
   { path: '/admin-api/wstrust', group: 'Management API', name: 'WS-Trust settings',
     specs: ['ws-trust', 'openapi'],
     what: 'GET /admin/wstrust over JSON: the one wstrust.* setting, and where ' +
