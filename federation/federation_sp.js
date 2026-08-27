@@ -970,10 +970,24 @@ app.get(LOGIN_PATH + '/:id', function (req, res) {
     // sends them AFTERWARDS. So the handle rides on TARGET rather than on a
     // RelayState, and the response comes back with no InResponseTo to match —
     // which is why fedAllowUnsolicited is forced on for this protocol.
+    //
+    // AND `shire` BESIDE IT, WHICH IS NOT DECORATION. Shibboleth's parameter
+    // for the assertion consumer service — where the <Response> is POSTed, as
+    // distinct from where the person goes afterwards. Without it a partner
+    // decides the destination for itself, and one that has this service
+    // REGISTERED posts to the registered address: the same path with the
+    // `fedctx` query STRIPPED, because a registration holds a URL and not a
+    // per-flow handle. The assertion then verifies, the sign-in completes, and
+    // the person lands on this service's "signed in" page instead of going back
+    // to the application that started the flow — a federation that works
+    // perfectly and never returns. Sending both is what a real SAML 1.1 service
+    // provider does, and it makes the flow independent of what is registered at
+    // the far end.
     const handle = putContext(contextRecord);
     const target = acsUrl(base, record) + '?fedctx=' + encodeURIComponent(handle);
     const joiner = String(record.fedSsoUrl).indexOf('?') === -1 ? '?' : '&';
-    const url = record.fedSsoUrl + joiner + 'TARGET=' + encodeURIComponent(target);
+    const url = record.fedSsoUrl + joiner + 'TARGET=' + encodeURIComponent(target) +
+      '&shire=' + encodeURIComponent(target);
     res.redirect(302, url);
     log.debug('Leaving the federation login endpoint. SAML 1.1 inter-site transfer.');
     return;

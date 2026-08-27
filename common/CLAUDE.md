@@ -1440,12 +1440,37 @@ the sightings, `appProtocol`, `appRedirectUriObserved`) or it DECLARES something
 — and of the declarations, `appAllowedProtocol` and the four per-family
 identifiers say in capitals that nothing in this service reads them.
 
-**`appFederationRelationship` is read.** It holds the `fedId` of a
+**`appFederationRelationship` is read.** Each value holds the `fedId` of a
 service-provider-side relationship in THIS realm, and `authn.js` consults it on
 the way to the sign-in screen: with one named and `appFederationAutoRedirect`
 left at its default, the browser is sent straight to that partner and the
-screen is never drawn. With the auto-redirect off, the screen appears and that
-partner is the ONLY one offered on it.
+screen is never drawn. With the auto-redirect off, the screen appears and those
+partners are the ONLY ones offered on it.
+
+**IT HOLDS A LIST SINCE 2026-08-26, AND IT USED TO HOLD ONE VALUE.** An
+application with two identity providers is the ordinary case in a real
+deployment — a workforce partner and a customer one, or one partner reached over
+two protocols during a migration — and while this attribute was single-valued
+the only way to say it was to configure nothing and let the person choose from
+the WHOLE register. Naming several is the middle answer: the choice is still
+made by a person, and the list they choose from is this application's own. The
+values need not share a protocol, because what the list names is where somebody
+can be authenticated and not how.
+
+**With more than one usable, `authn.js` draws `/authn/select-idp`** — one button
+per partner, no password field, and a banner per value that names something this
+service cannot use. `appFederationAutoRedirect` still means "without the sign-in
+screen" and never "without a page"; that page IS the screen's job done without
+the screen, and FALSE still keeps the screen with the buttons under the password
+box. `authn/CLAUDE.md` argues the chooser and why it is not the screen with its
+form hidden.
+
+**Its EDITABLE mode changed with its kind, from `set` to `multi`.** A caller
+that used to write it with `POST /admin-api/applications/set` now uses
+`/applications/add` and `/applications/remove` — which is the same rule every
+other identifier attribute here follows, and for the same reason: a `set` would
+replace the list with one value and read afterwards as the others having been
+forgotten.
 
 **What it answers is a question this registry could not answer before.** A
 relationship under `ou=federations` says how to talk to a foreign identity

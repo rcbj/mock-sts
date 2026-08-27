@@ -953,7 +953,15 @@ const LIST_PARAMS = {
   // through a form of its own — the picture and the table are filtered by one
   // control, so a reader who narrowed the table and then drew it gets the
   // picture of what they were looking at.
-  '/admin/delegation': ['type', 'mode', 'outcome', 'protocol', 'q', 'per', 'page'],
+  // The four names after `page` are the two CHOOSER SEARCHES and their offsets
+  // (chooserPane(), 2026-08-26). They are in here for the same reason `q` is:
+  // a reader who searched for `esb` and clicked the one result should come back
+  // from the drill-down to the page they left, and the drill-down's own copy of
+  // the chooser should open holding the search they were in the middle of. It
+  // is also what keeps the two searches independent of each other — each names
+  // its own pair, so paging one cannot move the other.
+  '/admin/delegation': ['type', 'mode', 'outcome', 'protocol', 'q', 'per', 'page',
+                        'appq', 'appfrom', 'userq', 'userfrom'],
   // The tokens page's own three filters and its paging, here since 2026-08-26
   // because that page now HAS a drill-down: every identifier links to
   // /admin/tokens/credential, and without this entry the way back from it landed
@@ -1593,6 +1601,31 @@ function page(title, active, inner, up, gate, req) {
     'textarea{width:100%;min-height:7rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
     '.formrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:.5em 0}' +
     '.formrow label{font-size:.78em;font-weight:600;color:#555}' +
+
+    // ---------------------------------------------------------------------
+    // THE SEARCH PANE UNDER A CHOOSER (chooserPane()). `max-height` with
+    // `overflow-y:auto` is the whole point of it rather than trim: the control
+    // must be the same size showing one match or twenty, because it sits above
+    // the table the reader came for and the `<select>` it replaced was one line
+    // whatever the register held. Twenty rows at this size is about 26em, so
+    // the pane scrolls from roughly the eleventh — which is what makes the
+    // count and the `next 20` link under it the page's own statement about what
+    // is off-screen rather than a thing the reader has to notice.
+    //
+    // `.on` is the entry the page is ALREADY showing, marked because the
+    // chooser is drawn under a selected application as well as over a bare
+    // list, and a search result identical to the page behind it reads as a link
+    // that does nothing.
+    // ---------------------------------------------------------------------
+    '.chooser{max-height:13.5em;overflow-y:auto;border:1px solid #e2e2ea;' +
+    'border-radius:6px;background:#fbfbfd;margin:.1em 0 .3em}' +
+    '.chooser ul.hits{list-style:none;margin:0;padding:0}' +
+    '.chooser li{border-bottom:1px solid #eeeef4;padding:.3rem .55rem;' +
+    'font-size:.82em;overflow-wrap:anywhere}' +
+    '.chooser li:last-child{border-bottom:none}' +
+    '.chooser li.on{background:#eef0ff}' +
+    '.chooser .hitwhat{display:block;color:#666;font-size:.9em}' +
+    '.chooser p.none{margin:.55rem;font-size:.82em;color:#666}' +
     'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;background:#f4f4f8;' +
     'padding:.1rem .25rem;border-radius:3px;word-break:break-all}a{color:#12107c}' +
     '.note{font-size:.78em;color:#666;margin:.3em 0 1em}' +
@@ -5571,13 +5604,16 @@ app.get('/admin/delegation', function (req, res) {
     note('<strong>Or pivot on an application.</strong> A delegation ' +
     'has three parties and an application can be two of them — the ' +
     '<em>intermediary</em> that acts on somebody\'s behalf, and the ' +
-    '<em>target</em> the credential is for. Choose one and see everything that ' +
-    'has been delegated through it or to it, in either role, with every ' +
-    'credential that came out. <strong>The chooser follows the filter above and ' +
-    'the page it opens does not</strong>: it shows everything that application ' +
-    'has ever been part of, because <em>what exists because of this thing</em> ' +
-    'is not a question a half-answer is useful for.') +
-    delegationApplicationChooser(view.applications, '', listView) +
+    '<em>target</em> the credential is for. Search for one and click it, and ' +
+    'see everything that has been delegated through it or to it, in either ' +
+    'role, with every credential that came out. <strong>The search follows the ' +
+    'filter above and the page it opens does not</strong>: it shows everything ' +
+    'that application has ever been part of, because <em>what exists because ' +
+    'of this thing</em> is not a question a half-answer is useful for. Any ' +
+    'part of a name matches, EVERY spelling an act presented is searched, and ' +
+    'twenty are shown at a time with the rest a click away.') +
+    delegationApplicationChooser(view.applications, '', listView,
+        { path: '/admin/delegation', query: req.query }) +
 
     // AND THE THIRD WAY IN, which is the other half of the same question. The
     // application chooser answers *what has this thing got itself into*; this
@@ -5593,9 +5629,11 @@ app.get('/admin/delegation', function (req, res) {
     'of it, and the sign-ins it rests on — with any delegation naming them ' +
     'drawn in the same picture. <strong>The list includes people nothing was ' +
     'ever issued to</strong>, because an S4U2Self or an <code>OnBehalfOf</code> ' +
-    'names somebody who was never present, and that is the row worth ' +
-    'opening.') +
-    delegationUserChooser(userGraph.userList(), '', listView) +
+    'names somebody who was never present, and that is the row worth opening. ' +
+    'Search it the same way — any part of a name, every spelling they arrived ' +
+    'under, twenty at a time — and clicking a result IS the choice.') +
+    delegationUserChooser(userGraph.userList(), '', listView,
+        { path: '/admin/delegation', query: req.query }) +
 
     '<h2>What happened</h2>' +
     // No `page` input in this form, deliberately: changing a filter or the page
@@ -5603,6 +5641,7 @@ app.get('/admin/delegation', function (req, res) {
     // somebody on page 6 of a two-page result and the clamp in pagingOf() would
     // then move them again, which reads as the form ignoring them.
     '<form method="get" action="/admin/delegation"><div class="formrow">' +
+      chooserCarry(req.query) +
       '<label for="type">Mechanism</label><select id="type" name="type">' +
         typeOptions + '</select>' +
       '<label for="mode">Kind</label><select id="mode" name="mode">' +
@@ -6221,6 +6260,209 @@ function delegationEdgeRow(edge, lookOf) {
 }
 
 // ---------------------------------------------------------------------------
+// BOTH CHOOSERS ARE A SEARCH NOW, AND WHAT DECIDES THE SHAPE IS THE ONE THING
+// THIS CONSOLE CANNOT DO.
+//
+// Each of them was a `<select>` holding EVERY entry. That is fine at thirty and
+// it is what a register looks like after an afternoon; it is not what one looks
+// like after a week, and the two things a reader actually does with a long list
+// — type the first few letters of a name, or read the handful that match — are
+// the two a native select does worst. It also spends the same screen whether it
+// holds three names or three hundred, which is the complaint that started this.
+//
+// **THERE IS NO SCRIPT AND THERE MUST NOT BE ONE**, which is why this is not a
+// type-ahead. `script-src 'none'` holds over the whole service (common/app.js)
+// and the parent suite asserts it against this console's live headers
+// (tests/admin_api.js) — so there is no keystroke handler, no fetch and no
+// debounce to build one out of, and anything written as though there were would
+// be a control that silently does nothing rather than one that half works. What
+// a browser gives for free is a GET form submitted by the Enter key: type,
+// press Enter, and the page comes back around the matches. The cost is a round
+// trip per attempt instead of per keystroke, and the reader keeps typing until
+// the list is what they wanted, which is the same loop.
+//
+// **A RESULT IS A LINK AND THE LINK IS THE SELECTION.** A select needed a
+// button beside it because a `<select>` chooses nothing until something submits
+// the form it is in. A list of matches needs none: clicking a row IS choosing
+// that application or that person, which is one click where there were two.
+//
+// **TWENTY AT A TIME, IN A PANE THAT SCROLLS.** A wall of matching links would
+// be the select's own fault with the browser's scrolling taken away, so the
+// pane has a fixed maximum height and a scrollbar of its own: the control is
+// the same size showing one match or twenty. The line under it says how many
+// matched and offers the next twenty, because a list that silently stops at
+// twenty is one that has told the reader the twenty-first does not exist.
+//
+// **AN EMPTY BOX MATCHES EVERYTHING**, so this is useful before anybody types —
+// the first twenty with the total beside them, which is what the select showed
+// in one line rather than in a column.
+// ---------------------------------------------------------------------------
+const CHOOSER_HITS = 20;
+
+// One query parameter, first-wins. Express hands back an array when a parameter
+// is repeated, and String() on one is "a,b" — a search nothing matches, reached
+// by a link somebody clicked twice. The same rule pageParamsOf() applies.
+function queryOne(query, key) {
+  const raw = (query || {})[key];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value === undefined || value === null ? '' : String(value);
+}
+
+// Does one catalogue entry match what was typed? Case-insensitive, and over
+// EVERY spelling the catalogue holds rather than the one it shows: an
+// application arrives as `HTTP/backend@EXAMPLE.COM` and as `HTTP/backend`, a
+// person as `alice`, as `alice@STS.MOCK` and as `urn:sts-mock:user:alice`, and
+// each chooser draws one of them. A reader searching for a name they pasted out
+// of the acts table four inches up the page is pasting the OTHER one about half
+// the time, and a search that answers "nothing matches" to a string printed on
+// the same page is worse than no search at all.
+function chooserMatches(names, wanted) {
+  if (!wanted) {
+    return true;
+  }
+  const needle = wanted.toLowerCase();
+  return (names || []).some(function (name) {
+    return String(name == null ? '' : name).toLowerCase().indexOf(needle) >= 0;
+  });
+}
+
+// THE TWO SEARCHES, AS HIDDEN INPUTS FOR SOMEBODY ELSE'S FORM.
+//
+// The acts table's own filter is a GET form, and a GET form posts its own
+// fields and NOTHING else — so narrowing the table by mechanism would clear
+// both searches, which is a control undoing a control the reader is still
+// using. Each search re-emits the OTHER one through chooserPane()'s own hidden
+// inputs; this is for the forms on the page that are neither of them.
+function chooserCarry(query) {
+  return ['appq', 'appfrom', 'userq', 'userfrom'].map(function (name) {
+    const value = queryOne(query, name);
+    return value === ''
+      ? ''
+      : '<input type="hidden" name="' + esc(name) + '" value="' + esc(value) +
+        '">';
+  }).join('');
+}
+
+// The search box, the scrolling pane of results and the line under it, for
+// either kind of party. Written once because it is drawn six times — the two
+// choosers on /admin/delegation, both again on /admin/delegation/map, and one
+// each on the two drill-downs — and six hand-written copies of a control with
+// an offset in it is five chances to page one list with another's parameter.
+//
+// `spec`:
+//   here        { path, query } — THE PAGE THIS IS DRAWN ON, not the page a
+//               result opens. The form submits back to here, so a search
+//               neither leaves the page nor loses the table's filter, its
+//               paging or the other chooser's search: everything in the current
+//               query rides along as hidden inputs.
+//   param       the search box's name — `appq` / `userq`
+//   fromParam   the offset's name — `appfrom` / `userfrom`
+//   label       the box's label; `placeholder` what to type in it
+//   entries     the catalogue, each { key, names, label, detail, href }
+//   selectedKey the entry this page is already showing, marked in the pane
+//   nothing     what to say when the search matched none of them
+function chooserPane(spec) {
+  log.debug("Entering chooserPane(). param=" + spec.param);
+  const query = (spec.here && spec.here.query) || {};
+  const path = (spec.here && spec.here.path) || '';
+  const wanted = queryOne(query, spec.param).trim();
+  const matched = spec.entries.filter(function (entry) {
+    return chooserMatches(entry.names, wanted);
+  });
+
+  // A STALE OFFSET IS CLAMPED RATHER THAN OBEYED. `?appfrom=40` is a link the
+  // reader followed when 57 matched; narrowing the search to 6 would otherwise
+  // answer with an empty pane under a line saying 6 matched, which reads as the
+  // search being broken by the term that worked.
+  let from = parseInt(queryOne(query, spec.fromParam), 10);
+  if (!isFinite(from) || from < 0 || from >= matched.length) {
+    from = 0;
+  }
+  const shown = matched.slice(from, from + CHOOSER_HITS);
+
+  // What every control here carries with it. Two names come OUT of it and each
+  // for its own reason: the search term, because the text input re-emits it and
+  // a hidden input beside it would submit the old one; and the offset, because
+  // a NEW search starts at the first twenty — carrying 40 into a two-hit search
+  // is the stale-offset case above, arrived at by typing rather than by
+  // clicking.
+  const carried = pageParamsOf(query);
+  delete carried[spec.param];
+  delete carried[spec.fromParam];
+  const hidden = Object.keys(carried).map(function (name) {
+    return '<input type="hidden" name="' + esc(name) + '" value="' +
+           esc(carried[name]) + '">';
+  }).join('');
+
+  // The pager's own base keeps the search term — it is paging THESE results —
+  // and overrides only the offset. An offset of nothing rather than of 0, so
+  // the first page of a search is the same URL whether it was reached by
+  // typing or by clicking `previous`.
+  const paging = pageParamsOf(query);
+  const pageLink = function (at, label, title) {
+    // pageNav()'s own idiom, and for its reason: the control's OWN parameter is
+    // the only one it sets, so the other chooser's offset and the table's page
+    // stay where the reader left them.
+    const move = {};
+    move[spec.fromParam] = at > 0 ? at : '';
+    return '<a href="' + esc(path + queryWith(paging, move)) + '" title="' +
+      esc(title) + '">' + label + '</a>';
+  };
+
+  const rows = shown.map(function (entry) {
+    return '<li' + (entry.key && entry.key === spec.selectedKey
+                      ? ' class="on"' : '') + '>' +
+      '<a href="' + esc(entry.href) + '">' + esc(entry.label) + '</a>' +
+      (entry.detail
+        ? '<span class="hitwhat">' + esc(entry.detail) + '</span>' : '') +
+      '</li>';
+  }).join('');
+
+  const pane = '<div class="chooser">' +
+    (rows
+      ? '<ul class="hits">' + rows + '</ul>'
+      : '<p class="none">' + esc(spec.nothing) + '</p>') +
+    '</div>';
+
+  const noun = wanted
+    ? (matched.length === 1 ? 'match' : 'matches')
+    : 'in the list';
+  const count = matched.length
+    ? (matched.length > CHOOSER_HITS
+        ? 'Showing ' + (from + 1) + '&ndash;' + (from + shown.length) +
+          ' of ' + matched.length + ' ' + noun + '. '
+        : matched.length + ' ' + noun + '. ')
+    : '';
+  const more = [];
+  if (from > 0) {
+    more.push(pageLink(from - CHOOSER_HITS, '&larr; previous ' + CHOOSER_HITS,
+      'The twenty before these'));
+  }
+  if (from + CHOOSER_HITS < matched.length) {
+    more.push(pageLink(from + CHOOSER_HITS, 'next ' + CHOOSER_HITS + ' &rarr;',
+      'The twenty after these'));
+  }
+
+  log.debug("Leaving chooserPane(). " + matched.length + " matched, " +
+            shown.length + " shown from " + from + ".");
+  return '<form method="get" action="' + esc(path) + '">' +
+    '<div class="formrow">' + hidden +
+      '<label for="' + esc(spec.param) + '">' + esc(spec.label) + '</label>' +
+      '<input type="text" id="' + esc(spec.param) + '" name="' +
+        esc(spec.param) + '" size="32" value="' + esc(wanted) +
+        '" placeholder="' + esc(spec.placeholder) + '">' +
+      '<button class="secondary">Search</button>' +
+      (wanted
+        ? ' <a href="' + esc(path + queryWith(carried, {})) + '">clear</a>'
+        : '') +
+    '</div></form>' +
+    pane +
+    (count || more.length
+      ? '<p class="note">' + count + more.join(' &middot; ') + '</p>'
+      : '');
+}
+
+// ---------------------------------------------------------------------------
 // THE APPLICATION CHOOSER, DRAWN IN THREE PLACES AND THEREFORE A FUNCTION.
 //
 // It is on /admin/delegation (where somebody looking at the table wants to
@@ -6236,16 +6478,21 @@ function delegationEdgeRow(edge, lookOf) {
 // they paste into a ticket. A URL carrying `HTTP%2Fbackend%40EXAMPLE.COM` is one
 // somebody can check; one carrying a key they have never seen is not.
 //
-// A SELECT rather than a list of links because there can be thirty of these and
-// a wall of thirty links above the table would push the table itself off the
-// screen. The full list IS drawn as links, below, where it is the content rather
-// than a control.
+// **IT WAS A `<select>` UNTIL 2026-08-26 AND IS A SEARCH NOW** — chooserPane()
+// above carries the whole argument, including why it cannot be a type-ahead.
+// What survives of the old one is the sentence that made it a select rather
+// than a wall of links: a control here must be the same size whatever the
+// register holds, because the table it sits above is what the reader came for.
+// The pane scrolls instead. The full list IS still drawn as links, below, where
+// it is the content rather than a control.
 // ---------------------------------------------------------------------------
-// `carry` is the delegation table's own filter, spelt out as hidden inputs for
-// the reason perPageForm() gives: a GET form posts its own fields and NOTHING
-// else, so without them this control quietly empties the breadcrumb's way back
-// to the list the reader came from.
-function delegationApplicationChooser(catalogue, selectedKey, carry) {
+// `carry` is the delegation table's own filter, spelt into every RESULT's href
+// for the reason perPageForm() gives about hidden inputs: without it a click
+// here quietly empties the breadcrumb's way back to the list the reader came
+// from. `here` is the page this control is DRAWN on, which is where its own
+// form submits — a different page from the one a result opens, and conflating
+// the two is what a search added to a chooser gets wrong.
+function delegationApplicationChooser(catalogue, selectedKey, carry, here) {
   log.debug("Entering delegationApplicationChooser().");
   if (!catalogue.length) {
     log.debug("Leaving delegationApplicationChooser(). Nothing to choose from.");
@@ -6256,30 +6503,38 @@ function delegationApplicationChooser(catalogue, selectedKey, carry) {
       'that performed the exchange, a WS-Trust <code>AppliesTo</code>, or the ' +
       'service principal a Kerberos S4U request asked for a ticket to.');
   }
-  const options = catalogue.map(function (entry) {
+  const entries = catalogue.map(function (entry) {
     const roles = [];
     if (entry.roles.intermediary) roles.push(entry.roles.intermediary + ' as the intermediary');
     if (entry.roles.target) roles.push(entry.roles.target + ' as the target');
     if (entry.roles.initial) roles.push(entry.roles.initial + ' as the initial identity');
-    return '<option value="' + esc(entry.identifier) + '"' +
-      (entry.key === selectedKey ? ' selected' : '') + '>' +
-      esc(entry.identifier) + ' — ' + esc(entry.acts) + ' act(s): ' +
-      esc(roles.join(', ')) + '</option>';
-  }).join('');
-  log.debug("Leaving delegationApplicationChooser(). " + catalogue.length + " option(s).");
-  const carried = Object.keys(carry || {}).map(function (name) {
-    return '<input type="hidden" name="' + esc(name) + '" value="' +
-           esc((carry || {})[name]) + '">';
-  }).join('');
-  return '<form method="get" action="/admin/delegation/application">' +
-    '<div class="formrow">' + carried +
-      '<label for="application">Application</label>' +
-      '<select id="application" name="application">' +
-        (selectedKey ? '' : '<option value="">choose one&hellip;</option>') +
-        options +
-      '</select>' +
-      '<button class="secondary">Everything delegated through or to it</button>' +
-    '</div></form>';
+    return {
+      key: entry.key,
+      // EVERY spelling is searched and the newest is shown, which is the same
+      // split the option had — see chooserMatches() for why the difference
+      // matters more here than anywhere else on the page.
+      names: [entry.identifier].concat(entry.spellings || []),
+      label: entry.identifier,
+      detail: entry.acts + ' act(s): ' + roles.join(', '),
+      // THE IDENTIFIER AND NOT THE KEY, for the reason above: the route
+      // normalises either, and the identifier is what a reader recognises in
+      // the address bar and in a link they paste into a ticket.
+      href: '/admin/delegation/application' +
+            queryWith(carry || {}, { application: entry.identifier })
+    };
+  });
+  log.debug("Leaving delegationApplicationChooser(). " + catalogue.length +
+            " application(s) to search.");
+  return chooserPane({
+    here: here, param: 'appq', fromParam: 'appfrom',
+    label: 'Find an application',
+    placeholder: 'part of a client_id, an SPN or an audience',
+    entries: entries, selectedKey: selectedKey,
+    nothing: 'No application any act named matches that. This list holds what ' +
+      'some delegation actually presented, spellings and all, so a name that ' +
+      'is in the acts table above and not in here is one this register filed ' +
+      'as a person rather than as an application.'
+  });
 }
 
 // The same list as CONTENT: every application some act named, with what it did
@@ -6571,6 +6826,7 @@ app.get('/admin/delegation/map', function (req, res) {
     'a picture of the pagination.') +
 
     '<form method="get" action="/admin/delegation/map"><div class="formrow">' +
+      chooserCarry(req.query) +
       '<label for="type">Mechanism</label><select id="type" name="type">' +
         typeOptions + '</select>' +
       '<label for="mode">Kind</label><select id="mode" name="mode">' +
@@ -6607,8 +6863,10 @@ app.get('/admin/delegation/map', function (req, res) {
     'two, because it adds every ordinary grant, assertion, ticket and SVID ' +
     'issued in their name and the sign-ins the lot rests on. None of that is a ' +
     'delegation, so none of it can be on this diagram.') +
-    delegationApplicationChooser(view.applications, '', listView) +
-    delegationUserChooser(userGraph.userList(), '', listView) +
+    delegationApplicationChooser(view.applications, '', listView,
+        { path: '/admin/delegation/map', query: req.query }) +
+    delegationUserChooser(userGraph.userList(), '', listView,
+        { path: '/admin/delegation/map', query: req.query }) +
 
     (graph.acts
       ? picture.html
@@ -7071,7 +7329,8 @@ app.get('/admin/delegation/application', function (req, res) {
 
   // The chooser itself, drawn on the bare page AND under a selected application
   // — the second is what makes comparing two of them one click rather than two.
-  const chooser = delegationApplicationChooser(catalogue, key, listView);
+  const chooser = delegationApplicationChooser(catalogue, key, listView,
+      { path: '/admin/delegation/application', query: req.query });
 
   if (!entry) {
     const inner = messagesOf(req) + back +
@@ -7319,7 +7578,7 @@ app.get('/admin/delegation/application', function (req, res) {
 // S4U2Self or an OnBehalfOf named them — which is the case worth finding, and
 // exactly the case a chooser built from /admin/users alone would hide.
 // ---------------------------------------------------------------------------
-function delegationUserChooser(catalogue, selectedKey, carry) {
+function delegationUserChooser(catalogue, selectedKey, carry, here) {
   log.debug("Entering delegationUserChooser().");
   if (!catalogue.length) {
     log.debug("Leaving delegationUserChooser(). Nothing to choose from.");
@@ -7330,32 +7589,39 @@ function delegationUserChooser(catalogue, selectedKey, carry) {
       'issued naming somebody, or the moment a delegation names them — ' +
       'including one they were never present for.');
   }
-  const options = catalogue.map(function (entry) {
+  const entries = catalogue.map(function (entry) {
     const facts = [];
     if (entry.authentications) facts.push(entry.authentications + ' sign-in(s)');
     if (entry.tokens.issued) facts.push(entry.tokens.issued + ' token(s)');
     if (entry.artifacts) facts.push(entry.artifacts + ' artifact(s)');
     if (entry.acts) facts.push(entry.acts + ' delegation act(s)');
-    return '<option value="' + esc(entry.key) + '"' +
-      (entry.key === selectedKey ? ' selected' : '') + '>' +
-      esc(entry.key) + (entry.isClient ? ' (a client)' : '') +
-      (facts.length ? ' — ' + esc(facts.join(', ')) : ' — nothing yet') +
-      '</option>';
-  }).join('');
-  const carried = Object.keys(carry || {}).map(function (name) {
-    return '<input type="hidden" name="' + esc(name) + '" value="' +
-           esc((carry || {})[name]) + '">';
-  }).join('');
-  log.debug("Leaving delegationUserChooser(). " + catalogue.length + " option(s).");
-  return '<form method="get" action="/admin/delegation/user">' +
-    '<div class="formrow">' + carried +
-      '<label for="user">Person</label>' +
-      '<select id="user" name="user">' +
-        (selectedKey ? '' : '<option value="">choose one&hellip;</option>') +
-        options +
-      '</select>' +
-      '<button class="secondary">Everything issued in their name</button>' +
-    '</div></form>';
+    return {
+      key: entry.key,
+      // The key, the spelling this console shows, and every OTHER spelling the
+      // same person arrived under. Searching the key alone would answer
+      // "nobody matches" to `alice@STS.MOCK`, which is the form a Kerberos row
+      // on this very page prints.
+      names: [entry.key, entry.presented].concat(entry.forms || []),
+      label: entry.key + (entry.isClient ? ' (a client)' : ''),
+      detail: facts.length ? facts.join(', ') : 'nothing yet',
+      // THE NORMALISED KEY AND NOT A SPELLING, which is the one place this
+      // differs from the application chooser — the header above argues it.
+      href: '/admin/delegation/user' +
+            queryWith(carry || {}, { user: entry.key })
+    };
+  });
+  log.debug("Leaving delegationUserChooser(). " + catalogue.length +
+            " identity(ies) to search.");
+  return chooserPane({
+    here: here, param: 'userq', fromParam: 'userfrom',
+    label: 'Find a person',
+    placeholder: 'part of a username, a principal or a subject',
+    entries: entries, selectedKey: selectedKey,
+    nothing: 'Nobody here matches that. This list is the identity register ' +
+      'UNIONED with everybody a delegation named, so a name that is on the ' +
+      'page above and not in here reached this service as an application ' +
+      'rather than as a person.'
+  });
 }
 
 // The same list as CONTENT. It is not /admin/users and the page says so: that
@@ -7757,7 +8023,8 @@ app.get('/admin/delegation/user', function (req, res) {
   const up = upTo('/admin/delegation', 'One person', listView);
   const back = note('<a class="btn" href="' + esc(up.href) +
     '">&larr; Back to the delegation table</a>');
-  const chooser = delegationUserChooser(catalogue, key, listView);
+  const chooser = delegationUserChooser(catalogue, key, listView,
+      { path: '/admin/delegation/user', query: req.query });
 
   if (!activity) {
     const inner = messagesOf(req) + back +

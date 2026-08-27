@@ -2131,6 +2131,15 @@ GET /oauth2/authorize?response_type=code&client_id=…      no session
   302 -> http://localhost:3000/callback?code=…            answered per spec
 ```
 
+**It is not always the screen.** The same redirect goes to
+`/federation/login/{id}` when the application's entry names one usable federation
+relationship, and to **`/authn/select-idp`** when it names several — a page with
+one button per partner and no password field. The calling protocol cannot tell
+the three apart and must not: what it asked for is "get this person
+authenticated and bring them back", and which identity provider does it, or
+whether the person was asked which, is not its business. See *Home realm
+discovery* under *Federation*.
+
 The return URL is the request that was interrupted, whole, minus `prompt` — which
 has been honoured by then and would otherwise prompt for ever. Everything else
 goes back untouched, because the second pass is where the PKCE challenge, the
@@ -2675,6 +2684,47 @@ brings them back to it. Only relationships that would actually work are offered;
 a button leading to a refusal is worse than no button, because the person has
 already left the screen by the time they find out.
 
+#### Home realm discovery: which partner, and who decides
+
+Those buttons offer **every** relationship this service has, which is home realm
+discovery performed by the user against a list they have no way to reason about.
+`appFederationRelationship` on the application's entry under `ou=applications` is
+the answer to that, and it holds a **list**:
+
+| What the entry names | What a person meets |
+|---|---|
+| nothing | the sign-in screen, with the generic buttons under it |
+| one usable relationship | **nothing at all** — the browser goes straight to that partner |
+| several usable | **`/authn/select-idp`**: one button per partner, no password field |
+| several, `appFederationAutoRedirect` FALSE | the sign-in screen, with those partners as its only buttons |
+| only unusable values | the sign-in screen, with a banner naming what is wrong with each |
+
+The values need not share a protocol — a SAML 2.0 partner and an OpenID Connect
+one are the ordinary pair, and they arrive at the same `/federation/acs/{id}`.
+**Configuration decides the set; the person decides within it**, which is the
+difference between this page and the generic buttons: those ask "which of the
+seven identity services this mock has heard of are you?", and this asks "which
+of your employer's two".
+
+`appFederationAutoRedirect` means *without the sign-in screen* and never *without
+a page*. With one partner that is a redirect; with several it is the chooser,
+which is the screen's job done without the screen. There is no value of a boolean
+that can say which identity provider somebody's employer is.
+
+**A value naming a relationship this service cannot use is printed, not dropped**
+— disabled, half-configured, identity-provider-side, or absent from this realm.
+A list of three with one disabled draws two buttons, and two buttons is exactly
+what a correct list of two draws, so the difference has to be said in words. The
+one case that shows nobody anything is one usable value with the auto-redirect
+on: it works perfectly and draws no page, so the other values' problems go to the
+log at INFO instead.
+
+The four checks are made **when the attribute is read**, never when it is
+written: it is a string on a directory entry that `ldapmodify` reaches, and the
+relationship it names can be disabled by somebody who never looked at this
+application. The chooser re-reads them again when it is drawn, because the
+pending record lives ten minutes.
+
 #### The other direction: releasing attributes to a partner
 
 Every protocol endpoint here already issues to anybody that asks, so an
@@ -2762,12 +2812,11 @@ bugs rather than fidelity bugs, and a happy path proves close to nothing.
 and it is the browser-facing SSO profile this service went without for a long time.
 Everything it needs already existed — an assertion builder, a signer, a login screen,
 a session — and what was missing was the thing that hands an assertion to a relying
-party *through a browser*. Five endpoints:
+party *through a browser*. Four endpoints:
 
 | | |
 |---|---|
 | `GET`/`POST` `/wsfed` | the passive requestor endpoint, dispatching on `wa`. With no `wa` at all it describes itself, the way `GET /sts` does |
-| `POST /wsfed/login` | where the sign-in screen posts |
 | `GET /wsfed/autopost.js` | the one script the sign-in response page runs |
 | `GET /FederationMetadata/2007-06/FederationMetadata.xml` | signed federation metadata |
 | `GET`/`POST` `/wsfed/rp` | a **mock relying party** — non-spec, and the default `wreply` |
@@ -3374,9 +3423,9 @@ Under the picture the same thing in words, because a diagram nobody can quote is
 
 **Three links off that table narrow it to one thing.** Every row of both tables on `/admin/delegation` carries a link to **`/admin/delegation/chain`**, which draws THAT relationship on its own with everything else in the service left out — the whole picture is the right answer to *what does this service look like* and the wrong one to *what is this row, exactly*, which on a service driven for an afternoon is forty boxes. It carries the chain's own key rather than a row number, so a link put in a ticket cannot come back describing a different relationship once the cap has dropped an act; a chain whose acts have all been dropped says so rather than answering 404.
 
-And **`/admin/delegation/application`** asks the other question: not *what talks to what* but **what has been issued because of this application**. Choose one from the list every act has named — the chooser is on the delegation page as well — and get every act it took part in **regardless of the role it played**, the picture of every relationship it is in, and every delegated credential that came out, each with the role this application had in the act that produced it. That last part is the point: a middle tier is the *intermediary* of the chains it acts on and the *target* of the ones that reach it, so offering only what was issued FOR it would hide what was issued THROUGH it, which is the interesting half of a delegation. The list is built from the acts rather than from `ou=applications`, which is why an entry on it can be marked *not in the registry*. Both pages answer `?format=json` and `?format=svg`, and both link back to the table carrying whatever filter you left it with.
+And **`/admin/delegation/application`** asks the other question: not *what talks to what* but **what has been issued because of this application**. Search the list every act has named — the chooser is on the delegation page as well, and since 2026-08-26 it is a **search box over a scrolling pane of at most twenty matches**, where clicking a match is the choice; every spelling an act presented is searched, so a name pasted out of the acts table finds its application whichever form it was in — and get every act it took part in **regardless of the role it played**, the picture of every relationship it is in, and every delegated credential that came out, each with the role this application had in the act that produced it. That last part is the point: a middle tier is the *intermediary* of the chains it acts on and the *target* of the ones that reach it, so offering only what was issued FOR it would hide what was issued THROUGH it, which is the interesting half of a delegation. The list is built from the acts rather than from `ou=applications`, which is why an entry on it can be marked *not in the registry*. Both pages answer `?format=json` and `?format=svg`, and both link back to the table carrying whatever filter you left it with.
 
-**And `/admin/delegation/user` is the one picture here drawn from more than this register.** It answers *what has this service done in one person's name, end to end* — a question the three pages above it cannot, because most of what happens in somebody's name is not a delegation: an authorization code grant is not an act, nor is a Kerberos AS-REQ, nor a SAML assertion, so a person who signed in nine times and holds twenty tokens is an empty picture drawn from acts alone. Choose somebody — the chooser is on the delegation page and on the map as well — and get **every credential ever issued naming them** (JWT, SAML assertion, Kerberos ticket, SVID, verifiable credential) as a line to the application holding it, **labelled with the exact OAuth 2.0 grant or OpenID Connect flow that produced it** and the section that defines it: `authorization_code` beside *Authorization Code Flow* and RFC 6749 §4.1, `refresh_token` beside RFC 6749 §6, `client_credentials`, the password grant, the implicit and hybrid halves of an authorization response, OpenID4VCI's pre-authorized code, and RFC 8693 token exchange. A **dotted** line into the hexagon is them signing in, one per protocol family with the method on it, and it is why anything else on the picture was allowed. **A solid line out of an APPLICATION is what the credential it holds is addressed to** — an access token issued to a web front end and carrying `aud: https://apigw1.example.com` is this service saying that the front end may reach the API gateway in that person's name, so the picture draws it, labelled with the grant. It is the same *reaches* line the delegation half draws and it means the same thing; what tells them apart is the mechanism on the label, an ordinary grant against `Token exchange`, because nothing was exchanged to get this one. The audience is looked up in the applications registry — by registered audience and then by `client_id`, so `https://apigw1.example.com` and the bare `apigw1` a scope produces land on ONE box rather than two — and the string the token actually carries is in the line's tooltip. An `aud` naming several resources draws several lines, which is what RFC 8707's small set of resources produces; an `aud` that is **this service's own** — a refresh token is addressed to the token endpoint, and an access token nobody named a resource for carries the `<base>/resource` stand-in — draws none, because that is not a relationship with anybody. Any delegation naming them is in the same diagram, drawn by the same code the map uses — and the delegation lines are the only ones that carry a colour for impersonation or delegation, because a grant makes neither claim.
+**And `/admin/delegation/user` is the one picture here drawn from more than this register.** It answers *what has this service done in one person's name, end to end* — a question the three pages above it cannot, because most of what happens in somebody's name is not a delegation: an authorization code grant is not an act, nor is a Kerberos AS-REQ, nor a SAML assertion, so a person who signed in nine times and holds twenty tokens is an empty picture drawn from acts alone. Search for somebody — the chooser is on the delegation page and on the map as well, the same twenty-at-a-time search the application one is, and the same rule about spellings: `alice`, `alice@STS.MOCK` and `urn:sts-mock:user:alice` all find the one person this console files them under — and get **every credential ever issued naming them** (JWT, SAML assertion, Kerberos ticket, SVID, verifiable credential) as a line to the application holding it, **labelled with the exact OAuth 2.0 grant or OpenID Connect flow that produced it** and the section that defines it: `authorization_code` beside *Authorization Code Flow* and RFC 6749 §4.1, `refresh_token` beside RFC 6749 §6, `client_credentials`, the password grant, the implicit and hybrid halves of an authorization response, OpenID4VCI's pre-authorized code, and RFC 8693 token exchange. A **dotted** line into the hexagon is them signing in, one per protocol family with the method on it, and it is why anything else on the picture was allowed. **A solid line out of an APPLICATION is what the credential it holds is addressed to** — an access token issued to a web front end and carrying `aud: https://apigw1.example.com` is this service saying that the front end may reach the API gateway in that person's name, so the picture draws it, labelled with the grant. It is the same *reaches* line the delegation half draws and it means the same thing; what tells them apart is the mechanism on the label, an ordinary grant against `Token exchange`, because nothing was exchanged to get this one. The audience is looked up in the applications registry — by registered audience and then by `client_id`, so `https://apigw1.example.com` and the bare `apigw1` a scope produces land on ONE box rather than two — and the string the token actually carries is in the line's tooltip. An `aud` naming several resources draws several lines, which is what RFC 8707's small set of resources produces; an `aud` that is **this service's own** — a refresh token is addressed to the token endpoint, and an access token nobody named a resource for carries the `<base>/resource` stand-in — draws none, because that is not a relationship with anybody. Any delegation naming them is in the same diagram, drawn by the same code the map uses — and the delegation lines are the only ones that carry a colour for impersonation or delegation, because a grant makes neither claim.
 
 Two things about it are worth knowing before reading one. An RFC 8693 exchange writes a row in **both** registers for one credential, so it is drawn once — on its delegation line, which says more — and the number left off is printed rather than left to be noticed; a Kerberos S4U ticket is the overlap that survives, since a ticket has no identifier in either register to collapse the two on, and the page says so. And the chooser's list is the identity register **unioned** with the delegation one, so it offers people nothing was ever issued to: an `S4U2Self` or an `OnBehalfOf` names somebody who was never present and proved nothing, and that is precisely the row worth opening. `/admin/users` links to it, and the two are not summaries of each other — that page is the ledger, where a token is revoked, and this one is the relationships.
 

@@ -817,6 +817,16 @@ up is the front-channel / back-channel distinction, which needs two origins;
 what it bought is a test that runs in the ordinary suite on every stack in about
 four seconds.
 
+**`tests/federation_choice_sso.js` JOINED IT ON 2026-08-26 AND IS THE ONLY ONE
+THAT DRIVES AN APPLICATION WITH TWO PARTNERS.** `appFederationRelationship` on
+an application entry holds a LIST now, so one application may name a SAML 2.0
+relationship AND an OpenID Connect one, and this service then draws
+`/authn/select-idp` — one button per partner, no password field — instead of
+redirecting. That job signs in TWICE, once through each button, because the only
+assertion that distinguishes an honoured choice from a service that took the
+first usable partner is arithmetic on the two relationships' counters. See
+`federation/CLAUDE.md` and `authn/CLAUDE.md`.
+
 **It is an INTEGRATION test and it is not the list below.** What it proves is
 that the pieces fit: that a federated identity satisfies a flow the application
 started, that the ID Token the application verifies comes from the service

@@ -214,9 +214,11 @@ Four things about that are load-bearing:
 
 ## It checks no password
 
-* **It checks no password.** The username typed at `/authn/login` — or at
-  `/wsfed/login`, which creates the same session — becomes the identity in every
-  token and every assertion.
+* **It checks no password.** The username typed at `/authn/login` becomes the
+  identity in every token and every assertion — for every protocol, since
+  2026-08-26, when WS-Federation gave up the screen of its own that used to post
+  to `/wsfed/login` and started arriving here through `beginAuthentication()`
+  like the other three browser SSO profiles.
 
 One password IS rejected, here and in three other places:
 
@@ -228,24 +230,87 @@ One password IS rejected, here and in three other places:
 
 Since 2026-08-26 it takes an `application` — the identifier the caller's own
 protocol presented, a `client_id` from `oauth2.js`, an entityID from
-`saml2_sso.js`, a relying party id from `saml11_sso.js` — and when that
-application's registry entry names a usable federation relationship with the
-auto-redirect on, what comes back is `/federation/login/{id}` rather than
-`/authn/login`.
+`saml2_sso.js`, a relying party id from `saml11_sso.js` — and what comes back
+is now one of THREE things:
 
-**The caller cannot tell the two apart and must not.** What a protocol module
+| What the entry names | What comes back |
+|---|---|
+| ONE usable relationship, auto-redirect on | `/federation/login/{id}` — the partner, directly |
+| SEVERAL usable, auto-redirect on | `/authn/select-idp?authn={id}` — the CHOOSER |
+| anything else | `/authn/login?authn={id}` — this module's screen |
+
+**The caller cannot tell the three apart and must not.** What a protocol module
 asked for is "get this person authenticated and bring them back to `returnTo`",
-and which identity provider does the authenticating is not its business — which
-is the property the partner buttons at the foot of the screen have had all
-along. What is new is that nobody has to press one. `federationFor()` is the
-whole of it, and its header carries the four checks and why each is made at the
-READ rather than at the write.
+and which identity provider does the authenticating — or whether the person was
+asked which — is not its business. That is the property the partner buttons at
+the foot of the screen have had all along. What changed is first that nobody
+has to press one, and then that where there IS a choice it is between THIS
+APPLICATION'S partners rather than every relationship in the register.
+`federationFor()` is the whole of it, and its header carries the four checks
+and why each is made at the READ rather than at the write.
 
-**No pending record is written on that path**, and that is not an optimisation:
-the browser goes to a foreign identity provider and comes back to
+**No pending record is SPENT on the first path**, and that is not an
+optimisation: the browser goes to a foreign identity provider and comes back to
 `/federation/acs/{id}`, which finishes the sign-in through `startSession()`
 without this screen ever being drawn. A record minted there would be one nothing
-could ever spend.
+could ever spend. The CHOOSER is the opposite case — it draws a page, so it
+needs the record, and it reads the same one the screen would have, out of the
+same store and with the same ten-minute expiry.
+
+### `/authn/select-idp`: the chooser, and why it is not the screen with its form hidden
+
+An entry may name SEVERAL relationships — `appFederationRelationship` is
+multi-valued since 2026-08-26 — and they need not share a protocol: a SAML 2.0
+partner and an OpenID Connect one are the ordinary pair. When more than one of
+them is usable there is a question to put to the person, and
+`federationFor()` deliberately returns NO single `relationship` in that case,
+so the redirect branch above cannot fire and pick the first partner for
+somebody.
+
+**It is a page of its own.** The alternative was this module's own screen with
+its form suppressed, and that was refused: that page carries `username`,
+`password`, `kc-login` and `kc-cancel`, it POSTs to a handler that signs
+somebody in on a typed name, and every one of those element ids is what four
+tests and a person's muscle memory look for. Hiding the form leaves a page that
+is a sign-in screen in everything but what it shows — and the first time
+somebody re-added a field to it, the chooser would grow a password box nobody
+asked for.
+
+**`appFederationAutoRedirect` still decides whether a SCREEN is drawn.** It
+means what it always meant — "without the sign-in screen" — and with several
+partners that is this page, which is the screen's job done without the screen.
+FALSE with several named is therefore the screen itself, with one button per
+partner under the password box, exactly as FALSE has always behaved with the
+partners plural. What the setting never means is "pick one for them": there is
+no value of a boolean that can say which identity provider somebody's employer
+is.
+
+**The unusable values are PRINTED there, one banner each.** A list of three
+whose middle value names a disabled relationship draws two buttons, and two
+buttons is exactly what a correct list of two draws — so the difference has to
+be said in words, and each is a different entry for an operator to go and fix.
+
+**The list is resolved AGAIN when the page is drawn**, not taken from the
+redirect that produced it, and the record's copy is replaced with the answer.
+The record lives ten minutes and the register has four doors; a relationship
+disabled in between would otherwise be a button leading to a refusal at a
+foreign service. If fewer than two partners are left, the screen is drawn
+instead — and because the record was updated, the screen agrees with what the
+chooser just found.
+
+**There is no "none of these" escape**, deliberately. This page is reached
+because an application was configured to authenticate its people elsewhere, and
+an escape hatch to the password box would be that configuration meaning
+nothing. Every relationship being unusable is the one case where this page is
+not drawn at all: `federationFor()` reports no usable partner and the screen
+appears with the problems on it.
+
+**It is the ONE branch that draws no page that has to say so in the LOG.** With
+the auto-redirect on and exactly one usable value, an entry naming three
+partners of which two are disabled works perfectly and shows nobody anything —
+so `beginAuthentication()` logs the other values' problems at INFO. There is no
+banner to put them on and the flow succeeding is exactly why nobody would go
+looking.
 
 **`returnTo` is checked twice, here and again in `federation_sp.js`**, which
 that module's decision 4 already argued for its own reasons. Two checks on one
@@ -254,11 +319,16 @@ somebody handing the federated entry point a `returnTo` of their own.
 
 ### The screen's partner list, and the one setting it deliberately ignores
 
-`federatedOptionsHtml()` has two halves now. An application that NAMES a
-relationship gets that partner and only that partner — offering the others
-beside it would put the discovery step back one line below the configuration
-that removed it — and that half **ignores `federation.loginButtons`**, which
-the generic list still respects.
+`federatedOptionsHtml()` has two halves now. An application that NAMES
+relationships gets THOSE partners and only those — offering the rest of the
+register beside them would put the discovery step back one line below the
+configuration that narrowed it — and that half **ignores
+`federation.loginButtons`**, which the generic list still respects.
+
+**All of them, not the first.** The attribute holds a list, and this screen is
+what a person meets when the auto-redirect is OFF — which is precisely the
+configuration that says "let them choose". One button for a list of two would
+make that setting mean the opposite of what it says.
 
 The asymmetry is the point rather than an oversight. That setting exists so
 that a service with no federation configured has a sign-in screen byte for byte
@@ -330,7 +400,13 @@ not a mechanism.
 ### `record.mechanismProblem`, beside `record.federation`
 
 Both sources report an unusable relationship as a `problem` string, and the
-screen prints it rather than falling silently back to the password box. They
+screen prints it rather than falling silently back to the password box. **Every
+one of them, deduplicated.** The attribute holds a list, so an entry naming
+three partners of which two are disabled has two things wrong with it — showing
+one would have somebody fix it, reload, and meet the next. They overlap by
+construction, though: when the application entry is what decided the sign-in,
+`mechanismFor()` copies that entry's FIRST problem onto the record, so a plain
+concatenation prints it twice and reads as two faults. They
 fail DIFFERENTLY, though, and that is why the problem is carried on the record
 and not only inside `federation`: an application entry naming an unusable
 relationship still produces a `federation` object to hang it on, while a
@@ -344,7 +420,11 @@ prevent.
 The four checks `federationFor()` makes on a relationship id — it exists in
 this realm, it is service-provider-side, it is enabled, it is fully configured
 — are now one function in `federation/federation.js`, because
-`fedAuthnRelationship` gave them a second caller. A relationship id on an
+`fedAuthnRelationship` gave them a second caller. **`usableServiceProviders()`
+beside it is the same four over a LIST**, and it is a function rather than a
+`map().filter()` here for one reason: it KEEPS the unusable rows with the
+sentence written about each. Filtering them out at the call site is what makes
+a list of three with one disabled indistinguishable from a correct list of two. A relationship id on an
 application entry and one on another relationship are the same string,
 checkable the same four ways, and two implementations of "would this actually
 work" would answer differently the first time one of them learned a fifth.

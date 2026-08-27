@@ -39,25 +39,42 @@ passwordless sign-in a two-factor one. Anything reading `hwk` to mean "two
 factors" is wrong for the reason `../authn/CLAUDE.md` gives; this now tests for
 `hwk` AND `pwd`.
 
-## Both of this module's Maps are per trust realm, and one of them was a hole
+## This module no longer owns a sign-in screen, and that was a hole in three features
 
-`pendingSignIns` (the sign-in request the screen interrupted) and `rpContexts`
-(the `wctx` values the mock relying party minted) were plain `Map`s until
-2026-08-25, and the first was a realm-isolation hole rather than an
-untidiness. `POST /wsfed/login` looks a sign-in up by the id on the form, so an
-id minted at `/realm/acme/wsfed` was found by the DEFAULT realm's handler, which
-then called `startSession()` and issued the response with the default realm's
-key and issuer for a request that began in `acme`. It was verified by hand
-before the fix — the cross-realm POST answered 303 rather than "this sign-in
-form has expired" — and after it, both.
+Until 2026-08-26 it drew its own, on an argument that was right about the screen
+and wrong about the funnel: the parameters a person needs to see for a
+`wsignin1.0` are `wtrealm`, `wreply`, `wctx`, `wauth` and `whr`, and a screen
+printing `client_id: (none)` would describe a request that does not exist. But
+`beginAuthentication()` takes a `details` array for exactly that, and
+`saml2_sso.js` and `saml11_sso.js` both pass their own protocol's parameters
+through it. What owning the screen actually bought was owning the FUNNEL — and
+three features live in the funnel and were therefore inert for this profile
+alone:
 
-`realmSupport()` publishes this family as `full` and says single sign-on with
-OAuth "does not cross realms"; the store now agrees with the claim. `rpContexts`
-followed for a quieter reason worth stating rather than inheriting: `/wsfed/rp`
-answers under every realm prefix, so there is one mock relying party per realm,
-and a `wctx` minted by one being recognised by another would make the check that
-Map exists for — did my own value come back? — answer yes across a boundary the
-rest of the profile does not cross.
+* **Federation.** `appFederationRelationship` on the relying party's entry is
+  read by `mechanismFor()`, which is reached only from `beginAuthentication()`.
+  A `wtrealm` whose entry named a federation partner got a password box, and a
+  federated relying party looked exactly like a working one.
+* **`fedAuthnMechanism`** on an identity-provider-side relationship — how a
+  partner asking this service to authenticate somebody says what it wants done,
+  including `federation`, which is what makes this service an identity bridge.
+  All four values did nothing here.
+* **The WebAuthn step, in either role.** The old screen said so itself, calling
+  it "a real limitation rather than an omission". It is neither now.
+
+`POST /wsfed/login` and `pendingSignIns` went with the screen. The request
+travels back on the query string of the return address instead, which is byte
+for byte what that handler redirected to once it had a session — so there is one
+less store to make per realm, and the realm-isolation hole that store had in
+2026-08-25 cannot recur in it.
+
+## `rpContexts` is per trust realm
+
+`/wsfed/rp` answers under every realm prefix, so there is one mock relying party
+per realm, and a `wctx` minted by one being recognised by another would make the
+check that Map exists for — did my own value come back? — answer yes across a
+boundary the rest of the profile does not cross. `realmSupport()` publishes this
+family as `full` and says single sign-on with OAuth "does not cross realms".
 
 ## The autopost page is one of the three scripted pages
 
