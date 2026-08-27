@@ -1009,6 +1009,31 @@ find module` naming a file the operator never mentioned.
    `EDITABLE` mode**, `set` to `multi`, or the console offers a `set` the action
    refuses.
 
+   **EACH IDENTIFIER ATTRIBUTE ALSO CARRIES `identifierName` — THE PROTOCOL'S
+   OWN WORD FOR IT — AND `identifiersOf()` IS WHAT READS THE PAIR.** Added
+   2026-08-27 for the delegation pictures, which draw an application by the
+   name somebody GAVE it and said nowhere on the diagram what a request would
+   have to present to reach it. The attribute is unfriendly by design (an
+   `ldapsearch` and `/admin-api` share its spelling), so `oauthClientId` carries
+   `client_id`, `samlEntityId` carries `entityID`, `wsfedRealm` carries
+   `wtrealm`, `wstrustAppliesTo` carries `AppliesTo`,
+   `krb5ServicePrincipalName` carries `SPN`, and so on for all eleven.
+   `identifiersOf()` takes a `view()`, a record or a bare fields object and
+   returns one row per identifier attribute the entry actually carries a value
+   in — the attribute, that word, the FAMILIES it serves as labels, and the
+   values — in table order, skipping the empty ones.
+
+   **IT IS HERE RATHER THAN IN THE RENDERER FOR THE REASON EVERYTHING ELSE IN
+   THIS MODULE IS.** Which attribute is a family's identifier is the `PROTOCOLS`
+   table's statement and what the specification spells it is the `SCHEMA` row's;
+   a page building either list for itself would be a second opinion about the
+   store, and the first time a family was added it would be a second opinion
+   that disagreed. The families come back as LABELS and as a list because
+   several families share one attribute — naming only the first of OAuth 2.0,
+   OpenID Connect and OpenID4VCI would be picking one of three true answers.
+   `admin-ui/CLAUDE.md` argues what the picture then does with the rows,
+   including why it groups them by VALUE rather than by attribute.
+
    **`oauthAudience` IS DECLARED AND IT IS READ, WHICH MAKES IT THE ONE OF ITS
    KIND.** Added 2026-08-26. It is the audience an access token addressed to this
    application carries — a URI, the resource rather than the client that calls

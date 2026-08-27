@@ -581,6 +581,7 @@ const SCHEMA = {
             'oauth2.redirectUris setting and is treated as public.' },
     { name: 'oauthClientId', kind: 'multi', from: 'OAuth 2.0 / OIDC / OpenID4VCI',
       identifier: true,
+      identifierName: 'client_id',
       what: 'THE CLIENT_ID, and the identifier attribute of three families: an OpenID ' +
             'Connect relying party IS an OAuth client, and a wallet collecting a ' +
             'credential at the OpenID4VCI issuer authenticates as one, so all three ' +
@@ -678,6 +679,7 @@ const SCHEMA = {
             'authenticate.' },
     { name: 'oauthTlsClientAuthSubjectDn', kind: 'single', from: 'by hand',
       identifier: true,
+      identifierName: 'subject DN',
       what: 'RFC 8705 section 2.1.2 `tls_client_auth_subject_dn`: the subject DN of the PKI ' +
             'certificate this client authenticates with, in RFC 4514 form — the same spelling ' +
             '/admin/users files a verified certificate under, so one DN has one spelling across ' +
@@ -704,6 +706,7 @@ const SCHEMA = {
     // --- SAML, WS-Federation, WS-Trust ------------------------------------
     { name: 'samlEntityId', kind: 'multi', from: 'SAML 2.0 / SAML 1.1',
       identifier: true,
+      identifierName: 'entityID',
       what: 'THE SERVICE PROVIDER\'S ENTITYID — the assertion audience, and the identifier ' +
             'attribute of BOTH SAML families. SAML 1.1 has no entityID of its own in the ' +
             'protocol (there is no request message for one to travel in) and what stands in ' +
@@ -757,6 +760,7 @@ const SCHEMA = {
             'say nothing.' },
     { name: 'wsfedRealm', kind: 'multi', from: 'WS-Federation',
       identifier: true,
+      identifierName: 'wtrealm',
       what: 'THE WTREALM from a wsignin1.0 request (section 13.2.1) — WS-Federation\'s ' +
             'identifier attribute. Accumulates, for the reason every identifier here does.' },
     { name: 'wsfedReplyUrl', kind: 'multi',
@@ -773,6 +777,7 @@ const SCHEMA = {
             'one.' },
     { name: 'wstrustAppliesTo', kind: 'multi', from: 'WS-Trust',
       identifier: true,
+      identifierName: 'AppliesTo',
       what: 'THE APPLIESTO ADDRESS from a RequestSecurityToken — the service the token is ' +
             'issued FOR, and WS-Trust\'s identifier attribute. Accumulates.\n\n**IT IS ' +
             'READ**, which it was not before 2026-08-27, and it is `oauthAudience`\'s ' +
@@ -788,6 +793,7 @@ const SCHEMA = {
     // --- Kerberos and OID4VP ----------------------------------------------
     { name: 'krb5ServicePrincipalName', kind: 'multi', from: 'Kerberos v5',
       identifier: true,
+      identifierName: 'SPN',
       what: 'THE SPN, e.g. HTTP/sts@EXAMPLE.COM — Kerberos v5\'s identifier attribute. A ' +
             'Kerberos service is an application like the others here, and it is the one ' +
             'whose identifier this service may have created on demand ' +
@@ -811,6 +817,7 @@ const SCHEMA = {
             'oauthClientSecret is, and never written to the audit log.' },
     { name: 'oid4vpClientId', kind: 'multi', from: 'OpenID4VP',
       identifier: true,
+      identifierName: 'client_id',
       what: 'THE VERIFIER\'S CLIENT_ID in an Authorization Request asking for a ' +
             'presentation — OpenID4VP\'s identifier attribute. This service\'s own mock ' +
             'Verifier takes its from configuration (oid4vp.clientId) rather than from a ' +
@@ -829,6 +836,7 @@ const SCHEMA = {
     // and like it they grant and refuse nothing.
     { name: 'federationPartnerId', kind: 'multi', from: 'the console, or by hand',
       identifier: true,
+      identifierName: 'partner id',
       what: 'WHAT A FEDERATION PARTNER CALLS ITSELF — a foreign identity provider\'s ' +
             'entityID, or its issuer identifier where the relationship speaks OpenID ' +
             'Connect. THE RELATIONSHIP IS NOT HERE: the endpoints, the certificate and the ' +
@@ -839,6 +847,7 @@ const SCHEMA = {
             'sentence has teeth.' },
     { name: 'ldapBindDn', kind: 'multi', from: 'the console, or by hand',
       identifier: true,
+      identifierName: 'bind DN',
       what: 'THE DN A DIRECTORY CLIENT BINDS AS on 389 or LDAPS 636. EVERY BIND HERE ' +
             'SUCCEEDS — any DN, any password, anonymous — so nothing will ever write this ' +
             'and nothing will ever read it; it is where an operator records which ' +
@@ -846,6 +855,7 @@ const SCHEMA = {
             'application is.' },
     { name: 'scimClientId', kind: 'multi', from: 'the console, or by hand',
       identifier: true,
+      identifierName: 'client_id',
       what: 'WHAT A PROVISIONING CLIENT AT /scim/v2 IS CALLED — the OAuth client_id it ' +
             'presents a token from, or the username it sends in Basic. That surface ' +
             'authenticates its CALLER in any of the six schemes RFC 7644 section 2 names ' +
@@ -854,6 +864,7 @@ const SCHEMA = {
             'demanded at all.' },
     { name: 'spiffeWorkloadId', kind: 'multi', from: 'the console, or by hand',
       identifier: true,
+      identifierName: 'SPIFFE ID',
       what: 'A SPIFFE ID this application is expected to hold — spiffe://<trust ' +
             'domain>/<path>. A SPIFFE identity gets an entry of its OWN under ou=spiffe ' +
             '(see spiffe/CLAUDE.md) and the registry there is what an SVID is actually ' +
@@ -1207,6 +1218,69 @@ function declarationAttributes() {
 const DECLARATION_ATTRIBUTE_NAMES = declarationAttributes().map(function (row) {
   return row.attribute;
 });
+
+// The identifier half of that table, computed ONCE rather than per call. Every
+// caller of identifiersOf() below asks the same question of the same closed
+// table, and declarationAttributes() walks PROTOCOLS and can WARN while it does
+// — a page that asked it per box would print that warning once per box.
+const IDENTIFIER_ATTRIBUTES = declarationAttributes().filter(function (row) {
+  return row.role === 'identifier';
+});
+
+// ---------------------------------------------------------------------------
+// WHAT THIS APPLICATION ANSWERS TO, AND WHAT EACH PROTOCOL CALLS THAT NAME.
+//
+// Added 2026-08-27 for the delegation pictures, which draw an application by
+// the name somebody GAVE it — a `cn`, an `appName` — and until now said nowhere
+// on the diagram what a protocol would have to present to reach that box. A
+// rectangle labelled `Acme Web` is unusable in a request you are about to
+// build; `client_id: acme-web` under it is the whole point of looking.
+//
+// **IT IS HERE RATHER THAN IN THE RENDERER**, and that is the rule this module
+// already lives by: which attribute holds a family's identifier is the
+// PROTOCOLS table's statement, and `identifierName` — what the specification
+// spells it — is the SCHEMA row's. A picture that built either list for itself
+// would be a second opinion about the store, and the first time a family was
+// added it would be a second opinion that disagreed.
+//
+// Rows come back in table order and only where the entry actually carries a
+// value, so an application that has only ever been an OAuth client gets ONE
+// row rather than eleven, ten of them empty. The FAMILIES are labels rather
+// than ids because the only caller prints them, and because several families
+// share one attribute (see the PROTOCOLS header) — `oauthClientId` is the
+// identifier of OAuth 2.0, OpenID Connect and OpenID4VCI at once, so naming
+// only the first would be picking one of three true answers.
+//
+// It takes a `view()`, a record, or a bare fields object, because those are the
+// three shapes a caller has in hand and making them convert first would put
+// this module's own layout in the caller.
+// ---------------------------------------------------------------------------
+function identifiersOf(source) {
+  log.debug("Entering identifiersOf().");
+  const holder = source || {};
+  const fields = holder.fields || holder;
+  const rows = [];
+  IDENTIFIER_ATTRIBUTES.forEach(function (row) {
+    const values = valuesOf(fields[row.attribute]);
+    if (!values.length) {
+      return;
+    }
+    const schemaRow = ATTRIBUTE_BY_NAME[row.attribute];
+    rows.push({
+      attribute: row.attribute,
+      // The protocol's own word for it. Falling back to the ATTRIBUTE rather
+      // than to nothing: a row added to PROTOCOLS whose schema row forgot
+      // `identifierName` should read as `oauthClientId: acme-web`, which is
+      // ugly and correct, rather than as a bare value that says nothing about
+      // what kind of name it is.
+      name: (schemaRow && schemaRow.identifierName) || row.attribute,
+      families: row.families.map(function (one) { return one.label; }),
+      values: values
+    });
+  });
+  log.debug("Leaving identifiersOf(). " + rows.length + " identifier attribute(s).");
+  return rows;
+}
 
 // ---------------------------------------------------------------------------
 // THE VALUES A CREATE MAY CARRY, validated whole before anything is written.
@@ -2985,6 +3059,10 @@ module.exports = {
   // document, so neither can offer a field the other has never heard of.
   declarationAttributes: declarationAttributes,
   DECLARATION_ATTRIBUTE_NAMES: DECLARATION_ATTRIBUTE_NAMES,
+  // What an application answers to in each family, with the protocol's own
+  // word for it. Exported for the delegation pictures — see its header for why
+  // the list is built here and not in the renderer.
+  identifiersOf: identifiersOf,
   normaliseFields: normaliseFields,
   SCHEMA: SCHEMA,
   seen: seen,

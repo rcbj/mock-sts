@@ -763,7 +763,7 @@ merely FILTERS a list is not a drill-down, and this is not a filter, it is a
 second VIEW of the same list. A nineteenth sidebar tab would have shown nothing
 the tab above it does not already hold.
 
-Seven things about it are decisions rather than defaults.
+Eight things about it are decisions rather than defaults.
 
 * **THE MODEL IS IN `../common/delegation.js` AND THE DRAWING IS IN
   `delegation_map.js`, AND NEITHER KNOWS WHAT THE OTHER KNOWS.** `graph()` says
@@ -775,6 +775,57 @@ Seven things about it are decisions rather than defaults.
   files: what a party IS belongs to this console, where `directoryReader` and
   `applications` are, and it is the one question a layout engine has no business
   answering. `admin.js` is still the only place that knows both.
+
+* **A BOX CARRIES THE IDENTIFIER A PROTOCOL WOULD HAVE TO PRESENT, AND NOT ONLY
+  THE NAME SOMEBODY GAVE IT.** Added 2026-08-27, and it is the rule two
+  paragraphs up read forwards: the label is the `cn` or the `appName` where
+  there is one — what a person CALLED this thing — and until then a rectangle
+  reading `Acme Web` said nowhere on the diagram what a request would have to
+  carry to reach it. That string was in the tooltip, which is not a place a
+  picture pasted into a ticket keeps. So `delegationNodeLook()` now returns a
+  third line, `look.identifier`, and `delegation_map.js` draws it under the
+  kind: `client_id: acme-web`, `AppliesTo: https://esb.example.com`,
+  `SPN: HTTP/frontend.example.com@EXAMPLE.COM`. Four things about it were
+  decided rather than fallen into:
+
+  * **The list comes from `applications.identifiersOf()` and not from a walk of
+    the entry here.** Which attribute holds a family's identifier is the
+    PROTOCOLS table's statement and `identifierName` — what the specification
+    spells it — is the SCHEMA row's; a picture with its own copy of either would
+    disagree with the registry the first time a family was added. See
+    `../common/CLAUDE.md`.
+  * **They are grouped by VALUE, not by attribute**, because one string is
+    commonly two families' identifier and the box has room for one line. An
+    application declared for WS-Trust and SAML 2.0 carries
+    `https://esb.example.com` on `wstrustAppliesTo` AND on `samlEntityId`, and
+    naming the first would be picking one of two true answers —
+    `entityID / AppliesTo: https://esb.example.com` is the whole fact.
+  * **The one drawn is the one the ACT carried**, because that is the string on
+    the line the reader is following. Where the act carried something no
+    identifier attribute holds — the registry key of an entry made by hand, or
+    an application reached through an audience it registered — the first
+    declared identifier is drawn instead AND THE TOOLTIP SAYS SO in capitals,
+    because a box quietly showing a name nothing in the picture presented is
+    worse than one showing the key. Every name it answers to is in that tooltip
+    either way.
+  * **Where the label IS the identifier only the WORD is drawn** — `client_id`
+    under `acme-web` — because the value is already on the box and a second line
+    repeating it is one fact drawn twice. Where no family claims the name and it
+    is already the label, there is no third line at all.
+
+  It costs a line of height on every application box in EVERY picture drawn
+  from `delegationLooks()` — this one, the three delegation drill-downs and
+  `/admin/tokens/credential` — which is the point of that function rather than a
+  side effect: one answer to "what is this box" is what keeps a party the same
+  party on all five. And the identifier gets TWO wrapped lines where the kind
+  gets one: a kind is a
+  word from a closed list and an identifier is whatever a protocol allows, so at
+  one line `entityID / AppliesTo: https://esb.example.com` was cut to
+  `entityID / AppliesTo: https://…`, which keeps the half a reader already knew.
+  The two party TABLES draw it under the label as well
+  (`delegationNodeRow()`, `userNodeRow()`), so the table and the picture cannot
+  come to say different things, and the key has a row of its own explaining that
+  the two small lines are different sentences.
 
 * **IT IS `delegationView()`'s GRAPH, NOT A SECOND CALL.** That function builds
   it beside `chainList()` and puts it in `json.graph`, so this page, the

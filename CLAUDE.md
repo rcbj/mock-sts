@@ -927,30 +927,52 @@ requested claim exactly as it filters a configured one, and that the non-spec
 request-level parameter is a UNION with the token's own request and can never
 take a claim away from it.
 
-**THE SPNEGO SIGN-IN HAS HALF A TEST, AND THE HALF IT HAS IS THE UNUSUAL ONE.**
-`tests/spnego_identity.js` here asserts what a session minted from a ticket
-CLAIMS — which part of the principal becomes the username, and the `amr`/`acr`
-read off the ticket's flags — and it is in this repository rather than the
-parent's because the cases that matter cannot be produced over HTTP: this KDC
-requires pre-authentication, so no client can obtain a ticket claiming no
-factor at all, and nothing here ever sets `hw-authent`. What is still missing
-is the half that needs a listener, and it belongs beside
-`tests/krb5_spnego_http.js` over there, which already drives the acceptor this
-door shares: that a real AP-REQ produces a real session; that the session then
-satisfies `/oauth2/authorize`, `wsignin1.0` and a SAML `AuthnRequest`; that a
-REPLAYED AP-REQ is refused and mints nothing (the replay cache is the one check
-here whose absence would be a security bug rather than a fidelity one); that a
-ticket for another ACCOUNT's SPN is refused while one for a host this service
-answers for is not; that a half-finished `request-mic` exchange begun at
-`/spnego/protected` cannot be spent at this door; that exactly ONE
-authentication is recorded per sign-in rather than a ticket acceptance beside a
-session start; and that `krb5.spnegoAuthentication` off answers 403 and signs
-nobody in. All of that was hand-verified end to end on 2026-08-26 — 84 checks
-against a throwaway instance, driving a real AS-REQ and TGS-REQ pair over raw
-TCP, including all of the above — but that driver is a scratch script in
-neither repository, which is exactly the habit `tests/saml11_sso.js` broke by
-being promoted. Promote this one too: it is the same shape as
-`krb5_spnego_http.js` and most of the work is already done.
+**THE SPNEGO SIGN-IN HAS BOTH HALVES OF ITS TEST SINCE 2026-08-27, AND THEY ARE
+IN DIFFERENT REPOSITORIES ON PURPOSE.** `tests/spnego_identity.js` here asserts
+what a session minted from a ticket CLAIMS — which part of the principal becomes
+the username, and the `amr`/`acr` read off the ticket's flags — and it is here
+rather than in the parent's suite because the cases that matter cannot be
+produced over HTTP: this KDC requires pre-authentication, so no client can
+obtain a ticket claiming no factor at all, and nothing here ever sets
+`hw-authent`. The other half needed a listener and is
+`tests/kerberos_spnego_signin.js` over there, which drives the DEBUGGER's own
+AS, TGS and SPNEGO pages to build a real service ticket, spends it at
+`/authn/spnego`, and then completes an ordinary OIDC Authorization Code flow on
+the session that comes back. It covers: that a real AP-REQ produces a real
+session; that the session satisfies `/oauth2/authorize` with no screen drawn;
+that the ID Token's `sub`, `amr` and `acr` are the ones read off the ticket;
+that `appAuthnMechanism: spnego` on an application entry sends an authorization
+request straight to this door instead of to the password screen; that a REPLAYED
+AP-REQ is refused and mints nothing (the replay cache is the one check here
+whose absence would be a security bug rather than a fidelity one); and that
+`krb5.spnegoAuthentication` off answers 403 NAMING THE SETTING and signs nobody
+in. Each of those three was mutation-tested against a deliberately broken mock
+before it was committed.
+
+**THE BROWSER DOES NOT ANSWER THE CHALLENGE THERE, AND THAT IS A DECISION RATHER
+THAN A GAP.** RFC 4559 is answered from GSSAPI, which needs a credential cache
+and a host allow-list that the suite cannot assume on the machine it runs on —
+so the debugger is the Kerberos client instead, which shows more of the protocol
+than a browser handing the work to GSSAPI ever would. What that costs is one
+assignment: the `Set-Cookie` arrives at the api relay, and the test carries it
+into the browser before driving the application flow. The file's header says so
+rather than burying it.
+
+**A REAL-GSSAPI JOB IS NOW POSSIBLE AND IS NOT WRITTEN.** It was impossible
+until 2026-08-27 for a reason nothing had noticed: this KDC advertised no
+PA-ENC-TIMESTAMP, so no MIT-derived client could get a ticket from it at all —
+see *The KDC advertises PA-ENC-TIMESTAMP* in `kerberos/CLAUDE.md`. With that
+fixed, `kinit`, `kvno` and `curl --negotiate` complete against this service end
+to end, and a browser with a ccache and an allow-list entry would too. Such a
+job needs `krb5-user` in the parent's `tests/Dockerfile` and a per-run
+`krb5.conf`, so it would SKIP wherever that tooling is absent — which is why it
+is not where the only coverage of this door lives.
+
+Still untested at this door: that a ticket for another ACCOUNT's SPN is refused
+while one for a host this service answers for is not; that a half-finished
+`request-mic` exchange begun at `/spnego/protected` cannot be spent here; and
+that exactly ONE authentication is recorded per sign-in rather than a ticket
+acceptance beside a session start.
 
 **WS-Federation has no test in either repository.** The mock relying party at
 `/wsfed/rp` makes it look covered — it verifies a sign-in response check by check —

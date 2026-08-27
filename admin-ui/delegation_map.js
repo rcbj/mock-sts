@@ -416,7 +416,28 @@ const SIGNED_IN_CHARS = 44;
 function measure(node, look) {
   log.debug("Entering measure().");
   const lines = wrapLabel(look.label, MAX_LABEL_CHARS, 2);
-  const subLines = look.sublabel ? wrapLabel(look.sublabel, MAX_LABEL_CHARS + 6, 1) : [];
+  // TWO SUB-LINES AT MOST, AND THEY ARE DIFFERENT SENTENCES. The first is what
+  // kind of thing this is — `application`, `person + application` — and the
+  // second, added 2026-08-27, is the IDENTIFIER a protocol would have to
+  // present to reach it, with that protocol's own word for it: `client_id:
+  // acme-web`, `AppliesTo: https://esb.example.com`. They are concatenated
+  // rather than joined into one string because they wrap independently: an
+  // entityID is a URL and would otherwise push `application` off its own line.
+  //
+  // The caller decides whether there is a second one at all (see
+  // `delegationNodeLook()` in admin.js — a box whose LABEL is already the
+  // identifier gets the word alone, or nothing), so this is a list and not a
+  // pair of fields, and everything below counts `subLines.length` rather than
+  // asking whether there is one.
+  //
+  // The identifier gets TWO lines where the kind gets one, and that is not
+  // generosity: the kind is a word from a closed list and an identifier is
+  // whatever a protocol allows — `entityID / AppliesTo:
+  // https://esb.example.com` is 44 characters and would otherwise be cut to
+  // `entityID / AppliesTo: https://…`, which keeps the half a reader already
+  // knew and throws away the half they opened the picture for.
+  const subLines = (look.sublabel ? wrapLabel(look.sublabel, MAX_LABEL_CHARS + 6, 1) : [])
+    .concat(look.identifier ? wrapLabel(look.identifier, MAX_LABEL_CHARS + 6, 2) : []);
   let textW = 0;
   lines.forEach(function (one) {
     textW = Math.max(textW, textWidth(one, LABEL_SIZE));
@@ -424,7 +445,8 @@ function measure(node, look) {
   subLines.forEach(function (one) {
     textW = Math.max(textW, textWidth(one, SUB_SIZE));
   });
-  const textH = lines.length * LINE_HEIGHT + (subLines.length ? LINE_HEIGHT - 2 : 0);
+  const textH = lines.length * LINE_HEIGHT +
+                (subLines.length ? subLines.length * LINE_HEIGHT - 2 : 0);
 
   if (look.shape === 'person') {
     // The figure sits above the name rather than beside it. A person's label is
@@ -1650,7 +1672,7 @@ function nodeMarkupFor(entry, at, options) {
   } else if (size.shape === 'sts') {
     shape = '<path d="' + hexPath(x, y, size.width, size.height) + '" fill="' + WASH +
       '" stroke="' + INDIGO + '" stroke-width="1.8"/>';
-    textTop = at.y - ((size.lines.length + (size.subLines.length ? 1 : 0) - 1) *
+    textTop = at.y - ((size.lines.length + size.subLines.length - 1) *
                       LINE_HEIGHT) / 2 + LABEL_SIZE / 2 - 1;
   } else {
     shape = '<rect x="' + round(x) + '" y="' + round(y) + '" width="' + round(size.width) +
@@ -1665,7 +1687,7 @@ function nodeMarkupFor(entry, at, options) {
       textX = x + 6 + FIGURE_W * scale + 6;
       anchor = 'start';
     }
-    textTop = at.y - ((size.lines.length + (size.subLines.length ? 1 : 0) - 1) *
+    textTop = at.y - ((size.lines.length + size.subLines.length - 1) *
                       LINE_HEIGHT) / 2 + LABEL_SIZE / 2 - 1;
   }
 

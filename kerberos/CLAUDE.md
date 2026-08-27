@@ -202,6 +202,47 @@ binding 88 needs root, and on a host run it usually fails.
   and the trust must be three different secrets or assertions about which key sealed
   what pass for the wrong reason.
 
+## The KDC advertises PA-ENC-TIMESTAMP, and it did not until 2026-08-27
+
+`KDC_ERR_PREAUTH_REQUIRED`'s e-data is a METHOD-DATA (RFC 4120 section 5.9.1):
+the list of pre-authentication methods this KDC will accept. A client READS that
+list to decide what to send next. This one sent `PA-ETYPE-INFO2` and
+`PA-PW-SALT` and not `PA-ENC-TIMESTAMP`, so it named the salt a client needs
+without ever naming the method it wanted — and the consequence was total:
+
+* `kinit` from MIT Kerberos could not obtain a ticket from this KDC AT ALL. Its
+  trace reads `Processing preauth types: PA-ETYPE-INFO2 (19), PA-PW-SALT (3)`,
+  finds no method it can run, retries the same unauthenticated AS-REQ and gives
+  up with `Generic preauthentication failure while getting initial
+  credentials` — a message naming neither the padata list nor this KDC.
+* Chrome and Firefox answer a `Negotiate` challenge through the same GSSAPI, so
+  no browser could ever have signed in at `/spnego/protected` or
+  `/authn/spnego`. The note on the sign-in page telling somebody to set
+  `--auth-server-allowlist` was correct and would not have been enough.
+
+**NOTHING HERE NOTICED FOR AS LONG AS THE FEATURE HAS EXISTED**, and the reason
+is the shape of every interoperability defect a mock has: the debugger's client
+and this repository's tests both send PA-ENC-TIMESTAMP whether it was offered or
+not, because both were written against this KDC. Both ends shared the
+assumption, so both ends agreed. It took a REAL client to find it.
+
+The fix is one entry, empty and first, in `preAuthRequiredReply()` — the value
+is a zero-length octet string because in a reply it is an offer rather than
+data. `kinit`, `kvno` and `curl --negotiate` now complete against this KDC end
+to end.
+
+**IT IS GUARDED NOW, AND THE GUARD IS THE ONLY KIND THAT COULD WORK.** The
+parent suite's `tests/krb5_mit_client.js` drives this KDC with MIT Kerberos —
+`kinit`, `klist`, `kvno`, `kdestroy` and `curl --negotiate` — and its first
+section is exactly this: `kinit alice` completing at all means the method list
+was honest, and the failure message says so in those words and quotes what
+`kinit` printed. **No test written against our own client can guard it**, which
+is why `tests/krb5_as_exchange.js` and every Kerberos job in both repositories
+passed throughout: they send PA-ENC-TIMESTAMP whether it was offered or not.
+That job installs `krb5-user` in the parent's `tests/Dockerfile`, so the
+containerized suite always runs it, and SKIPS with a reason on a machine without
+MIT Kerberos.
+
 ## Delegation is recorded, refusals included, and the policy is published
 
 Four of the eight mechanisms `/admin/delegation` knows are this directory's:

@@ -873,10 +873,41 @@ function preAuthRequiredReply(client, request) {
     cname: request.reqBody.cname,
     sname: request.reqBody.sname,
     eText: 'NEEDED_PREAUTH',
-    // Both PA-ETYPE-INFO2 and PA-PW-SALT, which is what AD sends. The older
+    // ---------------------------------------------------------------------
+    // THREE ENTRIES, AND THE FIRST ONE IS THE ONE THAT MAKES THIS WORK WITH A
+    // REAL CLIENT.
+    //
+    // **PA-ENC-TIMESTAMP, EMPTY, FIRST.** RFC 4120 section 5.9.1 makes the
+    // e-data of KDC_ERR_PREAUTH_REQUIRED a METHOD-DATA: the list of
+    // pre-authentication methods this KDC will accept. A client reads that list
+    // to decide what to send next — it does not assume. So an empty
+    // PA-ENC-TIMESTAMP is not padding: it is the KDC saying "an encrypted
+    // timestamp is what I want", and every real KDC sends it (MIT, Heimdal and
+    // Active Directory alike).
+    //
+    // It was ABSENT here until 2026-08-27, and the cost was exact: `kinit` from
+    // MIT Kerberos could not obtain a ticket from this KDC at all. Its trace
+    // reads "Processing preauth types: PA-ETYPE-INFO2 (19), PA-PW-SALT (3)",
+    // finds no method it can run, retries the same unauthenticated AS-REQ and
+    // gives up with "Generic preauthentication failure while getting initial
+    // credentials" — a message that names neither the padata list nor this KDC.
+    // Chrome's Negotiate goes through the same GSSAPI, so no browser could
+    // answer a challenge from `/spnego/protected` or `/authn/spnego` either.
+    // Nothing here noticed, because the debugger's own client and this
+    // repository's tests both send PA-ENC-TIMESTAMP whether it was offered or
+    // not — which is the shape of every interoperability defect a mock has:
+    // both ends share the assumption, so both ends agree.
+    //
+    // The value is a ZERO-LENGTH octet string. In a REQUEST that field carries
+    // the encrypted timestamp; in this reply it is an offer, and there is
+    // nothing to put in it.
+    //
+    // Then PA-ETYPE-INFO2 and PA-PW-SALT, which is what AD sends. The older
     // PA-PW-SALT is there for clients that predate ETYPE-INFO2; a client should
     // prefer the newer one, and being able to see both is the point.
+    // ---------------------------------------------------------------------
     eData: asn1.encSequenceOf([
+      msgs.encPaData({ type: msgs.PA_TYPE.ENC_TIMESTAMP, value: new Uint8Array(0) }),
       msgs.encPaData({ type: msgs.PA_TYPE.ETYPE_INFO2, value: msgs.encEtypeInfo2(entries) }),
       msgs.encPaData({ type: msgs.PA_TYPE.PW_SALT, value: prim.utf8(client.salt) })
     ])

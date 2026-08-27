@@ -1501,7 +1501,29 @@ function page(title, active, inner, up, gate, req) {
     // the tables, which is the failure mode of letting it size to content.
     '.shell{display:flex;flex-wrap:wrap;align-items:flex-start;gap:18px;' +
     'max-width:92rem;margin:0 auto}' +
-    '.side{flex:0 0 13.5rem;position:sticky;top:1rem}' +
+    // THE SIDEBAR SCROLLS ITSELF RATHER THAN WITH THE PAGE. `position:sticky`
+    // alone was not enough and the reason is easy to miss: a sticky box that
+    // is TALLER than the viewport is pinned by its TOP, so the bottom of the
+    // nav sits below the fold and the only way to reach it is to scroll the
+    // whole document to its end — which got harder as the console grew, since
+    // the page a reader is on decides how far that is. Capping the column at
+    // the viewport and letting the nav overflow inside itself makes the two
+    // scrollbars independent: the tab list is reachable from anywhere on any
+    // page, at any length, and the page under it does not move.
+    //
+    // The column is a flex COLUMN so that the two lines above the nav keep
+    // their natural height and the nav takes what is left; `min-height:0` on
+    // the nav is what actually permits it to shrink below its content, which
+    // is the flexbox rule that makes an overflow child scroll instead of
+    // pushing its parent. The cap is `100vh` less the 1rem the sticky top
+    // holds plus 1rem of air below it, which is the geometry once the
+    // column is STUCK. Before the first scroll it is still in flow, an inch
+    // or so down the document, so the card can reach the bottom edge of the
+    // window — CSS cannot subtract an offset it does not know, and the only
+    // way to close that inch would be a script this console does not have.
+    // It costs nothing: the list is scrollable in that state as well.
+    '.side{flex:0 0 13.5rem;position:sticky;top:1rem;max-height:calc(100vh - 2rem);' +
+    'display:flex;flex-direction:column}' +
     // `min-width:0` on a flex child is what stops a wide table inside the card
     // from pushing the whole layout past the viewport: without it the card's
     // minimum width is its content's, and one long DN widens the page rather
@@ -1528,8 +1550,13 @@ function page(title, active, inner, up, gate, req) {
     // THE SIDEBAR. A list per section with a heading over it, in the same card
     // material as the page so the two read as one surface rather than as a
     // frame around a document.
+    // `flex:0 1 auto` with `min-height:0` and `overflow-y:auto` is the whole
+    // of the independent scrolling described on `.side` above: the card is
+    // its natural height while it fits and scrolls inside itself when it
+    // does not, so a short nav does not become a stretched empty box.
     'nav{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:14px 14px 8px;' +
-    'font-size:.85em;box-shadow:0 6px 24px rgba(0,0,0,.06)}' +
+    'font-size:.85em;box-shadow:0 6px 24px rgba(0,0,0,.06);' +
+    'flex:0 1 auto;min-height:0;overflow-y:auto}' +
     // THE REALM CHOOSER, first inside the nav card and separated from the
     // sections by a hairline rather than by a card of its own. Its label is
     // `.navhead`'s metrics on purpose: it sits above a list of choices in the
@@ -1828,7 +1855,14 @@ function page(title, active, inner, up, gate, req) {
     // flex-wrap has already done to it by then — the rule only undoes the
     // stickiness, which on a full-width block would pin the whole nav to the
     // top of the viewport and take the screen with it.
-    '@media (max-width:56rem){.side{position:static;flex:1 1 100%}' +
+    // The cap and the nav's own scrollbar come off with the stickiness, and
+    // for the same reason: down here the sidebar is a full-width block
+    // ABOVE the page, so a scrollbox inside it would be a second scrolling
+    // region in the ordinary flow of the document with nothing pinned
+    // beside it to make sense of.
+    '@media (max-width:56rem){.side{position:static;flex:1 1 100%;max-height:none;' +
+    'display:block}' +
+    'nav{overflow-y:visible}' +
     '.navsec{display:inline-block;vertical-align:top;min-width:11rem;margin-right:1.2em}' +
     '.navsec.open{margin-left:0;padding-left:0;border-left:0;border-top:3px solid #12107c;' +
     'padding-top:6px}}' +
@@ -5978,6 +6012,68 @@ function delegationNodeLook(node, known) {
   const appName = application ? (application.name || application.dnLabel) : '';
   const label = cn || appName || node.id;
 
+  // WHAT A PROTOCOL WOULD HAVE TO PRESENT TO REACH THIS BOX. Added 2026-08-27,
+  // and it exists because of the paragraph above it: the label is the CN where
+  // there is one, so a rectangle reading `Acme Web` said nothing anywhere on
+  // the diagram about the string a request would have to carry. That is the
+  // fact somebody opens a delegation picture to get — the `client_id` they are
+  // about to put in a token request, the `AppliesTo` in the RequestSecurityToken
+  // they are about to send — and it was in the tooltip, which is not a place a
+  // diagram pasted into a ticket keeps.
+  //
+  // The list comes from `applications.identifiersOf()` rather than from a walk
+  // of the entry here: which attribute is a family's identifier and what the
+  // specification calls it are that module's statements, and a picture holding
+  // a second opinion about either is drift nothing can see.
+  //
+  // **THE SPELLING IS OF THE NAME THE ACT ACTUALLY CARRIED**, not of the first
+  // identifier the entry happens to hold. An application answering to a
+  // client_id AND an entityID is one box, and which of the two is on the line
+  // is what the act says; naming the other one would put a string on the
+  // picture that nothing in this picture ever presented. The rest are in the
+  // tooltip, where "it also answers to" belongs.
+  const identifiers = application ? applications.identifiersOf(application) : [];
+  const presented = node.application ? String(node.application) : '';
+  // GROUPED BY VALUE AND NOT BY ATTRIBUTE, because one string is commonly two
+  // families' identifier and the box has room for one line: an application
+  // declared for WS-Trust and SAML 2.0 carries `https://esb.example.com` on
+  // `wstrustAppliesTo` AND on `samlEntityId`, and drawing the first of those
+  // would pick one of two true answers. `AppliesTo / entityID:
+  // https://esb.example.com` is the whole fact and is one line.
+  //
+  // Exact equality throughout, because `applications.js` does not case-fold an
+  // identifier anywhere else either — an audience that differs by a character
+  // is a different audience, and matching loosely here would be this page
+  // deciding a comparison rule on that module's behalf.
+  const byValue = [];
+  identifiers.forEach(function (row) {
+    row.values.forEach(function (value) {
+      const already = byValue.filter(function (one) { return one.value === value; })[0];
+      if (already) {
+        if (already.names.indexOf(row.name) < 0) already.names.push(row.name);
+        return;
+      }
+      byValue.push({ value: value, names: [row.name] });
+    });
+  });
+  // WHICH ONE GOES ON THE BOX. The name the ACT carried wins, because that is
+  // the string on the line the reader is following; where the act's name is not
+  // an identifier attribute at all — the registry key of an entry made by hand,
+  // or an application reached through an audience it registered — the first
+  // declared identifier is drawn instead, since a box that named only the key
+  // would be silent about the one thing somebody opened the picture to get.
+  // Everything not drawn is in the tooltip.
+  const chosen = byValue.filter(function (one) { return one.value === presented; })[0] ||
+                 byValue[0] || null;
+  // Nothing at all where the drawn name IS the identifier and no family claims
+  // it: the string is already on the box, and a second line repeating it is the
+  // same fact drawn twice. Where a family DOES claim it, the word alone is
+  // drawn — `client_id` under `acme-web` says what kind of name that is, which
+  // the box could not otherwise say.
+  const identifierLine = chosen
+    ? chosen.names.join(' / ') + (chosen.value === label ? '' : ': ' + chosen.value)
+    : (presented && presented !== label ? presented : '');
+
   const parts = [];
   if (isPerson) parts.push('person');
   if (isApplication) parts.push('application');
@@ -6018,6 +6114,23 @@ function delegationNodeLook(node, known) {
          'holds what this service has been ASKED ABOUT, and a delegation naming ' +
          'something nobody has otherwise mentioned is ordinary for an RFC 8693 ' +
          'audience.' : ''),
+    // EVERY name it answers to, family by family, because the box has room for
+    // one. This is where an application that is a client_id in one protocol and
+    // an entityID in another says so.
+    identifiers.length
+      ? 'It answers to: ' + identifiers.map(function (row) {
+          return row.name + ' ' + row.values.join(', ') +
+                 ' (' + row.families.join(', ') + ')';
+        }).join('; ') + '.'
+      : '',
+    (presented && chosen && chosen.value !== presented)
+      ? 'THE NAME ON THE BOX IS NOT THE NAME THIS ACT PRESENTED. It presented "' +
+        presented + '", which none of the identifier attributes above carries — ' +
+        'so which family spells it that way cannot be said, and the first ' +
+        'declared identifier is drawn instead. An entry created by a protocol ' +
+        'sighting carries that family\'s attribute; one made by hand, or reached ' +
+        'through an audience it registered, need not.'
+      : '',
     'Roles: initial ' + node.roles.initial + ', intermediary ' +
       node.roles.intermediary + ', target ' + node.roles.target + '.',
     node.selfTarget
@@ -6029,7 +6142,8 @@ function delegationNodeLook(node, known) {
     node.what || ''
   ].filter(Boolean).join('\n');
 
-  return { shape: shape, label: label, sublabel: sublabel, title: title,
+  return { shape: shape, label: label, sublabel: sublabel,
+           identifier: identifierLine, title: title,
            href: href, dashed: !isPerson && !isApplication };
 }
 
@@ -6090,6 +6204,40 @@ function delegationMapKey(options) {
       what: '<strong>This service, in one trust realm.</strong> Every line here ' +
             'exists because it issued or refused a credential. The realm is on ' +
             'the box because a realm is a whole logical copy of this service.' },
+    // Wider than every other swatch here, and it has to be: the whole point of
+    // the row is the THIRD line, and an identifier is the one thing on a box
+    // that is as long as a protocol allows. At 80 the sample ran out through
+    // its own rectangle, which is precisely the mistake this row is teaching a
+    // reader to look for.
+    { art: swatch('<rect x="3" y="2" width="104" height="36" rx="5" fill="' + C.panel +
+                  '" stroke="' + C.indigo + '" stroke-width="1.5"/>' +
+                  '<text x="55" y="15" text-anchor="middle" font-size="10" ' +
+                  'font-weight="600" fill="' + C.ink + '">Acme Web</text>' +
+                  '<text x="55" y="25" text-anchor="middle" font-size="8" fill="' +
+                  C.quiet + '">application</text>' +
+                  '<text x="55" y="34" text-anchor="middle" font-size="8" fill="' +
+                  C.quiet + '">client_id: acme-web</text>', 110),
+      what: '<strong>The two small lines under a name are different ' +
+            'sentences.</strong> The first is what the box IS &mdash; which of ' +
+            'the two stores knows it, or the role its shape was guessed from. ' +
+            'The second is <strong>the identifier a protocol would have to ' +
+            'present to reach it, with that protocol\'s own word for it</strong>: ' +
+            'a <code>client_id</code> for OAuth 2.0 and OpenID Connect, an ' +
+            '<code>entityID</code> for either SAML profile, a ' +
+            '<code>wtrealm</code> for WS-Federation, an <code>AppliesTo</code> ' +
+            'for WS-Trust, an <code>SPN</code> for Kerberos. The NAME on the box ' +
+            'is what somebody CALLED this thing &mdash; a <code>cn</code>, an ' +
+            '<code>appName</code> &mdash; and is no use in a request you are ' +
+            'about to build, which is why the identifier is on the picture and ' +
+            'not only in the tooltip. Where the two are the same string only the ' +
+            'word is drawn, because the value is already the label; where ONE ' +
+            'string is two families\' identifier both words are drawn ' +
+            '(<code>AppliesTo / entityID</code>); and where the application ' +
+            'answers to several DIFFERENT names, the one drawn is the one this ' +
+            'act actually carried &mdash; or, if the act carried something no ' +
+            'identifier attribute holds, the first declared one, with the ' +
+            'tooltip saying so. Every name it answers to is in that tooltip ' +
+            'either way.' },
     { art: swatch(delegationMap.personGlyph(9, 3, C.grey, true, 1), 44),
       what: '<strong>A dashed outline is something neither store knows.</strong> ' +
             'It is drawn in the shape its ROLE implies and is not an error: an ' +
@@ -6176,7 +6324,14 @@ function delegationNodeRow(node, known, look) {
   if (node.roles.intermediary) roles.push(node.roles.intermediary + ' × intermediary');
   if (node.roles.target) roles.push(node.roles.target + ' × target');
   return '<tr>' +
-    '<td>' + esc(look.label) + '</td>' +
+    '<td>' + esc(look.label) +
+      (look.identifier
+        ? '<br><span class="state-none" title="What a protocol would have to ' +
+          'present to reach this party, and that protocol\'s own word for it. ' +
+          'It is the second line inside the box in the picture above; where the ' +
+          'label IS the identifier, only the word is drawn.">' +
+          esc(look.identifier) + '</span>'
+        : '') + '</td>' +
     '<td>' + (look.shape === 'both'
                 ? 'person <strong>and</strong> application'
                 : look.shape === 'person' ? 'person'
@@ -7811,6 +7966,13 @@ function userNodeRow(node, known, look) {
         ? '<br><span class="state-valid" title="This is the person this page is ' +
           'about. Every line on the picture starts or ends here.">this ' +
           'page</span>'
+        : '') +
+      (look.identifier
+        ? '<br><span class="state-none" title="What a protocol would have to ' +
+          'present to reach this party, and that protocol\'s own word for it. ' +
+          'It is the second line inside the box in the picture above; where the ' +
+          'label IS the identifier, only the word is drawn.">' +
+          esc(look.identifier) + '</span>'
         : '') + '</td>' +
     '<td>' + (look.shape === 'both'
                 ? 'person <strong>and</strong> application'
