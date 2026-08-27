@@ -124,6 +124,33 @@ function labelY(svg, text) {
   return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
 }
 
+// THE STRAIGHT LINES, which is every line the issuer draws — the party lines
+// along the row are straight too and the arcs under it are cubics, so this is a
+// superset and the assertions below say which ones they mean.
+function segments(svg) {
+  const out = [];
+  const re = /<path d="M([\d.]+) ([\d.]+)L([\d.]+) ([\d.]+)" fill="none"/g;
+  let m = re.exec(svg);
+  while (m) {
+    out.push({ x1: Number(m[1]), y1: Number(m[2]),
+               x2: Number(m[3]), y2: Number(m[4]),
+               d: m[1] + ' ' + m[2] + ' ' + m[3] + ' ' + m[4] });
+    m = re.exec(svg);
+  }
+  return out;
+}
+
+// Whether a point is on a segment, read at that point's own height. The same
+// question the label-seating assertion asks, in one place because two of them
+// ask it.
+function onSegment(line, x, y) {
+  if (y < Math.min(line.y1, line.y2) || y > Math.max(line.y1, line.y2)) {
+    return false;
+  }
+  const t = (y - line.y1) / ((line.y2 - line.y1) || 1);
+  return Math.abs((line.x1 + (line.x2 - line.x1) * t) - x) <= 1;
+}
+
 function overlap(a, b) {
   return a.x < b.x + b.width && b.x < a.x + a.width &&
          a.y < b.y + b.height && b.y < a.y + a.height;
@@ -194,6 +221,38 @@ const FAN = {
           edge('7', 'alice', 'two', { relation: 'issued-for', credentials: 1 }),
           edge('8', 'alice', 'three', { relation: 'issued-for', credentials: 1 }),
           edge('9', 'alice', 'four', { relation: 'issued-for', credentials: 1 })]
+};
+
+// ONE PARTY WITH TWO LINES TO THE ISSUER, which was `bob_end_user`'s own
+// picture and was drawn as ONE line until 2026-08-26. Every issuer line is a
+// segment clipped to the two boxes at its ends, so two of them between the same
+// pair were the same segment computed twice — one path exactly over the other —
+// while their labels were seated in separate ROWS to keep labels from
+// colliding. What that read as was a single line saying `signed in / OAuth 2.0
+// / OIDC / 1 time` in one place and `signed in / OAuth 2.0 / 2 times` in
+// another: one relationship contradicting itself.
+//
+// THAT PARTICULAR PAIR IS GONE FROM THE GRAPH — `user_graph.js` draws one
+// sign-in line per person now, with the families listed on it, and
+// `tests/user_graph_signin.js` holds it to that. This fixture is the shape that
+// CANNOT be folded away, because the two lines say different things in
+// different directions: a client that authenticated as itself is `signed in`
+// one way and `issued for` the other, and the middle tier of a Kerberos chain
+// both authenticates and is issued to. The renderer must not assume the graph
+// handed to it folded anything.
+const TWICE = {
+  nodes: [STS, party('frontend', { chiefRole: 'initial', isSubject: true })],
+  edges: [edge('signed-in', 'frontend', ' sts',
+               { relation: 'signed-in', acts: 2, issued: 2,
+                 protocol: '',
+                 authentications: [
+                   { protocol: 'OAuth 2.0', method: 'client_credentials',
+                     count: 2 }
+                 ],
+                 typeLabel: 'OAuth 2.0 — client_credentials ×2' }),
+          edge('grant |  sts > frontend', ' sts', 'frontend',
+               { relation: 'issued-for', credentials: 2,
+                 typeLabel: 'Client Credentials grant' })]
 };
 
 // Nothing has ever happened. `delegation.graph([])`'s answer, which every one of
@@ -369,6 +428,77 @@ function run(t) {
           'and each of their labels sits ON its own line rather than beside it',
           seated.length + ' of ' + fanPanels.length + ' panels are on a straight ' +
           'segment (the rest belong to lines dagre routed)');
+
+  // -----------------------------------------------------------------------
+  t.log.info('two lines between one party and the issuer are two lines');
+  // -----------------------------------------------------------------------
+  // See the note on TWICE. This is asserted on the GEOMETRY rather than on the
+  // count of `<path>` elements, because the bug drew both of them: there were
+  // two paths in the document, with identical `d` attributes and identical
+  // arrowheads, one exactly under the other. What a reader saw was one line
+  // with two labels on it.
+  const twice = map.render(TWICE, { id: 'twice', label: 'twice' });
+  const twiceHex = hexagon(twice.svg);
+  // EITHER END, because these two run in opposite directions: the sign-in
+  // points INTO the hexagon and the grant comes back OUT of it, which is the
+  // whole reason the graph cannot fold them into one.
+  const atHex = function (line) {
+    return !!twiceHex && (Math.abs(line.y1 - twiceHex.bottom) <= 1 ||
+                          Math.abs(line.y2 - twiceHex.bottom) <= 1);
+  };
+  const hexEndOf = function (line) {
+    return Math.abs(line.y1 - (twiceHex ? twiceHex.bottom : 0)) <= 1
+      ? { x: line.x1, y: line.y1 } : { x: line.x2, y: line.y2 };
+  };
+  const signIns = segments(twice.svg).filter(atHex);
+  t.check(signIns.length >= 2,
+          'both of the party\'s lines to the issuer are drawn',
+          signIns.length + ' segment(s) touch the hexagon');
+  // COMPARED AS UNORDERED PAIRS OF POINTS, which matters here and would not
+  // have in a fixture whose lines ran the same way: these two run in opposite
+  // directions, so `M a L b` and `M b L a` are different strings for one
+  // segment drawn twice. Comparing the strings would call that two lines.
+  const distinct = {};
+  signIns.forEach(function (line) {
+    const ends = [line.x1 + ',' + line.y1, line.x2 + ',' + line.y2].sort();
+    distinct[ends.join(' ')] = true;
+  });
+  t.check(Object.keys(distinct).length === signIns.length,
+          'AND NO TWO OF THEM ARE THE SAME SEGMENT — one path over ' +
+          'another is one line wearing two labels',
+          signIns.map(function (line) { return line.d; }).join(' | '));
+
+  // Both ends still land on their own box. The fan aims a line to one side of
+  // the issuer's centre, so the hexagon end is clipped against the SHAPE rather
+  // than scaled along a ray out of its middle — and getting that wrong does not
+  // draw a wrong line, it draws a correct line that starts in mid-air a few
+  // pixels off the hexagon it points at.
+  const adrift = signIns.filter(function (line) {
+    const end = hexEndOf(line);
+    return !twiceHex || end.x < twiceHex.left - 1 || end.x > twiceHex.right + 1;
+  });
+  t.check(adrift.length === 0,
+          'and each of them meets the hexagon rather than stopping beside it',
+          adrift.length
+            ? adrift.map(function (line) { return line.d; }).join(' | ')
+            : 'both ends within the outline (' +
+              (twiceHex ? twiceHex.left.toFixed(0) + '-' +
+                          twiceHex.right.toFixed(0) : '?') + ')');
+
+  // AND THE LABELS FOLLOWED THEM. Two lines drawn apart with both labels seated
+  // on where the old single line was would be the same complaint in a new
+  // place, so each panel is required to sit on one of these segments and no two
+  // panels on the same one.
+  const twicePanels = panels(twice.svg);
+  const seats = signIns.map(function (line) {
+    return twicePanels.filter(function (one) {
+      return onSegment(line, one.x + one.width / 2, one.y + one.height / 2);
+    }).length;
+  });
+  const oneEach = seats.filter(function (n) { return n === 1; });
+  t.check(oneEach.length === signIns.length,
+          'and each line carries exactly one of the two labels',
+          'panels per line: ' + seats.join(', '));
 
   // -----------------------------------------------------------------------
   t.log.info('the issuer with nothing attached to it');

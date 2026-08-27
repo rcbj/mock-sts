@@ -1705,6 +1705,52 @@ const SETTINGS = [
     restartReason: 'that realm\'s krbtgt keys are derived from it at startup',
     description: 'The krbtgt password of the trusted realm.' },
 
+  // ---------------------------------------------------------------------
+  // THE TWO THAT TURN A KERBEROS TICKET INTO A SIGN-IN, and they are two
+  // rather than one because they answer different questions. The first is
+  // whether /authn/spnego will mint a SESSION; the second is whether the
+  // sign-in screen advertises it. A deployment that wants the door for a
+  // scripted client and not for people at a browser sets the second false, and
+  // a screen offering a button to a closed door is what the first prevents.
+  //
+  // BOTH ARE `runtime: true` AND DEFAULT ON. On, because a mock whose newest
+  // authentication mechanism has to be switched on before it can be exercised
+  // is one nobody exercises — and because nothing here becomes more permissive
+  // by it: past that door a person still has to hold a ticket this service's
+  // own acceptor accepts, which is the one credential check in this repository
+  // that is real. Runtime, because both are read at the moment they are used
+  // and neither binds a socket or derives a key.
+  // ---------------------------------------------------------------------
+  { key: 'krb5.spnegoAuthentication', group: 'Kerberos',
+    label: 'Sign in with a Kerberos ticket',
+    env: 'KRB5_SPNEGO_AUTHENTICATION', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Whether /authn/spnego turns a Kerberos ticket into a ' +
+                 'browser session — integrated authentication, available to ' +
+                 'every application and to none in particular. With it off ' +
+                 'that endpoint answers 403 saying which setting it was, and ' +
+                 '/spnego/protected still performs the whole handshake and ' +
+                 'shows you both halves of it; what it will not do is give ' +
+                 'you a session. An application or a federation relationship ' +
+                 'that names the `spnego` mechanism while this is off is ' +
+                 'REPORTED on the sign-in screen rather than meeting a 403 ' +
+                 'halfway through a flow.' },
+
+  { key: 'krb5.spnegoLoginButton', group: 'Kerberos',
+    label: 'Offer Kerberos at the sign-in screen',
+    env: 'KRB5_SPNEGO_LOGIN_BUTTON', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Show a "Sign in with Kerberos" button on /authn/login, so a ' +
+                 'ticket can satisfy ANY flow already in progress — an OAuth ' +
+                 '2.0 authorization request, a WS-Federation sign-in, a SAML ' +
+                 'AuthnRequest, the admin console. That is the same reason ' +
+                 'federation.loginButtons exists and it needs no registration ' +
+                 'at all here: whether a person can use a ticket is a fact ' +
+                 'about their machine and not about the relying party. The ' +
+                 'button is withheld from a request that demanded two ' +
+                 'factors, and says so, because a ticket claims whatever its ' +
+                 'own flags claim.' },
+
   { key: 'krb5.s2kparams', group: 'Kerberos', label: 'Send s2kparams',
     env: 'KRB5_S2KPARAMS', type: 'enum', enumValues: ['omit', 'send'],
     dflt: 'omit', runtime: true,

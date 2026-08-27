@@ -1563,8 +1563,9 @@ const SCHEMAS = {
 
   ClaimSets: openObject(
     'The two JWT claim sets — the OAuth 2.0 access token and the OIDC ID ' +
-    'Token — and the rules that govern them. The two SAML sets are at GET ' +
-    '/admin-api/saml-attributes; one store answers both.',
+    'Token — and the rules that govern them. The UserInfo set is at GET ' +
+    '/admin-api/userinfo-claims and the two SAML sets at GET ' +
+    '/admin-api/saml-attributes; one store answers all three.',
     Object.assign({
       reservedJwtClaims: {
         type: 'array', items: { type: 'string' },
@@ -1574,6 +1575,110 @@ const SCHEMAS = {
                      'produce tokens that fail to verify with nothing ' +
                      'pointing back at the operation that caused it.'
       },
+    }, CLAIM_SET_PROPS)),
+
+  UserInfoClaimSets: openObject(
+    'The `userinfo` claim set — what every UserInfo response carries — and the ' +
+    'OpenID Connect Core section 5.5 vocabulary a CLIENT may add to it. ' +
+    'Everything except `claimsRequest` is the shape GET /admin-api/claims ' +
+    'answers for the two JWT sets; one store answers all three resources.',
+    Object.assign({
+      reservedJwtClaims: {
+        type: 'array', items: { type: 'string' },
+        description: 'Claim names this service sets itself. Adding one is ' +
+                     'REFUSED. The list IS enforced here, unlike on the two ' +
+                     'SAML sets, and the reason is not a copy-paste: `sub` is ' +
+                     'required in this response by OIDC Core 5.3.2 and a ' +
+                     'client MUST check it against the ID Token\'s, and the ' +
+                     'signed form of the same response — for a client that ' +
+                     'registered a userinfo_signed_response_alg — is a JWT ' +
+                     'carrying iss, aud and exp.'
+      },
+      claimsRequest: openObject(
+        'THE HALF NO OPERATION HERE SETS. OpenID Connect Core section 5.5 lets ' +
+        'a client name individual claims in the `claims` request parameter at ' +
+        'the authorization endpoint, and this service parses it, refuses a ' +
+        'malformed one by name, carries it on the authorization code and ' +
+        'INSIDE the access token, and answers it by reading the named claims ' +
+        'off that person\'s entry under ou=users.',
+        {
+          supported: {
+            type: 'boolean',
+            description: 'The same fact `claims_parameter_supported` states in ' +
+                         'the OpenID Provider metadata, where it said false ' +
+                         'until 2026-08-26.'
+          },
+          members: {
+            type: 'array', items: { type: 'string' },
+            description: 'The two top-level members section 5.5 defines and ' +
+                         'this service acts on. Any OTHER top-level member is ' +
+                         'ignored rather than refused — the section says ' +
+                         'others MAY be defined — and the ignored names are ' +
+                         'reported in `preview.ignoredMembers` so that ' +
+                         '"ignored" and "not understood" are distinguishable.'
+          },
+          maxClaims: {
+            type: 'integer',
+            description: 'How many claims one request may name. The parsed ' +
+                         'request is copied into the access token, and one ' +
+                         'large enough to overflow a header would fail at a ' +
+                         'client in a way nothing points back here.'
+          },
+          requestable: {
+            type: 'array',
+            description: 'Every name a request may use. A nested claim appears ' +
+                         'twice: by its flat name (`address.locality`) and by ' +
+                         'its top-level name alone (`address`), which returns ' +
+                         'the whole Address Claim of OIDC Core 5.1.1 as one ' +
+                         'object and is the spelling section 5.5.1\'s own ' +
+                         'example uses. A language tag is part of the name ' +
+                         '(Core 5.2): `family_name#ja-Kana-JP` is answered ' +
+                         'under exactly that name with the one value this ' +
+                         'service holds.',
+            items: openObject('One requestable claim.', {
+              claim: { type: 'string' },
+              ldap: { type: 'string' },
+              label: { type: 'string' },
+              grouped: { type: 'boolean' }
+            })
+          },
+          fromTheSignIn: {
+            type: 'array', items: { type: 'string' },
+            description: 'The claims this service invents from the username ' +
+                         'rather than reading off an entry. They are ' +
+                         'answerable too, and they are listed apart because ' +
+                         'the difference is the interesting part: an ' +
+                         '`ldapmodify` moves everything in `requestable` and ' +
+                         'moves none of these.'
+          },
+          precedence: {
+            type: 'array', items: { type: 'string' },
+            description: 'The four layers of the response, outermost last. ' +
+                         'Layer 3 beating layer 2 is the one choice that is ' +
+                         'not obvious: a scope asks for a category and a ' +
+                         'claims request names a claim.'
+          },
+          notEnforced: {
+            type: 'array', items: { type: 'string' },
+            description: 'What is carried and deliberately not acted on, with ' +
+                         'the reason for each. `essential` is a hint (5.5.1 ' +
+                         'says a server MUST NOT error for an unavailable ' +
+                         'claim); `value` and `values` are checked and ' +
+                         'reported rather than echoed back.'
+          },
+          directParameter: openObject(
+            'NON-SPEC. The UserInfo endpoint also accepts a claims request on ' +
+            'the request itself, which section 5.3.1 does not define. It is a ' +
+            'union with what the access token carries and can never take a ' +
+            'claim away from it.', {}),
+          preview: openObject(
+            'What the `request` query parameter would return for `user`, ' +
+            'computed by the two functions the UserInfo endpoint itself calls. ' +
+            '`asked` is false when no request was given; `ok` is false, with ' +
+            '`error`, when the request is one the authorization endpoint would ' +
+            'refuse `invalid_request` — which is shown rather than corrected.',
+            {})
+        })
     }, CLAIM_SET_PROPS)),
 
   SamlAttributeSets: openObject(

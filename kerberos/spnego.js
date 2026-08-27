@@ -70,53 +70,36 @@
 // against nothing, and an error naming a checksum.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// THE EXCHANGE ITSELF MOVED OUT ON 2026-08-26, AND THIS FILE KEPT THE PAGE.
+//
+// Everything above this line still describes what happens; `spnego_exchange.js`
+// is where it happens now. The split was forced by a SECOND DOOR — the sign-in
+// at `/authn/spnego`, which turns this same handshake into a session — and the
+// argument is the one `krb5_service.js` made when THIS module was written: two
+// transports over one acceptor, because two acceptors would be a page that
+// documents a check the sign-in does not make, with nothing anywhere to fail.
+//
+// So what is below is a RENDERER. It asks `negotiate()` for a verdict, switches
+// on the verdict's `code`, and writes the prose. Not one line of Kerberos or
+// RFC 4178 is left in this file, and that is the property to keep: a branch
+// added here that decides something rather than describing it belongs one file
+// over.
+// ---------------------------------------------------------------------------
 const app = require('../common/app');
 const { log, xmlEscape } = require('../common/helpers');
-const prim = require('./krb5_primitives.js');
-const msgs = require('./krb5_messages.js');
-const kcrypto = require('./krb5_crypto.js');
-const gss = require('./krb5_gss.js');
+// For one thing only: whether the SIGN-IN door beside this page is open, which
+// the advertisement reports rather than implies. A library that registers no
+// route, so requiring it moves nothing.
+const config = require('../common/config');
 const spnego = require('./krb5_spnego.js');
 const principals = require('./krb5_principals.js');
-const krb5Service = require('./krb5_service.js');
+const exchange = require('./spnego_exchange.js');
 
-// What this acceptor supports, in ITS order of preference. Kerberos first
-// because it is the only thing here that works — NTLM is listed by every real
-// Windows server and is not implemented, so offering it would be a lie a client
-// could act on.
-const SUPPORTED_MECHS = [spnego.KRB5_MECH_OID, spnego.MS_KRB5_MECH_OID];
-
-// A half-finished negotiation, held between the two requests of a request-mic
-// exchange. A real acceptor keeps this on the CONNECTION — that is what RFC
-// 4559 section 5 means by the authentication being connection-based, and it is
-// why HTTP/2 and connection-pooling proxies break SPNEGO in ways nothing
-// reports. Node's Express gives no stable connection identity here, so this
-// stands in with the remote address plus the mechanism list, held briefly.
-// Being a stand-in is stated rather than hidden: it is the one place this mock
-// is structurally unlike a real server.
-const PENDING_TTL_MS = 120000;
-const MAX_PENDING = 64;
-const pending = new Map();
-
-function pendingKey(req, mechListDer) {
-  log.debug('Entering pendingKey().');
-  const who = (req.ip || req.connection.remoteAddress || 'unknown');
-  log.debug('Leaving pendingKey().');
-  return who + '|' + prim.toHex(mechListDer);
-}
-
-function prunePending(nowMs) {
-  log.debug('Entering prunePending().');
-  for (const [key, entry] of pending) {
-    if (nowMs - entry.at > PENDING_TTL_MS) {
-      pending.delete(key);
-    }
-  }
-  while (pending.size > MAX_PENDING) {
-    pending.delete(pending.keys().next().value);
-  }
-  log.debug('Leaving prunePending().');
-}
+// Re-exported from the library, because this page names them in its
+// advertisement and a second list would be a page describing an acceptor that
+// is not the one behind it.
+const SUPPORTED_MECHS = exchange.SUPPORTED_MECHS;
 
 // ---------------------------------------------------------------------------
 // The HTML the two pages share. A local copy of wsfed.js's page() rather than a
@@ -170,7 +153,7 @@ function checksTable(checks) {
 // is behind, and what a client has to do — which is the part a real intranet
 // site never tells you and the part that is always wrong.
 // ---------------------------------------------------------------------------
-const SPN = krb5Service.SERVICE_PRINCIPAL.join('/');
+const SPN = exchange.SPN;
 
 app.get('/spnego', function (req, res) {
   log.debug('Entering GET /spnego.');
@@ -179,6 +162,14 @@ app.get('/spnego', function (req, res) {
     log.debug('Leaving GET /spnego. JSON.');
     return res.status(200).json({
       protectedResource: '/spnego/protected',
+      // THE SECOND DOOR, named here because this page is where somebody comes
+      // to find out what SPNEGO surface this service has and the two are easy
+      // to confuse: the resource above proves a handshake and stops, and this
+      // one turns the same handshake into a session sixteen protocol families
+      // read. Its own availability is a setting, so it is reported rather than
+      // implied.
+      signInResource: '/authn/spnego',
+      signInEnabled: !!config.value('krb5.spnegoAuthentication'),
       servicePrincipalName: principal,
       // The SPN a client DERIVES from this URL's host is usually not the
       // canonical one above — RFC 4559 clients guess `HTTP/<url host>`, so
@@ -204,7 +195,12 @@ app.get('/spnego', function (req, res) {
           'negotiation is rejected',
         'mutual=off': 'accept the ticket but send no AP-REP back'
       },
-      lastExchange: lastExchange
+      // The knobs above are THIS page's and the sign-in door takes none of
+      // them, deliberately: a door that mints sessions with a query parameter
+      // that makes it fail in an instructive way is a footgun rather than a
+      // lesson, and the lesson is available here.
+      knobsApplyTo: '/spnego/protected only',
+      lastExchange: exchange.lastExchange()
     });
   }
   const inner = '<h1>A SPNEGO-protected page lives here</h1>' +
@@ -217,6 +213,28 @@ app.get('/spnego', function (req, res) {
     'explicit allow-list, so what you will see is the 401 itself. That is ' +
     'the point of the debugger &mdash; it performs the handshake by hand and ' +
     'shows you both halves.</p>' +
+    '<h2>And the same handshake as a sign-in</h2>' +
+    '<p><a href="/authn/spnego"><strong>/authn/spnego</strong></a> performs ' +
+    'exactly the negotiation above &mdash; same acceptor, same checks, same ' +
+    'code &mdash; and then <strong>starts a browser session</strong> for the ' +
+    'principal the ticket named. Past it, an OAuth 2.0 authorization ' +
+    'request, a <code>wsignin1.0</code>, a SAML <code>AuthnRequest</code> and ' +
+    'the admin console all complete without anybody typing anything, because ' +
+    'every protocol here reads the one session.</p>' +
+    '<p>That is the difference between the two doors, and it is the only ' +
+    'difference: this one proves a handshake and stops, that one acts on it. ' +
+    'It is available to every application and registered for none &mdash; a ' +
+    'button on the sign-in screen, <code>appAuthnMechanism: spnego</code> on ' +
+    'an application entry, or <code>fedAuthnMechanism: spnego</code> on a ' +
+    'federation relationship. ' +
+    (config.value('krb5.spnegoAuthentication')
+       ? ''
+       : '<strong>It is switched off right now</strong> ' +
+         '(<code>krb5.spnegoAuthentication</code>), so it answers 403 and ' +
+         'says so. ') +
+    'The three knobs below are this page&rsquo;s alone: a sign-in door with a ' +
+    'query parameter that makes it fail in an instructive way is a footgun ' +
+    'rather than a lesson.</p>' +
     '<h2>What a client needs before it can get in</h2>' +
     '<table>' +
     '<tr><th>Thing</th><th>Value</th></tr>' +
@@ -260,493 +278,151 @@ app.get('/spnego', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
-// The protected resource.
+// THE PROTECTED RESOURCE — a renderer over `negotiate()`'s verdict.
+//
+// One case per outcome in `spnego_exchange.js`'s OUTCOMES table, and the switch
+// is EXHAUSTIVE on purpose rather than defensive: a new outcome added over
+// there falls into `default`, which says so out loud instead of drawing a page
+// that quietly describes the wrong thing. That is the whole reason the codes
+// are a named table rather than a set of strings written at the branches.
+//
+// Nothing in here decides anything. Every heading below is a sentence about a
+// decision made one file over, and the moment one of them starts computing
+// something the split has been undone.
 // ---------------------------------------------------------------------------
-let lastExchange = null;
 
-function record(outcome) {
-  log.debug('Entering record().');
-  lastExchange = Object.assign({ at: new Date().toISOString() }, outcome);
-  log.debug('Leaving record().');
-}
+// The heading each verdict gets, and the `<title>`. Kept as a table because the
+// two are chosen together and a switch would have interleaved them with the
+// prose, where a reader comparing two branches has to hold both in their head.
+const HEADINGS = {
+  'no-authorization':        ['Authentication required', '401 &mdash; authentication required'],
+  'wrong-scheme':            ['Wrong scheme', '401 &mdash; wrong authentication scheme'],
+  'empty-token':             ['Empty token', '401 &mdash; an empty Negotiate token'],
+  'no-mech-token':           ['Send a token', '401 &mdash; send the mechanism&rsquo;s token'],
+  'ticket-refused':          ['Ticket refused', '401 &mdash; the ticket was refused'],
+  'request-mic':             ['Send the MIC', '401 &mdash; send the mechListMIC'],
+  'accepted':                ['Authenticated', '200 &mdash; you are in']
+};
 
-// ---------------------------------------------------------------------------
-// WHAT THIS MOCK VOLUNTEERS THAT NO REAL SERVER DOES, and why it is two headers.
-//
-// RFC 4559's challenge is `WWW-Authenticate: Negotiate` and nothing else. It does
-// not say the realm, the KDC or the SPN — so a client guesses `HTTP/<url host>`,
-// and when that guess is wrong the whole exchange fails at the KDC with an error
-// that names nothing about HTTP. That silence is the protocol's, it is the single
-// commonest cause of a SPNEGO failure in the field, and this mock cannot fix it
-// for the world. What it CAN do is stop being another instance of it.
-//
-// So the challenge carries two extra headers, on every 401 this resource sends:
-//
-//   X-Krb5-Service-Principal   the SPN this service holds a key for, canonically
-//   X-Krb5-Accepts-Spn-Hosts   every host it will answer for, comma-separated
-//
-// They are inert to every real client (an unknown header is ignored), they cost
-// nothing, and they are what lets the debugger say "your derived SPN will work
-// here" or "this service says it is X" BEFORE sending somebody to the KDC for a
-// ticket that cannot be issued. `X-` because they are nobody's standard: they are
-// this mock talking to this debugger, and the page labels them as such rather than
-// presenting them as something it learned from the protocol.
-// ---------------------------------------------------------------------------
-function volunteerTheSpn(res) {
-  log.debug('Entering volunteerTheSpn().');
-  res.set('X-Krb5-Service-Principal', SPN + '@' + principals.REALM);
-  res.set('X-Krb5-Accepts-Spn-Hosts', principals.SERVICE_DOMAINS.join(','));
-  log.debug('Leaving volunteerTheSpn().');
-}
+// Everything not in the table above is a REJECT, and they share one page: the
+// heading is the negotiation being rejected, the reason is in the banner, and
+// the detail below it is the only place a client could ever learn why.
+const REJECTED = ['Rejected', '401 &mdash; the negotiation was rejected'];
 
-// The bare challenge. No token: RFC 4559 section 4 — the server says only that
-// it will negotiate, and everything else is the client's problem.
-function challenge(res, body, status) {
-  log.debug('Entering challenge().');
-  res.set('WWW-Authenticate', 'Negotiate');
-  volunteerTheSpn(res);
-  res.status(status || 401).type('html').send(body);
-  log.debug('Leaving challenge().');
-}
-
-// A challenge that carries a token back — a continuation or a refusal.
-function challengeWith(res, token, body, status) {
-  log.debug('Entering challengeWith().');
-  res.set('WWW-Authenticate', 'Negotiate ' +
-    Buffer.from(token).toString('base64'));
-  volunteerTheSpn(res);
-  res.status(status || 401).type('html').send(body);
-  log.debug('Leaving challengeWith().');
-}
-
-function refusal(res, reason, detail, checks) {
-  log.debug('Entering refusal().');
-  record({ ok: false, reason: reason, checks: checks || null });
-  const token = spnego.encodeNegTokenResp({
-    negState: spnego.NEG_STATE.REJECT
-  });
-  const inner = '<h1>401 &mdash; the negotiation was rejected</h1>' +
-    '<div class="err">' + xmlEscape(reason) + '</div>' +
-    (detail ? '<p>' + detail + '</p>' : '') +
-    (checks ? '<h2>What this service checked</h2>' + checksTable(checks) : '') +
-    '<p class="sub">SPNEGO&rsquo;s <code>reject</code> carries no reason of ' +
-    'its own &mdash; the structure has no field for one. Everything above ' +
-    'this line is out of band, and a real server tells you none of it.</p>';
-  challengeWith(res, token, page('Rejected', inner));
-  log.debug('Leaving refusal().');
-}
-
-// Which of the client's mechanisms this acceptor will use, respecting the
-// CLIENT's order of preference — RFC 4178 section 4.1 makes the mechTypes list
-// ordered, and an acceptor that imposes its own order is what makes the
-// mechListMIC exchange mandatory rather than optional.
-function selectMech(offered, supported) {
-  log.debug('Entering selectMech().');
-  for (let i = 0; i < offered.length; i++) {
-    if (supported.indexOf(offered[i]) !== -1) {
-      log.debug('Leaving selectMech(). ' + offered[i]);
-      return offered[i];
-    }
-  }
-  log.debug('Leaving selectMech(). None.');
-  return null;
-}
-
-// The key each side signs the mechanism list with. See the header: the
-// asymmetry is forced by WHEN each MIC is computed, not chosen.
-function initiatorMicKey(result) {
-  log.debug('Entering initiatorMicKey().');
-  const key = result.initiatorSubkey || {
-    etype: result.sessionKeyEtype,
-    key: result.sessionKey
-  };
-  log.debug('Leaving initiatorMicKey().');
-  return key;
-}
-
-async function handleProtected(req, res) {
-  log.debug('Entering handleProtected().');
-  const supported = String(req.query.mech || '') === 'none' ? [] :
-    SUPPORTED_MECHS;
-  const wantMic = String(req.query.mic || '') === 'require';
-  const mutualOff = String(req.query.mutual || '') === 'off';
-  const header = req.get('authorization') || '';
-
-  if (!header) {
-    record({ ok: false, reason: 'no Authorization header; challenged' });
-    log.info('krb5-spnego: no Authorization header — answering 401 with a ' +
-      'bare Negotiate challenge');
-    const inner = '<h1>401 &mdash; authentication required</h1>' +
-      '<p>This resource is protected with <code>Negotiate</code>. The ' +
-      'challenge above carries <strong>no token</strong>, which is RFC 4559 ' +
-      'section 4: the server says only that it will negotiate, and the ' +
-      'client is expected to know the rest already.</p>' +
-      '<p>What the client has to work out for itself, with no help from this ' +
-      'exchange: that the service principal name is <code>' +
-      xmlEscape(SPN) + '</code>, which realm that is in, and where that ' +
-      'realm&rsquo;s KDC is.</p>';
-    challenge(res, page('Authentication required', inner));
-    log.debug('Leaving handleProtected(). Challenged.');
-    return;
-  }
-
-  const match = /^Negotiate\s+([A-Za-z0-9+/=]*)\s*$/i.exec(header.trim());
-  if (!match) {
-    // A scheme this resource does not speak. Named, because "401" on its own
-    // sends people to look at their ticket when they sent Basic.
-    const scheme = header.split(/\s/)[0] || '(none)';
-    record({ ok: false, reason: 'Authorization scheme ' + scheme });
-    log.info('krb5-spnego: refusing Authorization scheme ' + scheme);
-    const inner = '<h1>401 &mdash; wrong authentication scheme</h1>' +
-      '<div class="err">This resource speaks <code>Negotiate</code>. The ' +
-      'request offered <code>' + xmlEscape(scheme) + '</code>.</div>';
-    challenge(res, page('Wrong scheme', inner));
-    log.debug('Leaving handleProtected(). Wrong scheme.');
-    return;
-  }
-  if (!match[1]) {
-    record({ ok: false, reason: 'an empty Negotiate token' });
-    const inner = '<h1>401 &mdash; an empty Negotiate token</h1>' +
-      '<div class="err">The <code>Authorization</code> header named ' +
-      '<code>Negotiate</code> and carried nothing after it.</div>';
-    challenge(res, page('Empty token', inner));
-    log.debug('Leaving handleProtected(). Empty token.');
-    return;
-  }
-
-  const tokenBytes = new Uint8Array(Buffer.from(match[1], 'base64'));
-  let parsed;
-  try {
-    parsed = spnego.decodeNegotiationToken(tokenBytes);
-  } catch (e) {
-    refusal(res, 'the Negotiate token does not decode: ' + e.message,
-      '<p>The bytes after <code>Negotiate </code> must be a SPNEGO ' +
-      'negotiation token (RFC 4178) or a bare Kerberos GSS token (RFC 4121).' +
-      '</p>');
-    log.debug('Leaving handleProtected(). Undecodable.');
-    return;
-  }
-
-  // A continuation: the client answering our request-mic with the MIC alone.
-  if (parsed.kind === 'NegTokenResp') {
-    await handleContinuation(req, res, parsed);
-    log.debug('Leaving handleProtected(). Continuation.');
-    return;
-  }
-
-  let mechToken = null;
-  let selected = null;
-  let mechListDer = null;
-  let rawKerberos = false;
-
-  if (parsed.kind === 'RawKerberos') {
-    // No negotiation at all. Accepted, because real clients do this and a
-    // debugger that refused would be teaching something false — but the
-    // difference is stated rather than smoothed over, since none of SPNEGO's
-    // protection applies to it.
-    rawKerberos = true;
-    mechToken = tokenBytes;
-    selected = spnego.KRB5_MECH_OID;
-  } else {
-    mechListDer = parsed.mechListDer;
-    selected = selectMech(parsed.mechTypes, supported);
-    if (!selected) {
-      refusal(res, 'no mechanism in common',
-        '<p>The client offered ' + parsed.mechTypes.length + ' mechanism(s): ' +
-        parsed.mechTypes.map(function (oid, i) {
+// The paragraph under the banner, per outcome. A function rather than a table
+// because five of them read facts off the verdict.
+function detailFor(verdict) {
+  log.debug('Entering detailFor(). code=' + verdict.code);
+  let html = '';
+  switch (verdict.code) {
+    case 'no-authorization':
+      html = '<p>This resource is protected with <code>Negotiate</code>. The ' +
+        'challenge above carries <strong>no token</strong>, which is RFC 4559 ' +
+        'section 4: the server says only that it will negotiate, and the ' +
+        'client is expected to know the rest already.</p>' +
+        '<p>What the client has to work out for itself, with no help from this ' +
+        'exchange: that the service principal name is <code>' +
+        xmlEscape(SPN) + '</code>, which realm that is in, and where that ' +
+        'realm&rsquo;s KDC is.</p>';
+      break;
+    case 'wrong-scheme':
+      html = '<div class="err">This resource speaks <code>Negotiate</code>. The ' +
+        'request offered <code>' + xmlEscape(verdict.scheme) + '</code>.</div>';
+      break;
+    case 'empty-token':
+      html = '<div class="err">The <code>Authorization</code> header named ' +
+        '<code>Negotiate</code> and carried nothing after it.</div>';
+      break;
+    case 'undecodable':
+      html = '<p>The bytes after <code>Negotiate </code> must be a SPNEGO ' +
+        'negotiation token (RFC 4178) or a bare Kerberos GSS token (RFC 4121).' +
+        '</p>';
+      break;
+    case 'no-common-mechanism':
+      html = '<p>The client offered ' + verdict.offered.length + ' mechanism(s): ' +
+        verdict.offered.map(function (oid, i) {
           return '<code>' + xmlEscape(oid) + '</code> (' +
-            xmlEscape(parsed.mechTypeNames[i]) + ')';
+            xmlEscape(verdict.offeredNames[i]) + ')';
         }).join(', ') + '. This service supports ' +
-        (supported.length
-          ? supported.map(function (oid) {
+        (verdict.supported.length
+          ? verdict.supported.map(function (oid) {
               return '<code>' + xmlEscape(oid) + '</code>';
             }).join(', ')
           : '<strong>nothing</strong> &mdash; <code>?mech=none</code> is set') +
-        '.</p>');
-      log.debug('Leaving handleProtected(). No common mechanism.');
-      return;
-    }
-    if (!parsed.mechToken) {
-      // A pessimistic NegTokenInit: the client named its mechanisms and sent
-      // no token. Legal, and it costs the round trip the optimistic token
-      // exists to avoid.
-      record({ ok: false, reason: 'no optimistic mechToken; asked for one' });
-      const token = spnego.encodeNegTokenResp({
-        negState: spnego.NEG_STATE.ACCEPT_INCOMPLETE,
-        supportedMech: selected
-      });
-      const inner = '<h1>401 &mdash; send the mechanism&rsquo;s token</h1>' +
-        '<p>The <code>NegTokenInit</code> carried a mechanism list and no ' +
+        '.</p>';
+      break;
+    case 'no-mech-token':
+      html = '<p>The <code>NegTokenInit</code> carried a mechanism list and no ' +
         '<code>mechToken</code>, so this reply selects <code>' +
-        xmlEscape(spnego.mechName(selected)) + '</code> and asks for one: ' +
+        xmlEscape(spnego.mechName(verdict.selected)) + '</code> and asks for one: ' +
         '<code>accept-incomplete</code>. That is the round trip the ' +
         '&ldquo;optimistic&rdquo; token exists to avoid.</p>';
-      challengeWith(res, token, page('Send a token', inner));
-      log.debug('Leaving handleProtected(). Asked for a mechToken.');
-      return;
-    }
-    mechToken = parsed.mechToken;
-    if (!spnego.isKerberosMech(selected)) {
-      refusal(res, 'the selected mechanism is not one this service performs',
-        '<p>Selected <code>' + xmlEscape(selected) + '</code>.</p>');
-      log.debug('Leaving handleProtected(). Non-Kerberos mechanism.');
-      return;
-    }
+      break;
+    case 'non-kerberos-mechanism':
+      html = '<p>Selected <code>' + xmlEscape(verdict.selected) + '</code>.</p>';
+      break;
+    case 'ticket-refused':
+      html = '<div class="err">The negotiation selected Kerberos and the AP-REQ ' +
+        'did not pass.</div>' +
+        '<p>The reason is in the <code>responseToken</code> of the ' +
+        '<code>WWW-Authenticate</code> header, as a <code>KRB-ERROR</code>. ' +
+        'SPNEGO itself carries no error detail at all, so a client that reads ' +
+        'only <code>negState</code> learns nothing but &ldquo;no&rdquo;.</p>';
+      break;
+    case 'bad-mech-list-mic':
+      // TWO WORDINGS FOR ONE CODE, and the distinction is the verdict's. On the
+      // first token the ticket was good and the MIC was computed over the wrong
+      // bytes; on the continuation the client was asked for exactly this one
+      // thing and got it wrong.
+      html = verdict.continuation
+        ? '<p>Computed over the DER of the <code>MechTypeList</code> &mdash; the ' +
+          'SEQUENCE, not the <code>[0]</code> wrapper (RFC 4178 section 5).</p>'
+        : '<p>The client&rsquo;s ticket was perfectly good. What failed is the ' +
+          'integrity check over the <em>mechanism list</em> &mdash; so either ' +
+          'the list was altered in transit, or the client computed the MIC ' +
+          'over the wrong bytes. The commonest cause of the second is signing ' +
+          '<code>[0] MechTypeList</code> rather than <code>MechTypeList</code>: ' +
+          'two bytes, and RFC 4178 section 5 spells the distinction out because ' +
+          'implementations kept getting it wrong.</p>';
+      break;
+    case 'mic-required':
+      html = '<p>' + xmlEscape(verdict.requirement.reason) + '</p>';
+      break;
+    case 'request-mic':
+      html = '<p>The ticket was accepted, and this reply is ' +
+        '<code>request-mic</code>: the mechanism list must be integrity ' +
+        'protected before the context is usable. Legal only in the ' +
+        'acceptor&rsquo;s first reply (RFC 4178 section 4.2.2).</p>' +
+        '<p>Answer with a bare <code>NegTokenResp</code> carrying only the ' +
+        '<code>mechListMIC</code>, computed over the DER of the ' +
+        '<code>MechTypeList</code> with the subkey from your Authenticator.</p>';
+      break;
+    case 'no-pending-continuation':
+      html = '<p>A bare <code>NegTokenResp</code> arrived, but nothing here is ' +
+        'waiting for one. A real acceptor keeps this state on the ' +
+        '<em>connection</em>, which is why SPNEGO breaks behind ' +
+        'connection-pooling proxies and on HTTP/2 in ways nothing reports.</p>';
+      break;
+    case 'continuation-no-mic':
+      html = '<p>The previous reply was <code>request-mic</code>, so the only ' +
+        'thing this token needed was the MIC.</p>';
+      break;
+    default:
+      html = '';
+      break;
   }
-
-  // The Kerberos half, unchanged: krb5_service.js's acceptor does every check
-  // it does over a raw socket. This module adds no protocol code to it, which
-  // was the design promise the split was made for.
-  let result;
-  try {
-    // `via` only names the transport for the console: every Kerberos check is that
-    // module's, and this one adds none. Without it a SPNEGO sign-in would be filed
-    // as a raw-socket one, which is the difference between "a browser did this" and
-    // "something on port 8888 did".
-    result = await krb5Service.accept(mechToken, { via: 'SPNEGO over HTTP (RFC 4559)' });
-  } catch (e) {
-    log.error('krb5-spnego: the acceptor threw: ' + (e.stack || e.message));
-    refusal(res, 'the Kerberos acceptor failed: ' + e.message, null);
-    log.debug('Leaving handleProtected(). Acceptor threw.');
-    return;
-  }
-
-  if (!result.ok) {
-    // The mechanism's own error token goes back INSIDE the responseToken. This
-    // is the only way a SPNEGO rejection can say why: negState has no reason
-    // field, so the KRB-ERROR is the entire diagnosis.
-    record({ ok: false, reason: 'the Kerberos AP-REQ was refused',
-             checks: result.checks });
-    const token = spnego.encodeNegTokenResp({
-      negState: spnego.NEG_STATE.REJECT,
-      supportedMech: selected,
-      responseToken: result.reply
-        ? gss.encodeInitialContextToken(gss.TOK_ID.KRB_ERROR, result.reply)
-        : null
-    });
-    const inner = '<h1>401 &mdash; the ticket was refused</h1>' +
-      '<div class="err">The negotiation selected Kerberos and the AP-REQ ' +
-      'did not pass.</div>' +
-      '<p>The reason is in the <code>responseToken</code> of the ' +
-      '<code>WWW-Authenticate</code> header, as a <code>KRB-ERROR</code>. ' +
-      'SPNEGO itself carries no error detail at all, so a client that reads ' +
-      'only <code>negState</code> learns nothing but &ldquo;no&rdquo;.</p>' +
-      '<h2>What this service checked</h2>' + checksTable(result.checks);
-    challengeWith(res, token, page('Ticket refused', inner));
-    log.debug('Leaving handleProtected(). Ticket refused.');
-    return;
-  }
-
-  // The mechanism list is now integrity-protected, or it is not, and RFC 4178
-  // section 5 decides which of those is acceptable.
-  const requirement = rawKerberos
-    ? { required: false, reason: 'There is no mechanism list to protect: ' +
-        'this was a bare Kerberos token with no negotiation around it.' }
-    : spnego.micRequirement(parsed.mechTypes, selected);
-  const initiatorKey = initiatorMicKey(result);
-
-  if (parsed && parsed.mechListMic) {
-    let verdict;
-    try {
-      verdict = await spnego.verifyMechListMic({
-        key: initiatorKey.key,
-        etype: initiatorKey.etype,
-        mic: parsed.mechListMic,
-        mechListDer: mechListDer
-      });
-    } catch (e) {
-      verdict = { ok: false, error: e.message };
-    }
-    if (!verdict.ok) {
-      // A REJECT, not a warning. An acceptor that logs a bad MIC and carries
-      // on has implemented RFC 4178 section 5's syntax and none of its
-      // protection — the MIC is the only thing standing between this
-      // negotiation and an attacker who edited the mechanism list on the wire.
-      refusal(res, 'the mechListMIC does not verify' +
-        (verdict.error ? ': ' + verdict.error : ''),
-        '<p>The client&rsquo;s ticket was perfectly good. What failed is the ' +
-        'integrity check over the <em>mechanism list</em> &mdash; so either ' +
-        'the list was altered in transit, or the client computed the MIC ' +
-        'over the wrong bytes. The commonest cause of the second is signing ' +
-        '<code>[0] MechTypeList</code> rather than <code>MechTypeList</code>: ' +
-        'two bytes, and RFC 4178 section 5 spells the distinction out because ' +
-        'implementations kept getting it wrong.</p>', result.checks);
-      log.debug('Leaving handleProtected(). Bad mechListMIC.');
-      return;
-    }
-    log.info('krb5-spnego: the mechListMIC verifies (' + verdict.senderRole +
-      ', sequence ' + verdict.sequenceNumber + ')');
-  } else if (requirement.required && !rawKerberos) {
-    refusal(res, 'a mechListMIC was required and none was sent',
-      '<p>' + xmlEscape(requirement.reason) + '</p>', result.checks);
-    log.debug('Leaving handleProtected(). Missing required mechListMIC.');
-    return;
-  } else if (wantMic && !rawKerberos) {
-    // The knob: force the exchange even though section 5 would let it be
-    // skipped. Real acceptors do this — Windows sets request-mic whenever it
-    // wants the list protected regardless of preference order.
-    prunePending(Date.now());
-    pending.set(pendingKey(req, mechListDer), {
-      at: Date.now(),
-      mechListDer: mechListDer,
-      selected: selected,
-      initiatorKey: initiatorKey,
-      acceptorSubkey: result.acceptorSubkey || null,
-      client: result.client
-    });
-    const micToken = spnego.encodeNegTokenResp({
-      negState: spnego.NEG_STATE.REQUEST_MIC,
-      supportedMech: selected,
-      responseToken: result.reply || null
-    });
-    record({ ok: false, reason: 'request-mic sent; awaiting the client MIC',
-             client: result.client });
-    const inner = '<h1>401 &mdash; send the mechListMIC</h1>' +
-      '<p>The ticket was accepted, and this reply is ' +
-      '<code>request-mic</code>: the mechanism list must be integrity ' +
-      'protected before the context is usable. Legal only in the ' +
-      'acceptor&rsquo;s first reply (RFC 4178 section 4.2.2).</p>' +
-      '<p>Answer with a bare <code>NegTokenResp</code> carrying only the ' +
-      '<code>mechListMIC</code>, computed over the DER of the ' +
-      '<code>MechTypeList</code> with the subkey from your Authenticator.</p>';
-    challengeWith(res, micToken, page('Send the MIC', inner));
-    log.debug('Leaving handleProtected(). request-mic.');
-    return;
-  }
-
-  await succeed(res, {
-    result: result,
-    selected: selected,
-    mechListDer: mechListDer,
-    requirement: requirement,
-    rawKerberos: rawKerberos,
-    micVerified: !!(parsed && parsed.mechListMic),
-    mutualOff: mutualOff
-  });
-  log.debug('Leaving handleProtected(). Accepted.');
+  log.debug('Leaving detailFor().');
+  return html;
 }
 
-// The client's answer to request-mic: a bare NegTokenResp carrying the MIC and
-// nothing else. The context it belongs to is the pending one.
-async function handleContinuation(req, res, parsed) {
-  log.debug('Entering handleContinuation().');
-  prunePending(Date.now());
-  let entry = null;
-  let entryKey = null;
-  for (const [key, value] of pending) {
-    if (key.indexOf((req.ip || req.connection.remoteAddress || 'unknown') +
-        '|') === 0) {
-      entry = value;
-      entryKey = key;
-    }
-  }
-  if (!entry) {
-    refusal(res, 'there is no negotiation in progress to continue',
-      '<p>A bare <code>NegTokenResp</code> arrived, but nothing here is ' +
-      'waiting for one. A real acceptor keeps this state on the ' +
-      '<em>connection</em>, which is why SPNEGO breaks behind ' +
-      'connection-pooling proxies and on HTTP/2 in ways nothing reports.</p>');
-    log.debug('Leaving handleContinuation(). Nothing pending.');
-    return;
-  }
-  pending.delete(entryKey);
-  if (!parsed.mechListMic) {
-    refusal(res, 'the continuation carried no mechListMIC',
-      '<p>The previous reply was <code>request-mic</code>, so the only ' +
-      'thing this token needed was the MIC.</p>');
-    log.debug('Leaving handleContinuation(). No MIC.');
-    return;
-  }
-  let verdict;
-  try {
-    verdict = await spnego.verifyMechListMic({
-      key: entry.initiatorKey.key,
-      etype: entry.initiatorKey.etype,
-      mic: parsed.mechListMic,
-      mechListDer: entry.mechListDer
-    });
-  } catch (e) {
-    verdict = { ok: false, error: e.message };
-  }
-  if (!verdict.ok) {
-    refusal(res, 'the mechListMIC does not verify' +
-      (verdict.error ? ': ' + verdict.error : ''),
-      '<p>Computed over the DER of the <code>MechTypeList</code> &mdash; the ' +
-      'SEQUENCE, not the <code>[0]</code> wrapper (RFC 4178 section 5).</p>');
-    log.debug('Leaving handleContinuation(). Bad MIC.');
-    return;
-  }
-  await succeed(res, {
-    result: {
-      ok: true,
-      client: entry.client,
-      acceptorSubkey: entry.acceptorSubkey,
-      checks: [{ name: 'mechListMIC verifies', ok: true,
-                 detail: 'sent by the ' + verdict.senderRole +
-                   ', sequence ' + verdict.sequenceNumber }]
-    },
-    selected: entry.selected,
-    mechListDer: entry.mechListDer,
-    requirement: { required: true,
-                   reason: 'This acceptor asked for it with request-mic.' },
-    rawKerberos: false,
-    micVerified: true,
-    mutualOff: false,
-    continuation: true
-  });
-  log.debug('Leaving handleContinuation(). Accepted.');
-}
-
-// 200, and the token that proves who answered.
-async function succeed(res, ctx) {
-  log.debug('Entering succeed().');
-  const result = ctx.result;
-  let mic = null;
-  let micNote = null;
-  if (ctx.mechListDer && result.acceptorSubkey) {
-    // The ACCEPTOR's MIC, and it is keyed differently from the client's — see
-    // the header. The acceptor subkey is the context key once it has been
-    // offered, and the key usage is the acceptor's, 23.
-    try {
-      mic = await spnego.computeMechListMic({
-        key: result.acceptorSubkey.key,
-        etype: result.acceptorSubkey.etype,
-        role: 'acceptor',
-        acceptorSubkey: true,
-        mechListDer: ctx.mechListDer,
-        sequenceNumber: 0
-      });
-    } catch (e) {
-      // Not fatal: the context is established and the client has already
-      // authenticated. Reported rather than swallowed, because a missing MIC
-      // where one was expected is exactly what a client will complain about.
-      micNote = 'this service could not compute its own mechListMIC: ' +
-        e.message;
-      log.warn('krb5-spnego: ' + micNote);
-    }
-  }
-  const responseToken = (!ctx.continuation && !ctx.mutualOff && result.reply)
-    ? result.reply : null;
-  const token = spnego.encodeNegTokenResp({
-    negState: spnego.NEG_STATE.ACCEPT_COMPLETED,
-    // Legal only in the acceptor's FIRST reply. On the continuation of a
-    // request-mic exchange this is the second, so it is omitted — an acceptor
-    // that repeats it is telling the initiator to renegotiate.
-    supportedMech: ctx.continuation ? null : ctx.selected,
-    responseToken: responseToken,
-    mechListMic: mic
-  });
-  record({ ok: true, client: result.client || null,
-           mechanism: ctx.selected, micVerified: ctx.micVerified,
-           checks: result.checks || null });
-  log.info('krb5-spnego: ACCEPTED ' + (result.client || '?') + ' for ' + SPN +
-    ' over ' + spnego.mechName(ctx.selected) +
-    (ctx.micVerified ? ', mechListMIC verified' : '') +
-    (ctx.rawKerberos ? ' (a bare Kerberos token, no negotiation)' : ''));
-
-  const inner = '<h1>200 &mdash; you are in</h1>' +
+// The success page. Everything on it is read off the verdict, including the two
+// facts a person cannot get any other way: whether an AP-REP went back, and
+// whether the mechanism list was protected.
+function acceptedPage(verdict) {
+  log.debug('Entering acceptedPage().');
+  const inner = '<h1>' + HEADINGS.accepted[1] + '</h1>' +
     '<div class="ok">Authenticated as <strong>' +
-    xmlEscape(result.client || 'unknown') + '</strong> to <code>' +
+    xmlEscape(verdict.client || 'unknown') + '</strong> to <code>' +
     xmlEscape(SPN) + '</code>.</div>' +
     '<p>This is the protected content. Getting here took a Kerberos AP-REQ ' +
     'inside an RFC 4121 GSS token inside an RFC 4178 negotiation inside an ' +
@@ -755,35 +431,75 @@ async function succeed(res, ctx) {
     '<table>' +
     '<tr><th>What</th><th>Value</th></tr>' +
     '<tr><td>Client</td><td><code>' +
-      xmlEscape(result.client || 'unknown') + '</code></td></tr>' +
+      xmlEscape(verdict.client || 'unknown') + '</code></td></tr>' +
     '<tr><td>Mechanism selected</td><td><code>' +
-      xmlEscape(ctx.selected) + '</code> (' +
-      xmlEscape(spnego.mechName(ctx.selected)) + ')</td></tr>' +
-    '<tr><td>Negotiation</td><td>' + (ctx.rawKerberos
+      xmlEscape(verdict.selected) + '</code> (' +
+      xmlEscape(spnego.mechName(verdict.selected)) + ')</td></tr>' +
+    '<tr><td>Negotiation</td><td>' + (verdict.rawKerberos
       ? 'none &mdash; a bare Kerberos token. Accepted, but understand what ' +
         'it means: with no mechanism list there is nothing for a mechListMIC ' +
         'to protect, so none of SPNEGO&rsquo;s downgrade defence applies.'
       : 'SPNEGO, RFC 4178') + '</td></tr>' +
-    '<tr><td>mechListMIC</td><td>' + (ctx.micVerified
+    '<tr><td>mechListMIC</td><td>' + (verdict.micVerified
       ? '<span class="pass">verified</span>'
       : '<span class="fail">not sent</span> &mdash; ' +
-        xmlEscape(ctx.requirement.reason)) + '</td></tr>' +
-    '<tr><td>Mutual authentication</td><td>' + (responseToken
+        xmlEscape(verdict.requirement.reason)) + '</td></tr>' +
+    '<tr><td>Mutual authentication</td><td>' + (verdict.mutual
       ? 'an AP-REP is in the <code>WWW-Authenticate</code> header; check its ' +
         'echoed <code>ctime</code> and you have proved who answered'
-      : ctx.mutualOff
+      : verdict.mutualOff
         ? '<span class="fail">none</span> &mdash; <code>?mutual=off</code> is ' +
           'set, so nothing has proved this server is who it claims to be'
         : 'none in this reply') + '</td></tr>' +
-    (micNote ? '<tr><td>Note</td><td>' + xmlEscape(micNote) +
+    (verdict.micNote ? '<tr><td>Note</td><td>' + xmlEscape(verdict.micNote) +
       '</td></tr>' : '') +
     '</table>' +
-    (result.checks ? '<h2>What this service checked</h2>' +
-      checksTable(result.checks) : '');
-  res.set('WWW-Authenticate', 'Negotiate ' +
-    Buffer.from(token).toString('base64'));
-  res.status(200).type('html').send(page('Authenticated', inner));
-  log.debug('Leaving succeed().');
+    (verdict.checks ? '<h2>What this service checked</h2>' +
+      checksTable(verdict.checks) : '');
+  log.debug('Leaving acceptedPage().');
+  return inner;
+}
+
+// Everything that is not the success page.
+function refusalPage(verdict) {
+  log.debug('Entering refusalPage(). code=' + verdict.code);
+  const heading = HEADINGS[verdict.code] || REJECTED;
+  const rejected = !HEADINGS[verdict.code];
+  const inner = '<h1>' + heading[1] + '</h1>' +
+    // The banner is the REASON, and it is only drawn where the heading has not
+    // already said it — the three bare-challenge pages put their sentence in
+    // the detail, which is where it reads as an explanation rather than as an
+    // error about an error.
+    (rejected ? '<div class="err">' + xmlEscape(verdict.reason) + '</div>' : '') +
+    detailFor(verdict) +
+    (verdict.checks ? '<h2>What this service checked</h2>' +
+      checksTable(verdict.checks) : '') +
+    (rejected
+      ? '<p class="sub">SPNEGO&rsquo;s <code>reject</code> carries no reason of ' +
+        'its own &mdash; the structure has no field for one. Everything above ' +
+        'this line is out of band, and a real server tells you none of it.</p>'
+      : '');
+  log.debug('Leaving refusalPage().');
+  return inner;
+}
+
+async function handleProtected(req, res) {
+  log.debug('Entering handleProtected().');
+  const verdict = await exchange.negotiate(req, {
+    door: '/spnego/protected',
+    // THE THREE KNOBS, and they are this page's alone. `/authn/spnego` takes
+    // none of them: a sign-in door with a query parameter that makes it fail
+    // in an instructive way is a footgun rather than a lesson, and the lesson
+    // is available here.
+    supported: String(req.query.mech || '') === 'none' ? [] : SUPPORTED_MECHS,
+    wantMic: String(req.query.mic || '') === 'require',
+    mutualOff: String(req.query.mutual || '') === 'off'
+  });
+  exchange.applyVerdict(res, verdict);
+  const heading = HEADINGS[verdict.code] || REJECTED;
+  res.type('html').send(page(heading[0],
+    verdict.ok ? acceptedPage(verdict) : refusalPage(verdict)));
+  log.debug('Leaving handleProtected(). ' + verdict.code + '.');
 }
 
 app.get('/spnego/protected', function (req, res) {
@@ -805,5 +521,22 @@ app.get('/spnego/protected', function (req, res) {
 module.exports = {
   SPN: SPN,
   SUPPORTED_MECHS: SUPPORTED_MECHS,
-  lastExchange: function () { return lastExchange; }
+  // THE SHELL AND THE CHECK TABLE, for `spnego_authn.js` and for nothing else.
+  //
+  // Exported rather than copied, and the choice of WHICH look the sign-in door
+  // wears is the reason. Its pages could have been drawn in `authn.js`'s
+  // CARD_CSS — they are met mid-sign-in, and that is the stylesheet a person
+  // has just been looking at. They are drawn in THIS one because of what has
+  // to be on them: when a Kerberos sign-in fails, what the person needs is the
+  // nine checks `krb5_service.js` made and the sentence saying which one did
+  // not pass, and that is a table rather than a card. A third stylesheet was
+  // the other option and it would have been ten lines nobody would ever diff —
+  // the argument `authn.js` makes above CARD_CSS, reached from the other side.
+  page: page,
+  checksTable: checksTable,
+  // Still exported from here, because `GET /spnego` is the page that renders it
+  // and this is the module that page lives in. The RECORD is the library's now,
+  // and it covers both doors — see its header for why one record rather than
+  // two.
+  lastExchange: exchange.lastExchange
 };

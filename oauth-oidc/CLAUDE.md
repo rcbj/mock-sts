@@ -556,6 +556,99 @@ because a window wider than that has stopped being a tolerance.
 requires nothing from this repository, so the no-cycle property rule 3 asserts
 about `dpop.js` is unchanged.
 
+## THE USERINFO ENDPOINT HAS FOUR LAYERS AND A CLIENT CONTROLS ONE OF THEM
+
+Since 2026-08-26. It was `sub` plus whatever section 5.4's scope asked for, and a
+reader who still has that picture has the one this endpoint had before either of
+the two things below existed.
+
+**A CUSTOM CLAIM SET OF ITS OWN — `/admin/userinfo-claims`.** The fifth set in
+`admin_stats.js`, configured exactly like the four beside it: typed claims,
+ticked LDAP attribute types read off `ou=users`, and the groups claim. What
+makes it worth having SEPARATELY from the ID Token's set rather than being one
+list under two names is the one property no issued artefact has — **this
+response is built on every call**, so a claim added there reaches a client that
+signed in an hour ago and has done nothing since, where a claim added to the ID
+Token set is invisible until the next sign-in. That is the difference the
+console page is built around and the reason it is the one claims page with no
+"nothing already issued changes" warning on it.
+
+It carries `kind: 'userinfo'` rather than `kind: 'jwt'`, and `kind` answers
+exactly one question — which page and which `/admin-api` resource carries the
+set. `'jwt'` would have put it on `/admin/claims` automatically, which is the
+accident `JWT_CLAIM_SET_IDS` being derived exists to prevent in the other
+direction. **`SAML_CLAIM_SET_IDS` had to stop being `kind !== 'jwt'` in the same
+change**: a list derived by exclusion is derived from what existed when it was
+written, and that spelling would have swept the new set onto
+`/admin/saml-attributes` with nothing failing anywhere.
+
+**THE `claims` REQUEST PARAMETER — OpenID Connect Core section 5.5**, and
+`claims_parameter_supported` says `true` where it said `false`. A client names
+individual claims in the `userinfo` (or `id_token`) member; this server parses
+it, **refuses a malformed one at the AUTHORIZATION endpoint** with
+`invalid_request` — the last point at which the client is still being talked to,
+the same reasoning that puts RFC 8707's `resource` refusal there — carries it on
+the authorization code and **inside the access token** as the `claims` claim, and
+answers it by resolving each name against the LDAP attribute catalogue.
+
+Riding in the token is the same decision `authorization_details` records and for
+the same reason: the UserInfo endpoint sees the token and nothing else — no
+code, no session, no request record — so a side table keyed by `jti` would have
+to be swept and would not survive a refresh. `claims` is on
+`RESERVED_JWT_CLAIMS` so that no web form can decide what a request asked for,
+and the refresh grant carries it forward so that a renewal cannot narrow the
+grant any more than it can widen it.
+
+**THE FOUR LAYERS, LATER WINNING**, written out at the merge in `oauth2.js`
+because that is where somebody debugging an unexpected member is looking:
+
+1. the configured `userinfo` set — what everybody gets;
+2. section 5.4's scope-driven claims (`profile`, `email`);
+3. section 5.5's individually requested claims, read off `ou=users`;
+4. `sub`, assigned last and unconditionally (5.3.2 — a client MUST check it
+   against the ID Token's).
+
+**Layer 3 beating layer 2 is the one choice here that is not obvious.** A scope
+asks for a CATEGORY and a claims request names a CLAIM, so answering
+`{"email":null}` with the invented persona value while the entry holds a real
+`mail` would defeat the only reason the feature is worth having. Nothing in
+layer 3 can reach a structural claim, and that is by construction rather than by
+a guard: every name it resolves comes from the attribute catalogue or from
+`PERSONA_CLAIMS`, and no member of either is `iss`, `sub`, `aud`, `exp` or
+`nonce`.
+
+**`essential`, `value` and `values` are CARRIED AND NOT ENFORCED**, which is the
+honest reading of section 5.5.1 rather than a shortfall. That section says a
+server MUST NOT return an error because a requested claim is unavailable, so an
+essential claim this service cannot produce is absent and logged at warn level.
+`value` and `values` could be satisfied by echoing the asked-for value back and
+deliberately are not: everything this service says about a person comes from the
+directory or from the invented persona, and a UserInfo response that agreed with
+whatever a client asked it to assert would be the one surface here that cannot
+be used to test anything. The mismatch is reported instead.
+
+**NON-SPEC: the endpoint also takes a claims request on the request itself.**
+Section 5.3.1 defines no request parameters at all. `?claims={json}` and a
+repeated `?claim=name` are accepted anyway, on GET and on a form-encoded POST,
+because exercising section 5.5 through the specified route means running a whole
+authorization flow per variation and a mock nobody can poke is a mock nobody
+uses. It is a **union** with what the access token carries and can never take a
+claim away from it — what the client was authorized for is what the token says —
+and a malformed one is refused `invalid_request` rather than ignored, because
+ignoring a debugging parameter that was typed wrong produces exactly the
+response a parameter that was never sent produces.
+
+**`claims_supported` was NOT extended to cover any of it, and the absence is the
+answer.** That member lists what the protocol itself puts in an ID Token. It
+cannot honestly list what `/admin/userinfo-claims` has been configured to add
+nor the whole attribute catalogue section 5.5 can reach, because this document
+is fetched and cached by clients and both of those change at runtime from a
+console page — a list that tracked them would be stale in every cache the moment
+somebody ticked a box. `GET /admin-api/userinfo-claims` is the live answer and
+names every claim a request may ask for.
+
+---
+
 ## What this half deliberately does not do
 
 * **It is permissive on purpose, and it can be told not to be.** Everything in this

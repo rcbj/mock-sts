@@ -3,19 +3,21 @@
 // File: claim_attributes.js
 //
 // ---------------------------------------------------------------------------
-// WHICH LDAP ATTRIBUTES THE FOUR TOKEN AND ASSERTION SETS CARRY.
+// WHICH LDAP ATTRIBUTES THE FIVE TOKEN, RESPONSE AND ASSERTION SETS CARRY.
 //
-// admin_stats.js already holds the four CUSTOM CLAIM sets — a name and a value
-// somebody typed on /admin/claims or /admin/saml-attributes, with
+// admin_stats.js already holds the five CUSTOM CLAIM sets — a name and a value
+// somebody typed on /admin/claims, /admin/userinfo-claims or
+// /admin/saml-attributes, with
 // ${placeholders}. This holds the other half of those pages: a SELECTION out of
 // the directory's user-object attribute catalogue, per set, whose value is not
 // typed anywhere because it is read off that person's entry under ou=users.
 //
-// TWO PAGES SINCE 2026-08-24 AND STILL ONE SELECTION PER SET. The console shows
-// the two JWT sets on /admin/claims and the two SAML ones on
-// /admin/saml-attributes; nothing here knows that, and nothing here should — a
-// per-page store would be the second store this whole arrangement exists to
-// prevent, and the catalogue below is published by both replies in full.
+// THREE PAGES SINCE 2026-08-26 AND STILL ONE SELECTION PER SET. The console
+// shows the two JWT sets on /admin/claims, the UserInfo set on
+// /admin/userinfo-claims and the two SAML ones on /admin/saml-attributes;
+// nothing here knows that, and nothing here should — a per-page store would be
+// the second store this whole arrangement exists to prevent, and the catalogue
+// below is published by all three replies in full.
 //
 // The difference between the two halves is the whole reason this file exists.
 // A typed claim is a constant (or a placeholder over the sign-in), and it says
@@ -41,6 +43,7 @@
 //   vc_claims.js's own selection   what an issued CREDENTIAL carries   /admin/vc
 //   vc_verifier_config.js          what the mock Verifier ASKS FOR     /admin/vc-verifier-config
 //   this file                      what a TOKEN carries                /admin/claims
+//   this file (the same store)     what a USERINFO RESPONSE carries    /admin/userinfo-claims
 //   this file (the same store)     what an ASSERTION carries           /admin/saml-attributes
 //
 // Keeping them separate is what makes "issue a credential carrying a claim the
@@ -70,7 +73,7 @@
 // claims arrive through them. Four call sites edited would have been four that
 // drift, and a fifth added later that nobody remembers to edit.
 //
-// **NOTHING IS SELECTED ON A FRESH START, in any of the four sets.** That is not
+// **NOTHING IS SELECTED ON A FRESH START, in any of the five sets.** That is not
 // timidity, it is the only defensible default: this page changes what every
 // client of this service receives, and a mock that started issuing a `birthdate`
 // in every access token because a feature was added would break the tests of
@@ -118,13 +121,57 @@ CATALOGUE.forEach(function (row) {
   BY_LDAP.set(row.ldap.toLowerCase(), row);
 });
 
-// The four sets are admin_stats.js's four, read from there rather than written
-// out again: a fifth set added over there has to appear here, and a copy of the
-// list is how it would fail to.
+// ---------------------------------------------------------------------------
+// THE SAME CATALOGUE INDEXED THE OTHER WAY ROUND — by the OIDC CLAIM NAME.
+//
+// Everything above this line answers "somebody ticked an LDAP attribute type;
+// what claim does it become". OIDC Core 5.5 asks the opposite question: a
+// client sends `{"userinfo": {"birthdate": null}}` and names a CLAIM, and this
+// service has to find the attribute on that person's entry that would produce
+// it. Without this index the UserInfo endpoint would have to walk the catalogue
+// per requested name, which is the second walk of one list that this whole file
+// exists to prevent.
+//
+// TWO KINDS OF KEY, and the second is the one that is easy to leave out:
+//
+//   * the FLAT claim name, which is `row.claim.join('.')` — the same string
+//     `report[].claim` carries and the same one a SAML attribute is named with.
+//     So `address.locality` is a key, and a client may ask for exactly that.
+//   * the TOP-LEVEL name of a nested claim — `address` — which maps to EVERY
+//     row beneath it. That is the spelling OIDC Core 5.5.1 actually uses:
+//     `{"address": null}` asks for the whole Address Claim (Core 5.1.1), one
+//     JSON object with up to six members, and answering it with nothing because
+//     no single catalogue row is called `address` would be the most confusing
+//     possible reading of a request this service can satisfy in full.
+//
+// Lower-cased for lookup, because a claim name arrives from a client and
+// `Birthdate` is a misspelling worth answering rather than a different claim.
+// The catalogue's own spelling is what goes back on the wire.
+// ---------------------------------------------------------------------------
+const BY_CLAIM = new Map();
+CATALOGUE.forEach(function (row) {
+  const flat = row.claim.join('.');
+  if (!BY_CLAIM.has(flat.toLowerCase())) {
+    BY_CLAIM.set(flat.toLowerCase(), [row]);
+  }
+  if (row.claim.length > 1) {
+    const top = row.claim[0].toLowerCase();
+    if (!BY_CLAIM.has(top)) {
+      BY_CLAIM.set(top, []);
+    }
+    BY_CLAIM.get(top).push(row);
+  }
+});
+
+// The sets are admin_stats.js's, read from there rather than written out again:
+// a set added over there has to appear here, and a copy of the list is how it
+// would fail to. It was four until 2026-08-26 and is five now, and NOTHING IN
+// THIS FILE WAS EDITED TO MAKE THAT TRUE — which is the whole reason the list
+// is derived.
 const SET_IDS = stats.CLAIM_SET_IDS;
 
-// setId -> Set of lower-cased attribute names. Empty on a fresh start, in all
-// four; see the header for why that is the only defensible default. Held in
+// setId -> Set of lower-cased attribute names. Empty on a fresh start, in every
+// one of them; see the header for why that is the only defensible default. Held in
 // memory like every other piece of configuration in this service — the signing
 // key is regenerated on every start, so a selection that outlived it would
 // describe tokens nothing can verify.
@@ -261,8 +308,8 @@ function setSelection(setId, names, how) {
   const id = String(setId || '');
   if (!isKnownSet(id)) {
     log.debug("Leaving setSelection(). No such set.");
-    return { ok: false, errors: ['There is no claim set called "' + id + '". The four are: ' +
-                                 SET_IDS.join(', ') + '.'] };
+    return { ok: false, errors: ['There is no claim set called "' + id + '". The ' +
+                                 SET_IDS.length + ' are: ' + SET_IDS.join(', ') + '.'] };
   }
   const errors = [];
   const wanted = new Set();
@@ -426,8 +473,200 @@ function catalogueValuesFor(username) {
   return { byLdap: byLdap, entryFound: built.entryFound };
 }
 
+// ---------------------------------------------------------------------------
+// OIDC CORE 5.5 — A CLAIM THE CLIENT ASKED FOR BY NAME.
+//
+// The whole of this file above answers "what did an ADMINISTRATOR tick"; this
+// answers "what did the CLIENT ask for", which is the other half of what
+// reaches a UserInfo response. The two are deliberately separate stores of
+// intent and neither is derived from the other: a claims request naming
+// `birthdate` is honoured whether or not `schacDateOfBirth` is ticked on the
+// UserInfo set, because the set is what everybody gets and the request is what
+// this client asked for this time. See oauth2.js's userinfoResponse(), which is
+// where the precedence between the two is written down.
+//
+// THREE THINGS ARE WORTH KNOWING BEFORE READING THE CODE.
+//
+// **One directory read for the whole request, not one per name.** A client may
+// name a dozen claims; subjectClaimsFor() reads the entry once and is handed
+// the union of the rows they resolve to. A read per requested name would be a
+// read per name too many, and — worse — two reads of one entry mid-`ldapmodify`
+// could answer one request with two versions of one person.
+//
+// **A LANGUAGE TAG IS PART OF THE NAME AND IS NOT A DIFFERENT CLAIM.** Core 5.2
+// lets a client ask for `family_name#ja-Kana-JP`, and this service holds one
+// value per attribute — so the tag is stripped for the lookup and PUT BACK on
+// the way out, which is what section 5.2 says a response does. The value is the
+// same one `family_name` would have carried, and pretending otherwise (by
+// refusing the name, or by answering under the untagged one) would be a client
+// unable to match the request it sent to the response it got.
+//
+// **AN UNRESOLVABLE NAME IS REPORTED, NOT REFUSED.** Core 5.5.1 is explicit:
+// a server MUST NOT return an error because a requested claim is not available,
+// and `essential` does not change that — it is a hint about what the client
+// will do without it. So the name comes back in `unknown` for the log, the
+// console and the API to say so, and the response simply lacks it.
+// ---------------------------------------------------------------------------
+
+// The rows one requested claim name resolves to, and how it should be spelled
+// back. Returns null for a name this service's catalogue cannot produce.
+function rowsForClaim(name) {
+  const raw = String(name == null ? '' : name).trim();
+  if (!raw) {
+    return null;
+  }
+  const hash = raw.indexOf('#');
+  const base = hash >= 0 ? raw.slice(0, hash) : raw;
+  const tag = hash >= 0 ? raw.slice(hash) : '';
+  const rows = BY_CLAIM.get(base.toLowerCase());
+  if (!rows || !rows.length) {
+    return null;
+  }
+  // A GROUP request (`address`) is the top-level name of a nested claim and
+  // resolves to every row beneath it; anything else is one row. `grouped` is
+  // what tells the caller which of the two it has, because the answer is
+  // shaped differently — an object with members, or one value.
+  const grouped = rows.length > 1 || (rows[0].claim.length > 1 && base.indexOf('.') < 0);
+  return { requested: raw, base: base, tag: tag, rows: rows, grouped: grouped };
+}
+
+// Put a value at a dotted path, creating the objects on the way down. Written
+// here rather than reached for in vc_claims.js because that module's own
+// setPath() is private to it, and exporting it would make a helper that exists
+// for the credential builder into part of this file's contract.
+function setPath(target, path, value) {
+  let node = target;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (!node[path[i]] || typeof node[path[i]] !== 'object') {
+      node[path[i]] = {};
+    }
+    node = node[path[i]];
+  }
+  node[path[path.length - 1]] = value;
+}
+
+// What a list of requested claim names produces for one person, read off their
+// entry under ou=users — or, where the entry has nothing, invented from the
+// username, deterministically, exactly as every other reader of this catalogue
+// does. `claims` is ready to merge into a response; `report` is one row per
+// name for the log and the console; `unknown` is every name this catalogue
+// cannot produce.
+function requestedClaimsFor(username, names) {
+  log.debug("Entering requestedClaimsFor(). user=" + username + ", " +
+            (names || []).length + " name(s) requested.");
+  const asked = [];
+  const unknown = [];
+  (names || []).forEach(function (name) {
+    const resolved = rowsForClaim(name);
+    if (!resolved) {
+      unknown.push(String(name));
+      return;
+    }
+    asked.push(resolved);
+  });
+  if (!asked.length) {
+    log.debug("Leaving requestedClaimsFor(). Nothing in the catalogue answers this request.");
+    return { claims: {}, report: [], unknown: unknown, entryFound: false };
+  }
+
+  // The union, in CATALOGUE order and without repeats — the same ordering rule
+  // selectedRows() follows, and for the same reason: the order reaches the
+  // response, and a claim list that reordered itself because a client listed
+  // its names differently would look like a different document to anything
+  // diffing them.
+  const wanted = new Set();
+  asked.forEach(function (entry) {
+    entry.rows.forEach(function (row) { wanted.add(row.ldap.toLowerCase()); });
+  });
+  const rows = CATALOGUE.filter(function (row) {
+    return wanted.has(row.ldap.toLowerCase());
+  });
+  const built = vcClaims.subjectClaimsFor(username, {}, rows);
+  const byFlat = {};
+  built.report.forEach(function (item) { byFlat[item.claim] = item; });
+
+  const claims = {};
+  const report = [];
+  asked.forEach(function (entry) {
+    if (entry.grouped) {
+      // The whole Address Claim, as one object. Taken off `built.claims` rather
+      // than reassembled from the report, because that object is what
+      // setPath() already nested correctly and a second assembly here would be
+      // a second answer to "what shape is an address".
+      const value = built.claims[entry.rows[0].claim[0]];
+      if (value === undefined) {
+        unknown.push(entry.requested);
+        return;
+      }
+      claims[entry.rows[0].claim[0]] = value;
+      entry.rows.forEach(function (row) {
+        const item = byFlat[row.claim.join('.')];
+        if (item) {
+          report.push({ requested: entry.requested, claim: item.claim, ldap: item.ldap,
+                        value: item.value, source: item.source });
+        }
+      });
+      return;
+    }
+    const row = entry.rows[0];
+    const item = byFlat[row.claim.join('.')];
+    if (!item) {
+      unknown.push(entry.requested);
+      return;
+    }
+    if (entry.tag) {
+      // Core 5.2: the tag is part of the member name in the response, so a
+      // tagged request is answered at the top level under the name it was
+      // asked under — even where the untagged claim nests. A nested member
+      // cannot carry a tag on its container, and inventing a spelling for that
+      // would be this service making up a section of the specification.
+      claims[entry.requested] = item.value;
+    } else if (row.claim.length > 1) {
+      setPath(claims, row.claim, item.value);
+    } else {
+      claims[row.claim[0]] = item.value;
+    }
+    report.push({ requested: entry.requested, claim: item.claim, ldap: item.ldap,
+                  value: item.value, source: item.source });
+  });
+
+  log.debug("Leaving requestedClaimsFor(). " + report.length + " claim(s) resolved, " +
+            unknown.length + " name(s) this catalogue cannot produce.");
+  return { claims: claims, report: report, unknown: unknown, entryFound: built.entryFound };
+}
+
+// Every claim name a client may ask for, in the two spellings the index holds —
+// the flat name of each row and the top-level name of each nested group. It is
+// what the console lists under "what a client may request" and what the
+// management API publishes, so that a client learns the vocabulary from this
+// service rather than from a copy of the catalogue in a document.
+function requestableClaims() {
+  log.debug("Entering requestableClaims().");
+  const seen = new Set();
+  const out = [];
+  CATALOGUE.forEach(function (row) {
+    if (row.claim.length > 1) {
+      const top = row.claim[0];
+      if (!seen.has(top)) {
+        seen.add(top);
+        out.push({ claim: top, ldap: CATALOGUE.filter(function (r) {
+          return r.claim[0] === top && r.claim.length > 1;
+        }).map(function (r) { return r.ldap; }).join(', '),
+          label: 'The whole ' + top + ' claim (OIDC Core 5.1.1)', grouped: true });
+      }
+    }
+    const flat = row.claim.join('.');
+    if (!seen.has(flat)) {
+      seen.add(flat);
+      out.push({ claim: flat, ldap: row.ldap, label: row.label, grouped: false });
+    }
+  });
+  log.debug("Leaving requestableClaims(). " + out.length + " name(s).");
+  return out;
+}
+
 // The catalogue as the console's table and the API's document want it: one row
-// per attribute type, with which of the four sets currently carries it. Built
+// per attribute type, with which of the sets currently carries it. Built
 // here rather than in admin.js because the API answers the same list and neither
 // of them should be walking the catalogue itself.
 function catalogueRows() {
@@ -467,9 +706,10 @@ stats.setAttributeResolver({
 
 log.info('The claim-attribute selection is loaded: /admin/claims can now put ' +
          'LDAP attributes from the directory into an access token and an ID ' +
-         'Token, and /admin/saml-attributes into a SAML 2.0 assertion and a ' +
-         'SAML 1.1 one. Nothing is selected on a fresh start, so this changes ' +
-         'no token until somebody asks it to.');
+         'Token, /admin/userinfo-claims into a UserInfo response, and ' +
+         '/admin/saml-attributes into a SAML 2.0 assertion and a SAML 1.1 one. ' +
+         'Nothing is selected on a fresh start, so this changes no token until ' +
+         'somebody asks it to.');
 
 module.exports = {
   CATALOGUE: CATALOGUE,
@@ -485,5 +725,11 @@ module.exports = {
   samlAttributesFor: samlAttributesFor,
   previewFor: previewFor,
   catalogueValuesFor: catalogueValuesFor,
-  catalogueRows: catalogueRows
+  catalogueRows: catalogueRows,
+  // OIDC Core 5.5's half. Read by oauth-oidc/oauth2.js at the UserInfo endpoint
+  // and by admin-ui/admin.js for the page that documents it — one resolver, so
+  // the vocabulary the console publishes cannot drift from the one the endpoint
+  // answers.
+  requestedClaimsFor: requestedClaimsFor,
+  requestableClaims: requestableClaims
 };

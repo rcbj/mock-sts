@@ -184,6 +184,13 @@ const STATUS_SUCCESS = 'urn:oasis:names:tc:SAML:2.0:status:Success';
 const contexts = realms.map();
 const MAX_CONTEXTS = 500;
 
+// The longest `application` a context will carry. A client_id has no length
+// limit in any specification this service implements, and this value is written
+// into a directory attribute at the far end — so it is bounded where it is
+// accepted rather than where it is spent. It is generous: the longest identifier
+// anything here files an application under is a SAML entityID, which is a URL.
+const MAX_APPLICATION_LEN = 256;
+
 function contextTtlMs() {
   return config.value('federation.requestTtlMin') * 60 * 1000;
 }
@@ -216,6 +223,32 @@ function putContext(record) {
                                        expires: now + contextTtlMs() }, record));
   log.debug('Leaving putContext(). handle=' + handle + ', ' + contexts.size + ' in flight.');
   return handle;
+}
+
+// ---------------------------------------------------------------------------
+// WHAT A COMPLETED SIGN-IN NEEDS OFF THE REQUEST CONTEXT, in one place.
+//
+// FIVE call sites build the result `completeSignIn()` is handed — one per
+// protocol, plus OAuth 2.0's two ways of learning who somebody is — and each of
+// them reads these fields off the context it holds. They were five copies of
+// `returnTo: (context && context.returnTo) || ''` until `application` joined it,
+// at which point the shape of the mistake became obvious: a sixth field, or a
+// sixth protocol, is five places to remember and one to forget. A federated
+// sign-in that succeeds and lands somebody on a page nobody asked for is what a
+// dropped `returnTo` looks like; a dropped `application` is a count on
+// /admin/federation/map that is quietly short.
+//
+// A MISSING CONTEXT IS NOT AN ERROR HERE. The SAML 1.1 unsolicited case has no
+// context at all (`fedAllowUnsolicited`), so both fields are empty and both
+// callers already behave correctly for that: the person lands on this service's
+// own "signed in" page, and no pair is counted because nothing said what the
+// sign-in was for.
+// ---------------------------------------------------------------------------
+function fromContext(context) {
+  return {
+    returnTo: (context && context.returnTo) || '',
+    application: (context && context.application) || ''
+  };
 }
 
 // Read AND SPEND. A context is good for one response, which is what makes a
@@ -602,7 +635,12 @@ function completeSignIn(req, res, record, result) {
     }
   };
 
-  federation.recordUse(record.fedId, { user: mapped.username });
+  // The relationship's own counts, and — where this sign-in began at an
+  // application configured to authenticate through it — that pair's counts
+  // beside them. `result.application` is the hint the login endpoint put on the
+  // request context; recordUse() decides whether it means anything.
+  federation.recordUse(record.fedId,
+                       { user: mapped.username, application: result.application || '' });
 
   // The foreign identity provider as an APPLICATION, so that the one question
   // `ou=applications` exists to answer — what parties has this service dealt
@@ -924,6 +962,24 @@ app.get(LOGIN_PATH + '/:id', function (req, res) {
   const pkce = pkcePair();
   const contextRecord = {
     id: record.fedId, protocol: record.fedProtocol, returnTo: returnTo,
+    // WHAT THE PERSON WAS SIGNING IN TO, carried across the round trip so that
+    // completeSignIn() can move the relationship's per-application counts.
+    //
+    // IT IS HERE BECAUSE THERE IS NOWHERE ELSE IT COULD BE. What comes back to
+    // `/federation/acs/{id}` is a signed document about a PERSON: it names the
+    // partner, the subject and the attributes, and it says nothing whatever
+    // about the application at this end — there is no field in any of the five
+    // protocols for one. `authn.js` knows the pair at the moment it sends the
+    // browser away and never again, so either it rides on the context or the
+    // number cannot be had at all.
+    //
+    // TRUNCATED, AND NOT TRUSTED. It is a query parameter on an endpoint that —
+    // alone in this module — needs no configuration at all to reach, so it is
+    // bounded here against a context whose size somebody else chose, and
+    // `federation.recordUse()` checks the pair against the live register before
+    // writing anything anywhere. Neither check is sufficient alone: this one
+    // bounds the MAP, that one bounds the DIRECTORY.
+    application: String(req.query.application || '').slice(0, MAX_APPLICATION_LEN),
     nonce: 'n-' + randomId(16),
     pkceVerifier: pkce.verifier, pkceChallenge: pkce.challenge
   };
@@ -1213,7 +1269,8 @@ function consumeSamlResponse(req, res, record, params, version) {
     bag: contents.bag,
     amr: amr.length ? ['federated'] : ['federated'],
     acr: contents.context || '',
-    returnTo: (context && context.returnTo) || ''
+    returnTo: fromContext(context).returnTo,
+    application: fromContext(context).application
   });
 }
 
@@ -1297,7 +1354,8 @@ function consumeWsFedResponse(req, res, record, params) {
   return completeSignIn(req, res, record, {
     subject: contents.subject, bag: contents.bag,
     amr: ['federated'], acr: contents.context || '',
-    returnTo: (context && context.returnTo) || ''
+    returnTo: fromContext(context).returnTo,
+    application: fromContext(context).application
   });
 }
 
@@ -1580,7 +1638,9 @@ function finishOidc(req, res, record, context, idToken, accessToken) {
       });
       return completeSignIn(req, res, record, {
         subject: String(payload.sub || ''), bag: bag, amr: amr,
-        acr: String(payload.acr || ''), returnTo: context.returnTo || ''
+        acr: String(payload.acr || ''),
+        returnTo: fromContext(context).returnTo,
+        application: fromContext(context).application
       });
     };
     if (!accessToken || !String(record.fedUserinfoUrl || '').trim()) {
@@ -1672,7 +1732,9 @@ function finishOauth2(req, res, record, context, tokens) {
       log.debug('Leaving finishOauth2(). A verified JWT access token.');
       return completeSignIn(req, res, record, {
         subject: String(payload.sub || ''), bag: bag, amr: ['federated'],
-        acr: '', returnTo: context.returnTo || ''
+        acr: '',
+        returnTo: fromContext(context).returnTo,
+        application: fromContext(context).application
       });
     });
   }
@@ -1703,7 +1765,9 @@ function finishOauth2(req, res, record, context, tokens) {
     log.debug('Leaving finishOauth2(). The profile endpoint answered.');
     return completeSignIn(req, res, record, {
       subject: String(profile.sub || profile.id || profile.user_id || ''),
-      bag: bag, amr: ['federated'], acr: '', returnTo: context.returnTo || ''
+      bag: bag, amr: ['federated'], acr: '',
+      returnTo: fromContext(context).returnTo,
+      application: fromContext(context).application
     });
   });
 }

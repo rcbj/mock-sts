@@ -22,19 +22,19 @@ files did not change; the paths did.
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
 | `home/` | The front door: `GET /` and the one image on it. |
 | `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
-| `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles. |
-| `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. |
+| `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles, and **the UserInfo endpoint's four layers** — a claim set of its own configured at `/admin/userinfo-claims`, the scope-driven set, OIDC Core 5.5's claims request, and `sub`. |
+| `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. **One endpoint in its own path space lives elsewhere**: `/authn/spnego` is `kerberos/spnego_authn.js`, for a require-order reason both files argue. |
 | `saml/` | The two assertion builders, and A BROWSER-FACING IDENTITY PROVIDER FOR EACH: SAML 2.0's Web Browser SSO profile (all three bindings, Single Logout, metadata per service provider) and SAML 1.1's two browser profiles (Browser/POST, Browser/Artifact, a SOAP responder that is also an attribute authority, metadata per relying party). **They are separate implementations, not one with a version flag** — SAML 1.1 has no request message, no Single Logout, and a different spelling for almost every shared element; `saml/CLAUDE.md` has the table. |
 | `ws-trust/` | WS-Trust 1.0–1.4. |
 | `ws-federation/` | WS-Federation 1.2, the passive requestor profile, and the mock relying party. |
-| `federation/` | **Federation relationships, in either direction, in five protocols.** The register (`ou=federations` IS the store), the attribute mapping, the four endpoints — and the ONLY OUTBOUND REQUEST in this repository, in a module of its own that will not take a URL from anywhere but a relationship entry. |
-| `kerberos/` | The KDC, the acceptor, SPNEGO, and the eight codec modules they rest on — **all eight VENDORED from the parent project and not editable here**, despite not being under `common/vendored/`. See `kerberos/CLAUDE.md`. |
+| `federation/` | **Federation relationships, in either direction, in five protocols.** The register (`ou=federations` IS the store), the attribute mapping, the four endpoints, the graph the console's picture is drawn from — and the ONLY OUTBOUND REQUEST in this repository, in a module of its own that will not take a URL from anywhere but a relationship entry. |
+| `kerberos/` | The KDC, the acceptor, SPNEGO in three layers — the negotiation, the page that explains it, and **the SIGN-IN that turns a ticket into this service's session** — and the eight codec modules they rest on, **all eight VENDORED from the parent project and not editable here**, despite not being under `common/vendored/`. See `kerberos/CLAUDE.md`. |
 | `ldap/` | The embedded directory. Also the STORE for people, groups, applications and the SPIFFE registry. |
 | `scim/` | `/scim/v2`, its authentication, and its attribute mapping. |
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
-| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, and the one DRAWING in this service — `/admin/delegation/map`, laid out on the server. |
+| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
 | `tests/` | **THE ONLY TEST DIRECTORY HERE** since 2026-08-26: in-process assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. NOT a place to put a protocol test — see *Tests* below for the line, and `tests/CLAUDE.md` for the two rules that are not optional there. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
@@ -84,9 +84,9 @@ FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
 *clients*: it checks no password, validates no access token and **attests no
 workload**.
 
-**FOUR surfaces are the exception to that sentence and all of them are worth
-knowing before reading further — and the fourth is a different KIND of exception
-from the other three.** The SCIM endpoints REQUIRE a credential, in any
+**FIVE surfaces are the exception to that sentence and all of them are worth
+knowing before reading further — and the last two are each a different KIND of
+exception from the first three.** The SCIM endpoints REQUIRE a credential, in any
 of the
 six schemes RFC 7644 section 2 names, and the OAuth ones must carry `scim:read`
 or `scim:write`; they create and DELETE accounts, which is why. The **SPIRE
@@ -121,6 +121,25 @@ the subject** — past it, any username in a verified assertion is accepted and 
 entry is created for them, exactly as permissively as everywhere else.
 `federation/CLAUDE.md` argues all of it, and it is the file to read before
 "fixing" a refusal in that directory.
+
+**AND THERE IS A FIFTH SINCE 2026-08-26, WHICH IS A DIFFERENT KIND AGAIN: IT IS
+NOT A REFUSAL AT ALL.** `/authn/spnego` signs a person in on a KERBEROS TICKET —
+integrated authentication, available to every application and registered for
+none — and it is the one door here that verifies a credential rather than
+accepting a name. Not because it is guarding anything: because **Kerberos cannot
+be permissive the way the rest of this service is.** The password there IS the
+key, so pre-authentication and the AS-REP's enc-part are both encrypted under it
+and a KDC that accepted anything would still have to pick a key the client could
+not guess. `krb5_principals.js` therefore does the permissive equivalent — one
+password shared by every user account, an account created for any name on first
+sight — and the ACCEPTOR still decrypts a real ticket under a real long-term key
+and refuses a replay. So a session minted at that door rests on something
+checked, while the account policy behind it is as open as everything else. **The
+verification is real and the account policy is not**, and those are two
+different sentences that this repository's prose has to keep apart.
+`kerberos/CLAUDE.md` argues it; `krb5.spnegoAuthentication` closes the door, and
+`/spnego/protected` then still performs the whole handshake and gives no
+session.
 
 **`/admin-api` is NOT gated and that is deliberate** — it is what a test drives,
 and it is the way back in when nobody holds a role. Which means anybody who can
@@ -399,6 +418,7 @@ require can see at a glance whether they are about to break one.
 | 11–14 | `oid4vc/*` | `vc_offers` before `vc_issuer`; both read `vc_configs`, which is why that module exists (rule 2). | `oid4vc/CLAUDE.md` |
 | 15–16 | `kerberos/krb5_kdc`, `krb5_service` | Their listeners start from `listen()`, not here. | `kerberos/CLAUDE.md` |
 | 17 | `kerberos/spnego` | **After `krb5_service`** — it calls that module's `accept()` and adds no check of its own. | `kerberos/CLAUDE.md` |
+| 17a | `kerberos/spnego_authn` | **After `spnego` AND after `authn/authn`.** It draws with that module's page shell and negotiates through `spnego_exchange.js`; and it calls `authn.startSession()`, which is why the endpoint is HERE and not in `authn/` — a require the other way would drag the KDC's routes ahead of `oauth2.js` and close a cycle. It needs no slot: the two things `authn.js` must know are a path it declares itself and one setting they both read. | `kerberos/CLAUDE.md`, `authn/CLAUDE.md` |
 | 18 | `admin-ui/admin` | **After `oauth2`** — rule 5. And before `ldap`, `scim` and `spiffe`, which is why it offers five slots rather than requiring them. | `admin-ui/CLAUDE.md` |
 | 19 | `mgmt-api/admin_api` | **After `admin-ui/admin`** — rule 7. It calls that module's action functions and JSON views. | `mgmt-api/CLAUDE.md` |
 | 20 | `tls/tls_server` | **Before `ldap/ldap_server`**, which serves its certificate and key on 636. | `tls/CLAUDE.md` |
@@ -557,6 +577,22 @@ to wonder why dragging does nothing; the filter narrows a busy picture and
 follows is the one the six above establish read backwards: the argument for a
 script has to be that the page CANNOT work without one, and a diagram that does
 not move can.
+
+**THE FEDERATION PICTURE ADDED ON 2026-08-26 IS THE NINTH CANDIDATE AND IS NOT
+ONE EITHER, AND IT IS THE CASE THE SEVENTH'S RULE WAS WRITTEN FOR.**
+`/admin/federation/map` draws a second graph in the console, and every argument
+for reaching for a browser graph library applies to it exactly as it applied to
+the delegation picture — which is precisely why it does not get to cite that
+one. The argument is made again from scratch in
+`admin-ui/federation_diagram.js`'s header and it lands in the same place for the
+same reason: the test for a script is that the page CANNOT work without one, and
+a diagram that does not move can. `@dagrejs/dagre` computes the layout on the
+server, that file emits the shapes, and the SVG arrives inline as ordinary
+markup — so `script-src 'none'` is untouched, `img-src` is not reached, and what
+it costs is pan and zoom, which the page says out loud and answers with
+`?format=svg`. **The rule to take from having now refused it twice is that the
+second refusal was not cheaper than the first**: the seventh candidate's whole
+point is that "the same as the page next door" is not an argument.
 
 **THE COLLAPSIBLE PROSE BLOCKS ADDED TO THE CONSOLE ON 2026-08-26 ARE THE
 EIGHTH CANDIDATE AND ALSO NOT ONE**, and it is the case that shows the rule
@@ -864,6 +900,58 @@ one**, for `tests/sts_dpop.js`'s reason — and here a shared misunderstanding
 about which element a signature covers would not merely interoperate with
 nobody, it would BE the hole.
 
+**THE USERINFO ENDPOINT'S TWO NEW HALVES HAVE NO TEST IN EITHER REPOSITORY,
+and by the line above they belong in the PARENT suite** — every one of the
+assertions below can be made by driving the running service over HTTP, so
+nothing about them justifies a directory here. What a test would have to cover
+is almost entirely the CLAIMS REQUEST, because the configured `userinfo` set is
+the four claim sets' behaviour on a fifth set and the one thing about it that is
+its own is worth one assertion: a claim added to it reaches a client that
+already holds its token, with no new sign-in. The rest is OIDC Core section 5.5,
+and it is mostly negatives: a `claims` parameter that is not JSON, is not an
+object, whose `userinfo` member is a string or a number, whose individual claim
+request is a number, whose `essential` is not a boolean, whose `values` is not a
+non-empty array, or that names more claims than the cap — each refused at the
+AUTHORIZATION endpoint with `invalid_request` and the reason, which is where the
+client can still be told; an unknown TOP-LEVEL member ignored rather than
+refused, and named in the reply; a name nothing can resolve simply absent and
+never an error; an `essential` one absent too; a `value` that does not match
+answered with the value HELD. Beside those, the properties that only a test can
+pin down: that the parsed request rides in the access token and survives a
+REFRESH, that the ID Token honours the `id_token` member and the UserInfo
+response the `userinfo` one, that `address` returns the whole Address Claim
+where `address.locality` returns one member, that `family_name#ja-Kana-JP` comes
+back under exactly that name, that a requested claim beats the scope-driven one
+and `sub` beats everything, that the federation release policy filters a
+requested claim exactly as it filters a configured one, and that the non-spec
+request-level parameter is a UNION with the token's own request and can never
+take a claim away from it.
+
+**THE SPNEGO SIGN-IN HAS HALF A TEST, AND THE HALF IT HAS IS THE UNUSUAL ONE.**
+`tests/spnego_identity.js` here asserts what a session minted from a ticket
+CLAIMS — which part of the principal becomes the username, and the `amr`/`acr`
+read off the ticket's flags — and it is in this repository rather than the
+parent's because the cases that matter cannot be produced over HTTP: this KDC
+requires pre-authentication, so no client can obtain a ticket claiming no
+factor at all, and nothing here ever sets `hw-authent`. What is still missing
+is the half that needs a listener, and it belongs beside
+`tests/krb5_spnego_http.js` over there, which already drives the acceptor this
+door shares: that a real AP-REQ produces a real session; that the session then
+satisfies `/oauth2/authorize`, `wsignin1.0` and a SAML `AuthnRequest`; that a
+REPLAYED AP-REQ is refused and mints nothing (the replay cache is the one check
+here whose absence would be a security bug rather than a fidelity one); that a
+ticket for another ACCOUNT's SPN is refused while one for a host this service
+answers for is not; that a half-finished `request-mic` exchange begun at
+`/spnego/protected` cannot be spent at this door; that exactly ONE
+authentication is recorded per sign-in rather than a ticket acceptance beside a
+session start; and that `krb5.spnegoAuthentication` off answers 403 and signs
+nobody in. All of that was hand-verified end to end on 2026-08-26 — 84 checks
+against a throwaway instance, driving a real AS-REQ and TGS-REQ pair over raw
+TCP, including all of the above — but that driver is a scratch script in
+neither repository, which is exactly the habit `tests/saml11_sso.js` broke by
+being promoted. Promote this one too: it is the same shape as
+`krb5_spnego_http.js` and most of the work is already done.
+
 **WS-Federation has no test in either repository.** The mock relying party at
 `/wsfed/rp` makes it look covered — it verifies a sign-in response check by check —
 but a person has to click it and read the page. What a test would add is the
@@ -886,11 +974,12 @@ argument in two places is an argument that will disagree with itself.
 | Federate with anybody it was not CONFIGURED to federate with — the one place this service refuses by default, and the one refusal that is not a mode | `federation/CLAUDE.md` |
 | Decrypt an assertion a federation partner encrypted, consume a federated SIGN-OUT, or re-check a federated person after the session exists | `federation/CLAUDE.md` |
 | Dial any URL that did not come off a federation relationship entry — `jwks_uri` on an application entry and WS-Federation's `wreqptr` are still never followed | `federation/CLAUDE.md`, `oauth-oidc/CLAUDE.md` |
-| Check any end user's password, in any protocol | `authn/CLAUDE.md` |
+| Check any end user's password, in any protocol — **with one exception since 2026-08-26**: a Kerberos ticket presented at `/authn/spnego` is verified against a real long-term key before a session is minted, because Kerberos cannot be permissive the way everything else here is. The KDC behind it still is | `authn/CLAUDE.md`, `kerberos/CLAUDE.md` |
 | Check any credential except a registered client's secret, in RFC 9700 mode only | `oauth-oidc/CLAUDE.md` |
 | Refuse any LDAP bind — any DN, any password, anonymous, on 389 and 636 alike | `ldap/CLAUDE.md` |
 | Check a Kerberos password, though it cannot not check the KEY | `kerberos/CLAUDE.md` |
 | Verify an access token it did not issue, except at UserInfo | `oauth-oidc/CLAUDE.md` |
+| Enforce `value` or `values` in an OIDC Core 5.5 claims request, or treat `essential` as an instruction — all three are carried, checked and reported, and section 5.5.1 says a server MUST NOT error for an unavailable claim | `oauth-oidc/CLAUDE.md` |
 | Require DPoP — nonce mode makes proofs fresher, not mandatory | `oauth-oidc/CLAUDE.md` |
 | Turn a verified client certificate into a login | `tls/CLAUDE.md` |
 | Verify anything in an issued credential's values, which are invented | `oid4vc/CLAUDE.md` |
@@ -909,7 +998,7 @@ argument in two places is an argument that will disagree with itself.
 | Verify a SAML AuthnRequest's signature, or consume SP metadata — both recorded, neither checked | `saml/CLAUDE.md` |
 | Encrypt an assertion in the Web SSO profile — WS-Trust's `?encrypt=1` still does | `saml/CLAUDE.md` |
 
-THREE exceptions to the whole of that list, and each is worth knowing before
+FOUR exceptions to the whole of that list, and each is worth knowing before
 reading further. **The SCIM endpoints REQUIRE a credential** — in any of the six
 schemes RFC 7644 section 2 names, with the OAuth ones needing `scim:read` or
 `scim:write` — because they create and DELETE accounts. **The SPIRE Server
@@ -920,6 +1009,16 @@ requires a sign-on session and one of two roles**, because it is the one surface
 that can change what every protocol endpoint does. All three are a turnstile
 rather than a lock, and each can be turned off (`scim.authRequired`,
 `spiffe.authRequired`, `admin.authRequired`).
+
+**A FOURTH IS NOT A TURNSTILE AND IS NOT GUARDING ANYTHING**: `/authn/spnego`,
+where a KERBEROS TICKET is verified against a real long-term key before a
+session is minted. It is on this list only because Kerberos cannot be permissive
+the way the rest of this service is — the password there IS the key — so the
+mock's permissiveness had to move into the KDC's ACCOUNT POLICY (one shared
+password, an account for any name) and leave the verification real. The row
+above about not checking passwords holds everywhere else, and the reason it
+cannot hold here is `kerberos/CLAUDE.md`'s. `krb5.spnegoAuthentication` turns
+that door off.
 
 The console's is the newest and the one with the most surprising edges, all of
 which are argued in `admin-ui/CLAUDE.md`: the two roles are ORDINARY DIRECTORY

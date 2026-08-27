@@ -1,12 +1,13 @@
 # admin-ui/
 
-The admin console at `/admin`. Three files now:
+The admin console at `/admin`. Four files now:
 
 | File | What it is |
 |---|---|
 | `admin.js` | Every page, every form, the shell they are drawn in, and the GATE in front of all of them. The largest file in the repository, because every page's HTML and every page's JSON view are built in the same function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives. |
 | `admin_rbac.js` | **Who may use it.** Two roles, held as two ordinary groups in the embedded directory. A library (rule 3): it registers nothing. |
 | `delegation_map.js` | **The delegation picture**, at `/admin/delegation/map` — and, since 2026-08-26, one person's whole picture at `/admin/delegation/user`, which is the same renderer over a graph carrying two more kinds of line. Layout with `@dagrejs/dagre`, every shape its own SVG. A library (rule 3): it registers nothing, requires nothing in this service but `helpers.js`, and is HANDED what each box is. |
+| `federation_diagram.js` | **The federation picture**, at `/admin/federation/map`. The SECOND drawing in this console and a SEPARATE renderer — see the section below, where the case for not reusing the one above it is made. A library on the same terms, and the only thing it takes from this service beyond `helpers.js` is `delegation_map.js`'s palette, hexagon and text metric. |
 
 **It IS protected now, and it holds nothing on disk.** It is also the one surface
 that can CHANGE what the protocol endpoints do, which is why it is the one that
@@ -600,17 +601,28 @@ owns the store, and reimplementing any of it here is how the console and an
   nothing on disk.** It is
   the one surface that can change what the protocol endpoints do — it revokes tokens
   through the same set `/oauth2/revoke` writes to, and it adds custom claims to every
-  future access token, ID Token and SAML assertion — the tokens on `/admin/claims`
-  and the assertions on `/admin/saml-attributes` since 2026-08-24, **two pages onto
+  future access token, ID Token, UserInfo response and SAML assertion — the tokens on
+  `/admin/claims`, the UserInfo response on `/admin/userinfo-claims` since 2026-08-26
+  and the assertions on `/admin/saml-attributes` since 2026-08-24, **three pages onto
   one store**: one `CLAIM_SETS`, one `setClaimSet()`, one `claimsAction()` taking the
   set ids the door carries, and one audit row per change whichever door made it.
+  **`/admin/userinfo-claims` is the one of the three with no "nothing already issued
+  changes" warning on it, and that is the whole argument for it being a page.** A
+  UserInfo response is built on EVERY call rather than signed once, so a claim added
+  there reaches a client that signed in an hour ago and has done nothing since — which
+  is a thing to be able to demonstrate that no issued artefact can express. It is also
+  the only claim set a CLIENT can add to: OpenID Connect Core section 5.5's `claims`
+  request parameter names individual claims and they are answered off that person's
+  entry under `ou=users`, which is why that page carries a section the other two do
+  not — the vocabulary a request may use, the four layers of precedence, and a preview
+  built by the functions `/oauth2/userinfo` itself calls.
   Custom claims are **additive**:
   the names this service sets itself are refused at configuration time, because an
   `exp` settable from a web form would produce tokens that fail to verify with nothing
   pointing back at the page — and that list is a JWT rule, not enforced for a SAML
   attribute, because `exp` collides with nothing in an assertion. The other half of
   each set puts **LDAP attributes** in
-  those four, whose values come off the person's own entry rather than out of the form
+  those five, whose values come off the person's own entry rather than out of the form
   — see rule 3d, and note that the additive rule holds there too: the protocol's own
   claim wins, then a typed one, then the attribute. It deliberately does not invalidate assertions, tickets
   or credentials (nothing consults this service about those, so the button would be a
@@ -823,6 +835,59 @@ Seven things about it are decisions rather than defaults.
   all of it — the bands, the one plane, the centring, and that no two label
   panels overlap — because none of it fails loudly.
 
+* **ONE SIGN-IN LINE PER PERSON, WITH THE FAMILIES LISTED ON IT — and the bug
+  that forced it is the best example in this file of a picture lying without
+  drawing anything wrong.** `user_graph.js` drew one `signed-in` line per
+  protocol family somebody had authenticated with, on the argument that the
+  families are what a reader looks for. But those lines JOIN THE SAME TWO BOXES,
+  and an issuer line is a straight segment clipped to the boxes at its ends — so
+  two of them are one segment computed twice, one path exactly over the other,
+  one arrowhead exactly over the other. Their labels meanwhile were seated in
+  separate ROWS by the paragraph above, precisely so that labels do not collide.
+  `bob_end_user`'s page therefore showed ONE line saying `signed in / OAuth 2.0
+  / OIDC / 1 time` in one place and `signed in / OAuth 2.0 / 2 times` in
+  another: one relationship contradicting itself, when the truth is that he
+  signed in once at the screen and was named in two RFC 8693 exchanges — which
+  `oauth2.js` records as authentications under the bare `OAuth 2.0` family.
+
+  So the fold is in the GRAPH, where it belongs: one line, `authentications` on
+  it as a list of `{protocol, method, count}`, one entry per family and method,
+  ordered by the family's `firstAt` — which `admin_stats.js` had always kept and
+  began handing out for this — so the sign-in everything else rests on is read
+  before the exchanges that quote it. `edgeLabelLines()` draws `signed in` and
+  then the entries: `1 × OAuth 2.0 / OIDC (sign-in screen)`, `2 × OAuth 2.0
+  (token exchange)`. The old `N times` line is GONE — a total across a sign-in
+  and two exchanges is arithmetic rather than a fact, and it was the number that
+  read as N sign-ins. It is one entry PER METHOD rather than per family for
+  exactly that reason: `OAuth 2.0 ×2` is true and misleads, and the mechanism is
+  the word that stops it. The sign-in line is the one label allowed more than
+  three lines (`SIGNED_IN_ENTRIES`, then the rest are counted), which costs
+  nothing: it absorbed lines that had three each.
+
+  **AND THE RENDERER STILL FANS COINCIDENT ISSUER LINES, because the fold
+  cannot reach every case.** A party can hold a line INTO the hexagon and
+  another back OUT of it — a client that authenticated as itself is `signed in`
+  one way and `issued for` the other; the middle tier of a Kerberos chain both
+  authenticates and is issued to — and those are the same segment with the
+  arrowheads at opposite ends. So the lines of one party are aimed at points
+  spread `STS_FAN_SEP` apart about the issuer's centre. THE HEXAGON END is the
+  end that spreads, because the label rows are in the band directly under it;
+  they converge on the one party below. The aim is capped by the hexagon's own
+  half-width, and `crossingPoint()` exists because a fanned ray no longer passes
+  through that centre, so `boundaryPoint()` cannot scale it and the segment is
+  clipped against the shape instead — get that wrong and you do not draw a wrong
+  line, you draw a correct line that stops a few pixels short of the hexagon it
+  points at. `fitLabels()` interpolates along the SAME aim, so a label still
+  sits on the line it belongs to. Nothing in the renderer may assume the graph
+  handed to it has folded anything.
+
+  `tests/user_graph_signin.js` holds the fold AND the join — it records a
+  sign-in and two exchanges through the real funnel, then asserts the graph has
+  one line and the emitted SVG carries both entries, because either half is
+  green on its own while the page is still wrong.
+  `tests/delegation_map_bands.js`'s `TWICE` fixture holds the fan: two lines
+  rather than one path drawn twice, both meeting the hexagon, one label on each.
+
 * **AND SINCE LATER THE SAME DAY THE ROW OWNS BOTH COORDINATES, so the plane is
   real rather than a property of chains.** Taking the issuer out bought half of
   it. The moment a graph BRANCHES it stops being a chain and dagre goes back to
@@ -1022,10 +1087,11 @@ parameter, and it is the first thing to check any change to it against.
   a row of zeroes under the map's columns, with the interesting number nowhere
   on it.
 * **TWO NEW KINDS OF LINE, in `delegation_map.js`** — `signed-in` (dotted, into
-  the hexagon, one per protocol family) and `issued-for` (solid indigo, labelled
-  with the exact grant). Neither takes a MODE colour, deliberately: amber and
-  green are this console's judgement about impersonation versus delegation and an
-  ordinary grant makes neither claim. **`delegationMapKey()` takes
+  the hexagon, ONE PER PERSON with the protocol families listed on it — it was
+  one line per family until 2026-08-26; see the bullet on the fold below) and
+  `issued-for` (solid indigo, labelled with the exact grant). Neither takes a
+  MODE colour, deliberately: amber and green are this console's judgement about
+  impersonation versus delegation and an ordinary grant makes neither claim. **`delegationMapKey()` takes
   `{ issuance: true }`** to add their rows and the other three picture pages
   do not pass it — a legend must describe the diagram BESIDE it, and a key
   listing a line the page never draws teaches a reader to stop trusting it.
@@ -1169,6 +1235,122 @@ minted for a mock client. It is not shown here and never reaches the audit log,
 and the page says out loud that an `ldapsearch` shows it anyway. That is not a
 security boundary and must not be presented as one; it is this console not being
 a second way to read somebody else's credential out of the process.
+
+## `/admin/federation/map` IS THE SECOND DRAWING, AND IT IS NOT THE FIRST ONE REUSED
+
+Added 2026-08-26. A **DRILL-DOWN of `/admin/federation`** on exactly the terms
+`/admin/delegation/map` is one of its own list page — no `NAV` row, `active` is
+the federation page's path, `up` is
+`upTo('/admin/federation', 'The picture', …)`, so the trail reads
+`Admin console › Federation › The picture` and the way back carries the filter
+the reader came in with. Rule 7a's test decides it the same way: a parameter
+that merely FILTERS a list is not a drill-down, and this is not a filter, it is
+a second VIEW of the same register.
+
+**No form, so no operation on `/admin-api`** — rule 7 satisfied exactly as the
+four delegation drill-downs and the credential lineage satisfy it.
+`?format=json` is the graph, the relationships and the per-application counts;
+`?format=svg` is the document alone.
+
+### WHY IT EARNED A PAGE: THREE QUESTIONS A TABLE OF RELATIONSHIPS CANNOT HOLD
+
+`/admin/federation` has one row per relationship and no row can say anything
+about another. All three of these are facts about **two registers at once**:
+
+* **How many applications are behind this partner, and which.** It is
+  `appFederationRelationship` on entries under `ou=applications` pointing BACK
+  at a relationship, so the relationship's own entry has never known.
+* **How many people have come through it, PER APPLICATION.**
+  `fedAuthentications` answered the first half; the split is
+  `fedApplicationUse`, which exists because a partner shared by two
+  applications turns one number into two different questions.
+* **What an arriving foreign service provider actually meets** —
+  `fedAuthnMechanism`, and the onward relationship when it says `federation`. A
+  table can print the attribute; only a picture can show that the onward
+  relationship is the one two rows down and that the two together are a BRIDGE.
+
+### THE ARROW IS THE REQUEST, WHICH IS THE ONE THING THAT LOOKS BACKWARDS
+
+Three bands: everything LEFT of the hexagon arrives wanting somebody signed in,
+the hexagon is this trust realm, everything RIGHT is a party this service asks
+to do the signing in. So an identity-provider-side relationship points INTO the
+hexagon even though this service asserts outward — and that inversion is what
+turns an identity broker into a single straight line instead of two arrows
+leaving the same box in the same direction with nothing joining them.
+`../federation/CLAUDE.md` argues it; the page says it in a note above the
+picture and again in the key, because it is the one thing a reader will
+otherwise read as a bug.
+
+### AND IT IS A SEPARATE RENDERER, WHICH NEEDED THE ARGUMENT MADE
+
+Reusing `delegation_map.render()` was the first thing tried, and its vocabulary
+is close enough to be tempting — a hexagon for this service, a rectangle for an
+application, labelled edges. Two things stop it, and the first is the
+interesting one:
+
+* **THAT RENDERER'S LAYOUT IS A DELIBERATE SPECIALISATION AND THE
+  SPECIALISATION IS WRONG HERE.** It takes the hexagon OUT of dagre's layout
+  and puts it in a band above, then puts every party on one centreline —
+  because a delegation chain is a chain and the issuer is the box every line
+  touches. This graph is the opposite shape: the hexagon is the MIDDLE RANK of
+  a three-rank flow, and which side of it a box sits on is the entire claim.
+  Hoisting it into a band deletes the thing being said.
+* **AND ITS EDGE VOCABULARY IS DELEGATION'S.** `edgeLook()` there switches on
+  `acts-for`, `issued`, `reaches` and colours by
+  impersonation-versus-delegation — a judgement that means nothing about a
+  federation relationship. Teaching it a second vocabulary makes one function
+  that is really two, and the amber/green pairing a reader has learnt from
+  `/admin/delegation` starts meaning something else on this page.
+
+**What IS shared is the arithmetic and the palette**, and that is the half that
+matters for the console looking assembled rather than designed:
+`delegation_map.js` now exports `textWidth`, `wrapLabel` and `MAX_LABEL_CHARS`
+beside `COLOURS`, `hexPath` and `personGlyph`. Two estimates of how wide
+`HTTP/frontend.example.com` is would be two pictures whose boxes are different
+sizes for one string, and `wrapLabel` in particular would be got wrong a second
+time — it is not a word-wrap, it breaks after the characters an IDENTIFIER is
+built out of, because there are no spaces in a service principal name.
+
+**The name is `federation_diagram.js` and not `federation_map.js` on purpose**:
+`../federation/federation_map.js` already exists and maps a partner's ATTRIBUTE
+NAMES onto directory attributes. Two files with one name doing unrelated things
+is a bug waiting for somebody to open the wrong one.
+
+### FOUR SMALLER DECISIONS
+
+* **THE SHAPE IS DECIDED FROM THE NODE'S KIND AND IS NOT THE CALLER'S TO
+  CHANGE.** `options.resolve` may add an `href` and override a label — the
+  console passes one so a box links to that party's page — but a caller that
+  could set the shape would eventually draw a partner as a local box, which is
+  the one distinction this picture is built to carry. A hexagon is an identity
+  service, a rectangle is a party that consumes what one issues, and a DASHED
+  outline means foreign: two independent properties rather than four shapes to
+  memorise.
+* **THE LABELS ARE GIVEN TO DAGRE RATHER THAN PLACED AFTERWARDS**, which is why
+  this file has none of the lane-and-row assignment `delegation_map.js` needs.
+  That file took the coordinate pass away from dagre, so dagre no longer knows
+  where anything is and cannot reserve room; this one keeps dagre's
+  coordinates, so it says how big each label is and dagre routes around it.
+  `ranksep` is generous because that gap is where the labels live.
+* **A PARTNER WITH TWO RELATIONSHIPS LINKS TO THE FIRST**, which is a real
+  limitation and is the delegation picture's own: an SVG anchor wraps one shape
+  and has one href. The table under the picture lists every relationship a
+  partner has, which is where a reader with two goes.
+* **THE PER-APPLICATION COUNTS DO NOT HAVE TO ADD UP, AND THE PAGE NAMES THE
+  DIFFERENCE.** A relationship's own total counts every credential that crossed
+  it; the rows count only the ones that named a configured application. Three
+  ordinary things make the difference, none of them a fault, and on a page about
+  counting a column that does not add up is worse than one that explains itself.
+  `../federation/CLAUDE.md` carries the three.
+
+**A guard exists and it is in THIS repository**: `tests/federation_map_bands.js`
+asserts the bands, that the four relationship states are four distinguishable
+strokes, that a broker is one arrow that keeps its counts, and the remainder
+arithmetic. It is in `tests/` rather than the parent suite for the reason
+`delegation_map_bands.js` is, and `tests/CLAUDE.md` records the six mutants it
+was checked against.
+
+---
 
 ## 8. THE GATE, AND WHY THE OLD SENTENCE IS QUALIFIED RATHER THAN DELETED
 

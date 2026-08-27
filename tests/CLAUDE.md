@@ -105,6 +105,17 @@ Two rules that are not optional here:
   where a label's line is solved for, and moving one drew every label a few
   pixels BESIDE its own line rather than drawing the hexagon in the wrong
   place. It is one `stsAt` now.
+  `spnego_identity.js` was checked against six — `usernameFor()` stripping
+  EVERY realm rather than only the local one (3 assertions red), `factorsFor()`
+  claiming `pwd` for a ticket that claims nothing (10), reading `initial` as
+  evidence that a password was checked (2), calling a lone hardware factor
+  `mfa` because it is phishing-resistant (1), splitting the principal on the
+  FIRST `@` rather than the last (1), and collapsing the four method sentences
+  into one (1). The second of those is the case the file exists for and it is
+  the one no test over HTTP could have run: this KDC requires
+  pre-authentication, so no client can obtain a ticket claiming neither flag,
+  and `hw-authent` is never set by anything here at all — a test over there
+  would have exercised one branch of four and reported green over the rest.
 * **CLEAN UP THE PROCESS-WIDE STATE YOU TOUCH.** The realm table and
   `process.env` are shared by every test in the run and this service persists
   nothing, so a realm left behind changes what a later test resolves. Use the
@@ -119,6 +130,8 @@ Two rules that are not optional here:
 | `realm_isolation.js` | that a realm's identity register and its revocation set are its own, in both directions, and that removing a realm takes them with it |
 | `realm_directory_lookups.js` | that a lookup BY DN answers about one realm — groups, people and applications — including that a refused cross-realm delete leaves the entry where it was |
 | `delegation_map_bands.js` | that the delegation picture is TWO BANDS — the issuer above, centred, every party on one plane — and that no two edge labels are drawn on top of each other |
+| `federation_map_bands.js` | that the federation picture is THREE BANDS — left asks, right authenticates — that the four relationship states are four distinguishable strokes, that a brokered partner is ONE arrow which keeps that pair's counts, and that the per-application counts either add up or report the difference |
+| `spnego_identity.js` | what a SPNEGO sign-in claims: which part of a Kerberos principal becomes the session's username, and the `amr`/`acr` read off the ticket's own flags |
 
 Both realm files bend the rule at the top of this file, and each says so in
 its own header rather than leaving a reader to catch it.
@@ -127,6 +140,17 @@ half of the same fix — a subtree search is scoped to the realm its base
 names — needs a listener to test, so by this file's own rule it is not
 asserted here. It was verified by hand, and `ldap/CLAUDE.md` records what
 was checked.
+
+`spnego_identity.js` passes it on the same clause `config_realm_layer.js`
+does — **the cases worth asserting cannot be produced by driving the running
+service.** A ticket carrying neither `pre-authent` nor `hw-authent` is where an
+implementation is most tempted to fill in a plausible value, and this KDC
+requires pre-authentication so no client can obtain one; `hw-authent` is set by
+nothing in this repository, so the two-factor branch is unreachable from
+outside the process entirely. The end-to-end claim — a real AP-REQ over a real
+socket producing a real session — needs a listener and belongs in the parent
+suite beside `krb5_spnego_http.js`, which already drives the acceptor that door
+shares.
 
 `delegation_map_bands.js` passes the rule at the top of this file on a
 different clause from the realm files': `render()` is a pure function from a
@@ -141,6 +165,34 @@ same change — that an access token's audience becomes a line at all — becaus
 that one IS drivable over HTTP and belongs in the parent suite by the rule
 above. It was verified by hand against a four-tier chain; `common/CLAUDE.md`
 rule 3p records what the rule is.
+
+`federation_map_bands.js` passes on both of `delegation_map_bands.js`'s clauses
+at once, which is why it is one file rather than two. The DRAWING half is a pure
+function from a graph to an SVG document, so the cases worth asserting — a
+relationship in each of the four states at once, a broker whose onward partner
+is disabled — are ones the running service cannot be made to produce on demand.
+The MODEL half asserts arithmetic a page rounds off: *the per-application rows
+sum to less than the relationship's own total, by exactly the number of sign-ins
+that named no configured application* is a statement about two registers, and
+the only way to see it over HTTP is to have already trusted the number being
+checked. What it does NOT assert is the SIGN-IN PATH that fills the attribute —
+that the login endpoint carries the application across the round trip, and that
+all five `completeSignIn()` call sites pass it — because that IS drivable over
+HTTP and belongs in the parent suite by the rule at the top of this file. It was
+verified by hand against five real federated sign-ins; `federation/CLAUDE.md`
+records what was checked.
+
+It was mutation-tested against SIX mutants and each was caught: the `asks` arrow
+reversed in the model (5 assertions red), the broker dedupe removed so a
+brokered partner is drawn twice (5), the layout flipped to `rankdir: 'RL'` (4),
+a partner shape dropped so its box is never emitted (1),
+`applicationConfiguredFor()` replaced with "believe whatever the request named"
+(2), and the unattributed remainder stopped being computed (2). **The first of
+those is worth reading**: it was caught by the BROKER assertions and not by the
+band ones, because the band assertions build their graph by hand — so the two
+halves guard different things and the mutants that prove it are the layout ones,
+which the band assertions did catch. A guard that had only the hand-built graph
+would not have noticed the renderer.
 
 `realm_isolation.js` is the one closest to the line: the leak it guards IS
 observable over HTTP. It is here because the parent project's

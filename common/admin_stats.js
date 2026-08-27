@@ -1200,20 +1200,31 @@ function recordAuthentication(detail) {
 // ---------------------------------------------------------------------------
 // Custom claims.
 //
-// Four sets, one per place a claim can be put, because the four are genuinely
-// different vocabularies and a single list would have to guess:
+// FIVE sets since 2026-08-26, one per place a claim can be put, because the
+// five are genuinely different vocabularies and a single list would have to
+// guess:
 //
 //   access_token   members of the OAuth 2.0 access token's claim set
 //   id_token       members of the OIDC ID Token's claim set
+//   userinfo       members of the OIDC UserInfo response (Core 5.3.2)
 //   saml2          <saml:Attribute Name="..." NameFormat="...">
 //   saml11         <saml:Attribute AttributeName="..." AttributeNamespace="...">
 //
-// ONE STORE, TWO PAGES. The first two are configured on /admin/claims and the
-// last two on /admin/saml-attributes, and that split is a fact about the
-// CONSOLE rather than about this file: setClaimSet() is the one door onto all
-// four, so a set is changed the same way and audited the same way whichever
-// page or API operation reached it. JWT_CLAIM_SET_IDS and SAML_CLAIM_SET_IDS
-// below are what each page filters by, derived from `kind`.
+// ONE STORE, THREE PAGES. The first two are configured on /admin/claims, the
+// third on /admin/userinfo-claims and the last two on /admin/saml-attributes,
+// and that split is a fact about the CONSOLE rather than about this file:
+// setClaimSet() is the one door onto all five, so a set is changed the same way
+// and audited the same way whichever page or API operation reached it.
+// JWT_CLAIM_SET_IDS, USERINFO_CLAIM_SET_IDS and SAML_CLAIM_SET_IDS below are
+// what each page filters by, derived from `kind`.
+//
+// **THE THIRD IS THE ONE THAT IS NOT ISSUED.** An access token, an ID Token and
+// both assertions are minted once and are then signed documents nothing here
+// can reach inside. The UserInfo response is BUILT ON EVERY CALL, so a change
+// to that set is visible to a client already holding a token — which is the one
+// thing on this page that does not carry the "nothing already issued changes"
+// warning, and is why it is worth having separately from the ID Token that
+// carries the same person's claims.
 //
 // They are ADDITIVE. A configured claim is added to what the protocol already
 // puts in the token; it never replaces one, and the reserved list below is what
@@ -1225,12 +1236,38 @@ function recordAuthentication(detail) {
 const RESERVED_JWT_CLAIMS = [
   'iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti', 'typ', 'cnf',
   'scope', 'client_id', 'azp', 'nonce', 'at_hash', 'c_hash', 'auth_time',
-  'amr', 'acr', 'username', 'authorization_details', 'act'
+  'amr', 'acr', 'username', 'authorization_details', 'act',
+  // OIDC Core 5.5's claims request, as the authorization endpoint understood
+  // it. It rides in the access token for the reason `authorization_details`
+  // does — the UserInfo endpoint has to know what the client asked for, and a
+  // signed token is the one thing that reaches it — so a settable `claims`
+  // would let a web form decide what a request asked for. See oauth2.js.
+  'claims'
 ];
 
 const CLAIM_SETS = {
   access_token: { label: 'OAuth 2.0 access token', kind: 'jwt', claims: [] },
   id_token: { label: 'OIDC ID Token', kind: 'jwt', claims: [] },
+  // THE FIFTH SET, ADDED 2026-08-26, AND IT IS NOT A JWT SET EVEN THOUGH ITS
+  // CONTENT IS JSON AND ITS SIGNED FORM IS A JWT.
+  //
+  // `kind` here answers one question and one only: WHICH CONSOLE PAGE AND WHICH
+  // /admin-api RESOURCE CARRIES THIS SET. The UserInfo response has a page of
+  // its own — /admin/userinfo-claims — because the thing it configures is a
+  // different artefact from either token: it is fetched rather than issued, it
+  // is re-read on every call so a change here is visible without a new sign-in,
+  // and OIDC Core 5.4 makes a SCOPE decide half of what is in it, which is true
+  // of nothing else on this list. Giving it `kind: 'jwt'` would have put it on
+  // /admin/claims automatically, which is exactly the accident JWT_CLAIM_SET_IDS
+  // being DERIVED is meant to make impossible in the other direction.
+  //
+  // What it does share with a JWT set is the RESERVED LIST — see setClaimSet(),
+  // which checks `reservedNames()` rather than `kind === 'jwt'`. A UserInfo
+  // response carries `sub` (5.3.2, and a client MUST check it), and when the
+  // client registered a `userinfo_signed_response_alg` the whole thing is a JWT
+  // carrying `iss` and `aud` as well. Every name on that list is load-bearing in
+  // at least one of the two shapes, so the list applies whole.
+  userinfo: { label: 'OIDC UserInfo response', kind: 'userinfo', claims: [] },
   saml2: { label: 'SAML 2.0 Attribute', kind: 'saml2', claims: [] },
   saml11: { label: 'SAML 1.1 Attribute (WS-Federation)', kind: 'saml11', claims: [] }
 };
@@ -1253,8 +1290,18 @@ const CLAIM_SET_IDS = Object.keys(CLAIM_SETS);
 const JWT_CLAIM_SET_IDS = CLAIM_SET_IDS.filter(function (id) {
   return CLAIM_SETS[id].kind === 'jwt';
 });
+// THE SAML LIST IS NOW A POSITIVE TEST AND IT HAD TO BECOME ONE. It was
+// `kind !== 'jwt'` while there were exactly two kinds, and the day a third
+// arrived that spelling would have swept the UserInfo set onto
+// /admin/saml-attributes — a set with a page, a store and an issuance path,
+// configured on a page about assertions, and nothing anywhere failing. A list
+// derived by exclusion is only derived from what exists at the moment it is
+// written; this one is derived from what the sets ARE.
 const SAML_CLAIM_SET_IDS = CLAIM_SET_IDS.filter(function (id) {
-  return CLAIM_SETS[id].kind !== 'jwt';
+  return CLAIM_SETS[id].kind === 'saml2' || CLAIM_SETS[id].kind === 'saml11';
+});
+const USERINFO_CLAIM_SET_IDS = CLAIM_SET_IDS.filter(function (id) {
+  return CLAIM_SETS[id].kind === 'userinfo';
 });
 
 // The default namespace a SAML 1.1 attribute gets when the admin does not name
@@ -1499,6 +1546,22 @@ function recordClaimSetChange(id, set, added, removed, count, ok, errors) {
   log.debug("Leaving recordClaimSetChange().");
 }
 
+// WHICH NAMES A SET REFUSES, asked of the SET rather than tested against one
+// spelling of `kind`.
+//
+// It was `set.kind === 'jwt'` inline until the UserInfo set arrived, and that
+// was a check no reader could add a fourth kind to correctly: the answer is not
+// "is this a JWT" but "does this artefact have names this service sets itself".
+// A UserInfo response does — `sub` is required by OIDC Core 5.3.2 and a client
+// MUST verify it matches the ID Token's, and the signed form of the same
+// response is a JWT carrying `iss`, `aud` and `exp` — so it refuses the same
+// list. A SAML assertion does NOT: `exp` and `scope` collide with nothing in
+// an <Attribute>, and refusing them there would tell a caller their call will
+// fail when it will succeed.
+function reservedNames(set) {
+  return (set.kind === 'jwt' || set.kind === 'userinfo') ? RESERVED_JWT_CLAIMS : [];
+}
+
 // Validate and install a whole set at once. Returns the errors rather than
 // throwing, because the caller is a form handler that has to redisplay them.
 function setClaimSet(id, entries) {
@@ -1506,8 +1569,8 @@ function setClaimSet(id, entries) {
   const set = CLAIM_SETS[id];
   if (!set) {
     log.debug("Leaving setClaimSet(). No such claim set.");
-    return { ok: false, errors: ['There is no claim set called "' + id + '". The four are: ' +
-                                 CLAIM_SET_IDS.join(', ') + '.'] };
+    return { ok: false, errors: ['There is no claim set called "' + id + '". The ' +
+                                 CLAIM_SET_IDS.length + ' are: ' + CLAIM_SET_IDS.join(', ') + '.'] };
   }
   const errors = [];
   const cleaned = [];
@@ -1518,9 +1581,10 @@ function setClaimSet(id, entries) {
       errors.push('Entry ' + (index + 1) + ' has no name.');
       return;
     }
-    if (set.kind === 'jwt' && RESERVED_JWT_CLAIMS.indexOf(name) >= 0) {
+    if (reservedNames(set).indexOf(name) >= 0) {
       errors.push('"' + name + '" is a claim this service sets itself and cannot be overridden. ' +
-                  'Custom claims are added to a token, never substituted into it.');
+                  'Custom claims are added to a ' + (set.kind === 'userinfo' ? 'UserInfo response' : 'token') +
+                  ', never substituted into it.');
       return;
     }
     if (seen.has(name)) {
@@ -1554,6 +1618,52 @@ function setClaimSet(id, entries) {
 function claimSet(id) {
   const set = CLAIM_SETS[id];
   return set ? set.claims.slice() : [];
+}
+
+// ---------------------------------------------------------------------------
+// THE FEDERATION RELEASE POLICY, APPLIED TO AN OBJECT OF CLAIMS.
+//
+// Lifted out of jwtClaims() on 2026-08-26 rather than written a second time,
+// and the reason is the one that lifts anything out of anything here: it now
+// has a SECOND caller that is not a claim set. OIDC Core section 5.5's claims
+// request reaches the UserInfo endpoint without passing through jwtClaims() at
+// all — it is layer 3 of that response and the configured set is layer 1 — so a
+// partner with a release list naming `email` could otherwise have ASKED for
+// `birthdate` and been given it, which is precisely the hole a release list
+// exists to close. The filter belongs to the fact "this audience may see these
+// names", not to the mechanism that produced them.
+//
+// It REMOVES ONLY, and it cannot reach anything not in the object it is handed:
+// not `sub`, not `iss`, not `exp`, none of which is an attribute about a person
+// and every one of which is what makes the artefact verifiable at all.
+// `federation/CLAUDE.md` argues that boundary.
+//
+// NO POLICY IS NOT AN EMPTY POLICY. `releaseFilterFor()` answers null for a
+// partner with no release list, and null changes nothing.
+//
+// It stays HERE rather than moving to a library of its own because this module
+// already requires `federation.js` and three of the four modules allowed to do
+// so are named in rule 3o; a fifth requirer for one filter would be a require
+// added by analogy, which is exactly what that rule refuses.
+// ---------------------------------------------------------------------------
+function applyClaimRelease(out, context, what) {
+  const release = federation.releaseFilterFor(context);
+  if (!release) {
+    return out;
+  }
+  const before = Object.keys(out);
+  before.forEach(function (name) {
+    if (!release.names.has(name)) delete out[name];
+  });
+  const kept = Object.keys(out);
+  if (kept.length !== before.length) {
+    log.info('admin: the federation relationship "' + release.id + '" releases ' +
+             kept.length + ' of ' + before.length + ' ' + (what || 'claim(s)') +
+             ' to this audience; ' +
+             before.filter(function (n) { return !release.names.has(n); }).join(', ') +
+             ' withheld. The protocol\'s own claims are untouched.');
+  }
+  return out;
 }
 
 // The custom claims for a JWT, expanded against this token's context and typed.
@@ -1610,20 +1720,7 @@ function jwtClaims(id, context) {
   // partner with no release list, and null changes nothing — see its header,
   // where the difference is the whole point.
   // ---------------------------------------------------------------------
-  const release = federation.releaseFilterFor(context);
-  if (release) {
-    const before = Object.keys(out);
-    before.forEach(function (name) {
-      if (!release.names.has(name)) delete out[name];
-    });
-    const kept = Object.keys(out);
-    if (kept.length !== before.length) {
-      log.info('admin: the federation relationship "' + release.id + '" releases ' +
-               kept.length + ' of ' + before.length + ' custom claim(s) to this ' +
-               'audience; ' + before.filter(function (n) { return !release.names.has(n); })
-                 .join(', ') + ' withheld. The protocol\'s own claims are untouched.');
-    }
-  }
+  applyClaimRelease(out, context, 'custom claim(s)');
   const names = Object.keys(out);
   if (names.length) {
     log.debug("jwtClaims(): adding " + names.length + " custom claim(s) to a " + id + ": " + names.join(', '));
@@ -1989,7 +2086,13 @@ function userRows() {
       artifactKinds: countedRows(row.artifactKinds, 'kind'),
       protocols: Object.keys(row.protocols).map(function (name) {
         const family = row.protocols[name];
-        return { protocol: family.protocol, count: family.count, lastAt: family.lastAt,
+        // `firstAt` as well as `lastAt` since 2026-08-26: `user_graph.js` puts
+        // the families of one person in the order they STARTED, so that the
+        // sign-in everything else rests on is read before the exchanges that
+        // quote it, and `lastAt` orders them by whichever was busiest most
+        // recently instead.
+        return { protocol: family.protocol, count: family.count,
+                 firstAt: family.firstAt, lastAt: family.lastAt,
                  methods: countedRows(family.methods, 'method') };
       }).sort(function (a, b) { return b.lastAt - a.lastAt; })
     });
@@ -2198,6 +2301,8 @@ module.exports = {
   CLAIM_SET_IDS: CLAIM_SET_IDS,
   JWT_CLAIM_SET_IDS: JWT_CLAIM_SET_IDS,
   SAML_CLAIM_SET_IDS: SAML_CLAIM_SET_IDS,
+  USERINFO_CLAIM_SET_IDS: USERINFO_CLAIM_SET_IDS,
+  reservedNames: reservedNames,
   CLAIM_SETS: CLAIM_SETS,
   RESERVED_JWT_CLAIMS: RESERVED_JWT_CLAIMS,
   PLACEHOLDERS: PLACEHOLDERS,
@@ -2235,6 +2340,11 @@ module.exports = {
   setGroupResolver: setGroupResolver,
   jwtClaims: jwtClaims,
   samlAttributes: samlAttributes,
+  // The release filter on its own, for the ONE caller that produces claims
+  // without going through a claim set — the UserInfo endpoint's answer to a
+  // section 5.5 claims request. See the header above it for why that caller
+  // must not be exempt.
+  applyClaimRelease: applyClaimRelease,
   expandValue: expandValue,
   tokenList: tokenList,
   artifactList: artifactList,

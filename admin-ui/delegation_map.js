@@ -353,6 +353,59 @@ const LABEL_GUTTER = 10;
 const MAX_LABEL_ROWS = 5;
 
 // ---------------------------------------------------------------------------
+// TWO LINES BETWEEN THE HEXAGON AND ONE PARTY ARE TWO LINES, AND UNTIL
+// 2026-08-26 THEY WERE DRAWN ON TOP OF EACH OTHER.
+//
+// Every issuer line is a straight segment clipped to the two boxes at its ends,
+// so two of them between the SAME pair are the same segment computed twice —
+// one path exactly over the other, one arrowhead exactly over the other, and
+// nothing in the picture to say there are two. The labels, meanwhile, are
+// seated in ROWS by the block above precisely so that they do not collide, so
+// what a reader sees is ONE line carrying TWO labels: on
+// `bob_end_user`'s page, `signed in / OAuth 2.0 / OIDC / 1 time` above
+// `signed in / OAuth 2.0 / 2 times`, which reads as one relationship
+// contradicting itself rather than as the two it is (a sign-in at the screen,
+// and two token exchanges naming him).
+//
+// THE CASE ABOVE IS FIXED WHERE IT BELONGS — `user_graph.js` now draws ONE
+// sign-in line per person with the families listed on it, rather than one line
+// per family — because two lines saying the same thing about the same pair is a
+// fact about the GRAPH and not about the drawing. This stays, because the
+// drawing has to survive the shapes it cannot fold: a party can hold a line
+// INTO the hexagon and another back OUT of it (a client that authenticated as
+// itself, drawn as `signed in` one way and `issued for` the other; the middle
+// tier of a Kerberos chain, which both authenticates and is issued to), and
+// those are the same segment with the arrowheads at opposite ends. Nothing in
+// the renderer may assume the graph handed to it has folded anything.
+//
+// So the lines of one party are FANNED at the hexagon: each is aimed at a point
+// `STS_FAN_SEP` to one side of the issuer's centre, spread about it, which
+// separates them where they leave the hexagon and lets them converge on the one
+// party. The hexagon end is the end that is fanned deliberately — the label
+// rows are in the band immediately under it, so that is where the lines need to
+// be furthest apart. Both ends are still clipped to their own box exactly (see
+// `crossingPoint()`), so nothing gains a gap between an arrowhead and the shape
+// it points at, and the label of a fanned line is seated on the line it belongs
+// to because `fitLabels()` interpolates along the SAME aim.
+//
+// The separation is capped by the hexagon's own width rather than taken as
+// given: the aim has to stay inside the shape, or the line it describes would
+// leave the hexagon nowhere near it.
+// ---------------------------------------------------------------------------
+const STS_FAN_SEP = 26;
+const STS_FAN_MARGIN = 12;
+
+// How many entries a sign-in line's list draws before it counts the rest, and
+// how wide one of them is allowed to be. See `signedInLines()`.
+const SIGNED_IN_ENTRIES = 3;
+// Wide enough for the longest entry the service can actually produce —
+// `2 × Kerberos (AS-REQ with PA-ENC-TIMESTAMP)` — because the mechanism is the
+// half of the entry that stops `OAuth 2.0 ×2` reading as two sign-ins, and an
+// ellipsis through it puts the misleading half on the picture and the useful
+// half in the tooltip.
+const SIGNED_IN_CHARS = 44;
+
+// ---------------------------------------------------------------------------
 // WHAT A BOX LOOKS LIKE, AND HOW BIG IT IS.
 //
 // One function answers both, because they are the same question asked twice and
@@ -477,6 +530,48 @@ function boundaryPoint(at, size, towards) {
 }
 
 // ---------------------------------------------------------------------------
+// WHERE A LINE REACHES A BOX IT IS AIMED INTO BUT NOT AT THE CENTRE OF.
+//
+// `boundaryPoint()` above scales a ray that STARTS at a box's own centre, which
+// is every line in the picture but the fanned ones: those are aimed at a point
+// `STS_FAN_SEP` to one side of the hexagon's centre, so the ray they travel on
+// does not pass through it and scaling it would land beside the shape. This
+// clips the segment against the box's two slabs instead and answers with the
+// point where it ENTERS — the far side is behind the shape and is never the
+// one wanted.
+//
+// `aim` is INSIDE the box (the fan is capped so that it is), so there is always
+// a crossing; a caller that passed one outside would get the entry of the
+// extended line, which is still on the boundary.
+// ---------------------------------------------------------------------------
+function crossingPoint(from, aim, centre, size) {
+  log.debug("Entering crossingPoint().");
+  const dx = aim.x - from.x;
+  const dy = aim.y - from.y;
+  if (!dx && !dy) {
+    // The same divide-by-zero guard boundaryPoint() carries, for the same
+    // reason: NaN in a path draws nothing at all.
+    log.debug("Leaving crossingPoint(). The line has no length.");
+    return { x: from.x, y: from.y };
+  }
+  const hw = size.width / 2;
+  const hh = size.height / 2;
+  const spans = [];
+  if (dx) {
+    spans.push(((centre.x + (dx > 0 ? -hw : hw)) - from.x) / dx);
+  }
+  if (dy) {
+    spans.push(((centre.y + (dy > 0 ? -hh : hh)) - from.y) / dy);
+  }
+  // The LATER of the two entries is the one that is on the box: a segment
+  // crosses the x slab and the y slab at two different points and only the
+  // second of them is inside both.
+  const t = Math.max.apply(null, spans);
+  log.debug("Leaving crossingPoint().");
+  return { x: from.x + dx * t, y: from.y + dy * t };
+}
+
+// ---------------------------------------------------------------------------
 // AN EDGE'S ROUTE. dagre hands back the points a line should pass through — one
 // per rank it crosses, including the invisible ranks it made for the labels —
 // and a polyline through them has a corner at every one.
@@ -582,6 +677,12 @@ function edgeLook(edge) {
 // mechanism, and how it came out — because everything else is in the <title> and
 // in the tables under the picture. A fourth line was tried and it is what turns
 // a diagram into a page of text laid out badly.
+//
+// THE ONE EXCEPTION IS THE SIGN-IN LINE, which is allowed a fourth and a fifth
+// because it is the one line that ABSORBED others: there was a line per
+// protocol family until 2026-08-26, each with three lines of label, and they
+// joined the same two boxes and were therefore drawn on top of each other. The
+// list it carries instead is shorter than what it replaced.
 function edgeLabelLines(edge, labelOf) {
   log.debug("Entering edgeLabelLines().");
   const lines = [];
@@ -591,15 +692,13 @@ function edgeLabelLines(edge, labelOf) {
       lines.push(edge.protocols.join(', '));
     }
   } else if (edge.relation === 'signed-in') {
-    // WHAT WAS ASKED FOR IN SO MANY WORDS: the family they signed in with. The
-    // METHODS are in `typeLabel` and are deliberately not here — `the sign-in
-    // screen (password + a security key) ×3` is a sentence, and a sentence on a
-    // line is what turns a diagram into a page of text laid out badly. It is in
-    // the tooltip and in the table under the picture.
+    // ONE STATEMENT AND THEN A LIST — see `signedInLines()`. There is exactly
+    // one of these lines per person, and what varies is on it: `1 × OAuth 2.0 /
+    // OIDC (sign-in screen)`, `2 × OAuth 2.0 (token exchange)`.
     lines.push('signed in');
-    if (edge.protocol) {
-      lines.push(trim(edge.protocol, 26));
-    }
+    signedInLines(edge).forEach(function (one) {
+      lines.push(one);
+    });
   } else if (edge.relation === 'issued-for') {
     // AND THE GRANT, WHICH IS THE WHOLE LABEL. `typeLabel` carries the flow's
     // own name — `Authorization Code grant`, `Refresh Token grant` — so this is
@@ -628,10 +727,12 @@ function edgeLabelLines(edge, labelOf) {
       counts.push(edge.credentials + ' credential' + (edge.credentials === 1 ? '' : 's'));
     }
   } else if (edge.relation === 'signed-in') {
-    // `issued` on this line counts authentications, not credentials, so the
-    // word has to change with it: `4 issued` under a sign-in line would be four
-    // of something that does not exist.
-    counts.push(edge.acts + ' time' + (edge.acts === 1 ? '' : 's'));
+    // NOTHING. The count used to be here — `2 times` — and it is now on each
+    // entry of the list above, where it says what it is a count OF. A total
+    // under that list would be a third number on a line that already carries
+    // two, and it is the number nobody was asking for: `3 times` across a
+    // sign-in and two exchanges is arithmetic rather than a fact. The tooltip
+    // still totals them.
   } else {
     if (edge.issued) counts.push(edge.issued + ' issued');
     if (edge.refused) counts.push(edge.refused + ' refused');
@@ -646,7 +747,63 @@ function edgeLabelLines(edge, labelOf) {
     lines.push(counts.join(', '));
   }
   log.debug("Leaving edgeLabelLines().");
-  return lines.slice(0, 3);
+  // THREE, except on the one line that carries a list — `signed in` plus its
+  // entries, which is what the fold in `user_graph.js` bought: those entries
+  // used to be a line each, with three lines of label apiece and every one of
+  // them drawn on top of the last.
+  return lines.slice(0, edge.relation === 'signed-in'
+    ? SIGNED_IN_ENTRIES + 1 : 3);
+}
+
+// ---------------------------------------------------------------------------
+// THE LIST ON A SIGN-IN LINE. One entry per (family, method) pair, busiest
+// first, as `user_graph.js` ordered them.
+//
+// `SIGNED_IN_ENTRIES` is a giving-up point in the same spirit as
+// `MAX_LABEL_ROWS`: four lines of label is 44px and the rows the issuer's
+// labels are seated in are 46 apart, so a fifth entry is one that would be
+// drawn into the row below. Past it the remainder is COUNTED rather than
+// dropped — a list that silently stops is a list that reads as complete — and
+// the tooltip and the table under the picture carry every entry.
+//
+// A graph with no `authentications` on the edge falls back to what this line
+// said before the fold. That is not defensive dressing: `delegation_map.js`
+// draws whatever graph it is handed and the fixtures in
+// `tests/delegation_map_bands.js` are written by hand, so an edge with a
+// protocol and a count and no list is a shape that really does arrive here.
+// ---------------------------------------------------------------------------
+function signedInLines(edge) {
+  log.debug("Entering signedInLines().");
+  const entries = edge.authentications || [];
+  const out = [];
+  if (!entries.length) {
+    if (edge.protocol) {
+      out.push(trim(edge.protocol, 26));
+    }
+    if (edge.acts) {
+      out.push(edge.acts + ' time' + (edge.acts === 1 ? '' : 's'));
+    }
+    log.debug("Leaving signedInLines(). No list on the edge; " + out.length +
+              " line(s) from the protocol and the count.");
+    return out;
+  }
+  const shown = entries.length > SIGNED_IN_ENTRIES
+    ? entries.slice(0, SIGNED_IN_ENTRIES - 1) : entries;
+  shown.forEach(function (one) {
+    // `shortType()` on the method for the reason it is used on a mechanism
+    // everywhere else here: `sign-in screen (password and a security key)` is a
+    // sentence and `sign-in screen` is the noun. The parenthetical is in the
+    // tooltip.
+    out.push(trim(one.count + ' × ' + one.protocol +
+                  (one.method ? ' (' + shortType(one.method) + ')' : ''),
+                  SIGNED_IN_CHARS));
+  });
+  if (shown.length < entries.length) {
+    out.push('+' + (entries.length - shown.length) + ' more');
+  }
+  log.debug("Leaving signedInLines(). " + out.length + " line(s) for " +
+            entries.length + " entry/entries.");
+  return out;
 }
 
 // The mechanism's label, minus the parenthetical the table has room for. Every
@@ -1035,6 +1192,45 @@ function renderUnguarded(graph, options) {
     ? { x: width / 2, y: MARGIN + stsSize.height / 2 }
     : null;
 
+  // HOW FAR TO ONE SIDE OF THE ISSUER'S CENTRE EACH LINE IS AIMED. See the note
+  // on STS_FAN_SEP: the lines of ONE party are the same segment computed once
+  // per line, so a party with two of them gets one path drawn over the other
+  // and two labels seated over one line. They are grouped by the party at the
+  // far end — every line touching the hexagon touches exactly one — and spread
+  // about the centre, so a party with a single line is aimed at the centre and
+  // is drawn exactly as it was.
+  const stsFan = {};
+  const stsLinesOf = {};
+  stsEdges.forEach(function (edge) {
+    if (!placedFor(edge)) {
+      return;
+    }
+    const partyId = isSts(edge.from) ? edge.to : edge.from;
+    if (!stsLinesOf[partyId]) {
+      stsLinesOf[partyId] = [];
+    }
+    stsLinesOf[partyId].push(edge);
+  });
+  Object.keys(stsLinesOf).forEach(function (partyId) {
+    const group = stsLinesOf[partyId];
+    if (group.length < 2 || !stsSize) {
+      return;
+    }
+    // Capped by the shape: the aim has to stay inside the hexagon, or the line
+    // it describes leaves it somewhere the reader can see it did not.
+    const room = Math.max(0, stsSize.width / 2 - STS_FAN_MARGIN);
+    const step = Math.min(STS_FAN_SEP, (room * 2) / (group.length - 1));
+    // Sorted by id rather than left in the order the graph was built, so the
+    // same picture drawn twice fans the same way round — an edge order that
+    // depends on which register was read first would move the lines under a
+    // reader comparing two runs.
+    group.slice(0).sort(function (a, b) {
+      return String(a.id).localeCompare(String(b.id));
+    }).forEach(function (edge, index) {
+      stsFan[edge.id] = (index - (group.length - 1) / 2) * step;
+    });
+  });
+
   // THE ISSUER'S LINES, AND HOW DEEP THE GAP ABOVE THE PARTIES HAS TO BE. See
   // the note on LABEL_ROW_H: the answer is decided by the labels rather than by
   // a constant, so it is settled before anything is positioned.
@@ -1051,6 +1247,10 @@ function renderUnguarded(graph, options) {
       edge: edge, partyId: partyId,
       width: Math.ceil(labelW) + 10,
       height: lines.length * (LINE_HEIGHT - 2) + 6,
+      // WHERE THIS LINE IS AIMED, so that its label is seated on the line that
+      // is actually drawn rather than on the one that would have been drawn if
+      // this were the party's only line. Zero for every party with one.
+      fan: stsFan[edge.id] || 0,
       // Sorted on where the line ENDS, so the rows are filled left to right and
       // a reader following the fan outwards meets them in order.
       partyX: g.node(partyId).x + shiftX
@@ -1085,7 +1285,11 @@ function renderUnguarded(graph, options) {
         // Where this line is when it crosses that row. The party's centre is
         // below the whole band, so the denominator cannot be zero.
         const span = (partyAt.y + (stsSize ? stsSize.height : 0) + gap) - stsCentre.y;
-        const x = stsCentre.x + (one.partyX - stsCentre.x) * ((y - stsCentre.y) / span);
+        // From the point this line is AIMED at rather than from the issuer's
+        // centre — the same aim the routing below clips to, so the two cannot
+        // disagree about where the line is.
+        const originX = stsCentre.x + one.fan;
+        const x = originX + (one.partyX - originX) * ((y - stsCentre.y) / span);
         const left = x - one.width / 2;
         const right = x + one.width / 2;
         const clash = taken[r].filter(function (held) {
@@ -1223,8 +1427,20 @@ function renderUnguarded(graph, options) {
       // generous at the two slanted ends. An arrow starting a little inside the
       // shape it is leaving is invisible; the alternative is intersecting a
       // six-sided path, for that.
-      const from = boundaryPoint(placed[edge.from], drawn[edge.from].size, placed[edge.to]);
-      const to = boundaryPoint(placed[edge.to], drawn[edge.to].size, placed[edge.from]);
+      // THE AIM, which is the hexagon's centre for all but a fanned line — see
+      // the note on STS_FAN_SEP. The party end is scaled along the ray it
+      // travels on, exactly as an unfanned line is; the hexagon end cannot be,
+      // because that ray no longer passes through the hexagon's centre, so it
+      // is clipped against the shape instead.
+      const partyId = isSts(edge.from) ? edge.to : edge.from;
+      const fan = stsFan[edge.id] || 0;
+      const aim = { x: stsAt.x + fan, y: stsAt.y };
+      const partyEnd = boundaryPoint(placed[partyId], drawn[partyId].size, aim);
+      const stsEnd = fan
+        ? crossingPoint(placed[partyId], aim, stsAt, stsSize)
+        : boundaryPoint(stsAt, stsSize, placed[partyId]);
+      const from = isSts(edge.from) ? stsEnd : partyEnd;
+      const to = isSts(edge.to) ? stsEnd : partyEnd;
       const lines = edgeLabels[edge.id] || [];
       const seat = fitted.at[edge.id];
       let labelW = 0;
@@ -1357,7 +1573,10 @@ function edgeTitle(edge) {
     }
   }
   if (edge.typeLabel) {
-    parts.push(edge.protocol + ' — ' + edge.typeLabel +
+    // The protocol only where the line HAS one. A sign-in line carries several
+    // and leaves the field empty (see user_graph.js), and ` — ` with nothing in
+    // front of it reads as a missing word rather than as an absent one.
+    parts.push((edge.protocol ? edge.protocol + ' — ' : '') + edge.typeLabel +
                (edge.spec ? ' (' + edge.spec + ')' : '') + '.');
   }
   if (edge.mode) {
@@ -1488,5 +1707,26 @@ module.exports = {
     grey: GREY, quiet: QUIET, line: LINE, panel: PANEL, paper: PAPER, wash: WASH
   },
   personGlyph: personGlyph,
-  hexPath: hexPath
+  hexPath: hexPath,
+  // ---------------------------------------------------------------------
+  // THE TEXT METRIC AND THE IDENTIFIER WRAP, exported for the SECOND picture
+  // in this console — `admin-ui/federation_diagram.js`, which lays its own
+  // graph out and draws its own shapes but must size a box the same way this
+  // one does.
+  //
+  // They are shared rather than copied for the reason `COLOURS` is: two
+  // estimates of how wide `HTTP/frontend.example.com` is would be two pictures
+  // whose boxes are different sizes for the same string, and the error is
+  // invisible until somebody puts the two pages side by side. Both are PURE —
+  // no state, no config, no directory — so exporting them costs nothing and
+  // couples nothing but the arithmetic.
+  //
+  // `wrapLabel` in particular is not a word-wrap and would be got wrong a
+  // second time: it breaks after the characters an IDENTIFIER is built out of
+  // (see BREAK_AFTER above), because there are no spaces in a service
+  // principal name and a word-wrap gives up on one.
+  // ---------------------------------------------------------------------
+  textWidth: textWidth,
+  wrapLabel: wrapLabel,
+  MAX_LABEL_CHARS: MAX_LABEL_CHARS
 };

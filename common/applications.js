@@ -710,7 +710,12 @@ const SCHEMA = {
             'for it — Shibboleth\'s providerId, the path segment, or the TARGET\'s origin — ' +
             'names the same party, so one attribute holds it rather than two that would ' +
             'disagree the first time an application was declared for both. Accumulates: an ' +
-            'application answering to two entityIDs is one application.' },
+            'application answering to two entityIDs is one application.\n\nIT IS READ, as ' +
+            'the SECOND half of forAppliesTo(): a WS-Trust AppliesTo and the ' +
+            'AudienceRestriction of the assertion issued for it are one string, so an ' +
+            'application that registered it here rather than on `wstrustAppliesTo` still ' +
+            'gets its own box on the delegation map. The same lookup and the same ' +
+            'non-permission — nothing here is ever refused for being unregistered.' },
     { name: 'samlAssertionConsumerService', kind: 'multi', from: 'SAML 2.0 / SAML 1.1',
       what: 'THE ASSERTION CONSUMER SERVICE URL — where a SAML response is posted back to, ' +
             'and the redirect URI of both SAML families. It held WS-Federation\'s `wreply` ' +
@@ -769,7 +774,16 @@ const SCHEMA = {
     { name: 'wstrustAppliesTo', kind: 'multi', from: 'WS-Trust',
       identifier: true,
       what: 'THE APPLIESTO ADDRESS from a RequestSecurityToken — the service the token is ' +
-            'issued FOR, and WS-Trust\'s identifier attribute. Accumulates.' },
+            'issued FOR, and WS-Trust\'s identifier attribute. Accumulates.\n\n**IT IS ' +
+            'READ**, which it was not before 2026-08-27, and it is `oauthAudience`\'s ' +
+            'exception arriving through a second protocol: an OnBehalfOf or ActAs asking ' +
+            'for a token to reach `https://esb.example.com` is recorded on ' +
+            '/admin/delegation against the APPLICATION that registered that address, so a ' +
+            'chain of delegated hops draws as one picture rather than as boxes named after ' +
+            'URLs that nothing else in it mentions. A LOOKUP and not a permission — an ' +
+            'AppliesTo nobody registered is issued for exactly as before and recorded ' +
+            'verbatim. See forAppliesTo(), which asks this attribute first and ' +
+            '`samlEntityId` behind it.' },
 
     // --- Kerberos and OID4VP ----------------------------------------------
     { name: 'krb5ServicePrincipalName', kind: 'multi', from: 'Kerberos v5',
@@ -927,7 +941,73 @@ const SCHEMA = {
             'plural.\n\nWith no relationship ' +
             'named it does nothing at all, rather than being an error: the two are ' +
             'edited separately and a value left behind by a relationship that was ' +
-            'cleared should not refuse the next write.' }
+            'cleared should not refuse the next write.' },
+
+    // ---------------------------------------------------------------------
+    // AND THE THIRD, WHICH GENERALISES THE PAIR ABOVE IT.
+    //
+    // The two attributes above can say "send my people to a federated
+    // identity provider" and cannot say anything else, because until
+    // 2026-08-26 there was nothing else to say: every way of authenticating
+    // somebody here was either this service's own screen or somebody else's
+    // service. The SPNEGO sign-in is neither — it is a credential the
+    // browser already holds — so an application had no way to ask for the
+    // commonest integrated-authentication deployment there is.
+    //
+    // ITS VOCABULARY IS THE FEDERATION REGISTER'S, and deliberately the same
+    // one: `password`, `password-mfa`, `webauthn`, `spnego`, `federation`,
+    // which is `fedAuthnMechanism`'s list exactly. Two tables would have
+    // drifted the first time either grew a value, and the two attributes
+    // answer the same question from two sides — this one says where THIS
+    // APPLICATION's people sign in, and that one says what to do when THAT
+    // PARTNER asks. **The list is not imported here**, which is worth saying
+    // rather than looking like an oversight: `federation.js` requires this
+    // file, so a require back would close a cycle. It is checked where it is
+    // READ instead — `authn.js`'s declaredMechanismFor() — which is where
+    // `appFederationRelationship`'s four checks are made too, and for the same
+    // reason: this is a string on a directory entry that `ldapmodify` can
+    // reach, so a check made at the write would be a check about the past.
+    //
+    // AN EMPTY VALUE IS NOT `password`. It means this entry says nothing, and
+    // that is the whole compatibility argument: every entry in existence holds
+    // an empty one, and reading it as an explicit "use the password screen"
+    // would have switched off every appFederationRelationship in the field in
+    // one commit.
+    //
+    // LIKE THE PAIR ABOVE IT, IT IS NOT A PERMISSION. Nothing refuses a person
+    // who reaches the sign-in screen by another route, nothing refuses the
+    // Kerberos door to an application that has not declared it — the button is
+    // on the screen for everybody — and clearing this takes the shortcut away
+    // rather than locking anybody out. What it changes is the DEFAULT ROUTE.
+    // ---------------------------------------------------------------------
+    { name: 'appAuthnMechanism', kind: 'single',
+      from: 'the console, the management API, or by hand',
+      what: 'HOW THIS APPLICATION\'S USERS AUTHENTICATE, one value from the ' +
+            'same closed list fedAuthnMechanism uses: password, password-mfa, ' +
+            'webauthn, spnego, federation.\n\nIt is the generalisation of ' +
+            'appFederationRelationship beside it, and the value that could not ' +
+            'be said before it existed is `spnego` — INTEGRATED ' +
+            'AUTHENTICATION, where this application\'s people are sent to ' +
+            '/authn/spnego and signed in on the Kerberos ticket their machine ' +
+            'already holds, with no screen drawn and nothing typed. That is ' +
+            'the one mechanism here resting on a credential this service ' +
+            'genuinely verifies.\n\n`federation` means the relationships ' +
+            'named in appFederationRelationship, which is what naming one ' +
+            'already implied, said out loud — so it changes nothing, and ' +
+            'declaring it while naming NO usable relationship is reported on ' +
+            'the sign-in screen rather than falling quietly back to a password ' +
+            'box. `password`, `password-mfa` and `webauthn` are the sign-in ' +
+            'screen, in the three shapes it has.\n\nEMPTY MEANS THIS ENTRY ' +
+            'SAYS NOTHING, which is not the same as password: it falls through ' +
+            'to appFederationRelationship and then to the screen, which is ' +
+            'exactly what every application did before this attribute ' +
+            'existed.\n\nA value this service cannot honour — a mechanism it ' +
+            'does not have, or `spnego` while krb5.spnegoAuthentication is off ' +
+            '— is REPORTED on the screen, one line, rather than dropped. A ' +
+            'configured mechanism that silently is not happening looks exactly ' +
+            'like one that is.\n\nIt is WRITTEN BY NOBODY. No protocol ' +
+            'presents it and no sighting derives it, so it is editable and it ' +
+            'starts empty.' }
   ]
 };
 
@@ -1016,6 +1096,13 @@ const EDITABLE = {
   // argument every other identifier attribute above makes.
   appFederationRelationship: 'multi',
   appFederationAutoRedirect: 'set',
+  // And the THIRD of that group, added 2026-08-26. Editable for the same
+  // reason the other two are: nothing in this service can OBSERVE how an
+  // application's people are supposed to authenticate, so if it cannot be
+  // written here it cannot be written at all. `set` and not `multi` — an
+  // application has one answer to "how do my people sign in", and a list would
+  // be a question this attribute has no page to ask.
+  appAuthnMechanism: 'set',
   ldapBindDn: 'multi',
   scimClientId: 'multi',
   spiffeWorkloadId: 'multi',
@@ -2568,6 +2655,90 @@ function forClientId(clientId) {
   return found[0];
 }
 
+// ---------------------------------------------------------------------------
+// WHICH APPLICATION ANSWERS TO THIS AppliesTo, or null.
+//
+// The THIRD lookup here that is not by identifier, and it is the WS-Trust and
+// SAML spelling of the question `forAudience()` asks for OAuth. An RST naming
+// `https://esb.example.com` in <wsp:AppliesTo> has named a SERVICE, and the
+// assertion that comes back carries that string as its <saml:Audience> — so a
+// delegation act filed under the URI draws a box on /admin/delegation/map that
+// nothing else in the picture ever mentions, while the application it means is
+// sitting in this registry two rows away. That is the failure forAudience()'s
+// header describes, arriving through a different protocol.
+//
+// IT READS TWO ATTRIBUTES, IN THIS ORDER, AND THAT IS DELIBERATE. The schema
+// keeps `wstrustAppliesTo` and `samlEntityId` apart because they are two
+// registrations and not two spellings of one — an application may be a WS-Trust
+// relying party and no SAML service provider, or the other way about. But this
+// caller has ONE string that is both at once: WS-Trust issues a SAML 2.0
+// assertion whose audience IS the AppliesTo, which is why wstrust.js's own
+// `seen()` call writes the value into both attributes. So the narrower
+// registration is asked first and the SAML one stands in behind it, and the
+// caller is told WHICH answered — `matchedAttribute` on the reply — because a
+// row saying only "the registry named this application" cannot be checked
+// against what somebody actually registered.
+//
+// THE SAME THREE THINGS IT IS NOT, for the same reasons forAudience() gives:
+// not a permission (an AppliesTo nobody registered comes back null and the
+// caller records the URI verbatim — nothing is refused, because a mock that
+// refused would remove a test case rather than add one), not case-folded (an
+// AppliesTo is an opaque string the STS understands, and one that differs by a
+// character is a different service), and not a fallback to the IDENTIFIER,
+// which `get()` already answers.
+// ---------------------------------------------------------------------------
+function forAppliesTo(appliesTo) {
+  log.debug("Entering forAppliesTo(). appliesTo=" + appliesTo);
+  const wanted = String(appliesTo == null ? '' : appliesTo).trim();
+  if (!wanted) {
+    log.debug("Leaving forAppliesTo(). Nothing was asked for.");
+    return null;
+  }
+  const attributes = ['wstrustAppliesTo', 'samlEntityId'];
+  for (let i = 0; i < attributes.length; i++) {
+    const attribute = attributes[i];
+    const found = list().filter(function (row) {
+      // THE ENTRY NAMED BY THE ADDRESS ITSELF IS SKIPPED, and this is the one
+      // way this lookup differs from forAudience() in behaviour rather than in
+      // wording. Nothing creates an entry named after an OAuth `audience`, but
+      // wstrust.js's own seen() files every AppliesTo it accepts as an
+      // identifier — writing the address into BOTH of these attributes on the
+      // way — so this registry always holds an entry called
+      // `https://esb.example.com` a moment after the first request for it, and
+      // a lookup that could return that one would answer "the application for
+      // this address is the address", which is what the caller already does
+      // when nothing is found. Skipping it makes the question the useful one:
+      // is there an application, known here by ANOTHER name, that has declared
+      // this address? Verified the hard way — without this, a two-hop chain
+      // still drew as two halves and the log carried only a duplicate warning.
+      return row.identifier !== wanted &&
+             valuesOf(row.fields[attribute]).indexOf(wanted) >= 0;
+    });
+    if (!found.length) {
+      continue;
+    }
+    if (found.length > 1) {
+      // Said out loud for the reason its two neighbours say it: the act is
+      // filed against one of two applications and nothing on the page says the
+      // other exists.
+      log.warn('applications: ' + found.length + ' applications have ' +
+               'registered "' + wanted + '" on ' + attribute + ' (' +
+               found.map(function (row) { return row.identifier; }).join(', ') +
+               '). The first is what a token issued for it will be recorded ' +
+               'against. An AppliesTo names one service; remove it from the ' +
+               'others.');
+    }
+    log.debug("Leaving forAppliesTo(). " + found[0].identifier + " via " +
+              attribute + ".");
+    // A COPY with one member added rather than the row itself: the caller wants
+    // to say which registration answered, and mutating what list() handed back
+    // would put that member on a record other readers share.
+    return Object.assign({}, found[0], { matchedAttribute: attribute });
+  }
+  log.debug("Leaving forAppliesTo(). No application has registered it.");
+  return null;
+}
+
 function count() {
   const backing = store();
   return backing ? backing.countApplications() : 0;
@@ -2842,6 +3013,10 @@ module.exports = {
   // The client_id lookup beside it, exported for oauth2.js's audienceScopes().
   // Two lookups rather than one that tries both — see forClientId()'s header.
   forClientId: forClientId,
+  // And the WS-Trust / SAML spelling of forAudience(), exported for
+  // wstrust.js's delegation act. Its header says why it reads two attributes
+  // where the other two read one.
+  forAppliesTo: forAppliesTo,
   count: count,
   containerDn: containerDn,
   maxApplications: maxApplications

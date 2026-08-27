@@ -186,6 +186,8 @@ var config = {
     trustPassword: "inter-realm-trust-password",                   // Trust password; restart to apply
     trustedDomainSid: "S-1-5-21-2035427030-2118130302-1178042555", // Trusted domain SID; restart to apply
     trustedKrbtgtPassword: "partner-krbtgt-password",              // Trusted realm krbtgt password; restart to apply
+    spnegoAuthentication: true,                                    // Sign in with a Kerberos ticket
+    spnegoLoginButton: true,                                       // Offer Kerberos at the sign-in screen
     s2kparams: "omit"                                              // Send s2kparams
   },
 

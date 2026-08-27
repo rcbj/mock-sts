@@ -783,9 +783,15 @@ const SPECS = [
               'against each other (tests/webauthn_cross_impl.js).' },
   { id: 'oidc', name: 'OpenID Connect Core 1.0',
     where: 'OpenID Foundation', url: 'https://openid.net/specs/openid-connect-core-1_0.html',
-    coverage: 'partial: id_token with nonce, at_hash and c_hash, the three authentication flows, and ' +
+    coverage: 'partial: id_token with nonce, at_hash and c_hash, the three authentication flows, ' +
               'the section 5.3 UserInfo endpoint — which is the one place a scope changes what comes ' +
-              'back, since the id_token carries every claim whatever was asked for. No request object.' },
+              'back, since the id_token carries every claim whatever was asked for — and, since ' +
+              '2026-08-26, SECTION 5.5\'s claims request: both members, parsed, refused by name at ' +
+              'the authorization endpoint when malformed, carried inside the access token, and ' +
+              'answered off the person\'s entry under ou=users, with section 5.2 language tags. ' +
+              'What it does NOT do there is enforce `value`/`values` or treat `essential` as more ' +
+              'than a hint, which section 5.5.1 permits and /admin/userinfo-claims states out loud. ' +
+              'Still no request object and no request_uri.' },
   { id: 'oidc-fclogout', name: 'OpenID Connect Front-Channel Logout 1.0',
     where: 'OpenID Foundation',
     url: 'https://openid.net/specs/openid-connect-frontchannel-1_0.html',
@@ -1836,6 +1842,25 @@ const ENDPOINTS = [
           'the page). Values may carry ${username}-style placeholders. Add ?format=json; POST the ' +
           'same JSON to set a set. The two SAML sets moved to /admin/saml-attributes on ' +
           '2026-08-24; the store behind both pages is one store.' },
+  { path: '/admin/userinfo-claims', group: 'Admin', name: 'UserInfo claims',
+    specs: ['oidc'],
+    effect: 'changes what EVERY UserInfo response carries, including for ' +
+            'clients already holding their tokens',
+    what: 'NON-SPEC configuration of a SPEC behaviour. The fifth claim set, ' +
+          'and the only one whose subject is not something this service issues ' +
+          '— so it is the one claims page with no "nothing already issued ' +
+          'changes" warning, which is the point of it being a page. A UserInfo ' +
+          'response is built on EVERY call, so a claim ticked here reaches a ' +
+          'client that signed in an hour ago and has done nothing since. Same ' +
+          'two halves as /admin/claims (typed claims, ticked LDAP attribute ' +
+          'types) and the same reserved list, which applies HERE and not to ' +
+          'the SAML sets: sub is required by OIDC Core 5.3.2 and the SIGNED ' +
+          'form of this response is a JWT carrying iss, aud and exp. It also ' +
+          'carries the half no administrator sets — OIDC Core section 5.5\'s ' +
+          'claims request, every name a client may ask for, the four layers of ' +
+          'precedence, and a preview of what a given request returns for a ' +
+          'given person built by the functions /oauth2/userinfo itself calls. ' +
+          'Add ?format=json; ?request= previews a claims request.' },
   { path: '/admin/saml2', group: 'Admin', name: 'SAML 2.0 identity provider',
     specs: ['saml2', 'saml2-metadata', 'saml2-profiles'],
     effect: 'writes to the LDAP directory, and answers the one question nothing else here can',
@@ -1862,6 +1887,43 @@ const ENDPOINTS = [
           'ldapmodify of it. The one field it will not show is ' +
           'fedClientSecret — this service\'s own credential AT the partner, ' +
           'which an ldapsearch still prints, deliberately and loudly.' },
+  { path: '/admin/federation/map', group: 'Admin', name: 'Federation — the picture',
+    // The same five specifications as the page above it, and for the delegation
+    // map's reason: this is that page's register DRAWN rather than a different
+    // subject, and a shorter list here would say the diagram covers less than
+    // the table it comes from — which is exactly backwards, because the picture
+    // is what makes the five readable against each other.
+    specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
+    what: 'NON-SPEC PAGE OVER FIVE SPECIFICATIONS, and a DRILL-DOWN of ' +
+          '/admin/federation rather than a section of its own. The same ' +
+          'register as a DIAGRAM, generated on the server as SVG — this ' +
+          'console has no scripts and this page adds none. THREE BANDS, and ' +
+          'the bands are the claim: everything on the LEFT arrives wanting ' +
+          'somebody signed in (an application here, or a foreign service ' +
+          'provider), the HEXAGON in the middle is this trust realm, and ' +
+          'everything on the RIGHT is a party this service asks to do the ' +
+          'signing in. So an AN ARROW IS A REQUEST AND NOT AN ASSERTION: an ' +
+          'identity-provider-side relationship points INWARD even though this ' +
+          'service asserts outward, which is what turns an identity BROKER — ' +
+          'one relationship authenticating through another — into a single ' +
+          'straight line through the middle instead of two arrows leaving one ' +
+          'box. A DASHED outline means foreign; a hexagon is an identity ' +
+          'service and a rectangle is a party that consumes what one issues. ' +
+          'It adds the three things a table of relationships has nowhere to ' +
+          'put, all of them facts about TWO registers at once: how many ' +
+          'applications are configured to use each partner, how many people ' +
+          'have signed in through each APPLICATION AND RELATIONSHIP pair ' +
+          '(fedApplicationUse, which is written only for a pair this service ' +
+          'is configured for and is checked against the live register at the ' +
+          'write), and what the identity-provider side is configured to do ' +
+          'about authenticating somebody — fedAuthnMechanism, including the ' +
+          'unset case, which is not "unknown" but the sign-in screen. Of ONE ' +
+          'trust realm, because the register is per realm; the realm is drawn ' +
+          'on the hexagon so a saved copy still says which. Filtered by role, ' +
+          'protocol and free text, the same control narrowing the picture and ' +
+          'the tables under it; no paging. ?format=svg is the document alone ' +
+          'with no links in it, and ?format=json carries the graph, the ' +
+          'relationships and the per-application counts.' },
   { path: '/admin/saml11', group: 'Admin', name: 'SAML 1.1 identity provider',
     specs: ['saml11', 'saml11-profiles', 'saml2-metadata'],
     effect: 'writes to the LDAP directory, and answers a question the SAML 2.0 page never has to',
@@ -2370,6 +2432,33 @@ const ENDPOINTS = [
           'saml11 is refused here and named: that door is ' +
           '/admin-api/saml-attributes. Nothing already issued changes. Mirrors ' +
           'POST /admin/claims.' },
+  { path: '/admin-api/userinfo-claims', group: 'Management API',
+    name: 'UserInfo claims',
+    specs: ['oidc'],
+    what: 'NON-SPEC. The UserInfo claim set of the same store, the catalogue ' +
+          'of LDAP attribute types it chooses from, and the one thing no ' +
+          'operation here sets: OIDC Core section 5.5\'s claims request — ' +
+          'every name a client may ask for, the four layers of precedence, ' +
+          'what is carried and NOT enforced (essential, value, values), and ' +
+          'the non-spec way to send one straight to /oauth2/userinfo. ' +
+          '?request= previews what a given claims request would return, ' +
+          'computed by the two functions that endpoint itself calls. Mirrors ' +
+          'GET /admin/userinfo-claims.' },
+  { path: '/admin-api/userinfo-claims/:action', group: 'Management API',
+    name: 'UserInfo claim actions',
+    specs: ['oidc'],
+    effect: 'changes what EVERY UserInfo response carries, including for ' +
+            'clients already holding their tokens',
+    what: 'NON-SPEC. The same seven URLs behind one pattern, on the one ' +
+          'UserInfo set: add, remove, clear, replace, attributes, ' +
+          'attributes-all, attributes-clear. One action function and one store ' +
+          'behind this, /admin-api/claims/:action and ' +
+          '/admin-api/saml-attributes/:action alike; what differs is which ' +
+          'sets each accepts, and a `set` this door does not carry is refused ' +
+          'by name. UNLIKE the other two, what it changes is visible ' +
+          'immediately to a client that is already holding its tokens — a ' +
+          'UserInfo response is built on every call. Mirrors POST ' +
+          '/admin/userinfo-claims.' },
   { path: '/admin-api/federation', group: 'Management API',
     name: 'Federation relationships',
     specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
@@ -2860,7 +2949,13 @@ const ENDPOINTS = [
           'answered with a 302 leaves a client waiting for a postMessage that never comes), ' +
           'and RFC 8707 `resource` — which becomes the access token\'s audience, ' +
           'may be repeated for a small set of resource servers, and must be an absolute URI ' +
-          'with no fragment. In RFC 9700 mode (oauth2.rfc9700, off by default) it also refuses ' +
+          'with no fragment. SINCE 2026-08-26 it also reads OIDC Core section 5.5\'s `claims` ' +
+          'parameter — its userinfo and id_token members, with essential/value/values carried — ' +
+          'refuses a malformed one HERE with invalid_request (which is the last point at which ' +
+          'the client is still being talked to), carries it on the authorization code and INSIDE ' +
+          'the access token, and answers it from the person\'s entry under ou=users. What it ' +
+          'still does not accept is a `request` object or a `request_uri`; the three booleans in ' +
+          'the discovery document say which is which. In RFC 9700 mode (oauth2.rfc9700, off by default) it also refuses ' +
           'what ' +
           'that BCP says to refuse: a redirect_uri that is not registered — answered HERE as a ' +
           '400 rather than redirected, since redirecting an error to an unvalidated URI is the ' +
@@ -2937,6 +3032,34 @@ const ENDPOINTS = [
           'exactly what a correct list of two draws. The list is re-read when this page is drawn ' +
           'rather than taken from the redirect that produced it, and if fewer than two partners ' +
           'are left the sign-in screen is drawn instead.' },
+  { path: '/authn/spnego', group: 'Authentication',
+    name: 'Sign in with a Kerberos ticket',
+    specs: ['rfc4559', 'rfc4178', 'rfc4120', 'rfc3961', 'oidc'],
+    effect: 'answers 401 with "WWW-Authenticate: Negotiate" and, to a request carrying a ' +
+            'valid service ticket, establishes the browser session and returns to whatever ' +
+            'was interrupted',
+    what: 'INTEGRATED AUTHENTICATION, AND THE ONE SIGN-IN HERE THAT RESTS ON A CREDENTIAL ' +
+          'THIS SERVICE GENUINELY VERIFIED. Everywhere else the username typed IS the ' +
+          'identity; Kerberos cannot work that way, because the password there is the key — ' +
+          'so this door checks a real service ticket against a real long-term key, through ' +
+          'the same acceptor /spnego/protected uses and with no protocol code of its own. ' +
+          'The KDC behind it is still as permissive as the protocol allows (any username, one ' +
+          'shared password, an account created on first sight), which is what keeps the mock a ' +
+          'mock — the verification is real, the account policy is not. It is AVAILABLE TO ' +
+          'EVERY APPLICATION and registered for none: a button on /authn/login offers it for ' +
+          'whatever flow is already in progress, appAuthnMechanism: spnego on an application ' +
+          'entry sends that application\'s people straight here, and fedAuthnMechanism: spnego ' +
+          'on an identity-provider-side federation relationship makes a Kerberos ticket ' +
+          'satisfy a foreign partner that has never heard of Kerberos. What the session then ' +
+          'claims is read off the TICKET\'s own flags — amr ["pwd"] for pre-authent, ["hwk"] ' +
+          'for hw-authent, both for both, and nothing at all for a ticket claiming neither, ' +
+          'because this service will not name a factor no credential evidenced. It takes ' +
+          '?authn= and NEVER a returnTo: the return address is on the pending record, so ' +
+          'there is no open-redirect surface here at all. A client that cannot get a ticket ' +
+          'meets a page with the sign-in screen linked from it, because a bare 401 Negotiate ' +
+          'is a dead end in every browser not configured for this host. ' +
+          'krb5.spnegoAuthentication turns it off, and it then answers 403 saying so rather ' +
+          'than 404.' },
   { path: '/authn/webauthn', group: 'Authentication', name: 'WebAuthn security-key step',
     specs: ['oidc', 'webauthn'],
     effect: 'enrols or asserts a security key, then completes the sign-in',
@@ -3101,7 +3224,16 @@ const ENDPOINTS = [
           'ISSUE: it verifies the signature, the typ (so a refresh token or an id_token is refused), ' +
           'revocation and the openid scope, each with its own error. Bearer or DPoP-bound, through ' +
           'the same check the credential endpoints use. Returns application/jwt instead of JSON to a ' +
-          'client that registered userinfo_signed_response_alg=RS256.' },
+          'client that registered userinfo_signed_response_alg=RS256. ' +
+          'FOUR LAYERS SINCE 2026-08-26, later winning: the userinfo CUSTOM CLAIM SET ' +
+          'configured at /admin/userinfo-claims (built on every call, so it reaches a client ' +
+          'already holding its tokens), section 5.4\'s scope-driven claims, the claims a client ' +
+          'named in OIDC Core section 5.5\'s claims request — read off that person\'s entry ' +
+          'under ou=users — and sub, which nothing may displace. NON-SPEC BESIDE THAT: it also ' +
+          'accepts a claims request on the request itself (?claims={json} or repeated ?claim=), ' +
+          'which section 5.3.1 does not define, as a UNION with what the access token carries ' +
+          'and never as a way to take a claim away from it; a malformed one is refused ' +
+          'invalid_request rather than ignored.' },
   { path: '/oauth2/introspect', group: 'OAuth 2.0 / OIDC', name: 'Introspection endpoint',
     specs: ['rfc7662'], what: 'Honest active/inactive with the presented token\'s claims.' },
   { path: '/oauth2/revoke', group: 'OAuth 2.0 / OIDC', name: 'Revocation endpoint',

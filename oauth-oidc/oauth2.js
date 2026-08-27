@@ -136,6 +136,17 @@ const applications = require('../common/applications');
 // other grant here delegates anything. A library like the one above: it
 // registers no route, so it can neither create a cycle nor move one.
 const delegation = require('../common/delegation');
+// The LDAP-attribute half of a claim set, read here for ONE thing this module
+// could not do without it: OpenID Connect Core section 5.5 lets a client name
+// individual claims it wants back from the UserInfo endpoint, and answering
+// that means finding the attribute on that person's entry under ou=users which
+// produces the named claim. A library (rule 3) — it registers no route and
+// requires helpers.js, realms.js, admin_stats.js, vc_claims.js and audit.js,
+// none of which requires it back — so it can neither create a cycle nor move a
+// route. It is required here rather than reached through admin_stats.js's slot
+// because the slot answers "what did an administrator TICK" and this is the
+// other question: "what did the CLIENT ask for".
+const claimAttributes = require('../common/claim_attributes');
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
 //
@@ -618,22 +629,38 @@ function oidcMetadata(req, issuer) {
     id_token_signing_alg_values_supported: ['RS256'],
 
     // --- RECOMMENDED / OPTIONAL, and true of this server --------------------
-    // Exactly what idToken() puts in the token, in the order it puts it there.
-    // A client can read this list and know that asking for anything else — an
-    // address, a phone number, an acr — gets it nothing.
+    // WHAT THE PROTOCOL ITSELF PUTS IN AN ID TOKEN, in the order idToken() puts
+    // it there. It was the whole answer to "what claims can I get from this
+    // server" until 2026-08-26 and is no longer, so what it is NOT is worth
+    // stating rather than leaving a client to work out: it does not list what
+    // /admin/userinfo-claims has been configured to add, and it does not list
+    // the LDAP-attribute catalogue that section 5.5's claims request can now
+    // reach. Neither could honestly go here — this document is fetched and
+    // cached by clients, and both of those change at runtime from a console
+    // page, so a list that tracked them would be stale in every cache the
+    // moment somebody ticked a box. `GET /admin-api/userinfo-claims` is the
+    // live answer, and it names every claim a request may ask for.
     claims_supported: ['iss', 'sub', 'aud', 'exp', 'iat', 'nbf', 'auth_time', 'nonce', 'azp',
                        'jti', 'at_hash', 'c_hash', 'name', 'given_name', 'family_name',
                        'preferred_username', 'email', 'email_verified'],
     claim_types_supported: ['normal'],
-    // Three parameters this server reads and three it does not, stated as the
+    // Three parameters this server reads and two it does not, stated as the
     // booleans the specification defines rather than left to a client to
     // discover by sending one and watching it be ignored. The authorization
-    // endpoint honours prompt=none and prompt=login (and nothing else), and it
-    // does not accept a `claims` parameter, a `request` object or a `request_uri`
-    // — which is the same "no request object here" the /admin/sts-metadata
-    // coverage note already says in prose.
+    // endpoint honours prompt=none and prompt=login (and nothing else).
+    //
+    // `claims_parameter_supported` BECAME TRUE ON 2026-08-26 and it is the one
+    // of these that changed. Section 5.5's request is parsed, refused by name
+    // when it is malformed, carried on the authorization code and INSIDE the
+    // access token, honoured in the ID Token and at the UserInfo endpoint, and
+    // resolved against the person's entry under ou=users. What it still does
+    // not do is enforce `value`/`values` or treat `essential` as anything but a
+    // hint, which section 5.5.1 permits and which /admin/userinfo-claims states
+    // out loud. A request object is still not accepted, so the two booleans
+    // below are still false — which is what /admin/sts-metadata's coverage note
+    // says in prose.
     prompt_values_supported: ['none', 'login'],
-    claims_parameter_supported: false,
+    claims_parameter_supported: true,
     request_parameter_supported: false,
     request_uri_parameter_supported: false,
     // Moot while request_uri_parameter_supported is false, and stated anyway:
@@ -1062,6 +1089,15 @@ function accessToken(base, opts) {
   // so the credential endpoint can verify one without consulting any state — the
   // token is signed, so the wallet cannot award itself an identifier.
   if (opts.authorization_details) payload.authorization_details = opts.authorization_details;
+  // OIDC Core section 5.5's claims request, as the authorization endpoint
+  // understood it. It rides here for the reason authorization_details does: the
+  // UserInfo endpoint sees this token and NOTHING ELSE — no code, no session,
+  // no request record — so a side table keyed by jti would have to be swept,
+  // would not survive a refresh, and would stop the token being the record of
+  // what was authorized. The whole parsed object goes in rather than only its
+  // `userinfo` member, because a token dumped into a debugger should show what
+  // the client asked for rather than what this endpoint kept.
+  if (opts.claims) payload.claims = opts.claims;
   // Whatever the admin console was told to add — see admin_stats.js. The merge is
   // this way round, custom claims UNDER the protocol's own, so that a claim the
   // console somehow accepted which collides with one of these loses. The console
@@ -1117,7 +1153,14 @@ function refreshToken(base, opts) {
     // access token it mints has to authorize the same credential, or a section
     // 14.5 refresh would be refused by the credential endpoint for naming an
     // identifier "that was not granted".
-    authorization_details: opts.authorization_details || undefined
+    authorization_details: opts.authorization_details || undefined,
+    // OIDC Core 5.5's claims request, for the same reason the line above it is
+    // here: the refresh grant reads this token back and mints an access token
+    // from it, and a refreshed token that had forgotten the claims request
+    // would make the UserInfo response change under a client that did nothing
+    // but renew. A grant does not narrow itself by being renewed any more than
+    // it widens itself.
+    claims: opts.claims || undefined
   };
   if (opts.request) {
     payload.cnf = mtls.confirmationFor(opts.request, payload.cnf);
@@ -1207,6 +1250,40 @@ function idToken(base, opts) {
   // test that a claim reached one and not the other.
   const payloadWithCustom = Object.assign(
     stats.jwtClaims('id_token', customClaimContext(base, payload, user)), payload);
+  // ---------------------------------------------------------------------
+  // AND THE ONE LAYER ABOVE ALL OF THEM: a claim THIS CLIENT asked for by
+  // name, in the `id_token` member of OIDC Core section 5.5's claims request.
+  //
+  // LAST, so it wins, and that is the whole precedence rule of this service
+  // read to its end: the groups claim is what everybody gets, a ticked
+  // directory attribute is what this service was configured to add, a typed
+  // claim is what somebody wrote about it, the protocol's own claims are what
+  // the specification requires — and a claim a client NAMED is the most
+  // specific statement of all, so it is answered from the directory even where
+  // one of the layers below already carried something under that name. A
+  // request for `email` answered with the invented persona value while the
+  // entry holds a real one would defeat the only reason this feature is worth
+  // having.
+  //
+  // IT CANNOT REACH A STRUCTURAL CLAIM and that is by construction rather than
+  // by a guard: every name it can resolve comes from the LDAP attribute
+  // catalogue or from PERSONA_CLAIMS, and no member of either is `iss`, `sub`,
+  // `aud`, `exp`, `nonce` or any of the rest. A guard here would suggest to the
+  // next reader that one of them is reachable.
+  // ---------------------------------------------------------------------
+  const asked = requestedClaimsOf(opts.claims, 'id_token', user.username, user);
+  if (asked.report.length) {
+    log.debug("idToken(): " + asked.report.length + " claim(s) this client asked for by name.");
+    // The federation release policy applies to these TOO, and this is the one
+    // line that says so. A partner with a release list naming `email` must not
+    // be able to ASK for `birthdate` and be given it — the list is about what
+    // this audience may see, not about which mechanism produced the value. It
+    // removes only, and it cannot reach anything outside this object.
+    Object.assign(payloadWithCustom,
+                  stats.applyClaimRelease(asked.claims,
+                                          customClaimContext(base, payload, user),
+                                          'requested claim(s)'));
+  }
   const token = signJwt(payloadWithCustom, issuanceContext(opts));
   log.debug("Leaving idToken().");
   return token;
@@ -1447,6 +1524,309 @@ function parseClaimsDescriptions(raw, configId) {
   }
   log.debug("Leaving parseClaimsDescriptions(). " + out.length + " claim(s) requested.");
   return { claims: out };
+}
+
+// ---------------------------------------------------------------------------
+// OpenID Connect Core 1.0 section 5.5 — THE `claims` REQUEST PARAMETER.
+//
+// A client sends a JSON object at the authorization endpoint naming the
+// individual claims it wants, per artefact:
+//
+//   claims={"userinfo":{"birthdate":null,"address":null,
+//                       "email":{"essential":true}},
+//           "id_token":{"acr":{"values":["urn:mace:incommon:iap:silver"]}}}
+//
+// Two top-level members are defined and only two. Anything else is IGNORED
+// rather than refused — section 5.5 says other members MAY be defined, so a
+// request carrying one this service has never heard of is a request from a
+// client that knows something this one does not, and refusing it would make
+// this service the reason an extension cannot be tried against it. What is
+// ignored is REPORTED, in the reply's log line and on /admin/userinfo-claims,
+// because "ignored silently" and "not understood" look identical from a client.
+//
+// WHAT IS REFUSED IS THE SHAPE, and that is a deliberate asymmetry. A `claims`
+// that is not JSON, or is not an object, or whose `userinfo` member is a string,
+// or whose individual claim request is a number, is not an extension — it is a
+// client that has misread the section, and answering `invalid_request` with the
+// reason is the only thing that will ever tell them so. That refusal happens at
+// the AUTHORIZATION endpoint, which is the last point at which the client is
+// still being talked to: a token endpoint refusal for a parameter sent an
+// interaction earlier is a message nobody is reading for. Same reasoning as
+// RFC 8707's `resource`, which is refused two functions below for the same
+// reason.
+//
+// **`essential`, `value` and `values` ARE CARRIED AND ARE NOT ENFORCED, and
+// that is the honest reading of the section rather than a shortfall.**
+// Section 5.5.1 says an essential claim is a hint about what the client will do
+// without it, and that a server MUST NOT return an error because a requested
+// claim is unavailable. `value` and `values` ask for a claim to be returned
+// with a particular value — which this service could satisfy by echoing the
+// value back, and deliberately does not: everything this mock says about a
+// person comes from the directory or from the invented persona, and a UserInfo
+// response that agreed with whatever the client asked it to say would be the
+// one surface here that cannot be used to test anything. The MISMATCH is
+// reported instead, in the log and in the response's artifact, which is the
+// thing a client's error path is built for.
+//
+// THE PARSED REQUEST RIDES IN THE ACCESS TOKEN, as the `claims` claim. That is
+// the same decision `authorization_details` records above it and for the same
+// reason: the UserInfo endpoint sees the token and nothing else — no code, no
+// session, no request record — so a side table keyed by jti would have to be
+// swept, would not survive a refresh, and would make the token stop being the
+// record of what was authorized. `claims` is on the reserved list in
+// admin_stats.js so that no web form can decide what a request asked for.
+// ---------------------------------------------------------------------------
+
+// The two members section 5.5 defines. `userinfo` is the one this service acts
+// on at the endpoint below; `id_token` is honoured where idToken() is built.
+const CLAIMS_REQUEST_MEMBERS = ['userinfo', 'id_token'];
+
+// A cap, for the reason every other cap in this file has one: the parsed object
+// is copied into a signed token, and a request naming ten thousand claims would
+// produce a token no HTTP header can carry — which fails somewhere unrelated,
+// at a client, in a way nobody traces back to here.
+const MAX_REQUESTED_CLAIMS = 64;
+
+// One individual claim request (section 5.5.1). `null` means "asked for, no
+// further constraint", which is by far the common shape; an object may carry
+// `essential`, `value` and `values`, and any member not understood MUST be
+// ignored — so unknown members are dropped here rather than refused, which is
+// the one place in this parser that section says to be permissive.
+function parseIndividualClaimRequest(member, name, raw) {
+  if (raw === null || raw === undefined) {
+    return { entry: null };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: 'claims.' + member + '["' + name + '"] must be null or a JSON object ' +
+                    '(OpenID Connect Core section 5.5.1); this one is ' +
+                    (Array.isArray(raw) ? 'an array' : 'a ' + typeof raw) + '.' };
+  }
+  const entry = {};
+  if (raw.essential !== undefined) {
+    if (typeof raw.essential !== 'boolean') {
+      return { error: 'claims.' + member + '["' + name + '"].essential must be a boolean.' };
+    }
+    entry.essential = raw.essential;
+  }
+  if (raw.value !== undefined) {
+    entry.value = raw.value;
+  }
+  if (raw.values !== undefined) {
+    if (!Array.isArray(raw.values) || !raw.values.length) {
+      return { error: 'claims.' + member + '["' + name + '"].values must be a non-empty array.' };
+    }
+    entry.values = raw.values.slice(0);
+  }
+  // An object with nothing in it is legal and means exactly what null means.
+  // Normalised to null so that everything downstream has two shapes to read
+  // rather than three.
+  return { entry: Object.keys(entry).length ? entry : null };
+}
+
+// Returns { claims: null } when the parameter was not sent — ABSENT IS NOT
+// EMPTY, exactly as parseClaimsDescriptions() above says of the OID4VCI member:
+// `{}` is a client that asked for no individual claims, and no parameter at all
+// is a client that has never heard of the section. Both behave the same today
+// and they are still different facts, and the one that is recorded on the token
+// is the one the client actually sent.
+function parseClaimsRequest(raw) {
+  log.debug("Entering parseClaimsRequest().");
+  if (raw === undefined || raw === null || raw === '') {
+    log.debug("Leaving parseClaimsRequest(). No claims parameter.");
+    return { claims: null };
+  }
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      log.debug("Leaving parseClaimsRequest(). The parameter is not JSON.");
+      return { error: 'the claims parameter must be a JSON object (OpenID Connect Core ' +
+                      'section 5.5): ' + e.message + '. It is sent as ordinary URL-encoded ' +
+                      'JSON — no base64, no JWT — unless it is inside a Request Object.' };
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    log.debug("Leaving parseClaimsRequest(). Not an object.");
+    return { error: 'the claims parameter must be a JSON OBJECT with a "userinfo" and/or an ' +
+                    '"id_token" member (OpenID Connect Core section 5.5).' };
+  }
+  const out = {};
+  const ignored = [];
+  let total = 0;
+  const members = Object.keys(parsed);
+  for (let i = 0; i < members.length; i++) {
+    const member = members[i];
+    if (CLAIMS_REQUEST_MEMBERS.indexOf(member) < 0) {
+      // Section 5.5: other members MAY be defined. Ignored, and named, so that
+      // a client can tell "ignored" from "not understood".
+      ignored.push(member);
+      continue;
+    }
+    const value = parsed[member];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      log.debug("Leaving parseClaimsRequest(). The " + member + " member is not an object.");
+      return { error: 'claims.' + member + ' must be a JSON object whose members are claim ' +
+                      'names (OpenID Connect Core section 5.5); this one is ' +
+                      (Array.isArray(value) ? 'an array' : 'a ' + typeof value) + '.' };
+    }
+    const names = Object.keys(value);
+    const bucket = {};
+    for (let j = 0; j < names.length; j++) {
+      const name = String(names[j]).trim();
+      if (!name) {
+        log.debug("Leaving parseClaimsRequest(). An empty claim name.");
+        return { error: 'claims.' + member + ' has a member with an empty name.' };
+      }
+      total++;
+      if (total > MAX_REQUESTED_CLAIMS) {
+        log.debug("Leaving parseClaimsRequest(). Over the cap.");
+        return { error: 'a claims request may name at most ' + MAX_REQUESTED_CLAIMS + ' claims ' +
+                        'here. The parsed request is copied into the access token, and one large ' +
+                        'enough to overflow a header would fail at a client in a way nothing ' +
+                        'points back here.' };
+      }
+      const one = parseIndividualClaimRequest(member, name, value[names[j]]);
+      if (one.error) {
+        log.debug("Leaving parseClaimsRequest(). " + one.error);
+        return { error: one.error };
+      }
+      bucket[name] = one.entry;
+    }
+    out[member] = bucket;
+  }
+  if (ignored.length) {
+    log.info('A claims request carried the member(s) ' + ignored.join(', ') + ', which OpenID ' +
+             'Connect Core section 5.5 does not define and this service therefore ignores. The ' +
+             'two it acts on are userinfo and id_token.');
+  }
+  if (!Object.keys(out).length) {
+    log.debug("Leaving parseClaimsRequest(). Nothing this service acts on.");
+    return { claims: null, ignored: ignored };
+  }
+  log.debug("Leaving parseClaimsRequest(). " + total + " claim(s) requested across " +
+            Object.keys(out).length + " member(s).");
+  return { claims: out, ignored: ignored };
+}
+
+// The names one member of a parsed claims request asks for, in the order the
+// client wrote them. A helper rather than an inline Object.keys() because three
+// call sites need it and one of them is the console.
+function requestedClaimNames(request, member) {
+  const asked = request && request[member];
+  return asked ? Object.keys(asked) : [];
+}
+
+// The six claims this service invents from the username, in userFor(). They are
+// the FALLBACK for a requested name the LDAP catalogue cannot produce, and the
+// list is written out rather than derived from that object because `userFor()`
+// also carries `sub` and `username`, neither of which a client may displace or
+// ask for by name — `sub` is the subject identifier the whole response is about
+// and `username` is not an OIDC claim at all.
+const PERSONA_CLAIMS = ['name', 'given_name', 'family_name', 'preferred_username',
+                        'email', 'email_verified'];
+
+// ---------------------------------------------------------------------------
+// WHAT A CLAIMS REQUEST ACTUALLY PRODUCES FOR ONE PERSON.
+//
+// TWO SOURCES, IN THIS ORDER, and the order is the point:
+//
+//   1. the DIRECTORY, through the catalogue every claim-set page chooses from —
+//      the person's entry under ou=users, or, where the entry has nothing, the
+//      persona invented from their username, deterministically. This is the
+//      whole reason the feature is worth having: a client asks for `birthdate`
+//      and gets what an `ldapmodify` put there, so an LDAP client and an OIDC
+//      client pointed at this service are shown one person.
+//   2. the six claims userFor() invents, for the names the catalogue has no
+//      attribute type for — `email_verified` above all, which is a fact about a
+//      sign-in rather than a value on an entry.
+//
+// A name neither can produce comes back in `unknown`, and NOTHING IS REFUSED
+// FOR IT. Section 5.5.1 is explicit that a server MUST NOT return an error
+// because a requested claim is unavailable, and `essential` does not change
+// that — it says what the client will do without it, not what this server must
+// do about it. So an unresolvable name is LOGGED and reported, which is the
+// only thing that will ever tell a client the difference between "asked for and
+// absent" and "never asked for".
+//
+// `value` and `values` are CHECKED AND NOT HONOURED, deliberately. A mock that
+// echoed back whatever value a client asked it to assert would be the one
+// surface here that cannot be used to test anything — everything this service
+// says about a person comes from the directory or from the invented persona.
+// The mismatch is reported instead, which is what a client's error path is for.
+// ---------------------------------------------------------------------------
+function requestedClaimsOf(request, member, username, user) {
+  log.debug("Entering requestedClaimsOf(). member=" + member);
+  const names = requestedClaimNames(request, member);
+  const out = { names: names, claims: {}, report: [], unknown: [], mismatched: [],
+                missingEssential: [], entryFound: false };
+  if (!names.length) {
+    log.debug("Leaving requestedClaimsOf(). Nothing was asked for.");
+    return out;
+  }
+  const built = claimAttributes.requestedClaimsFor(username, names);
+  out.claims = Object.assign({}, built.claims);
+  out.report = built.report.slice(0);
+  out.entryFound = built.entryFound;
+  built.unknown.forEach(function (name) {
+    if (PERSONA_CLAIMS.indexOf(name) >= 0 && user && user[name] !== undefined) {
+      out.claims[name] = user[name];
+      out.report.push({ requested: name, claim: name, ldap: '',
+                        value: user[name], source: 'the sign-in' });
+      return;
+    }
+    out.unknown.push(name);
+  });
+
+  // What the request asked for that this answer does not satisfy. Reported and
+  // never refused — see the header.
+  const asked = request[member] || {};
+  names.forEach(function (name) {
+    const spec = asked[name];
+    const resolved = out.unknown.indexOf(name) < 0;
+    if (!resolved && spec && spec.essential) {
+      out.missingEssential.push(name);
+      return;
+    }
+    if (!resolved || !spec) {
+      return;
+    }
+    const item = out.report.filter(function (row) { return row.requested === name; })[0];
+    const held = item ? item.value : undefined;
+    if (spec.value !== undefined && String(spec.value) !== String(held)) {
+      out.mismatched.push(name + ' (asked for "' + spec.value + '", holds "' + held + '")');
+    }
+    if (spec.values && !spec.values.some(function (v) { return String(v) === String(held); })) {
+      out.mismatched.push(name + ' (asked for one of "' + spec.values.join('", "') +
+                          '", holds "' + held + '")');
+    }
+  });
+
+  if (out.unknown.length) {
+    log.info('A claims request asked the ' + member + ' for ' + out.unknown.join(', ') +
+             ', which neither the LDAP attribute catalogue nor the sign-in can produce. ' +
+             'OpenID Connect Core section 5.5.1 says a server MUST NOT error for that, so the ' +
+             'claim is simply absent. GET /admin/userinfo-claims lists every name that can be ' +
+             'asked for.');
+  }
+  if (out.missingEssential.length) {
+    log.warn('A claims request marked ' + out.missingEssential.join(', ') + ' ESSENTIAL in the ' +
+             member + ' and this service cannot produce ' +
+             (out.missingEssential.length > 1 ? 'them' : 'it') + '. That is still not an error ' +
+             '(section 5.5.1); the client is the half that decides what to do without it.');
+  }
+  if (out.mismatched.length) {
+    log.warn('A claims request asked for particular VALUES in the ' + member + ' and this ' +
+             'service holds others: ' + out.mismatched.join('; ') + '. The values held are what ' +
+             'is returned — a mock that echoed back whatever a client asked it to assert could ' +
+             'not be used to test anything.');
+  }
+  log.debug("Leaving requestedClaimsOf(). " + Object.keys(out.claims).length + " claim(s), " +
+            out.unknown.length + " unresolvable.");
+  return out;
 }
 
 function parseAuthorizationDetails(raw) {
@@ -1801,6 +2181,26 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     logArtifact('RFC 8707 resource indicators', 'as requested', resources);
   }
 
+  // OpenID Connect Core section 5.5 — the claims request. Refused HERE for the
+  // same reason `resource` is refused two blocks up: this is the last point at
+  // which the client is still being talked to, and a token endpoint refusal for
+  // a parameter sent an interaction earlier is a message nobody is reading for.
+  // `invalid_request` rather than a name of its own, because section 5.5 defines
+  // no error code for it and inventing one would send a client looking for a
+  // code no other provider returns.
+  const parsedClaims = parseClaimsRequest(query.claims);
+  if (parsedClaims.error) {
+    log.debug("Leaving issueAuthorizationResponse(). " + parsedClaims.error);
+    log.debug("Leaving issueAuthorizationResponse().");
+    return redirectBack(res, base, redirectUri, query.state,
+      { error: 'invalid_request', error_description: parsedClaims.error },
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
+  }
+  const claimsRequest = parsedClaims.claims;
+  if (claimsRequest) {
+    logArtifact('claims request', 'as understood (OIDC Core 5.5)', claimsRequest);
+  }
+
   // RFC 9700 section 2.1.1 — the code_challenge and the nonce must be
   // transaction-specific. Checked HERE, immediately before anything is minted,
   // and nowhere else: this same request runs through the authorization endpoint
@@ -1896,6 +2296,11 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
       // authorization_details rather than a scope. The token response has to
       // echo it back with the credential_identifiers it grants.
       authorization_details: authorizationDetails,
+      // OIDC Core 5.5's claims request, carried on the code for the same reason
+      // everything else here is: the token endpoint has the client and not the
+      // browser, so this is the only route between the request that was made
+      // and the tokens it is redeemed for.
+      claims: claimsRequest,
       expires: Date.now() + AUTH_CODE_TTL_MS
     });
     out.code = code;
@@ -1919,7 +2324,14 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
                                              ? (resources.length === 1 ? resources[0] : resources)
                                              : audienceClaim(withOwnResource(
                                                  base, named.audiences, named.scope)),
-                                           session_id: sessionId, grant: flow });
+                                           session_id: sessionId, grant: flow,
+                                           // The claims request travels on the
+                                           // token minted HERE too, or a client
+                                           // using the implicit flow would send
+                                           // a section 5.5 request and find the
+                                           // UserInfo endpoint had never heard
+                                           // of it.
+                                           claims: claimsRequest });
     out.token_type = 'Bearer';
     out.expires_in = accessTokenTtl();
     // What the ACCESS TOKEN carries, which is RFC 6749 section 5.1's rule read
@@ -1932,7 +2344,8 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     out.id_token = idToken(base, {
       user: user, client_id: String(query.client_id), nonce: query.nonce, auth_time: authTime,
       amr: amr, acr: acr, session_id: sessionId, grant: flow,
-      access_token: out.access_token, code: out.code
+      access_token: out.access_token, code: out.code,
+      claims: claimsRequest
     });
   }
   // Remembered now that they have been spent, so the NEXT authorization request
@@ -2663,15 +3076,130 @@ function dropCode(code) {
 // whatever was asked for, which the same section permits — the claims go in the
 // id_token when there is no access token to fetch them with — and it is also the
 // only behaviour that can serve the implicit flow this server offers.
+//
+// ---------------------------------------------------------------------------
+// TWO THINGS ARRIVED HERE ON 2026-08-26 AND BOTH CHANGE WHAT THIS ENDPOINT
+// ANSWERS. A reader who knows this endpoint as "sub plus whatever the scope
+// asked for" has the picture it had before them.
+//
+// **A CUSTOM CLAIM SET OF ITS OWN — /admin/userinfo-claims.** The fifth set in
+// admin_stats.js, configured like the four beside it: typed claims, ticked LDAP
+// attribute types read off the person's entry under ou=users, and the groups
+// claim. What makes it worth having SEPARATELY from the ID Token's set, rather
+// than being the same list under two names, is the one property no issued
+// artefact has — this response is BUILT ON EVERY CALL, so a claim added here
+// reaches a client that is already holding its tokens and has not signed in
+// since. That is a different thing to be able to test from anything the ID
+// Token set can express, and it is the reason the page carries no "nothing
+// already issued changes" warning while every other claims page does.
+//
+// **THE CLAIMS REQUEST — OIDC Core section 5.5.** A client may name individual
+// claims in the `userinfo` member of the `claims` parameter, and this server now
+// parses it, refuses a malformed one BY NAME at the authorization endpoint,
+// carries it on the code and inside the access token, and answers it HERE by
+// reading the named claims off that person's directory entry. It is the one
+// path by which a client — rather than an administrator at a console — decides
+// what this response carries, and `claims_parameter_supported` says so in the
+// discovery document, where it said `false` until that day.
+//
+// The four layers and which of them wins are written out at the merge below,
+// because that is where somebody debugging an unexpected member will be looking.
 // ---------------------------------------------------------------------------
 
 // Which claims each scope asks for (section 5.4), restricted to the ones
 // userFor() actually mints — `address` and `phone` are not in scopes_supported
 // for exactly that reason, so they are not here either.
+//
+// **THEY ARE NO LONGER THE WHOLE ANSWER, AND HAVE NOT BEEN SINCE 2026-08-26.**
+// Two things reach this response beside them, and both are argued at the merge
+// in userinfoResponse() rather than here: the `userinfo` CUSTOM CLAIM SET
+// configured on /admin/userinfo-claims, which is what everybody gets, and the
+// claims a CLIENT named in section 5.5's request, which is what this client
+// asked about this person this time. A reader who takes this table for the
+// response has the picture this service had before either existed.
 const USERINFO_SCOPE_CLAIMS = {
   profile: ['name', 'given_name', 'family_name', 'preferred_username'],
   email: ['email', 'email_verified']
 };
+
+// ---------------------------------------------------------------------------
+// NON-SPEC: A CLAIMS REQUEST SENT TO THE USERINFO ENDPOINT ITSELF.
+//
+// OpenID Connect Core defines exactly one way to ask for individual claims —
+// the `claims` parameter at the AUTHORIZATION endpoint, section 5.5 — and that
+// is implemented above and is the one a real client uses. Section 5.3.1 defines
+// no request parameters at all here: an access token and nothing else.
+//
+// This accepts one anyway, and it is labelled rather than quietly added,
+// because the reason is about what this service is FOR. Exercising a claims
+// request through the specified route means running a whole authorization flow
+// per variation — a browser, a sign-in, a code, a redemption — to change one
+// claim name. A person debugging what this endpoint does with `address` versus
+// `address.locality` versus a name nothing can produce wants to send three
+// requests, and a mock that made them sign in three times would not be used.
+//
+// TWO SPELLINGS, both of which the console's own links use:
+//
+//   ?claims={"userinfo":{"birthdate":null}}   the section 5.5 structure, whole
+//   ?claim=birthdate&claim=address            the shorthand, one name each
+//
+// **IT IS A UNION WITH THE TOKEN'S OWN REQUEST AND NEVER A REPLACEMENT.** What
+// the client asked for at the authorization endpoint is what it was authorized
+// for, and a request parameter that could take a claim AWAY from that would
+// make the two disagree about the same grant. What this can do is add to it —
+// which changes nothing about what the grant permits, because every name it can
+// answer is one the endpoint would already answer for this same subject.
+//
+// A MALFORMED ONE IS REFUSED, `invalid_request`, with the reason. The
+// alternative was to ignore it, and ignoring a debugging parameter that was
+// typed wrong is the worst possible answer: the response looks exactly like the
+// one for a parameter that was never sent.
+// ---------------------------------------------------------------------------
+function directClaimsRequest(req) {
+  log.debug("Entering directClaimsRequest(). method=" + req.method);
+  const body = req.method === 'POST' ? parseBody(req) : {};
+  const raw = req.query.claims !== undefined ? req.query.claims : body.claims;
+  const shorthand = []
+    .concat(req.query.claim === undefined ? []
+            : (Array.isArray(req.query.claim) ? req.query.claim : [req.query.claim]))
+    .concat(req.method === 'POST' ? bodyValues(req, body, 'claim') : []);
+  if (raw === undefined && !shorthand.length) {
+    log.debug("Leaving directClaimsRequest(). Nothing was sent on the request itself.");
+    return { request: null };
+  }
+  let request = null;
+  if (raw !== undefined) {
+    const parsed = parseClaimsRequest(raw);
+    if (parsed.error) {
+      log.debug("Leaving directClaimsRequest(). " + parsed.error);
+      return { error: parsed.error };
+    }
+    request = parsed.claims;
+  }
+  if (shorthand.length) {
+    const bucket = Object.assign({}, (request && request.userinfo) || {});
+    shorthand.forEach(function (name) {
+      const key = String(name).trim();
+      if (key) bucket[key] = null;
+    });
+    request = Object.assign({}, request, { userinfo: bucket });
+  }
+  log.debug("Leaving directClaimsRequest(). " +
+            requestedClaimNames(request, 'userinfo').length + " name(s) asked for.");
+  return { request: request };
+}
+
+// The token's own claims request and the request's, as one. The token's wins
+// where both name a claim, because the token's entry is the one that was
+// AUTHORIZED and may carry an `essential` or a `value` the shorthand cannot
+// express — losing it to a bare `null` from a query string would quietly
+// discard what the client actually asked for.
+function mergedUserinfoRequest(fromToken, fromRequest) {
+  const merged = Object.assign({},
+    (fromRequest && fromRequest.userinfo) || {},
+    (fromToken && fromToken.userinfo) || {});
+  return Object.keys(merged).length ? { userinfo: merged } : null;
+}
 
 // The reason a token failed to verify, in the words a person debugging it needs.
 // jwt.verify() throws one of a small set of named errors and the distinction
@@ -2767,16 +3295,88 @@ function userinfoResponse(req, res) {
       ', scope="openid"');
   }
 
+  // A claims request sent to THIS endpoint rather than through the
+  // authorization one — non-spec, and refused here rather than ignored, because
+  // a debugging parameter that was typed wrong must not produce the same
+  // response as one that was never sent. See directClaimsRequest().
+  const direct = directClaimsRequest(req);
+  if (direct.error) {
+    return challenge(400, 'invalid_request', direct.error);
+  }
+
   // Who the token was issued for. `sub` comes from the token rather than from
   // userFor(), because section 5.3.2 requires the sub here to be the one the
   // client saw in the id_token and the token is the record of what that was; the
   // rest is rebuilt from the username that travels with it.
   const user = userFor(claims.username);
-  const body = { sub: claims.sub || user.sub };
+  const username = String(claims.username || user.username || '');
+
+  // -----------------------------------------------------------------------
+  // WHAT THE RESPONSE CARRIES, IN FOUR LAYERS. LATER WINS, and every step up
+  // is a step towards the more specific statement:
+  //
+  //   1. THE CONFIGURED SET — /admin/userinfo-claims. Typed claims, ticked
+  //      directory attributes and the groups claim, in the precedence
+  //      admin_stats.js already applies among those three. It is what EVERY
+  //      client of this service is shown, and it is the layer that makes this
+  //      response worth configuring separately from the ID Token: it is rebuilt
+  //      on every call, so a change here is visible to a client already holding
+  //      a token, where a change to the ID Token set is not visible until the
+  //      next sign-in.
+  //
+  //   2. SECTION 5.4's SCOPE-DRIVEN CLAIMS. `profile` and `email` are requests
+  //      for a named set of claims AT THIS ENDPOINT, which is the one place in
+  //      this service where a scope genuinely changes an answer.
+  //
+  //   3. SECTION 5.5's INDIVIDUALLY REQUESTED CLAIMS, resolved off the person's
+  //      entry under ou=users. They BEAT the layer above, and that is the one
+  //      precedence decision here that is not obvious, so it is written down
+  //      rather than left in the code: a scope asks for a category and a claims
+  //      request names a claim, and answering `{"email":null}` with the persona
+  //      value `alice@sts-mock.example` while the entry holds a real `mail`
+  //      would defeat the only reason the feature is worth having. Nothing in
+  //      layer 3 can name a structural claim — see requestedClaimsOf().
+  //
+  //   4. `sub`, LAST AND UNCONDITIONALLY. Section 5.3.2: the client MUST verify
+  //      that it matches the `sub` of the ID Token, so it is the one member of
+  //      this response that no layer above may reach. It is assigned after
+  //      everything else rather than defended by a check, because an assignment
+  //      cannot be forgotten and a check in three places can.
+  // -----------------------------------------------------------------------
+  const body = {};
+
+  const configured = stats.jwtClaims('userinfo', customClaimContext(base, claims, user));
+  Object.assign(body, configured);
+  if (Object.keys(configured).length) {
+    log.debug("userinfoResponse(): " + Object.keys(configured).length +
+              " claim(s) from the configured UserInfo set.");
+  }
+
   Object.keys(USERINFO_SCOPE_CLAIMS).forEach(function (scope) {
     if (!hasScope(claims.scope, scope)) return;
     USERINFO_SCOPE_CLAIMS[scope].forEach(function (name) { body[name] = user[name]; });
   });
+
+  const request = mergedUserinfoRequest(claims.claims, direct.request);
+  const asked = requestedClaimsOf(request, 'userinfo', username, user);
+  if (asked.names.length) {
+    logArtifact('UserInfo claims request', 'as understood (OIDC Core 5.5)',
+                { requested: asked.names, resolved: asked.report,
+                  unresolvable: asked.unknown, essentialAndAbsent: asked.missingEssential,
+                  valueMismatches: asked.mismatched,
+                  fromTheAccessToken: requestedClaimNames(claims.claims, 'userinfo'),
+                  fromThisRequest: requestedClaimNames(direct.request, 'userinfo') });
+    // The federation release policy applies to a REQUESTED claim exactly as it
+    // applies to a configured one — see stats.applyClaimRelease(). Layer 1
+    // above went through jwtClaims() and was filtered there; this layer did
+    // not, and a layer that skipped it would be the hole the release list
+    // exists to close.
+    Object.assign(body, stats.applyClaimRelease(asked.claims,
+                                                customClaimContext(base, claims, user),
+                                                'requested claim(s)'));
+  }
+
+  body.sub = claims.sub || user.sub;
   logArtifact('UserInfo response', 'as returned', body);
 
   // Section 5.3.2: the response is JSON unless the client registered a
@@ -3397,7 +3997,11 @@ function tokenEndpoint(req, res) {
       // ordinary case: most tokens this service issues belong to a sign-on session
       // and only arrive at the console as belonging to one because of this line.
       session_id: record.session_id || '', grant: 'authorization_code',
-      authorization_details: grantIdentifiers(record.authorization_details, record.user)
+      authorization_details: grantIdentifiers(record.authorization_details, record.user),
+      // Off the code as well. What the client asked for at the authorization
+      // endpoint is what the UserInfo endpoint honours, and the access token is
+      // the only thing that reaches it.
+      claims: record.claims || null
     });
     // Single use — and remembered as used, with what it bought, so that the
     // same request arriving again gets that answer back instead of a sentence
@@ -3609,6 +4213,11 @@ function tokenEndpoint(req, res) {
       // section 14.5 refresh on step 4 exists to make — naming a
       // credential_identifier "that was not granted".
       authorization_details: claims.authorization_details,
+      // And the same for OIDC Core 5.5's claims request, for exactly the reason
+      // above it: it was authorized by the authorization request this refresh
+      // token descends from, so an access token that dropped it would make the
+      // UserInfo response change under a client that did nothing but renew.
+      claims: claims.claims || null,
       // A refresh keeps whatever binding it had: re-binding to the key that
       // happens to have signed this request would let a stolen bound token be
       // laundered into one bound to the thief's key.
@@ -4223,7 +4832,28 @@ module.exports = {
   // notification's `iss`. This process runs several named authorization servers
   // and an RP is expecting the one that issued ITS tokens, so the caller has to
   // be able to ask rather than assume the default.
-  issuerOf: issuerOf
+  issuerOf: issuerOf,
+  // ------------------------------------------------------------------------
+  // OIDC Core section 5.5, for the CONSOLE — /admin/userinfo-claims previews
+  // what a claims request would return, and it does it by calling the two
+  // functions the UserInfo endpoint itself calls rather than by reimplementing
+  // them. That is the rule every other preview in this service follows (see
+  // claim_attributes.js's previewFor()) and it exists for the same reason: a
+  // preview that agreed with the page and disagreed with the endpoint would be
+  // worse than no preview at all.
+  //
+  // They are exported rather than moved to a library because they are PROTOCOL
+  // knowledge — what section 5.5 says a request looks like, and what this
+  // server does with one — and this is the module that owns it. admin.js is
+  // required after this one (rule 5), so the require runs in the ordinary
+  // direction and closes no cycle.
+  // ------------------------------------------------------------------------
+  parseClaimsRequest: parseClaimsRequest,
+  requestedClaimsOf: requestedClaimsOf,
+  requestedClaimNames: requestedClaimNames,
+  CLAIMS_REQUEST_MEMBERS: CLAIMS_REQUEST_MEMBERS,
+  MAX_REQUESTED_CLAIMS: MAX_REQUESTED_CLAIMS,
+  PERSONA_CLAIMS: PERSONA_CLAIMS
   // `registeredClients` used to be exported from here. It is not a Map in this
   // module any more — the registrations are entries under ou=applications, and
   // `applications.registrationOf()` is how anything reads one. Re-exporting a
