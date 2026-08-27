@@ -34,7 +34,7 @@ files did not change; the paths did.
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
-| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. |
+| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, **every setting drawn on the page for the protocol it configures** (2026-08-27 — `SETTING_HOMES` is the table, `/admin/config` keeps the rows belonging to no protocol and the index of the rest), and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
 | `tests/` | **THE ONLY TEST DIRECTORY HERE** since 2026-08-26: in-process assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. NOT a place to put a protocol test — see *Tests* below for the line, and `tests/CLAUDE.md` for the two rules that are not optional there. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
@@ -201,7 +201,9 @@ a mock, so do not quieten it by default.
 ANYWHERE STOPS THE SERVICE FROM STARTING.** Since 2026-08-24 the appconfig layer
 is `env/defaults.js` with the selected file unioned over it, the selected file
 winning key by key; above both sit the environment variables, and above those the
-runtime overrides `/admin/config` and `/admin-api` set in memory. **There is no
+runtime overrides the console and `/admin-api` set in memory — the console
+draws each group of settings on the page for the protocol it configures, and
+`/admin/config` is the index of that plus the rows belonging to no protocol. **There is no
 sixth level** — no constant in a module underneath the table — so a row added to
 `common/config.js`'s `SETTINGS` with no row in `env/defaults.js` refuses to start
 and names itself. `env/defaults.js` is GENERATED from that table (`node
@@ -305,7 +307,7 @@ http://host:8081/realm/acme/oauth2/token     the realm `acme`
 `/admin/realms` defines them, `POST /admin-api/realms/create` does it without a
 browser, and `GET /realms` is the ungated directory a client discovers them
 from. The console carries a realm switcher on every page and shows ONE realm at
-a time — including `/admin/config`, which reads AND WRITES the realm it is
+a time — including every settings form, which reads AND WRITES the realm it is
 reached in.
 
 **THE DEFAULT REALM HAS AN EMPTY PREFIX, AND A SERVICE WITH NO REALMS DEFINED
@@ -364,7 +366,7 @@ reaches outside that file:
    realm's** `ou=groups`, read there whichever realm the console is reached in,
    and a grant made through `/realm/acme/admin-api/rbac/grant` lands there too
    and says so in its reply. One roster for the process, on purpose: a role is
-   permission to change what EVERY realm does — `/admin/config` writes the
+   permission to change what EVERY realm does — a settings form writes the
    realm it is reached in, `/admin/realms` can delete a realm outright — so a
    per-realm roster would mean anybody who can create a realm can make
    themselves an administrator of the service. The gate agrees with the roster:

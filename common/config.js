@@ -453,7 +453,8 @@ const SETTINGS = [
     restartReason: 'the listener is bound when the process starts',
     description: 'The port everything HTTP here answers on: the protocol ' +
                  'endpoints, the console and this API. The two TLS listeners ' +
-                 'are separate and are under TLS below.' },
+                 'are separate and are the tls.* settings, which the console ' +
+                 'draws on its own TLS page.' },
 
   // ---------------------------------------------------------------------
   // The scheme the port above answers on, and it is DERIVED (`derived: true`,
@@ -1401,7 +1402,8 @@ const SETTINGS = [
     description: 'The `iss` of the JWT this STS returns in a ' +
                  'RequestSecurityTokenResponse, and the issuer named on GET ' +
                  '/sts. A SAML token requested through WS-Trust is built by ' +
-                 'the SAML modules and carries the SAML issuer above.' },
+                 'the SAML modules and carries saml.issuer instead, which the ' +
+                 'console draws on its two SAML pages.' },
 
   // --- WS-Federation -------------------------------------------------------
   { key: 'wsfed.entityId', group: 'WS-Federation', label: 'Entity ID',

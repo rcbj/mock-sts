@@ -394,7 +394,7 @@ function handle(info, fn) {
       sendScimError(req, res, info, new SCIMMY.Types.Error(501, null,
         'SCIM is turned off on this service (scim.enabled). The routes are ' +
         'registered, which is why this is a 501 and not a 404. Turn it back on ' +
-        'at /admin/config or with SCIM_ENABLED=true.'));
+        'at /admin/scim or with SCIM_ENABLED=true.'));
       log.debug("Leaving the SCIM handler. It is turned off.");
       return;
     }

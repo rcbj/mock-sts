@@ -174,8 +174,10 @@ direction that matters: a require here would close a cycle.
 
 The slot answers the REALM RECORD rather than its overrides, because
 **`config.js` writes through it too**. `setOverride()` in a realm sets the
-REALM's value — which is what makes `/admin/config`, `/admin/token-lifetimes`
-and `POST /admin-api/config/set` realm-aware without one of them being edited.
+REALM's value — which is what makes every settings form in the console,
+`/admin/token-lifetimes` and `POST /admin-api/config/set` realm-aware without
+one of them being edited, including the twenty-one drawn on protocol pages
+since 2026-08-27.
 Setting a value while `acme` is ambient means setting it for `acme`; anything
 else would be a console page that reads one realm and writes another.
 
@@ -375,7 +377,9 @@ anything without restarting it, and no list anywhere of what could be changed at
 by refusing to start and naming the row. The row carries the key
 (which is both the dot path in the appconfig file and the name every surface uses),
 the environment variable, the type, the default, the prose, and `runtime`. From that
-one row it appears in `/admin/config`, in `GET /admin-api/config`, in the OpenAPI
+one row it appears in the admin console — on the page for the protocol it
+configures, which since 2026-08-27 is where each group is drawn — in
+`GET /admin-api/config`, in the OpenAPI
 document's `Config` schema, and in the startup audit — none of which has a list of
 its own to update. A `process.env` read added anywhere else is invisible to all four,
 which is the state this file exists to end.
@@ -403,7 +407,7 @@ about a realm was consumed at startup and `oauth2_bcp.js`'s `enabled()` reads
 the setting per request through the realm layer like any runtime row. So
 `checkOverride(key, raw, forRealm)` takes a third argument, `realms.js`'s
 `checkRealmOverride()` is the only caller that passes it, and the refusal a
-person meets at `/admin/config` in the default realm — and at `POST
+person meets at `/admin/oauth2` in the default realm — and at `POST
 /admin-api/config/set` outside a realm — is unchanged. `describe()` decides
 `editable` the same way, so the console under a realm's prefix offers the
 control the same page in the default realm correctly refuses.
@@ -436,7 +440,7 @@ pass "is it a whole number", and both produce a service whose tokens are wrong
 in a way that reads as a client bug. **`step` is a MULTIPLE-OF rather than a
 slider increment**, counted from `min` so that a floor which is not itself a
 multiple of the step is still reachable. `describe()` publishes all three, so
-`/admin/config`, the console's own pages and the OpenAPI `ConfigSetting` schema
+every settings form in the console and the OpenAPI `ConfigSetting` schema
 render the same three numbers the check enforces — the bound is declared once
 and nothing repeats it. **Put a new constraint here rather than at the call
 site**: this is the only place one refusal can serve the console form, the
@@ -495,7 +499,7 @@ which had to be true at once:
 **`env/defaults.js` IS GENERATED AND MUST NOT BE HAND-EDITED.** `node
 env/generate_defaults.js` writes it from the `dflt` column. Two copies of a
 default is one copy that will be wrong, and wrong in the quietest way — the
-service running on one value while `/admin/config`, the OpenAPI document's
+service running on one value while the console, the OpenAPI document's
 `default` property and README.md's table all report the other. That generator
 neutralises `process.exit` for the length of its own `require` of this module,
 because regenerating the file is the one moment when an incomplete
@@ -508,7 +512,7 @@ reads, while `resolve()` digs the operator's file and then `env/defaults.js` so
 it can say WHICH — `source: 'appconfig'` against `source: 'defaults'`. A value
 from the operator's file and the same value from the defaults are
 indistinguishable once merged, and "where did this come from?" is the question
-`/admin/config` exists to answer. `auditAppconfig()` reads the operator's file
+the *Source* column on every settings form exists to answer. `auditAppconfig()` reads the operator's file
 alone for the same reason: audited against the union it would answer "nothing is
 missing" every time and be dead code that looked alive.
 
@@ -770,8 +774,9 @@ find module` naming a file the operator never mentioned.
    carry it — which is also why it is REPORTED by all three claim-set pages and
    owned by none of them. That is the deliberate opposite of `/admin/claims`'s
    three selections, and it is why the control is a `config.js` ROW rather than a
-   form: four settings on `/admin/config`, which already has a page and already
-   has `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
+   form: four settings in `config.js`'s table, drawn by the console on
+   `/admin/groups` — where the membership they name is — and already served by
+   `POST /admin-api/config/set`, so the console's parity rule (rule 7) is
    satisfied by there being no new control. **A second form on `/admin/claims`,
    `/admin/userinfo-claims` or `/admin/saml-attributes` would be a second door
    to one setting** — four doors now that there are three pages — which is the

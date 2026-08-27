@@ -1565,8 +1565,9 @@ const ENDPOINTS = [
           'itself, read from the module that implements it rather than described a second ' +
           'time here: the endpoints, the four things SCIM here deliberately does not do, ' +
           'the five things you can do to make it fail, and which LDAP attribute each SCIM ' +
-          'member is. IT HAS NO CONTROLS, which is the console parity rule holding rather ' +
-          'than a gap: everything about SCIM that can be changed is a configuration row. ' +
+          'member is. Its ONE control is the eighteen scim.* settings, which moved here ' +
+          'from /admin/config on 2026-08-27 and post back to it — a second door onto one ' +
+          'store, which is why /admin-api needs no POST beside its GET. ' +
           'The bulk count deliberately does not tally with the rest — one Bulk of five ' +
           'creates is one bulk AND five creates. Add ?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
@@ -1830,7 +1831,7 @@ const ENDPOINTS = [
           'events the cap discarded. In memory and dies with the process, and there is NO CLEAR ' +
           'BUTTON — an erase control on an unprotected console would make the page unable to ' +
           'answer the one question an audit log exists for. audit.maxEvents and ' +
-          'audit.protocolCalls on /admin/config change the cap and whether the noisiest category ' +
+          'audit.protocolCalls on /admin/audit change the cap and whether the noisiest category ' +
           'is recorded at all.' },
   { path: '/admin/claims', group: 'Admin', name: 'Custom claims',
     specs: ['rfc7519', 'oidc'],
@@ -1869,8 +1870,11 @@ const ENDPOINTS = [
           'application, and the slug in its path is a digest nobody derives by ' +
           'hand. It holds nothing: every row is an entry in ou=applications, ' +
           'and both its writes go through the same updateApplication() ' +
-          '/admin/applications posts to. The saml2.* settings are READINGS ' +
-          'here with a link to /admin/config, not a second form onto them.' },
+          '/admin/applications posts to. The saml2.* settings ARE a form here ' +
+          'since 2026-08-27, along with saml.issuer — which the SAML 1.1 page ' +
+          'draws too, because it is the Issuer of every assertion this ' +
+          'service builds. They post to /admin/config, so it is a second door ' +
+          'onto one store rather than a second store.' },
   { path: '/admin/federation', group: 'Admin', name: 'Federation relationships',
     specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
     effect: 'writes to the LDAP directory, and CONFIGURES A REFUSAL — the only ' +
@@ -1936,7 +1940,10 @@ const ENDPOINTS = [
           'guessed audience fails inside a signature check with nothing ' +
           'explaining why. It holds nothing: every row is an entry in ' +
           'ou=applications. It has ONE action where /admin/saml2 has four, and ' +
-          'the three it lacks are three things SAML 1.1 has no protocol for.' },
+          'the three it lacks are three things SAML 1.1 has no protocol for. ' +
+          'The saml11.* settings are a FORM here since 2026-08-27, with ' +
+          'saml.issuer beside them — the same setting the SAML 2.0 page draws, ' +
+          'because one Issuer serves both profiles and WS-Federation.' },
   { path: '/admin/saml-attributes', group: 'Admin', name: 'Custom SAML attributes',
     specs: ['saml2', 'saml11'],
     effect: 'changes what every FUTURE SAML assertion contains',
@@ -2017,28 +2024,128 @@ const ENDPOINTS = [
     specs: [],
     effect: 'changes what every FUTURE token, assertion, ticket and search is ' +
             'built with, for the settings that are changeable at all',
-    what: 'NON-SPEC. Every setting this service has, grouped by the protocol ' +
-          'they belong to, with the effective value ' +
-          'of each and, which is the part that was not answerable before, ' +
-          'WHERE THAT VALUE CAME FROM: a runtime override set here, an ' +
-          'environment variable, the appconfig file this process was started ' +
-          'with, or env/defaults.js under it — and there is no fifth, since a ' +
-          'setting with a value in none of them stops this service from ' +
-          'starting. The page itself says how many there ' +
-          'are and how many can be changed while the service runs, counted ' +
-          'off config.js\'s table — this sentence used to carry the two ' +
-          'numbers and had drifted by half. The rest were consumed at ' +
-          'startup (a bound ' +
-          'socket, the TLS certificate\'s names, the Kerberos principal ' +
-          'database and its long-term keys, the directory\'s base DN) and are ' +
-          'shown with the reason rather than hidden. Changes are IN MEMORY and ' +
-          'are gone on restart — nothing writes to the appconfig file.' },
+    what: 'NON-SPEC. THE INDEX of every setting this service has — which ' +
+          'group, how many, how many overridden right now, and the console ' +
+          'page that draws each group — plus the form for the five that ' +
+          'belong to no protocol (the bind address, the port, the scheme, the ' +
+          'proxy header and the log level). It was every setting in one page ' +
+          'until 2026-08-27; they now live on the page for the family they ' +
+          'configure, and every one of those forms posts back to THIS ' +
+          'endpoint, so there is one store and one action. ?format=json still ' +
+          'answers the WHOLE table, because a caller asking for the ' +
+          'configuration should not have to visit twenty-one pages to ' +
+          'assemble it. Every row says WHERE ITS VALUE CAME FROM: a runtime ' +
+          'override, an environment variable, the appconfig file this process ' +
+          'was started with, or env/defaults.js under it — and there is no ' +
+          'fifth, since a setting with a value in none of them stops this ' +
+          'service from starting. A restart-only row is shown with its input ' +
+          'disabled and the reason beside it rather than hidden. Changes are ' +
+          'IN MEMORY and are gone on restart — nothing writes to the ' +
+          'appconfig file. Reset all is here and on no protocol page.' },
+  // ---------------------------------------------------------------------------
+  // THE EIGHT PROTOCOL SETTINGS PAGES, added 2026-08-27 when every family's
+  // appconfig rows moved off /admin/config and onto the page for the family
+  // they configure. Each of these families had settings and no page, which is
+  // why they are new rather than the settings having been added to something
+  // that already existed. They are `group: 'Admin'` like every other console
+  // page: what they configure is a protocol, but what they ARE is a page of
+  // this console.
+  // ---------------------------------------------------------------------------
+  { path: '/admin/oauth2', group: 'Admin', name: 'OAuth 2.0 / OIDC settings',
+    specs: ['rfc6749', 'oidc', 'rfc9700', 'oidc-fclogout', 'rfc7523'],
+    effect: 'changes what the authorization server will accept and what it ' +
+            'puts into what it issues',
+    what: 'NON-SPEC. The thirteen oauth2.* settings, on the page for the ' +
+          'family rather than among a hundred and fifty-four rows on ' +
+          '/admin/config: the issuer identifier, RFC 9700 mode, the ' +
+          'registered redirect URIs and the loopback port wildcard, ' +
+          'Front-Channel Logout, the refresh token idle timeout and whether a ' +
+          'sign-out revokes refresh tokens, the client assertion clock skew, ' +
+          'the four lifetimes /admin/token-lifetimes also draws — and ' +
+          'oauth2.breakIdTokenNonce, which makes this service return a WRONG ' +
+          'nonce on purpose so that a client can be shown to check it. Every ' +
+          'form here posts to /admin/config, so there is one store and one ' +
+          'action; what moved is the door. Add ?format=json.' },
+  { path: '/admin/oid4vci', group: 'Admin', name: 'OpenID4VCI settings',
+    specs: ['oid4vci', 'sd-jwt-vc', 'vcdm', 'did-core'],
+    effect: 'changes what the credential issuer advertises and will accept',
+    what: 'NON-SPEC. The nine oid4vci.* settings: the wallet an offer sends a ' +
+          'holder to, the authorization server the credential endpoint takes ' +
+          'a token from, the batch size, the deferred issuance timings, the ' +
+          'offer username, whether a credential request must be encrypted, ' +
+          'and whether the SD-JWT VC and ldp_vc issuers name themselves by ' +
+          'did:web or by URL — the two that change what a verifier has to ' +
+          'resolve. What a credential CONTAINS is /admin/vc. Add ?format=json.' },
+  { path: '/admin/oid4vp', group: 'Admin', name: 'OpenID4VP settings',
+    specs: ['oid4vp', 'sd-jwt-vc'],
+    effect: 'changes how the mock Verifier identifies itself and what it will ' +
+            'accept in a presentation',
+    what: 'NON-SPEC. The four oid4vp.* settings: the verifier\'s client_id, ' +
+          'the wallet it sends a holder to (which falls back to the OID4VCI ' +
+          'one, since it is the same wallet in every arrangement this service ' +
+          'is used in), the Key Binding JWT\'s maximum age, and the claims ' +
+          'asked for by default. The DCQL query itself is ' +
+          '/admin/vc-verifier-config. Add ?format=json.' },
+  { path: '/admin/kerberos', group: 'Admin', name: 'Kerberos settings',
+    specs: ['rfc4120', 'rfc3961', 'rfc4178', 'rfc4559', 'ms-kkdcp', 'ms-sfu'],
+    effect: 'changes the KDC, and most of it only on the next start',
+    what: 'NON-SPEC. The nineteen krb5.* settings: the realm and the two raw ' +
+          'ports, the clock skew and the deliberate clock OFFSET that makes ' +
+          'KRB_AP_ERR_SKEW reachable without touching a system clock, the one ' +
+          'password every user account shares, the names that stay unknown so ' +
+          'KDC_ERR_C_PRINCIPAL_UNKNOWN is reachable too, the long-term keys ' +
+          'behind krbtgt and the inter-realm trust, s2kparams, and the two ' +
+          'that decide whether a ticket may start a browser session at ' +
+          '/authn/spnego. Most are restart-only because the principal ' +
+          'database is built from them at startup. Add ?format=json.' },
+  { path: '/admin/ldap', group: 'Admin', name: 'LDAP / LDAPS settings',
+    specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4519', 'rfc8446'],
+    effect: 'changes the embedded directory, and its two ports only on the ' +
+            'next start',
+    what: 'NON-SPEC. The six ldap.* settings: the two raw ports, the base DN ' +
+          'every realm\'s subtree hangs under, whether a name seen for the ' +
+          'first time gets an entry, and the two ceilings that keep a mock ' +
+          'from being filled up. What is IN the directory is /admin/users, ' +
+          '/admin/groups and /ldap/directory; whether both sockets came up is ' +
+          '/ldap. No setting here can make a bind be refused — none is ' +
+          'missing, there is no such behaviour. Add ?format=json.' },
+  { path: '/admin/wstrust', group: 'Admin', name: 'WS-Trust settings',
+    specs: ['ws-trust', 'saml11', 'saml2', 'wss-username'],
+    effect: 'changes who the token service says issued its tokens',
+    what: 'NON-SPEC. The one wstrust.* setting — the token service\'s own ' +
+          'issuer — and the page that says what else about a WS-Trust ' +
+          'response is configured elsewhere: the assertion inside it is built ' +
+          'by the same two functions the SAML profiles use, so its Issuer is ' +
+          'saml.issuer on the SAML pages and its attributes are ' +
+          '/admin/saml-attributes. Add ?format=json.' },
+  { path: '/admin/wsfed', group: 'Admin', name: 'WS-Federation settings',
+    specs: ['ws-federation', 'saml11', 'xmldsig'],
+    effect: 'changes the entity ID this service names itself by in the ' +
+            'passive requestor profile',
+    what: 'NON-SPEC. The one wsfed.* setting, and where the rest of what a ' +
+          'relying party receives is configured — the assertion is a SAML 1.1 ' +
+          'one, so saml.issuer and /admin/saml-attributes decide its issuer ' +
+          'and its contents. The page also states the two things this profile ' +
+          'deliberately does not do: wauth is recorded and not honoured, and ' +
+          'wreqptr is never dereferenced. Add ?format=json.' },
+  { path: '/admin/tls', group: 'Admin', name: 'TLS / mutual TLS settings',
+    specs: ['rfc8446', 'rfc5280', 'rfc8705'],
+    effect: 'changes the two listeners and the certificate four sockets ' +
+            'share, on the next start',
+    what: 'NON-SPEC. The four tls.* settings: the two ports, and the ' +
+          'hostnames and IP addresses that go into the self-signed ' +
+          'certificate this service mints on every start and serves on 8443, ' +
+          '9443, LDAPS 636 and — when global.https is on — the main port. All ' +
+          'four are restart-only: the certificate is minted before anything ' +
+          'is listening. Whether the MAIN port is HTTPS is global.https on ' +
+          '/admin/config, which is a fact about the process rather than about ' +
+          'these listeners. Add ?format=json.' },
   { path: '/admin/token-lifetimes', group: 'Admin', name: 'Token lifetimes',
     specs: ['rfc6749', 'rfc7519', 'oidc'],
     effect: 'changes how long every FUTURE access token, ID Token and refresh ' +
             'token is good for, and what this service believes when it reads ' +
             'one back',
-    what: 'NON-SPEC. Four of the settings on /admin/config, on a page of ' +
+    what: 'NON-SPEC. Four of the settings /admin/oauth2 draws, on a page of ' +
           'their own because they are the ones somebody sets to a specific ' +
           'number to watch something happen: the access token, ID Token and ' +
           'refresh token lifetimes, and the clock skew applied wherever this ' +
@@ -2393,6 +2500,75 @@ const ENDPOINTS = [
           'change is in memory and gone on restart, and reset-all is what a ' +
           'test should call to put the service back. Mirrors POST ' +
           '/admin/config.' },
+  // ---------------------------------------------------------------------------
+  // THE EIGHT PROTOCOL SETTINGS RESOURCES, mirroring the eight console pages
+  // added on 2026-08-27. Each is READ-ONLY and none has a POST beside it: every
+  // form on the page it mirrors posts `set-many` to /admin/config, which
+  // POST /admin-api/config/set-many already mirrors, so a POST here would be
+  // another door onto one function. That is the same answer /admin-api/scim
+  // and /admin-api/audit give, for the same rule.
+  //
+  // TWO OF THE PATHS CARRY `-settings` AND THAT IS A COLLISION RATHER THAN A
+  // STYLE: /admin-api/credential-claims and /admin-api/verifier-request already
+  // mirror the other two pages of those two families, so the bare names would
+  // have read as theirs.
+  // ---------------------------------------------------------------------------
+  { path: '/admin-api/oauth2', group: 'Management API',
+    name: 'OAuth 2.0 / OIDC settings',
+    specs: ['rfc6749', 'oidc', 'rfc9700', 'openapi'],
+    what: 'GET /admin/oauth2 over JSON: the thirteen oauth2.* settings ' +
+          'described — value, source, whether it can be changed while the ' +
+          'service runs — and the prose and caveats the page carries, ' +
+          'including that oauth2.breakIdTokenNonce makes this service wrong on ' +
+          'purpose. Read-only; POST /admin-api/config/set-many is how they are ' +
+          'written.' },
+  { path: '/admin-api/oid4vci-settings', group: 'Management API',
+    name: 'OpenID4VCI settings',
+    specs: ['oid4vci', 'did-core', 'openapi'],
+    what: 'GET /admin/oid4vci over JSON: the nine oid4vci.* settings, ' +
+          'including the two restart-only ones that decide whether the SD-JWT ' +
+          'VC and ldp_vc issuers name themselves by did:web or by URL. What a ' +
+          'credential CONTAINS is /admin-api/credential-claims, which is why ' +
+          'this path carries -settings. Read-only.' },
+  { path: '/admin-api/oid4vp-settings', group: 'Management API',
+    name: 'OpenID4VP settings',
+    specs: ['oid4vp', 'openapi'],
+    what: 'GET /admin/oid4vp over JSON: the four oid4vp.* settings, one of ' +
+          'which is DERIVED — the wallet falls back to the OID4VCI one. The ' +
+          'DCQL query itself is /admin-api/verifier-request, which is why this ' +
+          'path carries -settings. Read-only.' },
+  { path: '/admin-api/kerberos', group: 'Management API', name: 'Kerberos settings',
+    specs: ['rfc4120', 'rfc4178', 'rfc4559', 'openapi'],
+    what: 'GET /admin/kerberos over JSON: the nineteen krb5.* settings, most ' +
+          'of them restart-only because the principal database and every ' +
+          'long-term key in it are built from them at startup. Two of them ' +
+          'exist to make failures reachable — krb5.unknownUsers and ' +
+          'krb5.clockOffset — and the reply says so. Read-only.' },
+  { path: '/admin-api/ldap', group: 'Management API', name: 'LDAP / LDAPS settings',
+    specs: ['rfc4511', 'rfc4519', 'openapi'],
+    what: 'GET /admin/ldap over JSON: the six ldap.* settings. It also carries ' +
+          'the sentence a caller most needs about this family — no bind is ' +
+          'ever refused and no setting is missing that would refuse one. What ' +
+          'is IN the directory is /admin-api/users and /admin-api/groups. ' +
+          'Read-only.' },
+  { path: '/admin-api/wstrust', group: 'Management API', name: 'WS-Trust settings',
+    specs: ['ws-trust', 'openapi'],
+    what: 'GET /admin/wstrust over JSON: the one wstrust.* setting, and where ' +
+          'the rest of a WS-Trust response is configured — the assertion is ' +
+          'built by the SAML modules, so its Issuer is saml.issuer and its ' +
+          'attributes are /admin-api/saml-attributes. Read-only.' },
+  { path: '/admin-api/wsfed', group: 'Management API', name: 'WS-Federation settings',
+    specs: ['ws-federation', 'openapi'],
+    what: 'GET /admin/wsfed over JSON: the one wsfed.* setting, and the two ' +
+          'things this profile deliberately does not do — wauth is recorded ' +
+          'and not honoured, wreqptr is never dereferenced. Read-only.' },
+  { path: '/admin-api/tls', group: 'Management API', name: 'TLS / mutual TLS settings',
+    specs: ['rfc8446', 'rfc5280', 'openapi'],
+    what: 'GET /admin/tls over JSON: the four tls.* settings, all restart-only ' +
+          'because the certificate is minted and the sockets bound before ' +
+          'anything is listening. Whether the MAIN port is HTTPS is ' +
+          'global.https, on /admin-api/config with the process\'s own ' +
+          'settings. Read-only.' },
   { path: '/admin-api/token-lifetimes', group: 'Management API',
     name: 'Token lifetimes',
     specs: ['rfc6749', 'rfc7519', 'oidc'],
@@ -3207,7 +3383,7 @@ const ENDPOINTS = [
           'the mode has an opinion about, and whether it is ENFORCED, only DETECTED (the ones ' +
           'that are the client\'s to keep, which this server can see broken but cannot fix), ' +
           'ALWAYS true here, or NOT enforced with the reason attached. Read-only: the mode is ' +
-          'the oauth2.rfc9700 setting, so it is turned on at /admin/config or through ' +
+          'the oauth2.rfc9700 setting, so it is turned on at /admin/oauth2 or through ' +
           'POST /admin-api/config like everything else configurable.' },
   { path: '/oauth2/userinfo', group: 'OAuth 2.0 / OIDC', name: 'UserInfo endpoint',
     specs: ['oidc', 'rfc6750', 'rfc9449', 'rfc7591', 'rfc8705', 'rfc8707'],

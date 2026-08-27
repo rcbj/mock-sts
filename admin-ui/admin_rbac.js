@@ -750,7 +750,7 @@ function refusalText(written, dn) {
     return 'There is already an entry at ' + dn + ' and it is not a group. ' +
            'Something wrote it — an ldapadd, a SCIM POST — and this console ' +
            'will not overwrite an entry it did not make. Delete it, or point ' +
-           'the role at another cn on /admin/config.';
+           'the role at another cn on /admin/rbac.';
   }
   if (written.reason === 'noParent') {
     log.debug("Leaving refusalText().");

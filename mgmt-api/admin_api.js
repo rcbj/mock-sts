@@ -486,6 +486,161 @@ function claimSetActions(family) {
 // (`route` with `:action` in it + `handler` + `actions`), where each action is
 // one documented operation at its own concrete URL.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE EIGHT PROTOCOL SETTINGS PAGES, mirrored. Rule 7 wants an operation per
+// console page, and on 2026-08-27 eight pages arrived at once — one per
+// protocol family whose appconfig rows had no page of their own.
+//
+// THERE IS NO POST BESIDE ANY OF THEM, and that is the rule read exactly
+// rather than a gap. Every form on those pages posts `set-many` to
+// /admin/config, which `POST /admin-api/config/set-many` already mirrors, so
+// a POST here would be eight more doors onto one function — the thing this
+// parity exists to prevent. It is the same answer /admin-api/scim and
+// /admin-api/applications/new give, for the same reason.
+//
+// They are BUILT FROM A TABLE for the reason the console's own eight pages
+// are: the operations differ only in prose, and eight hand-written rows
+// would be seven copies plus the one somebody edited. The generated OpenAPI
+// document cannot tell the difference — `admin_api_spec.js` reads this array
+// and nothing else.
+// ---------------------------------------------------------------------------
+const PROTOCOL_SETTINGS_OPERATIONS = [
+  { path: '/oauth2', console: '/admin/oauth2', tag: 'OAuth 2.0 / OIDC',
+    operationId: 'getOauth2Settings',
+    summary: 'The authorization server\'s own settings',
+    description: 'The thirteen `oauth2.*` settings: the issuer identifier, ' +
+                 'RFC 9700 mode, the registered redirect URIs and the ' +
+                 'loopback port wildcard, Front-Channel Logout, the refresh ' +
+                 'token idle timeout, whether a sign-out revokes refresh ' +
+                 'tokens, the client assertion clock skew, the four ' +
+                 'lifetimes `GET /token-lifetimes` also reports — and ' +
+                 '`oauth2.breakIdTokenNonce`, which makes this service return ' +
+                 'an ID Token whose `nonce` is WRONG so that a client can be ' +
+                 'shown to check it.\n\n`oauth2.rfc9700` is restart-only and ' +
+                 'says so in `restartReason`: `global.https` derives from it ' +
+                 'and a listener\'s scheme is settled when the socket is ' +
+                 'bound. A TRUST REALM can carry it while the process does ' +
+                 'not, which is how one process answers permissively at ' +
+                 '/oauth2/authorize and enforces the BCP under a realm ' +
+                 'prefix.' },
+  { path: '/oid4vci-settings', console: '/admin/oid4vci', tag: 'OpenID4VCI',
+    operationId: 'getOid4vciSettings',
+    summary: 'The credential issuer\'s own settings',
+    description: 'The nine `oid4vci.*` settings: the wallet an offer sends a ' +
+                 'holder to, the authorization server the credential endpoint ' +
+                 'will take a token from, the batch size, the deferred ' +
+                 'issuance timings, the offer username, whether a credential ' +
+                 'request must be encrypted, and the two that decide whether ' +
+                 'the SD-JWT VC and `ldp_vc` issuers name themselves by ' +
+                 '`did:web` or by URL.\n\nThose two are restart-only and they ' +
+                 'change what a VERIFIER has to resolve — a key fetched from ' +
+                 'a DID document rather than from JWKS. What a credential ' +
+                 'CONTAINS is `GET /credential-claims`.' },
+  { path: '/oid4vp-settings', console: '/admin/oid4vp', tag: 'OpenID4VP',
+    operationId: 'getOid4vpSettings',
+    summary: 'The mock Verifier\'s own settings',
+    description: 'The four `oid4vp.*` settings: the client identifier the ' +
+                 'verifier presents as, where it sends a holder to present, ' +
+                 'the Key Binding JWT\'s maximum age, and the claims asked ' +
+                 'for when nothing else has been chosen.\n\n' +
+                 '`oid4vp.walletUrl` is DERIVED: with no value of its own it ' +
+                 'is the OID4VCI wallet, since it is the same wallet in every ' +
+                 'arrangement this service is used in. Its `source` is ' +
+                 '`default` for that reason and for no other. The DCQL query ' +
+                 'itself is `GET /verifier-request`.' },
+  { path: '/kerberos', console: '/admin/kerberos', tag: 'Kerberos',
+    operationId: 'getKerberosSettings',
+    summary: 'The KDC\'s own settings',
+    description: 'The nineteen `krb5.*` settings: the realm, the two raw ' +
+                 'ports, the clock skew and the deliberate clock OFFSET, the ' +
+                 'one password every user account shares, the names that stay ' +
+                 'unknown, the long-term keys behind krbtgt and the ' +
+                 'inter-realm trust, `s2kparams`, and the two that decide ' +
+                 'whether a ticket presented at /authn/spnego may start a ' +
+                 'browser session.\n\nMOST OF THEM ARE RESTART-ONLY, and one ' +
+                 'fact is why: the principal database — every long-term key ' +
+                 'in it — is built from these when the process starts, so a ' +
+                 'realm or a password changed at runtime would leave every ' +
+                 'existing ticket undecryptable by the service that issued ' +
+                 'it.\n\nTWO OF THEM EXIST TO MAKE FAILURES REACHABLE. ' +
+                 '`krb5.unknownUsers` names the only principals that can ' +
+                 'produce `KDC_ERR_C_PRINCIPAL_UNKNOWN` — every other name ' +
+                 'gets an account — and `krb5.clockOffset` moves this KDC\'s ' +
+                 'idea of now so a client can be shown `KRB_AP_ERR_SKEW` ' +
+                 'without anybody touching a system clock.' },
+  { path: '/ldap', console: '/admin/ldap', tag: 'LDAP',
+    operationId: 'getLdapSettings',
+    summary: 'The embedded directory\'s own settings',
+    description: 'The six `ldap.*` settings: the two raw ports, the base DN, ' +
+                 'whether a name seen for the first time gets an entry, and ' +
+                 'the two ceilings that keep a mock from being filled ' +
+                 'up.\n\nNOTHING HERE REFUSES A BIND, and no setting is ' +
+                 'missing: any DN with any password, and anonymous, are ' +
+                 'accepted on 389 and 636 alike. There is no such behaviour ' +
+                 'to turn on.\n\nThe base DN is the DEFAULT realm\'s ' +
+                 'directory and every other realm is a subtree beneath it, ' +
+                 'because a socket has no path to put a realm segment in and ' +
+                 'a DN is the one name a client can carry. What is IN the ' +
+                 'directory is `GET /users` and `GET /groups`.' },
+  { path: '/wstrust', console: '/admin/wstrust', tag: 'WS-Trust',
+    operationId: 'getWsTrustSettings',
+    summary: 'The security token service\'s own setting',
+    description: 'One setting — who a WS-Trust token says issued it — and it ' +
+                 'is a different setting from `saml.issuer`, which is the ' +
+                 'Issuer INSIDE the assertion. They share a default and were ' +
+                 'one setting until they had to differ.\n\nWhat an assertion ' +
+                 'CONTAINS is `GET /saml-attributes`: WS-Trust here issues ' +
+                 'SAML 1.1 and SAML 2.0 assertions through the same two ' +
+                 'builders the SAML profiles use.' },
+  { path: '/wsfed', console: '/admin/wsfed', tag: 'WS-Federation',
+    operationId: 'getWsFedSettings',
+    summary: 'The passive requestor profile\'s own setting',
+    description: 'One setting — the entity ID this service names itself by ' +
+                 'in the WS-Federation metadata and in a sign-in ' +
+                 'response.\n\nThe assertion it carries is a SAML 1.1 one, so ' +
+                 'its Issuer is `saml.issuer` (on `GET /saml2` and ' +
+                 '`GET /saml11`) and its contents are ' +
+                 '`GET /saml-attributes`. `wauth` is recorded and not ' +
+                 'honoured and `wreqptr` is never dereferenced; neither is a ' +
+                 'setting, and the page says so rather than implying a ' +
+                 'missing one.' },
+  { path: '/tls', console: '/admin/tls', tag: 'TLS',
+    operationId: 'getTlsSettings',
+    summary: 'The two TLS listeners\' own settings',
+    description: 'The four `tls.*` settings: the two ports, and the hostnames ' +
+                 'and IP addresses that go into the self-signed certificate ' +
+                 'this service mints on every start.\n\nALL FOUR ARE ' +
+                 'RESTART-ONLY: the certificate is minted and the sockets are ' +
+                 'bound before anything is listening. One certificate serves ' +
+                 '8443, 9443, LDAPS 636 and — when `global.https` is on — the ' +
+                 'main port, so a caller trusts this service once rather than ' +
+                 'four times.\n\nWhether the MAIN port is HTTPS is ' +
+                 '`global.https`, which is on `GET /config` with the rest of ' +
+                 'the process\'s own settings: it is a fact about the process ' +
+                 'rather than about these listeners, and it defaults to ' +
+                 'whatever `oauth2.rfc9700` is.' }
+].map(function (row) {
+  return { method: 'GET', path: BASE + row.path, tag: row.tag,
+           operationId: row.operationId,
+           summary: row.summary,
+           description: row.description +
+             '\n\nTHERE IS NO POST BESIDE THIS ONE and that is not a gap: ' +
+             'every form on the console page this mirrors posts `set-many` to ' +
+             '/admin/config, so `POST /admin-api/config/set-many` is already ' +
+             'the operation for it. One store, one action, two doors.',
+           mirrors: 'GET ' + row.console,
+           responseDescription: 'What the page says, and the settings it ' +
+                                'draws — described rows carrying each ' +
+                                'value\'s source and whether it can be ' +
+                                'changed while the service runs.',
+           responseSchema: { $ref: '#/components/schemas/PageSettings' },
+           handler: function (req, res) {
+             log.debug("Entering the management API " + row.console + " endpoint.");
+             sendJson(res, 200, admin.protocolSettingsJsonFor(row.console));
+             log.debug("Leaving the management API " + row.console + " endpoint.");
+           } };
+});
+
 const ROUTES = [
   { method: 'GET', path: BASE, tag: 'Service',
     operationId: 'getIndex',
@@ -1634,6 +1789,8 @@ const ROUTES = [
   // section and wrong for a test that means to set a lifetime — a misspelt
   // key there succeeds and changes nothing. This one refuses anything that is
   // not one of the four, by name.
+  ...PROTOCOL_SETTINGS_OPERATIONS,
+
   { method: 'GET', path: BASE + '/token-lifetimes', tag: 'Token lifetimes',
     operationId: 'getTokenLifetimes',
     summary: 'How long tokens issued here are good for',

@@ -9,8 +9,8 @@ nav_order: 3
 table inside it. That is not tidiness — it is what makes the next three sentences
 possible.
 
-From one row in that table, a setting appears in the admin console at
-`/admin/config`, in `GET /admin-api/config`, in the management API's OpenAPI
+From one row in that table, a setting appears in the admin console — on the page
+for the protocol it configures — in `GET /admin-api/config`, in the management API's OpenAPI
 document, and in the startup audit that logs what the appconfig file omitted and
 what key it carried that the table does not know. None of those four has a list
 of its own. A `process.env` read added anywhere else is invisible to all four,
@@ -20,7 +20,7 @@ which is the state this arrangement exists to end.
 
 Five levels, first match wins:
 
-1. **A runtime override** — set through `/admin/config` or `POST /admin-api/config/set`
+1. **A runtime override** — set on the console page for that setting's protocol, or through `POST /admin-api/config/set`
 2. **The environment variable**
 3. **A legacy environment variable** — there is exactly one, `STS_ISSUER`
 4. **The appconfig file** named by `CONFIG_FILE`
@@ -79,8 +79,8 @@ Three kinds are restart-only and it is worth knowing which:
 
 Everything else is live. That is why so much of the code reads a setting through
 a function call rather than a module-level `const` — a `const` captured at
-require time is the one thing `/admin/config` cannot change, and it fails in the
-direction that looks like the console is broken.
+require time is the one thing a runtime override cannot change, and it fails in
+the direction that looks like the console is broken.
 
 ## The settings worth knowing about first
 
@@ -216,8 +216,10 @@ does.
 | `oauth2.refreshTokenTtlS` | `86400` (twenty-four hours) | 30–2592000, in steps of 30 |
 | `oauth2.clockSkewS` | `30` | 0–300, in steps of 30 |
 
-All four are runtime settings, read per token, and there is a page of their own
-for them at `/admin/token-lifetimes` as well as the usual row on `/admin/config`.
+All four are runtime settings, read per token, and they are drawn twice: with
+the rest of the `oauth2.*` rows on `/admin/oauth2`, and on a page of their own at
+`/admin/token-lifetimes` that puts them beside a count of what has already
+expired. Both write through the same function — one store, two doors.
 
 Set one low and the next token dies on cue, which is the reason to point a client
 at a mock at all:
@@ -260,8 +262,14 @@ curl -s localhost:8081/admin-api/config | jq
 ```
 
 Every row, with its value, where the value came from, its type, its prose, and
-whether it can be set at runtime. The console renders the same thing at
-`/admin/config` with a form.
+whether it can be set at runtime — the whole table, whichever page edits it. It
+also carries `homes`: which console page draws each group.
+
+**In the console each group is on the page for the protocol it configures** —
+`/admin/kerberos`, `/admin/ldap`, `/admin/saml2`, `/admin/scim`, and so on.
+`/admin/config` holds the five settings that belong to no protocol and the index
+of where the other 149 are. Every one of those forms posts to the same endpoint,
+so there is one store however many pages draw the door.
 
 ## Changing one at runtime
 

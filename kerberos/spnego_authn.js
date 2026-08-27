@@ -354,7 +354,7 @@ async function handleSignIn(req, res) {
         '<div class="err">This service can sign people in with a Kerberos ' +
         'ticket, and <code>krb5.spnegoAuthentication</code> is set to ' +
         'false.</div>' +
-        '<p>Turn it on at <a href="/admin/config">/admin/config</a>, or with ' +
+        '<p>Turn it on at <a href="/admin/kerberos">/admin/kerberos</a>, or with ' +
         '<code>POST /admin-api/config/set</code>. Nothing else changes when ' +
         'it is off: <a href="/spnego/protected">/spnego/protected</a> still ' +
         'performs the whole handshake and shows you both halves of it &mdash; ' +

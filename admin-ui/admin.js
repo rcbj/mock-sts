@@ -530,6 +530,24 @@ const SECTIONS = [
         what: 'Which authorization server a flow runs against, how long what ' +
               'it issues lasts, and what this service puts into it.',
         items: [
+          // FIRST IN ITS GROUP, and the position is the argument for the page
+          // existing: the other four are about one aspect each — which server,
+          // how long, which claims — and this one is the family's own
+          // configuration, which is what a reader who has not decided what
+          // they are looking at yet wants first.
+          { path: '/admin/oauth2', label: 'OAuth 2.0 / OIDC settings',
+            blurb: 'The thirteen appconfig rows behind the authorization ' +
+                   'server: the issuer identifier, RFC 9700 mode, the ' +
+                   'registered redirect URIs and how a loopback one is ' +
+                   'matched, Front-Channel Logout, the refresh token\'s idle ' +
+                   'timeout and whether a sign-out revokes it, the client ' +
+                   'assertion\'s clock skew — and the deliberate defect ' +
+                   '<code>oauth2.breakIdTokenNonce</code>, which makes this ' +
+                   'service return an ID Token whose <code>nonce</code> is ' +
+                   'wrong so that a client can find out whether it checks. ' +
+                   'The four lifetimes are here too and have a page of their ' +
+                   'own beside this one, because they are the ones somebody ' +
+                   'sets to a specific number to watch something happen.' },
           { path: '/admin/authorization-servers',
             label: 'Authorization servers',
             blurb: 'Several authorization servers in ONE process, told apart ' +
@@ -548,8 +566,9 @@ const SECTIONS = [
                    'may be before this service stops believing one of its ' +
                    'own. Four configuration settings with a page of their ' +
                    'own, written through the same function ' +
-                   '<a href="/admin/config">Configuration</a> writes ' +
-                   'through — a change made on either page is one change.' },
+                   '<a href="/admin/oauth2">the OAuth 2.0 / OIDC settings</a> ' +
+                   'write through — a change made on either page is one ' +
+                   'change.' },
           { path: '/admin/claims', label: 'Custom claims',
             blurb: 'What to add to every OAuth 2.0 access token and every ' +
                    'OIDC ID Token this service issues FROM NOW ON. Two sets, ' +
@@ -621,6 +640,20 @@ const SECTIONS = [
         what: 'Both halves: what the OID4VCI issuer puts in a credential, ' +
               'and what the OID4VP verifier asks a wallet to present.',
         items: [
+          // THE ORDER PAIRS EACH PROTOCOL WITH THE PAGE THAT SAYS WHAT GOES
+          // THROUGH IT — issuance, then what an issued credential carries;
+          // presentation, then what a wallet is asked for. Grouping the two
+          // settings pages together instead would put the OID4VP settings
+          // three rows from the request they configure.
+          { path: '/admin/oid4vci', label: 'OpenID4VCI',
+            blurb: 'The issuer\'s own settings: which wallet the offer pages ' +
+                   'send somebody to, which authorization server the ' +
+                   'credential endpoint trusts a token from, how many ' +
+                   'credentials one request may ask for, how long a deferred ' +
+                   'issuance pretends to take, whether a credential request ' +
+                   'must be encrypted, and whether the SD-JWT VC and ldp_vc ' +
+                   'issuers name themselves by DID or by URL — the one ' +
+                   'choice here that changes what a verifier has to resolve.' },
           { path: '/admin/vc', label: 'Credential claims',
             blurb: 'Which claims a Verifiable Credential issued from now on ' +
                    'carries, chosen from a catalogue of LDAP attribute TYPES ' +
@@ -629,6 +662,13 @@ const SECTIONS = [
                    'selection also populates the directory, so an LDAP ' +
                    'client and a wallet describe one person. It applies to ' +
                    'all five OID4VCI configurations at once.' },
+          { path: '/admin/oid4vp', label: 'OpenID4VP',
+            blurb: 'The verifier\'s own settings: the client identifier it ' +
+                   'presents as, where it sends a holder to present, how ' +
+                   'fresh a Key Binding JWT has to be, and the claims its ' +
+                   'request asks for by default. The DCQL query itself is on ' +
+                   '<a href="/admin/vc-verifier-config">Verifier request</a> ' +
+                   'next door — these four are the settings around it.' },
           { path: '/admin/vc-verifier-config', label: 'Verifier request',
             blurb: 'The other end of that lifecycle: what the mock Verifier ' +
                    'at <code>/oid4vp/verifier</code> asks a wallet for, and ' +
@@ -700,7 +740,63 @@ const SECTIONS = [
                'produce is the same one every other family and this console ' +
                'read. So a relationship is created DISABLED and an assertion ' +
                'is refused unless it verifies against the certificate ' +
-               'configured on it.' }
+               'configured on it.' },
+
+      // FIVE PAGES ADDED ON 2026-08-27, AND EVERY ONE OF THEM EXISTS BECAUSE
+      // ITS FAMILY HAD SETTINGS AND NO PAGE. Kerberos has nineteen appconfig
+      // rows, SCIM has eighteen and SPIFFE twenty-eight — and until this date
+      // only the last two were reachable from a page about the protocol they
+      // configure. The other five families' settings were on /admin/config
+      // among a hundred and fifty-four rows, which is the same as being
+      // nowhere for anybody who looked under the protocol first.
+      //
+      // They are UNGROUPED, beside SCIM and Federation, for the reason a group
+      // of one is refused everywhere else here: the heading would say the
+      // label twice. They come after those two rather than before, in the
+      // order the families arrived in this service, because there is no
+      // ranking between them that a reader would predict — alphabetical would
+      // put TLS before WS-Trust and teach nobody anything.
+      { path: '/admin/kerberos', label: 'Kerberos',
+        blurb: 'The KDC\'s own settings: the realm, the two raw ports, the ' +
+               'clock skew and the deliberate clock OFFSET, the one password ' +
+               'every user account shares, the names that stay unknown so a ' +
+               'client can be shown a real KDC error, the long-term keys ' +
+               'behind krbtgt and the inter-realm trust, and whether a ticket ' +
+               'presented at <code>/authn/spnego</code> may start a browser ' +
+               'session at all. Most of them are restart-only: the principal ' +
+               'database is built from them when the process starts.' },
+      { path: '/admin/ldap', label: 'LDAP / LDAPS',
+        blurb: 'The embedded directory\'s two raw sockets and the store ' +
+               'behind them: the ports, the base DN every realm\'s subtree ' +
+               'hangs under, whether a name seen for the first time gets an ' +
+               'entry, and the two ceilings that keep a mock from being ' +
+               'filled up. What is IN the directory is on ' +
+               '<a href="/admin/users">Users</a> and ' +
+               '<a href="/admin/groups">Groups</a>; this page is the ' +
+               'directory itself.' },
+      { path: '/admin/wstrust', label: 'WS-Trust',
+        blurb: 'The security token service at <code>/wstrust</code>, ' +
+               'WS-Trust 1.0 to 1.4, and the one setting it has of its own — ' +
+               'who its tokens say issued them. What an assertion CONTAINS is ' +
+               'the SAML pages next door, because the assertion is built by ' +
+               'the same two functions the SAML profiles use.' },
+      { path: '/admin/wsfed', label: 'WS-Federation',
+        blurb: 'The passive requestor profile at <code>/wsfed</code>, its ' +
+               'entity ID, and the mock relying party that checks a sign-in ' +
+               'response line by line. The assertion it carries is a SAML 1.1 ' +
+               'one, so its issuer and its attributes are configured on the ' +
+               'SAML pages — this page says which setting is which and links ' +
+               'to them rather than offering a third form onto the same ' +
+               'value.' },
+      { path: '/admin/tls', label: 'TLS / mutual TLS',
+        blurb: 'The two HTTPS listeners of this service\'s own — 8443, and ' +
+               '9443 which asks for a client certificate — and the ' +
+               'certificate three other sockets share with them, regenerated ' +
+               'on every start. The names and addresses that certificate ' +
+               'carries are settings here; whether the MAIN port is HTTPS too ' +
+               'is <code>global.https</code> on ' +
+               '<a href="/admin/config">Configuration</a>, because it is a ' +
+               'fact about the process rather than about these listeners.' }
     ] },
   { title: 'Directory',
     what: 'The embedded LDAP directory, and the identities this service has ' +
@@ -914,6 +1010,156 @@ SECTIONS.forEach(function (section) {
     NAV.push({ path: item.path, label: item.label, section: section.title });
   });
 });
+
+// ---------------------------------------------------------------------------
+// WHICH PAGE OWNS WHICH SETTINGS, AND THE ONE TABLE THAT DECIDES IT.
+//
+// Until 2026-08-27 every one of `config.js`'s settings was drawn on
+// `/admin/config` and nowhere else, and each protocol page that cared about
+// its own — `/admin/saml2`, `/admin/saml11`, `/admin/scim` — showed them as
+// READINGS with a link to that page, saying in three different sets of words
+// that the configuration page owned them. That was one page of a hundred and
+// fifty-four rows: somebody who came to the console to change the Kerberos
+// realm found the Kerberos page, read what a ticket carries, and was then sent
+// somewhere else to type it.
+//
+// So the settings moved to the page for the protocol they configure, and this
+// table is the whole of the mapping. Four rules about it, and each is the
+// reason the table exists rather than the placements being spread over twenty
+// route handlers:
+//
+//   * **A GROUP HAS EXACTLY ONE ROW HERE AND A ROW MAY NAME MORE THAN ONE
+//     PAGE.** `config.js`'s `group` is the unit — it is already the thing the
+//     table declares, the thing `config.groups()` buckets by and the thing a
+//     reader looking for "the Kerberos settings" is thinking of — so a page
+//     never names individual keys. A page that wanted half a group would be
+//     asking for the group to be split in `config.js`, where the reasoning for
+//     what belongs together lives.
+//   * **`SAML` IS THE ONE ROW WITH TWO PAGES, and it is not an untidiness.**
+//     `saml.issuer` is the Issuer of every assertion this service builds — SAML
+//     2.0's, SAML 1.1's, and WS-Federation's, which are built by the same two
+//     functions — so there is no one page it belongs to. It is drawn on both
+//     SAML pages, each form writing through `config.setOverride()` like every
+//     other, and `configFormsFor()` says so on both rather than letting a
+//     reader discover that the value they set on one page had appeared on the
+//     other. The WS-Federation page names it too, as a link: three forms onto
+//     one setting is where "shown in more than one place" stops being useful.
+//   * **THE PAGE IS NOT A SECOND STORE, which is what makes any of this
+//     allowed.** Every form these pages draw is `configSection()`, posting
+//     `set-many` to `POST /admin/config` — the same action function, the same
+//     override map, the same validation — with a hidden `from` naming the page
+//     to come back to. That is the rule `/admin/token-lifetimes` argued when it
+//     took four of these rows onto a page of its own: a second DOOR onto one
+//     value is fine and a second PLACE THE VALUE LIVES is not.
+//   * **DRIFT IS CHECKED AT STARTUP, not trusted.** A group added to
+//     `config.js` with no row here would silently stop being editable anywhere
+//     — the settings would exist, answer on `GET /admin-api/config`, and appear
+//     on no page at all. `checkSettingHomes()` below refuses to let that be
+//     quiet: it logs, and `/admin/config` shows it in the same spirit as
+//     `/admin/sts-metadata` reporting a route nobody described.
+//
+// The pages named here are ordinary console pages and every one of them is in
+// SECTIONS above. Eight of them were created for this: the OAuth2 / OIDC,
+// OpenID4VCI, OpenID4VP, WS-Trust, WS-Federation, Kerberos, LDAP / LDAPS and
+// TLS families had settings and no page, which is exactly the gap that made
+// them invisible on a console organised by protocol.
+const SETTING_HOMES = [
+  // The one group with no protocol to belong to, and the reason /admin/config
+  // still has a form on it. A bind address and a log level are facts about the
+  // PROCESS; there is no family whose page they would be less surprising on.
+  { group: 'Global', pages: ['/admin/config'] },
+
+  { group: 'Trust realms', pages: ['/admin/realms'] },
+  { group: 'OAuth 2.0 / OIDC', pages: ['/admin/oauth2'] },
+  { group: 'Admin console', pages: ['/admin/rbac'] },
+  { group: 'Applications', pages: ['/admin/applications'] },
+  { group: 'Federation', pages: ['/admin/federation'] },
+  // Two pages, deliberately. See the header above.
+  { group: 'SAML', pages: ['/admin/saml2', '/admin/saml11'] },
+  { group: 'SAML 2.0', pages: ['/admin/saml2'] },
+  { group: 'SAML 1.1', pages: ['/admin/saml11'] },
+  { group: 'WS-Trust', pages: ['/admin/wstrust'] },
+  { group: 'WS-Federation', pages: ['/admin/wsfed'] },
+  { group: 'TLS', pages: ['/admin/tls'] },
+  { group: 'OID4VCI', pages: ['/admin/oid4vci'] },
+  { group: 'OID4VP', pages: ['/admin/oid4vp'] },
+  { group: 'Kerberos', pages: ['/admin/kerberos'] },
+  { group: 'LDAP', pages: ['/admin/ldap'] },
+  { group: 'SCIM', pages: ['/admin/scim'] },
+  // The claim itself is an OAuth2/OIDC and SAML concern, but what it NAMES is a
+  // directory group and what decides whether somebody is in one is the Groups
+  // page. Somebody asking "why is this group not in my token" is looking at
+  // that page's membership table when the question occurs to them.
+  { group: 'Group claim', pages: ['/admin/groups'] },
+  { group: 'Audit log', pages: ['/admin/audit'] },
+  { group: 'Delegation', pages: ['/admin/delegation'] },
+  { group: 'Logout', pages: ['/admin/logout'] },
+  { group: 'SPIFFE', pages: ['/admin/spiffe'] }
+];
+
+// Every group `config.js` declares, in its order. Read off the table rather
+// than off `config.groups()` because this runs at require time and that call
+// describes every setting — the group NAME is all that is being checked, and
+// asking for a hundred and fifty-four descriptions to get twenty-two strings
+// would also drag a realm lookup into module load.
+function declaredSettingGroups() {
+  const seen = [];
+  config.SETTINGS.forEach(function (setting) {
+    if (seen.indexOf(setting.group) < 0) {
+      seen.push(setting.group);
+    }
+  });
+  return seen;
+}
+
+// The three ways this table can be wrong, checked once at require time. Each
+// would otherwise be found by a person who could not find a setting, which is
+// the slowest way to find any of them.
+function checkSettingHomes() {
+  log.debug("Entering checkSettingHomes().");
+  const problems = [];
+  const declared = declaredSettingGroups();
+  const homed = SETTING_HOMES.map(function (row) { return row.group; });
+
+  declared.forEach(function (group) {
+    const rows = homed.filter(function (name) { return name === group; }).length;
+    if (rows === 0) {
+      problems.push('The setting group "' + group + '" has no page to live on. ' +
+        'Add a row to SETTING_HOMES in admin-ui/admin.js naming the console ' +
+        'page that should draw it, or it is editable nowhere.');
+    }
+    if (rows > 1) {
+      problems.push('The setting group "' + group + '" has ' + rows + ' rows in ' +
+        'SETTING_HOMES. One row may name several pages; two rows cannot say ' +
+        'which of them a reader is meant to believe.');
+    }
+  });
+
+  SETTING_HOMES.forEach(function (row) {
+    if (declared.indexOf(row.group) < 0) {
+      problems.push('SETTING_HOMES names the setting group "' + row.group +
+        '", which config.js does not declare. It was probably renamed there.');
+    }
+    row.pages.forEach(function (path) {
+      const known = NAV.some(function (item) { return item.path === path; });
+      if (!known) {
+        problems.push('SETTING_HOMES sends the "' + row.group + '" settings to ' +
+          path + ', which is not a page in this console\'s SECTIONS. Nothing ' +
+          'would draw them.');
+      }
+    });
+  });
+
+  problems.forEach(function (problem) {
+    log.error('admin console: ' + problem);
+  });
+  log.debug("Leaving checkSettingHomes(). " + problems.length + " problem(s).");
+  return problems;
+}
+
+// Kept, not just logged: /admin/config renders it. A line in a log that scrolls
+// past at startup is not a thing anybody reads twice.
+const SETTING_HOME_PROBLEMS = checkSettingHomes();
 
 // The two measurements the folds below are decided by. They are declared
 // HERE, above everything, rather than beside note() where they are read:
@@ -1266,8 +1512,9 @@ const OPEN_BANNER =
   'else in this service does either: the username typed at the sign-in screen is the identity ' +
   'in every token it issues. Anyone who can reach this port can revoke every token and change ' +
   'what the next one contains. That is fine on a laptop or a compose network and is not fine on ' +
-  'a public address. Turn it on from <a href="/admin/config">Configuration</a>, and say who may ' +
-  'get in on <a href="/admin/rbac">Admin roles</a>.');
+  'a public address. Turn it on and say who may get in on ' +
+  '<a href="/admin/rbac">Admin roles</a>, which draws all four of its ' +
+  'settings.');
 
 // SAID WHEN — AND ONLY WHEN — THE SESSION BELONGS TO ANOTHER REALM.
 //
@@ -1669,6 +1916,19 @@ function page(title, active, inner, up, gate, req) {
     // list, and a search result identical to the page behind it reads as a link
     // that does nothing.
     // ---------------------------------------------------------------------
+    // A FORM THAT IS A FRAGMENT TARGET — the two chooser searches and the
+    // delegation table's filter. See chooserPane() for why they submit to
+    // themselves by fragment; this is the one rule they need in return.
+    // `scroll-margin-top` stops the browser from putting the form flush
+    // against the top of the window, and the size of it is measured rather
+    // than picked: each of these forms has ONE line above it that says what it
+    // is for — a folded sentence over the choosers, the `What happened`
+    // heading over the filter — and 3rem is what brings that line back onto
+    // the screen with the form. Landing one line lower would hide it, which is
+    // the wrong thing to hide from somebody who has just arrived at the
+    // control. It is the only effect this class has and the only reason any of
+    // those forms has a class at all.
+    'form.finder{scroll-margin-top:3rem}' +
     '.chooser{max-height:13.5em;overflow-y:auto;border:1px solid #e2e2ea;' +
     'border-radius:6px;background:#fbfbfd;margin:.1em 0 .3em}' +
     '.chooser ul.hits{list-style:none;margin:0;padding:0}' +
@@ -1769,7 +2029,13 @@ function page(title, active, inner, up, gate, req) {
     '.guide .undescribed{color:#a33}' +
     '.meta{margin-top:22px;padding-top:12px;border-top:1px solid #eee;font-size:.76em;color:#666}' +
     '.meta div{margin:3px 0}ul{margin:.3em 0;padding-left:1.2em}li{margin:.25em 0;font-size:.85em}' +
-    '.pagenav{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:.5em 0;font-size:.8em}' +
+    // The head copy of this control is a fragment TARGET — see pageNavPair()
+    // for why every paging link carries `#list-<param>`. The scroll margin is
+    // the same 3rem the search forms take and for the same reason: the line
+    // immediately above a pager is the heading or the filter that says which
+    // list it moves, and landing flush would put that line just off-screen.
+    '.pagenav{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:.5em 0;' +
+    'font-size:.8em;scroll-margin-top:3rem}' +
     '.pagenav a,.pagenav .here,.pagenav .off{display:inline-block;padding:3px 8px;border-radius:5px;' +
     'border:1px solid #d5d5dd;background:#fff;text-decoration:none;min-width:1.6em;text-align:center}' +
     '.pagenav .here{background:#12107c;border-color:#12107c;color:#fff;font-weight:700}' +
@@ -2908,7 +3174,7 @@ function pagingOf(query, total, options) {
     firstRow: total ? offset + 1 : 0,
     lastRow: Math.min(offset + perPage, total),
     // Which query parameter this list moves on, carried on the result rather than
-    // passed to pageNav() a second time: the one place that decides the name is the
+    // passed to pageNavPair() a second time: the one place that decides the name is the
     // one place that builds the links, so a control cannot come to page a list other
     // than the one it is drawn under.
     param: param,
@@ -3071,20 +3337,49 @@ function queryWith(params, overrides) {
 // The numbered links are a WINDOW around the current page rather than one per page:
 // 5,000 tokens at 50 a page is 100 links, which is a worse navigation aid than none.
 // First and last are always offered so the ends stay one click away.
-function pageNav(path, params, pg) {
-  log.debug("Entering pageNav(). pages=" + pg.pages + ", param=" + pg.param);
+//
+// IT RETURNS THE TWO COPIES RATHER THAN ONE STRING, AND THAT IS THE WHOLE
+// REASON THIS FUNCTION WAS RENAMED ON 2026-08-27.
+//
+// Every link here is a page load, and a page load lands at the top of the
+// document — so `next ›` threw the reader back past the sidebar, the folded
+// prose and the filter row to read the rows they had asked for, on pages that
+// are several thousand pixels long. The fix is the one chooserPane() and the
+// delegation filter use: the control submits to a FRAGMENT naming itself, so
+// the browser puts it back under the reader's eyes. This console runs no
+// script (app.js sets `script-src 'none'`), so nothing can restore a scroll
+// offset after the navigation and there is no other fix available.
+//
+// The fragment has to name ONE element, and this control is drawn TWICE with
+// the table between the copies. An id must be unique in a document, and the
+// two copies are not interchangeable anyway: whichever copy was clicked, the
+// reader wants the TOP of the page they have just asked for, which is the head
+// copy. So the head copy carries the id and the foot copy does not, and the
+// call site says which it is drawing — `nav.head` above the table, `nav.foot`
+// below it. Building both from one call is what stops the two from drifting
+// into controls that page different lists.
+//
+// The id is the list's OWN paging parameter, which is already unique per list
+// on a page for the reason pagingOf() gives — a drill-down draws five of these
+// and each must send its reader back to its own table, not to the first one.
+function pageNavPair(path, params, pg) {
+  log.debug("Entering pageNavPair(). pages=" + pg.pages + ", param=" + pg.param);
   if (pg.pages <= 1) {
-    log.debug("Leaving pageNav(). One page; no control drawn.");
-    return '';
+    log.debug("Leaving pageNavPair(). One page; no control drawn.");
+    return { head: '', foot: '' };
   }
+  const anchor = 'list-' + pg.param;
   function link(page, label, title) {
     const move = {};
     // The list's OWN parameter, off pg, so that a drill-down's five controls move
     // five different lists. Everything else in `params` rides along untouched,
     // which is what keeps the other four where the reader left them.
     move[pg.param] = page;
-    return '<a href="' + esc(path + queryWith(params, move)) + '"' +
-           (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</a>';
+    // The fragment is the head copy of THIS control — see the header. It rides
+    // on the href rather than on the page's own URL, so a link somebody copies
+    // out of here still opens where they were looking.
+    return '<a href="' + esc(path + queryWith(params, move)) + '#' + esc(anchor) +
+           '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</a>';
   }
   const out = [];
   if (pg.page > 1) {
@@ -3106,8 +3401,15 @@ function pageNav(path, params, pg) {
   }
   out.push('<span class="where">page ' + pg.page + ' of ' + pg.pages + ' — ' + pg.noun + ' ' +
            pg.firstRow + '&ndash;' + pg.lastRow + ' of ' + pg.total + '</span>');
-  log.debug("Leaving pageNav(). Drew " + out.length + " element(s).");
-  return '<div class="pagenav">' + out.join('') + '</div>';
+  log.debug("Leaving pageNavPair(). Drew " + out.length + " element(s).");
+  const inner = out.join('') + '</div>';
+  return {
+    head: '<div class="pagenav" id="' + esc(anchor) + '">' + inner,
+    // The same control, without the id. A list drawn with ONE copy uses `head`
+    // whichever end of the table it is at, because an anchor nothing points to
+    // is the bug this exists to prevent.
+    foot: '<div class="pagenav">' + inner
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3331,7 +3633,7 @@ app.get('/admin', function (req, res) {
     '302, 401, 403 and a role model. It does not make this port safe to expose.') +
     bullet('<strong>It enforces nothing by default, and widening is what most of these pages do.</strong> ' +
     'RFC 9700 mode is the one MODE that makes this service refuse what it would otherwise accept, ' +
-    'and it is off unless <a href="/admin/config">Configuration</a> turns it on. Three surfaces ' +
+    'and it is off unless <a href="/admin/oauth2">the OAuth 2.0 / OIDC settings</a> turn it on. Three surfaces ' +
     'ask for a credential without it — <a href="/admin/scim">SCIM</a>, the SPIRE Server API and ' +
     'this console — and all three are a turnstile rather than a lock: each can be switched off, ' +
     'and none of them checks a password. <a href="/admin/federation">Federation</a> is the one ' +
@@ -3359,7 +3661,7 @@ app.get('/admin', function (req, res) {
     'deactivates nobody at all.') +
     bullet('<strong>It shows ONE trust realm at a time, and it writes the one it is read in.</strong> ' +
     'Every page here reports the realm in the path it was reached by, and the switcher above the ' +
-    'nav is how you leave it — so a setting saved on <a href="/admin/config">Configuration</a> ' +
+    'nav is how you leave it — so a setting saved on any of these pages ' +
     'changes that realm and no other. There is deliberately no per-realm administrator: the two ' +
     'roles are groups in the ONE shared directory, so somebody who holds Admin Write holds it ' +
     'everywhere, and the console\'s own sign-on follows the roles rather than the sessions.') +
@@ -3935,11 +4237,11 @@ app.get('/admin/tokens', function (req, res) {
   const shown = view.shown;
   const heldByFamily = view.heldByFamily;
   // What every paging link has to carry with it. The page number is not in here —
-  // pageNav() supplies that per link — and neither is `format`, because JSON has no
+  // pageNavPair() supplies that per link — and neither is `format`, because JSON has no
   // links in it and a caller asking for JSON passes its own parameters anyway.
   const filterParams = { family: wantedFamily, kind: wantedKind, state: wantedState,
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/tokens', filterParams, paging);
+  const nav = pageNavPair('/admin/tokens', filterParams, paging);
   // What the POST handler sends the browser back to. A row button returns to THIS
   // page of THIS filter; the bulk buttons below keep the filter but not the page,
   // because after "revoke everything" the list they were looking at is a different
@@ -4052,12 +4354,12 @@ app.get('/admin/tokens', function (req, res) {
     // selects the reader can see it obeying.
     note('Family and Kind narrow together: choosing a family and a kind from a ' +
     'different one matches nothing, which is what an empty table below then means.') +
-    nav +
+    nav.head +
     '<table><tr><th>Kind</th><th>State</th><th>User</th><th>Subject</th>' +
     '<th>Client, audience or service</th><th>Detail</th>' +
     '<th>Presented as</th><th>Issued</th><th>Expires</th><th>jti or ID</th><th></th></tr>' +
     (rows || '<tr><td colspan="11">Nothing matches.</td></tr>') + '</table>' +
-    nav +
+    nav.foot +
     note(filtered.length + ' row(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
                         ' are on this page (' + paging.page + ' of ' + paging.pages + ')' : '') +
@@ -4803,10 +5105,16 @@ function logoutView(req) {
       'them would make a global logout look complete when it is not.') +
       note('A person signing THEMSELVES out uses <code>/logout</code>, which needs ' +
       'no console role and is where the front-channel notifications actually load: those are ' +
-      'iframes in the signed-out person\'s own browser, and this console is not that browser.');
+      'iframes in the signed-out person\'s own browser, and this console is not that browser.') +
+      // ON THE LOOKUP PAGE AND NOT ON THE PER-PERSON ONE. These four decide
+      // what a logout REACHES, which is a question about the feature; the
+      // drill-down is about one person, and a form there would invite somebody
+      // to change the rules for everybody while looking at one of them.
+      configFormsFor('/admin/logout');
     log.debug("Leaving logoutView(). The lookup form.");
-    return { json: { user: '', known: false, families: families }, inner: inner,
-             title: 'Sign-out' };
+    return { json: { user: '', known: false, families: families,
+                     settings: configSettingsJson('/admin/logout') },
+             inner: inner, title: 'Sign-out' };
   }
 
   const key = stats.identityKeyOf(wantedUser);
@@ -4870,7 +5178,7 @@ function logoutView(req) {
       ? '<table><thead><tr><th>Family</th><th>What</th><th>Kind</th><th>Since</th>' +
         '<th>Until</th><th>End</th></tr></thead><tbody>' +
         pg.shown.map(function (r) { return logoutRowHtml(r, canWrite, back); }).join('') +
-        '</tbody></table>' + pageNav('/admin/logout', params, pg.paging)
+        '</tbody></table>' + pageNavPair('/admin/logout', params, pg.paging).head
       : note('Nothing live' + (wantedFamily ? ' in that family' : '') + '.')) +
     (canWrite
       ? '<h2>Undo — both NON-SPEC</h2>' +
@@ -4931,13 +5239,13 @@ app.get('/admin/audit', function (req, res) {
   const summary = view.summary;
   const known = knownUserKeys();
   // What every paging link carries with it. The page number is not in here —
-  // pageNav() supplies that per link — for the reason the tokens page gives: a
+  // pageNavPair() supplies that per link — for the reason the tokens page gives: a
   // "next" that dropped the filter would be page 2 of a different list.
   const filterParams = { category: view.wantedCategory, action: view.wantedAction,
                          outcome: view.wantedOutcome, actor: view.wantedActor,
                          q: view.wantedText,
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/audit', filterParams, paging);
+  const nav = pageNavPair('/admin/audit', filterParams, paging);
 
   const rows = view.shown.map(function (row) {
     return auditRow(row, known);
@@ -5053,11 +5361,11 @@ app.get('/admin/audit', function (req, res) {
     'actor on a directory row is a bind DN and the one on a Kerberos row is ' +
     '<code>alice@REALM</code>; the collapse to a single key can only be done where an ' +
     'identity is normalised.') +
-    nav +
+    nav.head +
     '<table><tr><th class="num">#</th><th>When</th><th>Category</th><th>Action</th>' +
     '<th>Outcome</th><th>Actor</th><th>Target</th><th>What happened</th><th>Detail</th></tr>' +
     (rows || '<tr><td colspan="9">Nothing matches.</td></tr>') + '</table>' +
-    nav +
+    nav.foot +
 
     note(view.filtered.length + ' row(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
@@ -5067,7 +5375,7 @@ app.get('/admin/audit', function (req, res) {
     (summary.dropped
       ? ', and <strong>' + summary.dropped + ' dropped</strong> — the log holds at most ' +
         summary.maxEvents + ' events and discards the oldest first. Raise ' +
-        '<code>audit.maxEvents</code> on <a href="/admin/config">the configuration page</a> ' +
+        '<code>audit.maxEvents</code> in the settings at the foot of this page ' +
         'if that is losing something you need.'
       : '. The cap is ' + summary.maxEvents + ' events and nothing has been dropped yet.')) +
 
@@ -5109,15 +5417,20 @@ app.get('/admin/audit', function (req, res) {
     'page unable to answer the one question an audit log exists for. Restarting the ' +
     'service is how you get an empty one.') +
 
-    note('Two settings on <a href="/admin/config">the configuration page</a> ' +
-    'change this page and both take effect immediately: <code>audit.maxEvents</code> (now ' +
-    summary.maxEvents + ') is the cap, and <code>audit.protocolCalls</code> (now ' +
-    (summary.protocolCalls ? 'on' : '<strong>off</strong>') + ') is whether ordinary ' +
-    'protocol endpoint calls get a row at all. That last one is the noisy category — every ' +
-    'JWKS poll and metadata fetch is an event — so turning it off is how somebody watching ' +
-    'the directory or the console gets a readable page. It never affects the other five ' +
-    'categories, and <a href="/admin/metrics">the metrics page</a> counts every call either ' +
-    'way.') +
+    // THE TWO SETTINGS ARE ON THIS PAGE NOW rather than being described here
+    // and typed in somewhere else. `audit.protocolCalls` is the reason this
+    // one matters: it is the noisy category, and somebody turning it off is
+    // doing it BECAUSE they are looking at this page and cannot read it.
+    configFormsFor('/admin/audit') +
+    note('<code>audit.protocolCalls</code> (now ' +
+    (summary.protocolCalls ? 'on' : '<strong>off</strong>') + ') is the noisy ' +
+    'one — every JWKS poll and metadata fetch is an event — so turning it off ' +
+    'is how somebody watching the directory or the console gets a readable ' +
+    'page. It never affects the other five categories, and ' +
+    '<a href="/admin/metrics">the metrics page</a> counts every call either ' +
+    'way. Both take effect immediately, and lowering ' +
+    '<code>audit.maxEvents</code> (now ' + summary.maxEvents + ') discards the ' +
+    'oldest rows at once rather than on the next event.') +
 
     note('<strong>One request is deliberately never a row here: ' +
     '<code>GET /healthcheck</code> when it answered 200.</strong> It is asked ' +
@@ -5137,7 +5450,9 @@ app.get('/admin/audit', function (req, res) {
     'walk the whole list without guessing where it ends. The same list is at ' +
     '<code>GET /admin-api/audit</code> with the same parameters.');
 
-  respond(req, res, view.json, 'Audit log', '/admin/audit', inner);
+  respond(req, res, Object.assign({}, view.json,
+          { settings: configSettingsJson('/admin/audit') }),
+          'Audit log', '/admin/audit', inner);
   log.debug("Leaving the admin audit page.");
 });
 
@@ -5519,13 +5834,13 @@ app.get('/admin/delegation', function (req, res) {
   const policy = view.policy;
   const known = knownUserKeys();
   // What every paging link carries with it. The page number is not in here —
-  // pageNav() supplies that per link — for the reason the tokens page gives: a
+  // pageNavPair() supplies that per link — for the reason the tokens page gives: a
   // "next" that dropped the filter would be page 2 of a different list.
   const filterParams = { type: view.wantedType, mode: view.wantedMode,
                          outcome: view.wantedOutcome,
                          protocol: view.wantedProtocol, q: view.wantedText,
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/delegation', filterParams, paging);
+  const nav = pageNavPair('/admin/delegation', filterParams, paging);
 
   const listView = listViewOf('/admin/delegation', req.query);
   const rows = view.shown.map(function (row) {
@@ -5699,7 +6014,16 @@ app.get('/admin/delegation', function (req, res) {
     // size returns to page 1. Carrying the old page number over would land
     // somebody on page 6 of a two-page result and the clamp in pagingOf() would
     // then move them again, which reads as the form ignoring them.
-    '<form method="get" action="/admin/delegation"><div class="formrow">' +
+    // THE ANCHOR, for the reason chooserPane() gives at length: this is a GET
+    // that reloads the page, and without it a reader who had scrolled down to
+    // the filter was thrown back to the top of the document by the click that
+    // answered them — on the longest page in this console. It lands on the
+    // form rather than on the first row of the table because the reader has
+    // usually just CHANGED a control and wants to see what they set beside
+    // what came back; `scroll-margin-top` then keeps the `What happened`
+    // heading above it on screen, so the answer arrives with its question.
+    '<form method="get" id="filter-acts" class="finder" ' +
+      'action="/admin/delegation#filter-acts"><div class="formrow">' +
       chooserCarry(req.query) +
       '<label for="type">Mechanism</label><select id="type" name="type">' +
         typeOptions + '</select>' +
@@ -5714,7 +6038,9 @@ app.get('/admin/delegation', function (req, res) {
       '<input type="text" id="q" name="q" size="40" value="' + esc(view.wantedText) +
         '" placeholder="a person, an SPN, a client_id, an attribute">' +
       '<button class="secondary">Filter</button>' +
-      (filtering ? ' <a href="/admin/delegation">clear</a>' : '') +
+      (filtering
+        ? ' <a href="/admin/delegation#filter-acts">clear</a>'
+        : '') +
     '</div></form>' +
     note('The text box searches every party of the chain and both ' +
     'explanations at once, because the fact somebody arrives with names one of ' +
@@ -5725,7 +6051,7 @@ app.get('/admin/delegation', function (req, res) {
     'than to the act because an act has no picture of its own: a diagram has ' +
     'the times taken out, and four acts a second apart between the same three ' +
     'parties are one line.') +
-    nav +
+    nav.head +
     '<table><tr><th class="num">#</th><th>When</th><th>Mechanism</th>' +
     '<th>Kind</th><th>Outcome</th><th>Initial identity</th>' +
     '<th>Intermediary</th><th>Target</th><th>Authorized by / why not</th>' +
@@ -5741,7 +6067,7 @@ app.get('/admin/delegation', function (req, res) {
           'REFUSED attempt counts — the delegation page in the debugger will ' +
           'produce one on purpose.') +
       '</td></tr>') + '</table>' +
-    nav +
+    nav.foot +
 
     note(view.filtered.length + ' act(s) match' +
     (paging.pages > 1 ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
@@ -5751,9 +6077,8 @@ app.get('/admin/delegation', function (req, res) {
     (summary.dropped
       ? ', and <strong>' + summary.dropped + ' dropped</strong> — this page holds ' +
         'at most ' + summary.maxRecords + ' acts and discards the oldest first. ' +
-        'Raise <code>delegation.maxRecords</code> on ' +
-        '<a href="/admin/config">the configuration page</a> if that is losing ' +
-        'something you need.'
+        'Raise <code>delegation.maxRecords</code> in the settings at the foot ' +
+        'of this page if that is losing something you need.'
       : '. The cap is ' + summary.maxRecords + ' acts and nothing has been ' +
         'dropped yet.') +
     ' The <strong>#</strong> column is a sequence number and is monotonic and ' +
@@ -5879,6 +6204,13 @@ app.get('/admin/delegation', function (req, res) {
     'NEITHER, because nothing was accepted, and that gap is the reason this page ' +
     'keeps its own list rather than a filter over one of theirs.') +
 
+    // THE ONE SETTING THIS PAGE HAS, and it is the one a reader wants exactly
+    // when the paragraph above says something was dropped. It is also the only
+    // control on a page that had none — which does not change rule 7's answer
+    // for /admin-api/delegation: the form posts `set-many` to /admin/config,
+    // which POST /admin-api/config/set-many already mirrors.
+    configFormsFor('/admin/delegation') +
+
     note('Paging is <code>?page=</code> and <code>?per=</code> (at ' +
     'most ' + MAX_ROWS + ' rows a page) and both work with ' +
     '<code>?format=json</code>, whose reply carries <code>page</code>, ' +
@@ -5888,7 +6220,9 @@ app.get('/admin/delegation', function (req, res) {
     'can be longer than the list they are derived from. The same data is at ' +
     '<code>GET /admin-api/delegation</code> with the same parameters.');
 
-  respond(req, res, view.json, 'Delegation', '/admin/delegation', inner);
+  respond(req, res, Object.assign({}, view.json,
+          { settings: configSettingsJson('/admin/delegation') }),
+          'Delegation', '/admin/delegation', inner);
   log.debug("Leaving the admin delegation page.");
 });
 
@@ -6546,6 +6880,37 @@ function chooserPane(spec) {
   const query = (spec.here && spec.here.query) || {};
   const path = (spec.here && spec.here.path) || '';
   const wanted = queryOne(query, spec.param).trim();
+
+  // WHERE THE READER IS STANDING, SPELT AS A FRAGMENT SO THAT SEARCHING DOES
+  // NOT MOVE THEM.
+  //
+  // Every control in this pane is a GET that reloads the page, and a reload
+  // lands at the top of the document — so a reader who had scrolled past four
+  // hundred rows of the table to reach this chooser was thrown back to the
+  // heading by the very click that answered them, with the results they asked
+  // for now somewhere below the fold. It got worse the longer the page was,
+  // which is the same complaint the sidebar had.
+  //
+  // A fragment on the form's own action is the fix, and there is no other one
+  // available here: this console runs no script (see app.js's `script-src
+  // 'none'`), so nothing can restore a scroll offset after the navigation.
+  // What the fragment CAN do is put this pane back under the reader's eyes,
+  // which is what they were looking at when they pressed the button.
+  //
+  // It works because of a detail of the HTML form algorithm that is easy to
+  // doubt and was checked in a browser rather than assumed: submitting a GET
+  // form replaces the action URL's QUERY and leaves its FRAGMENT alone, so
+  // `action="/admin/delegation#find-appq"` arrives as
+  // `/admin/delegation?appq=x#find-appq`. That is the "mutate action URL"
+  // step of the HTML standard, which sets `url`'s query and touches nothing
+  // else — so a hidden input cannot do this job and there is nowhere else to
+  // put the fragment.
+  //
+  // The name is the search box's own parameter, which is what makes it unique
+  // on a page that draws this control twice — `appq` and `userq` never appear
+  // in one pane, and the two panes must not send each other's readers to the
+  // wrong half of the page.
+  const anchor = 'find-' + spec.param;
   const matched = spec.entries.filter(function (entry) {
     return chooserMatches(entry.names, wanted);
   });
@@ -6580,13 +6945,15 @@ function chooserPane(spec) {
   // typing or by clicking `previous`.
   const paging = pageParamsOf(query);
   const pageLink = function (at, label, title) {
-    // pageNav()'s own idiom, and for its reason: the control's OWN parameter is
+    // pageNavPair()'s own idiom, and for its reason: the control's OWN parameter is
     // the only one it sets, so the other chooser's offset and the table's page
     // stay where the reader left them.
     const move = {};
     move[spec.fromParam] = at > 0 ? at : '';
-    return '<a href="' + esc(path + queryWith(paging, move)) + '" title="' +
-      esc(title) + '">' + label + '</a>';
+    // The anchor for the reason above: paging the results is the same click
+    // as searching them, and it is a page reload just as much.
+    return '<a href="' + esc(path + queryWith(paging, move)) + '#' + esc(anchor) +
+      '" title="' + esc(title) + '">' + label + '</a>';
   };
 
   const rows = shown.map(function (entry) {
@@ -6625,7 +6992,8 @@ function chooserPane(spec) {
 
   log.debug("Leaving chooserPane(). " + matched.length + " matched, " +
             shown.length + " shown from " + from + ".");
-  return '<form method="get" action="' + esc(path) + '">' +
+  return '<form method="get" id="' + esc(anchor) + '" class="finder" action="' +
+    esc(path) + '#' + esc(anchor) + '">' +
     '<div class="formrow">' + hidden +
       '<label for="' + esc(spec.param) + '">' + esc(spec.label) + '</label>' +
       '<input type="text" id="' + esc(spec.param) + '" name="' +
@@ -6633,7 +7001,8 @@ function chooserPane(spec) {
         '" placeholder="' + esc(spec.placeholder) + '">' +
       '<button class="secondary">Search</button>' +
       (wanted
-        ? ' <a href="' + esc(path + queryWith(carried, {})) + '">clear</a>'
+        ? ' <a href="' + esc(path + queryWith(carried, {})) + '#' + esc(anchor) +
+          '">clear</a>'
         : '') +
     '</div></form>' +
     pane +
@@ -7261,8 +7630,8 @@ app.get('/admin/delegation/chain', function (req, res) {
           'first. So an old link coming back empty is the ordinary outcome ' +
           'rather than a mistake, and so is a link from a service that has ' +
           'restarted since: nothing here is persisted. Raise ' +
-          '<code>delegation.maxRecords</code> on <a href="/admin/config">the ' +
-          'configuration page</a> if this keeps happening to something you ' +
+          '<code>delegation.maxRecords</code> on <a href="/admin/delegation">the ' +
+          'delegation page</a> if this keeps happening to something you ' +
           'need.')
         : note('<strong>Name a relationship.</strong> This page draws ' +
           'ONE of them, and the way to it is a link on ' +
@@ -8965,7 +9334,7 @@ function authenticationTable(row) {
 // which an index into the session list would not.
 function sessionBlock(session, tokenPage, back, params) {
   log.debug("Entering sessionBlock(). id=" + session.id);
-  const nav = pageNav('/admin/users', params, tokenPage.paging);
+  const nav = pageNavPair('/admin/users', params, tokenPage.paging);
   const html = '<h3>Session ' + shortened(session.id, 12) + ' &mdash; ' +
     '<span class="' + (session.expired ? 'state-expired' : 'state-valid') + '">' +
     (session.expired ? 'expired, not yet swept' : 'active') + '</span></h3>' +
@@ -8976,12 +9345,12 @@ function sessionBlock(session, tokenPage, back, params) {
     '<td>' + esc(session.amr || '—') + '</td>' +
     '<td>' + esc(session.acr || '—') + '</td>' +
     '<td>' + (session.wsfedRealms.length ? esc(session.wsfedRealms.join(', ')) : '—') + '</td></tr></table>' +
-    nav +
+    nav.head +
     userTokenTable(tokenPage.shown, back,
       'Nothing has been issued on this session yet. A browser can hold a sign-on session and have ' +
       'been given no token at all — it is what the authorization endpoint reads before it issues ' +
       'anything.') +
-    nav;
+    nav.foot;
   log.debug("Leaving sessionBlock().");
   return html;
 }
@@ -9039,7 +9408,7 @@ function userDetailPage(req, key) {
   // keeps warning about.
   const sessionPage = pagedRows(req.query, sessionRows,
     { name: 'sessions', noun: 'sessions', defaultPer: DEFAULT_BLOCKS_PER_PAGE });
-  const sessionsNav = pageNav('/admin/users', params, sessionPage.paging);
+  const sessionsNav = pageNavPair('/admin/users', params, sessionPage.paging);
   // The token paging of each session that is on this page of sessions, kept beside
   // the block rather than recomputed for the JSON below: two calls with the same
   // arguments would be two chances for the page and the reply to disagree about
@@ -9060,13 +9429,13 @@ function userDetailPage(req, key) {
   // document gets right and a client author never finds.
   const endedPage = pagedRows(req.query, split.ended,
                               { name: 'tokensOnEndedSessions', noun: 'tokens' });
-  const endedNav = pageNav('/admin/users', params, endedPage.paging);
+  const endedNav = pageNavPair('/admin/users', params, endedPage.paging);
   const sessionlessPage = pagedRows(req.query, split.sessionless,
                                     { name: 'tokensWithNoSession', noun: 'tokens' });
-  const sessionlessNav = pageNav('/admin/users', params, sessionlessPage.paging);
+  const sessionlessNav = pageNavPair('/admin/users', params, sessionlessPage.paging);
   const artifactPage = pagedRows(req.query, detail.artifacts,
                                  { name: 'artifacts', noun: 'artifacts' });
-  const artifactNav = pageNav('/admin/users', params, artifactPage.paging);
+  const artifactNav = pageNavPair('/admin/users', params, artifactPage.paging);
 
   const inner = messagesOf(req) +
     '<div class="tiles">' +
@@ -9145,11 +9514,11 @@ function userDetailPage(req, key) {
     'client receives. The link is recorded out of band at issuance instead, and it survives a ' +
     'refresh: a refreshed token is looked up by the refresh token\'s <code>jti</code> and lands ' +
     'under the same session.') +
-    sessionsNav +
+    sessionsNav.head +
     (sessionBlocks || note('This user holds no sign-on session. That is the normal state ' +
       'for every identity that never used a browser here — a password grant, a Kerberos client, a ' +
       'WS-Trust requester — and for anyone whose session has expired and been swept.')) +
-    sessionsNav +
+    sessionsNav.foot +
 
     (split.ended.length
       ? '<h3>Issued on a session that has since ended</h3>' +
@@ -9157,7 +9526,7 @@ function userDetailPage(req, key) {
         'it is the ordinary end state: the session expired or was signed out, and the tokens it ' +
         'produced outlived it — which is exactly the position a client is in when its access token ' +
         'still verifies and the browser would be asked to sign in again.') +
-        endedNav + userTokenTable(endedPage.shown, back, '') + endedNav
+        endedNav.head + userTokenTable(endedPage.shown, back, '') + endedNav.foot
       : '') +
 
     (split.sessionless.length
@@ -9166,7 +9535,7 @@ function userDetailPage(req, key) {
         '<code>client_credentials</code>, OID4VCI\'s pre-authorized code, and token exchange. The ' +
         'Grant column says which. An empty Grant means the token was minted somewhere that states ' +
         'nothing about how — WS-Trust\'s JWT and the credential issuer both sign directly.') +
-        sessionlessNav + userTokenTable(sessionlessPage.shown, back, '') + sessionlessNav
+        sessionlessNav.head + userTokenTable(sessionlessPage.shown, back, '') + sessionlessNav.foot
       : '') +
 
     '<h2>Assertions, tickets and credentials</h2>' +
@@ -9174,7 +9543,7 @@ function userDetailPage(req, key) {
     'nothing consults this service about a SAML assertion, a Kerberos ticket or a credential, so a ' +
     'button would change a number on this page and nothing at all out there. The only distinction ' +
     'is whether the validity window has closed.') +
-    artifactNav + userArtifactTable(artifactPage.shown) + artifactNav +
+    artifactNav.head + userArtifactTable(artifactPage.shown) + artifactNav.foot +
 
     directory.html +
 
@@ -9251,7 +9620,7 @@ function usersListPage(req) {
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
   const filterParams = { q: wantedText, protocol: wantedProtocol,
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/users', filterParams, paging);
+  const nav = pageNavPair('/admin/users', filterParams, paging);
 
   // Sessions are counted per user here rather than fetched per row inside the loop:
   // one pass over the session map instead of one per user, and more importantly one
@@ -9393,7 +9762,7 @@ function usersListPage(req) {
       'is who this service has SEEN, and this is what the directory HOLDS. No password is set, ' +
       'because none is ever checked.') +
     '</form>' +
-    nav +
+    nav.head +
     '<table><tr><th>User</th><th>Kind</th><th>Authenticated</th><th>Protocols</th><th>Realms</th>' +
     '<th class="num">Sessions</th><th class="num">Tokens</th><th class="num">Valid</th>' +
     '<th class="num">Expired</th>' +
@@ -9401,7 +9770,7 @@ function usersListPage(req) {
     '<th>Last activity</th><th></th></tr>' +
     (rows || '<tr><td colspan="14">Nobody matches. Nothing has authenticated here yet unless a ' +
              'filter above is hiding it.</td></tr>') + '</table>' +
-    nav +
+    nav.foot +
     note(filtered.length + ' identit' + (filtered.length === 1 ? 'y' : 'ies') +
     ' match; ' + all.length + ' known in total, most recently active first. An identity marked ' +
     '<em>never</em> under Authenticated has been issued something without ever presenting a ' +
@@ -9706,7 +10075,7 @@ const GROUPS_CAVEAT =
   'a claim naming the groups its subject is in, read from these entries at the moment it is ' +
   'minted. Somebody in no group gets no claim at all rather than an empty list. What it is ' +
   'called, whether each value is a <code>cn</code> or a whole DN, and whether a person\'s own ' +
-  '<code>memberOf</code> counts are on <a href="/admin/config">the configuration page</a>; ' +
+  '<code>memberOf</code> counts are the four settings at the foot of this page; ' +
   '<a href="/admin/claims">the claims page</a> shows what it would say about one person. No ' +
   'Kerberos PAC and no WS-Federation-specific token carries a group either way.');
 
@@ -9742,7 +10111,7 @@ function groupsListPage(req) {
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
   const filterParams = { q: wantedText || '',
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/groups', filterParams, paging);
+  const nav = pageNavPair('/admin/groups', filterParams, paging);
 
   const listView = listViewOf('/admin/groups', req.query);
   const rows = shown.map(function (group) {
@@ -9793,7 +10162,7 @@ function groupsListPage(req) {
     '<button type="submit">Filter</button>' +
     (wantedText ? ' <a href="/admin/groups">clear</a>' : '') +
     '</div></form>' +
-    nav +
+    nav.head +
     '<table><tr><th>Group</th><th>DN</th><th>Counted because</th><th class="num">Members</th>' +
     '<th class="num">Resolve</th><th class="num">Dangling</th><th class="num">Claimed</th>' +
     '<th class="num">Attributes</th><th>Came from</th><th>Last modified</th></tr>' +
@@ -9801,7 +10170,7 @@ function groupsListPage(req) {
              (wantedText ? 'The filter above may be hiding some.' : 'This directory holds none — ' +
               'the two it seeds can be deleted through the protocol like any other entry.') +
              '</td></tr>') + '</table>' +
-    nav +
+    nav.foot +
     note('A group is an entry that sits under <code>' + esc(info.groupsDn) + '</code>, ' +
     'or that carries one of the group object classes (<code>groupOfNames</code>, ' +
     '<code>groupOfUniqueNames</code>, <code>posixGroup</code>, <code>groupOfURLs</code>) wherever ' +
@@ -9819,6 +10188,15 @@ function groupsListPage(req) {
     'members with nothing wrong. <strong>Claimed</strong> is the disagreement in the other ' +
     'direction: entries whose own <code>memberOf</code> names the group while the group does not ' +
     'list them back.') +
+    // THE GROUP CLAIM'S FOUR SETTINGS ARE HERE, and this is the one placement
+    // in SETTING_HOMES that is a judgement rather than an obvious fact. They
+    // decide what an OAuth2/OIDC token and a SAML assertion carry, so they
+    // could be argued onto either protocol's page; they are here because the
+    // question they answer — "why is this group not in my token" — occurs to
+    // somebody while they are looking at the membership table above, and
+    // because what the claim NAMES is a directory group, which is what this
+    // page is about.
+    configFormsFor('/admin/groups') +
     GROUPS_CAVEAT + GROUPS_LINKS;
 
   log.debug("Leaving groupsListPage(). " + shown.length + " row(s) drawn of " +
@@ -9828,6 +10206,7 @@ function groupsListPage(req) {
     json: {
       groupCount: info.groupCount, matched: filtered.length, shown: shown.length,
       membershipValues: totalMembers, dangling: totalDangling,
+      settings: configSettingsJson('/admin/groups'),
       filter: { q: wantedText || null },
       page: paging.page, pages: paging.pages, perPage: paging.perPage,
       firstRow: paging.firstRow, lastRow: paging.lastRow,
@@ -9890,9 +10269,9 @@ function groupDetailPage(req, wantedDn) {
   // "five members on this page" is not an answer to it.
   const params = pageParamsOf(req.query);
   const memberPage = pagedRows(req.query, group.members, { name: 'members', noun: 'members' });
-  const membersNav = pageNav('/admin/groups', params, memberPage.paging);
+  const membersNav = pageNavPair('/admin/groups', params, memberPage.paging);
   const claimedPage = pagedRows(req.query, group.claimed, { name: 'claimed', noun: 'entries' });
-  const claimedNav = pageNav('/admin/groups', params, claimedPage.paging);
+  const claimedNav = pageNavPair('/admin/groups', params, claimedPage.paging);
 
   const memberRows = memberPage.shown.map(function (member) {
     const state = member.present
@@ -9926,10 +10305,10 @@ function groupDetailPage(req, wantedDn) {
 
   const claimedSection = group.claimed.length
     ? '<h2>Entries that claim this group, and that it does not list</h2>' +
-      claimedNav +
+      claimedNav.head +
       '<table><tr><th>DN</th><th>cn</th><th>mail</th><th>On the users page</th></tr>' +
       claimedRows + '</table>' +
-      claimedNav +
+      claimedNav.foot +
       note('Each of these carries a <code>memberOf</code> naming this group while this ' +
       'group&rsquo;s own <code>member</code> does not name them back. <strong>Nothing here ' +
       'maintains <code>memberOf</code></strong> &mdash; it is not a standard attribute at all ' +
@@ -9968,10 +10347,10 @@ function groupDetailPage(req, wantedDn) {
     tile(group.claimed.length, 'Claim it back') +
     '</div>' +
     (group.memberCount
-      ? membersNav +
+      ? membersNav.head +
         '<table><tr><th>Member</th><th>From</th><th>State</th><th>What it is</th><th>cn</th>' +
         '<th>mail</th><th>On the users page</th><th>The value as stored</th></tr>' +
-        memberRows + '</table>' + membersNav
+        memberRows + '</table>' + membersNav.foot
       : note('This group lists nobody. An empty <code>groupOfNames</code> is something ' +
         'a real directory refuses &mdash; RFC 4519 makes <code>member</code> MUST &mdash; and ' +
         'this one has no schema, so it is here because something wrote it.')) +
@@ -10442,7 +10821,7 @@ function applicationsListPage(req) {
   const paging = paged.paging;
   const filterParams = { q: wantedText || '', kind: wantedKind || '',
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/applications', filterParams, paging);
+  const nav = pageNavPair('/admin/applications', filterParams, paging);
 
   const listView = listViewOf('/admin/applications', req.query);
   const rows = paged.shown.map(function (row) {
@@ -10520,7 +10899,7 @@ function applicationsListPage(req) {
     ((wantedText || wantedKind)
       ? ' <a href="/admin/applications">clear</a>' : '') +
     '</div></form>' +
-    nav +
+    nav.head +
     '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th><th>Protocols</th>' +
     '<th>Registered</th><th class="num">Auth</th><th class="num">Sessions</th>' +
     '<th class="num">Users</th><th>Last seen</th></tr>' +
@@ -10530,7 +10909,7 @@ function applicationsListPage(req) {
                : 'One appears the first time a client_id, wtrealm, AppliesTo, entityID ' +
                  'or service principal name is accepted here.') + '</td></tr>') +
     '</table>' +
-    nav +
+    nav.foot +
     '<h2>Add an application</h2>' +
     '<p class="sub"><a href="/admin/applications/new">The fuller form is on New ' +
     'application</a> &mdash; the same action, with the PROTOCOL FAMILIES this application ' +
@@ -10570,6 +10949,10 @@ function applicationsListPage(req) {
     'application used by two thousand people would otherwise carry two thousand values ' +
     '&mdash; so the count moves when the id differs from the last one recorded. Right for ' +
     'the ordinary case, and it undercounts somebody alternating between two applications.') +
+    // The two applications.* rows: how many entries this registry remembers,
+    // and whether the console and the management API are seeded into it as
+    // applications of their own.
+    configFormsFor('/admin/applications') +
     APPLICATIONS_CAVEAT + APPLICATIONS_LINKS;
 
   log.debug("Leaving applicationsListPage(). " + paged.shown.length + " row(s) of " +
@@ -10585,6 +10968,7 @@ function applicationsListPage(req) {
       container: applications.containerDn ? applications.containerDn() : null,
       max: applications.maxApplications ? applications.maxApplications() : null,
       kinds: applications.KINDS,
+      settings: configSettingsJson('/admin/applications'),
       applications: paged.shown
     }
   };
@@ -10718,7 +11102,7 @@ function applicationDetailPage(req, identifier) {
   const paged = pagedRows(req.query, attributeRows,
                           { name: 'attributes', noun: 'attributes' });
   const paging = paged.paging;
-  const nav = pageNav('/admin/applications', pageParamsOf(req.query), paging);
+  const nav = pageNavPair('/admin/applications', pageParamsOf(req.query), paging);
 
   const attrHtml = paged.shown.map(function (attr) {
     // What each attribute MEANS rather than only what it holds. The registry's
@@ -10784,7 +11168,7 @@ function applicationDetailPage(req, identifier) {
         (row.origin ? ' &middot; written by <code>' + esc(row.origin) + '</code>' : '') +
         '</p>'
       : '') +
-    nav +
+    nav.head +
     '<table><tr><th>Attribute</th><th>Value</th><th>What it is</th></tr>' +
     // Reachable only where no directory is loaded in this process. Every real
     // entry carries objectClass, cn, appIdentifier and its two timestamps at the
@@ -10794,7 +11178,7 @@ function applicationDetailPage(req, identifier) {
      'is no <code>ou=applications</code> container and no entry to show. This module ' +
      'keeps no store of its own on purpose.</td></tr>') +
     '</table>' +
-    nav +
+    nav.foot +
 
     '<h2>Change what it is allowed to do</h2>' +
     note('These write the same entry an <code>ldapmodify</code> writes, through the ' +
@@ -11409,7 +11793,7 @@ function asListPage(req) {
   const all = authorizationServers.list();
   const paged = pagedRows(req.query, all, { noun: 'authorization servers' });
   const paging = paged.paging;
-  const nav = pageNav('/admin/authorization-servers',
+  const nav = pageNavPair('/admin/authorization-servers',
                       { per: req.query.per ? paging.perPage : '' }, paging);
 
   const listView = listViewOf('/admin/authorization-servers', req.query);
@@ -11449,7 +11833,7 @@ function asListPage(req) {
     'both for a long time. <strong>A path nobody has configured publishes the document this ' +
     'service always published</strong>, so nothing that worked before this page existed ' +
     'behaves differently.') +
-    nav +
+    nav.head +
     '<table><tr><th>Authorization server</th><th>Label</th><th class="num">Overrides</th>' +
     '<th class="num">Removed</th><th class="num">Drift</th><th>Its endpoints</th>' +
     '<th>Came from</th><th class="num">Asked for</th></tr>' +
@@ -11457,7 +11841,7 @@ function asListPage(req) {
              'the document this service builds for itself, which is what RFC 9700 section 2.6 ' +
              'asks for &mdash; these are for when you need it to say something else.</td></tr>') +
     '</table>' +
-    nav +
+    nav.foot +
     '<h2>Add an authorization server</h2>' +
     '<form method="post" action="/admin/authorization-servers"><div class="formrow">' +
     '<input type="hidden" name="action" value="create">' +
@@ -11738,30 +12122,19 @@ function saml2Facts(base, identifier) {
   };
 }
 
-// The settings that decide what a service provider receives. They are on this
-// page as READINGS with a link to the one form that changes them, and not as a
-// second form: `/admin/config` owns every setting in this service, and a second
-// door onto one of them is exactly what /admin/scim's header refuses. The
-// difference from /admin/token-lifetimes — which IS a second door, and argued
-// for it — is that these are set once when a service provider is integrated,
-// not turned up and down inside a session to watch something happen.
-const SAML2_SETTINGS = ['saml2.entityId', 'saml2.perApplicationEntityId',
-                        'saml2.assertionLifetimeMin', 'saml2.signAssertion',
-                        'saml2.signResponse', 'saml2.nameIdFormat',
-                        'saml2.artifactTtlS', 'saml2.autocreateApplications',
-                        'saml2.defaultSingleLogoutService'];
-
-function saml2SettingRows() {
-  return SAML2_SETTINGS.map(function (key) {
-    // `describe()` takes the SETTING and not its key — `configSettingFor()` is
-    // the lookup this file already uses everywhere else it reads one, and
-    // passing the key straight in throws rather than answering.
-    const described = config.describe(configSettingFor(key));
-    return '<tr><td><code>' + esc(key) + '</code></td>' +
-      '<td>' + esc(String(config.value(key))) + '</td>' +
-      '<td>' + esc(described.label || '') + '</td></tr>';
-  }).join('');
-}
+// The settings that decide what a service provider receives are DRAWN ON THIS
+// PAGE, and until 2026-08-27 they were readings here with a link to
+// /admin/config. What changed is not the rule they were following — one store,
+// one function — but where the door is: `configFormsFor('/admin/saml2')` posts
+// `set-many` to that same endpoint against that same override map, exactly as
+// /admin/token-lifetimes has since it was written. See SETTING_HOMES, which is
+// where the keys are now named; a list of them here would be the second list
+// that disagrees with the first.
+//
+// This page draws TWO groups, and the second is worth knowing about: `SAML`
+// holds `saml.issuer`, the Issuer of every assertion this service builds — 2.0,
+// 1.1 and WS-Federation's, which come out of the same two functions — so it is
+// drawn on the SAML 1.1 page as well and configFormsFor() says so on both.
 
 function saml2ListPage(req) {
   log.debug("Entering saml2ListPage().");
@@ -11778,7 +12151,7 @@ function saml2ListPage(req) {
   const paging = paged.paging;
   const filterParams = { q: String(req.query.q || '') || '',
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/saml2', filterParams, paging);
+  const nav = pageNavPair('/admin/saml2', filterParams, paging);
   const listView = listViewOf('/admin/saml2', req.query);
 
   const rows = paged.shown.map(function (row) {
@@ -11821,11 +12194,11 @@ function saml2ListPage(req) {
     '<button class="secondary">Filter</button>' +
     (String(req.query.q || '') ? ' <a href="/admin/saml2">clear</a>' : '') +
     '</div></form>' +
-    nav +
+    nav.head +
     (rows
       ? '<table><thead><tr><th>Service provider (entityID)</th><th>Its metadata</th>' +
         '<th>Assertion consumer service</th><th>Single logout service</th>' +
-        '<th>Responses</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
+        '<th>Responses</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav.foot
       : note('No service provider has used this profile yet' +
         (needle ? ' under that filter' : '') + '. Start one at ' +
         '<a href="/saml2/sp">the mock service provider</a>, or register an entityID below.')) +
@@ -11840,14 +12213,12 @@ function saml2ListPage(req) {
     '<button>Register</button>' +
     '<span class="note">The same thing a request or a metadata fetch would do.</span>' +
     '</div></form>' +
-    '<h2>What every assertion this profile issues is governed by</h2>' +
-    '<table><thead><tr><th>Setting</th><th>Value</th><th>What it is</th></tr></thead><tbody>' +
-    saml2SettingRows() + '</tbody></table>' +
-    '<p class="sub">Readings, not a form: <a href="/admin/config">the configuration page</a> owns ' +
-    'every setting here, and a second door onto one of them is what this console refuses ' +
-    'elsewhere. <a href="/admin/saml-attributes">Custom SAML attributes</a> is the page that ' +
-    'changes what an assertion CONTAINS, and its SAML 2.0 set reaches this profile through the ' +
-    'same assertion builder that serves WS-Trust and WS-Federation.</p>' +
+    configFormsFor('/admin/saml2') +
+    note('These decide the SHAPE of an assertion — who issued it, how long it ' +
+    'is good for, what is signed. <a href="/admin/saml-attributes">Custom SAML ' +
+    'attributes</a> is the page that changes what one CONTAINS, and its SAML ' +
+    '2.0 set reaches this profile through the same assertion builder that ' +
+    'serves WS-Trust and WS-Federation.') +
     perPageForm('/admin/saml2', 'q', String(req.query.q || ''), paging.perPage, '', {});
 
   log.debug("Leaving saml2ListPage(). " + paged.shown.length + " row(s) of " +
@@ -11868,10 +12239,13 @@ function saml2ListPage(req) {
       }),
       paging: paging,
       unscopedMetadata: saml2Facts(base, '').metadataUrl,
-      settings: SAML2_SETTINGS.reduce(function (out, key) {
-        out[key] = config.value(key);
-        return out;
-      }, {}),
+      // The settings this page now EDITS, in the shape every page that owns
+      // settings answers with: described rows carrying their source and
+      // whether they can be changed while the service runs. It was a flat
+      // key-to-value map while they were readings, which could say what a
+      // value was and not where it came from — the question a person asking
+      // about somebody else's deployment actually has.
+      settings: configSettingsJson('/admin/saml2'),
       // Two numbers about the PROFILE rather than about any one service
       // provider, and both are the kind of thing that is invisible until it is
       // wrong: artifacts waiting to be resolved, and AuthnRequests held while a
@@ -12200,26 +12574,12 @@ function saml11ProfileLabel(value) {
   return value;
 }
 
-// The settings that decide what a relying party receives. READINGS with a link
-// to the one form that changes them, and not a second form: /admin/config owns
-// every setting in this service, which is the rule /admin/saml2 states at length
-// and this page follows rather than restating.
-const SAML11_SETTINGS = ['saml11.providerId', 'saml11.perApplicationProviderId',
-                         'saml11.assertionLifetimeMin', 'saml11.signAssertion',
-                         'saml11.signResponse', 'saml11.nameIdFormat',
-                         'saml11.defaultProfile', 'saml11.artifactTtlS',
-                         'saml11.autocreateApplications'];
-
-function saml11SettingRows() {
-  return SAML11_SETTINGS.map(function (key) {
-    // `describe()` takes the SETTING and not its key — the same trap
-    // saml2SettingRows() records.
-    const described = config.describe(configSettingFor(key));
-    return '<tr><td><code>' + esc(key) + '</code></td>' +
-      '<td>' + esc(String(config.value(key))) + '</td>' +
-      '<td>' + esc(described.label || '') + '</td></tr>';
-  }).join('');
-}
+// The settings that decide what a relying party receives are DRAWN ON THIS
+// PAGE, for the reason the SAML 2.0 page's equivalent comment gives and
+// through the same function. The `SAML` group appears on both pages because
+// `saml.issuer` governs both profiles; configFormsFor() says so where it draws
+// it, so a reader who sets it here is told it is the same value the 2.0 page
+// shows.
 
 function saml11ListPage(req) {
   log.debug("Entering saml11ListPage().");
@@ -12236,7 +12596,7 @@ function saml11ListPage(req) {
   const paging = paged.paging;
   const filterParams = { q: String(req.query.q || '') || '',
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/saml11', filterParams, paging);
+  const nav = pageNavPair('/admin/saml11', filterParams, paging);
   const listView = listViewOf('/admin/saml11', req.query);
 
   const rows = paged.shown.map(function (row) {
@@ -12289,11 +12649,11 @@ function saml11ListPage(req) {
     '<button class="secondary">Filter</button>' +
     (String(req.query.q || '') ? ' <a href="/admin/saml11">clear</a>' : '') +
     '</div></form>' +
-    nav +
+    nav.head +
     (rows
       ? '<table><thead><tr><th>Relying party</th><th>Its metadata</th>' +
         '<th>Assertion consumer (shire)</th><th>Profiles used</th>' +
-        '<th>Assertions</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav
+        '<th>Assertions</th><th>Last seen</th></tr></thead><tbody>' + rows + '</tbody></table>' + nav.foot
       : note('No relying party has taken a SAML 1.1 assertion yet' +
         (needle ? ' under that filter' : '') + '. Start one at ' +
         '<a href="/saml11/rp">the mock relying party</a>, or register an identifier below.')) +
@@ -12309,13 +12669,12 @@ function saml11ListPage(req) {
     '<button>Register</button>' +
     '<span class="note">The same thing a flow or a metadata fetch would do.</span>' +
     '</div></form>' +
-    '<h2>What every assertion this profile issues is governed by</h2>' +
-    '<table><thead><tr><th>Setting</th><th>Value</th><th>What it is</th></tr></thead><tbody>' +
-    saml11SettingRows() + '</tbody></table>' +
-    '<p class="sub">Readings, not a form: <a href="/admin/config">the configuration page</a> owns ' +
-    'every setting here. <a href="/admin/saml-attributes">Custom SAML attributes</a> is the page ' +
-    'that changes what an assertion CONTAINS, and its SAML 1.1 set reaches this profile through ' +
-    'the same assertion builder that serves WS-Trust and WS-Federation.</p>' +
+    configFormsFor('/admin/saml11') +
+    note('These decide the SHAPE of an assertion. ' +
+    '<a href="/admin/saml-attributes">Custom SAML attributes</a> is the page ' +
+    'that changes what one CONTAINS, and its SAML 1.1 set reaches this profile ' +
+    'through the same assertion builder that serves WS-Trust and ' +
+    'WS-Federation.') +
     perPageForm('/admin/saml11', 'q', String(req.query.q || ''), paging.perPage, '', {});
 
   log.debug("Leaving saml11ListPage(). " + paged.shown.length + " row(s) of " +
@@ -12336,10 +12695,9 @@ function saml11ListPage(req) {
       }),
       paging: paging,
       unscopedMetadata: saml11Facts(base, '').metadataUrl,
-      settings: SAML11_SETTINGS.reduce(function (out, key) {
-        out[key] = config.value(key);
-        return out;
-      }, {}),
+      // The shape every page that owns settings answers with. See the SAML
+      // 2.0 page's equivalent for why it is no longer a flat map.
+      settings: configSettingsJson('/admin/saml11'),
       // Three numbers about the PROFILE rather than about any one relying party,
       // and all three are the kind of thing that is invisible until it is wrong:
       // artifacts minted and not yet resolved, assertions held for an
@@ -12670,7 +13028,7 @@ function rbacListPage(req) {
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
   const filterParams = { q: wantedText || '', role: wantedRole || '',
                          per: req.query.per ? paging.perPage : '' };
-  const nav = pageNav('/admin/rbac', filterParams, paging);
+  const nav = pageNavPair('/admin/rbac', filterParams, paging);
   const carryBack = '<input type="hidden" name="back" value="' +
     esc(queryWith(listViewOf('/admin/rbac', req.query), {})) + '">';
 
@@ -12734,7 +13092,7 @@ function rbacListPage(req) {
               '<code>admin.authRequired</code> is OFF, so the console is open to anybody who ' +
               'can reach this port and these roles decide nothing. They are still real ' +
               'directory groups and can be granted now — turn the setting on from ' +
-              '<a href="/admin/config">Configuration</a> when the roster looks right.')));
+              'the settings below when the roster looks right.')));
 
   const noDirectory = info.available ? '' :
     '<div class="err">No LDAP directory is loaded in this process, so there is nowhere to hold ' +
@@ -12793,7 +13151,7 @@ function rbacListPage(req) {
     '<button type="submit">Filter</button>' +
     (wantedText || wantedRole ? ' <a href="/admin/rbac">clear</a>' : '') +
     '</div></form>' +
-    nav +
+    nav.head +
     '<table><tr><th>Person</th><th>Role</th><th>Group</th><th>Membership value</th>' +
     '<th>Take it away</th></tr>' +
     (rows || '<tr><td colspan="5">' +
@@ -12802,7 +13160,7 @@ function rbacListPage(req) {
         : 'Nobody holds either role.' +
           (info.openToAnyone ? ' Which is why anybody who signs in can read this page.' : '')) +
       '</td></tr>') +
-    '</table>' + nav +
+    '</table>' + nav.foot +
     (info.roles.some(function (r) { return r.claimedCount; })
       ? note('<strong>Some of those grants are on the PERSON rather than in the ' +
         'group.</strong> An entry whose own <code>memberOf</code> names a role group holds ' +
@@ -12835,28 +13193,22 @@ function rbacListPage(req) {
     esc(info.roles[1] ? info.roles[1].cn : '') + '</code> does not also need <code>' +
     esc(info.roles[0] ? info.roles[0].cn : '') + '</code>: a role that could post a form to a ' +
     'page it was not allowed to look at would be a trap rather than a permission.') +
-    '<h2>How the gate is set</h2>' +
-    '<table><tr><th>Setting</th><th>Now</th><th>What it does</th></tr>' +
-    '<tr><td><code>admin.authRequired</code></td><td>' +
-      (info.enforced ? '<span class="state-valid">on</span>' : '<span class="state-revoked">off</span>') +
-      '</td><td>Whether any of this is in force. Off, the console is completely open — which ' +
-      'is what it was before this existed and stays deliberately reachable.</td></tr>' +
-    '<tr><td><code>admin.openWhenEmpty</code></td><td>' +
-      (info.openWhenEmpty ? '<span class="state-expired">on</span>' : 'off') +
-      '</td><td>What happens while NO role has a member: on, anybody who signs in holds both; ' +
-      'off, nobody gets in at all. On by default because this service has no password to ' +
-      'bootstrap an administrator with and the roster dies with the process.</td></tr>' +
-    '<tr><td><code>admin.readGroup</code> / <code>admin.writeGroup</code></td><td><code>' +
-      esc(info.roles[0] ? info.roles[0].cn : '') + '</code> / <code>' +
-      esc(info.roles[1] ? info.roles[1].cn : '') + '</code></td>' +
-      '<td>Which groups these roles are. Renaming one does not move anybody: the members stay ' +
-      'in the old group, which stops granting anything the moment the name changes.</td></tr>' +
-    '</table>' +
-    note('All four are on <a href="/admin/config">Configuration</a> and every one of ' +
-    'them takes effect on the next request. <code>/admin-api</code> is NOT gated by any of ' +
-    'them, which is on purpose: it is the way back in when the roster is empty and ' +
-    '<code>admin.openWhenEmpty</code> is off, and it is why turning this on does not break a ' +
-    'test suite driving the management API.') +
+    // THE FOUR SETTINGS THEMSELVES, AND NOT A TABLE OF READINGS BESIDE THEM.
+    // This page carried its own four-row table saying what each one was set to
+    // and what it did, above a link to /admin/config; the descriptions in that
+    // table and the ones in config.js's own rows had already begun to differ.
+    // The form below is drawn from config.js, so there is one description and
+    // it is the one the API answers with. The two sentences that were ONLY in
+    // that table are the note under it — they are about this console rather
+    // than about the settings, which is why they are not in config.js either.
+    configFormsFor('/admin/rbac') +
+    note('<strong>Renaming a role group does not move anybody.</strong> The ' +
+    'members stay in the group they were put in, which stops granting anything ' +
+    'the moment the name changes — and the new name grants nothing until ' +
+    'somebody is put in it. <code>/admin-api</code> is not gated by any of ' +
+    'these four, on purpose: it is the way back in when the roster is empty and ' +
+    '<code>admin.openWhenEmpty</code> is off, and it is why turning the gate on ' +
+    'does not break a test suite driving the management API.') +
     RBAC_CAVEAT;
 
   log.debug("Leaving rbacListPage(). " + shown.length + " row(s) drawn of " +
@@ -12868,6 +13220,7 @@ function rbacListPage(req) {
       openToAnyone: info.openToAnyone, closedToEveryone: info.closedToEveryone,
       available: info.available, groupsDn: info.groupsDn, usersDn: info.usersDn,
       grantCount: info.grantCount, matched: filtered.length, shown: shown.length,
+      settings: configSettingsJson('/admin/rbac'),
       filter: { q: wantedText || null, role: wantedRole || null },
       page: paging.page, pages: paging.pages, perPage: paging.perPage,
       firstRow: paging.firstRow, lastRow: paging.lastRow,
@@ -13384,8 +13737,8 @@ function groupClaimSection(previewUser) {
             (state.memberOfCounts ? 'counts' : 'does NOT count') + ' as membership.')
       : '<strong>Off.</strong> No token or assertion carries a groups claim. ' +
         'Turn it on with <code>groups.claim</code>.') +
-    ' Change any of it on <a href="/admin/config">the configuration page</a>: ' +
-    codeList(state.settings) + '.' +
+    ' Change any of it on <a href="/admin/groups">the groups page</a>, which ' +
+    'draws all four: ' + codeList(state.settings) + '.' +
     (state.loaded ? '' : ' <strong>The embedded directory is not loaded in this process</strong>, ' +
                          'so there are no groups to read.') +
     '</div>' +
@@ -15187,7 +15540,7 @@ function realmsListPage(req) {
           'and this whole service is the default realm. The definitions are ' +
           'untouched — that is what this setting is for: it lets a realm be ruled ' +
           'out as the cause of something without anything being deleted. Turn it ' +
-          'back on from <a href="/admin/config">Configuration</a>.')
+          'back on in the settings at the foot of this page.')
         : note('<strong>Trust realms are switched ON and none has been ' +
           'defined, which is this service\'s ordinary state rather than something ' +
           'to fix.</strong> <code>realms.enabled</code> is <code>true</code>; the ' +
@@ -15204,7 +15557,7 @@ function realmsListPage(req) {
     '<h2>The realms</h2>' +
     '<table><tr><th>Id</th><th>Name</th><th>Path prefix</th><th>Signing key</th>' +
     '<th class="num">Settings</th></tr>' + rows + '</table>' +
-    pageNav('/admin/realms', pageParamsOf(req.query), pg) +
+    pageNavPair('/admin/realms', pageParamsOf(req.query), pg).head +
     perPageForm('/admin/realms', 'per', req.query.per, pg.perPage, '', listView) +
 
     '<h2>Define a realm</h2>' +
@@ -15234,9 +15587,14 @@ function realmsListPage(req) {
     'embedded directory, and four families answer on sockets with no path in ' +
     'them at all. This table is the whole list, and <code>GET /realms</code> ' +
     'answers the same thing to a client that cannot read a console.</p>' +
-    realmSupportTable();
+    realmSupportTable() +
+    // The two realms.* rows. `realms.enabled` is the one that makes every
+    // prefixed path in this service answer or not, which is worth being able
+    // to see beside the list of realms it governs.
+    configFormsFor('/admin/realms');
 
   log.debug("Leaving realmsListPage().");
+  json.settings = configSettingsJson('/admin/realms');
   return { json: json, inner: inner };
 }
 
@@ -15285,10 +15643,10 @@ function realmDetailPage(req, wanted) {
 
     (inRealm
       ? '<div class="ok">You are reading this console <strong>inside</strong> ' +
-        'this realm. <a href="/admin/config">Configuration</a> writes here.</div>'
+        'this realm. Every settings form in this console writes here.</div>'
       : warn('You are reading this console in the <strong>' +
         esc(realms.current().name) + '</strong> realm. The switcher on the left ' +
-        'moves to this one; until then <a href="/admin/config">Configuration</a> ' +
+        'moves to this one; until then a settings form ' +
         'writes to the realm you are in, not to this one.')) +
 
     '<h2>Where it answers</h2>' +
@@ -15556,14 +15914,41 @@ app.post('/admin/realms', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
-// /admin/config — every setting this service has, in one page.
+// /admin/config — THE FIVE SETTINGS THAT BELONG TO NO PROTOCOL, AND THE INDEX
+// OF WHERE EVERY OTHER ONE IS EDITED.
 //
-// The sections are the PROTOCOLS, in the order config.js's table declares them,
-// because that is where a reader looks: somebody who wants the Kerberos realm
-// looks under Kerberos, not under an alphabetical list of forty-five keys. The
-// grouping is not decided here — `config.groups()` is the same call the
-// management API makes, so the page and the API cannot come to describe
-// different sets of settings.
+// It was every setting this service has, in one page, until 2026-08-27. What
+// that page got right is that the sections were the PROTOCOLS, in the order
+// config.js's table declares them, because that is where a reader looks:
+// somebody who wants the Kerberos realm thinks of Kerberos. What it got wrong
+// follows from the same sentence — they think of Kerberos, so they open the
+// console's Kerberos page, and until that day the answer there was a table of
+// readings and a link to here. A hundred and fifty-four rows on one page is
+// also a page nobody reads: the group somebody wants is one of twenty-two, and
+// the twenty-one they scroll past are noise every time.
+//
+// So the settings live on the page for the family they configure, and what is
+// left here is the two things that have nowhere else to be:
+//
+//   * **The `Global` group** — a bind address, a port, the scheme, the proxy
+//     header and the log level. Facts about the PROCESS rather than about
+//     anything it speaks, so there is no family page they would be less
+//     surprising on. They are drawn by the same `configSection()` every
+//     protocol page draws.
+//   * **The INDEX**: every group, how many settings are in it, how many of
+//     those are overridden right now, and the page that edits it. Derived from
+//     SETTING_HOMES and `config.groups()`, so a group cannot be added to
+//     config.js and go unlisted here, and a page cannot be renamed out from
+//     under a link.
+//
+// Two things did NOT move, and both are deliberate. `Reset all` stays here,
+// because clearing every runtime override in the service is not an act about
+// one protocol and a button that did it from the Kerberos page would be the
+// only control in this console whose blast radius was invisible from where it
+// was pressed. And `?format=json` still answers the WHOLE table — `GET
+// /admin-api/config` is the API's configuration resource and a caller asking
+// it for the settings should not have to visit twenty-one pages to assemble
+// them. The page narrowed; the resource did not.
 //
 // EVERY ROW SAYS WHERE ITS VALUE CAME FROM. That is the question this page
 // exists to answer and it is the one that used to require a grep: a value can
@@ -15625,7 +16010,198 @@ function sourceNote(setting) {
   return 'derived from another setting';
 }
 
-function configRow(setting) {
+// ---------------------------------------------------------------------------
+// THE SETTINGS BLOCK EVERY PROTOCOL PAGE DRAWS, AND THE ONE FUNCTION THAT
+// DRAWS IT.
+//
+// `configFormsFor('/admin/kerberos')` is the whole of what a page has to say to
+// own its settings: it looks the page up in SETTING_HOMES, renders one
+// `configSection()` per group that lives there, and returns the markup. A page
+// therefore names no key, decides no order and repeats no prose — which is the
+// property that keeps twenty-one pages from coming to describe the same table
+// twenty-one ways, and it is why the block reads identically wherever it
+// appears.
+//
+// WHAT IT SAYS IS SAID ONCE, HERE. Each of these pages used to carry its own
+// sentence about the configuration page owning its settings, and the three that
+// existed had already drifted into three different claims. The lead note below
+// is the only one now, and everything in it is derived: which groups these are,
+// how many rows cannot be changed while the service runs, whether the group is
+// shared with another page, and which file to put a value in to make it
+// survive a restart.
+//
+// A PAGE WITH NO ROW IN SETTING_HOMES GETS AN EMPTY STRING, deliberately. The
+// alternative is a page that draws an empty *Settings* heading because
+// somebody added the call before adding the table row, which reads as "this
+// family has no settings" — a claim no page here should make by accident.
+// ---------------------------------------------------------------------------
+
+// The row for a group, or null. A page asks the other way round; both are
+// looked up in the same table.
+function settingHomeRowOf(group) {
+  return SETTING_HOMES.filter(function (row) { return row.group === group; })[0] || null;
+}
+
+// The described settings this page owns, grouped, in `config.js`'s declaration
+// order rather than SETTING_HOMES's. Two orders would be two answers to "which
+// comes first" and the table that already decides it is the one that also
+// carries the reasoning for what sits beside what.
+function settingsGroupsFor(path) {
+  log.debug("Entering settingsGroupsFor(). path=" + path);
+  const mine = SETTING_HOMES.filter(function (row) {
+    return row.pages.indexOf(path) >= 0;
+  }).map(function (row) { return row.group; });
+  const out = config.groups().filter(function (group) {
+    return mine.indexOf(group.group) >= 0;
+  });
+  log.debug("Leaving settingsGroupsFor(). " + out.length + " group(s).");
+  return out;
+}
+
+// What `?format=json` and the management API answer for a page's settings. The
+// same described rows the form is drawn from — including `source`, `editable`
+// and `restartReason` — so a caller can see WHY a value is what it is without
+// fetching the whole table from /admin-api/config and filtering it themselves.
+function configSettingsJson(path) {
+  log.debug("Entering configSettingsJson(). path=" + path);
+  const groups = settingsGroupsFor(path);
+  const all = groups.reduce(function (rows, group) {
+    return rows.concat(group.settings);
+  }, []);
+  const json = {
+    page: path,
+    groups: groups,
+    settingCount: all.length,
+    editableCount: all.filter(function (setting) { return setting.editable; }).length,
+    overridden: all.filter(function (setting) { return setting.overridden; })
+                   .map(function (setting) { return setting.key; }),
+    // Where a caller POSTs a change. Named rather than left to be inferred:
+    // these settings are edited through the configuration resource wherever
+    // they are DRAWN, which is the whole of why there is no second store.
+    setWith: 'POST /admin-api/config/set-many'
+  };
+  log.debug("Leaving configSettingsJson(). " + json.settingCount + " setting(s).");
+  return json;
+}
+
+// The other pages a group of these settings is also drawn on, as a sentence, or
+// '' when there are none. Only `SAML` has any today; the sentence is derived so
+// that a second shared group cannot arrive without being announced.
+function sharedSettingNote(groupName, path) {
+  const row = settingHomeRowOf(groupName);
+  if (!row || row.pages.length < 2) {
+    return '';
+  }
+  const others = row.pages.filter(function (other) { return other !== path; });
+  return '<strong>These are the same settings ' +
+    others.map(function (other) {
+      return '<a href="' + esc(other) + '">' + esc(labelOfPath(other)) + '</a>';
+    }).join(' and ') + ' draws.</strong> One setting, shown in both places ' +
+    'because it governs both: a value saved here is saved there. Nothing is ' +
+    'copied — both forms post to the same action against the same override map.';
+}
+
+// A page's own label, off NAV, so a cross-reference cannot name a tab that has
+// been renamed. `upTo()` does the same thing for a breadcrumb and for the same
+// reason; this one answers with the label alone.
+function labelOfPath(path) {
+  const item = NAV.filter(function (row) { return row.path === path; })[0];
+  return item ? item.label : path;
+}
+
+// The block itself.
+function configFormsFor(path) {
+  log.debug("Entering configFormsFor(). path=" + path);
+  const groups = settingsGroupsFor(path);
+  if (!groups.length) {
+    log.debug("Leaving configFormsFor(). No settings live on " + path + ".");
+    return '';
+  }
+
+  const all = groups.reduce(function (rows, group) {
+    return rows.concat(group.settings);
+  }, []);
+  const fixed = all.filter(function (setting) { return !setting.editable; }).length;
+  const overridden = all.filter(function (setting) { return setting.overridden; })
+                        .map(function (setting) { return setting.key; });
+  const configFile = process.env.CONFIG_FILE || 'env/local.js';
+
+  const shared = groups.map(function (group) {
+    return sharedSettingNote(group.group, path);
+  }).filter(Boolean).map(function (text) { return note(text); }).join('');
+
+  const inner = '<h2>Settings</h2>' +
+
+    note('The appconfig rows that decide what this family does, on the page ' +
+    'for the family rather than on <a href="/admin/config">Configuration</a>. ' +
+    'They are the same settings, written through the same function against the ' +
+    'same override map — this is a second DOOR onto them and not a second ' +
+    'place they live, which is the rule <a href="/admin/token-lifetimes">Token ' +
+    'lifetimes</a> was the first page here to apply. The <em>Source</em> column ' +
+    'says where each value came from: a runtime override set on a page like ' +
+    'this one, an environment variable, the appconfig file this process was ' +
+    'started with, or the default appconfig file under it.') +
+
+    shared +
+
+    warn('<strong>Changes here are in memory and are gone on restart.</strong> ' +
+    'Nothing writes to the appconfig file, deliberately: a service that edited ' +
+    'a file checked into a repository would leave a test\'s forgotten change ' +
+    'behind permanently. To make something stick, put it in <code>' +
+    esc(configFile) + '</code> or in the setting\'s environment variable.') +
+
+    (fixed
+      ? warn('<strong>' + esc(String(fixed)) + ' of these ' +
+        esc(String(all.length)) + ' cannot be changed while this service ' +
+        'runs.</strong> They are shown with their inputs disabled and the ' +
+        'reason beside each, rather than hidden: they were consumed by the time ' +
+        'this service was listening — a bound socket, a certificate\'s names, ' +
+        'the Kerberos principal database and its long-term keys, the ' +
+        'directory\'s base DN — and accepting a change to one would do nothing ' +
+        'and read as having worked.')
+      : '') +
+
+    (overridden.length
+      ? '<div class="ok">' + esc(String(overridden.length)) + ' of these has a ' +
+        'runtime override in force: ' + codeList(overridden) + '. Each row\'s ' +
+        'Reset puts it back to the value its file or environment variable ' +
+        'gives it.</div>'
+      : '') +
+
+    groups.map(function (group) { return configSection(group, path); }).join('') +
+
+    note('<a href="/admin/config">Configuration</a> holds the whole table — ' +
+    'every setting this service has, whichever page edits it — and the rows ' +
+    'that belong to no protocol. The same settings over JSON are at ' +
+    '<code>' + esc(path) + '?format=json</code> and ' +
+    '<code>GET /admin-api/config</code>; the four actions are ' +
+    '<code>POST /admin-api/config/set</code>, <code>/set-many</code>, ' +
+    '<code>/reset</code> and <code>/reset-all</code>.');
+
+  log.debug("Leaving configFormsFor(). " + all.length + " setting(s) in " +
+            groups.length + " group(s).");
+  return inner;
+}
+
+// WHERE A SAVE GOES BACK TO. Every settings form posts to /admin/config
+// wherever it was drawn, so the page a person was on has to travel with it —
+// otherwise saving the Kerberos realm from the Kerberos page lands them on the
+// configuration page, which is exactly the journey this change removed.
+//
+// It is checked against SETTING_HOMES rather than merely being escaped, and
+// that is not ceremony: what comes out of here is put into a Location header,
+// so the set of values has to be one this file wrote. An unknown `from` is not
+// an error — it is the configuration page, which is where the form used to
+// send everybody.
+function configReturnTo(body) {
+  const asked = String((body && body.from) || '').trim();
+  const known = SETTING_HOMES.some(function (row) {
+    return row.pages.indexOf(asked) >= 0;
+  });
+  return known ? asked : '/admin/config';
+}
+
+function configRow(setting, from) {
   const id = 'cfg-' + setting.key.replace(/\./g, '-');
   // The control carries the description as a tooltip, at the length a tooltip
   // holds. See the comment above the return.
@@ -15648,14 +16224,34 @@ function configRow(setting) {
         hint + ' size="34" value="' + esc(setting.text) + '"' +
         (setting.editable ? '' : ' disabled') + '>');
 
-  // The Reset button is its own form. It has to be: it is a different action
-  // from the section's Save, and a second submit button inside one form would
-  // post every field in the section with it.
+  // THE RESET BUTTON IS A `formaction`, AND IT USED TO BE A NESTED `<form>`
+  // THAT NO BROWSER EVER CREATED. This row is inside the section's form, and
+  // the HTML parser DROPS a `<form>` start tag inside another form — the
+  // element is never created and its children are adopted by the outer form.
+  // So the row's `action=reset` and `key` hidden inputs became fields of the
+  // SECTION's form, `parseBody()` takes the last value of a repeated name, and
+  // the section's Save button therefore performed a RESET of the last
+  // overridden key instead of saving. Nothing failed: the page reloaded with a
+  // cheerful message about the thing it had just done instead of the thing it
+  // was asked to do. It was found by dumping the parsed DOM rather than by
+  // reading the markup, which is the only way this class of defect is ever
+  // found.
+  //
+  // `formaction` is the fix and it needs no script: the button submits the
+  // same form to a different URL, and the key rides in that URL where it
+  // cannot be confused with a field. THE KEY IS IN THE QUERY STRING AND NOT IN
+  // A HIDDEN INPUT for exactly that reason.
+  //
+  // It also fixes what pressing ENTER in a text box does. A form with no
+  // hidden `action` and two named submit buttons would submit the FIRST one on
+  // Enter — a Reset — so the hidden `action=set-many` stays and the buttons
+  // carry no name at all: Enter posts to the form's own action and saves.
+  //
+  // `form-action` is deliberately absent from this service's CSP (see
+  // `common/app.js`), so nothing here is relaxed to allow it.
   const reset = setting.overridden
-    ? '<form method="post" action="/admin/config" class="inline">' +
-      '<input type="hidden" name="action" value="reset">' +
-      '<input type="hidden" name="key" value="' + esc(setting.key) + '">' +
-      '<button class="secondary">Reset</button></form>'
+    ? '<button class="secondary" formaction="/admin/config?reset=' +
+      esc(encodeURIComponent(setting.key)) + '">Reset</button>'
     : '';
 
   const provenance = setting.overridden
@@ -15695,9 +16291,11 @@ function configRow(setting) {
     '<td>' + reset + '</td></tr>';
 }
 
-function configSection(group) {
+function configSection(group, from) {
   log.debug("Entering configSection(). group=" + group.group);
-  const rows = group.settings.map(configRow).join('');
+  const rows = group.settings.map(function (setting) {
+    return configRow(setting, from);
+  }).join('');
   const anyEditable = group.settings.some(function (setting) { return setting.editable; });
   const save = anyEditable
     ? '<p><button>Save ' + esc(group.group) + '</button> ' +
@@ -15711,6 +16309,7 @@ function configSection(group) {
   return '<h3>' + esc(group.group) + '</h3>' +
     '<form method="post" action="/admin/config">' +
     '<input type="hidden" name="action" value="set-many">' +
+    '<input type="hidden" name="from" value="' + esc(from || '/admin/config') + '">' +
     '<table><tr><th>Setting</th><th>Value</th><th>Source</th><th></th></tr>' +
     rows + '</table>' + save + '</form>';
 }
@@ -15822,9 +16421,22 @@ function configSettingFor(key) {
   })[0];
 }
 
+// The whole table, plus WHERE EACH GROUP IS EDITED. The snapshot is untouched
+// — this resource is still every setting this service has, because a caller
+// asking the API for the configuration should not have to visit twenty-one
+// pages to assemble it — and `homes` is what a caller needs to send a person to
+// the right console page, or to notice that a group has none.
 function configJson() {
   log.debug("Entering configJson().");
   const json = config.snapshot();
+  json.homes = SETTING_HOMES.map(function (row) {
+    return { group: row.group, pages: row.pages,
+             labels: row.pages.map(labelOfPath) };
+  });
+  // Empty on a service whose table and console agree, which is every service
+  // that starts from a commit where they did. Present either way, so a caller
+  // can assert on it.
+  json.homeProblems = SETTING_HOME_PROBLEMS;
   log.debug("Leaving configJson(). " + json.settingCount + " setting(s).");
   return json;
 }
@@ -15832,8 +16444,21 @@ function configJson() {
 app.post('/admin/config', function (req, res) {
   log.debug("Entering the admin configuration action endpoint.");
   const body = parseBody(req);
-  const result = configAction(body);
-  respondToAction(req, res, '/admin/config', result);
+  // A RESET ARRIVES AS `?reset=<key>` ON THE SECTION'S OWN FORM — see the
+  // comment above the button in configRow() for why the key is in the URL. It
+  // is normalised into the body here rather than in configAction(), because
+  // this is the shape a BROWSER posts and that function is also what the
+  // management API calls with an `action` taken from its own URL.
+  const reset = String(req.query.reset || '').trim();
+  const result = configAction(reset
+    ? { action: 'reset', key: reset, from: body.from }
+    : body);
+  // BACK TO THE PAGE THE FORM WAS ON. Every protocol page draws its own
+  // settings and every one of those forms posts here, so this endpoint serves
+  // twenty-one pages and can no longer assume it serves one. See
+  // configReturnTo(), which is why an unrecognised `from` cannot become a
+  // redirect to somewhere this file did not write.
+  respondToAction(req, res, configReturnTo(body), result);
   log.debug("Leaving the admin configuration action endpoint.");
 });
 
@@ -16140,7 +16765,7 @@ app.get('/admin/token-lifetimes', function (req, res) {
   const inner = messagesOf(req) +
     note('How long an access token, an ID Token and a refresh token issued here are ' +
     'good for, and how far out a clock may be before this service stops believing one of its ' +
-    'own. All four are <a href="/admin/config">configuration settings</a> and this page is a ' +
+    'own. All four are <a href="/admin/oauth2">configuration settings</a> and this page is a ' +
     'shorter way to the same four rows — it writes through the same function, so a change ' +
     'made here and one made there are one change.') +
 
@@ -16231,7 +16856,7 @@ app.get('/admin/token-lifetimes', function (req, res) {
     'configurable: it is redeemed within seconds of being issued or it is a bug in the client, ' +
     'and a code that could be made long-lived would be an invitation to build one that is. ' +
     'RFC 9700 mode’s <strong>refresh idle timeout</strong> ' +
-    '(<code>oauth2.refreshIdleSeconds</code>, on <a href="/admin/config">Configuration</a>) is a ' +
+    '(<code>oauth2.refreshIdleSeconds</code>, on <a href="/admin/oauth2">the OAuth 2.0 / OIDC settings</a>) is a ' +
     'different question from the refresh lifetime above: it is measured from the last time any ' +
     'token in a refresh CHAIN was redeemed rather than from issuance, so a busy client keeps its ' +
     'grant indefinitely and a quiet one is cut off. The lifetime here is a wall the chain cannot ' +
@@ -16311,7 +16936,11 @@ function scimJson(req) {
     reachableNegatives: surface ? surface.reachableNegatives : [],
     mapping: { user: scimMap.USER_ATTRIBUTES.map(scimMappingRow),
                group: scimMap.GROUP_ATTRIBUTES.map(scimMappingRow) },
-    counters: counters
+    counters: counters,
+    // The eighteen scim.* rows this page now edits, described. It answers the
+    // question the rest of this reply cannot: not what the server does, but
+    // where the value that decides it came from.
+    settings: configSettingsJson('/admin/scim')
   };
   log.debug("Leaving scimJson(). " + counters.total + " request(s) counted.");
   return out;
@@ -16378,7 +17007,7 @@ function authenticationSection(auth, counters) {
       ? 'OPEN, because a client has to be able to read which schemes exist ' +
         'before it can use one'
       : 'closed as well (<code>scim.authDiscovery</code>)') + '. Every switch ' +
-    'here is on <a href="/admin/config">Configuration</a>.') +
+    'here is in the settings at the foot of this page.') +
     '<table><tr><th>Scheme</th><th>type</th><th>State</th><th>May do</th>' +
     '<th class="num">Requests</th></tr>' + rows + extra + '</table>' +
     note('The two OAuth scopes are <code>' + esc(auth.scopes.read) +
@@ -16481,7 +17110,7 @@ app.get('/admin/scim', function (req, res) {
         '(<code>scim.enabled</code>). The routes are still registered and answer ' +
         '<code>501</code> rather than <code>404</code>, because the feature ' +
         'being off and the URL being wrong are different sentences to a client. ' +
-        'Turn it back on at <a href="/admin/config">Configuration</a>.')
+        'Turn it back on in the settings at the foot of this page.')
       : '') +
 
     note('SCIM 2.0 — RFC 7642, 7643 and 7644 — at <code>' +
@@ -16575,10 +17204,18 @@ app.get('/admin/scim', function (req, res) {
     '<h2>The Group mapping</h2>' +
     mappingTable(json.mapping.group) +
 
-    note('Nothing on this page is a control, because everything about ' +
-    'SCIM that can be changed is a configuration row: <code>scim.enabled</code> ' +
-    'and the three limits, on <a href="/admin/config">Configuration</a>. A form ' +
-    'here would be a second door to one setting.') +
+    // THIS PAGE USED TO SAY IT HAD NO CONTROLS, and the sentence it said it
+    // in was the one every other page here cited: "a form here would be a
+    // second door to one setting". What that argument was actually protecting
+    // is the ONE-STORE rule, and the form below does not break it — it is
+    // `configSection()`, posting to the same action against the same override
+    // map as /admin/config, which is the arrangement /admin/token-lifetimes
+    // established. What has changed is only which page draws the door.
+    configFormsFor('/admin/scim') +
+    note('These are the settings; everything else on this page is a ' +
+    'reading. What SCIM has WRITTEN is not configuration at all — it went into ' +
+    'the embedded directory, so it is on <a href="/admin/users">Users</a> and ' +
+    '<a href="/admin/groups">Groups</a>.') +
 
     note('<a href="/scim">What this is, for a person</a> &middot; ' +
     '<a href="/admin/scim?format=json">this page as JSON</a> &middot; ' +
@@ -16589,68 +17226,478 @@ app.get('/admin/scim', function (req, res) {
   log.debug("Leaving the admin SCIM page.");
 });
 
+// ONE ROW OF THE INDEX: a group, its size, what is overridden in it, and the
+// page that edits it. Built from `config.groups()` and SETTING_HOMES together,
+// which is what makes a group with no home visible here rather than merely
+// absent — see checkSettingHomes(), whose findings the page prints above this
+// table.
+function configHomeRow(group) {
+  const row = settingHomeRowOf(group.group);
+  const overridden = group.settings.filter(function (setting) {
+    return setting.overridden;
+  }).length;
+  const fixed = group.settings.filter(function (setting) {
+    return !setting.editable;
+  }).length;
+  const where = row
+    ? row.pages.map(function (path) {
+        return '<a href="' + esc(path) + '">' + esc(labelOfPath(path)) + '</a>';
+      }).join(' and ')
+    : '<span class="state-invalid">nowhere — this group has no row in ' +
+      'SETTING_HOMES, so nothing draws it</span>';
+  return '<tr><td>' + esc(group.group) + '</td>' +
+    '<td class="num">' + group.settings.length + '</td>' +
+    '<td class="num">' + (fixed || '') + '</td>' +
+    '<td class="num">' + (overridden || '') + '</td>' +
+    '<td>' + where + '</td></tr>';
+}
+
 app.get('/admin/config', function (req, res) {
   log.debug("Entering the admin configuration page.");
   const snapshot = config.snapshot();
   const overridden = snapshot.overridden.length;
+  // What this page still edits: the one group with no protocol to belong to.
+  // Asked for by path rather than by name, like every other page, so that
+  // moving `Global` somewhere else one day is a row in SETTING_HOMES and not an
+  // edit here.
+  const mine = settingsGroupsFor('/admin/config');
+  const mineCount = mine.reduce(function (n, group) {
+    return n + group.settings.length;
+  }, 0);
 
   const inner = messagesOf(req) +
-    note('Every setting this service has, grouped by the protocol it ' +
-    'belongs to. A value can arrive from four places and the <em>Source</em> ' +
-    'column says which: a runtime override set on this page, an environment ' +
-    'variable, the appconfig file this process was started with (<code>' +
-    esc(snapshot.configFile || '(none)') + '</code>), or <code>' +
-    esc(snapshot.defaultsFile) + '</code> — the default appconfig file that one ' +
-    'is unioned on top of. Higher beats lower, so an environment variable set ' +
-    'on the container still wins over the file — which is what keeps every ' +
-    'existing deployment working unchanged.') +
+
+    (SETTING_HOME_PROBLEMS.length
+      ? '<div class="err"><strong>Some settings are not on any page.</strong>' +
+        '<ul>' + SETTING_HOME_PROBLEMS.map(function (problem) {
+          return '<li>' + esc(problem) + '</li>';
+        }).join('') + '</ul>This is reported rather than hidden, in the same ' +
+        'spirit as <a href="/admin/sts-metadata">Service metadata</a> naming a ' +
+        'route nobody described: a setting that exists and appears nowhere is ' +
+        'worse than one that is missing, because the service still reads it.' +
+        '</div>'
+      : '') +
+
+    note('<strong>Every setting this service has lives on the page for the ' +
+    'protocol it configures.</strong> This page is the index of that — and the ' +
+    'form for the ' + esc(String(mineCount)) + ' rows that belong to no ' +
+    'protocol, which are facts about the process rather than about anything it ' +
+    'speaks. It was all ' + esc(String(snapshot.settingCount)) + ' of them ' +
+    'until 2026-08-27; what moved is where they are DRAWN, and nothing about ' +
+    'what they do or how they are read.') +
+
+    note('A value can arrive from four places and the <em>Source</em> ' +
+    'column on every one of these pages says which: a runtime override set on ' +
+    'the page, an environment variable, the appconfig file this process was ' +
+    'started with (<code>' + esc(snapshot.configFile || '(none)') + '</code>), ' +
+    'or <code>' + esc(snapshot.defaultsFile) + '</code> — the default appconfig ' +
+    'file that one is unioned on top of. Higher beats lower, so an environment ' +
+    'variable set on the container still wins over the file — which is what ' +
+    'keeps every existing deployment working unchanged.') +
 
     note('<strong>There is no fifth place.</strong> A setting with no ' +
     'value in either appconfig file and no environment variable stops this ' +
     'service from starting, by name, rather than falling back to a constant ' +
-    'buried in a module. So every value below is one somebody can find in a ' +
-    'file — which is what makes the <em>Source</em> column worth reading.') +
+    'buried in a module. So every value on these pages is one somebody can find ' +
+    'in a file — which is what makes the <em>Source</em> column worth reading.') +
 
-    warn('<strong>Changes here are in memory and are gone on ' +
-    'restart.</strong> Nothing writes to the appconfig file. That is the same ' +
-    'arrangement as the custom claims and the credential claims next door, and ' +
-    'it is deliberate: a service that edited a file checked into a repository ' +
-    'would leave a test\'s forgotten change behind permanently. To make ' +
-    'something stick, put it in <code>' + esc(snapshot.configFile || 'env/local.js') +
-    '</code>.') +
-
-    warn('<strong>' + esc(String(snapshot.settingCount - snapshot.editableCount)) +
-    ' of these ' + esc(String(snapshot.settingCount)) + ' cannot be changed while ' +
-    'this service runs</strong>, and they are shown with their inputs disabled ' +
-    'and the reason beside them rather than hidden. They are the ones already ' +
-    'consumed by the time the service was listening: a bound socket, the TLS ' +
-    'certificate\'s names, the Kerberos principal database and its long-term ' +
-    'keys, and the directory\'s base DN. Accepting a change to one of those ' +
-    'would do nothing and read as having worked.') +
+    warn('<strong>Changes are in memory and are gone on restart.</strong> ' +
+    'Nothing writes to the appconfig file. That is the same arrangement as the ' +
+    'custom claims and the credential claims next door, and it is deliberate: a ' +
+    'service that edited a file checked into a repository would leave a test\'s ' +
+    'forgotten change behind permanently. To make something stick, put it in ' +
+    '<code>' + esc(snapshot.configFile || 'env/local.js') + '</code>.') +
 
     '<h2>' + esc(String(snapshot.settingCount)) + ' settings, ' +
-    esc(String(snapshot.editableCount)) + ' of them changeable here</h2>' +
+    esc(String(snapshot.editableCount)) + ' of them changeable while this ' +
+    'service runs</h2>' +
 
     (overridden
       ? '<div class="ok">' + esc(String(overridden)) + ' runtime override(s) in ' +
-        'force: ' + codeList(snapshot.overridden) + '. ' +
+        'force, anywhere in the service: ' + codeList(snapshot.overridden) + '. ' +
         '<form method="post" action="/admin/config" class="inline">' +
         '<input type="hidden" name="action" value="reset-all">' +
         '<button class="secondary">Reset all</button></form></div>'
-      : note('No runtime overrides are in force: every value below ' +
-        'is coming from the environment or from one of the two appconfig ' +
-        'files.')) +
+      : note('No runtime overrides are in force anywhere in this ' +
+        'service: every value is coming from the environment or from one of ' +
+        'the two appconfig files.')) +
 
-    snapshot.groups.map(configSection).join('') +
+    note('<strong>Reset all is here and on no protocol page</strong>, ' +
+    'because it clears every override in the service and not only the ones ' +
+    'below it. A button that reached that far from the Kerberos page would be ' +
+    'the one control in this console whose blast radius was invisible from ' +
+    'where it was pressed.') +
 
-    note('The same table over JSON is at <code>/admin/config?format=json</code> ' +
-    'and <code>GET /admin-api/config</code>; the four actions on this page are ' +
+    '<h2>Where every setting is edited</h2>' +
+    note('The whole table, group by group, in the order <code>config.js</code> ' +
+    'declares them. The <em>Page</em> column is where that group\'s form is ' +
+    'drawn; the counts are of the group, and <em>Overridden</em> is how many of ' +
+    'them have a runtime override in force right now.') +
+    '<table><thead><tr><th>Group</th><th class="num">Settings</th>' +
+    '<th class="num">Restart-only</th><th class="num">Overridden</th>' +
+    '<th>Page</th></tr></thead><tbody>' +
+    snapshot.groups.map(configHomeRow).join('') +
+    '</tbody></table>' +
+
+    configFormsFor('/admin/config') +
+
+    note('The whole table over JSON — every setting, whichever page edits ' +
+    'it — is at <code>/admin/config?format=json</code> and ' +
+    '<code>GET /admin-api/config</code>; the four actions on these pages are ' +
     '<code>POST /admin-api/config/set</code>, <code>/set-many</code>, ' +
     '<code>/reset</code> and <code>/reset-all</code>.');
 
   respond(req, res, configJson(), 'Configuration', '/admin/config', inner);
   log.debug("Leaving the admin configuration page.");
 });
+
+// ---------------------------------------------------------------------------
+// THE EIGHT PROTOCOL SETTINGS PAGES ADDED ON 2026-08-27, AND WHY THEY ARE A
+// TABLE AND A LOOP RATHER THAN EIGHT ROUTE HANDLERS.
+//
+// Five protocol families here had settings and no page in this console —
+// OAuth 2.0 / OIDC, WS-Trust, WS-Federation, Kerberos, LDAP, TLS, OpenID4VCI
+// and OpenID4VP, eight pages across six of them — so their configuration was
+// only ever reachable at /admin/config among a hundred and fifty-four rows.
+// Every one of these pages is therefore the SAME page: a paragraph or two
+// saying what the family is and where it answers, the links to the surfaces it
+// already has, and `configFormsFor()`. The differences between them are PROSE.
+//
+// Eight handlers would have been eight copies of one four-line body, and the
+// copy nobody edited is the one a reader believes — the defect this repository
+// warns about everywhere else. So the prose is a table and the handler is
+// written once. Three things follow and each is deliberate:
+//
+//   * **REGISTRATION IS STILL AT THE TOP LEVEL** (rule 1). The loop runs while
+//     this module is being required, so these routes are registered in the
+//     order they appear here, are behind the gate registered above them, and
+//     are visible to `sts_metadata.js` reading the router — a page built in a
+//     loop is not a page built differently.
+//   * **THE SETTINGS ARE NOT IN THIS TABLE.** A row names a `path`, and
+//     SETTING_HOMES says what lives there. Naming keys here would be the
+//     second list that disagrees with the first.
+//   * **A ROW MAY SAY WHAT ITS FAMILY DOES NOT DO**, and several do. These are
+//     the pages a person lands on when they are deciding whether this service
+//     can stand in for a real one, and the answer "it speaks the protocol"
+//     without "it checks nothing" is the misleading half of a true sentence —
+//     which is the same rule `sts_metadata.js`'s coverage notes follow.
+//
+// WHAT IS DELIBERATELY NOT ON THEM IS AN ENDPOINT LIST. Every one of these
+// families answers on paths this file would have to keep in step by hand, and
+// `/admin/sts-metadata` already derives exactly that list from the running
+// router. A hand-written table here would be the drift that page exists to
+// catch, on a page that cannot be checked. The links below are to the
+// family's own surfaces — pages that explain themselves — and to the
+// service metadata for the rest.
+const PROTOCOL_SETTINGS_PAGES = [
+  { path: '/admin/oauth2', title: 'OAuth 2.0 / OIDC settings',
+    lead: '<strong>The authorization server\'s own settings.</strong> ' +
+          'Everything about what this service will ACCEPT at ' +
+          '<code>/oauth2/authorize</code> and <code>/oauth2/token</code> and ' +
+          'what it puts into what comes back — separately from which ' +
+          'authorization server a flow runs against, which is ' +
+          '<a href="/admin/authorization-servers">Authorization servers</a>, ' +
+          'and from what a token CARRIES, which is ' +
+          '<a href="/admin/claims">Custom claims</a> and ' +
+          '<a href="/admin/userinfo-claims">UserInfo claims</a>.',
+    also: ['<strong><code>oauth2.rfc9700</code> is the one MODE this service ' +
+           'has</strong>, and it is off unless it is turned on. With it off ' +
+           'nothing below is enforced: no PKCE is required, no redirect URI ' +
+           'is matched exactly, no client is authenticated. That is what this ' +
+           'service is for — a client\'s error paths cannot be exercised ' +
+           'against a server that refuses nothing — and it is why the mode ' +
+           'exists rather than the checks being on. It is restart-only, ' +
+           'because <code>global.https</code> derives from it and a ' +
+           'listener\'s scheme is settled when the socket is bound; a TRUST ' +
+           'REALM can be in the mode while the process is not, which is the ' +
+           'way to have both at once.',
+           '<strong><code>oauth2.breakIdTokenNonce</code> makes this service ' +
+           'wrong on purpose.</strong> Turn it on and every ID Token carries ' +
+           'a <code>nonce</code> that is not the one the client sent, so a ' +
+           'client that does not check gets a token it should have refused. ' +
+           'It is the same device as the reserved password ' +
+           '<code>invalid</code> and the Kerberos names that stay unknown: a ' +
+           'permissive server is hard to write error handling against, so the ' +
+           'errors have to be reachable deliberately.'],
+    links: [['/.well-known/openid-configuration', 'the discovery document'],
+            ['/oauth2/rfc9700', 'what the mode enforces'],
+            ['/admin/token-lifetimes', 'how long what it issues lasts'],
+            ['/admin/tokens', 'what has been issued']] },
+
+  { path: '/admin/oid4vci', title: 'OpenID4VCI',
+    lead: '<strong>The credential issuer at <code>/issuer</code>, and the ' +
+          'settings around it.</strong> What a credential CONTAINS is ' +
+          '<a href="/admin/vc">Credential claims</a> next door; these are the ' +
+          'ones about the exchange — where a holder is sent, which ' +
+          'authorization server the credential endpoint will take a token ' +
+          'from, how big a batch may be, and how long a deferred issuance ' +
+          'pretends to take.',
+    also: ['<strong>The two DID settings change what a VERIFIER has to ' +
+           'resolve, and they are restart-only.</strong> With ' +
+           '<code>oid4vci.sdJwtIssuerDid</code> or ' +
+           '<code>oid4vci.ldpVcIssuerDid</code> on, the issuer names itself ' +
+           'with a <code>did:web</code> identifier instead of an https URL, ' +
+           'so the key a verifier fetches comes from a DID document rather ' +
+           'than from JWKS. They are read while the issuer metadata is being ' +
+           'built, which is why they cannot be changed while the service ' +
+           'runs.',
+           '<strong>Nothing in an issued credential is verified.</strong> The ' +
+           'values come off the holder\'s directory entry and the entry is ' +
+           'created for anybody who asks; a diploma issued here says whatever ' +
+           '<a href="/admin/vc">Credential claims</a> selected. What is real ' +
+           'is the signature, the proofs and the formats — which is the half ' +
+           'a wallet has to get right.'],
+    links: [['/issuer', 'the issuer, for a person'],
+            ['/issuer/offer', 'a Credential Offer'],
+            ['/.well-known/openid-credential-issuer', 'the issuer metadata'],
+            ['/admin/vc', 'what a credential carries']] },
+
+  { path: '/admin/oid4vp', title: 'OpenID4VP',
+    lead: '<strong>The mock Verifier at <code>/oid4vp/verifier</code>, and ' +
+          'the settings around its request.</strong> The DCQL query — which ' +
+          'credential, which claims — is ' +
+          '<a href="/admin/vc-verifier-config">Verifier request</a> next ' +
+          'door; these four are the client identifier it presents as, where ' +
+          'it sends a holder to present, how fresh a Key Binding JWT has to ' +
+          'be, and the claims it asks for when nothing else has been chosen.',
+    also: ['<strong>A verified presentation does not sign anybody in.</strong> ' +
+           'This verifier checks the presentation, reports what it found and ' +
+           'stops there: no session is started, no token is issued, and ' +
+           'nothing about the holder is written to the directory. OpenID4VP ' +
+           'is a presentation protocol here and not a second front door.'],
+    links: [['/oid4vp/verifier', 'the verifier, for a person'],
+            ['/admin/vc-verifier-config', 'what it asks for']] },
+
+  { path: '/admin/kerberos', title: 'Kerberos',
+    lead: '<strong>The KDC on raw TCP and UDP 88, the same exchange over ' +
+          'MS-KKDCP at <code>/KdcProxy</code>, the Kerberos-protected ' +
+          'service, and SPNEGO over HTTP.</strong> Most of these settings are ' +
+          'restart-only and the reason is one fact: the principal database — ' +
+          'every long-term key in it — is built from them when the process ' +
+          'starts, so a realm or a password changed at runtime would leave ' +
+          'every existing ticket undecryptable by the service that issued it.',
+    also: ['<strong>This is the one family here that cannot be permissive the ' +
+           'way the rest of this service is.</strong> A Kerberos password IS ' +
+           'the key: pre-authentication and the AS-REP\'s enc-part are both ' +
+           'encrypted under it, so a KDC that accepted anything would still ' +
+           'have to pick a key the client could not guess. The permissiveness ' +
+           'moved into the ACCOUNT POLICY instead — one password shared by ' +
+           'every user account (<code>krb5.userPassword</code>), an account ' +
+           'created for any name on first sight — and the acceptor still ' +
+           'decrypts a real ticket under a real key and refuses a replay. So ' +
+           'the verification is real and the account policy is not, and those ' +
+           'are two different sentences.',
+           '<strong><code>krb5.unknownUsers</code> is how a client\'s error ' +
+           'path is reached.</strong> Every other name gets an account, so ' +
+           'these are the only ones that can produce ' +
+           '<code>KDC_ERR_C_PRINCIPAL_UNKNOWN</code>. ' +
+           '<code>krb5.clockOffset</code> is the same device for skew: it ' +
+           'moves this KDC\'s idea of now so that a client can be shown ' +
+           '<code>KRB_AP_ERR_SKEW</code> without anybody touching a system ' +
+           'clock.',
+           '<strong><code>krb5.spnegoAuthentication</code> is a door and not ' +
+           'a mode.</strong> With it on, a ticket presented at ' +
+           '<code>/authn/spnego</code> starts a browser sign-on session — the ' +
+           'same session <code>/oauth2/authorize</code>, ' +
+           '<code>/wsfed</code>, <code>/saml2/sso</code> and this console ' +
+           'read — which makes Kerberos an authentication mechanism for every ' +
+           'application here. With it off that endpoint answers 403 naming ' +
+           'this setting, and <code>/spnego/protected</code> still performs ' +
+           'the whole handshake and gives no session.'],
+    links: [['/krb5/principals', 'the principal database'],
+            ['/krb5/service', 'the protected service'],
+            ['/spnego', 'what SPNEGO is, for a person'],
+            ['/authn/spnego', 'sign in with a ticket'],
+            ['/admin/delegation', 'what S4U and a forwarded TGT did here']] },
+
+  { path: '/admin/ldap', title: 'LDAP / LDAPS',
+    lead: '<strong>The embedded directory: RFC 4511 on raw TCP 389, and the ' +
+          'same handlers behind TLS on 636.</strong> One store behind both, ' +
+          'and it is not a copy of anything — it IS where people, groups, ' +
+          'applications, federation relationships and the SPIFFE registry ' +
+          'live, so what a SCIM POST writes and what an <code>ldapadd</code> ' +
+          'writes are one entry.',
+    also: ['<strong>No bind is ever refused.</strong> Any DN, any password, ' +
+           'anonymous, on 389 and 636 alike — there is no setting below that ' +
+           'changes it, which is why none of them is called ' +
+           '<code>authRequired</code>. What the directory is for here is ' +
+           'being READ by a client that expects a directory, and a bind that ' +
+           'failed would only ever stop that.',
+           '<strong>The base DN is the DEFAULT realm\'s directory, and every ' +
+           'other realm is a subtree beneath it.</strong> A search scoped to ' +
+           '<code>dc=example,dc=com</code> answers from the default realm ' +
+           'only; <code>-b "dc=acme,dc=example,dc=com"</code> answers from ' +
+           'acme\'s. The realm is in the DN because a socket has no path to ' +
+           'put a segment in — see <a href="/admin/realms">Trust realms</a>.'],
+    links: [['/ldap', 'the directory, and whether both sockets came up'],
+            ['/ldap/directory', 'every entry, as a tree'],
+            ['/admin/users', 'the people in it'],
+            ['/admin/groups', 'the groups in it']] },
+
+  { path: '/admin/wstrust', title: 'WS-Trust',
+    lead: '<strong>The security token service at <code>/sts</code>, ' +
+          'WS-Trust 1.0 through 1.4.</strong> It answers ' +
+          '<code>RequestSecurityToken</code> over SOAP for Issue, Validate, ' +
+          'Renew and Cancel, in whichever of the four namespace versions the ' +
+          'request used, and it will issue a SAML 1.1 or a SAML 2.0 ' +
+          'assertion. One setting is its own: who its tokens say issued them.',
+    also: ['<strong>What an assertion CONTAINS is configured on the SAML ' +
+           'pages</strong>, because it is built by the same two functions the ' +
+           'two identity providers use — <a href="/admin/saml-attributes">' +
+           'Custom SAML attributes</a> adds attributes to it, and ' +
+           '<code>saml.issuer</code> on <a href="/admin/saml2">SAML 2.0</a> ' +
+           'is the Issuer inside the assertion. <code>wstrust.issuer</code> ' +
+           'here is the token service\'s own name and they share a default ' +
+           'rather than being one setting: they were one until they had to ' +
+           'differ, which is the kind of thing that is discovered the hard ' +
+           'way.',
+           '<strong>Nothing about a request is checked.</strong> An ' +
+           '<code>OnBehalfOf</code> or <code>ActAs</code> element names ' +
+           'anybody and gets an assertion for them — this service polices no ' +
+           'delegation in WS-Trust, which <a href="/admin/delegation">' +
+           'Delegation</a> says beside every act it recorded.'],
+    links: [['/sts', 'the token service, for a person'],
+            ['/sts/cert', 'the certificate its assertions verify against'],
+            ['/admin/saml-attributes', 'what goes into the assertion'],
+            ['/admin/delegation', 'what was asked for on whose behalf']] },
+
+  { path: '/admin/wsfed', title: 'WS-Federation',
+    lead: '<strong>The passive requestor profile at <code>/wsfed</code>, ' +
+          'WS-Federation 1.2.</strong> A browser arrives with ' +
+          '<code>wa=wsignin1.0</code> and leaves with a SAML 1.1 assertion in ' +
+          'a self-submitting form; <code>wa=wsignout1.0</code> ends the ' +
+          'session. One setting is its own — the entity ID its metadata and ' +
+          'its responses name this service by.',
+    also: ['<strong>The assertion is a SAML 1.1 one, so its issuer and its ' +
+           'attributes are configured next door.</strong> ' +
+           '<code>saml.issuer</code> is on <a href="/admin/saml11">SAML 1.1</a> ' +
+           'and <a href="/admin/saml2">SAML 2.0</a>, and it is the same ' +
+           'setting in both places; <a href="/admin/saml-attributes">Custom ' +
+           'SAML attributes</a> decides what the assertion carries. This page ' +
+           'links to them rather than drawing a third form onto one value.',
+           '<strong>Single sign-on with OAuth 2.0 / OIDC is the point of the ' +
+           'require order.</strong> This module is loaded after the ' +
+           'authorization server so that both read one session: sign in at ' +
+           '<code>/oauth2/authorize</code> and <code>/wsfed</code> knows it, ' +
+           'and the other way round.',
+           '<strong><code>wauth</code> is recorded and not honoured, and ' +
+           '<code>wreqptr</code> is never dereferenced.</strong> A relying ' +
+           'party that demands a stronger factor gets whatever the session ' +
+           'already had, and this service dials no URL that did not come off ' +
+           'a federation relationship.'],
+    links: [['/wsfed', 'the profile, for a person'],
+            ['/wsfed/rp', 'the mock relying party'],
+            ['/FederationMetadata/2007-06/FederationMetadata.xml', 'its metadata'],
+            ['/admin/saml-attributes', 'what goes into the assertion']] },
+
+  { path: '/admin/tls', title: 'TLS / mutual TLS',
+    lead: '<strong>Two HTTPS listeners of this service\'s own — 8443, and ' +
+          '9443 which asks the client for a certificate — whose whole content ' +
+          'is what the SERVER saw of the connection.</strong> They exist so ' +
+          'that a client author can find out what actually arrived: the ' +
+          'protocol version, the cipher, the SNI name, and every field of the ' +
+          'certificate that was presented.',
+    also: ['<strong>A verified client certificate is not a login.</strong> ' +
+           '9443 asks for one, reports it in full, and starts no session and ' +
+           'issues no token on the strength of it. The one place a ' +
+           'certificate authenticates anybody here is the SPIRE Server API, ' +
+           'which is <a href="/admin/spiffe">SPIFFE</a>.',
+           '<strong>One self-signed certificate, regenerated on every ' +
+           'start, is shared by four sockets</strong> — 8443, 9443, LDAPS 636 ' +
+           'and the main port when <code>global.https</code> is on — so a ' +
+           'caller trusts this service once rather than four times. The names ' +
+           'and addresses below are what goes into it, which is why they are ' +
+           'restart-only: it is minted before anything is listening.',
+           '<strong>Whether the MAIN port is HTTPS is not here.</strong> ' +
+           '<code>global.https</code> is on <a href="/admin/config">' +
+           'Configuration</a> with the rest of the process\'s own settings, ' +
+           'and it defaults to whatever <code>oauth2.rfc9700</code> is — RFC ' +
+           '9700 section 2.1 says an authorization response must not travel ' +
+           'over an unencrypted connection, and the authorization endpoint is ' +
+           'on that port.'],
+    links: [['/tls', 'both listeners, and whether they came up'],
+            ['/tls/trust', 'the certificate, to trust it'],
+            ['/tls/forwarded', 'what a proxy said about the connection'],
+            ['/admin/spiffe', 'the one place a certificate authenticates']] }
+];
+
+// What one of these pages answers over `?format=json`, and what the management
+// API mirrors. The settings are `configSettingsJson()` — the same described
+// rows the form is drawn from — and the rest is what the page SAYS, in the
+// text it says it in: a caller driving this console without a browser should
+// be able to read the caveats too, since on these pages the caveats are most
+// of the content.
+function protocolSettingsJson(row) {
+  log.debug("Entering protocolSettingsJson(). path=" + row.path);
+  const json = {
+    page: row.path,
+    title: row.title,
+    what: plainTextOf(row.lead),
+    notes: (row.also || []).map(plainTextOf),
+    links: (row.links || []).map(function (link) {
+      return { href: link[0], what: link[1] };
+    }),
+    settings: configSettingsJson(row.path)
+  };
+  log.debug("Leaving protocolSettingsJson(). " + json.settings.settingCount +
+            " setting(s).");
+  return json;
+}
+
+// The page, written once. `configFormsFor()` is the whole of the second half;
+// everything above it is the row.
+function protocolSettingsPage(req, row) {
+  log.debug("Entering protocolSettingsPage(). path=" + row.path);
+  const inner = messagesOf(req) +
+    note(row.lead) +
+    (row.also || []).map(function (text) { return warn(text); }).join('') +
+    configFormsFor(row.path) +
+    // A `<p class="sub">` AND NOT A `note()`, which is the rule bullet() states
+    // for a list item that opens with a link, applied one helper across. A row
+    // of links is longer than a line and note() would therefore FOLD it — and
+    // the summary of that fold is a truncation of the first two link texts,
+    // so the only controls in the row end up behind a summary made of their
+    // own words. Every other link row in this console is a `<p class="sub">`
+    // for the same reason.
+    '<p class="sub">' + (row.links || []).map(function (link) {
+      return '<a href="' + esc(link[0]) + '">' + esc(link[1]) + '</a>';
+    }).concat(['<a href="' + esc(row.path) + '?format=json">this page as JSON</a>',
+               '<a href="/admin/sts-metadata">every endpoint this service ' +
+               'registers</a>']).join(' &middot; ') + '</p>';
+  log.debug("Leaving protocolSettingsPage().");
+  return inner;
+}
+
+// REGISTERED IN A LOOP, at the top level, which is rule 1 held rather than
+// bent: requiring this module registers these routes, in this order, below the
+// gate. `row` is captured per iteration because `forEach`'s callback has its
+// own scope — the same reason the equivalent `for (var i…)` would not have
+// worked and is not what this is.
+PROTOCOL_SETTINGS_PAGES.forEach(function (row) {
+  app.get(row.path, function (req, res) {
+    log.debug("Entering the admin " + row.title + " page.");
+    respond(req, res, protocolSettingsJson(row), row.title, row.path,
+            protocolSettingsPage(req, row));
+    log.debug("Leaving the admin " + row.title + " page.");
+  });
+});
+
+// What `mgmt-api/admin_api.js` calls for each of these. It takes the PATH
+// rather than an index or a title, because that is what SETTING_HOMES and NAV
+// are keyed by and it is what the API's own route already carries.
+function protocolSettingsJsonFor(path) {
+  const row = PROTOCOL_SETTINGS_PAGES.filter(function (item) {
+    return item.path === path;
+  })[0];
+  if (!row) {
+    // A caller asking for a page this table does not have is a wiring mistake
+    // in this repository rather than anything a request can cause, so it
+    // throws rather than answering an empty object that would read as "this
+    // family has no settings".
+    throw new Error('No protocol settings page at ' + path + '.');
+  }
+  return protocolSettingsJson(row);
+}
 
 // ---------------------------------------------------------------------------
 // /admin/spiffe, /admin/spiffe/entries, /admin/spiffe/agents — THE SPIFFE
@@ -16854,8 +17901,8 @@ function spiffePage(req) {
   const inner = messagesOf(req) + spiffePostureNote() +
     (json.enabled ? '' : warn('SPIFFE is turned OFF ' +
       '(<code>spiffe.enabled</code>): the bundle endpoint answers 404 and every ' +
-      'gRPC call is refused with <code>Unavailable</code>. Turn it back on from ' +
-      '<a href="/admin/config">Configuration</a>; it needs no restart.')) +
+      'gRPC call is refused with <code>Unavailable</code>. Turn it back on in ' +
+      'the settings at the foot of this page; it needs no restart.')) +
     (json.ready ? '' : warn((json.error
       ? 'The issuing authority could not be built, so nothing here will issue ' +
         'an SVID: ' + esc(json.error)
@@ -16924,7 +17971,7 @@ function spiffePage(req) {
         esc(entity.what) + '</td></tr>';
     }).join('') + '</table>' +
     note('Administrators by configuration ' +
-    '(<a href="/admin/config"><code>spiffe.adminIds</code></a>): ' +
+    '(<code>spiffe.adminIds</code>, in the settings at the foot of this page): ' +
     (json.authentication.adminIds.length
       ? json.authentication.adminIds.map(function (id) {
           return '<code>' + esc(id) + '</code>';
@@ -17006,8 +18053,15 @@ function spiffePage(req) {
     '<li><a href="/spiffe">What this is, and what it does not check</a></li>' +
     '<li><a href="/ldap/spiffe">The containers and their schema</a></li>' +
     '<li><a href="/admin-api/spiffe">The same, over JSON</a></li>' +
-    '</ul>';
+    '</ul>' +
+    // The twenty-eight spiffe.* rows, on the page about the trust domain
+    // rather than on /admin/config. The two lists below them — the
+    // registration entries and the agents — are a STORE and are edited on
+    // their own pages; these are the settings that decide what an SVID minted
+    // against any entry looks like.
+    configFormsFor('/admin/spiffe');
   log.debug("Leaving spiffePage().");
+  json.settings = configSettingsJson('/admin/spiffe');
   return { json: json, inner: inner, title: 'SPIFFE' };
 }
 
@@ -17091,7 +18145,7 @@ function spiffeEntriesListPage(req) {
     '<code>ldap</code>.') + '</div></form>' +
     '<table><tr><th>SPIFFE ID / entry id</th><th>Selectors</th><th>Origin</th>' +
     '<th>Hint</th><th>SVIDs</th><th>Revision</th></tr>' + rows + '</table>' +
-    pageNav('/admin/spiffe/entries', filterOnly(listView), view.paging) +
+    pageNavPair('/admin/spiffe/entries', filterOnly(listView), view.paging).head +
     spiffeCreateEntryForm() ;
   log.debug("Leaving spiffeEntriesListPage().");
   return { json: json, inner: inner };
@@ -17311,7 +18365,7 @@ function spiffeAgentsListPage(req) {
     '</select><button class="secondary">Filter</button></div></form>' +
     '<table><tr><th>Agent</th><th>Attestor</th><th>State</th>' +
     '<th>Attestations</th><th>Last seen</th></tr>' + rows + '</table>' +
-    pageNav('/admin/spiffe/agents', filterOnly(listView), view.paging);
+    pageNavPair('/admin/spiffe/agents', filterOnly(listView), view.paging).head;
   log.debug("Leaving spiffeAgentsListPage().");
   return { json: json, inner: inner };
 }
@@ -17852,7 +18906,7 @@ function federationListPage(req) {
   });
   const paging = pagingOf(req.query, filtered.length, {});
   const paged = pagedRows(req.query, filtered, {});
-  const nav = pageNav('/admin/federation', pageParamsOf(req.query), paging);
+  const nav = pageNavPair('/admin/federation', pageParamsOf(req.query), paging);
 
   const rows = paged.shown.map(function (row) {
     return '<tr><td><a href="/admin/federation' +
@@ -17913,7 +18967,7 @@ function federationListPage(req) {
     '<select id="per" name="per">' + perPageOptions(paging.perPage) + '</select>' +
     '<button type="submit">Filter</button>' +
     ((wantedText || wantedRole) ? ' <a href="/admin/federation">clear</a>' : '') +
-    '</div></form>' + nav +
+    '</div></form>' + nav.head +
     '<table><tr><th>Relationship</th><th>This service is</th><th>Protocol</th>' +
     '<th>Partner</th><th>State</th><th class="num">Sign-ins</th><th class="num">People</th>' +
     '<th>Last refusal</th></tr>' +
@@ -17921,7 +18975,7 @@ function federationListPage(req) {
       ((wantedText || wantedRole) ? 'matches. The filter above may be hiding some.'
         : 'is configured. Nothing federated happens until one is — and then not until it ' +
           'is enabled, which is a second, deliberate act.') + '</td></tr>') +
-    '</table>' + nav +
+    '</table>' + nav.foot +
     federationCreateForm() +
     '<h2>The two directions</h2>' +
     '<table><tr><th>This service is</th><th>What it means</th></tr>' +
@@ -17939,6 +18993,11 @@ function federationListPage(req) {
       return '<tr><td>' + esc(one.label) + '</td><td>' + esc(one.what) + '</td>' +
         '<td class="sub">' + esc(one.spec) + '</td></tr>';
     }).join('') + '</table>' +
+    // The eight federation.* rows, on the page that configures the feature.
+    // `federation.enabled` and `federation.outbound` are the two that turn
+    // halves of it off, and a person reading a relationship that does not work
+    // should not have to guess that the answer is a setting somewhere else.
+    configFormsFor('/admin/federation') +
     FEDERATION_LINKS;
 
   log.debug("Leaving federationListPage(). " + paged.shown.length + " row(s) of " +
@@ -17952,6 +19011,7 @@ function federationListPage(req) {
       page: paging.page, pages: paging.pages, perPage: paging.perPage,
       firstRow: paging.firstRow, lastRow: paging.lastRow,
       container: federation.containerDn(), max: federation.maxRelationships(),
+      settings: configSettingsJson('/admin/federation'),
       roles: federation.ROLES, protocols: federation.PROTOCOLS,
       paths: federation.PATHS,
       relationships: paged.shown
@@ -19005,6 +20065,22 @@ module.exports = {
   // name that promised four.
   tokenLifetimesAction: tokenLifetimesAction,
   // The JSON views, one per page, for the same reason. See the block comment
+  // The eight protocol settings pages, through ONE export keyed by path.
+  // Rule 7 wants an operation per page and there are eight of them, all
+  // answering the same shape — eight exported functions would have been eight
+  // names for one call. There is no action beside it, and that is the rule read
+  // exactly: every form on those pages posts `set-many` to /admin/config, which
+  // `POST /admin-api/config/set-many` already mirrors. A second POST per page
+  // would be eight more doors onto one function.
+  protocolSettingsJsonFor: protocolSettingsJsonFor,
+  // Where each group of settings is drawn, for the API's own /config resource
+  // and for anything that wants to send a person to the right page.
+  settingHomes: function () {
+    return SETTING_HOMES.map(function (row) {
+      return { group: row.group, pages: row.pages,
+               labels: row.pages.map(labelOfPath) };
+    });
+  },
   // above consoleJson().
   consoleJson: consoleJson,
   metricsJson: metricsJson,
