@@ -90,7 +90,7 @@ before you build a test on it.
 | | |
 |---|---|
 | **The signing key** | Each realm generates its own. A token minted in one does not verify against another's JWKS. Each realm's `kid` is on `/admin/realms`. |
-| **Every setting** | Per realm, above whatever the process is configured with. `/admin/config` and `POST /admin-api/config/set` reached under a realm's prefix read *and write* that realm. |
+| **Every setting** | Per realm, above whatever the process is configured with. Every settings form in the console — each protocol's page, and `/admin/config` — and `POST /admin-api/config/set` reached under a realm's prefix read *and write* that realm. |
 | **Sessions** | Signing in to one realm signs you in to that realm only. **The admin console is the one exception**: its gate resolves your session cookie in whichever realm minted it, so the realm switcher switches rather than asking you to sign in again — the browser has only one session cookie, and before this a switch overwrote it. Every protocol endpoint is unchanged: in the realm you switched to, `/oauth2/authorize`, `/wsfed` and the two SAML profiles see no session. The console's banner names the realm your session belongs to whenever it is not the one you are looking at. |
 | **Everything in flight** | Authorization codes, access and refresh tokens, refresh families, DPoP replay and nonce state, client-assertion replay state, named authorization servers, credential offers, pre-authorized codes, deferred transactions, issuance nonces, presentation transactions, SAML 2.0 and 1.1 request state and artifacts. |
 | **What goes into a token** | The custom claim selections, the SAML attribute selections, the credential claims, the verifier's request. |
@@ -151,7 +151,7 @@ whichever realm the console is reached in, and a grant made through
 `/realm/acme/admin-api/rbac/grant` lands there too and says so in its reply.
 
 There is one administrator roster for the process on purpose: a role is
-permission to change what *every* realm does — `/admin/config` writes the realm
+permission to change what *every* realm does — a settings form writes the realm
 it is reached in, and `/admin/realms` can delete a realm outright — so a
 per-realm roster would mean anybody who can create a realm can administer the
 whole service.

@@ -318,6 +318,46 @@ const CONFIG_SETTING = openObject(
                                'matching a string.' }
   });
 
+// THE SETTINGS BLOCK EVERY PAGE THAT OWNS SETTINGS CARRIES, written once for
+// the same reason CONFIG_SETTING above is: since 2026-08-27 twenty-one console
+// pages draw their own settings, and their `settings` member is this shape on
+// every one of them. A caller reads it once.
+const SETTINGS_BLOCK = openObject(
+  'The settings this page draws, described. The same rows GET /config returns, ' +
+  'filtered to the ones this page owns — which is where they are EDITED, not a ' +
+  'second copy of them: every form posts to POST /config/set-many.',
+  {
+    page: { type: 'string' },
+    groups: {
+      type: 'array',
+      description: 'In the order config.js declares them. Usually one; the ' +
+                   'SAML pages draw two, because `saml.issuer` is a group of ' +
+                   'its own governing both profiles.',
+      items: openObject('One group\'s settings.', {
+        group: { type: 'string' },
+        settings: { type: 'array', items: CONFIG_SETTING }
+      })
+    },
+    settingCount: { type: 'integer' },
+    editableCount: {
+      type: 'integer',
+      description: 'How many of them can be changed while the service runs. ' +
+                   'The rest were consumed at startup and say why in ' +
+                   '`restartReason`; on the Kerberos and TLS pages that is ' +
+                   'most of them.'
+    },
+    overridden: {
+      type: 'array', items: { type: 'string' },
+      description: 'The keys on this page with a runtime override in force.'
+    },
+    setWith: {
+      type: 'string',
+      description: 'The operation that writes them, named rather than left to ' +
+                   'be inferred: one store, one action, however many pages ' +
+                   'draw the door.'
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // THE PROPERTIES BOTH CLAIM-SET REPLIES CARRY.
 //
@@ -868,11 +908,7 @@ const SCHEMAS = {
                      'identity provider for everybody and works for a service ' +
                      'provider that does not want a document of its own.'
       },
-      settings: openObject(
-        'The nine saml2.* settings, as read. They are reported and not ' +
-        'settable here: POST /admin-api/config/set owns every setting in this ' +
-        'service, and a second door onto one of them is what this API refuses ' +
-        'except where the narrow door buys a refusal the wide one cannot.', {}),
+      settings: SETTINGS_BLOCK,
       artifactsAwaitingResolution: {
         type: 'integer',
         description: 'How many artifacts are minted and not yet resolved. An ' +
@@ -1002,9 +1038,7 @@ const SCHEMAS = {
                      'identity provider for everybody and works for a relying ' +
                      'party that does not want a document of its own.'
       },
-      settings: openObject(
-        'The nine saml11.* settings, as read. Reported and not settable here: ' +
-        'POST /admin-api/config/set owns every setting in this service.', {}),
+      settings: SETTINGS_BLOCK,
       artifactsAwaitingResolution: {
         type: 'integer',
         description: 'How many type 0x0001 artifacts are minted and not yet ' +
@@ -1492,7 +1526,65 @@ const SCHEMAS = {
           group: { type: 'string' },
           settings: { type: 'array', items: CONFIG_SETTING }
         })
+      },
+      homes: {
+        type: 'array',
+        description: 'WHERE EACH GROUP IS EDITED. Since 2026-08-27 every ' +
+                     'group is drawn on the console page for the protocol it ' +
+                     'configures rather than all of them on /admin/config, ' +
+                     'and this says which — so a caller can send a person to ' +
+                     'the right page instead of to a table of a hundred and ' +
+                     'fifty-four rows. A row may name TWO pages: `saml.issuer` ' +
+                     'governs both SAML profiles and WS-Federation, so it is ' +
+                     'drawn on both SAML pages. Every one of those forms ' +
+                     'posts to the same four actions below, so this changes ' +
+                     'nothing about how a setting is written.',
+        items: openObject('One group, and the page or pages that draw it.', {
+          group: { type: 'string' },
+          pages: { type: 'array', items: { type: 'string' } },
+          labels: { type: 'array', items: { type: 'string' },
+                    description: 'The pages\' console labels, in the same ' +
+                                 'order, read off the console\'s own ' +
+                                 'navigation rather than repeated here.' }
+        })
+      },
+      homeProblems: {
+        type: 'array', items: { type: 'string' },
+        description: 'Empty, and reported rather than left implicit. A ' +
+                     'sentence here means a setting group exists that no ' +
+                     'console page draws — the drift this service checks for ' +
+                     'at startup and refuses to be quiet about, since a ' +
+                     'setting that is read and appears nowhere is worse than ' +
+                     'one that is missing.'
       }
+    }),
+
+  // The shape every page that OWNS SETTINGS answers with, and one schema
+  // rather than eight: the eight protocol settings pages differ in prose and
+  // in which group they draw, and a schema per page would have been eight
+  // copies of this. It is also what the `settings` member of the SAML, SCIM,
+  // SPIFFE, federation and directory pages carries, so a caller learns one
+  // shape and reads it everywhere.
+  PageSettings: openObject(
+    'One console page, and the settings it draws. The settings are the same ' +
+    'described rows GET /config returns — value, text, source, editable, ' +
+    'bounds — filtered to the ones that page owns.',
+    {
+      page: { type: 'string', description: 'The console path this mirrors.' },
+      title: { type: 'string' },
+      what: { type: 'string',
+              description: 'What the page says the family is, as plain text.' },
+      notes: { type: 'array', items: { type: 'string' },
+               description: 'The caveats the page carries, in order. On these ' +
+                            'pages the caveats are most of the content — what ' +
+                            'a family does NOT check is the half a client ' +
+                            'author cannot read off a protocol trace.' },
+      links: { type: 'array',
+               items: openObject('One link the page offers.', {
+                 href: { type: 'string' },
+                 what: { type: 'string' }
+               }) },
+      settings: SETTINGS_BLOCK
     }),
 
   TokenLifetimes: openObject(

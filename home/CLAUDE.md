@@ -53,7 +53,7 @@ localhost, as `sts` on a compose network and through a published port;
 request, and a same-origin link does not have to know any of that.
 
 Its one sentence about signing in is read from `admin.authRequired` **per
-request**, not captured at require time, because `/admin/config` and the
+request**, not captured at require time, because a settings form and the
 management API can turn that setting off while the process runs. A front page
 promising a sign-in screen over a console that is open is the kind of small lie
 that costs somebody ten minutes.

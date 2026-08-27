@@ -152,6 +152,200 @@ It also reads the SESSION store, which `../authn/authn.js` owns.
 
 ---
 
+## EVERY SETTING IS DRAWN ON THE PAGE FOR THE PROTOCOL IT CONFIGURES (2026-08-27)
+
+Until this date `/admin/config` drew all 154 of `config.js`'s settings and
+every protocol page that cared about its own showed them as READINGS with a
+link to that page. `/admin/saml2`, `/admin/saml11` and `/admin/scim` each said
+so in its own words, and the three sets of words had already begun to disagree.
+
+Now each of `config.js`'s 22 GROUPS is drawn on the console page for the family
+it configures, `/admin/config` keeps the one group that belongs to no protocol
+(`Global`) and becomes the INDEX of where the rest are, and eight pages were
+created for the families that had settings and no page at all.
+
+### The table is the whole of it
+
+`SETTING_HOMES` in `admin.js` — one row per group, naming the page or pages
+that draw it. Four properties, and each is why it is a table rather than a
+placement made in twenty-one route handlers:
+
+* **A group is the unit, and a page never names a key.** `group` is already
+  what `config.js` declares, what `config.groups()` buckets by, and what
+  somebody means by "the Kerberos settings". A page that wanted half a group
+  would be asking for the group to be SPLIT in `config.js`, where the reasoning
+  for what belongs with what lives.
+* **A row may name two pages, and exactly one does.** `saml.issuer` is the
+  Issuer of every assertion this service builds — SAML 2.0's, SAML 1.1's and
+  WS-Federation's, out of the same two builders — so there is no one page it
+  belongs to. It is drawn on both SAML pages and `configFormsFor()` says so on
+  each, because a value that silently appeared somewhere else would be the
+  worst version of this. The WS-Federation page LINKS to it instead: three
+  forms onto one setting is where "shown where it is relevant" stops being
+  useful.
+* **`/admin/config` is not special in the code.** It is a row in that table
+  like the other twenty-one, so moving `Global` somewhere else one day is an
+  edit to the table and to nothing else.
+* **Drift is checked at startup.** `checkSettingHomes()` runs at require time
+  and reports a group with no page, a group with two rows, a row naming a group
+  `config.js` does not declare, and a row naming a path that is not in
+  `SECTIONS`. It logs, and `/admin/config` prints what it found — the same
+  spirit as `/admin/sts-metadata` naming a route nobody described. A setting
+  that is READ by the service and appears on no page is worse than one that is
+  missing, because nothing about the service's behaviour tells you it is there.
+
+### Why this is not a second store, and why that question is the only one
+
+Every form these pages draw is `configSection()`, which posts `set-many` to
+`POST /admin/config` — the same action function, the same validation, the same
+override map — with a hidden `from` naming the page to return to.
+`configReturnTo()` checks that value against `SETTING_HOMES` rather than merely
+escaping it, because it ends up in a `Location` header; an unrecognised `from`
+is not an error, it is `/admin/config`.
+
+So the rule `/admin/token-lifetimes` argued when it was the FIRST page to take
+config rows onto a page of its own is the rule this follows twenty-one times: a
+second DOOR onto one value is fine, a second PLACE THE VALUE LIVES is not.
+What changed on 2026-08-27 is that the door moved to where the reader already
+is. **`/admin/token-lifetimes` still earns its place, and the test for it has
+narrowed rather than gone**: it is not "these are settings on a page", which is
+now every page, but that those four are a QUANTITY somebody types repeatedly
+inside one session, that they INTERACT in two ways a flat table cannot report,
+and that the count of what has already expired belongs beside the numbers that
+decided it. Its own section above is unchanged and is still the argument.
+
+### THE RESET BUTTON WAS A NESTED `<form>`, AND SAVE PERFORMED A RESET
+
+Found while moving the block onto twenty-one pages, and it had been wrong on
+`/admin/config` since that page was written.
+
+Each overridden row drew its own `<form>` for Reset, INSIDE the section's form,
+with a comment saying it had to be its own form because a second submit button
+would post the whole section. **No browser ever created that form.** The HTML
+parser drops a `<form>` start tag inside another form: the element is never
+created and its children are adopted by the OUTER form. So the row's
+`action=reset` and `key` hidden inputs became fields of the section's form,
+`parseBody()` keeps the LAST value of a repeated name — and the section's Save
+button therefore performed a RESET of the last overridden key instead of
+saving. The page reloaded with a cheerful message about the thing it had just
+done instead of the thing it was asked to do.
+
+**It is a `formaction` now**, which needs no script: the button submits the same
+form to `/admin/config?reset=<key>`, and the key rides in the URL where it
+cannot be confused with a field. Two details are load-bearing:
+
+* **The hidden `action=set-many` stays and the buttons carry no `name`.** A form
+  with two NAMED submit buttons and no hidden action submits the FIRST button's
+  name and value when somebody presses Enter in a text box — which would be a
+  Reset. As written, Enter posts to the form's own action and saves.
+* **`form-action` is deliberately absent from this service's CSP**
+  (`common/app.js` says why, and it is about the authorization response's
+  redirect chain rather than about this). So nothing was relaxed to allow it.
+
+**The lesson is the method rather than the markup**: this was found by dumping
+the PARSED DOM (`google-chrome --headless --dump-dom`) and counting the forms,
+not by reading the markup, which looked correct and had a comment explaining why
+it was correct. Every other page in this console was checked the same way and
+none nests a form.
+
+### What `/admin/config` is now
+
+The `Global` form, and the index: every group, its size, how many of its
+settings are restart-only, how many carry a runtime override right now, and the
+page that draws it. Two things deliberately did NOT move:
+
+* **`Reset all`**, because it clears every override in the SERVICE and not only
+  the ones under it. A button that reached that far from the Kerberos page
+  would be the one control in this console whose blast radius was invisible
+  from where it was pressed.
+* **`?format=json`**, which still answers the whole table. `GET
+  /admin-api/config` is the API's configuration resource and a caller asking it
+  for the configuration should not have to visit twenty-one pages to assemble
+  one. It gained `homes` (where each group is drawn) and `homeProblems` (what
+  `checkSettingHomes()` found, normally empty). **The page narrowed; the
+  resource did not.**
+
+### The eight new pages, and why they are a table and a loop
+
+`PROTOCOL_SETTINGS_PAGES` — OAuth 2.0 / OIDC, OpenID4VCI, OpenID4VP, Kerberos,
+LDAP / LDAPS, WS-Trust, WS-Federation, TLS / mutual TLS. Every one of them is
+the same page: a paragraph or two saying what the family is, its caveats, the
+links to the surfaces it already has, and `configFormsFor()`. The differences
+are PROSE, so the prose is a table and the handler is written once — eight
+copies of one four-line body is eight chances for the copy nobody edited to be
+the one a reader believes.
+
+Three things about them:
+
+* **Registration is still at the top level.** The loop runs while the module is
+  being required, so the routes are registered in order, below the gate, and
+  visible to `sts_metadata.js` reading the router. Rule 1 is held, not bent.
+* **A row carries what its family does NOT do.** These are the pages somebody
+  lands on while deciding whether this service can stand in for a real one, and
+  "it speaks the protocol" without "it checks nothing" is the misleading half
+  of a true sentence. Kerberos's page says the verification is real and the
+  account policy is not; LDAP's says no bind is ever refused and that no
+  setting is missing; TLS's says a verified client certificate is not a login.
+* **There is deliberately NO ENDPOINT LIST on them.** Every one of these
+  families answers on paths this file would have to keep in step by hand, and
+  `/admin/sts-metadata` already derives exactly that list from the running
+  router. A table here would be the drift that page exists to catch, on a page
+  nothing can check.
+
+**Where the two grouped families' pages went in the sidebar** is argued in
+`SECTIONS` beside the rows: the OAuth 2.0 / OIDC settings page is FIRST in its
+group, because the other four are about one aspect each and this one is the
+family's own configuration; the two Verifiable Credentials pages are
+interleaved — OpenID4VCI, Credential claims, OpenID4VP, Verifier request — so
+each protocol sits beside the page saying what goes through it. The five
+ungrouped ones sit beside SCIM and Federation, because a group of one is a
+heading that says the label twice.
+
+### Rule 7 costs eight GETs and no POST
+
+Each new page gets `GET /admin-api/<name>` — built from a table in
+`admin_api.js` for the same reason the pages are — and **no POST beside it**.
+That is the rule read exactly rather than a gap: every form on those pages
+posts `set-many` to `/admin/config`, which `POST /admin-api/config/set-many`
+already mirrors, so a POST per page would be eight more doors onto one
+function. It is the same answer `/admin-api/scim` and
+`/admin-api/applications/new` give.
+
+Two operation names are not the obvious ones and the reason is a collision:
+`/admin-api/oid4vci-settings` and `/admin-api/oid4vp-settings`, because
+`/admin-api/credential-claims` and `/admin-api/verifier-request` already mirror
+the other two pages of those families and the bare names would have read as
+theirs.
+
+**What no code here can check is still the same gap rule 7 names.** Nothing in
+this service can see a form appear on a page, so the parity is asserted from
+outside by the parent project's `tests/admin_api.js` — and that test's page
+list comes back in `GET /admin-api/status`, which now names eight more.
+
+### What this cost on the pages that already existed
+
+Twelve pages gained a settings block and three lost prose that had been
+explaining where their settings were instead:
+
+* `/admin/saml2` and `/admin/saml11` lost their *What every assertion this
+  profile issues is governed by* readings tables, and with them
+  `SAML2_SETTINGS`, `SAML11_SETTINGS` and the two row builders — two
+  hand-maintained lists of keys that `SETTING_HOMES` makes redundant. Their
+  `settings` member in JSON changed shape from a flat key-to-value map to the
+  described block every page now answers with, which is the shape that can say
+  where a value CAME FROM.
+* `/admin/rbac` lost its four-row *How the gate is set* table, whose
+  descriptions and `config.js`'s own had already begun to differ. The two
+  sentences that were only ever in that table — a renamed role group moves
+  nobody, and `/admin-api` is not gated by any of the four — are a note under
+  the form now, because they are about this console rather than about the
+  settings.
+* `/admin/scim` stopped saying it has no controls. The argument that sentence
+  made is intact and is the one above; what changed is which page draws the
+  door.
+
+---
+
 ## `/admin/token-lifetimes` IS FOUR CONFIG ROWS ON A PAGE, AND THAT NEEDED AN ARGUMENT
 
 The access token, ID Token and refresh token lifetimes and the clock skew
@@ -1556,8 +1750,9 @@ would cost an afternoon:
   seventy-odd pages the other fifteen never mention it on. **Nothing is lost**,
   and it is worth knowing where each half of it went before putting it back:
   it is on `/admin/sts-metadata`, the one page whose subject is what this
-  service IS; it is on `/admin/config` under WS-Trust, which is where it is
-  SET; and it is in this line's tooltip, so that somebody who had learnt to
+  service IS; it is on `/admin/wstrust`, which is where it is SET — it was
+  `/admin/config` under WS-Trust until the settings moved to their protocols'
+  pages on 2026-08-27; and it is in this line's tooltip, so that somebody who had learnt to
   read it off the shell finds it where they look. What is at the top of every
   page instead is the Refresh control — see *The head row* above.
 
@@ -1624,10 +1819,12 @@ would cost an afternoon:
   rather than trusted, with `/admin` as the answer to both refusals. It is not
   in `NAV`, so it is not one of the console's pages and `tests/admin_api.js`'s
   page parity does not ask for a `/admin-api` operation mirroring it.
-* **`/admin/config` WRITES the realm it is read in.** `config.setOverride()`
-  lands on the ambient realm — see rule 3m — so the Save button on this console
-  changes one realm, and `/admin/token-lifetimes` and every other page that
-  writes a setting does the same without knowing it. That is why the switcher
+* **A SETTINGS FORM WRITES THE REALM IT IS READ IN, wherever it is drawn.**
+  `config.setOverride()` lands on the ambient realm — see rule 3m — so the Save
+  button on `/admin/kerberos` under a realm prefix changes THAT realm's
+  Kerberos settings, and `/admin/config`, `/admin/token-lifetimes` and the
+  other nineteen do the same without knowing it. Nothing about the 2026-08-27
+  move touched this: the forms multiplied and the function under them did not. That is why the switcher
   says so on every page: a form that read one realm and wrote another is the
   surprise this arrangement exists to avoid, and the only way a reader can tell
   which realm they are in is if it is named where they are looking.

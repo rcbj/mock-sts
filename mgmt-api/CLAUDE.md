@@ -90,6 +90,47 @@ about that line had to change.
    is the thing this whole arrangement exists to prevent.
 
 
+### EIGHT MORE GETs WITH NO POST BESIDE THEM (2026-08-27), and they are the same sentence eight times
+
+On 2026-08-27 every one of `config.js`'s setting groups moved onto the console
+page for the protocol it configures, and eight pages were created for the
+families that had settings and no page: `/admin/oauth2`, `/admin/oid4vci`,
+`/admin/oid4vp`, `/admin/kerberos`, `/admin/ldap`, `/admin/wstrust`,
+`/admin/wsfed` and `/admin/tls`. Rule 7 asks for an operation per page, so each
+gained a GET here — and **no POST**, for exactly the reason the row below gives.
+
+**Every form on those pages posts `set-many` to `/admin/config`**, which `POST
+/admin-api/config/set-many` already mirrors. A POST per page would be eight more
+operations over one function, and a caller handed nine ways to set
+`krb5.clockSkew` would have to work out which one the service believes. So the
+parity is satisfied by an operation that already existed, plus the GET every
+page gets. **Twelve pages that already existed gained a settings block on the
+same day and needed nothing here at all**, for the same reason — `/admin/scim`,
+`/admin/spiffe`, `/admin/saml2`, `/admin/rbac`, `/admin/groups`,
+`/admin/audit`, `/admin/delegation` and the rest already had their GETs.
+
+**The eight rows are GENERATED from a table** (`PROTOCOL_SETTINGS_OPERATIONS` in
+`admin_api.js`) for the reason `claimSetActions(family)` is: the operations
+differ only in prose, and eight hand-written rows would be seven copies plus the
+one somebody edited. `admin_api_spec.js` reads the array and cannot tell the
+difference. They share one response schema, `PageSettings`, which is also what
+the `settings` member of `/admin-api/saml2`, `/admin-api/saml11`,
+`/admin-api/scim` and the rest now carries — one shape a caller learns once.
+
+**Two of the paths are not the obvious ones**, and the collision is worth
+knowing before somebody "fixes" them: `/admin-api/oid4vci-settings` and
+`/admin-api/oid4vp-settings`, because `/admin-api/credential-claims` and
+`/admin-api/verifier-request` already mirror the other two pages of those
+families and the bare names would have read as theirs.
+
+**`GET /admin-api/config` did not narrow when the page did.** It still answers
+the whole table — a caller asking this API for the configuration should not have
+to fetch twenty-one resources and assemble one — and it gained `homes`, which
+says which console page draws each group, and `homeProblems`, which is empty
+unless a group exists that no page draws. `admin-ui/CLAUDE.md` argues the whole
+move; this file's half of it is the paragraph above.
+
+
 ### `/admin-api/applications/new` is a GET WITH NO POST BESIDE IT, and that is rule 7 read exactly
 
 `/admin/applications/new` arrived on 2026-08-25 — a console page whose one

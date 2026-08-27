@@ -1256,7 +1256,7 @@ function checkRedirectUri(opts) {
              description: 'RFC 9700 section 2.1 requires redirect_uri to be compared by exact ' +
                           'string match against the URIs registered for this client, and none ' +
                           'are registered. Add this URI to the oauth2.redirectUris setting ' +
-                          '(/admin/config, or POST /admin-api/config), or register the client ' +
+                          '(/admin/oauth2, or POST /admin-api/config), or register the client ' +
                           'with its redirect_uris at POST /oauth2/register.' };
   }
   let matched = null;

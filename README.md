@@ -171,8 +171,18 @@ mock.
 
 **Every one of the 118 is listed below**, with its appconfig key, its
 environment variable, its default and whether it can be changed without a
-restart. That table is generated from the same row `/admin/config` renders, so
-it cannot describe a setting this service does not have.
+restart. That table is generated from the same rows the console renders, so it
+cannot describe a setting this service does not have.
+
+**Since 2026-08-27 the console draws each setting on the page for the protocol
+it configures** — the Kerberos settings on `/admin/kerberos`, the SCIM ones on
+`/admin/scim`, and so on for all twenty-two groups. `/admin/config` keeps the
+five that belong to no protocol (the bind address, the port, the scheme, the
+proxy header and the log level) and is otherwise the INDEX: every group, its
+size, what is overridden right now, and the page that draws it. Nothing else
+changed — every one of those forms posts to the same endpoint against the same
+override map, and `GET /admin/config?format=json` and `GET /admin-api/config`
+still answer the whole table.
 
 #### Where a value comes from
 
@@ -180,7 +190,7 @@ Highest wins:
 
 | | Where | Survives a restart? |
 |---|---|---|
-| 1 | a **runtime override** — set on `/admin/config` or through `POST /admin-api/config/set` | no, in memory only |
+| 1 | a **runtime override** — set on the console page for that setting's protocol, or through `POST /admin-api/config/set` | no, in memory only |
 | 2 | the setting's **environment variable** — `STS_PORT`, `KRB5_REALM`, … | yes |
 | 3 | its **legacy** environment variable, where it has one — only `STS_ISSUER` does | yes |
 | 4 | the **appconfig file** `CONFIG_FILE` names, e.g. `env/local.js` | yes |
@@ -223,8 +233,8 @@ which is a setting somebody added and did not finish adding.
 env/generate_defaults.js` writes it from the table's `dflt` column, which is
 where each default is written down next to the paragraph explaining why it is
 the default. Two copies of a default is one copy that will be wrong, and wrong
-in the quietest possible way — the service running on one value while
-`/admin/config`, the OpenAPI document and this table all report the other. To
+in the quietest possible way — the service running on one value while the
+console, the OpenAPI document and this table all report the other. To
 configure a deployment, edit the file `CONFIG_FILE` names, or set the
 environment variable.
 
@@ -248,10 +258,12 @@ accepted change that does nothing reads as having worked.
 `common/config.js` is the table, and it is the one place that says, for each
 setting, what it does, what its environment variable is, what the default is and
 *why*, and whether changing it while the service runs does anything.
-`/admin/config` renders that table with the effective value of each setting and
+The console renders that table with the effective value of each setting and
 **which of the five places above it came from** — the question it exists to
-answer, since the five are indistinguishable once a value has been read. `GET
-/admin-api/config` is the same thing over JSON, and `POST
+answer, since the five are indistinguishable once a value has been read — with
+each group on the page for the protocol it configures and `/admin/config`
+holding the index and the five settings that belong to no protocol. `GET
+/admin-api/config` is the same thing over JSON, whole, and `POST
 /admin-api/config/{set,set-many,reset,reset-all}` are its four actions.
 `set-many` is all-or-nothing, so a section's Save cannot half-apply.
 
@@ -339,16 +351,19 @@ docker-compose up
 
 ### Every setting
 
-Generated from `common/config.js`'s table — the same rows `/admin/config`
-renders and `GET /admin-api/config` answers, so this list cannot describe a
-setting this service does not have or miss one it does.
+Generated from `common/config.js`'s table — the same rows the console renders
+and `GET /admin-api/config` answers, so this list cannot describe a setting this
+service does not have or miss one it does. The **Group** each setting belongs to
+is also the console page that draws it: the *Kerberos* rows are on
+`/admin/kerberos`, the *SCIM* rows on `/admin/scim`, and `/admin/config` lists
+the mapping for all twenty-two.
 
 How to read it. **The appconfig key is the dot path in the file**, so
 `oid4vci.batchSize` is `oid4vci: { batchSize: … }`; `logLevel` is the one key
 that sits at the top level rather than in a section, because it was there before
 this table existed and moving it would have broken every config file for no
 gain. **Every setting has an environment variable and it beats the file.**
-**Change while running** says whether `/admin/config` and `POST
+**Change while running** says whether the console and `POST
 /admin-api/config/set` will take it: *restart* means the value was consumed
 before the service was listening — a bound socket, the TLS certificate's names,
 the Kerberos principal database and its long-term keys, the directory tree's
@@ -358,7 +373,7 @@ default is computed from a neighbouring setting rather than written in a file.
 The *What it does* column is the first sentence or two of the setting's own
 description. The full paragraph — with the reasoning, which is usually the
 record of something having gone wrong once — is in `common/config.js` beside the
-row, and on `/admin/config` beside the input.
+row, and beside the input on whichever console page draws it.
 
 
 Four things about these settings do not fit in a cell and have cost real time:
@@ -806,8 +821,9 @@ Separated, completely, by the path:
   does not verify against another's JWKS. That is the point of a realm rather
   than a side effect of one, and each realm's `kid` is on `/admin/realms`.
 * every **setting** in the table above, per realm, above whatever the process is
-  configured with. `/admin/config` and `POST /admin-api/config/set` reached under
-  a realm's prefix read and write THAT realm.
+  configured with. Every settings form in the console and `POST
+  /admin-api/config/set` reached under a realm's prefix read and write THAT
+  realm.
 * **sessions** (so signing in to one realm signs you in to that realm only —
   with ONE exception, the admin console, whose gate resolves the session cookie
   in whichever realm minted it so that the realm switcher does not sign you out;
@@ -1098,7 +1114,7 @@ Two consequences, neither of them hidden:
 **`oauth2.rfc9700` is restart-only now — for the PROCESS.** It used to be a
 runtime setting and stopped being one the moment it grew a consequence that
 happens before the service is listening. A flag that was runtime for its checks
-and restart-only for its socket would report the mode as *on* at `/admin/config`
+and restart-only for its socket would report the mode as *on* at `/admin/oauth2`
 while every authorization response still went out over plain HTTP — the silent
 disagreement `config.js` warns about in its own header. Set it in the appconfig
 file or as `STS_OAUTH2_RFC9700` and restart; `POST /admin-api/config/set`
@@ -1118,7 +1134,7 @@ curl -X POST http://localhost:8081/admin-api/realms/create \
 
 gives one process a permissive authorization server at `/oauth2/authorize` and a
 compliant one at `/realm/rfc9700/oauth2/authorize`, each with its own issuer,
-signing key, codes and tokens. `/admin/config` reached under that prefix offers
+signing key, codes and tokens. `/admin/oauth2` reached under that prefix offers
 the control the same page in the default realm refuses.
 
 What a realm does **not** bring with it is a scheme. The main port is HTTPS or it
@@ -3512,7 +3528,7 @@ Paging is `?page=` and `?per=` as everywhere else, but **the thing to walk this 
 
 Two things it deliberately does not have. **No client address**: this service is reached over a compose bridge, through a published port or from the same machine, so what it would record is the bridge — a fact about docker rather than about whoever made the call, and a column that was right on a laptop and quietly wrong everywhere else is worse than no column. What a row *does* say is the channel — `http`, `ldap`, `ldaps`, `grpc` for the two SPIFFE gRPC surfaces, or `internal` for the things this service did on its own, such as the directory entry it seeds for somebody who authenticated elsewhere — which is the part that is actually knowable and is what somebody who has just turned LDAPS on wants to check. And **no clear button**, here or on the API: an erase control on an unprotected surface would make an audit log unable to answer the one question it exists for. Restarting the service is how you get an empty one, which is also what happens anyway — this is in memory and dies with the process, like the counters, the sessions and the signing key. There is no compliance story here to serve: this service checks no password anywhere, so an audit log of it is a debugging aid and not a record of anything.
 
-Two settings on `/admin/config` change it and both take effect immediately, because `audit.js` reads them per event rather than capturing them at require time. `audit.maxEvents` (5,000) is the cap, and what was dropped is counted and shown, so a truncated log says it was truncated instead of implying the cap is all there ever was — lowering it from 5,000 to 100 discards the excess on the very next event rather than one row per event for the next 4,900. `audit.protocolCalls` (on) is whether ordinary protocol endpoint calls get a row at all; it is far and away the noisiest category, since every JWKS poll and metadata fetch is one, and turning it off is how somebody watching the directory or the console gets a readable page. It never touches the other five categories, and `/admin/metrics` counts every call either way.
+Two settings on `/admin/audit` — the page itself, since 2026-08-27 — change it and both take effect immediately, because `audit.js` reads them per event rather than capturing them at require time. `audit.maxEvents` (5,000) is the cap, and what was dropped is counted and shown, so a truncated log says it was truncated instead of implying the cap is all there ever was — lowering it from 5,000 to 100 discards the excess on the very next event rather than one row per event for the next 4,900. `audit.protocolCalls` (on) is whether ordinary protocol endpoint calls get a row at all; it is far and away the noisiest category, since every JWKS poll and metadata fetch is one, and turning it off is how somebody watching the directory or the console gets a readable page. It never touches the other five categories, and `/admin/metrics` counts every call either way.
 
 **`/admin/token-lifetimes`** decides how long what this service issues is good for, and it is the page to reach for when the question is *why has my client stopped working*. Three lifetimes and one allowance, all four in seconds: an **access token** and an **ID Token** last an hour by default, a **refresh token** twenty-four hours, and the **clock skew** — thirty seconds — is how far out a clock may be before this service stops believing a token it signed itself.
 
@@ -3524,7 +3540,7 @@ Two things about it are worth knowing before the first surprise. **A change reac
 
 **The refresh default changed from thirty days to twenty-four hours** with this page. A client that held a refresh token across a long test run now meets an ordinary `invalid_grant` where it did not; `oauth2.refreshTokenTtlS: 2592000` in the appconfig file is exactly the old behaviour. It is a different setting from RFC 9700 mode's `oauth2.refreshIdleSeconds`, which is measured from the last time anything in a refresh *chain* was redeemed rather than from issuance — a busy client keeps its grant indefinitely under that one and is still walled by this one.
 
-All four are ordinary `config.js` rows, so they are on `/admin/config` too and this page writes through the same function — one store, two doors. The management API has a narrow door of its own at `GET /admin-api/token-lifetimes` and `POST /admin-api/token-lifetimes/set`, which differs from `POST /admin-api/config/set-many` in one way that matters to a test: it **refuses** a key that is not one of the four instead of ignoring it, so a misspelt `oauth2.accessTokenTtlsS` fails loudly rather than succeeding and changing nothing. `POST /admin-api/token-lifetimes/defaults` puts the four back without disturbing any other setting.
+All four are ordinary `config.js` rows, so they are on `/admin/oauth2` too and this page writes through the same function — one store, two doors. The management API has a narrow door of its own at `GET /admin-api/token-lifetimes` and `POST /admin-api/token-lifetimes/set`, which differs from `POST /admin-api/config/set-many` in one way that matters to a test: it **refuses** a key that is not one of the four instead of ignoring it, so a misspelt `oauth2.accessTokenTtlsS` fails loudly rather than succeeding and changing nothing. `POST /admin-api/token-lifetimes/defaults` puts the four back without disturbing any other setting.
 
 Every screen that reports token state now reports **expired** as its own answer rather than leaving it to be inferred: the users list gained an *Expired* column beside *Valid* and *Revoked*, and a person's drill-down a matching tile. The count was always there and was simply not shown, so "12 issued, 1 valid" left eleven to be guessed at — and the guess is wrong, because a revoked token, one not yet valid and one with no expiry stated all sit in that difference.
 
@@ -4460,7 +4476,7 @@ Digest. Anybody can register a HOBA key. Nothing here decides that a caller *sho
 allowed to delete an account — it decides that they said who they were first. Do not put
 this port on a public address on the strength of it.
 
-Every switch is a `config.js` row and therefore already on `/admin/config` and
+Every switch is a `config.js` row and therefore already on `/admin/scim` and
 `POST /admin-api/config/set`: `scim.authRequired` (on by default; turning it **off**
 restores the unauthenticated behaviour these endpoints used to have, which stays reachable
 on purpose), `scim.authDiscovery`, `scim.authRealm`, `scim.scopeRead`, `scim.scopeWrite`,
@@ -4575,12 +4591,12 @@ being true.
 because each of the five really is performed. A reader adding the column up would
 otherwise conclude the counting is broken.
 
-**It has no controls, and that is the console parity rule holding rather than a gap.**
-Everything about SCIM that can be changed is a `config.js` row — `scim.enabled` and three
-limits — so `/admin/config` already has the form and `POST /admin-api/config/set` already
-has the operation. A second form here would be a second door to one setting.
-`GET /admin-api/scim` is therefore read-only, which it shares with `/admin-api/audit`, and
-in both cases for the same reason.
+**Its one control is the eighteen `scim.*` settings, and there is still no POST beside
+`GET /admin-api/scim`.** Everything about SCIM that can be changed is a `config.js` row,
+and since 2026-08-27 this page is where those rows are DRAWN rather than described with a
+link to `/admin/config`. The form posts to that endpoint, so `POST /admin-api/config/set`
+is already the operation for it and a POST here would be a second door onto one function.
+The parity rule is holding rather than being bent — see `mgmt-api/CLAUDE.md`.
 
 One thing those settings do that is worth copying: `applyCapabilities()` is called both at
 require time *and* at the top of the ServiceProviderConfig handler. Without the second

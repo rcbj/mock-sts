@@ -515,7 +515,7 @@ function checkRealmOverride(key, raw) {
     return '"' + key + '" cannot be set on one realm: it is what decides ' +
       'whether realms exist and where they are found, so a realm carrying it ' +
       'would be changing how it was reached half way through the request that ' +
-      'reached it. Set it on the service as a whole — /admin/config, or POST ' +
+      'reached it. Set it on the service as a whole — /admin/oauth2, or POST ' +
       '/admin-api/config/set.';
   }
   // `true` is the `forRealm` argument, and it is what admits the one setting

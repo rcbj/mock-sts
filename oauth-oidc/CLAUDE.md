@@ -52,7 +52,7 @@ are facts about `server.js`: `ws-federation/wsfed.js` must be required AFTER
    service is listening: `global.https` derives its default from it, so it binds
    the main port as HTTPS. A flag that was runtime for its checks and
    restart-only for its socket is the silent disagreement the config.js header
-   warns about — /admin/config would report the mode as on while every
+   warns about — /admin/oauth2 would report the mode as on while every
    authorization response still went out over plain HTTP.
 
    **RESTART-ONLY FOR THE PROCESS; A TRUST REALM MAY CARRY IT.** That is the
@@ -470,7 +470,7 @@ of five; caching took it from 762 to 8,006 requests a second.
 no nonce, no `jti`, nothing bound to the caller, so two clients a second apart
 are entitled to byte-identical documents. Everything that can vary — the base
 URL the request arrived on, the authorization-server profile it selected, any
-setting changed at runtime through `/admin/config` — varies the METADATA, and
+setting changed at runtime through `/admin/oauth2` — varies the METADATA, and
 **the metadata is the cache key**, so runtime settability is untouched: a
 document differing by one member is a different key and is signed afresh.
 
@@ -508,7 +508,7 @@ this service.
   literally — a runtime setting must be READ WHERE IT IS USED — and these are
   the settings where it bites hardest, because "make it a minute so I can watch
   my client refresh" is why somebody points a client at a mock at all. A value
-  captured at require time is the one thing `/admin/config` cannot change, and
+  captured at require time is the one thing a runtime override cannot change, and
   it fails in the direction that looks like the console is broken.
 * **THE GRANULARITY IS THIRTY SECONDS AND THE FLOOR IS ONE STEP**, declared as
   `min`/`max`/`step` on the row rather than checked at a call site — see
