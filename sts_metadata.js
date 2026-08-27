@@ -2523,13 +2523,6 @@ const ENDPOINTS = [
           'The token is a SAML 1.1 assertion by default because that is what AD FS issues; ' +
           '?tokenType=saml2 and ?trust=1.3 are NON-SPEC switches for the other token type and the ' +
           'ws-sx RSTR Collection wrapper. wattr1.0 and wpseudo1.0 answer 501; wreqptr is refused.' },
-  { path: '/wsfed/login', group: 'WS-Federation', name: 'Sign-in form target',
-    specs: ['ws-federation'],
-    what: 'Where the WS-Federation sign-in screen posts. No password is checked — the username typed ' +
-          'becomes the subject of the assertion — except that the literal "invalid" fails, as it does ' +
-          'in every other protocol here. It creates the SAME session the OAuth 2.0 / OIDC login ' +
-          'screen creates, which is what makes single sign-on work across the two: sign in there with ' +
-          'a security key and the assertion issued here says a hardware key was used.' },
   { path: '/wsfed/autopost.js', group: 'WS-Federation', name: 'Sign-in response auto-post script',
     specs: ['ws-federation'],
     what: 'Submits the section 13.2.2 form. A separate resource rather than an inline script for the ' +
@@ -2923,6 +2916,27 @@ const ENDPOINTS = [
           'into whatever its own specification says a refusal looks like. The return URL is checked ' +
           'to be a path on this service — an authentication service that will redirect anywhere ' +
           'after signing somebody in is a phishing tool with a login screen in front of it.' },
+  { path: '/authn/select-idp', group: 'Authentication', name: 'Federation partner chooser',
+    specs: ['oidc'],
+    effect: 'asks which of an application\'s federated identity providers to sign in at; needs ' +
+            'an ?authn= id, so following it bare answers 400',
+    what: 'HOME REALM DISCOVERY, NARROWED TO ONE APPLICATION. An entry under ou=applications may ' +
+          'name SEVERAL federation relationships in appFederationRelationship — a SAML 2.0 ' +
+          'partner and an OpenID Connect one are the ordinary pair — and when more than one of ' +
+          'them is usable this page is drawn instead of the sign-in screen. One button per ' +
+          'partner, no password field and no form at all: the buttons are links, because a form ' +
+          'control here would post to the sign-in handler, which signs somebody in on a typed ' +
+          'name — the one thing an application that federates its authentication has said it ' +
+          'does not want. Naming exactly one relationship still redirects straight to it and this ' +
+          'page is never seen, which is what appFederationAutoRedirect has always done; that ' +
+          'setting means "without the sign-in screen" and never "without a page", because there ' +
+          'is no value of a boolean that can say which identity provider somebody\'s employer is. ' +
+          'A value naming a relationship this service cannot use — disabled, half-configured, ' +
+          'identity-provider-side, or absent from this realm — is PRINTED here rather than ' +
+          'dropped: a list of three with one disabled draws two buttons, and two buttons is ' +
+          'exactly what a correct list of two draws. The list is re-read when this page is drawn ' +
+          'rather than taken from the redirect that produced it, and if fewer than two partners ' +
+          'are left the sign-in screen is drawn instead.' },
   { path: '/authn/webauthn', group: 'Authentication', name: 'WebAuthn security-key step',
     specs: ['oidc', 'webauthn'],
     effect: 'enrols or asserts a security key, then completes the sign-in',

@@ -108,6 +108,12 @@ const audit = require('../common/audit');
 // The path a caller sends the browser to. Exported, because the two callers
 // build a URL out of it and a string spelled twice is a string that drifts.
 const LOGIN_PATH = '/authn/login';
+// WHERE A PERSON PICKS BETWEEN AN APPLICATION'S FEDERATION PARTNERS. A page of
+// its own rather than the screen above with its form suppressed — see
+// beginAuthentication(), where the choice between the two is argued. It is
+// reached only with an `?authn=` id, exactly as the screen is, because what it
+// needs is the pending record and not a partner list somebody could compose.
+const SELECT_IDP_PATH = '/authn/select-idp';
 
 const SESSION_COOKIE = 'sts_mock_session';
 
@@ -628,28 +634,58 @@ function endSession(req, res) {
 // ---------------------------------------------------------------------------
 // WHERE THIS APPLICATION'S PEOPLE SIGN IN, if its entry says.
 //
-// An application entry may name a federation relationship
+// An application entry may name federation relationships
 // (`appFederationRelationship`), which is the registry answering a question it
 // could not answer before: a relationship under `ou=federations` says how to
 // talk to a foreign identity provider and nothing about WHO should be sent
 // there, and until this attribute existed the only answer was a person
 // choosing a button at the foot of the screen below — home realm discovery
-// performed by the user, once per sign-in.
+// performed by the user, against every relationship this service has, once per
+// sign-in.
 //
-// FOUR CHECKS, AND EACH OF THEM IS MADE HERE RATHER THAN AT THE WRITE.
-// The attribute is a string on a directory entry: `ldapmodify` reaches it, so
-// does the management API, and the relationship it names can be disabled or
-// deleted afterwards by somebody who never looked at this application. A check
-// made when it was written would therefore be a check about the past. The
-// relationship must exist IN THIS REALM (the register is per realm, so an id
-// from another realm names nothing here), must be service-provider-side (the
-// other direction is this service asserting TO that partner — there is nothing
-// to sign in to), must be enabled, and must be fully configured.
+// IT HOLDS A LIST SINCE 2026-08-26, AND THAT IS THE ONE THING TO UNDERSTAND
+// ABOUT THIS FUNCTION. An application with two identity providers is the
+// ordinary case in a real deployment — a workforce partner and a customer one,
+// or the same partner reached over two protocols during a migration — and the
+// attribute was single-valued, so the only way to say it was to configure
+// nothing and let the person choose from the whole register. Naming several
+// here is the middle answer: the choice is still made by the person, and the
+// list they choose from is this application's own.
 //
-// A failure of any of them is REPORTED rather than swallowed, in `problem`,
-// and the caller shows it on the sign-in screen. The alternative — falling
-// silently back to the password box — is a federated application quietly
-// authenticating people locally, which looks exactly like it working.
+// WHAT COMES BACK IS THEREFORE A LIST, and the two shapes callers actually
+// want are precomputed rather than left to be derived twice:
+//
+//   ids        every value on the entry, in the order the entry holds them
+//   options    one row per value: { id, relationship, problem, option }, with
+//              `relationship` null and `problem` set for a value that names
+//              something this service cannot use
+//   usable     the subset with a relationship — what a page may offer
+//   id/relationship  the single usable one, when there is EXACTLY one. This
+//              pair is what every caller written before the list existed
+//              reads, and it is null the moment there is a choice to make, so
+//              a caller that has not been taught about the chooser cannot
+//              silently pick the first partner for somebody.
+//   auto       appFederationAutoRedirect, which means "without the sign-in
+//              screen" and never "without a page" — see below.
+//   problem    the FIRST unusable value's sentence, for the caller that shows
+//              one line; `problems` has them all.
+//
+// FOUR CHECKS PER VALUE, AND EACH OF THEM IS MADE HERE RATHER THAN AT THE
+// WRITE. The attribute is a string on a directory entry: `ldapmodify` reaches
+// it, so does the management API, and a relationship it names can be disabled
+// or deleted afterwards by somebody who never looked at this application. A
+// check made when it was written would therefore be a check about the past.
+// The relationship must exist IN THIS REALM (the register is per realm, so an
+// id from another realm names nothing here), must be service-provider-side
+// (the other direction is this service asserting TO that partner — there is
+// nothing to sign in to), must be enabled, and must be fully configured.
+//
+// A failure of any of them is REPORTED rather than swallowed, and the caller
+// shows it. The alternative — falling silently back to the password box — is a
+// federated application quietly authenticating people locally, which looks
+// exactly like it working. WITH A LIST THAT MATTERS MORE rather than less: a
+// list of three whose middle value is disabled draws two buttons, and two
+// buttons is exactly what a correctly configured list of two draws.
 //
 // Returns null when there is nothing to say: no application named, no entry,
 // or no relationship on the entry. That is the ordinary case and it is the
@@ -678,9 +714,17 @@ function federationFor(applicationId) {
     log.debug("Leaving federationFor(). The registry threw.");
     return null;
   }
-  const named = String(((entry || {}).fields ||
-                        {}).appFederationRelationship || '').trim();
-  if (!named) {
+  // A LIST OR A STRING, AND BOTH ARE READ. The schema says `multi` and
+  // `applications.js` hands back an array for a multi row — but an entry
+  // written by an older build of this service, or by an `ldapmodify` against a
+  // directory that enforces no schema, can hold a bare string. Normalising
+  // here rather than trusting the row is one line, and the alternative fails
+  // as `named.filter is not a function` on a sign-in screen.
+  const raw = ((entry || {}).fields || {}).appFederationRelationship;
+  const ids = (Array.isArray(raw) ? raw : [raw])
+    .map(function (one) { return String(one == null ? '' : one).trim(); })
+    .filter(Boolean);
+  if (!ids.length) {
     log.debug("Leaving federationFor(). That application names no partner.");
     return null;
   }
@@ -693,16 +737,22 @@ function federationFor(applicationId) {
   // entry and one on another relationship are the same string, checkable the
   // same four ways, and two implementations of "would this actually work"
   // would answer differently the first time one of them learned a fifth.
-  const usable = federation.usableServiceProvider(
-    named, 'This application');
-  if (usable.problem) {
-    log.debug("Leaving federationFor(). " + usable.problem);
-    return { id: named, relationship: null, auto: auto,
-             problem: usable.problem };
-  }
-  log.debug("Leaving federationFor(). " + named + ", auto=" + auto + ".");
-  return { id: named, relationship: usable.relationship, auto: auto,
-           problem: '' };
+  const resolved = federation.usableServiceProviders(ids, 'This application');
+  // EXACTLY ONE, or neither. `relationship` is what beginAuthentication()
+  // redirects to without asking anybody, so it must be empty whenever there is
+  // a question to put to the person — two usable partners and no chooser is
+  // this service deciding which identity provider somebody's employer is.
+  const only = resolved.usable.length === 1 ? resolved.usable[0] : null;
+  log.debug("Leaving federationFor(). " + ids.length + " named, " +
+            resolved.usable.length + " usable, auto=" + auto + ".");
+  return { ids: ids,
+           options: resolved.all,
+           usable: resolved.usable,
+           id: only ? only.id : (ids.length === 1 ? ids[0] : ''),
+           relationship: only ? only.relationship : null,
+           auto: auto,
+           problem: resolved.problems[0] || '',
+           problems: resolved.problems };
 }
 
 // ---------------------------------------------------------------------------
@@ -770,9 +820,24 @@ function mechanismFor(applicationId) {
     broker = null;
   }
   if (broker) {
+    // ONE PARTNER, IN THE SHAPE federationFor() RETURNS. `fedAuthnRelationship`
+    // names exactly one onward relationship and is deliberately not a list —
+    // the broker case is a relationship SAYING WHERE IT SENDS PEOPLE, which is
+    // a statement with one answer, where an application naming several is a
+    // person's choice narrowed. But everything downstream of here reads
+    // `options` and `usable`, so a broker that filled in only the two legacy
+    // fields would draw an empty chooser the first time somebody rearranged
+    // this branch. It fills in all of them.
     const home = broker.relationship
-      ? { id: broker.onward, relationship: broker.relationship, auto: true,
-          problem: '' }
+      ? { ids: [broker.onward],
+          options: [{ id: broker.onward, relationship: broker.relationship,
+                      problem: '',
+                      option: federation.optionOf(broker.relationship) }],
+          usable: [{ id: broker.onward, relationship: broker.relationship,
+                     problem: '',
+                     option: federation.optionOf(broker.relationship) }],
+          id: broker.onward, relationship: broker.relationship, auto: true,
+          problem: '', problems: [] }
       : null;
     log.info('authn: the federation relationship "' + broker.via + '" says ' +
              'this sign-in is "' + (broker.mechanism || 'unrecognised') +
@@ -821,13 +886,21 @@ function mechanismFor(applicationId) {
 // Returns the path to redirect to. A path rather than a full URL: the browser
 // is already on this origin, and building an absolute URL here would mean
 // guessing the base the caller was reached on. IT IS NOT ALWAYS THIS MODULE'S
-// SCREEN — an application whose entry names a usable federation relationship,
-// with the auto-redirect left on, is answered with the federated flow's own
-// entry point instead. The caller cannot tell the two apart and must not: what
-// it asked for is "get this person authenticated and bring them back to
-// returnTo", and which identity provider does the authenticating is not its
-// business. That is the same property the buttons at the foot of the screen
-// have had all along; what is new is that nobody has to press one.
+// SCREEN, and there are now THREE things it can be:
+//
+//   * the federated flow's own entry point, when the application names exactly
+//     ONE usable relationship and the auto-redirect is left on;
+//   * the CHOOSER at /authn/select-idp, when it names more than one — a page
+//     with one button per partner and no password field;
+//   * the sign-in screen, for everything else.
+//
+// The caller cannot tell the three apart and must not: what it asked for is
+// "get this person authenticated and bring them back to returnTo", and which
+// identity provider does the authenticating — or whether the person was asked
+// — is not its business. That is the same property the buttons at the foot of
+// the screen have had all along; what changed is first that nobody has to
+// press one, and then that where there IS a choice it is this application's
+// partners being chosen between rather than every relationship in the register.
 // ---------------------------------------------------------------------------
 function beginAuthentication(opts) {
   log.debug("Entering beginAuthentication(). protocol=" + (opts.protocol || '(unnamed)'));
@@ -865,11 +938,62 @@ function beginAuthentication(opts) {
                         chosen.via + '" brokers it there'
                       : '') +
              ', so this sign-in goes straight there rather than to the sign-in ' +
-             'screen.');
+             'screen.' +
+             // SAID HERE OR NOWHERE. This is the one branch that draws no page,
+             // so a value on the entry that names something unusable has no
+             // banner to appear on — and the flow works, which is exactly why
+             // nobody would go looking. An operator who meant to offer two
+             // partners and is offering one needs to be told by the log.
+             (home.problems && home.problems.length
+                ? ' ' + home.problems.length + ' other value(s) on that ' +
+                  'entry name a relationship this service cannot use, and no ' +
+                  'page is drawn to say so: ' + home.problems.join(' ')
+                : ''));
     log.debug("Leaving beginAuthentication(). Federated to " +
               home.relationship.fedId + ".");
     return target;
   }
+  // ---------------------------------------------------------------------
+  // MORE THAN ONE USABLE PARTNER: THE CHOOSER, AND WHY IT IS A PAGE OF ITS
+  // OWN RATHER THAN THE SCREEN BELOW WITH THE PASSWORD BOX HIDDEN.
+  //
+  // `home.relationship` is deliberately null the moment there is a choice
+  // (see federationFor()), so the branch above cannot fire and pick the first
+  // partner for somebody. What is left is a question, and a question needs a
+  // page.
+  //
+  // The alternative was the sign-in screen drawn with only its buttons. It was
+  // refused because that page is the AUTHENTICATION SERVICE'S own screen: it
+  // carries `username`, `password`, `kc-login` and `kc-cancel`, it POSTs to a
+  // handler that signs somebody in on a typed name, and every one of those
+  // element ids is what four tests and a person's muscle memory look for.
+  // Hiding the form would leave a page that is a sign-in screen in everything
+  // but what it shows, and the first time somebody re-added a field to it the
+  // chooser would grow a password box nobody asked for.
+  //
+  // `auto` STILL DECIDES WHETHER A SCREEN IS DRAWN, AND IT MEANS WHAT IT
+  // ALWAYS MEANT: "without the sign-in screen". With one partner that is a
+  // redirect; with several it is THIS PAGE, which is the sign-in screen's job
+  // done without the sign-in screen. What it never means is "pick one for
+  // them" — there is no value of a boolean that can say which identity
+  // provider somebody's employer is.
+  //
+  // SO auto=FALSE WITH SEVERAL PARTNERS IS THE SCREEN, with one button per
+  // partner under the password box, which is exactly what auto=FALSE has done
+  // since it existed — "keep the screen, where the partner is then the only
+  // button offered", now with the partners plural. That is why this branch
+  // tests it: a chooser drawn for an application that asked to keep its
+  // sign-in screen would be this attribute quietly meaning the opposite of
+  // what it says, on the one page where the password box is the point.
+  //
+  // The record is minted through the same store the screen uses, which is what
+  // keeps `returnTo` server-side and out of the URL — federation_sp.js's
+  // decision 3, one layer up. Without it the chooser would be a page carrying
+  // a return address anybody could rewrite, and the buttons on it would be an
+  // open redirect with a heading.
+  // ---------------------------------------------------------------------
+  const choosing = !!home && home.auto && !home.relationship &&
+                   home.usable.length > 1;
   // ---------------------------------------------------------------------
   // THE THREE MECHANISMS THAT STILL DRAW THIS SCREEN, folded into the record
   // the screen is drawn from rather than handled beside it — so that a
@@ -919,7 +1043,7 @@ function beginAuthentication(opts) {
     // silent fallback the first case was made loud to prevent.
     mechanismProblem: chosen.problem || '',
     protocol: opts.protocol || 'OAuth 2.0 / OIDC',
-    // Carried so the screen can offer the RIGHT partner rather than every
+    // Carried so the screen can offer the RIGHT partners rather than every
     // usable one, and so that a relationship this application names and cannot
     // use is reported instead of being replaced by a password box.
     application: String(opts.application || ''),
@@ -930,6 +1054,28 @@ function beginAuthentication(opts) {
   pending.forEach(function (v, k) {
     if (v.expires < Date.now()) pending.delete(k);
   });
+  // ONE RECORD, TWO PAGES, AND THE PAGE IS THE ONLY DIFFERENCE. The chooser
+  // reads the same record the screen does — same store, same ten-minute
+  // expiry, same returnTo — so a person who chooses a partner and a person who
+  // types a name are spending the same pending authentication. That is why the
+  // record is built above this branch rather than inside each of them: two
+  // constructions would be two places for `returnTo` to be forgotten, and a
+  // federated sign-in that succeeds and lands somebody on a page nobody asked
+  // for is the failure federatedButtons() already carries a comment about.
+  if (choosing) {
+    log.info('authn: "' + String(opts.application || '(none)') + '" names ' +
+             home.usable.length + ' usable federation relationships (' +
+             home.usable.map(function (one) { return one.id; }).join(', ') +
+             '), so this sign-in asks which one rather than choosing.' +
+             (home.problems.length
+                ? ' ' + home.problems.length + ' more value(s) on that entry ' +
+                  'name something this service cannot use and are shown on the ' +
+                  'page as such.'
+                : ''));
+    log.debug("Leaving beginAuthentication(). " + record.id +
+              " goes to the chooser and will return to " + returnTo + ".");
+    return SELECT_IDP_PATH + '?authn=' + encodeURIComponent(record.id);
+  }
   log.debug("Leaving beginAuthentication(). " + record.id + " will return to " + returnTo + ".");
   return LOGIN_PATH + '?authn=' + encodeURIComponent(record.id);
 }
@@ -1000,6 +1146,40 @@ function pendingFor(id) {
 // Keycloak-shaped vocabulary, the same statement that no password is checked.
 // What changed is where it lives, what it posts to, and that its footer rows
 // are supplied rather than read off an authorization request.
+// ---------------------------------------------------------------------------
+// THE ONE STYLESHEET BOTH PAGES IN THIS MODULE ARE DRAWN WITH.
+//
+// It was inline in loginPage() until the chooser at /authn/select-idp needed
+// the same card, the same buttons and the same error banner. Copying it would
+// have been ten lines nobody would ever have diffed, and the two pages sit one
+// redirect apart — a person who picks a partner and comes back to type a name
+// sees both in the same second, so a drift between them is visible rather than
+// theoretical.
+//
+// Everything a person meets in this service is still ONE FILE WITH NO ASSETS:
+// `script-src 'none'` holds, there is no stylesheet to fetch, and neither page
+// runs a line of script. The WebAuthn step is the exception this service
+// already argues at length, and it is not one of these two.
+// ---------------------------------------------------------------------------
+const CARD_CSS =
+  'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
+  'display:flex;align-items:center;justify-content:center;min-height:100vh;color:#222}' +
+  '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:28px 32px;width:380px;' +
+  'box-shadow:0 6px 24px rgba(0,0,0,.08)}h1{font-size:1.25em;margin:0 0 4px}' +
+  'p.sub{color:#666;font-size:.85em;margin:0 0 18px}label{display:block;font-size:.85em;font-weight:600;' +
+  'margin:12px 0 4px}input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:8px 10px;' +
+  'border:1px solid #bbb;border-radius:5px;font-size:1em}.row{display:flex;gap:10px;margin-top:20px}' +
+  'button{flex:1;padding:9px 12px;border-radius:5px;border:1px solid #12107c;background:#12107c;color:#fff;' +
+  'font-size:.95em;cursor:pointer}button.secondary{background:#fff;color:#12107c}' +
+  '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
+  'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
+  'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}code{font-family:ui-monospace,' +
+  'SFMono-Regular,Menlo,monospace}.fed{margin-top:18px;padding-top:14px;border-top:1px solid #eee}' +
+  '.fed p{font-size:.78em;color:#666;margin:0 0 8px}' +
+  'a.fedbtn{display:block;text-align:center;padding:9px 12px;margin:6px 0;border-radius:5px;' +
+  'border:1px solid #12107c;color:#12107c;background:#fff;text-decoration:none;font-size:.9em}' +
+  'a.fedbtn span{display:block;font-size:.75em;color:#777}';
+
 // The partner buttons, or nothing at all. Nothing at all is the ordinary state
 // — a service with no federation configured must have a sign-in screen byte for
 // byte the one it always had, which is why this returns an empty string rather
@@ -1022,19 +1202,26 @@ function federatedOptionsHtml(record) {
   // so honouring it here would make the same configuration behave two ways
   // depending on one unrelated boolean.
   // ---------------------------------------------------------------------
+  //
+  // ALL OF THEM, NOT THE FIRST. `appFederationRelationship` holds a list, and
+  // this screen is what a person meets when the auto-redirect is OFF — which
+  // is precisely the configuration that says "let them choose". Drawing one
+  // button for a list of two would make that setting mean the opposite of what
+  // it says.
   const home = record.federation;
-  if (home && home.relationship) {
-    const html = federatedButtons(record, [{
-      id: home.relationship.fedId,
-      label: home.relationship.fedName || home.relationship.fedId,
-      protocolLabel: (federation.protocolRow(home.relationship.fedProtocol) ||
-                      {}).label || home.relationship.fedProtocol,
-      peer: home.relationship.fedPeer
-    }], 'This application signs its users in at a federated identity ' +
-        'provider. No password is typed here and none is checked there ' +
-        'either as far as this service can tell — what it checks is the ' +
-        'partner\'s signature.');
-    log.debug("Leaving federatedOptionsHtml(). The application's own partner.");
+  if (home && home.usable && home.usable.length) {
+    const many = home.usable.length > 1;
+    const html = federatedButtons(record,
+      home.usable.map(function (one) { return one.option; }),
+      'This application signs its users in at ' +
+      (many ? 'one of these federated identity providers. Pick the one you ' +
+              'have an account at'
+            : 'a federated identity provider') +
+      '. No password is typed here and none is checked there ' +
+      'either as far as this service can tell — what it checks is the ' +
+      'partner\'s signature.');
+    log.debug("Leaving federatedOptionsHtml(). " + home.usable.length +
+              " partner(s) this application names.");
     return html;
   }
   if (!config.value('federation.loginButtons')) {
@@ -1091,21 +1278,8 @@ function loginPage(base, record, error) {
   log.debug("Entering loginPage(). protocol=" + record.protocol +
             (error ? ", showing an error" : ""));
   const page = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
-    '<title>Sign in — mock authentication service</title><style>' +
-    'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:#f4f4f7;margin:0;' +
-    'display:flex;align-items:center;justify-content:center;min-height:100vh;color:#222}' +
-    '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;padding:28px 32px;width:380px;' +
-    'box-shadow:0 6px 24px rgba(0,0,0,.08)}h1{font-size:1.25em;margin:0 0 4px}' +
-    'p.sub{color:#666;font-size:.85em;margin:0 0 18px}label{display:block;font-size:.85em;font-weight:600;' +
-    'margin:12px 0 4px}input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:8px 10px;' +
-    'border:1px solid #bbb;border-radius:5px;font-size:1em}.row{display:flex;gap:10px;margin-top:20px}' +
-    'button{flex:1;padding:9px 12px;border-radius:5px;border:1px solid #12107c;background:#12107c;color:#fff;' +
-    'font-size:.95em;cursor:pointer}button.secondary{background:#fff;color:#12107c}' +
-    '.err{background:#fdecea;border:1px solid #f5c6c2;color:#b00020;padding:8px 10px;border-radius:5px;' +
-    'font-size:.85em;margin-bottom:12px}.meta{margin-top:20px;padding-top:14px;border-top:1px solid #eee;' +
-    'font-size:.75em;color:#777;word-break:break-all}.meta div{margin:2px 0}code{font-family:ui-monospace,' +
-    'SFMono-Regular,Menlo,monospace}.fed{margin-top:18px;padding-top:14px;border-top:1px solid #eee}.fed p{font-size:.78em;color:#666;margin:0 0 8px}a.fedbtn{display:block;text-align:center;padding:9px 12px;margin:6px 0;border-radius:5px;border:1px solid #12107c;color:#12107c;background:#fff;text-decoration:none;font-size:.9em}a.fedbtn span{display:block;font-size:.75em;color:#777}'
-    + '</style></head><body><div class="card">' +
+    '<title>Sign in — mock authentication service</title><style>' + CARD_CSS +
+    '</style></head><body><div class="card">' +
     '<h1>Sign in</h1>' +
     '<p class="sub">Mock authentication service at <code>' + xmlEscape(base) + '</code></p>' +
     (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
@@ -1202,6 +1376,140 @@ function sendLoginPage(res, html) {
   res.status(200).type('text/html').set('Cache-Control', 'no-store').send(html);
 }
 
+// ---------------------------------------------------------------------------
+// THE CHOOSER: WHICH OF THIS APPLICATION'S FEDERATION PARTNERS.
+//
+// Drawn when the application entry names MORE THAN ONE usable
+// service-provider-side relationship. It is home realm discovery, narrowed:
+// the buttons at the foot of the sign-in screen offer every relationship this
+// service has, and these offer the ones this application was configured with.
+//
+// THERE IS NO PASSWORD FIELD AND NO FORM. The buttons are links, for
+// federatedButtons()' reason made a second time and with more force here: a
+// form control would post to the sign-in handler, which signs somebody in on a
+// typed name — which is the one thing an application that federates its
+// authentication has said it does not want. Leaving is a GET.
+//
+// THE UNUSABLE VALUES ARE PRINTED, not dropped. A list of three whose middle
+// value names a disabled relationship draws two buttons, and two buttons is
+// exactly what a correct list of two draws — so the difference has to be said
+// in words. Each line is the sentence usableServiceProvider() wrote, which
+// names the id and what is wrong with it.
+//
+// THERE IS NO "NONE OF THESE" ESCAPE, and that is deliberate rather than
+// missing. This page is reached because an application was configured to
+// authenticate its people elsewhere; an escape hatch back to the password box
+// would be that configuration meaning nothing, which is the failure this whole
+// feature is careful about. Somebody who needs the password box clears the
+// attribute — and every relationship being unusable is the one case where this
+// page is not drawn at all, because federationFor() reports no usable partner
+// and beginAuthentication() falls through to the screen with the problems on it.
+// ---------------------------------------------------------------------------
+function selectIdpPage(base, record) {
+  log.debug("Entering selectIdpPage(). " +
+            ((record.federation || {}).usable || []).length + " partner(s).");
+  const home = record.federation || {};
+  const usable = home.usable || [];
+  const problems = home.problems || [];
+  const page = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
+    '<title>Choose how to sign in — mock authentication service</title><style>' +
+    CARD_CSS + '</style></head><body><div class="card">' +
+    '<h1>Choose how to sign in</h1>' +
+    '<p class="sub">Mock authentication service at <code>' +
+    xmlEscape(base) + '</code></p>' +
+    // Every unusable value gets its own banner rather than one banner listing
+    // them, because each is a different entry to go and fix and an operator
+    // reading this is about to fix one of them.
+    problems.map(function (one) {
+      return '<div class="err">' + xmlEscape(one) + '</div>';
+    }).join('') +
+    federatedButtons(record, usable.map(function (one) { return one.option; }),
+      (record.application
+         ? '<code>' + xmlEscape(record.application) + '</code> signs its users in at '
+         : 'This application signs its users in at ') +
+      'one of these federated identity providers. Pick the one you have an ' +
+      'account at. No password is typed here and none is checked there either ' +
+      'as far as this service can tell — what it checks is the partner\'s ' +
+      'signature.') +
+    '<div class="meta">' +
+    '<div>These are the relationships named on this application\'s entry under ' +
+    '<code>ou=applications</code>, in <code>appFederationRelationship</code> — ' +
+    'not every federation relationship this service has.</div>' +
+    '<div>Signing in for: <code>' + xmlEscape(record.protocol) + '</code></div>' +
+    record.details.map(function (d) {
+      return '<div>' + xmlEscape(d.label) + ': <code>' +
+             xmlEscape(d.value == null ? '' : d.value) + '</code>' +
+             (d.note ? ' (' + xmlEscape(d.note) + ')' : '') + '</div>';
+    }).join('') +
+    '</div></div></body></html>\n';
+  log.debug("Leaving selectIdpPage().");
+  return page;
+}
+
+// A GET, and it needs the `?authn=` id for the same reason the screen does:
+// what it draws comes off the pending record, and the return address is on
+// that record rather than in this URL. A person who arrives here bare is
+// answered 400 and told to start again at the application, exactly as at the
+// screen — there is no partner list to compose without knowing what was
+// interrupted.
+app.get(SELECT_IDP_PATH, function (req, res) {
+  log.debug("Entering the federation chooser.");
+  const record = pendingFor((req.query || {}).authn);
+  if (!record) {
+    log.debug("Leaving the federation chooser. Nothing is pending under that id.");
+    return oauthError(res, 400, 'invalid_request',
+      'There is no sign-in waiting under that id, or it has expired. Start the request again ' +
+      'from the application that sent you here.');
+  }
+  // ---------------------------------------------------------------------
+  // RESOLVED AGAIN HERE, AND THE RECORD IS UPDATED WITH THE ANSWER.
+  //
+  // beginAuthentication() decided this record goes to the chooser, but the
+  // list it decided from is TEN MINUTES OLD by the time this page can be
+  // reloaded, and the register is four doors wide — the console, the
+  // management API, an `ldapmodify` and this module. A relationship can be
+  // disabled between the redirect and the click, and drawing a button for it
+  // would send somebody to a refusal at a foreign service.
+  //
+  // So the entry is read again rather than the snapshot trusted, and the
+  // snapshot is REPLACED — because the sign-in screen reads the same field,
+  // and a chooser that had refreshed while the screen it falls back to had not
+  // would be two pages disagreeing about what is configured.
+  //
+  // ONLY THE PARTNER LIST IS REFRESHED, not the mechanism. `forceMfa` and
+  // `forcePasswordless` were resolved against the request the calling protocol
+  // made — a RequestedAuthnContext, a wauth — and that request is not in scope
+  // here. Re-deriving them from a config read would quietly drop a demand for
+  // two factors that a protocol module made minutes ago.
+  // ---------------------------------------------------------------------
+  // AND ONLY WHEN THE APPLICATION ENTRY IS WHAT DECIDED THIS. A record whose
+  // mechanism came from a BROKERING relationship names one onward partner and
+  // can never reach this page — `fedAuthnRelationship` holds a single id, so
+  // there is nothing to choose — but re-reading the application entry for such
+  // a record would answer a different question and could replace a live
+  // federation object with null. The guard costs one line and removes the
+  // whole class of that mistake.
+  const fresh = record.mechanismSource === 'relationship'
+    ? record.federation
+    : federationFor(record.application);
+  record.federation = fresh;
+  const usable = (fresh || {}).usable || [];
+  if (usable.length < 2) {
+    log.info('authn: the chooser was asked for ' + record.id + ' and "' +
+             (record.application || '(none)') + '" now names ' + usable.length +
+             ' usable federation relationship(s), so there is nothing to ' +
+             'choose between — a relationship was disabled, deleted or ' +
+             'unconfigured since this sign-in began. The sign-in screen is ' +
+             'drawn instead, and it offers whatever is left.');
+    log.debug("Leaving the federation chooser. Nothing left to choose between.");
+    return res.redirect(303, LOGIN_PATH + '?authn=' + encodeURIComponent(record.id));
+  }
+  res.status(200).type('text/html').set('Cache-Control', 'no-store')
+     .send(selectIdpPage(baseUrlOf(req), record));
+  log.debug("Leaving the federation chooser. Offered " + usable.length +
+            " partner(s) for " + record.id + ".");
+});
+
 // The screen. A GET, because that is what a redirect from a protocol endpoint
 // produces — and it is why this is a service rather than a page: it can be
 // linked, reloaded and bookmarked while the request it interrupted waits.
@@ -1218,8 +1526,27 @@ app.get(LOGIN_PATH, function (req, res) {
   // than being replaced silently by the password box below it. That fallback is
   // the failure worth being loud about: a federated application authenticating
   // people locally looks exactly like a federated application working.
-  const problem = record.mechanismProblem ||
-                  ((record.federation || {}).problem) || '';
+  //
+  // EVERY UNUSABLE VALUE, not the first. `appFederationRelationship` holds a
+  // list, and an entry naming three partners of which two are disabled has two
+  // things wrong with it — showing one would have somebody fix it, reload, and
+  // meet the next one. `mechanismProblem` comes first because a BROKERING
+  // relationship that cannot broker is a statement about this exchange rather
+  // than about the application's own configuration.
+  //
+  // DEDUPLICATED, because the two sources overlap by construction: when the
+  // application entry is what decided this sign-in, mechanismFor() copies that
+  // entry's FIRST problem onto the record as `mechanismProblem`, so a plain
+  // concatenation prints it twice and reads as two faults.
+  const seenProblem = {};
+  const problem = [record.mechanismProblem]
+    .concat(((record.federation || {}).problems) || [])
+    .filter(function (one) {
+      if (!one || seenProblem[one]) return false;
+      seenProblem[one] = true;
+      return true;
+    })
+    .join(' ');
   sendLoginPage(res, loginPage(baseUrlOf(req), record, problem));
   log.debug("Leaving the authentication screen. Showed the form for " + record.id +
             (problem ? ", with a federation problem." : "."));
@@ -1493,6 +1820,43 @@ app.get('/authn/webauthn.js', function (req, res) {
   res.type('application/javascript').set('Cache-Control', 'no-store').send(WEBAUTHN_SCRIPT);
 });
 
+// ---------------------------------------------------------------------------
+// THE ORIGIN THE CEREMONY IS BOUND TO, which is NOT this service's base URL —
+// and the difference was a bug for every trust realm from the day realms
+// existed until 2026-08-26.
+//
+// `baseUrlOf(req)` answers what this service calls itself, PREFIX INCLUDED:
+// `https://sts:8081` in the default realm and
+// `https://sts:8081/realm/acme` in `acme`. A browser's `clientDataJSON.origin`
+// is an ORIGIN — scheme, host and port, never a path — so comparing it against
+// the base URL succeeds in the default realm by coincidence and fails in every
+// other one, with `origin matches / got https://sts:8081, expected
+// https://sts:8081/realm/acme`. Every WebAuthn ceremony inside a realm was
+// therefore refused, and nothing noticed because the only test of this step ran
+// in the default realm.
+//
+// It is its own function beside `rpIdOf()` because the two are the same
+// mistake waiting to be made twice: one is the origin, one is its host, and
+// neither is the base URL.
+// ---------------------------------------------------------------------------
+function originOf(base) {
+  log.debug("Entering originOf(). base=" + base);
+  try {
+    const origin = new URL(base).origin;
+    log.debug("Leaving originOf(). " + origin);
+    return origin;
+  } catch (e) {
+    // A base that will not parse is a misconfiguration of this service rather
+    // than of the ceremony, and the same fallback rpIdOf() takes: strip
+    // whatever path is there and keep the authority, so the comparison below
+    // is at least against something of the right shape.
+    const stripped = String(base).replace(
+      /^(https?:\/\/[^/?#]+).*$/, '$1');
+    log.debug("Leaving originOf(). Unparseable; " + stripped);
+    return stripped;
+  }
+}
+
 // The RP ID is the origin's HOST, never anything configurable. A mock that let
 // you set it to something else would be teaching the one lesson WebAuthn exists
 // to prevent.
@@ -1538,7 +1902,9 @@ app.post('/authn/webauthn', function (req, res) {
         '  (WebAuthn reports one error for several situations, so this does not say which.)'));
   }
 
-  const expectedOrigin = base;
+  // THE ORIGIN, NOT THE BASE URL. See originOf() — a realm's base URL carries a
+  // path and a clientDataJSON origin never does.
+  const expectedOrigin = originOf(base);
   const expectedRpId = rpIdOf(base);
   let verdict;
   try {

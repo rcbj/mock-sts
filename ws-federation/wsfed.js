@@ -18,7 +18,6 @@
 //                              wsignoutcleanup1.0  clean up (13.2.4)
 //                              wattr1.0/wpseudo1.0 refused, and says why
 //                            With no `wa` at all it describes itself, like GET /sts.
-//   POST /wsfed/login        where the sign-in screen posts
 //   GET  /wsfed/autopost.js  the one script the sign-in response page runs
 //   GET  /FederationMetadata/2007-06/FederationMetadata.xml
 //                            the signed federation metadata, at the path AD FS
@@ -66,7 +65,13 @@
 //
 // 3. **The session is the one oauth2.js owns**, through its startSession/sessionOf
 //    (this module is required after it in server.js, so the dependency is one-way
-//    and no cycle exists). Single sign-on across the two protocols is the point:
+//    and no cycle exists) — and since 2026-08-26 the SCREEN that establishes it is
+//    `authn.js`'s too, rather than one of this module's own. That change is
+//    argued at length in `signIn()`; the short form is that owning a screen also
+//    meant owning the funnel, and three features that live in the funnel —
+//    federation, `fedAuthnMechanism`, and the WebAuthn step in either role —
+//    were inert for this profile alone as a result.
+//    Single sign-on across the two protocols is the point:
 //    sign in at the OIDC screen with a security key and arrive at `wsignin1.0`, and
 //    the assertion's AuthenticationMethod says a hardware key was used because the
 //    session recorded `amr: ["pwd","hwk"]`. Two session stores would have made that
@@ -97,7 +102,8 @@ const { buildSaml11Assertion } = require('../saml/saml11');
 // through another endpoint without losing the wresult), but the SESSION it
 // lands in has to be the same one — single sign-on between the two protocols
 // is the interesting behaviour, and two stores would each look right alone.
-const { sessionOf, startSession, endSession } = require('../authn/authn');
+const { sessionOf, startSession, endSession, beginAuthentication } =
+  require('../authn/authn');
 // The application registry, which lives under ou=applications in the embedded
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
@@ -199,23 +205,15 @@ const PASSIVE_PATH = '/wsfed';
 
 const RP_PATH = '/wsfed/rp';
 
-const SIGNIN_TTL_MS = 10 * 60 * 1000;
-
-const RP_CONTEXT_TTL_MS = 30 * 60 * 1000;
-
-// The sign-in request being interrupted by the screen, exactly as pendingLogins
-// does for the authorization endpoint: sign-in id -> the parameters it arrived with.
-//
-// PER TRUST REALM since 2026-08-25, and one shared Map here was a hole rather
-// than an untidiness. `POST /wsfed/login` looks a sign-in up by the id on the
-// form, so an id minted at `/realm/acme/wsfed` was found by the DEFAULT realm's
-// handler — which then called `startSession()` and issued the response with the
-// default realm's key and issuer for a request that began in `acme`. Verified
-// by hand before it was fixed: the cross-realm POST answered 303 rather than
-// "this sign-in form has expired". `realmSupport()` publishes this family as
-// `full` and says single sign-on "does not cross realms", so the claim and the
-// store now agree.
-const pendingSignIns = realms.map();
+// THIS PROFILE NO LONGER HOLDS AN INTERRUPTED SIGN-IN, and the store that did
+// is worth a line rather than a silent deletion. `pendingSignIns` was a
+// per-realm map from a sign-in id to the parameters the request arrived with,
+// because the screen this module used to draw posted to `/wsfed/login` and that
+// handler had to find the request again. There is no such screen and no such
+// handler now — see the long note in `signIn()` — and the request travels back
+// on the query string of the return address instead, which is byte for byte
+// what that handler redirected to once it had a session. One less store, and
+// one less thing to make per realm.
 
 // The `wctx` values the mock relying party has minted, so it can check the round
 // trip. Its own state and nobody else's — which is the whole point of wctx.
@@ -544,57 +542,6 @@ function sendSignInResponse(res, inner) {
      .send(page('Signing in — WS-Federation', inner));
 }
 
-// --- the sign-in screen ----------------------------------------------------
-// Its own screen rather than the authorization endpoint's, because the parameters a
-// person needs to see are different ones — wtrealm, wreply, wctx, wauth, whr — and
-// a screen that showed `client_id: (none)` for a WS-Federation sign-in would be
-// describing a request that does not exist.
-//
-// It has no security-key checkbox — neither of the two that /authn/login now
-// offers — and that is a real limitation rather than an omission: the WebAuthn
-// step lives in authn.js with the pending record it shares with the password
-// step, and this screen exists at all only because section 13.2.1 lets a
-// sign-in request arrive as a cross-site POST that SameSite=Lax keeps a cookie
-// off. What replaces it is the shared session — sign in once through
-// /authn/login with a key, in either role, and the session carries `hwk` here —
-// which is what both `wauth` demands are answered from.
-function signInPage(base, signIn, error) {
-  log.debug("Entering signInPage(). wtrealm=" + (signIn.params.wtrealm || '(none)'));
-  const p = signIn.params;
-  const inner = '<h1>Sign in</h1>' +
-    '<p class="sub">Mock WS-Federation identity provider at <code>' + xmlEscape(base) + '</code></p>' +
-    (error ? '<div class="err">' + xmlEscape(error) + '</div>' : '') +
-    '<form method="post" action="/wsfed/login">' +
-    '<input type="hidden" name="signin_id" value="' + xmlEscape(signIn.id) + '">' +
-    '<label for="username">Username</label>' +
-    '<input type="text" id="username" name="username" autocomplete="username" autofocus value="">' +
-    '<label for="password">Password</label>' +
-    '<input type="password" id="password" name="password" autocomplete="current-password">' +
-    '<div class="row"><button type="submit" id="wsfed-login" name="action" value="login">Sign In</button>' +
-    '<button type="submit" id="wsfed-cancel" name="action" value="cancel" class="secondary">Cancel' +
-    '</button></div></form>' +
-    '<div class="meta">' +
-    '<div>No password is checked. The username you enter is the subject of the assertion, and the ' +
-    'claims are built from it.</div>' +
-    '<div>wtrealm: <code>' + xmlEscape(p.wtrealm || '') + '</code></div>' +
-    '<div>wreply: <code>' + xmlEscape(p.wreply || '(none — the response goes to this service\'s own ' +
-      'mock relying party at ' + RP_PATH + ')') + '</code></div>' +
-    '<div>wctx: <code>' + xmlEscape(p.wctx || '(none)') + '</code></div>' +
-    (p.wauth ? '<div>wauth: <code>' + xmlEscape(p.wauth) + '</code> — the authentication method this ' +
-               'relying party asked for.</div>' : '') +
-    (p.wfresh !== undefined ? '<div>wfresh: <code>' + xmlEscape(p.wfresh) + '</code> — why this screen ' +
-               'appeared even if you were already signed in.</div>' : '') +
-    (p.whr ? '<div>whr: <code>' + xmlEscape(p.whr) + '</code> — a home realm was named. This service ' +
-             'is the only identity provider here, so the request is answered locally rather than ' +
-             'forwarded, and the parameter is recorded rather than honoured.</div>' : '') +
-    '<div>The session this creates is the SAME one the OAuth 2.0 / OIDC login screen creates, so ' +
-    'signing in here signs you in there and the other way round. To get an assertion that says a ' +
-    'hardware key was used, sign in at <code>/oauth2/authorize</code> with a security key first.</div>' +
-    '</div>';
-  log.debug("Leaving signInPage().");
-  return inner;
-}
-
 function sendPage(res, status, title, inner) {
   res.status(status).type('text/html').set('Cache-Control', 'no-store').send(page(title, inner));
 }
@@ -698,6 +645,32 @@ function signIn(req, res, params) {
       'would let the demand appear to have been met.</p>');
   }
 
+  // ---------------------------------------------------------------------
+  // THE PERSON CANCELLED AT THE SCREEN, or it failed. `authn.js` reports back
+  // on the query string of the return address and leaves it to the CALLER to
+  // decide what its protocol does about it — and this profile's answer is the
+  // one it has always given: NOTHING GOES TO THE RELYING PARTY. Section 13.2.2
+  // defines a sign-in RESPONSE and no error response beside it, so an RP
+  // learns only that the browser never came back. Saying so on a page here is
+  // the honest version, and it is the same page the old `POST /wsfed/login`
+  // rendered for its own cancel button.
+  //
+  // IT MUST BE HANDLED BEFORE THE SESSION CHECK. With no session and no branch
+  // here, the request that comes back carrying `authn_error` would be sent
+  // straight to the authentication service again, which would report the same
+  // failure again, forever.
+  // ---------------------------------------------------------------------
+  if (params.authn_error) {
+    log.debug("Leaving signIn(). The sign-in did not complete: " + params.authn_error);
+    return wsfedError(res, 200, 'Sign-in cancelled',
+      'The sign-in did not complete — the authentication service reported "' +
+      xmlEscape(String(params.authn_error_description || params.authn_error)) +
+      '". This profile has no error response to send a relying party — unlike ' +
+      'an OAuth authorization request, which would be answered with ' +
+      'error=access_denied at its redirect_uri, and unlike SAML 2.0, which has ' +
+      'a status for it — so ' + xmlEscape(realm) + ' is simply never posted to.');
+  }
+
   // Already signed in, and fresh enough? Then this is the second pass — after the
   // screen, or a later request on a session that already exists — and the response
   // goes out now. This is where single sign-on happens.
@@ -732,11 +705,21 @@ function signIn(req, res, params) {
         'request without wauth</a>.</li></ul>');
     }
     if (WAUTH_MULTIFACTOR.indexOf(wauth) >= 0 && !authnMethodsFor(session).multiFactor) {
-      // The one place this profile has to refuse something it could have faked. The
-      // screen below cannot run a WebAuthn ceremony (see signInPage), so answering
-      // a multi-factor demand from a password session would mean writing a claim
-      // that did not happen — and a relying party reading it would have learned
-      // something false about how the person signed in.
+      // The one place this profile has to refuse something it could have faked:
+      // answering a multi-factor demand from a password session would mean
+      // writing a claim that did not happen, and a relying party reading it
+      // would have learned something false about how the person signed in.
+      //
+      // THE REASON THIS IS A REFUSAL RATHER THAN A STEP-UP is the SESSION, not
+      // the screen — and that distinction is new. It used to be the screen:
+      // this module drew its own, and that screen could not run a WebAuthn
+      // ceremony. It goes through `authn.js` now, which can. What is left is a
+      // deliberate limit of this profile: `wauth` is read on a request that
+      // ALREADY has a session, and re-authenticating somebody who is signed in
+      // is what `wfresh` is for. A relying party that wants two factors asks
+      // for them with `wfresh=0` and a multi-factor `wauth` together, or the
+      // deployment configures `fedAuthnMechanism: password-mfa` on the
+      // relationship and every sign-in for that partner has two.
       log.debug("Leaving signIn(). wauth asked for multi-factor and the session has one factor.");
       return wsfedError(res, 400, 'This session has one factor',
         'wauth asked for "' + wauth + '", and the browser session here was established with ONE ' +
@@ -757,18 +740,79 @@ function signIn(req, res, params) {
     return issueSignInResponse(req, res, params, session, realm, wreply, asked.tokenType);
   }
 
-  // Otherwise: authenticate first. The request is stashed whole so the login POST
-  // can send the browser back to it unchanged.
-  const signInState = {
-    id: randomId(18),
-    params: JSON.parse(JSON.stringify(params)),
-    expires: Date.now() + SIGNIN_TTL_MS
-  };
-  pendingSignIns.set(signInState.id, signInState);
-  pendingSignIns.forEach(function (v, k) { if (v.expires < Date.now()) pendingSignIns.delete(k); });
-  sendPage(res, 200, 'Sign in — WS-Federation',
-           signInPage(base, signInState, fresh.ok ? '' : fresh.why));
-  log.debug("Leaving signIn(). Showing the sign-in screen first.");
+  // ---------------------------------------------------------------------
+  // Otherwise: AUTHENTICATE FIRST, through authn.js — which is what the other
+  // three browser SSO profiles here have always done and what this one did
+  // not until 2026-08-26.
+  //
+  // WHAT IT USED TO DO AND WHY THAT WAS A HOLE. It drew a sign-in screen of
+  // its own, on the argument recorded above `signInPage()`: the parameters a
+  // person needs to see for a wsignin1.0 are wtrealm, wreply, wctx, wauth and
+  // whr, and a screen printing `client_id: (none)` would be describing a
+  // request that does not exist. That argument was right about the SCREEN and
+  // wrong about the FUNNEL — `beginAuthentication()` takes a `details` array
+  // for exactly this, and saml2_sso.js and saml11_sso.js each pass their own
+  // protocol's parameters through it. Owning the screen bought a better
+  // caption and cost three things, each of which was a feature that silently
+  // did nothing for this profile alone:
+  //
+  //   * FEDERATION. `appFederationRelationship` on the relying party's entry
+  //     is read by `mechanismFor()`, which is reached only from here. So a
+  //     wtrealm whose application entry named a federation partner drew a
+  //     password box instead, and a federated relying party looked exactly
+  //     like a working one — the failure `authn.js` calls out by name as the
+  //     one worth being loud about.
+  //   * `fedAuthnMechanism` on an identity-provider-side relationship, which
+  //     is how a partner asking this service to authenticate somebody says
+  //     what it wants done — including `federation`, which is what makes this
+  //     service an identity bridge. All four values were inert here.
+  //   * The WebAuthn step, in either role. `signInPage()` said so itself:
+  //     "a real limitation rather than an omission". It is not a limitation
+  //     now, and the note it stood under is gone with the screen.
+  //
+  // THE RETURN ADDRESS is the request as it arrived, on the query string —
+  // byte for byte what `POST /wsfed/login` used to redirect to after calling
+  // `startSession()`, so coming back runs this function again from the top
+  // with a session in place. `wfresh` is dropped for the reason
+  // `requeryString()` gives: it has been honoured by this pass and carrying it
+  // back would demand a fresh authentication on every pass, forever.
+  // ---------------------------------------------------------------------
+  const returnTo = PASSIVE_PATH + '?' + requeryString(params, ['wfresh']);
+  const where = beginAuthentication({
+    returnTo: returnTo,
+    protocol: 'WS-Federation',
+    // WHICH RELYING PARTY, so that an entry naming a federation relationship
+    // sends the person to that partner instead of to the sign-in screen. It is
+    // the raw wtrealm: the registry is keyed by the identifier a protocol
+    // presented, and one this service has never heard of simply has no entry,
+    // which is not an error.
+    application: realm,
+    details: [
+      { label: 'wtrealm', value: realm,
+        note: 'the relying party this token is for, and the assertion\'s ' +
+              'audience restriction.' },
+      { label: 'wreply', value: wreply,
+        note: params.wreply ? 'where the sign-in response is POSTed.'
+                            : 'none was sent, so the response goes to this ' +
+                              'service\'s own mock relying party.' },
+      { label: 'wctx', value: String(params.wctx || '(none)'),
+        note: 'echoed back byte for byte and never interpreted.' }
+    ].concat(wauth
+      ? [{ label: 'wauth', value: wauth,
+           note: 'the authentication method this relying party asked for.' }]
+      : []).concat(params.whr
+      ? [{ label: 'whr', value: String(params.whr),
+           note: 'a home realm was named. It is recorded rather than ' +
+                 'honoured — what decides where this sign-in happens is the ' +
+                 'relying party\'s own entry.' }]
+      : []).concat(fresh.ok
+      ? []
+      : [{ label: 'wfresh', value: String(params.wfresh),
+           note: fresh.why }])
+  });
+  res.set('Cache-Control', 'no-store').redirect(303, where);
+  log.debug("Leaving signIn(). To the authentication service, returning to " +
+            returnTo + ".");
 }
 
 function issueSignInResponse(req, res, params, session, realm, wreply, tokenType) {
@@ -853,68 +897,6 @@ function issueSignInResponse(req, res, params, session, realm, wreply, tokenType
   sendSignInResponse(res, signInResponsePage(wreply, wresult, params.wctx, realm, tokenType));
   log.debug("Leaving issueSignInResponse(). " + user.username + " signed in to " + realm + ".");
 }
-
-app.post('/wsfed/login', function (req, res) {
-  log.debug("Entering the WS-Federation sign-in form target.");
-  const base = baseUrlOf(req);
-  const body = parseBody(req);
-  const signInState = pendingSignIns.get(String(body.signin_id || ''));
-  if (!signInState || signInState.expires < Date.now()) {
-    pendingSignIns.delete(String(body.signin_id || ''));
-    log.debug("Leaving the sign-in form target. The form had expired.");
-    return wsfedError(res, 400, 'This sign-in form has expired',
-      'The form is held for ten minutes with the sign-in request it interrupted. Start the ' +
-      'wsignin1.0 request again from the relying party.');
-  }
-
-  if (String(body.action || '') === 'cancel') {
-    pendingSignIns.delete(signInState.id);
-    log.debug("Leaving the sign-in form target. The user cancelled.");
-    // There is nowhere to report this TO. The OAuth flow answers a cancellation
-    // with error=access_denied at the redirect_uri, and WS-Federation's passive
-    // profile has no such response: an RP learns nothing except that the browser
-    // never came back. Saying so on the page is the honest version.
-    return wsfedError(res, 200, 'Sign-in cancelled',
-      'You cancelled at the sign-in screen. This profile has no error response to send a relying ' +
-      'party — unlike an OAuth authorization request, which would be answered with ' +
-      'error=access_denied at its redirect_uri — so ' + xmlEscape(String(signInState.params.wtrealm ||
-      'the relying party')) + ' is simply never posted to.');
-  }
-
-  const username = String(body.username || '').trim();
-  if (!username) {
-    log.debug("Leaving the sign-in form target. No username, so the form is shown again.");
-    return sendPage(res, 200, 'Sign in — WS-Federation',
-      signInPage(base, signInState, 'Enter a username. It does not have to exist — it is the subject ' +
-                                    'of the assertion this identity provider will issue.'));
-  }
-  if (String(body.password || '') === 'invalid') {
-    // The same reserved password WS-Trust and the password grant refuse, so a
-    // negative test has one thing to fail on in every protocol here.
-    log.debug("Leaving the sign-in form target. The reserved password was used.");
-    return sendPage(res, 200, 'Sign in — WS-Federation',
-      signInPage(base, signInState, 'Authentication failed for ' + username + '.'));
-  }
-
-  pendingSignIns.delete(signInState.id);
-  // The fifth argument names the screen: the session store is shared with OIDC by
-  // design, so nothing about the session itself says which of the two screens made
-  // it, and the admin console would otherwise file every WS-Federation sign-in under
-  // OAuth 2.0 / OIDC.
-  startSession(res, username, ['pwd'], '1', 'WS-Federation');
-  // Back to the passive endpoint with the request as it arrived — minus wfresh,
-  // which has now been honoured and would otherwise demand a fresh authentication
-  // on every pass, forever.
-  // 303 rather than 302, and never 307: this redirect follows the POST that
-  // carried a username and a password. RFC 9700 section 4.12 — a 307 would
-  // preserve the method and the body and repeat those credentials to wherever
-  // this points. See the long note at authn.js's returnToCaller(), which is the
-  // OIDC screen's equivalent of this line; the two screens are separate for the
-  // reason section 13.2.1 gives, so the choice has to be made twice, and making
-  // it the same way twice is the point of saying so here.
-  res.redirect(303, base + PASSIVE_PATH + '?' + requeryString(signInState.params, ['wfresh']));
-  log.debug("Leaving the sign-in form target. " + username + " is signed in; back to " + PASSIVE_PATH + ".");
-});
 
 // --- sign-out (13.2.4) -----------------------------------------------------
 // The session ends here, and every relying party it signed into is sent a cleanup

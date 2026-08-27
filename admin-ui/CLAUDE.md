@@ -938,17 +938,57 @@ server is seeing tokens it did not expect.
   carries a ROLE column rather than being filtered by one. `rolesBySeq` is keyed
   on the act's sequence number, which is monotonic and never reused, so a role
   cannot end up beside the wrong credential.
-* **The choice is from a LIST and not a text box, which is where it departs from
-  `/admin/logout`.** That page takes an identity and any name a person can type
-  is a legitimate thing to ask about. Here the question means something only for
-  an application some act NAMED, so the console offers what it has rather than
-  inviting somebody to guess a spelling and be told nothing matched. The chooser
-  is drawn in three places by one function — the delegation page, the bare
-  application page, and again under a selected one so that comparing two is one
-  click — and it is a `<select>` with a button because this console runs no
-  script and because thirty links above the table would push the table off the
-  screen. The same list IS drawn as links, below, where it is content rather than
-  a control.
+* **The choice is from THIS SERVICE'S OWN LIST and not from a free text box,
+  which is where it departs from `/admin/logout`.** That page takes an identity
+  and any name a person can type is a legitimate thing to ask about. Here the
+  question means something only for an application some act NAMED, so the
+  console offers what it has rather than inviting somebody to guess a spelling
+  and be told nothing matched. The chooser is drawn in three places by one
+  function — the delegation page, the bare application page, and again under a
+  selected one so that comparing two is one click — and the same list IS drawn
+  as links, below, where it is content rather than a control.
+* **IT WAS A `<select>` UNTIL 2026-08-26 AND IT IS A SEARCH NOW**
+  (`chooserPane()`, which the person chooser shares). A select holding every
+  entry is fine at thirty and is what a register looks like after an afternoon;
+  it is not what one looks like after a week, and the two things a reader
+  actually does with a long list — type the first few letters, or read the
+  handful that match — are the two a native select does worst. Four decisions,
+  and the first is the one that decides the rest:
+  * **There is no script and there must not be one.** `script-src 'none'` holds
+    over the whole service (`../common/app.js`) and the parent suite asserts it
+    against this console's live headers (`tests/admin_api.js`), so there is no
+    keystroke handler, no fetch and no debounce to build a type-ahead out of —
+    and anything written as though there were would be a control that silently
+    does nothing rather than one that half works. What a browser gives free is a
+    GET form submitted by the Enter key: type, press Enter, and the page comes
+    back around the matches. A round trip per attempt instead of per keystroke,
+    and the reader types again until the list is what they wanted.
+  * **A result is a link and the link IS the selection.** The select needed its
+    button because a `<select>` chooses nothing until a form is submitted. A
+    list of matches does not, so clicking a row is choosing that application —
+    one click where there were two.
+  * **Twenty at a time, in a pane that scrolls.** The complaint the select
+    answered was screen real estate, and a wall of matching links would be that
+    complaint with the browser's scrolling taken away: the pane has a fixed
+    `max-height` and a scrollbar of its own, so the control is the same size
+    showing one match or twenty. The line under it says how many matched and
+    offers the next twenty — a list that silently stops at twenty is one that
+    has told the reader the twenty-first does not exist.
+  * **Every SPELLING is searched and the newest is shown.** An application
+    arrives as `HTTP/backend@EXAMPLE.COM` and as `HTTP/backend`, a person under
+    three forms, and each pane draws one of them. A reader searching for a name
+    they pasted out of the acts table four inches up the page is pasting the
+    other one about half the time, and a search that answers *nothing matches*
+    to a string printed on the same page is worse than no search.
+
+  The two searches are independent (`appq`/`appfrom` and `userq`/`userfrom`),
+  each rides in the OTHER's form and in the acts table's filter form
+  (`chooserCarry()`) so that no control on the page clears a control the reader
+  is still using, and all four are in `LIST_PARAMS` so a drill-down comes back
+  to the page they were on rather than to an unsearched one. **A stale offset is
+  clamped rather than obeyed**: `?appfrom=40` narrowed to six matches would
+  otherwise draw an empty pane under a line saying six matched, which reads as
+  the search being broken by the term that worked.
 * **The chooser follows the filter and the page it opens does not**, which the
   page says out loud. `applicationList()` is called on `filtered` for the reason
   `chainList()` is; the page then shows everything that application has ever been
@@ -1021,11 +1061,14 @@ parameter, and it is the first thing to check any change to it against.
 * **The chooser's list includes people nothing was ever issued to**, which is
   the half worth keeping: an S4U2Self subject who has never been near this
   service is exactly the row worth opening. Everything else about it follows the
-  application chooser's rules — a `<select>`, drawn in three places by one
-  function, a bare page that is the chooser rather than a 404 — with ONE
-  departure argued at the function: **the option's value is the NORMALISED KEY
-  and not a spelling**, because a person has no identifier of their own and every
-  other link in this console files them under that key.
+  application chooser's rules — the same `chooserPane()` search, drawn in three
+  places by one function, a bare page that is the chooser rather than a 404 —
+  with ONE departure argued at the function: **the RESULT'S LINK carries the
+  NORMALISED KEY and not a spelling**, because a person has no identifier of
+  their own and every other link in this console files them under that key. The
+  search still reads every spelling, which is the half that makes the departure
+  survivable: `alice@STS.MOCK` is a form this very page prints and is not the
+  key it would link to.
 * **`/admin/users?user=…` links to it and the link says which question the other
   page answers.** That page is the LEDGER — every token with its state and its
   revoke button, grouped by session — and this is the RELATIONSHIPS. Neither is

@@ -1008,21 +1008,35 @@ function inRole(role) {
   return list().filter(function (record) { return record.fedRole === wanted; });
 }
 
+// HOW A RELATIONSHIP IS DESCRIBED ON A PAGE SOMEBODY CHOOSES FROM, in one
+// place. Three pages draw a partner now — the buttons at the foot of the
+// sign-in screen, the same buttons narrowed to one application's own partners,
+// and the chooser at /authn/select-idp — and the fields they show are the same
+// three because they are the three a person picking between two partners needs:
+// what it is called, which protocol it speaks (a SAML 2.0 partner and an
+// OpenID Connect one are the ordinary pair, and they look identical without
+// it), and who is at the far end.
+//
+// It is HERE and not in authn.js because the register owns what a relationship
+// IS. A second description assembled in the sign-in path would be the copy that
+// stopped matching the day fedName gained a fallback.
+function optionOf(record) {
+  return {
+    id: record.fedId,
+    label: record.fedName || record.fedId,
+    protocol: record.fedProtocol,
+    protocolLabel: (protocolRow(record.fedProtocol) || {}).label || record.fedProtocol,
+    peer: record.fedPeer
+  };
+}
+
 // What the sign-in screen offers: the service-provider-side relationships that
 // would actually work if somebody clicked them. A button that led to a refusal
 // would be worse than no button, which is why this is `isUsable` and not
 // `isEnabled`.
 function signInOptions() {
   log.debug('Entering signInOptions().');
-  const rows = inRole('service-provider').filter(isUsable).map(function (record) {
-    return {
-      id: record.fedId,
-      label: record.fedName || record.fedId,
-      protocol: record.fedProtocol,
-      protocolLabel: (protocolRow(record.fedProtocol) || {}).label || record.fedProtocol,
-      peer: record.fedPeer
-    };
-  });
+  const rows = inRole('service-provider').filter(isUsable).map(optionOf);
   log.debug('Leaving signInOptions(). ' + rows.length + ' partner(s) to offer.');
   return rows;
 }
@@ -1032,9 +1046,9 @@ function signInOptions() {
 // checks that decide it.
 //
 // TWO CALLERS AND ONE IMPLEMENTATION, which is the whole reason this is here
-// rather than in either of them. `authn.js`'s federationFor() asks it of the
-// id on an APPLICATION entry (`appFederationRelationship`) and
-// authenticationFor() below asks it of the id on a RELATIONSHIP
+// rather than in either of them. `usableServiceProviders()` below asks it of
+// every id on an APPLICATION entry (`appFederationRelationship`, which holds a
+// list) and authenticationFor() asks it of the id on a RELATIONSHIP
 // (`fedAuthnRelationship`). Both are a string somebody typed into a directory
 // attribute, both name a relationship that can be disabled or deleted
 // afterwards by somebody who never looked at the entry pointing at it, and
@@ -1093,6 +1107,60 @@ function usableServiceProvider(id, subject) {
   }
   log.debug('Leaving usableServiceProvider(). ' + named + ' is usable.');
   return { id: named, relationship: record, problem: '' };
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME QUESTION ASKED OF A LIST, and it is a function rather than a loop
+// at the call site for one reason: WHAT IT DOES WITH THE UNUSABLE ONES.
+//
+// An application entry may name several service-provider-side relationships
+// (`appFederationRelationship` is multi-valued since 2026-08-26), and the
+// tempting shape is `ids.map(usableServiceProvider).filter(usable)`. That
+// shape loses the thing an operator needs: a list of three whose middle value
+// names a DISABLED relationship then draws two buttons and says nothing, which
+// is indistinguishable from a list of two. So every value is resolved and the
+// unusable ones are KEPT, each with the sentence usableServiceProvider() wrote
+// about it, and the caller decides where to print them.
+//
+// DUPLICATES ARE COLLAPSED and the order of first appearance is kept. Nothing
+// stops `ldapmodify` writing one id twice — the directory's own multi-valued
+// semantics deduplicate at the attribute level, but a caller may hand us a
+// list from anywhere — and two identical buttons is a page that looks broken.
+//
+// EMPTY IN, EMPTY OUT, with no problem reported. A relationship id list with
+// nothing in it is the state every application in this registry is in, and
+// calling that a misconfiguration would put an error banner on every sign-in
+// screen in the service.
+// ---------------------------------------------------------------------------
+function usableServiceProviders(ids, subject) {
+  log.debug('Entering usableServiceProviders(). ' +
+            (Array.isArray(ids) ? ids.length : (ids ? 1 : 0)) + ' named.');
+  const wanted = (Array.isArray(ids) ? ids : [ids])
+    .map(function (one) { return String(one == null ? '' : one).trim(); })
+    .filter(Boolean);
+  const seen = {};
+  const rows = [];
+  wanted.forEach(function (id) {
+    if (seen[id]) {
+      log.info('federation: "' + String(subject || 'something here') + '" names ' +
+               'the federation relationship "' + id + '" more than once. It is ' +
+               'offered once — two identical buttons is a page that looks ' +
+               'broken — and the duplicate is a configuration to tidy rather ' +
+               'than a rule this service applies.');
+      return;
+    }
+    seen[id] = true;
+    const one = usableServiceProvider(id, subject);
+    rows.push({ id: one.id, relationship: one.relationship,
+                problem: one.problem,
+                option: one.relationship ? optionOf(one.relationship) : null });
+  });
+  const usable = rows.filter(function (one) { return !!one.relationship; });
+  log.debug('Leaving usableServiceProviders(). ' + usable.length + ' of ' +
+            rows.length + ' usable.');
+  return { all: rows, usable: usable,
+           problems: rows.filter(function (one) { return !!one.problem; })
+                         .map(function (one) { return one.problem; }) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,6 +1782,10 @@ module.exports = {
   isEnabled: isEnabled,
   isUsable: isUsable,
   signInOptions: signInOptions,
+  // How one relationship is described on a page somebody chooses from. Read by
+  // authn.js's broker branch, which builds the same shape by hand for a
+  // relationship it already holds.
+  optionOf: optionOf,
   // THE BROKER HALF. `identityProviderFor()` finds the relationship a partner
   // asking this service to authenticate somebody is registered under,
   // `authenticationFor()` says what that relationship wants done about it, and
@@ -1721,6 +1793,10 @@ module.exports = {
   // authn.js's federationFor() make on a relationship id somebody typed. All
   // three are read by authn.js's mechanismFor() and by nothing else.
   usableServiceProvider: usableServiceProvider,
+  // The same four checks over a LIST, keeping the unusable ones so the caller
+  // can print what is wrong with each. See its header for why that is not a
+  // map-and-filter at the call site.
+  usableServiceProviders: usableServiceProviders,
   identityProviderFor: identityProviderFor,
   authenticationFor: authenticationFor,
   // The identity-provider half, and the one function on the ISSUING path. See

@@ -869,18 +869,40 @@ const SCHEMA = {
     // screen by another route, and clearing them takes the shortcut away
     // rather than locking anybody out. What they change is the DEFAULT ROUTE
     // to the screen — see authn.js's federationFor().
-    { name: 'appFederationRelationship', kind: 'single',
+    //
+    // AND THE FIRST OF THEM HOLDS A LIST, since 2026-08-26. The discovery step
+    // this pair removed was a person choosing from EVERY relationship this
+    // service has; naming several here narrows that list to this
+    // application's own partners without pretending the choice does not
+    // exist. A deployment with one federated identity provider still gets the
+    // redirect it always got — the list is one value long — and one with two
+    // gets a page listing exactly two. See authn.js's federationFor(), which
+    // resolves every value and reports the ones that would not work.
+    { name: 'appFederationRelationship', kind: 'multi',
       from: 'the console, the management API, or by hand',
-      what: 'THE FEDERATION RELATIONSHIP THIS APPLICATION\'S USERS ARE AUTHENTICATED ' +
-            'THROUGH — the `fedId` of an entry under ou=federations, in THIS trust realm, ' +
-            'whose `fedRole` is service-provider. Both halves of that are checked when it ' +
-            'is read rather than when it is written: an identity-provider-side ' +
-            'relationship goes the other way (this service asserts to that partner, so ' +
-            'there is nothing to sign in to), and the register is per realm, so an id ' +
-            'that names a relationship in another realm names nothing here.\n\nIt is ' +
-            'WRITTEN BY NOBODY. No protocol presents it and no sighting derives it — an ' +
-            'application\'s home identity provider is an arrangement somebody made, not ' +
-            'something this service can observe — so it is editable and it starts empty.' },
+      what: 'THE FEDERATION RELATIONSHIPS THIS APPLICATION\'S USERS ARE AUTHENTICATED ' +
+            'THROUGH — each value the `fedId` of an entry under ou=federations, in THIS ' +
+            'trust realm, whose `fedRole` is service-provider. Both halves of that are ' +
+            'checked when it is read rather than when it is written: an ' +
+            'identity-provider-side relationship goes the other way (this service asserts ' +
+            'to that partner, so there is nothing to sign in to), and the register is per ' +
+            'realm, so an id that names a relationship in another realm names nothing ' +
+            'here.\n\nIT HOLDS A LIST, and that is what makes an application able to ' +
+            'offer more than one identity provider. ONE usable value with the ' +
+            'auto-redirect on is the case this attribute was added for and it is ' +
+            'unchanged: the browser goes straight to that partner. SEVERAL usable values ' +
+            'draw /authn/select-idp, where the person chooses which one — home realm ' +
+            'discovery narrowed to this application\'s partners rather than performed ' +
+            'against every relationship this service has. They need not share a protocol: ' +
+            'a SAML 2.0 partner and an OpenID Connect one are two values here and two ' +
+            'buttons there, because what the list names is where a person can be ' +
+            'authenticated and not how.\n\nA value that names a relationship this ' +
+            'service cannot use is REPORTED on the screen rather than dropped, one line ' +
+            'per value: a list of three whose middle entry is disabled must not look like ' +
+            'a list of two.\n\nIt is WRITTEN BY NOBODY. No protocol presents it and no ' +
+            'sighting derives it — an application\'s home identity provider is an ' +
+            'arrangement somebody made, not something this service can observe — so it is ' +
+            'editable and it starts empty.' },
     { name: 'appFederationAutoRedirect', kind: 'single',
       from: 'the console, the management API, or by hand',
       what: 'TRUE if a person signing in to this application should be sent STRAIGHT to ' +
@@ -889,10 +911,20 @@ const SCHEMA = {
             'what a deployment with one federated identity provider actually does.\n\n' +
             'It is TRUE BY DEFAULT once a relationship is named, because naming one and ' +
             'then having to click a button is the state nobody wants; set it FALSE to ' +
-            'keep the screen, where the partner is then the only button offered. An ' +
+            'keep the screen, where the partners are then the only buttons offered. An ' +
             'absent value therefore means "yes" here and not "unknown", which is the ' +
             'opposite of what RFC 7591 section 2 makes an omitted boolean mean — said ' +
-            'out loud because the two rules meet on one entry.\n\nWith no relationship ' +
+            'out loud because the two rules meet on one entry.\n\nWITH SEVERAL ' +
+            'RELATIONSHIPS NAMED IT MEANS EXACTLY WHAT IT ALWAYS MEANT — "without the ' +
+            'sign-in screen" — and what changes is what that leaves. With one it is a ' +
+            'redirect straight to the partner. With several it is the chooser at ' +
+            '/authn/select-idp: one button per partner and no password field, which is ' +
+            'the sign-in screen\'s job done without the sign-in screen. What it never ' +
+            'means is "pick one for them"; there is no value of a boolean that can say ' +
+            'which identity provider somebody\'s employer is.\n\nFALSE with several ' +
+            'named is therefore the SCREEN, with one button per partner under the ' +
+            'password box — the same thing FALSE has always done, with the partners ' +
+            'plural.\n\nWith no relationship ' +
             'named it does nothing at all, rather than being an error: the two are ' +
             'edited separately and a value left behind by a relationship that was ' +
             'cleared should not refuse the next write.' }
@@ -976,7 +1008,13 @@ const EDITABLE = {
   // Editable for the reason the rest of the declared half is: nothing observes
   // an application's home identity provider, so if this cannot be written here
   // it cannot be written at all.
-  appFederationRelationship: 'set',
+  // `multi` since 2026-08-26, and it used to be `set`. An application may name
+  // SEVERAL service-provider-side relationships — a SAML 2.0 partner and an
+  // OpenID Connect one are an ordinary pair — and the person picks between them
+  // at /authn/select-idp. A `set` here would replace the list with one value and
+  // read afterwards as the others having been forgotten, which is the same
+  // argument every other identifier attribute above makes.
+  appFederationRelationship: 'multi',
   appFederationAutoRedirect: 'set',
   ldapBindDn: 'multi',
   scimClientId: 'multi',

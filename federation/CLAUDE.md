@@ -272,7 +272,9 @@ this order:
    OAuth client, registered by two different people, and only one of those
    facts is about the exchange in progress.
 2. **`appFederationRelationship` on the application entry** — home realm
-   discovery by configuration, unchanged.
+   discovery by configuration. It holds a LIST since 2026-08-26, so this step
+   can produce a partner, or a QUESTION: several usable values draw the chooser
+   at `/authn/select-idp` rather than redirecting anywhere.
 3. the sign-in screen.
 
 `federation.js` supplies the pieces (`identityProviderFor()`,
@@ -647,6 +649,26 @@ get right. Two realms on one origin cannot make that distinction at all. What it
 bought is that the test now runs in the ordinary suite, on every stack, in about
 four seconds, instead of in a stack somebody has to remember to bring up.
 
+**AND SINCE 2026-08-26 THERE IS A FOURTH JOB OVER THERE, WHICH IS THE ONLY ONE
+THAT DRIVES AN APPLICATION WITH MORE THAN ONE PARTNER.**
+`tests/federation_choice_sso.js` registers `webapp-sso-1` in
+`federation-choice-1` naming BOTH a SAML 2.0 relationship and an OpenID Connect
+one to `federation-choice-2`, so `authn.js` draws `/authn/select-idp` instead of
+redirecting — and it signs in TWICE, once through each button.
+
+**The second sign-in is the whole point.** Both relationships work, and the
+three jobs above already prove that; running either again from a page with two
+buttons on it would assert nothing new. What is new is that a choice was
+OFFERED and HONOURED, and the only assertion that can tell those apart from a
+service that ignored the click is arithmetic on the counters: after the first
+sign-in the SAML relationship has counted ONE and the OpenID Connect one ZERO,
+and after the second, one each. A mock that drew the page and then federated
+through whichever relationship it found first passes every other assertion in
+that file. It also asserts the page carries no `username`, `password`,
+`kc-login` or `<form>` — the chooser is not the sign-in screen with its form
+suppressed — and mutation-tests the feature by REMOVING one value, after which
+no page may be drawn at all.
+
 **It covers exactly ONE of the refusals below**, as its predecessor did. What it
 proves is that the pieces fit — that a federated identity satisfies a flow the
 application started, that the ID Token the application verifies comes from the
@@ -740,6 +762,24 @@ entry under `ou=applications`, with `appFederationAutoRedirect` beside it, both
 read by `authn.js`'s `federationFor()` and by nothing in this directory. See
 `common/CLAUDE.md` and `authn/CLAUDE.md`.
 
+**AND IT IS A LIST, WHICH PUT THE USER'S CHOICE BACK — NARROWED.** An
+application may name SEVERAL service-provider-side relationships, in different
+protocols, and when more than one is usable `authn.js` draws
+`/authn/select-idp`: one button per partner, no password field. That is not a
+retreat to the buttons at the foot of the sign-in screen and the difference is
+the whole point of the attribute. Those offer EVERY relationship this service
+has, which is a question nobody can answer sensibly about an unfamiliar
+service; these offer the ones this application was configured with, which is
+the question a real deployment actually asks. Configuration decides the SET;
+the person decides WITHIN it.
+
+**This directory supplies one function for it and makes no decision.**
+`usableServiceProviders()` is `usableServiceProvider()`'s four checks over a
+list, keeping the unusable rows with the sentence written about each — because
+a list of three whose middle value is disabled draws two buttons, and two
+buttons is exactly what a correct list of two draws. Which page gets drawn is
+`authn.js`'s, for 4b's reason.
+
 **There is a SECOND answer since 2026-08-26 and it is in this directory after
 all** — `fedAuthnMechanism`, above — but it is not home realm discovery and
 saying so matters. That attribute does not decide who gets sent to a partner;
@@ -758,7 +798,15 @@ operator is already looking at when they ask.
 still refuses until it is fully configured, and still verifies every assertion
 against `fedSigningCertificate` and nothing else. An application naming a
 relationship that is disabled, half-configured, identity-provider-side or
-absent gets an error banner on the sign-in screen rather than a silent fallback
-to the password box — which is the failure worth being loud about, because a
-federated application authenticating people locally looks exactly like a
-federated application working.
+absent gets an error banner rather than a silent fallback to the password box —
+which is the failure worth being loud about, because a federated application
+authenticating people locally looks exactly like a federated application
+working. **With a list that matters MORE rather than less**, and the banner
+moves with the page: on the chooser when there is still a choice to be made,
+and on the sign-in screen when there is not.
+
+**One case shows nobody anything, and it is the log's job.** One usable value
+with the auto-redirect on is a redirect, so an entry naming three partners of
+which two are disabled works perfectly and draws no page at all. There is no
+banner to put those two problems on, and the flow succeeding is exactly why
+nobody would go looking — so `beginAuthentication()` writes them at INFO.
