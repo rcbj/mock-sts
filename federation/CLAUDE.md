@@ -229,12 +229,26 @@ the first one in the document. A Response carrying a signed Assertion has two,
 and taking whichever came first is how a check ends up verifying the wrong
 element — and reporting success for a document whose assertion was swapped.
 
-The `idAttribute` argument is `wsfed.js`'s trap, made again: SAML 1.1's is
-`AssertionID`, which xml-crypto does not look for; and passing `idAttribute:
-'ID'` for SAML 2.0, where it is already a default, makes xml-crypto refuse a
+The `idAttribute` argument WAS `wsfed.js`'s trap, made again: SAML 1.1's is
+`AssertionID`, which xml-crypto did not look for; and passing `idAttribute:
+'ID'` for SAML 2.0, where it was already a default, made xml-crypto refuse a
 perfectly good document with a signature-wrapping error. **Symmetry between the
-two call sites is what produces that bug.** Read that module's comment before
-touching this one.
+two call sites is what produced that bug.**
+
+**IT IS GONE SINCE 2026-08-27.** `common/crypto.js` resolves every SAML id
+spelling from the document, so `verifyXmlSignature()` here takes the ELEMENT to
+check and no id argument at all, and the three call sites that used to thread
+one around no longer compute a partner's SAML version in advance.
+
+**WHAT DID NOT MOVE IS THE POLICY, AND THAT IS THE PART TO GUARD.** Two rules
+stay in this file because they are facts about a RELATIONSHIP rather than about
+XML: no `fedSigningCertificate` means nothing is accepted, and the certificate
+passed to the verifier is always the relationship's. The second one is load
+bearing in a way that is easy to lose — the shared verifier falls back to the
+certificate inside the document's own `<ds:KeyInfo>` when it is given no other,
+which is correct for a general-purpose tool and would be the whole hole here,
+since anybody can sign an assertion and attach the key that verifies it. **This
+door reaches that fallback only if somebody stops passing `certPem`.**
 
 ---
 

@@ -9,6 +9,7 @@ more than one family needs it, not because it felt general.
 | `config_file.js` | The one place that decides what `CONFIG_FILE` means. Requires nothing at all. |
 | `config.js` | Every setting this service has, and the refusal to start without one. The only module `helpers.js` depends on. |
 | `helpers.js` | Log, keys, `signJwt()`, `userFor()`, the cross-protocol parsers. |
+| `crypto.js` | **EVERY SIGNATURE AND EVERY CIPHER IN THIS SERVICE, since 2026-08-27.** XML Signature and XML Encryption, JWS, JWE, key and certificate generation, thumbprints, constant-time comparison. A LEAF — it sits UNDER `helpers.js` and may never require it back. See below. |
 | `app.js` | The express app and every middleware. Requiring it is how a protocol module gets somewhere to register. |
 | `admin_stats.js` | The counters, the revocation set, and `recordAuthentication()` — the single authentication funnel. |
 | `audit.js` | What happened, when, and to whom, as discrete events. Sits BESIDE `admin_stats.js`, not under it. |
@@ -98,11 +99,73 @@ the cost of issuing a token was re-reading a key that has not changed since
 startup. One signature went from 1.08ms to 0.48ms and the token endpoint's
 throughput rather more than doubled.
 
-`privateKeyPem` is KEPT and is not deprecated — the three XML signers
-(`saml2.js`, `saml11.js`, `wsfed.js`) pass it to xml-crypto, which wants a PEM.
-**A new signer picks by library**: jsonwebtoken gets `STS.privateKey`,
-xml-crypto gets `STS.privateKeyPem`. They are the same key and are derived from
-each other, so they cannot drift.
+`privateKeyPem` is KEPT and is not deprecated — `crypto.js`'s XML signer hands
+it to node-forge, which wants a PEM. **A caller picks by what it is doing**:
+`signJws()` takes `STS.privateKey`, `signXml()` takes `STS.privateKeyPem`. They
+are the same key and are derived from each other, so they cannot drift.
+
+That sentence used to name three files and xml-crypto. There is one signer now
+and this service requires xml-crypto nowhere — see below.
+
+---
+
+## `crypto.js`: one signer, one verifier, one cipher
+
+**It replaced six XML signers, four XML signature verifiers, two hand-rolled JWE
+halves, three RFC 7638 thumbprints, two self-signed certificate builders and two
+`timingSafeEqual` wrappers.** None of those was carelessness: each was written
+where it was needed and the copies agreed on the day they were made. What the
+copies cost is recorded in `saml/CLAUDE.md` — the `Id="_0"` defect, where every
+SAML 1.1 assertion this service ever issued carried an attribute the schema does
+not have, it verified anyway so it survived for months, and the fix had to be
+applied to EACH SIGNER SEPARATELY.
+
+**The mechanism is `common/vendored/xmldsig.js` and the policy is here**, and
+that split is the design rather than tidiness. The vendored file is the parent
+project's own XML security module, copied byte-identical, and it is the OTHER
+END of most of these exchanges: `tests/xmlsec_interop.js` over there already
+drives it against xml-crypto AND xml-encryption across all three SAML versions.
+What `crypto.js` adds is what is true of THIS service — which placements its
+documents use, that a verifier must be TOLD which element it is checking, that a
+decryption answers rather than throws, that a token read back against our own
+certificate gets the configured clock skew.
+
+**IT IS A LEAF AND MUST STAY ONE.** It requires npm packages, the vendored
+signer and `config.js` — which requires nothing here — so the require is
+downward and no cycle is possible. `helpers.js` requires IT. Concretely that
+means **nothing in it reads `STS`, the ambient realm or a session**: every
+function takes the key it is to use as a parameter, and the realm-aware half
+stays in `helpers.js`. It also means `logArtifact()` is out of reach, which is
+why `encryptElement()` takes the logger as an ORDINARY PARAMETER that
+`saml/saml2.js` fills in — not a sixth inverted slot, because rule 3e is for a
+require that would close a cycle or move a route, and a caller that already has
+the function can simply hand it over.
+
+**THE VERIFIER TAKES THE ELEMENT'S NAME AND THAT IS NOT A CONVENIENCE.** A SAML
+Response carrying a signed assertion has two signatures. Three of the four
+implementations this replaced took the FIRST `<ds:Signature>` in the document,
+so a caller asking "is this Response signed by us" was answered about the
+ASSERTION — a confident yes about a different element, one step from accepting a
+response whose assertion was swapped for another validly-signed one. The shared
+verifier is told which element, takes the signature that is that element's own
+DIRECT CHILD, and additionally refuses a signature whose reference names
+something else, which none of the four ever checked. `tests/crypto_module.js`
+asserts all of it and was mutation-tested against eight mutants.
+
+**XML ENCRYPTION MOVED RATHER THAN BEING REPLACED**, and it is the one place the
+vendored file did not win. It was never duplicated — one implementation, two
+callers — and the vendored `encryptXml()` produces a byte-compatible document,
+so there was no interop gap to close. What this one has is the DIAGNOSIS: it
+answers rather than throwing, names an unknown cipher and an unknown key
+transport separately, checks the unwrapped key's LENGTH (RSA-1_5 unwraps a wrong
+key to plausible garbage rather than failing), parses the plaintext before
+calling CBC a success, and tells a NamespaceError in a good NameID apart from a
+wrong certificate. Those messages are the product.
+
+**xml-crypto IS STILL A DEPENDENCY AND NOTHING IN THE SERVICE REQUIRES IT.** It
+is there for `tests/crypto_module.js`, which is the only independent reading of
+XMLDSIG in this repository — the thing that makes "our signature verifies"
+mean something. Removing it saves a package and costs that.
 
 ## `realms.js`: several logical copies of this service, in one process
 
@@ -1552,6 +1615,73 @@ find module` naming a file the operator never mentioned.
   Since 2026-08-25 there is a THIRD door onto the create, `/admin/applications/new`,
   and it is not a third store either: it posts `action=create` to the same
   endpoint the list page's own row does.
+
+## AN APPLICATION ENTRY CAN NOW CARRY ITS OWN SAML SETTINGS, AND THAT IS A THIRD KIND OF ATTRIBUTE
+
+Added 2026-08-27. Ten attributes — five per SAML profile — each naming one
+`config.js` setting in an `overrides` member on its SCHEMA row and, where the
+entry carries a value, winning over that setting for that application alone.
+
+**IT IS A THIRD KIND, AND THE SECTION BELOW'S TWO-WAY SPLIT IS WHY THAT NEEDS
+SAYING.** Every attribute here used to be either RECORDED (what happened) or
+DECLARED (what somebody said, which nothing reads). These are declared AND read:
+`saml/saml2_sso.js` and `saml/saml11_sso.js` resolve every one of their five
+settings through `settingFor()` on every assertion. They join
+`appFederationRelationship` and `appAuthnMechanism` on the short list of
+declarations that actually do something — and unlike those two, what they change
+is not WHERE somebody signs in but what the document they get looks like.
+
+**THE MAPPING IS BUILT FROM THE SCHEMA, ONCE, AND THERE IS NO SECOND TABLE.**
+`OVERRIDE_ATTRIBUTES` is derived from the rows' own `overrides` members at
+require time; `settingFor()` reads it, `overridableSettings()` publishes it, and
+`/admin/saml-assertions` and `/admin/applications/new` both draw from that.
+Adding an eleventh override is a row in `SCHEMA.attributes` and nothing else — a
+map written by hand here would be the first thing to disagree with the schema.
+
+**`config` IS PASSED IN RATHER THAN REQUIRED**, which keeps this module's near-
+empty require list true (rule 3g) and keeps the resolver testable with a stub.
+
+**ALL TEN ARE `single`, AGAINST THE GRAIN OF EVERY IDENTIFIER HERE.** Those are
+`multi` because an application answering to two client_ids is one application. A
+SETTING is the opposite case: there is one answer to "sign the assertion?", and
+a list would be a question with no rule for which value won.
+
+**IT IS TWENTY ATTRIBUTES ACROSS FOUR PROTOCOLS SINCE THE SECOND PASS**, and
+the mechanism did not change to take them: five OAuth 2.0 / OIDC per-client
+settings, the SAML ten, WS-Federation's assertion lifetime, and the group
+claim's four. Each is a row in `SCHEMA.attributes` carrying `overrides`, and
+that is the whole of what adding one costs — `settingFor()`, the New Application
+form, both defaults pages and `GET /admin-api/saml-assertions` all read the same
+derived table.
+
+**THE GROUP CLAIM'S FOUR ARE THE ONE SET THAT IS NOT A PROTOCOL'S**, and they
+are the reason `appOf(context)` in `group_claims.js` looks at `client_id` OR
+`audience`: those four reach an access token, an ID Token, a SAML 2.0 assertion
+and a SAML 1.1 one from a single resolver, so one application entry has to be
+findable from whichever of the four is being built. An application declared for
+two protocols therefore gets the same claim name in both, which is what a claim
+mapping should do.
+
+**WHAT IS DELIBERATELY NOT OVERRIDABLE is worth reading before adding a
+twenty-first.** Not `oauth2.issuer` or `oauth2.rfc9700` — those describe the
+authorization SERVER, and a per-client issuer produces tokens that fail
+discovery. Not any clock skew, in any protocol: `oauth2.clockSkewS`,
+`oauth2.clientAssertionSkewS` and `saml.clockSkewS` are facts about the clocks in
+the estate this service issues into, decided once, and a per-application answer
+would be a question two applications could not meaningfully answer differently.
+And not a socket, a port, a key or a limit anywhere.
+
+**AN APPLICATION DECLARED FOR SAML GETS AN ENTITYID.** `createApplication()`
+fills `samlEntityId` from the identifier when `saml2` or `saml11` is ticked and
+no entityID was given — because that is what the same application would have got
+by ARRIVING on its own, where the registry files a service provider under its
+entityID. Without it the declaration was a note and nothing more: `samlEntityId`
+is what both SAML modules file an application under and what their
+per-service-provider metadata is published for. It is a default and not a rule —
+an explicit value wins, and nothing is refused, because this service accepts any
+entityID on sight everywhere else.
+
+---
 
 ## An application entry now says WHERE ITS PEOPLE SIGN IN, and that is the first thing on one anybody reads
 

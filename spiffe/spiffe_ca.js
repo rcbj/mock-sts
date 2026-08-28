@@ -73,6 +73,8 @@
 
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const pkijs = require('pkijs');
 const asn1js = require('asn1js');
 const { log, b64u, nowSec, dnRfc4514 } = require('../common/helpers');
@@ -300,9 +302,7 @@ async function makeJwtAuthority(keyTypeId) {
 // SPIRE's `local authority` ids are and what a person can compare with
 // `openssl x509 -fingerprint -sha256`.
 function authorityIdOf(pem) {
-  const der = Buffer.from(String(pem).replace(/-----[^-]+-----/g, '')
-    .replace(/\s+/g, ''), 'base64');
-  return crypto.createHash('sha256').update(der).digest('hex').slice(0, 16);
+  return stsCrypto.certificateThumbprint(pem, { format: 'hex', truncate: 16 });
 }
 
 // RFC 7638 JWK thumbprint, which is the only correct way to derive a kid from a
@@ -310,16 +310,17 @@ function authorityIdOf(pem) {
 // two implementations agree. Hashing the PEM instead would give a different
 // answer for the same key depending on line wrapping.
 function thumbprintOf(jwk) {
-  let members;
-  if (jwk.kty === 'RSA') {
-    members = { e: jwk.e, kty: jwk.kty, n: jwk.n };
-  } else if (jwk.kty === 'EC') {
-    members = { crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y };
-  } else {
-    members = { crv: jwk.crv, kty: jwk.kty, x: jwk.x };
-  }
-  return b64u(crypto.createHash('sha256').update(JSON.stringify(members))
-    .digest()).slice(0, 16);
+  // RFC 7638, and it is still the only correct way to derive a kid from a key:
+  // the members are ordered and the set of them is fixed per key type, so two
+  // implementations agree. Hashing the PEM instead would give a different
+  // answer for the same key depending on line wrapping.
+  //
+  // It used to build that canonical JSON here, with JSON.stringify over an
+  // object literal — correct, and correct only because the members were typed
+  // in lexicographic order. `common/crypto.js` builds it from an ordered list
+  // instead, so the ordering is a property of the code rather than of how
+  // somebody happened to type an object.
+  return stsCrypto.jwkThumbprint(jwk, { truncate: 16 });
 }
 
 // A public key PEM as a JWK. Node's own converter rather than one of the
@@ -735,7 +736,7 @@ async function mintJwtSvid(id, audiences, options) {
     iat: issuedAt,
     jti: b64u(crypto.randomBytes(12))
   };
-  const token = jwt.sign(payload, authority.privateKeyPem, {
+  const token = stsCrypto.signJws(payload, authority.privateKeyPem, {
     algorithm: authority.alg,
     keyid: authority.id,
     // `JWT` rather than the default, and stated rather than left implicit: the
@@ -831,10 +832,14 @@ async function validateJwtSvid(token, audience) {
   let lastError = '';
   for (let i = 0; i < usable.length && !verified; i++) {
     try {
-      verified = jwt.verify(text, usable[i].pem, {
+      verified = stsCrypto.verifyJws(text, usable[i].pem, {
         audience: wanted,
-        // No leeway. A JWT-SVID lives for minutes by design, and clock skew
-        // tolerance on a credential that short is most of its lifetime.
+        // No leeway, stated deliberately. A JWT-SVID lives for minutes by
+        // design, and clock skew tolerance on a credential that short is most
+        // of its lifetime. `stsCrypto.verifyJws()` would otherwise apply
+        // `oauth2.clockSkewS`, which is the right default for an OAuth token
+        // and the wrong one here — so this is the opt-out that default exists
+        // to make visible.
         clockTolerance: 0,
         algorithms: usable[i].algorithms
       });

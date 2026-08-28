@@ -303,6 +303,105 @@ deployment that needed one of them to be its own real name had to change all
 three. All three still default to `urn:wstrust:mock:sts` and all three are still
 fed by `STS_ISSUER` when it is set, which is the whole of layer 3.
 
+**The `SAML` group has a second row since 2026-08-27**, and it is the one
+setting here that changes what goes INTO an assertion's validity window rather
+than how long that window is. `saml.clockSkewS` is added to BOTH ENDS of every
+assertion this service issues — `NotBefore` backdated, `NotOnOrAfter` extended
+— which is the answer to a service provider whose clock is a few seconds behind
+refusing a perfectly good assertion as not-yet-valid. It is deliberately not
+`oauth2.clockSkewS`: that one is a TOLERANCE applied wherever this service reads
+a document back, including an inbound federation partner's assertion, and a
+deployment wanting a strict reading and a forgiving issuance has to be able to
+say so. How LONG an assertion is valid is still per profile —
+`saml2.assertionLifetimeMin` and `saml11.assertionLifetimeMin` — because the two
+profiles are separate implementations consumed differently. All three are drawn
+together on `/admin/saml-assertions`, which is the only page where both
+lifetimes are visible at once.
+
+**AND SINCE 2026-08-27 TEN OF THOSE SETTINGS ARE DEFAULTS RATHER THAN
+DECISIONS.** Five per profile — the assertion lifetime, `signAssertion`,
+`signResponse`, `nameIdFormat` and `artifactTtlS` — can be answered PER
+APPLICATION on an application entry, and where they are, that answer wins for
+that application alone. The attributes are `saml2AssertionLifetimeMin`,
+`saml2SignAssertion`, `saml2SignResponse`, `saml2NameIdFormat`,
+`saml2ArtifactTtlS` and the five `saml11*` equivalents; set them on
+`/admin/applications/new`, with `POST /admin-api/applications/set`, or with an
+`ldapmodify`. An ABSENT attribute means inherit — there is no third state — and
+a value that will not parse is ignored, logged and the setting used instead.
+`GET /admin-api/saml-assertions` lists which setting each attribute overrides.
+The keys and environment variables above are unchanged; what changed is that
+they are now the answer for an application that has not been given one of its
+own.
+
+**An application declared for SAML 2.0 or SAML 1.1 gets an `samlEntityId`** — its
+own identifier, if none was given — so its per-service-provider metadata at
+`/saml2/metadata/{sp}` and `/saml11/metadata/{rp}` is publishable the moment the
+entry exists.
+
+### Per-application configuration, in one place
+
+`/admin/applications/new` is where an application's own answers are typed, and
+since 2026-08-27 **twenty settings across four protocols** can be answered there
+rather than only service-wide:
+
+| Protocol | Settings a single application may overrule | Attributes |
+|---|---|---|
+| OAuth 2.0 / OIDC | the three token lifetimes, the refresh idle timeout, revoke-on-logout | `oauthAccessTokenTtlS`, `oauthIdTokenTtlS`, `oauthRefreshTokenTtlS`, `oauthRefreshIdleSeconds`, `oauthRevokeRefreshOnLogout` |
+| SAML 2.0 | assertion lifetime, both signature switches, NameID format, artifact lifetime | `saml2AssertionLifetimeMin`, `saml2SignAssertion`, `saml2SignResponse`, `saml2NameIdFormat`, `saml2ArtifactTtlS` |
+| SAML 1.1 | the same five | `saml11*` |
+| WS-Federation | assertion lifetime | `wsfedAssertionLifetimeMin` |
+| the groups claim | whether it is carried, its name, its value form, where it is read from | `appGroupsClaim`, `appGroupsClaimName`, `appGroupsClaimValue`, `appGroupsClaimFromMemberOf` |
+
+An **absent attribute means inherit** — there is no third state — and a value
+that will not parse is ignored, logged and the setting used instead. The
+defaults live on `/admin/token-lifetimes` and `/admin/saml-assertions`, and each
+page names the attribute that overrides each row. The globals each protocol
+keeps — its issuer identity, its sockets, its clock skews — stay on that
+protocol's own page.
+
+**The New Application form shows a field only when its protocol is ticked**, so
+an OAuth client is not asked for a SAML entityID. That is done in CSS with
+`:has()` and no script; a browser without `:has()` shows every field, which the
+page says on itself.
+
+### SAML 2.0 encryption
+
+Since 2026-08-27 this service encrypts and decrypts. There is no
+`EncryptedAuthnRequest` in SAML 2.0, so "request encryption" means
+`<saml:EncryptedID>`:
+
+| | Outbound | Inbound |
+|---|---|---|
+| Response | `<saml:EncryptedAssertion>` | — |
+| LogoutRequest | `<saml:EncryptedID>` | `<saml:EncryptedID>`, always decrypted |
+
+The assertion is **signed first and then encrypted**, so the signature is inside
+the ciphertext. `/saml2/metadata` now publishes a `use="encryption"`
+KeyDescriptor — the same certificate it signs with, regenerated on every start —
+which is what a service provider encrypts an `EncryptedID` to.
+
+**Where the recipient's certificate comes from**, most specific first:
+
+1. `samlSpMetadata` / `samlSpMetadataUrl` on the entry. Set the URL and press
+   **Refresh the metadata** on the application page (or
+   `POST /admin-api/applications/refresh-metadata`); the `use="encryption"`
+   KeyDescriptor is extracted into `samlEncryptionCertificate`. The document can
+   also be pasted for a service provider this service cannot reach.
+2. `samlEncryptionCertificate`, typed.
+3. `samlSigningCertificate` — captured off a signed AuthnRequest, so a service
+   provider that signs its requests needs no configuration at all.
+4. Nothing: the assertion goes out **in clear** and says so at WARN. It is not
+   refused, because a mock that stopped issuing when a key was missing is
+   useless exactly when somebody is setting it up.
+
+**The fetch never happens while a flow is running.** It is an explicit action
+that writes the certificate onto the entry, and issuing reads the entry — so no
+sign-in waits on somebody else's web server. It is the second outbound-request
+surface in this service after federation, and follows the same refusals: https
+only unless `federation.outboundAllowInsecure` is on, a timeout of
+`federation.outboundTimeoutMs`, no redirects followed, and a size cap. A failure
+changes nothing, so an application that was working keeps working.
+
 **The OAuth 2.0 / OIDC issuer identifier is empty by default**, which means each
 response names the base URL the request arrived on — what makes one process
 answer correctly as `localhost`, as `sts` on a compose network and through a
@@ -495,6 +594,7 @@ are refused at both ends.
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
 | `saml.issuer` | `STS_SAML_ISSUER`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The <saml:Issuer> of every SAML 2.0 assertion and the Issuer attribute of every SAML 1.1 one. WS-Federation's assertions are built by the same two functions, so this is their issuer too, and it is what /wsfed/rp checks a presented assertion against. |
+| `saml.clockSkewS` | `STS_SAML_CLOCK_SKEW_S` | `0` | yes | How far to widen the validity window of every assertion this service ISSUES, at both ends: Conditions/NotBefore is backdated by this many seconds and NotOnOrAfter is extended by it. Both builders apply it, so it reaches SAML 2.0, SAML 1.1, WS-Trust and WS-Federation alike. IssueInstant and the authentication instant are NOT moved — those state when something happened. 0 to 300; 0 is what this service always did. It is NOT `oauth2.clockSkewS`, which is the tolerance applied when this service READS a document back. |
 
 #### SAML 2.0
 
@@ -512,6 +612,10 @@ identity provider in a browser profile.
 | `saml2.signResponse` | `STS_SAML2_SIGN_RESPONSE` | `true` | yes | Sign the <samlp:Response> around the assertion as well, which is what AD FS and Keycloak do by default. Both signatures are ordinary: the response is signed AFTER the assertion inside it, so the assertion's own signature is part of what the response signature covers. On the HTTP Redirect binding this ALSO controls the query-string signature of section 3.4.4.1, which is the one a redirect response is really verified by. |
 | `saml2.nameIdFormat` | `STS_SAML2_NAMEID_FORMAT` | `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` | yes | The Format on the NameID when the AuthnRequest's NameIDPolicy asks for none. A request that DOES name one is answered with the one it named — any of them, including a format this service has never heard of, because a service provider being told its own format back is the behaviour worth exercising and refusing with InvalidNameIDPolicy would remove the test case. |
 | `saml2.artifactTtlS` | `STS_SAML2_ARTIFACT_TTL_S` | `300` | yes | How long a SAML artifact can be resolved for at the Artifact Resolution Service. An artifact is ALSO one-shot — resolving it destroys it, which section 3.6.4.1 requires and which no lifetime can express — so a second ArtifactResolve for the same artifact is refused however long this is. |
+| `saml2.encryptAssertion` | `STS_SAML2_ENCRYPT_ASSERTION` | `false` | yes | Wrap the assertion in a `<saml:EncryptedAssertion>`. Needs a recipient certificate; with none the assertion is sent IN CLEAR and the reason is logged at WARN. Per application with `saml2EncryptAssertion`. |
+| `saml2.encryptionAlgorithm` | `STS_SAML2_ENCRYPTION_ALGORITHM` | `aes256-gcm` | yes | The block cipher: `aes256-gcm`, `aes128-gcm`, `aes256-cbc`, `aes128-cbc`. The GCM pair is authenticated; the CBC pair is not, which is CBC's property and is offered because real service providers require it. Per application with `saml2EncryptionAlgorithm`. |
+| `saml2.keyTransportAlgorithm` | `STS_SAML2_KEY_TRANSPORT_ALGORITHM` | `rsa-oaep-mgf1p` | yes | How the content key is wrapped: `rsa-oaep-mgf1p` or `rsa-1_5`. The second is Bleichenbacher-broken and is offered because many deployed service providers accept nothing else. Per application with `saml2KeyTransportAlgorithm`. |
+| `saml2.encryptLogoutNameId` | `STS_SAML2_ENCRYPT_LOGOUT_NAMEID` | `false` | yes | Send `<saml:EncryptedID>` rather than `<saml:NameID>` in a LogoutRequest — the only encryptable thing in a SAML 2.0 request. Reading one is never gated. Per application with `saml2EncryptLogoutNameId`. |
 | `saml2.autocreateApplications` | `STS_SAML2_AUTOCREATE_APPLICATIONS` | `true` | yes | ON by default: an entityID this service has not seen before gets an application entry under ou=applications the moment it appears in a valid AuthnRequest — or the moment somebody asks for its metadata — so nothing has to be provisioned before a service provider can be pointed here. OFF still ANSWERS the request; it simply records nothing, which is what somebody driving a fuzzer at this endpoint wants before their directory has ten thousand entries in it. |
 | `saml2.defaultSingleLogoutService` | `STS_SAML2_DEFAULT_SLO_SERVICE` | *(empty)* | yes | Where a <samlp:LogoutResponse> goes when the service provider has no SingleLogoutService recorded on its application entry. A LogoutRequest carries no return address of its own — only SP metadata has one, and this service does not consume SP metadata — so without this the fallback is the assertion consumer service URL that application last used, which is stated on the page rather than done quietly. Set it to remove the guess. |
 
@@ -550,6 +654,7 @@ ordinary case, and one `entityId` between them would make that unexpressible.
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
+| `wsfed.assertionLifetimeMin` | `STS_WSFED_ASSERTION_LIFETIME_MIN` | `60` | yes | How long the SAML 1.1 assertion inside a WS-Federation sign-in response is valid, and the wsu:Lifetime of the RequestSecurityTokenResponse around it. It was a hardcoded 60 in wsfed.js until 2026-08-27. Per relying party with `wsfedAssertionLifetimeMin` on the application entry; the default is drawn on `/admin/saml-assertions`, because a WS-Federation response carries a SAML 1.1 assertion built by the same function. |
 | `wsfed.entityId` | `STS_WSFED_ENTITY_ID`<br>or `STS_ISSUER` | `urn:wstrust:mock:sts` | yes | The entityID in the federation metadata at /FederationMetadata/2007-06/FederationMetadata.xml. Split from the SAML issuer because the two are different things that happened to share a value: this names the IdP, that names whoever signed an assertion. |
 
 #### TLS
@@ -949,6 +1054,39 @@ cached copy outlives the key it describes.
 
 All tokens are RS256 JWTs signed with that key, so they verify against the advertised
 JWKS.
+
+### One crypto module — `common/crypto.js`
+
+**Every signature, verification, encryption and decryption in this service goes
+through one module**, and has since 2026-08-27. Before that it did all four in about
+twenty places: six XML signers, four XML signature verifiers, two hand-rolled halves
+of one JWE, three RFC 7638 JWK thumbprints, two self-signed certificate builders and
+two constant-time comparisons. Each was written where it was needed and each was
+correct on the day it was written; what they could not do was stay correct together.
+
+Three things it holds that are worth knowing as a *user* of this service rather than
+as a maintainer:
+
+* **The XML signer is the debugger's own**, vendored byte-identical from
+  `../oauth2-oidc-debugger/common/xmldsig.js`. Both ends of a SAML or WS-Federation
+  exchange with this service now canonicalize with the same code — which matters
+  because a disagreement about canonicalization is invisible until it is a signature
+  that verifies on one side and not the other.
+* **A verifier is always told which element it is checking.** A SAML Response
+  carrying a signed assertion has two signatures; asking "is this Response signed
+  by us" and being answered about the assertion is a step away from accepting a
+  response whose assertion was swapped. A signature whose reference names a
+  different element is refused outright.
+* **The reference always names the element's real id** — `ID`, `AssertionID`,
+  `ResponseID` or `RequestID`. Nothing is ever invented.
+
+One user-visible behaviour changed with it: four places in the OpenID4VCI code read
+this service's own access tokens back **without** the configured `oauth2.clockSkewS`
+allowance, so a token that introspected active could be refused at a credential
+endpoint seconds before it should have been. They apply it now, like everywhere else.
+
+`tests/crypto_module.js` (`npm test`) checks the whole surface against `xml-crypto` —
+an independent implementation — in both directions.
 
 ### Persistence — three things survive a restart, and nothing this service mints does
 
@@ -3070,13 +3208,22 @@ Two things about the token that took a debugging session each. **`ds:Signature` 
 in three different positions in three documents here** — last in a SAML 1.1
 assertion, second (after `Issuer`) in a SAML 2.0 one, and first in the federation
 metadata's `EntityDescriptor` — and all three are schema-mandated rather than
-stylistic. And **xml-crypto has to be told about `AssertionID` and must *not* be told
-about `ID`**: it resolves a reference URI by looking for attributes named Id/ID/id, so
-SAML 1.1's unusual name has to be added or a perfectly good signature reports as
-broken, while passing `idAttribute: 'ID'` for SAML 2.0 unshifts a *duplicate* onto
-that list and the library then refuses the document with a signature-wrapping-attack
-error naming a document that has nothing wrong with it. Symmetry between the two call
-sites is what produced the second one.
+stylistic. They are the three placements `common/crypto.js` names.
+
+The second one used to be that **the signing library had to be told about
+`AssertionID` and must *not* be told about `ID`** — it resolved a reference URI by
+looking for attributes named Id/ID/id, so SAML 1.1's unusual name had to be added or a
+perfectly good signature reported as broken, while naming `ID` for SAML 2.0 unshifted a
+*duplicate* onto that list and the library then refused the document with a
+signature-wrapping-attack error naming a document that had nothing wrong with it.
+Symmetry between the two call sites is what produced the second one. **Since
+2026-08-27 there is no such argument anywhere**: every signature and every cipher in
+this service goes through `common/crypto.js`, which resolves `ID`, `AssertionID`,
+`ResponseID` and `RequestID` from the document itself. It is worth knowing about
+because the underlying trap is real in any XMLDSIG code — and because for months
+every SAML 1.1 assertion this service issued carried an `Id="_0"` attribute the
+schema does not have, verified anyway, and had to be fixed at six signers
+independently.
 
 **The session is the one `oauth2.js` owns.** `wsfed.js` is required after it in
 `server.js`, so the dependency is one-way and no cycle exists, and `startSession` /

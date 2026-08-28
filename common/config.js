@@ -687,7 +687,7 @@ const SETTINGS = [
   // like every other refusal that mode adds — because a refresh token that
   // stops working after a quiet afternoon is a surprise nobody asked for on a
   // service whose default is to be permissive.
-  { key: 'oauth2.refreshIdleSeconds', group: 'OAuth 2.0 / OIDC',
+  { key: 'oauth2.refreshIdleSeconds', group: 'OAuth 2.0 / OIDC per-client',
     label: 'Refresh token idle timeout (s)',
     env: 'STS_OAUTH2_REFRESH_IDLE_SECONDS', type: 'int', dflt: 86400,
     runtime: true,
@@ -711,7 +711,7 @@ const SETTINGS = [
   // and "revoke after a security event" are different policies a deployment
   // chooses separately — one is about a client that went away and the other
   // about a person who signed out.
-  { key: 'oauth2.revokeRefreshOnLogout', group: 'OAuth 2.0 / OIDC',
+  { key: 'oauth2.revokeRefreshOnLogout', group: 'OAuth 2.0 / OIDC per-client',
     label: 'Revoke refresh tokens on sign-out',
     env: 'STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT', type: 'bool', dflt: true,
     runtime: true,
@@ -778,7 +778,7 @@ const SETTINGS = [
   // exactly the old behaviour back. It is stated in the description below as
   // well as here, because the person who meets it is reading the console
   // rather than this file.
-  { key: 'oauth2.accessTokenTtlS', group: 'OAuth 2.0 / OIDC',
+  { key: 'oauth2.accessTokenTtlS', group: 'OAuth 2.0 / OIDC per-client',
     label: 'Access token lifetime (s)',
     env: 'STS_OAUTH2_ACCESS_TOKEN_TTL_S', type: 'int', dflt: 3600,
     min: 30, max: 2592000, step: 30, runtime: true,
@@ -795,7 +795,7 @@ const SETTINGS = [
                  'Set it low to exercise a client\'s refresh path on demand; ' +
                  'the tokens page reports what has already expired.' },
 
-  { key: 'oauth2.idTokenTtlS', group: 'OAuth 2.0 / OIDC',
+  { key: 'oauth2.idTokenTtlS', group: 'OAuth 2.0 / OIDC per-client',
     label: 'ID Token lifetime (s)',
     env: 'STS_OAUTH2_ID_TOKEN_TTL_S', type: 'int', dflt: 3600,
     min: 30, max: 2592000, step: 30, runtime: true,
@@ -808,7 +808,7 @@ const SETTINGS = [
                  'watch which one the client actually notices. Thirty-second ' +
                  'granularity, like the other two.' },
 
-  { key: 'oauth2.refreshTokenTtlS', group: 'OAuth 2.0 / OIDC',
+  { key: 'oauth2.refreshTokenTtlS', group: 'OAuth 2.0 / OIDC per-client',
     label: 'Refresh token lifetime (s)',
     env: 'STS_OAUTH2_REFRESH_TOKEN_TTL_S', type: 'int', dflt: 86400,
     min: 30, max: 2592000, step: 30, runtime: true,
@@ -1165,6 +1165,39 @@ const SETTINGS = [
                  'their issuer too, and it is what /wsfed/rp checks a ' +
                  'presented assertion against.' },
 
+  // The one setting on this page that changes what goes INTO an assertion's
+  // validity window rather than how long that window is. It is deliberately
+  // NOT oauth2.clockSkewS: that one is a TOLERANCE applied when this service
+  // READS a token or an assertion back — federation/federation_sp.js applies
+  // it to an inbound partner assertion and argues there that a deployment
+  // decides its reading tolerance once — and this one is what this service
+  // WRITES into a document it issues. One is about somebody else's clock and
+  // one is about how much of somebody else's clock this service is willing to
+  // pay for in advance, and a deployment wanting a strict reading and a
+  // forgiving issuance has to be able to say so.
+  { key: 'saml.clockSkewS', group: 'SAML', label: 'Assertion clock skew (s)',
+    env: 'STS_SAML_CLOCK_SKEW_S', type: 'int', dflt: 0,
+    min: 0, max: 300, step: 30, runtime: true,
+    description: 'How far to widen the validity window of every assertion ' +
+                 'this service ISSUES, at both ends: NotBefore is backdated ' +
+                 'by this many seconds and NotOnOrAfter is extended by it. ' +
+                 'Both SAML 2.0 and SAML 1.1 assertions are built by the two ' +
+                 'functions WS-Trust and WS-Federation also come through, so ' +
+                 'this reaches all four. 0 by default, which is what this ' +
+                 'service has always done: NotBefore is stamped at exactly ' +
+                 'the moment of issue. That is the strict reading and it is ' +
+                 'the one that breaks against a service provider whose clock ' +
+                 'is a few seconds behind — the assertion is not yet valid ' +
+                 'when it arrives, and the refusal reads as a signature or a ' +
+                 'trust-store problem from both ends. Capped at 300 for the ' +
+                 'reason oauth2.clockSkewS is: five minutes is what Kerberos ' +
+                 'allows here (krb5.clockSkew), and wider than that the ' +
+                 'window has stopped being a tolerance and become a lifetime ' +
+                 'nobody chose. It is NOT a lifetime — the assertion ' +
+                 'lifetimes are saml2.assertionLifetimeMin and ' +
+                 'saml11.assertionLifetimeMin, and this is added to both ' +
+                 'ends of whatever they decide.' },
+
   // --- SAML 2.0 Web Browser SSO --------------------------------------------
   // The profile arrived on 2026-08-24 and brought its own group, which is a
   // decision rather than a formality: `saml.issuer` above governs what SIGNED
@@ -1199,7 +1232,7 @@ const SETTINGS = [
                  'entityID expects. Both are real deployments, which is why ' +
                  'it is a setting and not a decision.' },
 
-  { key: 'saml2.assertionLifetimeMin', group: 'SAML 2.0',
+  { key: 'saml2.assertionLifetimeMin', group: 'SAML 2.0 assertions',
     label: 'Assertion lifetime (minutes)',
     env: 'STS_SAML2_ASSERTION_LIFETIME_MIN', type: 'int', dflt: 60,
     runtime: true,
@@ -1209,7 +1242,7 @@ const SETTINGS = [
                  'watch a service provider refuse a stale assertion, which is ' +
                  'the check most of them get wrong.' },
 
-  { key: 'saml2.signAssertion', group: 'SAML 2.0', label: 'Sign the assertion',
+  { key: 'saml2.signAssertion', group: 'SAML 2.0 assertions', label: 'Sign the assertion',
     env: 'STS_SAML2_SIGN_ASSERTION', type: 'bool', dflt: true, runtime: true,
     description: 'Sign the <saml:Assertion> itself. ON by default because a ' +
                  'service provider that verifies anything verifies this, and ' +
@@ -1219,7 +1252,7 @@ const SETTINGS = [
                  'mistake: a service provider that accepts an unsigned ' +
                  'assertion has a hole, and this is how to find out.' },
 
-  { key: 'saml2.signResponse', group: 'SAML 2.0', label: 'Sign the response',
+  { key: 'saml2.signResponse', group: 'SAML 2.0 assertions', label: 'Sign the response',
     env: 'STS_SAML2_SIGN_RESPONSE', type: 'bool', dflt: true, runtime: true,
     description: 'Sign the <samlp:Response> around the assertion as well, ' +
                  'which is what AD FS and Keycloak do by default. Both ' +
@@ -1230,7 +1263,7 @@ const SETTINGS = [
                  'signature of section 3.4.4.1, which is the one a redirect ' +
                  'response is really verified by.' },
 
-  { key: 'saml2.nameIdFormat', group: 'SAML 2.0', label: 'Default NameID format',
+  { key: 'saml2.nameIdFormat', group: 'SAML 2.0 assertions', label: 'Default NameID format',
     env: 'STS_SAML2_NAMEID_FORMAT', type: 'string',
     dflt: 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified',
     runtime: true,
@@ -1242,13 +1275,92 @@ const SETTINGS = [
                  'worth exercising and refusing with InvalidNameIDPolicy ' +
                  'would remove the test case.' },
 
-  { key: 'saml2.artifactTtlS', group: 'SAML 2.0', label: 'Artifact lifetime (seconds)',
+  { key: 'saml2.artifactTtlS', group: 'SAML 2.0 assertions', label: 'Artifact lifetime (seconds)',
     env: 'STS_SAML2_ARTIFACT_TTL_S', type: 'int', dflt: 300, runtime: true,
     description: 'How long a SAML artifact can be resolved for at the ' +
                  'Artifact Resolution Service. An artifact is ALSO one-shot — ' +
                  'resolving it destroys it, which section 3.6.4.1 requires and ' +
                  'which no lifetime can express — so a second ArtifactResolve ' +
                  'for the same artifact is refused however long this is.' },
+
+  // --- SAML 2.0 encryption -------------------------------------------------
+  // Four rows in the `SAML 2.0 assertions` group, so they are drawn on
+  // /admin/saml-assertions with the rest of what goes into a document and can
+  // be answered per application. Encryption is exactly the kind of thing two
+  // service providers in one estate disagree about: one is a modern library
+  // that wants GCM, the next is an appliance that speaks aes128-cbc and rsa-1_5
+  // and nothing else.
+  //
+  // ALL FOUR ARE OFF-BY-DEFAULT OR MODERN-BY-DEFAULT, which is this service's
+  // rule everywhere: `encryptAssertion` is false, so a service provider that
+  // has never heard of these gets exactly the document it got before they
+  // existed, and the two algorithm rows default to the pair
+  // `encryptAssertion()` was fixed at when only WS-Trust used it.
+  { key: 'saml2.encryptAssertion', group: 'SAML 2.0 assertions',
+    label: 'Encrypt the assertion',
+    env: 'STS_SAML2_ENCRYPT_ASSERTION', type: 'bool', dflt: false, runtime: true,
+    description: 'Wrap the <saml:Assertion> in a <saml:EncryptedAssertion> ' +
+                 'inside the Response. OFF by default, because it needs a ' +
+                 'RECIPIENT CERTIFICATE and a service provider that has not ' +
+                 'given this service one cannot read what comes back. Where ' +
+                 'no certificate can be found the assertion is sent in CLEAR ' +
+                 'and the reason is logged and shown on /admin/saml2 — a ' +
+                 'refusal to issue would be a mock that stopped answering, ' +
+                 'and silently sending plaintext while a page said ' +
+                 '"encrypted" would be worse than either. The certificate is ' +
+                 'taken from the service provider\'s metadata if this ' +
+                 'service holds any, then samlEncryptionCertificate on its ' +
+                 'entry, then samlSigningCertificate — which is captured off ' +
+                 'a signed AuthnRequest, so a service provider that signs its ' +
+                 'requests needs no configuration at all. The assertion is ' +
+                 'SIGNED FIRST and then encrypted, which is the order every ' +
+                 'service provider expects: the signature is inside the ' +
+                 'ciphertext and is what survives decryption.' },
+
+  { key: 'saml2.encryptionAlgorithm', group: 'SAML 2.0 assertions',
+    label: 'Encryption algorithm',
+    env: 'STS_SAML2_ENCRYPTION_ALGORITHM', type: 'enum',
+    enumValues: ['aes256-gcm', 'aes128-gcm', 'aes256-cbc', 'aes128-cbc'],
+    dflt: 'aes256-gcm', runtime: true,
+    description: 'The block cipher every encrypted element is encrypted ' +
+                 'with. The two GCM ones are AUTHENTICATED: an altered ' +
+                 'ciphertext fails its tag and is refused. The two CBC ones ' +
+                 'are NOT, and that is not a defect in this service — it is ' +
+                 'the property CBC has, real service providers require it, ' +
+                 'and a mock that offered only the safe choice could not be ' +
+                 'used to show what the unsafe one does. What this service ' +
+                 'does about it when READING is parse the result and refuse ' +
+                 'anything that is not well-formed XML, which catches the ' +
+                 'ordinary corruption and is not integrity.' },
+
+  { key: 'saml2.keyTransportAlgorithm', group: 'SAML 2.0 assertions',
+    label: 'Key transport algorithm',
+    env: 'STS_SAML2_KEY_TRANSPORT_ALGORITHM', type: 'enum',
+    enumValues: ['rsa-oaep-mgf1p', 'rsa-1_5'],
+    dflt: 'rsa-oaep-mgf1p', runtime: true,
+    description: 'How the one-time content key is wrapped to the ' +
+                 'recipient\'s RSA public key. `rsa-1_5` is RSAES-PKCS1-v1_5 ' +
+                 'and is BROKEN — Bleichenbacher\'s adaptive chosen-ciphertext ' +
+                 'attack is against exactly this — and it is offered because ' +
+                 'a great many deployed service providers accept nothing ' +
+                 'else, which is a fact about the world that a client library ' +
+                 'is entitled to be tested against. Nothing this service ' +
+                 'encrypts is a real secret.' },
+
+  { key: 'saml2.encryptLogoutNameId', group: 'SAML 2.0 assertions',
+    label: 'Encrypt the NameID in a LogoutRequest',
+    env: 'STS_SAML2_ENCRYPT_LOGOUT_NAMEID', type: 'bool', dflt: false, runtime: true,
+    description: 'Send <saml:EncryptedID> instead of <saml:NameID> in the ' +
+                 'LogoutRequest this identity provider sends a service ' +
+                 'provider during Single Logout. It is the only thing in a ' +
+                 'SAML 2.0 REQUEST that can be encrypted — there is no ' +
+                 'EncryptedAuthnRequest in the specification — and it uses ' +
+                 'the same certificate and the same two algorithms as the ' +
+                 'assertion. Reading one is not gated by this or by anything: ' +
+                 'an <saml:EncryptedID> arriving in a service provider\'s own ' +
+                 'LogoutRequest is always decrypted, because refusing to ' +
+                 'understand a message this service published an encryption ' +
+                 'key for would make that key a lie.' },
 
   { key: 'saml2.autocreateApplications', group: 'SAML 2.0',
     label: 'Register a service provider on sight',
@@ -1316,7 +1428,7 @@ const SETTINGS = [
                  'mints: the SourceID is a hash of the providerID, so turning ' +
                  'this off makes one SourceID where there were many.' },
 
-  { key: 'saml11.assertionLifetimeMin', group: 'SAML 1.1',
+  { key: 'saml11.assertionLifetimeMin', group: 'SAML 1.1 assertions',
     label: 'Assertion lifetime (minutes)',
     env: 'STS_SAML11_ASSERTION_LIFETIME_MIN', type: 'int', dflt: 60, runtime: true,
     description: 'How long the browser profiles\' assertions are valid for, in ' +
@@ -1327,7 +1439,7 @@ const SETTINGS = [
                  'a realistic test, where the same value would make a ' +
                  'WS-Federation session expire while somebody was reading it.' },
 
-  { key: 'saml11.signAssertion', group: 'SAML 1.1', label: 'Sign the assertion',
+  { key: 'saml11.signAssertion', group: 'SAML 1.1 assertions', label: 'Sign the assertion',
     env: 'STS_SAML11_SIGN_ASSERTION', type: 'bool', dflt: true, runtime: true,
     description: 'Sign the <saml:Assertion> itself, with ds:Signature as its ' +
                  'LAST child and the reference naming AssertionID — which is ' +
@@ -1339,7 +1451,7 @@ const SETTINGS = [
                  'a mistake — a relying party that accepts it anyway has a ' +
                  'hole in it, and this is how somebody finds that out.' },
 
-  { key: 'saml11.signResponse', group: 'SAML 1.1', label: 'Sign the response',
+  { key: 'saml11.signResponse', group: 'SAML 1.1 assertions', label: 'Sign the response',
     env: 'STS_SAML11_SIGN_RESPONSE', type: 'bool', dflt: true, runtime: true,
     description: 'Sign the <samlp:Response> around the assertion as well, with ' +
                  'the reference naming ResponseID. Real identity providers ' +
@@ -1349,7 +1461,7 @@ const SETTINGS = [
                  'pulled back over the artifact channel, where the SOAP ' +
                  'exchange is what a relying party is trusting.' },
 
-  { key: 'saml11.nameIdFormat', group: 'SAML 1.1', label: 'Default NameIdentifier format',
+  { key: 'saml11.nameIdFormat', group: 'SAML 1.1 assertions', label: 'Default NameIdentifier format',
     env: 'STS_SAML11_NAMEID_FORMAT', type: 'string',
     dflt: 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified',
     runtime: true,
@@ -1374,7 +1486,7 @@ const SETTINGS = [
                  'watches. A request naming `profile` or carrying `SAMLart` ' +
                  'overrides it.' },
 
-  { key: 'saml11.artifactTtlS', group: 'SAML 1.1', label: 'Artifact lifetime (seconds)',
+  { key: 'saml11.artifactTtlS', group: 'SAML 1.1 assertions', label: 'Artifact lifetime (seconds)',
     env: 'STS_SAML11_ARTIFACT_TTL_S', type: 'int', dflt: 300, runtime: true,
     description: 'How long an artifact can be resolved for at the SAML ' +
                  'responder before it is swept. It is an UPPER bound and not ' +
@@ -1406,6 +1518,40 @@ const SETTINGS = [
                  'console draws on its two SAML pages.' },
 
   // --- WS-Federation -------------------------------------------------------
+  // --- WS-Federation assertions --------------------------------------------
+  // A GROUP OF ONE, and it earns that the way the two SAML assertion groups do:
+  // it is a DEFAULT an application may overrule, and the page it is drawn on is
+  // the page that says so. `wsfed.entityId` beside it is this service's own name
+  // and no application can have an opinion about it, which is the line between
+  // the two groups.
+  //
+  // IT IS DRAWN ON /admin/saml-assertions rather than on /admin/wsfed, and that
+  // is not filing it under the wrong protocol: a WS-Federation sign-in response
+  // CARRIES A SAML 1.1 ASSERTION, built by the same buildSaml11Assertion() the
+  // SAML 1.1 profiles use, so this row and `saml11.assertionLifetimeMin` decide
+  // the same kind of document. Putting it on the WS-Federation page would have
+  // separated it from every other setting that governs an assertion's validity.
+  //
+  // UNTIL 2026-08-27 THIS WAS A MODULE-LEVEL `const lifetimeMin = 60` in
+  // ws-federation/wsfed.js and could not be changed at all — which is why the
+  // default is 60 rather than something better argued: it is what this service
+  // has always issued, and a new default would have changed every existing
+  // caller's tokens on an upgrade.
+  { key: 'wsfed.assertionLifetimeMin', group: 'WS-Federation assertions',
+    label: 'Assertion lifetime (minutes)',
+    env: 'STS_WSFED_ASSERTION_LIFETIME_MIN', type: 'int', dflt: 60,
+    min: 1, max: 43200, runtime: true,
+    description: 'How long the SAML 1.1 assertion inside a WS-Federation ' +
+                 'sign-in response is valid for, and the wsu:Lifetime of the ' +
+                 'RequestSecurityTokenResponse around it. It is separate from ' +
+                 'saml11.assertionLifetimeMin for the reason that setting\'s ' +
+                 'own description gives: a browser-profile assertion is ' +
+                 'consumed within seconds and a short lifetime there is a ' +
+                 'realistic test, where the same value would expire a ' +
+                 'WS-Federation session while somebody was reading the page it ' +
+                 'signed them into. An application may overrule it with ' +
+                 'wsfedAssertionLifetimeMin on its entry.' },
+
   { key: 'wsfed.entityId', group: 'WS-Federation', label: 'Entity ID',
     env: 'STS_WSFED_ENTITY_ID', legacyEnv: 'STS_ISSUER', type: 'string',
     dflt: 'urn:wstrust:mock:sts', runtime: true,
@@ -3538,8 +3684,55 @@ if (audit.unknown.length && distinctiveMissing !== DISTINCTIVE.length) {
            '. A misspelt key looks exactly like this.');
 }
 
+// ---------------------------------------------------------------------------
+// PARSE A VALUE THAT DID NOT COME FROM ANY OF THE FIVE LAYERS.
+//
+// Added 2026-08-27 for the per-application SAML overrides. An application entry
+// in the embedded directory may carry `saml2SignAssertion: "false"`, and the
+// module reading it needs the same string turned into the same JavaScript value
+// that `value()` would have produced for `saml2.signAssertion` — a boolean, not
+// the truthy string "false", which is the bug this function exists to make
+// impossible.
+//
+// IT IS NOT A SIXTH LAYER. Nothing here is consulted by value(), no override is
+// recorded, and the setting's own five layers are untouched: this only lends
+// out the TYPE. The caller decides whether it had something to parse and what
+// to do when it did not, which is why the answer is `{ ok, value, problem }`
+// rather than a value with a silent fallback hidden inside it.
+//
+// A VALUE THAT WILL NOT PARSE IS REPORTED, NOT THROWN, and the caller logs it
+// and falls back. An `ldapmodify` can put any string on any attribute, and an
+// identity provider that stopped issuing because somebody typed "yes" would be
+// a mock that stopped answering — which `applications.js`'s own header argues
+// at length about this directory being a vocabulary rather than a constraint.
+function parseAs(key, raw) {
+  log.debug("Entering parseAs(). key=" + key);
+  const setting = byKey[key];
+  if (!setting) {
+    log.debug("Leaving parseAs(). Unknown setting.");
+    return { ok: false, problem: 'Unknown setting "' + key + '".' };
+  }
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    log.debug("Leaving parseAs(). Nothing to parse.");
+    return { ok: false, problem: 'no value' };
+  }
+  // The SAME check the console form and the management API run, so a value a
+  // person could not type into /admin/config is not one an ldapmodify can
+  // smuggle past by another door. Bounds included: an artifact lifetime of a
+  // fortnight is refused here exactly as it is there.
+  const problem = TYPES[setting.type].check(raw, setting);
+  if (problem) {
+    log.debug("Leaving parseAs(). Refused: " + problem);
+    return { ok: false, problem: '"' + key + '" ' + problem };
+  }
+  const parsed = TYPES[setting.type].parse(raw, setting);
+  log.debug("Leaving parseAs(). Parsed.");
+  return { ok: true, value: parsed };
+}
+
 module.exports = {
   SETTINGS: SETTINGS,
+  parseAs: parseAs,
   setRealmContext: setRealmContext,
   DEFAULTS_FILE: DEFAULTS_FILE,
   value: value,

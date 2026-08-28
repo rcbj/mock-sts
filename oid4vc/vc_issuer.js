@@ -42,6 +42,8 @@ const crypto = require('crypto');
 // no route, so its position is not a position at all.
 const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
+// One signer, one verifier and one JWE for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const config = require('../common/config');
 const bbs2023 = require('../common/vendored/bbs2023.js');
@@ -249,7 +251,7 @@ function sendVciMetadata(req, res) {
   const claims = Object.assign({}, meta, { sub: meta.credential_issuer });
   logArtifact('OID4VCI signed_metadata', 'before signing', claims);
   try {
-    meta.signed_metadata = jwt.sign(claims, STS.privateKey,
+    meta.signed_metadata = stsCrypto.signJws(claims, STS.privateKey,
       { algorithm: 'RS256', issuer: meta.credential_issuer, expiresIn: 3600, keyid: STS.kid });
     logArtifact('OID4VCI signed_metadata', 'after signing', meta.signed_metadata);
   } catch (e) {
@@ -445,7 +447,7 @@ function buildSdJwtVc(subjectClaims, holderJwk, credentialIssuer, issuerDid) {
 
   // iat is added by the signer (jsonwebtoken drops a payload iat when it is
   // told not to timestamp, so it is left to do it).
-  const issuerJwt = jwt.sign(payload, STS.privateKey, {
+  const issuerJwt = stsCrypto.signJws(payload, STS.privateKey, {
     algorithm: 'RS256',
     header: { alg: 'RS256', typ: 'dc+sd-jwt', kid: STS.kid }
   });
@@ -515,7 +517,7 @@ function buildJwtVcJson(subjectClaims, holderJwk, credentialIssuer, issuerDid) {
   logArtifact('jwt_vc_json credential', 'before signing',
               { header: { alg: 'RS256', typ: 'JWT', kid: STS.kid }, payload: payload });
 
-  const token = jwt.sign(payload, STS.privateKey, {
+  const token = stsCrypto.signJws(payload, STS.privateKey, {
     algorithm: 'RS256',
     header: { alg: 'RS256', typ: 'JWT', kid: STS.kid }
   });
@@ -819,7 +821,14 @@ function requestedClaimPaths(accessToken, configId) {
   log.debug("Entering requestedClaimPaths(). configId=" + (configId || '(none)'));
   let claims;
   try {
-    claims = jwt.verify(accessToken, STS.certPem, { algorithms: ['RS256'] });
+    // **THIS NOW APPLIES `oauth2.clockSkewS` AND DID NOT BEFORE 2026-08-27**,
+    // which is a behaviour change rather than a refactor and is the point of
+    // the change. `oauth2.js` has always said in capitals that every read-back
+    // of one of our own tokens takes the configured allowance; this file was
+    // outside the scope of that promise and quietly held a stricter opinion, so
+    // a token that introspected active could be refused here seconds before it
+    // should have been. The shared verifier applies it by default.
+    claims = stsCrypto.verifyJws(accessToken, STS.certPem);
   } catch (e) {
     log.debug("Leaving requestedClaimPaths(). The token is not one of ours: " + e.message);
     return null;
@@ -874,7 +883,10 @@ function grantedIdentifiers(accessToken) {
   log.debug("Entering grantedIdentifiers().");
   let claims;
   try {
-    claims = jwt.verify(accessToken, STS.certPem, { algorithms: ['RS256'] });
+    // Applies `oauth2.clockSkewS` since 2026-08-27 — see the note in
+    // requestedClaimPaths() above; this was the second of the four sites that
+    // had drifted away from the rule oauth2.js states.
+    claims = stsCrypto.verifyJws(accessToken, STS.certPem);
   } catch (e) {
     // Not our token (or not valid): nothing was granted by us. The caller still
     // checks the token elsewhere; this only answers "what did we grant".
@@ -961,11 +973,13 @@ function vciRequestEncryptionRequired() {
 const VCI_REQUEST_ENC_KEY = (function () {
   const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const publicJwk = pair.publicKey.export({ format: 'jwk' });
-  // RFC 7638 thumbprint: the canonical members, in lexicographic order, no
-  // whitespace. Deriving the kid from the key means it cannot outlive it.
-  const thumbprint = crypto.createHash('sha256')
-    .update(JSON.stringify({ e: publicJwk.e, kty: publicJwk.kty, n: publicJwk.n }))
-    .digest('base64url').slice(0, 16);
+  // RFC 7638 thumbprint. This was the THIRD hand-written copy in the service —
+  // `dpop.js` and `spiffe_ca.js` had the others — and this one and SPIFFE's
+  // both leant on JSON.stringify over an object literal whose keys happened to
+  // be in lexicographic order. Correct as typed, and one member added out of
+  // order away from silently producing a different thumbprint for the same key.
+  // Deriving the kid from the key still means it cannot outlive it.
+  const thumbprint = stsCrypto.jwkThumbprint(publicJwk, { truncate: 16 });
   return {
     privateKey: pair.privateKey,
     publicJwk: Object.assign({}, publicJwk, {
@@ -999,80 +1013,31 @@ function credentialRequestEncryptionMetadata() {
 // is the wallet's request being unusable, not an issuer fault.
 function decryptJweRequest(compact) {
   log.debug("Entering decryptJweRequest().");
-  const parts = String(compact || '').trim().split('.');
-  if (parts.length !== 5) {
-    throw new Error('an encrypted Credential Request must be a JWE in compact serialization ' +
-      '(five dot-separated parts); this has ' + parts.length + '.');
-  }
-  let header;
-  try {
-    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
-  } catch (e) {
-    throw new Error('the JWE protected header is not valid base64url JSON: ' + e.message);
-  }
-  logArtifact('OID4VCI Credential Request', 'JWE protected header as received', header);
-  if (header.alg !== VCI_ENC_ALG) {
-    throw new Error('this issuer decrypts with alg ' + VCI_ENC_ALG + '; the request used "' +
-      header.alg + '".');
-  }
-  if (VCI_REQUEST_ENC_VALUES.indexOf(header.enc) === -1) {
-    throw new Error('this issuer supports enc ' + VCI_REQUEST_ENC_VALUES.join(' or ') +
-      '; the request used "' + header.enc + '".');
-  }
-  if (header.zip) {
-    throw new Error('this issuer advertises no zip_values_supported, so a compressed request ' +
-      'cannot be read.');
-  }
-  // Section 10 requires the kid to be echoed when the chosen key has one, and
-  // this issuer's key always does. Checking it is what makes key rotation
-  // detectable: a wallet holding a stale key is told so, instead of getting an
-  // opaque decryption failure.
-  if (header.kid !== VCI_REQUEST_ENC_KEY.publicJwk.kid) {
-    throw new Error('the JWE kid "' + (header.kid || '(absent)') + '" is not this issuer\'s current ' +
-      'request encryption key "' + VCI_REQUEST_ENC_KEY.publicJwk.kid + '". Re-read the credential ' +
-      'issuer metadata: this key is regenerated when the issuer restarts.');
-  }
-
-  let cek;
-  try {
-    cek = crypto.privateDecrypt({
-      key: VCI_REQUEST_ENC_KEY.privateKey,
-      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256'
-    }, Buffer.from(parts[1], 'base64url'));
-  } catch (e) {
-    throw new Error('the content encryption key could not be unwrapped with this issuer\'s private ' +
-      'key: ' + e.message);
-  }
-  const bits = header.enc === 'A128GCM' ? 128 : 256;
-  if (cek.length !== bits / 8) {
-    throw new Error('the unwrapped content encryption key is ' + cek.length + ' bytes; ' +
-      header.enc + ' needs ' + (bits / 8) + '.');
-  }
-
-  let plaintext;
-  try {
-    const decipher = crypto.createDecipheriv('aes-' + bits + '-gcm', cek,
-      Buffer.from(parts[2], 'base64url'));
-    decipher.setAAD(Buffer.from(parts[0], 'ascii'));
-    decipher.setAuthTag(Buffer.from(parts[4], 'base64url'));
-    plaintext = Buffer.concat([
-      decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()
-    ]).toString('utf8');
-  } catch (e) {
-    // An authentication tag failure lands here, and it is the interesting case:
-    // the ciphertext or the header was altered in flight.
-    throw new Error('the ciphertext did not decrypt or its authentication tag did not verify: ' +
-      e.message);
-  }
+  // **THE MECHANICS MOVED TO `common/crypto.js` ON 2026-08-27; THE POLICY DID
+  // NOT.** What is decided here is what THIS ENDPOINT accepts — which `enc`
+  // values it advertised, and that the kid must be the issuer's current
+  // request-encryption key — and those are OID4VCI section 10 facts about this
+  // issuer rather than facts about JWE. What moved is the unwrap, the AAD, the
+  // tag and the key-length check, which sat two hundred lines from the encrypt
+  // half that had to agree with them exactly.
+  //
+  // The hand-rolled implementation was KEPT rather than replaced by a JOSE
+  // library, for the reason encryptToJwe() has always given: having the steps
+  // visible is the point of a mock. It is simply in one place now.
+  const result = stsCrypto.decryptJweCompact(compact, {
+    privateKey: VCI_REQUEST_ENC_KEY.privateKey,
+    allowedEnc: VCI_REQUEST_ENC_VALUES,
+    expectedKid: VCI_REQUEST_ENC_KEY.publicJwk.kid
+  });
+  logArtifact('OID4VCI Credential Request', 'JWE protected header as received', result.header);
   let body;
   try {
-    body = JSON.parse(plaintext);
+    body = JSON.parse(result.plaintext);
   } catch (e) {
     throw new Error('the decrypted request is not JSON: ' + e.message);
   }
   logArtifact('OID4VCI Credential Request', 'after decryption', body);
-  log.debug("Leaving decryptJweRequest(). Decrypted " + plaintext.length + " characters.");
+  log.debug("Leaving decryptJweRequest(). Decrypted " + result.plaintext.length + " characters.");
   return body;
 }
 
@@ -1179,27 +1144,14 @@ function encryptionProblem(encryption) {
 // having the steps visible is the point of a mock.
 function encryptToJwe(plaintext, encryption) {
   log.debug("Entering encryptToJwe(). enc=" + encryption.enc);
-  const bits = encryption.enc === 'A128GCM' ? 128 : 256;
-  const cek = crypto.randomBytes(bits / 8);
-  const iv = crypto.randomBytes(12);
-  const header = { alg: VCI_ENC_ALG, enc: encryption.enc, typ: 'JWT' };
-  if (encryption.jwk.kid) header.kid = encryption.jwk.kid;
-  const headerB64 = b64u(Buffer.from(JSON.stringify(header), 'utf8'));
-
-  const publicKey = crypto.createPublicKey({ key: encryption.jwk, format: 'jwk' });
-  const encryptedKey = crypto.publicEncrypt({
-    key: publicKey,
-    padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-    oaepHash: 'sha256'
-  }, cek);
-
-  const cipher = crypto.createCipheriv('aes-' + bits + '-gcm', cek, iv);
-  // The protected header is the additional authenticated data, per RFC 7516.
-  cipher.setAAD(Buffer.from(headerB64, 'ascii'));
-  const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  const compact = [headerB64, b64u(encryptedKey), b64u(iv), b64u(ciphertext), b64u(tag)].join('.');
+  // Still written out by hand rather than with a JOSE library — see
+  // `common/crypto.js` Section 4, where that argument is now made once for both
+  // directions. The wallet's key and the algorithm it asked for are this
+  // endpoint's business; the CEK, the wrap, the AAD and the tag are not.
+  const compact = stsCrypto.encryptJweCompact(plaintext, {
+    jwk: encryption.jwk,
+    enc: encryption.enc
+  });
   log.debug("Leaving encryptToJwe(). " + compact.length + " characters.");
   return compact;
 }

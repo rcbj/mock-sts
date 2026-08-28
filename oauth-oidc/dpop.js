@@ -48,7 +48,8 @@ const realms = require('../common/realms');
 // verifies an access token this service issued before believing its cnf. Still a
 // leaf — jsonwebtoken is an npm package and helpers.js is this module's only
 // project dependency, so the no-cycle property is unchanged.
-const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const helpers = require('../common/helpers');
 // RFC 8705 — the other sender constraint. A library like this one: it registers
 // nothing and requires only helpers.js and config.js, so requiring it here
@@ -177,33 +178,24 @@ function nonceIsCurrent(nonce) {
 // the wallet sends its key in every proof header, and if a stray member changed
 // the digest the token would stop matching its own key.
 // ---------------------------------------------------------------------------
-const THUMBPRINT_MEMBERS = {
-  EC: ['crv', 'kty', 'x', 'y'],
-  RSA: ['e', 'kty', 'n'],
-  OKP: ['crv', 'kty', 'x'],
-  oct: ['k', 'kty']
-};
-
-function canonicalJwk(jwk) {
-  log.debug('Entering canonicalJwk().');
-  if (!jwk || !jwk.kty) throw new Error('a JWK Thumbprint needs a key with a kty.');
-  const members = THUMBPRINT_MEMBERS[jwk.kty];
-  if (!members) throw new Error('no RFC 7638 member list for kty ' + jwk.kty + '.');
-  const missing = members.filter(function (m) {
-    return jwk[m] === undefined || jwk[m] === null || jwk[m] === '';
-  });
-  if (missing.length) {
-    throw new Error('this ' + jwk.kty + ' key is missing ' + missing.join(', ') + '.');
-  }
-  log.debug('Leaving canonicalJwk().');
-  return '{' + members.map(function (m) {
-    return JSON.stringify(m) + ':' + JSON.stringify(jwk[m]);
-  }).join(',') + '}';
-}
-
+// ---------------------------------------------------------------------------
+// THE RFC 7638 MEMBER TABLE AND THE CANONICAL JSON MOVED TO `common/crypto.js`
+// ON 2026-08-27, and the paragraph above is why they had to move rather than be
+// tidied: there were THREE copies of this computation in the service, and the
+// other two derived a `kid` with JSON.stringify over an object literal whose
+// keys happened to be in lexicographic order. All three agreed. RFC 7638 exists
+// so that two implementations agree, and three that agree by coincidence are
+// two bugs waiting for somebody to add a member out of order.
+//
+// **THE `jkt` IS NEVER TRUNCATED AND THAT IS NOT A STYLE CHOICE.** The other
+// two callers shorten theirs, because a `kid` only has to be unique within a
+// JWKS and a short one is readable in a log. This one is compared BYTE FOR BYTE
+// against a value the client computed from the same key, so a truncation here
+// would be a binding that accepts a prefix collision.
+// ---------------------------------------------------------------------------
 function thumbprint(jwk) {
   log.debug('Entering thumbprint().');
-  const jkt = b64u(crypto.createHash('sha256').update(canonicalJwk(jwk), 'utf8').digest());
+  const jkt = stsCrypto.jwkThumbprint(jwk);
   log.debug('Leaving thumbprint(). jkt=' + jkt);
   return jkt;
 }
@@ -667,9 +659,7 @@ function presentedAccessToken(req, res, where) {
   let claims = null;
   let verified = false;
   try {
-    claims = jwt.verify(accessToken, STS.certPem,
-                        { algorithms: ['RS256'],
-                          clockTolerance: config.value('oauth2.clockSkewS') });
+    claims = stsCrypto.verifyJws(accessToken, STS.certPem);
     verified = true;
   } catch (e) {
     log.debug("This access token is not one of ours, so its claims are read unverified: " +
@@ -774,7 +764,12 @@ module.exports = {
   PROOF_TYP: PROOF_TYP,
   SIGNING_ALGS: SIGNING_ALGS,
   IAT_SKEW_SECONDS: IAT_SKEW_SECONDS,
-  canonicalJwk: canonicalJwk,
+  // Re-exported so that a caller reaching for the canonical form gets the ONE
+  // implementation rather than writing a fourth. Nothing in this repository
+  // consumes it today; the parent project's DPoP test computes its own on
+  // purpose, so that a shared misunderstanding could not make both ends agree
+  // and interoperate with nobody.
+  canonicalJwk: stsCrypto.canonicalJwk,
   thumbprint: thumbprint,
   athOf: athOf,
   htuOf: htuOf,

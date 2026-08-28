@@ -67,6 +67,8 @@
 // ===========================================================================
 
 const crypto = require('crypto');
+// One thumbprint computation for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const { log, b64u } = require('../common/helpers');
 const config = require('../common/config');
 
@@ -100,11 +102,15 @@ function peerCertificate(req) {
   return cert;
 }
 
+// RFC 8705 `x5t#S256`: SHA-256 over the DER, base64url. The same digest
+// `tls/tls_server.js` prints as colon-hex and `spiffe/spiffe_ca.js` truncates
+// as an authority id — three spellings of one computation, which is why the
+// shared function takes a format and the three that each computed it are one.
 function thumbprintOf(cert) {
   if (!cert || !cert.raw) {
     return '';
   }
-  return b64u(crypto.createHash('sha256').update(cert.raw).digest());
+  return stsCrypto.certificateThumbprint(cert);
 }
 
 // The thumbprint of whatever certificate this request arrived with, or ''. The

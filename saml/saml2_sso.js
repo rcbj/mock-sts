@@ -118,8 +118,13 @@ const zlib = require('zlib');
 // no route, so its position is not a position at all.
 const realms = require('../common/realms');
 const crypto = require('crypto');
-const { DOMParser } = require('@xmldom/xmldom');
-const { SignedXml } = require('xml-crypto');
+const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
+// Every signature and every cipher in this service is in one module since
+// 2026-08-27. This file signs four documents and verifies two, and xml-crypto
+// is no longer required here: `common/crypto.js` sits over the parent
+// project's own signer, so a Response minted here canonicalizes with the same
+// code the debugger uses to check it.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
         parseBody, firstByLocal, textByLocal } = require('../common/helpers');
@@ -127,7 +132,9 @@ const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
 // and /admin-api can change what the next response says and how it is signed.
 const config = require('../common/config');
 // The one assertion writer. See decision 4.
-const { buildSamlAssertion } = require('./saml2');
+const { buildSamlAssertion, encryptElement, decryptElement,
+        BLOCK_CIPHERS, KEY_TRANSPORTS } = require('./saml2');
+const spMetadata = require('./sp_metadata');
 // The session, from the service that owns it. This profile starts none of its
 // own: `beginAuthentication()` sends the browser to authn.js's screen and back.
 const { sessionOf, endSession, beginAuthentication } = require('../authn/authn');
@@ -165,13 +172,15 @@ const STATUS_NO_PASSIVE = 'urn:oasis:names:tc:SAML:2.0:status:NoPassive';
 
 const STATUS_PARTIAL_LOGOUT = 'urn:oasis:names:tc:SAML:2.0:status:PartialLogout';
 
-const SIG_RSA_SHA256 = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256';
-
-const DIGEST_SHA256 = 'http://www.w3.org/2001/04/xmlenc#sha256';
-
-const C14N_EXCLUSIVE = 'http://www.w3.org/2001/10/xml-exc-c14n#';
-
-const TRANSFORM_ENVELOPED = 'http://www.w3.org/2000/09/xmldsig#enveloped-signature';
+// The one algorithm URI this file still names for itself, and it is not a
+// signing parameter: `SigAlg` is a QUERY PARAMETER of the HTTP Redirect binding
+// (saml-bindings-2.0-os section 3.4.4.1), sent so the far end knows what to
+// verify with. It is taken from the crypto module rather than typed again, so
+// the string a verifier is told to use and the string this service actually
+// signs with cannot drift apart. The digest, canonicalization and transform
+// URIs that used to sit beside it are gone — they were the four constants every
+// one of the six signers repeated, and they live once in `common/crypto.js` now.
+const SIG_RSA_SHA256 = stsCrypto.SIG_RSA_SHA256;
 
 // The NameID formats this identity provider ADVERTISES. It is not a list of
 // what it will accept: a NameIDPolicy naming something outside this list is
@@ -513,24 +522,23 @@ function samlError(res, status, title, detail, extra) {
 // both.
 function signDocument(xml, rootLocalName, id, placement) {
   log.debug("Entering signDocument(). root=" + rootLocalName + ", placement=" + placement);
-  const sig = new SignedXml({ privateKey: STS.privateKeyPem, publicCert: STS.certPem });
-  sig.signatureAlgorithm = SIG_RSA_SHA256;
-  sig.canonicalizationAlgorithm = C14N_EXCLUSIVE;
-  sig.addReference({
-    xpath: "/*[local-name(.)='" + rootLocalName + "']",
-    transforms: [TRANSFORM_ENVELOPED, C14N_EXCLUSIVE],
-    digestAlgorithm: DIGEST_SHA256,
-    uri: id ? ('#' + id) : ''
+  // `after-issuer` for a protocol message, `prepend` for metadata — the two
+  // spellings this file has always used, mapped onto the shared signer's names.
+  // Kept as two locations rather than two functions because everything else
+  // about the signature is identical, and a second function is where the two
+  // drift.
+  const signed = stsCrypto.signXml(xml, {
+    privateKeyPem: STS.privateKeyPem,
+    certPem: STS.certPem,
+    placement: placement === 'prepend'
+      ? stsCrypto.PLACEMENT.FIRST : stsCrypto.PLACEMENT.AFTER_ISSUER,
+    // The id is passed explicitly rather than left to the signer to find,
+    // because this function is given one and the caller's is authoritative:
+    // three of the four documents here are built by a template that put it
+    // there, and re-deriving it would be a second opinion about the same value.
+    refUri: id ? ('#' + id) : '',
+    what: 'SAML 2.0 ' + rootLocalName
   });
-  // `after-issuer` for a protocol message, `prepend` for metadata. Written as
-  // two locations rather than two functions because everything else about the
-  // signature is identical, and a second function is where the two drift.
-  const location = placement === 'prepend'
-    ? { reference: "/*[local-name(.)='" + rootLocalName + "']", action: 'prepend' }
-    : { reference: "/*[local-name(.)='" + rootLocalName + "']/*[local-name(.)='Issuer']",
-        action: 'after' };
-  sig.computeSignature(xml, { location: location });
-  const signed = sig.getSignedXml();
   log.debug("Leaving signDocument(). " + signed.length + " characters.");
   return signed;
 }
@@ -544,8 +552,7 @@ function signDocument(xml, rootLocalName, id, placement) {
 // and whose only symptom at the far end is "invalid signature".
 function signQueryString(queryString) {
   log.debug("Entering signQueryString().");
-  const signature = crypto.createSign('RSA-SHA256')
-    .update(queryString, 'utf8').sign(STS.privateKeyPem).toString('base64');
+  const signature = stsCrypto.signQueryString(queryString, STS.privateKeyPem);
   log.debug("Leaving signQueryString().");
   return signature;
 }
@@ -658,14 +665,137 @@ function responseBindingFor(request) {
   return { error: asked };
 }
 
+// ---------------------------------------------------------------------------
+// THE FIVE SETTINGS ON THIS PAGE ARE PER SERVICE PROVIDER, AND THIS IS THE ONE
+// PLACE THAT IS DECIDED.
+//
+// `settingFor(sp, 'saml2.signAssertion')` is the value for THAT service
+// provider: what its application entry says if it carries the matching
+// attribute, and `saml2.signAssertion` itself if it does not. The five are the
+// assertion lifetime, the two signature switches, the default NameID format and
+// the artifact lifetime; `/admin/saml-assertions` draws the defaults and names
+// the attribute beside each one.
+//
+// EVERY CALLER PASSES AN ENTITYID AND SOME OF THEM HAVE TO BE HANDED ONE. That
+// is the whole cost of this feature in this file: `buildResponse()`,
+// `deliver()` and `stashArtifact()` are reached from paths that knew the
+// service provider and were not carrying it, so they now take it. A caller with
+// nothing to pass passes '' and gets the service-wide value, which is what this
+// service did everywhere before 2026-08-27.
+//
+// IT IS NOT CACHED, deliberately. The lookup is a read of an in-memory
+// directory, and a cache would be a second place the value lived — the thing
+// `applications.js`'s header spends three paragraphs refusing.
+function settingFor(spEntityId, key) {
+  return applications.settingFor(spEntityId, key, config);
+}
+
+// ---------------------------------------------------------------------------
+// ENCRYPTION: WHOSE KEY, WHICH ALGORITHMS, AND WHAT HAPPENS WHEN THERE IS NO
+// KEY AT ALL.
+//
+// THE CERTIFICATE IS LOOKED FOR IN THREE PLACES, most specific first:
+//
+//   1. `samlEncryptionCertificate` on the entry — which the metadata refresh
+//      writes from a <md:KeyDescriptor use="encryption">, and which can also be
+//      typed for a service provider whose metadata this service cannot reach.
+//   2. `samlSigningCertificate` — captured off a SIGNED AuthnRequest's
+//      ds:KeyInfo. Using a signing key to encrypt to is not what a careful
+//      deployment does; it is the right default for a mock, because it means a
+//      service provider that signs its requests needs no configuration at all
+//      to receive an encrypted assertion.
+//   3. Nothing, and this is the case the whole design turns on.
+//
+// WITH NO CERTIFICATE THE DOCUMENT GOES OUT IN CLEAR AND SAYS SO LOUDLY. It is
+// not refused: a mock that stopped issuing because a key was missing would be
+// useless exactly when somebody is setting this up. It is not silent either —
+// silently sending plaintext while a console page says "encrypted" is the worst
+// of the three, because the person testing their client would believe the
+// wrong thing about what their client accepted. So it is logged at WARN, every
+// time, naming the application and what to do about it.
+function encryptionCertificateFor(spEntityId) {
+  log.debug("Entering encryptionCertificateFor(). sp=" + (spEntityId || '(none)'));
+  const record = spEntityId ? applications.get(spEntityId) : null;
+  const fields = (record && record.fields) || {};
+  const first = function (value) {
+    const one = Array.isArray(value) ? value[0] : value;
+    return String(one == null ? '' : one).trim();
+  };
+  const configured = first(fields.samlEncryptionCertificate);
+  if (configured) {
+    log.debug("Leaving encryptionCertificateFor(). Its own encryption certificate.");
+    return { pem: spMetadata.toPem(configured), source: 'samlEncryptionCertificate' };
+  }
+  const signing = first(fields.samlSigningCertificate);
+  if (signing) {
+    log.debug("Leaving encryptionCertificateFor(). Its signing certificate.");
+    return { pem: spMetadata.toPem(signing), source: 'samlSigningCertificate' };
+  }
+  log.debug("Leaving encryptionCertificateFor(). There is none.");
+  return { pem: '', source: '' };
+}
+
+// The two algorithm choices for one service provider, each falling back to the
+// setting. A value the enum does not know is IGNORED with a warning rather than
+// used — `applications.settingFor()` already refuses one that fails the
+// setting's own check, and this second guard catches the case where the SETTING
+// itself was widened and an entry still names something retired.
+function encryptionAlgorithmsFor(spEntityId) {
+  const algorithm = String(settingFor(spEntityId, 'saml2.encryptionAlgorithm') || '');
+  const keyTransport = String(settingFor(spEntityId, 'saml2.keyTransportAlgorithm') || '');
+  return {
+    algorithm: BLOCK_CIPHERS[algorithm] ? algorithm : 'aes256-gcm',
+    keyTransport: KEY_TRANSPORTS[keyTransport] ? keyTransport : 'rsa-oaep-mgf1p'
+  };
+}
+
+// Encrypt `xml` for this service provider, or hand back the plaintext and say
+// why. ONE function for the assertion and the logout NameID, differing only in
+// the wrapper element — the same argument encryptElement() itself makes.
+function encryptFor(spEntityId, xml, wrapper, what) {
+  log.debug("Entering encryptFor(). sp=" + (spEntityId || '(none)') + ", as=" + wrapper);
+  const cert = encryptionCertificateFor(spEntityId);
+  if (!cert.pem) {
+    log.warn('saml2: ' + (spEntityId || 'this service provider') + ' is configured to have ' +
+             'its ' + what + ' ENCRYPTED and this service holds no certificate to encrypt ' +
+             'to, so it is going out IN CLEAR. Set samlSpMetadataUrl and refresh the ' +
+             'metadata, set samlEncryptionCertificate by hand, or have it sign its ' +
+             'AuthnRequests — a signed request\'s certificate is used as a fallback.');
+    log.debug("Leaving encryptFor(). No certificate; plaintext.");
+    return { xml: xml, encrypted: false, why: 'no certificate' };
+  }
+  const how = encryptionAlgorithmsFor(spEntityId);
+  try {
+    const out = encryptElement(xml, cert.pem,
+      { algorithm: how.algorithm, keyTransport: how.keyTransport, wrapper: wrapper });
+    log.info('saml2: the ' + what + ' for ' + (spEntityId || '(unnamed)') + ' is encrypted ' +
+             '(' + how.algorithm + ', key wrapped with ' + how.keyTransport + ', to the ' +
+             'certificate on ' + cert.source + ').');
+    log.debug("Leaving encryptFor(). Encrypted.");
+    return { xml: out, encrypted: true, algorithm: how.algorithm,
+             keyTransport: how.keyTransport, source: cert.source };
+  } catch (e) {
+    // A certificate that parsed and will not encrypt — an EC key, most likely,
+    // since XML Encryption key transport here wraps to RSA. Plaintext and a
+    // warning, for the reason the missing-certificate case above gives.
+    log.error('saml2: the ' + what + ' for ' + (spEntityId || '(unnamed)') + ' could not be ' +
+              'encrypted (' + e.message + '), so it is going out IN CLEAR. The certificate ' +
+              'on ' + cert.source + ' is readable but cannot be encrypted to — an EC key ' +
+              'is the usual cause, since key transport here wraps to RSA.');
+    log.debug("Leaving encryptFor(). Failed; plaintext.");
+    return { xml: xml, encrypted: false, why: e.message };
+  }
+}
+
 // The NameID Format to answer with. See `saml2.nameIdFormat`: a request naming a
-// format gets that format back, whatever it is.
-function nameIdFormatFor(request) {
+// format gets that format back, whatever it is — and where it does not, the
+// service provider's own `saml2NameIdFormat` decides before the setting does.
+function nameIdFormatFor(request, spEntityId) {
   const asked = String(request.nameIdFormat || '');
   if (asked) {
     return asked;
   }
-  return String(config.value('saml2.nameIdFormat') ||
+  return String(settingFor(spEntityId, 'saml2.nameIdFormat') ||
                 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified');
 }
 
@@ -748,6 +878,12 @@ function statusElement(code, subCode, message) {
 // success and the failure alike, because the two differ by exactly one child
 // element and a status code — and because an error response that took a
 // different code path is an error response nobody ever looks at.
+// `opts.sp` is the SERVICE PROVIDER'S entityID and is what makes the signature
+// switch per application — NOT `opts.issuer`, which is this identity provider's
+// own entityID and is a DIFFERENT string per service provider when
+// `saml2.perApplicationEntityId` is on. Passing the issuer here would have
+// looked right, found no application entry under it, and silently used the
+// service-wide default every time.
 function buildResponse(opts) {
   log.debug("Entering buildResponse(). status=" + opts.status);
   const id = genId();
@@ -761,7 +897,7 @@ function buildResponse(opts) {
       (opts.assertion || '') +
     '</samlp:Response>';
   logArtifact('SAML 2.0 Response', 'before signing', xml);
-  if (!config.value('saml2.signResponse')) {
+  if (!settingFor(opts.sp || '', 'saml2.signResponse')) {
     log.debug("Leaving buildResponse(). Unsigned: saml2.signResponse is off.");
     return { xml: xml, id: id, signed: false };
   }
@@ -787,8 +923,8 @@ function buildAssertionFor(request, session, spEntityId, idpEntityId, acsUrl) {
   log.debug("Entering buildAssertionFor(). sp=" + spEntityId);
   const user = session.user;
   const context = authnContextFor(session);
-  const lifetimeMin = Number(config.value('saml2.assertionLifetimeMin')) || 60;
-  const format = nameIdFormatFor(request);
+  const lifetimeMin = Number(settingFor(spEntityId, 'saml2.assertionLifetimeMin')) || 60;
+  const format = nameIdFormatFor(request, spEntityId);
   const assertion = buildSamlAssertion(user.username, spEntityId, lifetimeMin, {
     issuer: idpEntityId,
     authnContextClassRef: context.classRef,
@@ -802,14 +938,21 @@ function buildAssertionFor(request, session, spEntityId, idpEntityId, acsUrl) {
     subjectConfirmation: {
       recipient: acsUrl,
       inResponseTo: request.id,
-      notOnOrAfter: iso(lifetimeMin)
+      // The SAME instant as the Conditions/NotOnOrAfter the builder computes,
+      // saml.clockSkewS included. Two expiries inside one assertion that
+      // disagree by the skew is the kind of defect a service provider reports
+      // as "assertion expired" while the console shows a window that has not
+      // closed, so this reads the setting the builder reads rather than
+      // re-deriving the lifetime on its own.
+      notOnOrAfter: iso(lifetimeMin +
+        Math.max(0, Number(config.value('saml.clockSkewS')) || 0) / 60)
     },
     // The SESSION, not the assertion, is what a LogoutRequest names later. This
     // is the line that makes Single Logout able to find anything.
     sessionIndex: session.id,
     authnInstant: new Date((session.authTime || 0) * 1000).toISOString(),
     attributes: attributesFor(user),
-    sign: config.value('saml2.signAssertion')
+    sign: settingFor(spEntityId, 'saml2.signAssertion')
   });
   log.debug("Leaving buildAssertionFor(). " + assertion.length + " characters.");
   return assertion;
@@ -887,13 +1030,13 @@ function sendPostBinding(res, title, inner) {
 // A message on the HTTP Redirect binding: DEFLATE, base64, URL-encode, and — when
 // this service signs its responses — the detached signature of section 3.4.4.1
 // over the octet string in the order that section fixes.
-function redirectUrlFor(destination, field, xml, relayState) {
+function redirectUrlFor(destination, field, xml, relayState, spEntityId) {
   log.debug("Entering redirectUrlFor(). field=" + field);
   let qs = field + '=' + encodeURIComponent(encodeRedirect(xml));
   if (relayState) {
     qs += '&RelayState=' + encodeURIComponent(relayState);
   }
-  if (config.value('saml2.signResponse')) {
+  if (settingFor(spEntityId || '', 'saml2.signResponse')) {
     qs += '&SigAlg=' + encodeURIComponent(SIG_RSA_SHA256);
     qs += '&Signature=' + encodeURIComponent(signQueryString(qs));
   }
@@ -927,7 +1070,9 @@ function mintArtifact(idpEntityId, endpointIndex) {
 }
 
 function stashArtifact(artifact, detail) {
-  const ttlS = Number(config.value('saml2.artifactTtlS')) || 300;
+  // Off the service provider this artifact was minted FOR, which `detail`
+  // already carried before this was per application.
+  const ttlS = Number(settingFor(detail.spEntityId || '', 'saml2.artifactTtlS')) || 300;
   artifacts.set(artifact, Object.assign({ expires: Date.now() + ttlS * 1000 }, detail));
   artifacts.forEach(function (v, k) { if (v.expires < Date.now()) artifacts.delete(k); });
 }
@@ -959,7 +1104,8 @@ function deliver(res, opts) {
     return;
   }
   if (opts.binding === BINDING_REDIRECT) {
-    const url = redirectUrlFor(opts.destination, opts.field, opts.xml, opts.relayState);
+    const url = redirectUrlFor(opts.destination, opts.field, opts.xml, opts.relayState,
+                               opts.spEntityId);
     if (url.length > 8000) {
       // Not refused — reported. Section 4.1.2 says the Redirect binding MUST
       // NOT be used for a response because it will typically exceed what a user
@@ -1137,7 +1283,8 @@ function singleSignOn(req, res) {
       // which is exactly why it is implemented rather than ignored.
       log.debug("IsPassive is set and there is no usable session, so NoPassive goes back.");
       const refusal = buildResponse({
-        issuer: idpEntityId, destination: acsUrl, inResponseTo: request.id,
+        issuer: idpEntityId, sp: spEntityId,
+        destination: acsUrl, inResponseTo: request.id,
         status: STATUS_RESPONDER, subStatus: STATUS_NO_PASSIVE,
         statusMessage: session
           ? 'The session here has one factor and this request asked for more, and IsPassive ' +
@@ -1214,7 +1361,8 @@ function singleSignOn(req, res) {
     log.debug("The sign-in did not complete: " + params.authn_error);
     pendingRequests.delete(String(params.rid || ''));
     const refusal = buildResponse({
-      issuer: idpEntityId, destination: acsUrl, inResponseTo: request.id,
+      issuer: idpEntityId, sp: spEntityId,
+      destination: acsUrl, inResponseTo: request.id,
       status: STATUS_RESPONDER,
       subStatus: 'urn:oasis:names:tc:SAML:2.0:status:AuthnFailed',
       statusMessage: String(params.authn_error_description || params.authn_error)
@@ -1243,10 +1391,21 @@ function singleSignOn(req, res) {
 function issueSignInResponse(res, ctx) {
   log.debug("Entering issueSignInResponse(). sp=" + ctx.spEntityId);
   const session = ctx.session;
-  const assertion = buildAssertionFor(ctx.request, session, ctx.spEntityId,
-                                      ctx.idpEntityId, ctx.acsUrl);
+  const built = buildAssertionFor(ctx.request, session, ctx.spEntityId,
+                                 ctx.idpEntityId, ctx.acsUrl);
+  // SIGNED FIRST, THEN ENCRYPTED, and that order is the specification's rather
+  // than a preference: the signature lives INSIDE the ciphertext, so what a
+  // service provider verifies is what it decrypted. Encrypting first and
+  // signing the ciphertext would produce a document that verifies without
+  // anybody being able to say what was signed. buildAssertionFor() has already
+  // signed it by the time it gets here.
+  const sealed = settingFor(ctx.spEntityId, 'saml2.encryptAssertion')
+    ? encryptFor(ctx.spEntityId, built, 'saml:EncryptedAssertion', 'assertion')
+    : { xml: built, encrypted: false };
+  const assertion = sealed.xml;
   const response = buildResponse({
-    issuer: ctx.idpEntityId, destination: ctx.acsUrl, inResponseTo: ctx.request.id,
+    issuer: ctx.idpEntityId, sp: ctx.spEntityId,
+    destination: ctx.acsUrl, inResponseTo: ctx.request.id,
     status: STATUS_SUCCESS, assertion: assertion
   });
 
@@ -1456,7 +1615,7 @@ function logoutReturnAddressFor(spEntityId) {
   return { url: '', from: '' };
 }
 
-function buildLogoutResponse(idpEntityId, destination, inResponseTo, status, message) {
+function buildLogoutResponse(idpEntityId, destination, inResponseTo, status, message, sp) {
   log.debug("Entering buildLogoutResponse(). status=" + status);
   const id = genId();
   const xml =
@@ -1468,7 +1627,7 @@ function buildLogoutResponse(idpEntityId, destination, inResponseTo, status, mes
       statusElement(status, '', message) +
     '</samlp:LogoutResponse>';
   logArtifact('SAML 2.0 LogoutResponse', 'before signing', xml);
-  if (!config.value('saml2.signResponse')) {
+  if (!settingFor(sp || '', 'saml2.signResponse')) {
     log.debug("Leaving buildLogoutResponse(). Unsigned.");
     return xml;
   }
@@ -1484,7 +1643,30 @@ function buildLogoutResponse(idpEntityId, destination, inResponseTo, status, mes
   }
 }
 
-function buildLogoutRequest(idpEntityId, destination, nameId, nameIdFormat, sessionIndex) {
+// The <saml:NameID> of a LogoutRequest, or the <saml:EncryptedID> that stands
+// in for it. Separate from buildLogoutRequest() so the decision is one
+// expression rather than a branch around eight lines of markup, and so the
+// plaintext element is built exactly once whether or not it is then sealed —
+// two spellings of a NameID is how the encrypted and clear paths come to
+// disagree about a Format attribute.
+function subjectFor(sp, nameId, nameIdFormat) {
+  const attributes = (nameIdFormat ? ' Format="' + xmlEscape(nameIdFormat) + '"' : '');
+  if (!settingFor(sp || '', 'saml2.encryptLogoutNameId')) {
+    // In the document, so the prefix is declared on the LogoutRequest above it.
+    return '<saml:NameID' + attributes + '>' + xmlEscape(nameId) + '</saml:NameID>';
+  }
+  // ENCRYPTED, SO IT DECLARES ITS OWN NAMESPACE. Once this element is
+  // ciphertext it has no parent to inherit `saml:` from — the service provider
+  // decrypts it as a standalone fragment, and one that relies on a declaration
+  // three levels up in a document it has not reassembled yet is a NamespaceError
+  // on the other side. Found by decrypting our own output, which is the only
+  // way this class of bug is ever found.
+  const plain = '<saml:NameID xmlns:saml="' + NS_SAML + '"' + attributes + '>' +
+    xmlEscape(nameId) + '</saml:NameID>';
+  return encryptFor(sp, plain, 'saml:EncryptedID', 'logout NameID').xml;
+}
+
+function buildLogoutRequest(idpEntityId, destination, nameId, nameIdFormat, sessionIndex, sp) {
   log.debug("Entering buildLogoutRequest(). to=" + destination);
   const id = genId();
   const xml =
@@ -1492,12 +1674,16 @@ function buildLogoutRequest(idpEntityId, destination, nameId, nameIdFormat, sess
       ' ID="' + id + '" Version="2.0" IssueInstant="' + iso(0) + '"' +
       (destination ? ' Destination="' + xmlEscape(destination) + '"' : '') + '>' +
       '<saml:Issuer>' + xmlEscape(idpEntityId) + '</saml:Issuer>' +
-      '<saml:NameID' + (nameIdFormat ? ' Format="' + xmlEscape(nameIdFormat) + '"' : '') + '>' +
-        xmlEscape(nameId) + '</saml:NameID>' +
+      // THE ONLY THING IN A SAML 2.0 REQUEST THAT CAN BE ENCRYPTED. There is no
+      // EncryptedAuthnRequest in the specification — a request is signed, not
+      // sealed — so <saml:EncryptedID> in a LogoutRequest is the whole of what
+      // "request encryption" means in this protocol. saml-core-2.0-os section
+      // 3.7.1 allows it exactly where the NameID would be.
+      subjectFor(sp, nameId, nameIdFormat) +
       (sessionIndex ? '<samlp:SessionIndex>' + xmlEscape(sessionIndex) + '</samlp:SessionIndex>' : '') +
     '</samlp:LogoutRequest>';
   logArtifact('SAML 2.0 LogoutRequest', 'before signing', xml);
-  if (!config.value('saml2.signResponse')) {
+  if (!settingFor(sp || '', 'saml2.signResponse')) {
     log.debug("Leaving buildLogoutRequest(). Unsigned.");
     return xml;
   }
@@ -1554,7 +1740,45 @@ function singleLogout(req, res) {
   }
   const requestId = root.getAttribute('ID') || '';
   const spEntityId = textByLocal(root, 'Issuer') || scoped.entityId;
-  const nameIdEl = firstByLocal(root, 'NameID');
+  // THE SUBJECT, WHICH MAY BE ENCRYPTED. A service provider that has this
+  // service's metadata has an encryption key to use, and section 3.7.1 lets it
+  // send <saml:EncryptedID> in place of <saml:NameID>.
+  //
+  // IT IS ALWAYS DECRYPTED AND THERE IS NO SETTING FOR IT. Every other
+  // encryption switch here governs what this service SENDS; refusing to
+  // understand a message somebody encrypted to a key this service published
+  // would make that key a lie. The outbound switches exist because a service
+  // provider may not be able to READ what we send; nothing equivalent applies
+  // in this direction.
+  //
+  // A FAILURE IS A REFUSAL WITH A SENTENCE, not a silent fall-through to an
+  // empty NameID. An empty one would end the session anyway — endSession()
+  // reads the cookie, not this value — and the LogoutResponse would say
+  // Success, so the service provider would be told its logout worked while
+  // this service had no idea who it was about.
+  const encryptedIdEl = firstByLocal(root, 'EncryptedID');
+  let nameIdEl = firstByLocal(root, 'NameID');
+  let decrypted = null;
+  if (encryptedIdEl && !nameIdEl) {
+    decrypted = decryptElement(new XMLSerializer().serializeToString(encryptedIdEl),
+                               STS.privateKeyPem);
+    if (!decrypted.ok) {
+      log.warn('saml2: a LogoutRequest from ' + (spEntityId || '(unnamed)') + ' carried an ' +
+               '<saml:EncryptedID> that could not be read — ' + decrypted.why + '.');
+      return samlError(res, 400, 'That EncryptedID could not be decrypted',
+        'This LogoutRequest carries a &lt;saml:EncryptedID&gt; rather than a ' +
+        '&lt;saml:NameID&gt;, and ' + xmlEscape(decrypted.why) + '. The session was NOT ended, ' +
+        'because a logout this service cannot attribute to anybody is one it cannot ' +
+        'honestly report as done. This service\'s current encryption certificate is in ' +
+        'its metadata, which is regenerated on every start.');
+    }
+    const reparsed = new DOMParser().parseFromString(decrypted.xml, 'text/xml');
+    nameIdEl = reparsed && reparsed.documentElement ? reparsed.documentElement : null;
+    log.info('saml2: the LogoutRequest from ' + (spEntityId || '(unnamed)') + ' carried an ' +
+             'encrypted NameID (' + decrypted.algorithm + ', key unwrapped with ' +
+             decrypted.keyTransport + '); it decrypted to ' +
+             ((nameIdEl && nameIdEl.textContent) || '(nothing)') + '.');
+  }
   const nameId = nameIdEl ? (nameIdEl.textContent || '').trim() : '';
   const nameIdFormat = nameIdEl ? (nameIdEl.getAttribute('Format') || '') : '';
   const sessionIndex = textByLocal(root, 'SessionIndex');
@@ -1611,7 +1835,7 @@ function singleLogout(req, res) {
   }
 
   const response = buildLogoutResponse(idpEntityId, back.url, requestId,
-                                       status, message);
+                                       status, message, spEntityId);
   log.info('saml2: ' + spEntityId + ' logged out' + (nameId ? ' ' + nameId : '') +
            (sessionIndex ? ' (session index ' + sessionIndex + ')' : '') +
            '; the LogoutResponse goes to ' + back.url + ', from ' + back.from + '.');
@@ -1652,8 +1876,8 @@ function logoutTargetsFor(session) {
     const back = logoutReturnAddressFor(name);
     const idpEntityId = signedInto[name].idpEntityId || idpEntityIdFor(name);
     const request = buildLogoutRequest(idpEntityId, back.url, username,
-                                       String(config.value('saml2.nameIdFormat')),
-                                       (session && session.id) || '');
+                                       String(settingFor(name, 'saml2.nameIdFormat')),
+                                       (session && session.id) || '', name);
     return {
       entityId: name,
       from: back.from,
@@ -1753,6 +1977,20 @@ function metadataFor(base, spEntityId) {
         ' WantAuthnRequestsSigned="false"' +
         ' protocolSupportEnumeration="' + NS_SAMLP + '">' +
         keyDescriptor('signing') +
+        // AN ENCRYPTION KEY, published since 2026-08-27, and it is the SAME
+        // certificate as the signing one because this service has one key. A
+        // real deployment separates them; a mock that minted a second key pair
+        // per start to look tidy would give a reader two certificates to keep
+        // straight for no behaviour. What matters is that the descriptor is
+        // HERE at all: without it a service provider has nowhere to learn the
+        // key it must encrypt an <saml:EncryptedID> to, and the inbound half
+        // of this feature would be unreachable.
+        //
+        // IT CHANGES ON EVERY START, like everything else this key signs, so a
+        // service provider that cached this document encrypts to a key that no
+        // longer exists — which decryptElement() names as the usual cause when
+        // an unwrap fails.
+        keyDescriptor('encryption') +
         // The artifact resolution service comes FIRST inside the descriptor,
         // because the metadata schema's sequence puts ArtifactResolutionService
         // before SingleLogoutService before NameIDFormat before
@@ -1995,46 +2233,24 @@ app.post(SLO_PATH + '/:sp', singleLogout);
 // ===========================================================================
 function verifyResponseSignature(xml, wanted) {
   log.debug("Entering verifyResponseSignature(). wanted=" + wanted);
-  try {
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    // The Response's own signature is a DIRECT child of the Response; the
-    // assertion's is a direct child of the Assertion. `firstByLocal` would find
-    // whichever came first in the document, which is not the same question — and
-    // getting it wrong reports the assertion's signature twice and the
-    // response's never.
-    const root = wanted === 'Response'
-      ? doc.documentElement
-      : firstByLocal(doc.documentElement, 'Assertion');
-    if (!root) {
-      log.debug("Leaving verifyResponseSignature(). There is no " + wanted + ".");
-      return { ok: false, present: false, why: 'there is no <' + wanted + '> to check' };
-    }
-    let sigEl = null;
-    for (let i = 0; i < root.childNodes.length; i++) {
-      const child = root.childNodes[i];
-      if (child.nodeType === 1 && child.localName === 'Signature') { sigEl = child; break; }
-    }
-    if (!sigEl) {
-      log.debug("Leaving verifyResponseSignature(). It is not signed.");
-      return { ok: false, present: false, why: 'the ' + wanted + ' carries no ds:Signature' };
-    }
-    const sig = new SignedXml({ publicCert: STS.certPem });
-    sig.loadSignature(sigEl);
-    // No `idAttribute` — SAML 2.0's is `ID`, which is already one of the
-    // defaults, and naming it again UNSHIFTS A DUPLICATE onto that list and
-    // trips xml-crypto's signature-wrapping guard with a security error about a
-    // document that has nothing wrong with it. wsfed.js's
-    // verifyAssertionSignature() cost a debugging session over exactly this.
-    const ok = sig.checkSignature(xml);
-    log.debug("Leaving verifyResponseSignature(). ok=" + ok);
-    return { ok: !!ok, present: true, why: ok ? '' : 'the signature did not verify' };
-  } catch (e) {
-    // xml-crypto throws rather than returning false for most failures, and the
-    // message names which of them it was — an unresolvable reference reads quite
-    // differently from a digest mismatch, and that distinction is the diagnosis.
-    log.debug("Leaving verifyResponseSignature(). It threw: " + e.message);
-    return { ok: false, present: true, why: e.message };
-  }
+  // **THE `element` ARGUMENT IS THE WHOLE POINT AND IT IS NOT A CONVENIENCE.**
+  // A Response carrying a signed assertion has TWO signatures, and asking a
+  // verifier "is this signed by us" without saying WHICH element gets an answer
+  // about whichever it found first. The shared verifier selects the element by
+  // name, takes the signature that is its own DIRECT CHILD, and additionally
+  // refuses a signature whose reference names something else — the last of
+  // which none of the four implementations this replaced ever checked.
+  //
+  // The `idAttribute` dance is gone with them: the shared signer resolves `ID`,
+  // `AssertionID`, `ResponseID` and `RequestID` natively, so there is no list to
+  // add a name to and no duplicate to unshift onto it. That is what removed the
+  // hazard this function used to carry a paragraph about.
+  const result = stsCrypto.verifyXmlSignature(xml, {
+    element: wanted,
+    certPem: STS.certPem
+  });
+  log.debug("Leaving verifyResponseSignature(). ok=" + result.ok);
+  return result;
 }
 
 // Every check, in the order a service provider would apply them, each with its

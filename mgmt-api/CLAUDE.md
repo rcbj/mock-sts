@@ -250,6 +250,22 @@ here"**. If the answer is no, the setting belongs on `/config` and nowhere else,
 which is the argument `/admin/scim` and `groups.claim` both already make for
 having no operation of their own.
 
+**`/admin-api/saml-assertions` IS THAT THIRD RESOURCE, added 2026-08-27**, and
+it was put to the test above rather than admitted by analogy. It sets three
+settings — the two assertion lifetimes and `saml.clockSkewS` — and a caller of
+`set-many` does get a wrong answer here: `saml2.assertionLifetimeMins` succeeds,
+changes nothing and reports success, and the caller finds out from an assertion
+that expired when it should not have. So it refuses anything outside its three
+by name, exactly as the token lifetimes door does.
+
+**Its GET earns its place beyond the parity**, which is the same thing to check
+here as everywhere: it reports `saml2WindowS` and `saml11WindowS`, the whole
+width of the window an assertion actually states. That is the lifetime plus
+TWICE the skew, and **no setting in `/config` states it** — a caller assembling
+it from the rows has to know that the skew is applied at both ends, which is
+precisely the thing somebody gets wrong. A resource that only echoed three rows
+back would not have earned anything.
+
 ---
 
 ## `/admin-api/docs` is the only page here with an *explorer* script

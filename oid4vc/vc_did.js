@@ -17,7 +17,8 @@
 
 const crypto = require('crypto');
 const forge = require('node-forge');
-const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const bbs2023 = require('../common/vendored/bbs2023.js');
 const { log, logArtifact, PORT, STS, baseUrlOf, bbsKeyPair } = require('../common/helpers');
@@ -204,7 +205,7 @@ async function domainLinkageCredential(req) {
     credentialSubject: { id: did, origin: origin }
   };
   logArtifact('Domain Linkage Credential', 'before signing', vc);
-  const token = jwt.sign({ iss: did, sub: did, nbf: now, exp: exp, vc: vc }, STS.privateKey, {
+  const token = stsCrypto.signJws({ iss: did, sub: did, nbf: now, exp: exp, vc: vc }, STS.privateKey, {
     algorithm: 'RS256',
     noTimestamp: true,
     header: { alg: 'RS256', kid: did + '#' + STS.kid, typ: undefined }
@@ -303,7 +304,7 @@ function credentialSignedBy(issuerDid, privateKey, alg, kid) {
   const header = { alg: alg, typ: 'dc+sd-jwt' };
   if (kid) header.kid = kid;
   logArtifact('generated SD-JWT VC', 'before signing', { header: header, payload: payload });
-  const signed = jwt.sign(payload, privateKey, { algorithm: alg, header: header });
+  const signed = stsCrypto.signJws(payload, privateKey, { algorithm: alg, header: header });
   logArtifact('generated SD-JWT VC', 'after signing', signed);
   log.debug("Leaving credentialSignedBy().");
   return signed + '~' + disclosure + '~';

@@ -66,6 +66,8 @@ const crypto = require('crypto');
 const realms = require('../common/realms');
 const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
         xmlEscape, parseBody, bodyValues, oauthError, signJwt, userFor,
@@ -519,7 +521,7 @@ function signedMetadata(meta) {
   }
   logArtifact('RFC 8414 signed_metadata', 'before signing', claims);
   try {
-    const signed = jwt.sign(claims, STS.privateKey,
+    const signed = stsCrypto.signJws(claims, STS.privateKey,
       { algorithm: 'RS256', issuer: meta.issuer, expiresIn: 3600, keyid: STS.kid });
     logArtifact('RFC 8414 signed_metadata', 'after signing', signed);
     if (signedMetadataCache.size >= MAX_SIGNED_METADATA) {
@@ -848,16 +850,35 @@ app.get('/oauth2/jwks', jwksEndpoint);
 // about signed statements rather than a limitation of this implementation, and
 // the console says so where somebody might expect otherwise.
 // ---------------------------------------------------------------------------
-function accessTokenTtl() {
-  return config.value('oauth2.accessTokenTtlS');
+// ---------------------------------------------------------------------------
+// THE THREE LIFETIMES ARE PER CLIENT SINCE 2026-08-27, AND THESE THREE
+// FUNCTIONS ARE THE ONLY PLACE THAT IS DECIDED.
+//
+// Each takes the `client_id` the token is being issued to and answers what THAT
+// client should get: `oauthAccessTokenTtlS` and its two siblings on the
+// application entry where they are set, and the service-wide setting where they
+// are not. `/admin/token-lifetimes` draws the defaults and names the attribute
+// that overrides each.
+//
+// A CALLER WITH NO CLIENT PASSES NOTHING and gets the service-wide value, which
+// is what every caller got before this existed. That is not a rare path: a
+// token minted for a direct grant or an exchange may have no client_id at all,
+// and this service issues one anyway.
+//
+// THE LOOKUP IS BY `client_id`, WHICH IS THE STRING THE REGISTRY FILES AN OAUTH
+// APPLICATION UNDER — `oauthClientId` is that attribute, and `applications.get()`
+// resolves an identifier or any of the per-family identifiers to one entry. So
+// the same entry a person edits on /admin/applications is the one read here.
+function accessTokenTtl(clientId) {
+  return applications.settingFor(clientId || '', 'oauth2.accessTokenTtlS', config);
 }
 
-function idTokenTtl() {
-  return config.value('oauth2.idTokenTtlS');
+function idTokenTtl(clientId) {
+  return applications.settingFor(clientId || '', 'oauth2.idTokenTtlS', config);
 }
 
-function refreshTokenTtl() {
-  return config.value('oauth2.refreshTokenTtlS');
+function refreshTokenTtl(clientId) {
+  return applications.settingFor(clientId || '', 'oauth2.refreshTokenTtlS', config);
 }
 
 // The allowance applied to `exp` and `nbf` EVERY time this file reads back a
@@ -866,11 +887,22 @@ function refreshTokenTtl() {
 // is deliberately a different setting from `oauth2.clientAssertionSkewS` (that
 // one is about a CLIENT'S clock; see the row in config.js).
 //
-// EVERY jwt.verify() OF ONE OF OUR OWN TOKENS IN THIS FILE TAKES IT. A verify
-// that did not would be a second, stricter opinion about what "expired" means,
-// reachable only through whichever endpoint forgot — and the symptom is a token
-// that introspects active and is refused at the refresh grant thirty seconds
-// before it should be, which reads as a client bug from every side.
+// EVERY jwt.verify() OF ONE OF OUR OWN TOKENS TAKES IT — and until 2026-08-27
+// that promise was scoped to "IN THIS FILE", which was the only part of it that
+// was true. Four verifications elsewhere (`vc_issuer.js` twice,
+// `vc_verifier.js` twice) omitted it entirely: a second, stricter opinion about
+// what "expired" means, reachable only through whichever endpoint had
+// forgotten, whose symptom is a token that introspects active and is refused at
+// a credential endpoint thirty seconds before it should be — a client bug from
+// every side.
+//
+// It is not scoped to this file any more. `stsCrypto.verifyJws()` APPLIES THIS
+// VALUE BY DEFAULT, so a caller now has to opt OUT deliberately rather than
+// remember to opt in, and the five call sites below read it through that
+// default rather than passing it. This function stays because the value is
+// still named here in prose and because `oauth2.clientAssertionSkewS` is a
+// DIFFERENT setting about a CLIENT'S clock; keeping both names visible is what
+// stops somebody collapsing them.
 function tokenClockSkew() {
   return config.value('oauth2.clockSkewS');
 }
@@ -1064,7 +1096,7 @@ function accessToken(base, opts) {
     iss: issuerOf(base), sub: opts.sub || user.sub,
     aud: opts.audience || base + '/resource',
     client_id: opts.client_id, scope: opts.scope || '', typ: 'Bearer',
-    jti: randomId(16), iat: iat, nbf: iat, exp: iat + accessTokenTtl(),
+    jti: randomId(16), iat: iat, nbf: iat, exp: iat + accessTokenTtl(opts.client_id),
     username: user.username
   };
   if (opts.act) payload.act = opts.act;
@@ -1134,7 +1166,7 @@ function refreshToken(base, opts) {
     // wider than what was authorized. A grant cannot widen itself by being
     // renewed.
     resources: (opts.resources && opts.resources.length) ? opts.resources : undefined,
-    iat: iat, nbf: iat, exp: iat + refreshTokenTtl(),
+    iat: iat, nbf: iat, exp: iat + refreshTokenTtl(opts.client_id),
     // RFC 9449 section 5: a refresh token issued to a PUBLIC client alongside a
     // DPoP-bound access token is itself bound to the same key. A wallet is a
     // public client and cannot authenticate, so without this the long-lived half
@@ -1190,7 +1222,7 @@ function idToken(base, opts) {
   const user = opts.user || userFor(opts.username);
   const payload = {
     iss: issuerOf(base), sub: opts.sub || user.sub, aud: opts.client_id, typ: 'ID',
-    iat: iat, nbf: iat, exp: iat + idTokenTtl(), auth_time: opts.auth_time || iat,
+    iat: iat, nbf: iat, exp: iat + idTokenTtl(opts.client_id), auth_time: opts.auth_time || iat,
     azp: opts.client_id, jti: randomId(16),
     name: user.name, given_name: user.given_name, family_name: user.family_name,
     preferred_username: user.preferred_username, email: user.email,
@@ -1354,7 +1386,7 @@ function tokenSet(base, opts) {
     // how the wallet learns it must send a proof on every subsequent call — a
     // bound token announced as Bearer would be presented as one and refused.
     token_type: opts.jkt ? 'DPoP' : 'Bearer',
-    expires_in: accessTokenTtl(),
+    expires_in: accessTokenTtl(opts.client_id),
     // RFC 6749 section 5.1: `scope` describes the ACCESS TOKEN that was issued,
     // and this one no longer carries the value that became its audience. It is
     // therefore not identical to what was requested, which is the case that
@@ -2333,7 +2365,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
                                            // of it.
                                            claims: claimsRequest });
     out.token_type = 'Bearer';
-    out.expires_in = accessTokenTtl();
+    out.expires_in = accessTokenTtl(String(query.client_id || ''));
     // What the ACCESS TOKEN carries, which is RFC 6749 section 5.1's rule read
     // through section 4.2.2 — and the code beside it in a hybrid response is
     // unaffected: `authzCodes` above holds the scope as AUTHORIZED, so redeeming
@@ -3207,7 +3239,7 @@ function mergedUserinfoRequest(fromToken, fromRequest) {
 function tokenFailure(token) {
   log.debug("Entering tokenFailure().");
   try {
-    jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
+    stsCrypto.verifyJws(token, STS.certPem);
     log.debug("Leaving tokenFailure(). It verifies after all.");
     return '';
   } catch (e) {
@@ -4109,8 +4141,7 @@ function tokenEndpoint(req, res) {
   if (grant === 'refresh_token') {
     let claims;
     try {
-      claims = jwt.verify(String(body.refresh_token || ''), STS.certPem,
-                          { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
+      claims = stsCrypto.verifyJws(String(body.refresh_token || ''), STS.certPem);
     } catch (e) {
       log.error('the refresh token is not valid: ' + e.message);
       log.debug("Leaving the token endpoint. The grant was refused.");
@@ -4357,8 +4388,7 @@ function tokenEndpoint(req, res) {
     // that never happened.
     let subjectVerified = true;
     try {
-      subject = jwt.verify(subjectToken, STS.certPem,
-                           { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
+      subject = stsCrypto.verifyJws(subjectToken, STS.certPem);
     } catch (e) {
       // A token from somewhere else: exchange it anyway, but say who it was for
       // as best it can be read.
@@ -4638,7 +4668,7 @@ function introspectEndpoint(req, res) {
   if (!token) return inactive();
   let claims;
   try {
-    claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
+    claims = stsCrypto.verifyJws(token, STS.certPem);
   } catch (e) {
     // Expired, forged, or simply not one of ours.
     log.debug("Introspection: the token does not verify (" + e.message + "), so it is inactive.");
@@ -4675,7 +4705,7 @@ function revokeEndpoint(req, res) {
   const token = String(body.token || '');
   if (token) {
     try {
-      const claims = jwt.verify(token, STS.certPem, { algorithms: ['RS256'], clockTolerance: tokenClockSkew() });
+      const claims = stsCrypto.verifyJws(token, STS.certPem);
       if (claims.jti) stats.revoke(claims.jti, 'the RFC 7009 revocation endpoint');
     } catch (e) {
       // RFC 7009: an invalid token is still a successful revocation.

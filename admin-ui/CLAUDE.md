@@ -386,6 +386,134 @@ test for a third page of this shape:
 rules exist to prevent.** That, and not the number of forms, is what to check a
 fourth page of this kind against.
 
+## `/admin/applications/new` SHOWS A FIELD ONLY WHEN ITS PROTOCOL IS TICKED, AND IT DOES IT IN CSS
+
+2026-08-27, and it is the tenth candidate for a script on a console page and the
+tenth refusal.
+
+That form offers a field for every protocol family this service has. Somebody
+registering an OAuth client was reading past a SAML entityID, a Kerberos service
+principal name and twenty per-application settings to reach the two boxes they
+came for. So a field is drawn only when the family it belongs to is ticked.
+
+**THE OBVIOUS IMPLEMENTATION IS A CHANGE LISTENER AND THIS IS NOT ONE.** It is
+`:has()`: the checkboxes are already in the same `<form>` as the fields and
+already carry `id="proto-<family>"`, so one selector per family does the whole
+thing and `script-src 'none'` is untouched. The rules live in `page()`'s
+stylesheet — the console's ONLY `<style>`, for the reason the service metadata
+page's classes live there — and are GENERATED from `applications.PROTOCOLS`, so
+a family added to that table gets its rule for nothing and cannot get a checkbox
+without one.
+
+**THE FALLBACK IS TO SHOW EVERYTHING**, which is why the rules sit inside
+`@supports selector(:has(*))`. A browser without `:has()` gets exactly the form
+that existed before this, and **the page says so on itself** rather than leaving
+somebody to wonder why nothing hides. That direction is the safe one and the
+reason is worth stating: no control a person needs is ever missing, and nothing
+they type is ever dropped, because the SERVER reads what was posted and has no
+idea what was visible. A rule that hid a field the server then ignored would be
+the dangerous version of this feature.
+
+**`display:revert`, not `display:block`.** These rules apply to `<tr>` as well
+as to `<div>`, and `block` on a table row makes a block box that no longer lines
+up with the header above it.
+
+**A SECTION CARRIES THE UNION OF ITS ROWS' FAMILIES.** Without that, a table
+whose every row was hidden left a heading and a bare header row behind, which
+reads as data having gone missing rather than as nothing applying.
+
+**IT WAS VERIFIED IN A BROWSER AND COULD NOT HAVE BEEN VERIFIED ANY OTHER WAY.**
+The markup is identical whether the rules work or not — the whole mechanism is a
+selector — so it was driven over CDP with headless Chrome. The first probe
+reported every field visible and was WRONG: `getComputedStyle(el).display` on a
+child of a `display:none` ancestor is still the child's own value.
+`el.checkVisibility()` is the call that answers the question actually being
+asked, and it is the one to use for the next page like this.
+
+---
+
+## `/admin/saml-assertions` IS THE THIRD PAGE OF THAT SHAPE, AND IT WAS CHECKED AGAINST THE TEST ABOVE RATHER THAN CITING IT
+
+Added 2026-08-27, under Protocols > SAML. Three `config.js` rows: the two
+assertion lifetimes — `saml2.assertionLifetimeMin` and
+`saml11.assertionLifetimeMin`, which already existed and are still drawn on
+`/admin/saml2` and `/admin/saml11` — and `saml.clockSkewS`, which is new.
+
+**It passes the three-part test above**, and the specific answers matter because
+"it is like Token lifetimes" is exactly the argument the section above says is
+not one:
+
+* They are a QUANTITY somebody types repeatedly inside one session — *make it a
+  minute and see whether that service provider checks `NotOnOrAfter` at all*.
+* They INTERACT, and `samlAssertionWarnings()` reports both directions. A skew
+  at least as long as a lifetime is an assertion valid for more than three times
+  what its lifetime claims, which silently removes the test somebody set a short
+  lifetime to run. **And a skew of ZERO is also reported**, which is the one
+  warning here with no equivalent on the token page: it is the default, it is
+  what this service always did, and it is the cause of the single most
+  misdiagnosed failure in this protocol family — an assertion refused as
+  not-yet-valid by a relying party whose clock is behind, which reads from both
+  ends as a signature or trust-store problem.
+* **The reason peculiar to this page**, and the one that is not borrowed: the
+  two lifetimes are SEPARATE SETTINGS on SEPARATE PAGES, because SAML 2.0 and
+  SAML 1.1 are separate implementations here. This is the only place both are
+  visible at once, which is what makes "are these two the same?" a question a
+  reader can answer by looking.
+
+**There is no store**, and the four doors onto these three values are this page,
+`/admin/saml2`, `/admin/saml11` and `/admin/config` — all of them calling
+`config.setOverride()` against one override map.
+
+**WHY THE SKEW IS ONE SETTING WHERE THE LIFETIMES ARE TWO.** A lifetime is a
+property of how a profile is consumed, and this repository argues in
+`common/config.js` why the two must be settable apart. A skew is a property of
+the CLOCKS IN THE ESTATE this service issues into, which a deployment decides
+once. It is applied inside the two builders rather than at their callers, so
+WS-Trust and WS-Federation get it without either module knowing it exists —
+the same choke-point argument `recordAssertion()` makes two lines away in
+`saml/saml2.js`.
+
+**IT BECAME THE DEFAULTS PAGE ON 2026-08-27, AND THAT IS WHY IT HOLDS ELEVEN
+ROWS RATHER THAN THREE.** The five settings each SAML profile had on its
+identity provider page — the assertion lifetime, the two signature switches, the
+NameID format and the artifact lifetime — are now PER APPLICATION, and this page
+is where the default every application inherits is set. They left
+`/admin/saml2` and `/admin/saml11` because those pages configure this service as
+an identity provider, and a value an application can overrule is not that: it is
+what this service does for an application nobody has configured.
+
+**THE MOVE WAS A GROUP MOVE, WHICH IS THE WHOLE OF WHY IT WAS CHEAP.** The ten
+rows changed `group` in `config.js` — to `SAML 2.0 assertions` and `SAML 1.1
+assertions` — and gained two rows in `SETTING_HOMES` naming this page. Nothing
+else was needed to take them off the two identity provider pages, because a
+group is drawn where its row says and nowhere else. **No KEY and no environment
+variable changed**, so every appconfig file and every `STS_SAML*` variable
+works exactly as it did. That property is what makes a settings move safe here,
+and it is the first thing to check for the next one.
+
+**THE PAGE NAMES THE ATTRIBUTE THAT OVERRIDES EACH ROW**, in a column of its
+own, read from `applications.overridableSettings()`. That is the one thing a
+reader needs that neither the setting nor the application page can tell them on
+its own: the default is here and the exception is typed there, and without the
+attribute name the connection is a paragraph somebody has to find.
+
+**AND IT IS NOT `oauth2.clockSkewS`, WHICH IS THE THING TO CHECK BEFORE
+"SIMPLIFYING" THE TWO INTO ONE.** That one is a TOLERANCE applied wherever this
+service READS a document back — including an inbound federation partner's SAML
+assertion, where `federation/federation_sp.js` argues that a reading tolerance
+is decided once and reuses it deliberately. `saml.clockSkewS` is what this
+service WRITES into a document it issues. One is about somebody else's clock;
+the other is about how much of somebody else's clock this service pays for in
+advance. A deployment wanting a strict reading and a forgiving issuance has to
+be able to say so, and with one setting it could not.
+
+**THE SKEW IS ALSO THE ONE ROW ON THIS PAGE WITH NO PER-APPLICATION FORM**, and
+the two facts are the same fact. A lifetime, a signature and a NameID format are
+things two service providers in one estate legitimately disagree about. How far
+out the CLOCKS are is a property of the estate, and a per-application answer to
+it would be a question nobody could answer differently for two applications
+without meaning something else.
+
 **EXPIRY IS REPORTED ON EVERY SCREEN THAT REPORTS TOKEN STATE, AND ONE OF THEM
 WAS COUNTING IT AND NOT SHOWING IT.** `/admin/tokens` and the user drill-down's
 token tables always had a state column from `stats.tokenStateOf()`. What did not

@@ -76,6 +76,8 @@ const crypto = require('crypto');
 // no route, so its position is not a position at all.
 const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const { log } = require('../common/helpers');
 const config = require('../common/config');
 const mtls = require('./mtls');
@@ -142,13 +144,13 @@ function clockSkewSeconds() {
   return config.value('oauth2.clientAssertionSkewS');
 }
 
+// One of two copies of this until 2026-08-27; `scim/scim_auth.js` had the
+// other, and both existed because `crypto.timingSafeEqual()` THROWS on buffers
+// of different lengths and every caller therefore has to write the same guard
+// around it. The name stays here because "do these two client secrets match" is
+// what this file is asking.
 function secretsMatch(presented, expected) {
-  const a = Buffer.from(String(presented || ''), 'utf8');
-  const b = Buffer.from(String(expected || ''), 'utf8');
-  if (a.length !== b.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(a, b);
+  return stsCrypto.constantTimeEquals(presented, expected);
 }
 
 // A registered JWKS, as a list of node public keys. Refuses rather than throws:
@@ -282,7 +284,14 @@ function verifyAssertion(opts) {
   const attempts = Array.isArray(verifyWith) ? verifyWith : [verifyWith];
   for (let i = 0; i < attempts.length && !claims; i++) {
     try {
-      claims = jwt.verify(assertion, attempts[i], {
+      // NOT one of our tokens: the key is the CLIENT'S and so is the algorithm.
+      // Every option here is named, including the clock tolerance — which is
+      // `oauth2.clientAssertionSkewS` and is a DIFFERENT setting from the one
+      // the shared verifier defaults to. That one is about how strictly we read
+      // back a token WE signed; this one is about how far a CLIENT'S clock may
+      // be out. Collapsing them would be easy and wrong, which is why this call
+      // passes its own rather than taking the default.
+      claims = stsCrypto.verifyJws(assertion, attempts[i], {
         algorithms: [alg],
         // The audience and the issuer are checked here rather than by hand
         // below, so that a library that knows the rules applies them: `aud` may

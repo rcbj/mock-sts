@@ -100,6 +100,11 @@ const config = require('./config');
 // The four claim sets, the reserved names, the SAML 1.1 default namespace and
 // the identity normalisation. This is the module whose slot is filled at the
 // bottom of this file, and the dependency runs in this direction only.
+// A LIBRARY REQUIRING A LIBRARY (rule 3e's test): applications.js registers no
+// route and requires nothing that requires this, so it closes no cycle and
+// moves nothing in the router. It is here for the four per-application
+// overrides the functions below resolve.
+const applications = require('./applications');
 const stats = require('./admin_stats');
 
 // ---------------------------------------------------------------------------
@@ -110,20 +115,50 @@ const stats = require('./admin_stats');
 // that looks like the console is broken. So they are functions, the same way
 // `maxEntries()` and `clockSkewSeconds()` are.
 // ---------------------------------------------------------------------------
-function enabled() {
-  return !!config.value('groups.claim');
+// ---------------------------------------------------------------------------
+// ALL FOUR ARE PER APPLICATION SINCE 2026-08-27, AND THESE FOUR FUNCTIONS ARE
+// THE ONLY PLACE THAT IS DECIDED.
+//
+// Each takes the application a token or an assertion is being issued TO and
+// answers what that application should get: `appGroupsClaim` and its three
+// siblings on the entry where they are set, and the service-wide setting where
+// they are not.
+//
+// THIS IS THE ONE OVERRIDE GROUP THAT IS NOT A PROTOCOL'S, and that is the
+// point of it: all four claim sets come through here, so one application entry
+// answers for that application's access token, its ID Token, its SAML 2.0
+// assertion and its SAML 1.1 one at once. An application declared for two
+// protocols gets the same claim name in both, which is what a claim mapping
+// should do and is why these are four attributes rather than eight.
+//
+// AN EMPTY `app` GETS THE SERVICE-WIDE VALUE, which is what every caller got
+// before this existed — and is deliberately what the console's preview gets,
+// because a preview with no application in mind is asking what the DEFAULT
+// does. groupsOf() says so in its answer.
+function enabled(app) {
+  return !!applications.settingFor(app || '', 'groups.claim', config);
 }
 
-function claimName() {
-  return String(config.value('groups.claimName') || '').trim();
+function claimName(app) {
+  return String(applications.settingFor(app || '', 'groups.claimName', config) || '').trim();
 }
 
-function valueForm() {
-  return String(config.value('groups.claimValue') || 'cn').trim();
+function valueForm(app) {
+  return String(applications.settingFor(app || '', 'groups.claimValue', config) || 'cn').trim();
 }
 
-function memberOfCounts() {
-  return !!config.value('groups.claimFromMemberOf');
+function memberOfCounts(app) {
+  return !!applications.settingFor(app || '', 'groups.claimFromMemberOf', config);
+}
+
+// WHICH APPLICATION A CLAIM IS BEING BUILT FOR, out of the context both
+// resolver halves are handed. `client_id` is what an OAuth 2.0 or OIDC context
+// carries and `audience` is what a SAML one does — the service provider's
+// entityID, or the SAML 1.1 relying party — and the registry files an
+// application under either, so one lookup answers for all four claim sets.
+function appOf(context) {
+  const ctx = context || {};
+  return String(ctx.client_id || ctx.audience || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +226,9 @@ function readGroups(username) {
 // single most expensive way for this to fail, and an empty reason is what turns
 // it into a support question.
 // ---------------------------------------------------------------------------
-function nameProblem() {
+function nameProblem(app) {
   log.debug("Entering nameProblem().");
-  const name = claimName();
+  const name = claimName(app);
   if (!name) {
     log.debug("Leaving nameProblem().");
     return 'groups.claimName is empty, so there is no claim to add.';
@@ -253,16 +288,22 @@ function valuesFrom(rows, form, useMemberOf) {
 // readers of one answer rather than three walks that can disagree. That is the
 // same reason claim_attributes.js's previewFor() is built on the function the
 // issuance path calls.
-function groupsOf(username) {
-  log.debug("Entering groupsOf(). user=" + username);
+function groupsOf(username, app) {
+  log.debug("Entering groupsOf(). user=" + username +
+            ", app=" + (app || '(the service-wide defaults)'));
   const out = {
     user: String(username == null ? '' : username),
     key: stats.identityKeyOf(username),
-    enabled: enabled(),
+    // WHICH APPLICATION THIS ANSWER IS FOR, reported rather than left implicit:
+    // the same person can get two different claim names in two applications,
+    // and an answer that did not say which one it was about would be unusable
+    // for explaining either.
+    application: String(app || ''),
+    enabled: enabled(app),
     loaded: directoryLoaded(),
-    claim: claimName(),
-    valueForm: valueForm(),
-    memberOfCounts: memberOfCounts(),
+    claim: claimName(app),
+    valueForm: valueForm(app),
+    memberOfCounts: memberOfCounts(app),
     reason: '',
     dn: '',
     entryFound: false,
@@ -275,7 +316,7 @@ function groupsOf(username) {
     log.debug("Leaving groupsOf(). The feature is off.");
     return out;
   }
-  out.reason = nameProblem();
+  out.reason = nameProblem(app);
   if (out.reason) {
     log.debug("Leaving groupsOf(). The configured name is unusable.");
     return out;
@@ -337,7 +378,7 @@ function subjectOf(context) {
 // per-set rule would go here rather than at four call sites.
 // ---------------------------------------------------------------------------
 function jwtClaimsFor(setId, context) {
-  const answer = groupsOf(subjectOf(context));
+  const answer = groupsOf(subjectOf(context), appOf(context));
   if (!answer.values.length) {
     return {};
   }
@@ -354,7 +395,7 @@ function jwtClaimsFor(setId, context) {
 // first and silently sees one group where the person is in four.
 function samlAttributesFor(setId, context) {
   log.debug("Entering samlAttributesFor().");
-  const answer = groupsOf(subjectOf(context));
+  const answer = groupsOf(subjectOf(context), appOf(context));
   if (!answer.values.length) {
     log.debug("Leaving samlAttributesFor().");
     return [];

@@ -538,9 +538,15 @@ function dropSession(id, via, cookiePresented) {
   // the back channel. A GLOBAL logout revokes the access tokens too — but it
   // does that itself, as a separate stated act, rather than by widening this
   // one: the two are different promises and only one of them is the BCP's.
-  if (id && bcp.revokeRefreshOnLogout()) {
+  // ASKED PER TOKEN, not once for the sign-out: `oauth2.revokeRefreshOnLogout`
+  // is per client since 2026-08-27, and this session may hold refresh tokens
+  // for several clients that answer differently. bcp.revokeRefreshOnLogout()
+  // still returns false for everything when RFC 9700 mode is off, so the shape
+  // of this is unchanged when the mode is.
+  if (id) {
     const revoked = stats.revokeWhere(function (record) {
-      return record.sessionId === id && String(record.typ || '') === 'Refresh';
+      return record.sessionId === id && String(record.typ || '') === 'Refresh' &&
+             bcp.revokeRefreshOnLogout(String(record.client_id || ''));
     }, 'RFC 9700 section 2.2.2: the sign-on session it was issued on ended');
     if (revoked) {
       log.info('RFC 9700 section 2.2.2: signing out of session ' + id + ' revoked ' + revoked +

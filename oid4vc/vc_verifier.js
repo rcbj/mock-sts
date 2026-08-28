@@ -62,6 +62,8 @@ const crypto = require('crypto');
 // no route, so its position is not a position at all.
 const realms = require('../common/realms');
 const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const qrcode = require('qrcode');
 const app = require('../common/app');
 const bbs2023 = require('../common/vendored/bbs2023.js');
@@ -624,7 +626,13 @@ function verifyVpJwt(presentation, record) {
 
   let issuerSignatureOk = false;
   try {
-    jwt.verify(vcJwt, STS.certPem, { algorithms: ['RS256'] });
+    // Applies `oauth2.clockSkewS` since 2026-08-27. This was the third of the
+    // four verifications of our own tokens that had drifted away from the rule
+    // `oauth-oidc/oauth2.js` states — and here the effect was sharpest, because
+    // a credential presented at the very edge of its validity window was
+    // reported to a person as a FAILED ISSUER SIGNATURE, which is the one
+    // verdict on this page that reads like an attack rather than like a clock.
+    stsCrypto.verifyJws(vcJwt, STS.certPem);
     issuerSignatureOk = true;
   } catch (e) {
     vpCheck(checks, 'Issuer signature', false, 'does not verify: ' + e.message);
@@ -747,7 +755,8 @@ function verifyPresentation(presentation, record) {
     'typ is "' + header.typ + '".');
   let issuerSignatureOk = false;
   try {
-    jwt.verify(issuerJwt, STS.certPem, { algorithms: ['RS256'] });
+    // The fourth. Same change, same reason as the note above.
+    stsCrypto.verifyJws(issuerJwt, STS.certPem);
     issuerSignatureOk = true;
   } catch (e) {
     // Not signed by us — or expired, which jsonwebtoken reports here too. Both
@@ -875,7 +884,12 @@ function verifyPresentation(presentation, record) {
   } else {
     try {
       const holderKey = crypto.createPublicKey({ key: cnfJwk, format: 'jwk' });
-      jwt.verify(kbJwt, holderKey, { algorithms: ['ES256', 'ES384', 'RS256', 'PS256'] });
+      // NOT one of our tokens — the key is the HOLDER'S, so the algorithm list
+      // is theirs and is named explicitly rather than taking the RS256 default.
+      // The clock allowance is still ours to grant, and it comes from the
+      // shared verifier for the same reason it does everywhere else.
+      stsCrypto.verifyJws(kbJwt, holderKey,
+                          { algorithms: ['ES256', 'ES384', 'RS256', 'PS256'] });
       vpCheck(checks, 'KB-JWT signature', true,
         'verifies against the cnf key in the credential (' + cnfJwk.kty + ' ' + (cnfJwk.crv || '') + ').');
     } catch (e) {

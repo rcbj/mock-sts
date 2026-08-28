@@ -42,7 +42,8 @@
 // tokens, it does not define them.
 // ---------------------------------------------------------------------------
 
-const jwt = require('jsonwebtoken');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const app = require('../common/app');
 // firstByLocal/textByLocal were written here and now live in helpers.js: WS-Federation
@@ -96,7 +97,10 @@ function buildJwt(subject, audience, lifetimeMin) {
   if (audience) opts.audience = audience;
   const claims = { sub: subject, name: subject };
   logArtifact('WS-Trust JWT', 'before signing', { header: { alg: opts.algorithm }, payload: claims, options: opts });
-  const signed = jwt.sign(claims, STS.privateKey, opts);
+  // Signed through the shared signer but NOT through helpers.signJwt(), so it
+  // carries no jti and is in no register — see the note further down, which is
+  // about the REGISTER and is unaffected by where the signature is made.
+  const signed = stsCrypto.signJws(claims, STS.privateKey, opts);
   logArtifact('WS-Trust JWT', 'after signing', signed);
   log.debug("Leaving buildJwt().");
   return signed;
@@ -122,9 +126,11 @@ function buildToken(tokenType, subject, audience, lifetimeMin) {
   log.debug("Leaving buildToken(). Issued a SAML 2.0 assertion with ID " + id + ".");
   // `id` is carried out because /admin/delegation quotes the identifier of what
   // a delegated request PRODUCED, and the AssertionID is the only one either
-  // token type here has: the JWT branch above signs with jwt.sign() directly
-  // rather than through signJwt(), so it carries no jti and is not in the
-  // tokens register either. A row for one of those says so rather than showing
+  // token type here has: the JWT branch above signs through the shared signer
+  // but NOT through helpers.signJwt(), so it carries no jti and is not in the
+  // tokens register either. (What puts a token in the register is that funnel,
+  // not where the RSA signature is computed — centralizing the crypto on
+  // 2026-08-27 did not change this and was not meant to.) A row for one of those says so rather than showing
   // an empty column that reads as a defect.
   return { xml: assertion, ref: ref, tokenType: SAML2_TOKEN_TYPE, id: id };
 }
