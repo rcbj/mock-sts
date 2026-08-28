@@ -1949,6 +1949,143 @@ const ROUTES = [
         responseDescription: 'The keys that had an override cleared, in ' +
                              '`cleared`.' } ] },
 
+  // ---------------------------------------------------------------------
+  // The SAML assertion window, which is three of the settings above under a
+  // name that promises three rather than a hundred and sixty-one.
+  //
+  // Rule 7 is satisfied the same way /token-lifetimes satisfies it, and the
+  // parallel is exact: /admin/saml-assertions grew a form, so it gets its
+  // operations. It gets no second store either — the handler calls
+  // admin.samlAssertionsAction, which writes through config.setOverride()
+  // against the same override map POST /config/set writes to, and the same
+  // map the two identity provider pages' own forms write to. Four doors, one
+  // thing.
+  //
+  // What the narrow door buys a CALLER is what it buys there: POST
+  // /config/set-many ignores a key it does not know, which is right for a
+  // form posting a whole section and wrong for a test that means to set an
+  // assertion lifetime, where a misspelt key succeeds and changes nothing.
+  { method: 'GET', path: BASE + '/saml-assertions', tag: 'SAML assertions',
+    operationId: 'getSamlAssertions',
+    summary: 'How long an issued assertion is valid, and the clock skew '
+             + 'written into it',
+    description: 'The two assertion lifetimes — SAML 2.0 and SAML 1.1 — and ' +
+                 'the clock skew added to BOTH ENDS of each, which is what ' +
+                 'this service writes into `Conditions/NotBefore` and ' +
+                 '`NotOnOrAfter`.\n\nAll three are ordinary configuration ' +
+                 'settings and appear in `GET /config` too; `settings` here ' +
+                 'is the same row shape, carrying each one\'s bounds, its ' +
+                 'source and its default. `assertions` beside it is the ' +
+                 'numbers, and includes `saml2WindowS` and `saml11WindowS` ' +
+                 '— the WHOLE width of the stated window, which is the ' +
+                 'lifetime plus TWICE the skew and is the figure a caller ' +
+                 'actually has to reason about. No single setting states ' +
+                 'it.\n\nTHE LIFETIMES ARE PER PROFILE AND THE SKEW IS NOT. ' +
+                 'SAML 2.0 and SAML 1.1 are separate implementations here, ' +
+                 'consumed differently, so each has its own lifetime; the ' +
+                 'skew is a fact about the clocks in the estate this service ' +
+                 'issues into, which a deployment decides once. All three ' +
+                 'reach WS-Trust and WS-Federation as well — their ' +
+                 'assertions come out of the same two builders — and a ' +
+                 'WS-Federation sign-in carries a SAML 1.1 assertion, so ' +
+                 '`saml11.assertionLifetimeMin` governs it.\n\n`saml.clockSkewS` ' +
+                 'IS NOT `oauth2.clockSkewS`. This one is written INTO a ' +
+                 'document this service issues. That one is the tolerance ' +
+                 'applied wherever this service READS one back, including an ' +
+                 'inbound federation partner\'s assertion, and it is on ' +
+                 '`GET /token-lifetimes`.\n\nIt also reports what has ' +
+                 'already been issued, per profile, counted against this ' +
+                 'service\'s own clock with no allowance applied.\n\nA ' +
+                 'WINDOW IS STAMPED INTO AN ASSERTION WHEN IT IS SIGNED, so ' +
+                 'changing one reaches the next assertion and nothing ' +
+                 'already issued.',
+    mirrors: 'GET /admin/saml-assertions',
+    responseDescription: 'The three settings, and what has been issued ' +
+                         'under them.',
+    responseSchema: { $ref: '#/components/schemas/SamlAssertions' },
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML assertions endpoint.");
+      sendJson(res, 200, admin.samlAssertionsJson());
+      log.debug("Leaving the management API SAML assertions endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/saml-assertions/:action',
+    tag: 'SAML assertions',
+    mirrors: 'POST /admin/saml-assertions',
+    handler: function (req, res) {
+      log.debug("Entering the management API SAML assertions action.");
+      const body = parseBody(req);
+      const result = admin.samlAssertionsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API SAML assertions action.");
+    },
+    actions: [
+      { action: 'set', operationId: 'setSamlAssertions',
+        summary: 'Set one or more of the three',
+        description: 'A RUNTIME OVERRIDE, like every other change made ' +
+                     'through this API: gone on restart in the default ' +
+                     'memory mode, and written down and re-applied at the ' +
+                     'next start when `persistence.appconfig` has a store ' +
+                     'under it. Nothing writes to the appconfig file in ' +
+                     'either case.\n\nName any of the three; the console ' +
+                     'form posts all three at once and a caller may post ' +
+                     'one. ALL-OR-NOTHING: every value is checked before ' +
+                     'any is written, so a body with one bad field changes ' +
+                     'nothing and names it.\n\nUNLIKE ' +
+                     '`POST /config/set-many`, a property that is not one ' +
+                     'of the three is REFUSED rather than ignored, for the ' +
+                     'reason `POST /token-lifetimes/set` gives.\n\nTHE TWO ' +
+                     'LIFETIMES ARE MINUTES AND THE SKEW IS SECONDS. That ' +
+                     'is not a formatting accident: a lifetime is set to a ' +
+                     'number of minutes to watch an assertion go stale, and ' +
+                     'a skew is a handful of seconds covering the ' +
+                     'difference between two machines. The skew is 0 to ' +
+                     '300 — five minutes is what Kerberos allows here ' +
+                     '(`krb5.clockSkew`), and wider than that the window ' +
+                     'has stopped being a tolerance. The bounds are on each ' +
+                     'setting\'s row in the GET, so a client can render ' +
+                     'them rather than repeat them.\n\nThe change applies ' +
+                     'to the NEXT assertion signed. Nothing already issued ' +
+                     'is affected: a validity window is two attributes ' +
+                     'inside a signed document.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          description: 'One property per setting, named by its dot path. ' +
+                       'Any subset of the three. The two lifetimes are in ' +
+                       'minutes; the skew is in seconds.',
+          properties: {
+            'saml2.assertionLifetimeMin': { type: 'integer' },
+            'saml11.assertionLifetimeMin': { type: 'integer' },
+            'saml.clockSkewS': { type: 'integer' }
+          },
+          examples: [{ 'saml2.assertionLifetimeMin': 1,
+                       'saml11.assertionLifetimeMin': 1,
+                       'saml.clockSkewS': 30 }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was applied, in `applied`, and what ' +
+                             'actually changed, in `changed`.' },
+
+      { action: 'defaults', operationId: 'resetSamlAssertions',
+        summary: 'Put the three back',
+        description: 'Clears the runtime override on THESE THREE ONLY, so ' +
+                     'each falls back to its environment variable, the ' +
+                     'appconfig file, or `env/defaults.js` — sixty ' +
+                     'minutes, sixty minutes and no skew at ' +
+                     'all.\n\nIt is deliberately not ' +
+                     '`POST /config/reset-all`, which would also drop an ' +
+                     'override somebody set on an unrelated page.\n\nA ' +
+                     'setting that was not overridden is skipped rather ' +
+                     'than refused, because this means "put these three ' +
+                     'back" rather than "undo this one change" — the ' +
+                     'per-key refusal is on `POST /config/reset`.',
+        requestBodyRequired: false,
+        requestBody: { type: 'object', properties: {},
+                       additionalProperties: false },
+        responseDescription: 'The keys that had an override cleared, in ' +
+                             '`cleared`.' } ] },
+
   { method: 'GET', path: BASE + '/claims', tag: 'Custom claims',
     operationId: 'getClaims',
     summary: 'The custom claims every new token and assertion will carry',
@@ -3287,6 +3424,16 @@ const ROUTES = [
       // validated.
       const protocols = namesOf(req, body, 'protocol', 'protocols');
       const result = admin.applicationsAction(withAction(req, body), protocols);
+      // `refresh-metadata` is asynchronous — it dials the service provider's
+      // metadata URL — and every other action is not. See that action's comment
+      // in admin.js for why one promise is cheaper than forty awaits.
+      if (result && typeof result.then === 'function') {
+        result.then(function (answer) {
+          sendJson(res, answer.ok ? 200 : 400, answer);
+          log.debug("Leaving the management API applications action endpoint. Fetched.");
+        });
+        return;
+      }
       sendJson(res, result.ok ? 200 : 400, result);
       log.debug("Leaving the management API applications action endpoint.");
     },
@@ -3525,6 +3672,44 @@ const ROUTES = [
         },
         responseDescription: 'The application as it now stands, with ' +
                              '`registered` false.' },
+
+      { action: 'refresh-metadata', operationId: 'refreshApplicationMetadata',
+        summary: 'Fetch this service provider\'s SAML metadata and store its ' +
+                 'encryption certificate',
+        description: 'Dials the `samlSpMetadataUrl` ON THE ENTRY — never a URL ' +
+                     'in the request body — parses the document, and writes ' +
+                     '`samlSpMetadata` and `samlEncryptionCertificate` back. ' +
+                     'That certificate is what an assertion for this service ' +
+                     'provider is encrypted to when `saml2.encryptAssertion` ' +
+                     '(or `saml2EncryptAssertion` on the entry) is on.\n\n' +
+                     'IT IS THE ONLY OPERATION IN THIS API THAT MAKES AN ' +
+                     'OUTBOUND REQUEST, and the second surface in this service ' +
+                     'that makes one at all — federation is the other. The same ' +
+                     'refusals apply: https only unless ' +
+                     '`federation.outboundAllowInsecure` is on, a timeout of ' +
+                     '`federation.outboundTimeoutMs`, no redirects followed, ' +
+                     'and a size cap.\n\nISSUING NEVER FETCHES. This writes ' +
+                     'the certificate onto the entry and an assertion reads the ' +
+                     'entry, so no sign-in waits on somebody else\'s web ' +
+                     'server.\n\nA FAILURE CHANGES NOTHING — not the ' +
+                     'document, not the certificate — so an application that ' +
+                     'was working does not stop working because a metadata host ' +
+                     'was down.\n\nThe `use="encryption"` KeyDescriptor is ' +
+                     'taken, falling back to one with no `use` at all; a ' +
+                     '`use="signing"` descriptor is deliberately NOT taken. The ' +
+                     'endpoints in the document are REPORTED and not applied.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          description: 'The application whose metadata should be refreshed.',
+          properties: { application: { type: 'string' } },
+          required: ['application'],
+          examples: [{ application: 'https://sp.example.com' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What the document said: its entityID, which ' +
+                             'KeyDescriptor the certificate came from, and the ' +
+                             'endpoints it describes.' },
 
       { action: 'forget', operationId: 'deleteApplication',
         summary: 'Delete an application entry entirely',

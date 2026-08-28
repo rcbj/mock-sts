@@ -68,10 +68,11 @@ change was mostly a prose sweep.
 
 ## What is still absent, and each is stated rather than left to be discovered
 
-* **No assertion is encrypted.** `saml2.js` has `encryptAssertion()` and WS-Trust
-  uses it (`/sts?encrypt=1`, where a WS-Security signature carries the recipient
-  certificate). This profile does not: there is no recipient certificate in an
-  AuthnRequest to encrypt to unless SP metadata is consumed, and it is not.
+* ~~**No assertion is encrypted.**~~ **REVERSED 2026-08-27** — see *SAML 2.0
+  encryption* below. The reason this said no was that there was no recipient
+  certificate to encrypt to unless SP metadata was consumed; the answer was to
+  consume it, in one direction and for one value, and to fall back to the
+  signing certificate off a signed AuthnRequest when there is none.
 * **No AuthnRequest signature is verified.** It is RECORDED — whether the request
   was signed, and the certificate off its `ds:KeyInfo` — and never checked. That
   is the same posture as the rest of this service (no password, no access token,
@@ -226,22 +227,122 @@ either, reporting *"multiple elements with the same value for the ID / Id / Id
 attributes"*: its signature-wrapping guard, firing on a document this service
 built itself.
 
-The fix is one option in each signer — `idAttribute: 'AssertionID'` in
+The fix WAS one option in each signer — `idAttribute: 'AssertionID'` in
 `saml11.js`, `'ResponseID'` in `saml11_sso.js`'s `signDocument()`. Then the real
 attribute is found, nothing is injected, and the reference names the id a SAML
 1.1 relying party expects. **WS-Federation's assertions changed as a result and
 are more correct for it**; `/wsfed/rp` verifies them check by check and was used
 to prove it.
 
-**It is only safe because neither name is already on that default list.** The
-opposite case is recorded in `saml2_sso.js`: naming `ID` for SAML 2.0 unshifts a
+**It was only safe because neither name was already on that default list.** The
+opposite case was recorded in `saml2_sso.js`: naming `ID` for SAML 2.0 unshifts a
 DUPLICATE onto the list and trips the very same guard on a document that has
-nothing wrong with it. Do not "make the two consistent" by naming an idAttribute
-in the 2.0 signer.
+nothing wrong with it. Two spellings of one argument, each of which had to be
+got exactly right in opposite directions at six call sites.
+
+---
+
+**ON 2026-08-27 THAT ARGUMENT STOPPED EXISTING, AND THAT — NOT THE LINE COUNT —
+IS WHAT `common/crypto.js` BOUGHT.** Every signer and verifier here now goes
+through one module over `common/vendored/xmldsig.js`, which resolves `ID`,
+`AssertionID`, `ResponseID` and `RequestID` from the document itself. There is
+no list to be told about, nothing is ever invented, and **there is no longer a
+parameter to get wrong** — `signDocument()` in `saml11_sso.js` and
+`verifyAssertionSignature()` in `wsfed.js` both lost theirs.
+
+The story is kept rather than deleted because it is the best argument this
+repository has for a single signer: a defect that produced a schema-invalid
+attribute in every SAML 1.1 assertion for months, verified anyway, and then had
+to be fixed six times. **Do not read the paragraphs above as instructions** — the
+option they describe is gone. `tests/crypto_module.js` asserts that no document
+this service signs carries an invented `Id="_0"`, and that its reference names
+the element's real id, for all seven document shapes.
+
+---
+
+## SAML 2.0 ENCRYPTION: WHAT IS ENCRYPTED, WHOSE KEY, AND WHAT HAPPENS WITHOUT ONE
+
+Added 2026-08-27, and it reverses the first line of *What is still absent*.
+
+**WHAT CAN BE ENCRYPTED IS TWO THINGS, AND THE SECOND IS THE WHOLE OF "REQUEST
+ENCRYPTION" IN THIS PROTOCOL.** There is no `EncryptedAuthnRequest` in SAML 2.0
+— a request is SIGNED, not sealed — so the only encryptable thing in a request
+is `<saml:EncryptedID>` where a `<saml:NameID>` would go, which saml-core-2.0-os
+section 3.7.1 allows in a LogoutRequest. Both directions:
+
+| | Outbound | Inbound |
+|---|---|---|
+| Response | `<saml:EncryptedAssertion>`, per application | — (this service issues, it does not consume) |
+| LogoutRequest | `<saml:EncryptedID>`, per application | `<saml:EncryptedID>`, **always** decrypted |
+
+**THE INBOUND HALF HAS NO SETTING AND THAT IS DELIBERATE.** Every switch here
+governs what this service SENDS, because a service provider may be unable to
+read what we send. Nothing equivalent applies in the other direction: this
+service publishes an encryption key in its metadata, and refusing to understand
+a message somebody encrypted to that key would make the key a lie.
+
+**SIGNED FIRST, THEN ENCRYPTED.** The signature lives inside the ciphertext, so
+what a service provider verifies is what it decrypted. The other order produces
+a document that verifies without anybody being able to say what was signed.
+
+**THE CERTIFICATE COMES FROM THREE PLACES, MOST SPECIFIC FIRST**:
+`samlEncryptionCertificate` (which the metadata refresh writes, or a person
+types), then `samlSigningCertificate` — captured off a SIGNED AuthnRequest, so a
+service provider that signs its requests needs no configuration at all — then
+nothing.
+
+**AND "NOTHING" IS THE CASE THE DESIGN TURNS ON.** With no certificate the
+document goes out IN CLEAR and is logged at WARN, every time, naming the
+application and what to do. It is not refused, because a mock that stopped
+issuing when a key was missing is useless exactly when somebody is setting this
+up; and it is not silent, because silently sending plaintext while a console
+page says "encrypted" would have the person testing their client believe the
+wrong thing about what their client accepted. Of the three possible behaviours
+that is the one worth arguing for, and it is the one to preserve.
+
+### The algorithms are a choice, and one of them is broken on purpose
+
+Four block ciphers (`aes256-gcm`, `aes128-gcm`, `aes256-cbc`, `aes128-cbc`) and
+two key transports (`rsa-oaep-mgf1p`, `rsa-1_5`), service-wide with
+per-application overrides. The defaults are the modern pair.
+
+**`rsa-1_5` IS BLEICHENBACHER-BROKEN AND IS OFFERED ANYWAY**, because a great
+many deployed service providers accept nothing else and a client library is
+entitled to be tested against the world as it is. Nothing this service encrypts
+is a real secret.
+
+**CBC IS UNAUTHENTICATED AND THAT IS NOT A DEFECT HERE.** It was MEASURED, not
+assumed: flipping one character of a CBC cipher value produces a plaintext that
+`finish()` accepts and that comes back TRUNCATED mid-tag, with no error
+anywhere. GCM's tag catches the same edit. `decryptElement()` therefore parses
+its output and refuses anything that is not well-formed XML — which is not
+integrity, cannot be, and turns the ordinary corruption into one refusal with a
+sentence instead of a crash two frames later.
+
+### Two bugs this feature found in itself, both by decrypting its own output
+
+**A DECRYPTED FRAGMENT HAS NO PARENT.** The first `<saml:EncryptedID>` this
+service emitted wrapped a `<saml:NameID>` that relied on the LogoutRequest three
+levels up for its `saml:` prefix. Once encrypted there is no LogoutRequest — the
+service provider decrypts a standalone fragment — so it parsed as a
+NamespaceError on the other side. What this service emits now declares its own
+namespace, and `parsesAsFragment()` tries a wrapped parse before calling
+somebody else's fragment corrupt, because their document is not ours to dictate.
+
+**A CATCH THAT NAMED THE WRONG CAUSE.** That NamespaceError was reported as "the
+wrapped key could not be unwrapped… fetch the metadata again", because one
+`catch` covered the decryption and the parse and assumed every failure was the
+key. It sends somebody to re-fetch a certificate over a bug in a parser three
+lines away. The message is now chosen from the error.
 
 ---
 
 ## FOUR SETTINGS GROUPS, AND `saml.issuer` IS NOT ONE OF THE PROFILES'
+
+The *SAML* group holds TWO rows since 2026-08-27 — `saml.issuer` and
+`saml.clockSkewS` — and what they have in common is the entry test for that
+group: both are read by BOTH builders and therefore reach WS-Trust and
+WS-Federation as well. See *The validity window* below for the second.
 
 `saml.issuer` (group *SAML*) governs who SIGNED an assertion and is shared by
 WS-Trust and WS-Federation. The nine `saml2.*` rows (group *SAML 2.0*) and the
@@ -258,6 +359,133 @@ own**, and it is not symmetry: a relying party that trusts this service for SAML
 consequence worth knowing: `saml11.providerId` is what every type 0x0001
 artifact's SourceID is a SHA-1 of, so changing it changes every artifact this
 service mints.
+
+---
+
+## TEN OF THESE SETTINGS ARE PER APPLICATION, AND `settingFor()` IS THE ONLY PLACE THAT IS DECIDED
+
+Since 2026-08-27 five settings in each profile are DEFAULTS rather than
+decisions. An application entry may carry its own answer, and where it does,
+that answer wins for that application alone:
+
+| Setting | Attribute on the application entry |
+|---|---|
+| `saml2.assertionLifetimeMin` | `saml2AssertionLifetimeMin` |
+| `saml2.signAssertion` | `saml2SignAssertion` |
+| `saml2.signResponse` | `saml2SignResponse` |
+| `saml2.nameIdFormat` | `saml2NameIdFormat` |
+| `saml2.artifactTtlS` | `saml2ArtifactTtlS` |
+| `saml11.*` | `saml11*`, the same five |
+
+`saml.clockSkewS` is NOT among them, and the section below says why.
+
+**BOTH MODULES HAVE A LOCAL `settingFor()` AND NEITHER READS THESE SETTINGS ANY
+OTHER WAY.** It delegates to `applications.settingFor(id, key, config)`, which
+finds the attribute from the SCHEMA row's own `overrides` member, parses it with
+`config.parseAs()` — the same type check the console form and the management API
+run — and falls back to the setting when the entry says nothing. A
+`config.value('saml2.signAssertion')` left anywhere in either file is a bug: it
+is an application's setting read as though it were the service's.
+
+**WHICH STRING IDENTIFIES THE APPLICATION IS THE THING TO GET RIGHT, AND IT IS
+NOT THE OBVIOUS ONE.** It is the SERVICE PROVIDER's entityID (`spEntityId`, or
+`rpId` in 1.1) and never `idpEntityId` / `providerId`. Those two are THIS
+service's own name for that application and differ per application when
+`saml2.perApplicationEntityId` is on — so passing one would have compiled, found
+no entry, and silently used the service-wide default every time. Both
+`buildResponse()` implementations take the service provider as its own member
+(`opts.sp` / `opts.rp`) for exactly this reason, rather than reusing the issuer
+that was already there.
+
+**THREE FUNCTIONS HAD TO BE HANDED THE APPLICATION**, and that is the whole cost
+of this feature in these two files: `buildResponse()`, `redirectUrlFor()` and
+`stashArtifact()` were reached from paths that knew the service provider and
+were not carrying it. `deliver()` already had `opts.spEntityId`, which is what
+made the artifact and redirect cases cheap. A caller with nothing to pass passes
+`''` and gets the service-wide value — which is what this service did everywhere
+before this existed, and is what keeps an autocreated service provider working.
+
+**AN UNPARSEABLE VALUE IS IGNORED AND LOGGED, NEVER REFUSED.** An `ldapmodify`
+can put `"yes"` on `saml2SignAssertion`. The resolver warns — naming the entry,
+the attribute and the reason — and uses the setting. This follows
+`applications.js`'s own rule that the directory here is a VOCABULARY rather than
+a constraint; an identity provider that stopped issuing because somebody typed
+the wrong word would be a mock that stopped answering. It also means the write
+is accepted at `POST /admin-api/applications/set` and only complained about when
+it is read, which is deliberate and is the same bargain every other attribute in
+that directory makes.
+
+**SINGLE LOGOUT FOLLOWS THE ASSERTION.** `buildLogoutRequest()` and
+`buildLogoutResponse()` take the service provider too, so a LogoutRequest for an
+application whose assertions are unsigned is unsigned as well. One application,
+one answer.
+
+---
+
+## THE VALIDITY WINDOW: TWO LIFETIMES, ONE SKEW, AND WHY THAT IS NOT AN INCONSISTENCY
+
+`buildSamlAssertion()` and `buildSaml11Assertion()` each compute three instants,
+and only one of them moved when `saml.clockSkewS` arrived on 2026-08-27:
+
+```
+IssueInstant  = now                          <- NOT moved
+AuthnInstant  = the session's authTime        <- NOT moved
+NotBefore     = now - saml.clockSkewS
+NotOnOrAfter  = now + lifetime + saml.clockSkewS
+```
+
+**THE TWO THAT DID NOT MOVE ARE THE POINT.** `IssueInstant` and the
+authentication instant state WHEN SOMETHING HAPPENED. Backdating those would be
+a lie about an event rather than an allowance about a clock, and a relying party
+that reads `AuthnInstant` to enforce a re-authentication age — WS-Federation's
+`wfresh` does exactly that — would be told the person authenticated earlier than
+they did. Only the `Conditions` move.
+
+**So the window an assertion states is the lifetime plus TWICE the skew**, which
+is why `/admin/saml-assertions` and `GET /admin-api/saml-assertions` both report
+`saml2WindowS` and `saml11WindowS`: no single setting states the figure a
+relying party actually experiences, and somebody setting a one-minute lifetime
+with a five-minute skew to watch an assertion go stale would otherwise wait
+eleven minutes and conclude the lifetime does not work.
+
+**AT THE DEFAULT 0 THE DOCUMENTS ARE BYTE-FOR-BYTE WHAT THIS SERVICE ALWAYS
+ISSUED**, `NotBefore` equal to `IssueInstant`. That is the contract to preserve
+if either builder is touched.
+
+**WHY ONE SKEW AND TWO LIFETIMES.** The lifetimes are per profile because 2.0
+and 1.1 are consumed differently — the section above argues why the two groups
+are separate at all — and a browser-profile assertion consumed in seconds wants
+a different number from one a WS-Federation session is read under. The skew is
+not about a profile: it is how far out the clocks in the estate this service
+issues into are allowed to be, which a deployment decides once. Putting it in
+the *SAML* group rather than in either profile's is that fact expressed in the
+table.
+
+**IT IS APPLIED IN THE BUILDERS, NOT AT THEIR CALLERS**, which is the same
+choke-point argument `recordAssertion()` makes: WS-Trust, WS-Federation and both
+browser profiles come through these two functions, so the setting reaches all
+four without any of those modules knowing it exists. What the two WS-* modules
+wrap an assertion in — `wsu:Lifetime` — still states the lifetime WITHOUT the
+skew. That is deliberate and conservative: the envelope describes what was asked
+for, the assertion states what it is actually valid for, and a relying party
+trusting the envelope discards early rather than late.
+
+**ONE CALLER HAD TO BE EDITED ANYWAY**, and it is the exception that proves the
+choke point. `saml2_sso.js` passes its own
+`SubjectConfirmationData/NotOnOrAfter`, because the Web Browser SSO profile
+requires the bearer confirmation to carry one; it now adds the same skew. Two
+expiries inside one assertion that disagree is a defect a service provider
+reports as *assertion expired* while this console shows a window that has not
+closed. **A future caller that passes its own expiry has to do the same** — that
+is the one thing about this feature that is not automatic.
+
+**AND IT IS NOT `oauth2.clockSkewS`.** That one is a TOLERANCE applied wherever
+this service READS a document back, including an inbound partner assertion at
+`/federation/acs/{id}` — where `federation/federation_sp.js` argues that a
+reading tolerance is decided once and reuses it on purpose. `saml.clockSkewS` is
+what this service WRITES into a document it issues. Merging them would take away
+a deployment's ability to read strictly and issue forgivingly, which are
+independent choices.
 
 ---
 

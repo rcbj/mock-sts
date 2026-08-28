@@ -85,7 +85,8 @@
 // ===========================================================================
 
 const { DOMParser } = require('@xmldom/xmldom');
-const { SignedXml } = require('xml-crypto');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
         parseBody, firstByLocal, textByLocal } = require('../common/helpers');
@@ -863,7 +864,17 @@ function issueSignInResponse(req, res, params, session, realm, wreply, tokenType
   const user = session.user;
   const methods = authnMethodsFor(session);
   const authnInstant = new Date((session.authTime || 0) * 1000).toISOString();
-  const lifetimeMin = 60;
+  // THE ASSERTION LIFETIME, which was this literal `60` until 2026-08-27 and is
+  // now a setting with a per-relying-party override. `realm` is the wtrealm —
+  // the string this registry files a WS-Federation application under — so the
+  // entry a person edits on /admin/applications is the one read here.
+  //
+  // It reaches BOTH branches below and the wsu:Lifetime of the RSTR around
+  // them, so the envelope and the assertion inside it cannot disagree about
+  // when the token dies. That was already true of the literal and is the
+  // property worth keeping.
+  const lifetimeMin =
+    Number(applications.settingFor(realm || '', 'wsfed.assertionLifetimeMin', config)) || 60;
   let assertion;
   if (tokenType === SAML2_TOKEN_TYPE) {
     assertion = buildSamlAssertion(user.username, realm, lifetimeMin, {
@@ -1195,22 +1206,17 @@ function federationMetadata(base) {
     '</EntityDescriptor>';
   logArtifact('WS-Federation metadata', 'before signing', xml);
   try {
-    const sig = new SignedXml({ privateKey: STS.privateKeyPem, publicCert: STS.certPem });
-    sig.signatureAlgorithm = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256';
-    sig.canonicalizationAlgorithm = 'http://www.w3.org/2001/10/xml-exc-c14n#';
-    sig.addReference({
-      xpath: "/*[local-name(.)='EntityDescriptor']",
-      transforms: [
-        'http://www.w3.org/2000/09/xmldsig#enveloped-signature',
-        'http://www.w3.org/2001/10/xml-exc-c14n#'
-      ],
-      digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
-      uri: '#' + id
+    // FIRST, which is where a metadata EntityDescriptor's signature goes — a
+    // protocol message puts it after <Issuer> and metadata puts it before
+    // everything. Both are schema-mandated, and getting either wrong produces a
+    // document that verifies and that a strict parser rejects.
+    const signed = stsCrypto.signXml(xml, {
+      privateKeyPem: STS.privateKeyPem,
+      certPem: STS.certPem,
+      placement: stsCrypto.PLACEMENT.FIRST,
+      refUri: '#' + id,
+      what: 'WS-Federation metadata'
     });
-    sig.computeSignature(xml, {
-      location: { reference: "/*[local-name(.)='EntityDescriptor']", action: 'prepend' }
-    });
-    const signed = sig.getSignedXml();
     logArtifact('WS-Federation metadata', 'after signing', signed);
     log.debug("Leaving federationMetadata(). Signed.");
     return signed;
@@ -1269,29 +1275,26 @@ app.get('/FederationMetadata/2007-06/FederationMetadata.xml', function (req, res
 //     naming a document that has nothing wrong with it. Symmetry between the two
 //     call sites is what produced it: SAML 1.1 needs the argument, so SAML 2.0
 //     looked like it needed the equivalent one, and it must have none.
-function verifyAssertionSignature(xml, idAttribute) {
-  log.debug("Entering verifyAssertionSignature(). idAttribute=" + (idAttribute || '(the defaults)'));
-  try {
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    const sigEl = firstByLocal(doc, 'Signature');
-    if (!sigEl) {
-      log.debug("Leaving verifyAssertionSignature(). There is no ds:Signature.");
-      return { ok: false, why: 'the assertion carries no ds:Signature at all' };
-    }
-    const options = { publicCert: STS.certPem };
-    if (idAttribute) options.idAttribute = idAttribute;
-    const sig = new SignedXml(options);
-    sig.loadSignature(sigEl);
-    const ok = sig.checkSignature(xml);
-    log.debug("Leaving verifyAssertionSignature(). ok=" + ok);
-    return { ok: !!ok, why: ok ? '' : 'the signature did not verify' };
-  } catch (e) {
-    // xml-crypto throws rather than returning false for most failures, and the
-    // message names which of them it was — an unresolvable reference reads quite
-    // differently from a digest mismatch, and that distinction is the diagnosis.
-    log.debug("Leaving verifyAssertionSignature(). It threw: " + e.message);
-    return { ok: false, why: e.message };
-  }
+function verifyAssertionSignature(xml, element) {
+  log.debug("Entering verifyAssertionSignature(). element=" + element);
+  // **THE `idAttribute` ARGUMENT IS GONE, AND THE PARAGRAPHS ABOVE ARE THE
+  // RECORD OF WHY IT HAD TO EXIST RATHER THAN INSTRUCTIONS FOR USING IT.** It
+  // had to be passed EXACTLY when it was needed and never otherwise — SAML 1.1
+  // needs `AssertionID` or a good signature reports as broken, SAML 2.0 must
+  // have none or xml-crypto unshifts a duplicate and refuses a perfectly good
+  // document with a security error. Both halves cost a debugging session, and
+  // symmetry between the two call sites is what produced the second one.
+  //
+  // The shared verifier resolves every SAML id spelling natively, so the
+  // argument that could be wrong in two directions no longer exists. What it
+  // takes instead is the thing this function actually needed to be told: WHICH
+  // element's signature to check.
+  const result = stsCrypto.verifyXmlSignature(xml, {
+    element: element,
+    certPem: STS.certPem
+  });
+  log.debug("Leaving verifyAssertionSignature(). ok=" + result.ok);
+  return { ok: result.ok, why: result.why };
 }
 
 // Every check, in the order a relying party would apply them, each with its own
@@ -1345,9 +1348,13 @@ function verifySignInResponse(params, realm) {
   const isSaml11 = assertion.namespaceURI === 'urn:oasis:names:tc:SAML:1.0:assertion';
   result.assertionVersion = isSaml11 ? 'SAML 1.1' : 'SAML 2.0';
 
-  // SAML 1.1's id attribute has to be named; SAML 2.0's must NOT be, because ID is
-  // already one of the defaults and naming it again trips the wrapping-attack guard.
-  const verdict = verifyAssertionSignature(wresult, isSaml11 ? 'AssertionID' : null);
+  // The ELEMENT is named, not the id attribute. Both versions spell the element
+  // <Assertion>, so this no longer branches on the version at all — which is
+  // the second thing the shared verifier removed here. The reference is
+  // resolved through `AssertionID` for 1.1 and `ID` for 2.0 by the verifier
+  // itself, from the document rather than from an argument a caller had to get
+  // right in opposite directions for the two versions.
+  const verdict = verifyAssertionSignature(wresult, 'Assertion');
   add('the assertion signature verifies against /sts/cert', verdict.ok,
       verdict.ok ? 'RSA-SHA256 over an exclusive canonicalization, resolved through ' +
                    (isSaml11 ? 'AssertionID' : 'ID')

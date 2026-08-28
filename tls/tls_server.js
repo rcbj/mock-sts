@@ -113,6 +113,10 @@ const https = require('https');
 const tls = require('tls');
 const crypto = require('crypto');
 const forge = require('node-forge');
+// The RSA keygen-and-self-sign skeleton this shares with `common/helpers.js`
+// lives in one module since 2026-08-27. What is NOT shared is anything below —
+// the extensions, and the subjectAltName that is the only place the names are.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const helpers = require('../common/helpers');
 const { log, xmlEscape, parseBody, baseUrlOf } = helpers;
@@ -165,18 +169,6 @@ let listenError = null;
 // ---------------------------------------------------------------------------
 function makeServerCertificate() {
   log.debug('Entering makeServerCertificate().');
-  const kp = forge.pki.rsa.generateKeyPair({ bits: 2048, e: 0x10001 });
-  const cert = forge.pki.createCertificate();
-  cert.publicKey = kp.publicKey;
-  cert.serialNumber = '03';
-  cert.validity.notBefore = new Date();
-  cert.validity.notAfter = new Date();
-  cert.validity.notAfter.setFullYear(
-      cert.validity.notBefore.getFullYear() + 2);
-  const attrs = [{ name: 'commonName', value: TLS_HOSTNAMES[0] || 'localhost' },
-                 { name: 'organizationName', value: 'mock-sts' }];
-  cert.setSubject(attrs);
-  cert.setIssuer(attrs);
   // altNames type 2 is dNSName and type 7 is iPAddress. The CN is ignored by
   // every current client — RFC 6125 has said so since 2011 and browsers stopped
   // reading it years ago — so the subjectAltName is not decoration here, it is
@@ -186,24 +178,36 @@ function makeServerCertificate() {
   }).concat(TLS_IPS.map(function (address) {
     return { type: 7, ip: address };
   }));
-  cert.setExtensions([
-    { name: 'basicConstraints', cA: false, critical: true },
-    { name: 'keyUsage', digitalSignature: true, keyEncipherment: true,
-      critical: true },
-    { name: 'extKeyUsage', serverAuth: true },
-    { name: 'subjectAltName', altNames: altNames }
-  ]);
-  cert.sign(kp.privateKey, forge.md.sha256.create());
-  const pem = forge.pki.certificateToPem(cert);
+  const keys = stsCrypto.selfSignedRsaCertificate({
+    bits: 2048,
+    commonName: TLS_HOSTNAMES[0] || 'localhost',
+    organizationName: 'mock-sts',
+    // '02' is the signing key's; two years rather than five because this one is
+    // put in somebody's truststore and a shorter life is the honest default for
+    // a certificate a person is told to trust by hand.
+    serialNumber: '03',
+    years: 2,
+    // Passed through to forge untouched rather than modelled: the signing
+    // certificate wants none of these and a third caller will want a third set,
+    // so modelling it would be inventing a certificate profile language.
+    extensions: [
+      { name: 'basicConstraints', cA: false, critical: true },
+      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true,
+        critical: true },
+      { name: 'extKeyUsage', serverAuth: true },
+      { name: 'subjectAltName', altNames: altNames }
+    ]
+  });
+  const pem = keys.certPem;
   log.debug('Leaving makeServerCertificate(). names=' +
             TLS_HOSTNAMES.concat(TLS_IPS).join(', '));
   return {
-    privateKeyPem: forge.pki.privateKeyToPem(kp.privateKey),
+    privateKeyPem: keys.privateKeyPem,
     certPem: pem,
     subject: 'CN=' + (TLS_HOSTNAMES[0] || 'localhost') + ', O=mock-sts',
     names: TLS_HOSTNAMES.concat(TLS_IPS),
     fingerprint256: fingerprintOf(pem),
-    notAfter: cert.validity.notAfter.toISOString()
+    notAfter: keys.notAfter.toISOString()
   };
 }
 
@@ -234,11 +238,13 @@ function bootstrapNote() {
 }
 
 function fingerprintOf(pem) {
-  const der = Buffer.from(String(pem)
-      .replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''), 'base64');
-  const hex = crypto.createHash('sha256').update(der).digest('hex')
-      .toUpperCase();
-  return (hex.match(/.{2}/g) || []).join(':');
+  // `colon-hex` is what `openssl x509 -fingerprint -sha256` prints, which is
+  // what a person is holding when they compare this by eye. It is the same
+  // digest RFC 8705's `x5t#S256` uses in `oauth-oidc/mtls.js` and the same one
+  // SPIRE's authority id truncates in `spiffe/spiffe_ca.js` — three spellings
+  // of one computation, which is why the format is a parameter and the three
+  // functions that each computed it are one.
+  return stsCrypto.certificateThumbprint(pem, { format: 'colon-hex' });
 }
 
 const SERVER_CERTIFICATE = makeServerCertificate();

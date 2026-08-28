@@ -17,6 +17,7 @@ arrives as a signature that does not verify rather than as a diff.
 | `jose_jwe.js` | JWE, for the same reason. |
 | `crypto_bytes.js` | The byte-level helpers those three rest on. |
 | `bbs2023.js` | The bbs-2023 Data Integrity cryptosuite, for `ldp_vc`. |
+| `xmldsig.js` | **XML Signature and XML Encryption, and since 2026-08-27 the signer behind every signed document this service emits.** It is not a library somebody found — it is the OTHER END of most of these exchanges: the debugger signs, verifies, encrypts and decrypts with this exact file on its WS-Trust, SAML and Digital Signature pages. Both ends of a SAML exchange now canonicalize with the same code, which matters because a disagreement about c14n is invisible until it is a signature that verifies on one side and not the other. |
 | `contexts/` | The three JSON-LD contexts `bbs2023.js` reads. |
 
 **`contexts/` is inside this directory because `bbs2023.js` resolves
@@ -30,11 +31,32 @@ which is exactly what that `existsSync` guard is for.
 Nothing in here requires anything outside this directory, and that is what makes
 the copies possible: `x509.js` requires `./jose_jwe` and `./key_material`,
 `jose_jwe.js` requires `./crypto_bytes`, `key_material.js` requires
-`./jose_jwe`, and `bbs2023.js` requires nothing local at all. The reorganisation
-did not have to touch a single line in this directory.
+`./jose_jwe`, `bbs2023.js` requires nothing local at all, and `xmldsig.js`
+requires nothing local either — only `bunyan` and `node-forge`. The
+reorganisation did not have to touch a single line in this directory.
 
 The four PKI modules are read from `spiffe/spiffe_ca.js`; `bbs2023.js` from
-`common/helpers.js` and the three `oid4vc/` modules that sign.
+`common/helpers.js` and the three `oid4vc/` modules that sign; `xmldsig.js` from
+`common/crypto.js` and from nothing else.
+
+---
+
+## `xmldsig.js` NEEDS TWO GLOBALS AND WILL NOT SAY SO
+
+It is the parent project's BROWSER code, where `DOMParser` and `XMLSerializer`
+are ambient. Node has neither. `common/crypto.js` installs `@xmldom/xmldom` as
+both **before it requires this file**, which is what `api/server.js` does over
+there for the same file — so it is the established way to run it server-side
+rather than something invented here.
+
+**The ordering is load-bearing and the failure is misleading.** Nothing is
+captured at require time, so a `require` that happened first would load
+perfectly and then fail on the first signature with `DOMParser is not defined`,
+which names neither the file nor the real problem. Require this module only
+through `common/crypto.js`.
+
+`genId()` in there also uses `window.crypto` and would throw in node. Nothing
+here calls it — `helpers.js` has its own — and it is exported, so do not start.
 
 `kerberos/krb5_spnego.js` is vendored too and is NOT here — it sits beside the
 Kerberos codec it belongs to, for the reason `kerberos/CLAUDE.md` gives.

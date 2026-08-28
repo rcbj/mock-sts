@@ -158,6 +158,9 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
+// One signer, one verifier and one constant-time comparison for the whole
+// service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 
 const { log, baseUrlOf, parseBody, hasScope } = require('../common/helpers');
 const config = require('../common/config');
@@ -937,8 +940,7 @@ function attemptDigest(req, ctx) {
     : digestHash(algorithm, ha1 + ':' + params.nonce + ':' + ha2);
 
   const given = String(params.response || '').toLowerCase();
-  const same = given.length === expected.length &&
-    crypto.timingSafeEqual(Buffer.from(given, 'utf8'), Buffer.from(expected, 'utf8'));
+  const same = stsCrypto.constantTimeEquals(given, expected);
   if (!same) {
     log.debug("Leaving attemptDigest(). The response hash does not match.");
     return unauthenticated(req,
@@ -1419,7 +1421,7 @@ function registerHobaKey(req) {
   // reason the signing key's `kid` is derived from its material in helpers.js —
   // two keys cannot then claim one id.
   const kid = String(body.kid || '').trim() ||
-    crypto.createHash('sha256').update(der).digest('base64url').slice(0, 22);
+    stsCrypto.certificateThumbprint(der, { truncate: 22 });
   if (/[.\s]/.test(kid)) {
     log.debug("Leaving registerHobaKey(). The kid carries a separator.");
     return { ok: false, status: 400,

@@ -55,6 +55,17 @@ const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const bunyan = require("bunyan");
 const bbs2023 = require('./vendored/bbs2023.js');
+// ---------------------------------------------------------------------------
+// THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS, since
+// 2026-08-27. It is a LEAF — it requires npm packages, the vendored XML signer
+// and `config.js`, which requires nothing here — so this require is downward
+// and cannot close a cycle. **IT MUST STAY THAT WAY**: `crypto.js` may never
+// require this file back, which is why every function over there takes the key
+// it is to use as a parameter rather than reaching for `STS`. The realm-aware
+// half of that — one key per realm, and `STS` as a view onto the current one —
+// is below and stays here.
+// ---------------------------------------------------------------------------
+const stsCrypto = require('./crypto');
 // TRUST REALMS. Two things in this file are per realm and both are here rather
 // than in twenty modules for the same reason: this is where every one of them
 // already looks. `baseUrlOf()` is how eighty call sites build a URL, and `STS`
@@ -162,24 +173,25 @@ const HOST = config.value('global.host');
 // --- STS signing key/cert (generated once at startup) ----------------------
 function makeStsKeys() {
   log.debug("Entering makeStsKeys().");
-  const kp = forge.pki.rsa.generateKeyPair({ bits: 2048, e: 0x10001 });
-  const cert = forge.pki.createCertificate();
-  cert.publicKey = kp.publicKey;
-  cert.serialNumber = '02';
-  cert.validity.notBefore = new Date();
-  cert.validity.notAfter = new Date();
-  cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 5);
-  const attrs = [{ name: 'commonName', value: 'ws-trust-mock-sts' }];
-  cert.setSubject(attrs);
-  cert.setIssuer(attrs);
-  cert.sign(kp.privateKey, forge.md.sha256.create());
-  const certB64 = forge.pki.certificateToPem(cert)
-    .replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  // The RSA keygen-and-self-sign skeleton is shared with `tls/tls_server.js`,
+  // which builds a very different certificate — a TLS server certificate lives
+  // or dies by its subjectAltName and this one carries no extensions at all.
+  // What they had in common was the twenty lines of forge boilerplate, and that
+  // is what moved; the differences stayed as arguments.
+  const keys = stsCrypto.selfSignedRsaCertificate({
+    bits: 2048,
+    commonName: 'ws-trust-mock-sts',
+    // Unchanged from when this was written out here, and not arbitrary: the TLS
+    // listener's certificate is '03', so a person looking at two of this
+    // service's certificates in a packet capture can tell which is which.
+    serialNumber: '02',
+    years: 5
+  });
   log.debug("Leaving makeStsKeys().");
   return {
-    privateKeyPem: forge.pki.privateKeyToPem(kp.privateKey),
-    certPem: forge.pki.certificateToPem(cert),
-    certB64: certB64,
+    privateKeyPem: keys.privateKeyPem,
+    certPem: keys.certPem,
+    certB64: keys.certB64,
     // A `kid` names a KEY, so it is derived from the key material rather than
     // hard-coded. This key is regenerated on every start, and the kid was
     // previously a constant — so two instances of this mock (a stale container
@@ -188,7 +200,14 @@ function makeStsKeys() {
     // fails, and reports "the signature does not verify", which reads like a
     // corrupt document instead of what it is: keys fetched from the wrong
     // instance. A per-key kid cannot collide, so the mismatch names itself.
-    kid: 'sts-mock-' + forge.md.sha256.create().update(certB64).digest().toHex().slice(0, 12)
+    // **DERIVED FROM THE BASE64 TEXT AND NOT FROM THE DER**, which is why this
+    // is not `stsCrypto.certificateThumbprint()`. That function hashes the DER,
+    // as RFC 8705's `x5t#S256` and SPIRE's authority id both require, and would
+    // produce a DIFFERENT value here. A kid is an opaque name and either would
+    // do — but changing it would change every JWKS this service has ever
+    // published, and a verifier matching a cached kid would report "the
+    // signature does not verify" rather than "the key was renamed".
+    kid: 'sts-mock-' + forge.md.sha256.create().update(keys.certB64).digest().toHex().slice(0, 12)
   };
 }
 
@@ -454,7 +473,8 @@ function signJwt(payload, context) {
   log.debug("Entering signJwt(). typ=" + (payload.typ || '(none)'));
   logArtifact('OAuth token (' + (payload.typ || 'unknown') + ')', 'before signing',
               { header: { alg: 'RS256', kid: STS.kid }, payload: payload });
-  const signed = jwt.sign(payload, STS.privateKey, { algorithm: 'RS256', keyid: STS.kid });
+  const signed = stsCrypto.signJws(payload, STS.privateKey,
+                                   { algorithm: 'RS256', keyid: STS.kid });
   logArtifact('OAuth token (' + (payload.typ || 'unknown') + ')', 'after signing', signed);
   // Every token this service issues passes through here, which is what makes the
   // admin console's count a count and not an estimate. Wrapped because a throw in

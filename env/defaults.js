@@ -102,7 +102,8 @@ var config = {
 
   // --- SAML ------------------------------------------------------------
   saml: {
-    issuer: "urn:wstrust:mock:sts"  // Assertion issuer
+    issuer: "urn:wstrust:mock:sts", // Assertion issuer
+    clockSkewS: 0                   // Assertion clock skew (s)
   },
 
   // --- SAML 2.0 --------------------------------------------------------
@@ -114,6 +115,10 @@ var config = {
     signResponse: true,                                                    // Sign the response
     nameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified", // Default NameID format
     artifactTtlS: 300,                                                     // Artifact lifetime (seconds)
+    encryptAssertion: false,                                               // Encrypt the assertion
+    encryptionAlgorithm: "aes256-gcm",                                     // Encryption algorithm
+    keyTransportAlgorithm: "rsa-oaep-mgf1p",                               // Key transport algorithm
+    encryptLogoutNameId: false,                                            // Encrypt the NameID in a LogoutRequest
     autocreateApplications: true,                                          // Register a service provider on sight
     defaultSingleLogoutService: ""                                         // Fallback logout return address
   },
@@ -136,8 +141,9 @@ var config = {
     issuer: "urn:wstrust:mock:sts"  // Token issuer
   },
 
-  // --- WS-Federation ---------------------------------------------------
+  // --- WS-Federation assertions ----------------------------------------
   wsfed: {
+    assertionLifetimeMin: 60,         // Assertion lifetime (minutes)
     entityId: "urn:wstrust:mock:sts"  // Entity ID
   },
 

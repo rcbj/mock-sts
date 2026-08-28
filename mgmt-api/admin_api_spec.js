@@ -1653,6 +1653,124 @@ const SCHEMAS = {
       }
     }),
 
+  SamlAssertions: openObject(
+    'The DEFAULTS every SAML application inherits: how long an assertion is ' +
+    'valid for in each profile, whether it and its response are signed, the ' +
+    'NameID format, the artifact lifetime, and the clock skew written into ' +
+    'both ends of the window. Eleven of the settings GET /config returns, ' +
+    'with `perApplication` naming the entry attribute that overrides each.',
+    {
+      assertions: openObject(
+        'The three effective values, plus the two figures no single setting ' +
+        'states. THE LIFETIMES ARE MINUTES AND THE SKEW IS SECONDS, which is ' +
+        'the unit each setting is declared in.',
+        {
+          saml2LifetimeMin: { type: 'integer' },
+          saml11LifetimeMin: { type: 'integer' },
+          clockSkewS: {
+            type: 'integer',
+            description: 'Added to BOTH ENDS of every assertion this service ' +
+                         'issues: `Conditions/NotBefore` is backdated by it ' +
+                         'and `NotOnOrAfter` extended by it, in SAML 2.0 and ' +
+                         'SAML 1.1 alike and therefore in WS-Trust and ' +
+                         'WS-Federation too. `IssueInstant` and the ' +
+                         'authentication instant are NOT moved — those state ' +
+                         'when something happened. 0, the default, is what ' +
+                         'this service always did. It is not ' +
+                         'oauth2.clockSkewS, which is the tolerance applied ' +
+                         'when this service READS a document back.'
+          },
+          saml2WindowS: {
+            type: 'integer',
+            description: 'The whole width of the window a SAML 2.0 assertion ' +
+                         'states, in seconds: the lifetime plus TWICE the ' +
+                         'skew. This is the figure a relying party ' +
+                         'experiences and it is what makes a large skew ' +
+                         'visible as the lifetime extension it is.'
+          },
+          saml11WindowS: {
+            type: 'integer',
+            description: 'The same for a SAML 1.1 assertion.'
+          }
+        }),
+      perApplication: {
+        type: 'array',
+        description: 'WHICH OF THESE AN APPLICATION MAY OVERRIDE, and the ' +
+                     'attribute that does it. Ten of the eleven: every ' +
+                     'setting here except the clock skew, which is a fact ' +
+                     'about the estate rather than about one relying ' +
+                     'party.\n\nSet the named attribute on an application ' +
+                     'entry — `POST /admin-api/applications/set` with ' +
+                     '`attribute` and `value`, on the console\'s New ' +
+                     'application form, or with an `ldapmodify` — and that ' +
+                     'application stops inheriting the row beside it. An ' +
+                     'ABSENT attribute means inherit; there is no third ' +
+                     'state, and clearing the attribute restores the ' +
+                     'default.\n\nA value that will not parse is IGNORED ' +
+                     'and logged, not refused: the directory is a vocabulary ' +
+                     'rather than a constraint here, and an identity ' +
+                     'provider that stopped issuing because somebody typed ' +
+                     '"yes" would be a mock that stopped answering.',
+        items: openObject('One overridable setting.', {
+          setting: { type: 'string',
+                     description: 'The appconfig key, as in GET /config.' },
+          attribute: { type: 'string',
+                       description: 'The application entry attribute that ' +
+                                    'overrides it.' },
+          profile: { type: 'string',
+                     description: '`saml2` or `saml11`. The two are ' +
+                                  'independent: an application declared for ' +
+                                  'both carries two lifetimes and gets each ' +
+                                  'where it applies.' }
+        })
+      },
+      settings: {
+        type: 'array',
+        description: 'The same eleven as full configuration rows — bounds, ' +
+                     'source, default and prose — in the shape GET /config ' +
+                     'uses, so a client renders them with one piece of code.',
+        items: CONFIG_SETTING
+      },
+      assertionsIssued: openObject(
+        'What has already been issued, per profile, counted against this ' +
+        'service\'s own clock with NO allowance applied — the skew is ' +
+        'written into an assertion rather than applied when one is read ' +
+        'here, so an assertion counted expired is one whose stated ' +
+        'NotOnOrAfter has passed. CHANGING A SETTING DOES NOT MOVE THESE — ' +
+        'a window is stamped into an assertion when it is signed. The counts ' +
+        'are of the artifacts still held, which is a rolling window capped ' +
+        'at `cap`.',
+        {
+          held: {
+            type: 'integer',
+            description: 'Artifacts of EVERY kind still held, not only ' +
+                         'assertions: it is the cap below that these are ' +
+                         'counted against, and Kerberos tickets and ' +
+                         'credentials share it.'
+          },
+          forgotten: { type: 'integer' },
+          cap: { type: 'integer' },
+          byKind: {
+            type: 'array',
+            description: 'One row per profile — `SAML 2.0` and `SAML 1.1` — ' +
+                         'always both, with zeroes where nothing has been ' +
+                         'issued, so a client need not handle an absent row.',
+            items: openObject('One profile.', {
+              kind: { type: 'string' },
+              issued: { type: 'integer' },
+              valid: { type: 'integer' },
+              expired: { type: 'integer' },
+              noExpiry: { type: 'integer' }
+            })
+          }
+        }),
+      now: {
+        type: 'integer',
+        description: 'This service\'s clock, in milliseconds, as the counts ' +
+                     'above were taken against it.'
+      }
+    }),
+
   ClaimSets: openObject(
     'The two JWT claim sets — the OAuth 2.0 access token and the OIDC ID ' +
     'Token — and the rules that govern them. The UserInfo set is at GET ' +

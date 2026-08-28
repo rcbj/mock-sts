@@ -165,7 +165,8 @@ const crypto = require('crypto');
 // no route, so its position is not a position at all.
 const realms = require('../common/realms');
 const { DOMParser } = require('@xmldom/xmldom');
-const { SignedXml } = require('xml-crypto');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
         parseBody, firstByLocal, textByLocal, userFor } = require('../common/helpers');
@@ -590,48 +591,35 @@ function samlError(res, status, title, detail, extra) {
 // resolution knows about `Id`, `ID` and `id` only. SIGNING does not care — the
 // digest is computed over the node an xpath selected — but VERIFICATION does, and
 // a verifier that is not told resolves `#_abc` to nothing and reports a perfectly
-// good signature as broken. That cost `wsfed.js` a debugging session, it is why
-// verifyAssertionSignature() there takes an idAttribute, and it is why the mock
-// relying party below passes one for both documents.
-function signDocument(xml, rootLocalName, id, placement, idAttribute) {
-  log.debug("Entering signDocument(). root=" + rootLocalName + ", placement=" + placement +
-            ", idAttribute=" + (idAttribute || '(the defaults)'));
-  // **NAMING THE ID ATTRIBUTE HERE IS WHAT KEEPS THIS DOCUMENT VERIFIABLE AT
-  // ALL**, and the failure it prevents is worth the paragraph because it looks
-  // like an attack report. xml-crypto's ensureHasId() searches the node for the
-  // first of `Id`, `ID`, `id`; finding none it INVENTS `Id="_0"` and rewrites the
-  // reference URI to match. A SAML 1.1 Response has `ResponseID` and the
-  // assertion inside it has `AssertionID`, so with nothing named BOTH get
-  // `Id="_0"` — and xml-crypto then refuses to verify either one, reporting
-  // "multiple elements with the same value for the ID / Id / Id attributes",
-  // which is its signature-wrapping guard firing on a document this service
-  // built itself.
+// good signature as broken. That cost `wsfed.js` a debugging session, and it is
+// why both signers here and the mock relying party below used to thread an
+// `idAttribute` argument around. **NONE OF THEM DOES NOW**: `common/crypto.js`
+// resolves `AssertionID`, `ResponseID`, `RequestID` and `ID` from the document
+// itself, so there is no argument left to pass and no way to pass it wrongly.
+function signDocument(xml, rootLocalName, id, placement) {
+  log.debug("Entering signDocument(). root=" + rootLocalName + ", placement=" + placement);
+  // **THE `idAttribute` PARAMETER IS GONE AND ITS ABSENCE IS THE POINT.** It
+  // used to carry a long warning: xml-crypto's ensureHasId() looks for the
+  // first of `Id`, `ID`, `id` on the node being signed, and finding none —
+  // `ResponseID` and `AssertionID` are none of them — it INVENTED `Id="_0"` and
+  // rewrote the reference to match. A Browser/POST response is two signed
+  // documents in one, so both got `Id="_0"` and xml-crypto then refused to
+  // verify either, reporting its signature-wrapping guard on a document this
+  // service built itself. Naming the attribute fixed it, and had to be got
+  // right at each of the six signers independently.
   //
-  // Passing the real name makes it find the real attribute, inject nothing, and
-  // reference `#` + that id — which is also the document a SAML 1.1 relying
-  // party expects. It is only safe because neither name is already on that
-  // default list: `saml2_sso.js` records the opposite case, where naming `ID`
-  // for SAML 2.0 unshifts a duplicate and trips the very same guard. The
-  // metadata's `EntityDescriptor` therefore passes NOTHING — its id attribute is
-  // spelled `ID`, which is already there.
-  const options = { privateKey: STS.privateKeyPem, publicCert: STS.certPem };
-  if (idAttribute) {
-    options.idAttribute = idAttribute;
-  }
-  const sig = new SignedXml(options);
-  sig.signatureAlgorithm = SIG_RSA_SHA256;
-  sig.canonicalizationAlgorithm = C14N_EXCLUSIVE;
-  sig.addReference({
-    xpath: "/*[local-name(.)='" + rootLocalName + "']",
-    transforms: [TRANSFORM_ENVELOPED, C14N_EXCLUSIVE],
-    digestAlgorithm: DIGEST_SHA256,
-    uri: id ? ('#' + id) : ''
+  // The shared signer resolves all four spellings natively. There is no list to
+  // be told about, nothing is ever injected, and the caller cannot get it wrong
+  // because there is no longer an argument to get wrong. `saml/CLAUDE.md`
+  // records the original defect; this is what closed it for good.
+  const signed = stsCrypto.signXml(xml, {
+    privateKeyPem: STS.privateKeyPem,
+    certPem: STS.certPem,
+    placement: placement === 'append'
+      ? stsCrypto.PLACEMENT.LAST : stsCrypto.PLACEMENT.FIRST,
+    refUri: id ? ('#' + id) : '',
+    what: 'SAML 1.1 ' + rootLocalName
   });
-  const location = placement === 'append'
-    ? { reference: "/*[local-name(.)='" + rootLocalName + "']", action: 'append' }
-    : { reference: "/*[local-name(.)='" + rootLocalName + "']", action: 'prepend' };
-  sig.computeSignature(xml, { location: location });
-  const signed = sig.getSignedXml();
   log.debug("Leaving signDocument(). " + signed.length + " characters.");
   return signed;
 }
@@ -748,7 +736,25 @@ function nameIdValueFor(format, session) {
 //   InResponseTo   present ONLY when answering a SOAP request. It MUST be absent
 //                  in Browser/POST, because there was no request — writing one
 //                  there names a RequestID nobody minted.
+// ---------------------------------------------------------------------------
+// THE FIVE SETTINGS ON THIS PAGE ARE PER RELYING PARTY, AND THIS IS THE ONE
+// PLACE THAT IS DECIDED. The same arrangement saml2_sso.js has, argued there;
+// what is different here is which string identifies the application. SAML 1.1
+// has no request message, so a relying party cannot name itself in the
+// protocol — `rpId` is what this service worked out from Shibboleth's
+// providerId, the path segment, or the TARGET's origin, and it is the string
+// the registry files this application under. It is therefore the right key, and
+// it is the ONLY one available.
+//
+// `opts.rpId` and never `opts.providerId`: the second is THIS identity
+// provider's own name for that relying party, which differs per relying party
+// when `saml11.perApplicationProviderId` is on and would find no entry.
+function settingFor(rpId, key) {
+  return applications.settingFor(rpId, key, config);
+}
+
 function buildResponse(opts) {
+  // `opts.rp` is the relying party; see settingFor() above.
   log.debug("Entering buildResponse(). status=" + opts.status);
   const id = genId();
   const xml =
@@ -765,7 +771,7 @@ function buildResponse(opts) {
       (opts.assertion || '') +
     '</samlp:Response>';
   logArtifact('SAML 1.1 Response', 'before signing', xml);
-  if (!config.value('saml11.signResponse')) {
+  if (!settingFor(opts.rp || '', 'saml11.signResponse')) {
     log.debug("Leaving buildResponse(). Unsigned: saml11.signResponse is off.");
     return { xml: xml, id: id, signed: false };
   }
@@ -773,7 +779,7 @@ function buildResponse(opts) {
     // 'prepend' — ds:Signature is the FIRST child of a 1.1 Response. See
     // signDocument()'s header, where all four positions in this service are
     // counted.
-    const signed = signDocument(xml, 'Response', id, 'prepend', 'ResponseID');
+    const signed = signDocument(xml, 'Response', id, 'prepend');
     logArtifact('SAML 1.1 Response', 'after signing', signed);
     log.debug("Leaving buildResponse(). Signed.");
     return { xml: signed, id: id, signed: true };
@@ -795,9 +801,9 @@ function buildAssertionFor(ctx) {
   const session = ctx.session;
   const user = session.user;
   const how = authnMethodFor(session);
-  const lifetimeMin = Number(config.value('saml11.assertionLifetimeMin')) || 60;
+  const lifetimeMin = Number(settingFor(ctx.rpId, 'saml11.assertionLifetimeMin')) || 60;
   const format = ctx.nameIdFormat ||
-    String(config.value('saml11.nameIdFormat') || NAMEID_FORMAT_UNSPECIFIED);
+    String(settingFor(ctx.rpId, 'saml11.nameIdFormat') || NAMEID_FORMAT_UNSPECIFIED);
   const authnInstant = new Date((session.authTime || 0) * 1000).toISOString();
   const assertion = buildSaml11Assertion({
     subject: user.username,
@@ -825,7 +831,7 @@ function buildAssertionFor(ctx) {
     // and caching it is the relying party's business.
     doNotCache: ctx.profile === 'post',
     attributes: attributesFor(user, how.method, authnInstant),
-    sign: config.value('saml11.signAssertion')
+    sign: settingFor(ctx.rpId, 'saml11.signAssertion')
   });
   log.debug("Leaving buildAssertionFor(). " + assertion.length + " characters.");
   return assertion;
@@ -967,7 +973,9 @@ function mintArtifact(providerId) {
 }
 
 function stashArtifact(artifact, detail) {
-  const ttlS = Number(config.value('saml11.artifactTtlS')) || 300;
+  // Off the relying party this artifact was minted FOR, which `detail`
+  // already carried before this was per application.
+  const ttlS = Number(settingFor(detail.rpId || '', 'saml11.artifactTtlS')) || 300;
   artifacts.set(artifact, Object.assign({ expires: Date.now() + ttlS * 1000 }, detail));
   artifacts.forEach(function (v, k) {
     if (v.expires < Date.now()) {
@@ -1005,7 +1013,7 @@ function deliver(res, opts) {
     return;
   }
   const response = buildResponse({
-    status: STATUS_SUCCESS,
+    status: STATUS_SUCCESS, rp: opts.rpId,
     // Recipient, and NO InResponseTo: there was no request. See buildResponse().
     recipient: opts.destination,
     assertion: opts.assertion
@@ -1354,7 +1362,7 @@ function respond(req, res) {
     log.debug("Entering answer().");
     const response = buildResponse({
       status: status, statusMessage: message, assertion: assertion || '',
-      inResponseTo: inResponseTo, recipient: recipient
+      inResponseTo: inResponseTo, recipient: recipient, rp: rpId
     });
     const envelope = soapEnvelope(response.xml);
     logArtifact('SAML 1.1 Response', 'as returned over SOAP', envelope);
@@ -1472,7 +1480,7 @@ function respond(req, res) {
     const assertion = buildSaml11Assertion({
       subject: username,
       audience: rpId,
-      lifetimeMin: Number(config.value('saml11.assertionLifetimeMin')) || 60,
+      lifetimeMin: Number(settingFor(rpId, 'saml11.assertionLifetimeMin')) || 60,
       authnMethod: how.method,
       authnInstant: now,
       issuer: providerId,
@@ -1486,7 +1494,7 @@ function respond(req, res) {
       // which is what the second statement carries. Passing none for the
       // authentication query is what leaves the attribute statement out.
       attributes: attributeQuery ? attributesFor(user, how.method, now) : [],
-      sign: config.value('saml11.signAssertion')
+      sign: settingFor(rpId, 'saml11.signAssertion')
     });
     rememberAssertion(assertion);
     log.debug("Leaving respond(). A query was answered about " + username + ".");
@@ -1747,52 +1755,19 @@ function describeProfilePage(base) {
 //     arrived on, a status QName written as a URI, an audience naming a guessed
 //     origin rather than the relying party.
 // ===========================================================================
-function verifySignature(xml, rootLocalName, idAttribute) {
-  log.debug("Entering verifySignature(). root=" + rootLocalName + ", id=" + idAttribute);
-  try {
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    const root = rootLocalName === 'Response'
-      ? doc.documentElement
-      : firstByLocal(doc.documentElement, 'Assertion');
-    if (!root) {
-      log.debug("Leaving verifySignature(). There is no " + rootLocalName + ".");
-      return { ok: false, present: false, why: 'there is no <' + rootLocalName + '> to check' };
-    }
-    // A DIRECT child only. `firstByLocal` would find whichever Signature came
-    // first in the document, which is not the same question — and getting it
-    // wrong reports the assertion's signature twice and the response's never.
-    let sigEl = null;
-    for (let i = 0; i < root.childNodes.length; i++) {
-      const child = root.childNodes[i];
-      if (child.nodeType === 1 && child.localName === 'Signature') {
-        sigEl = child;
-        break;
-      }
-    }
-    if (!sigEl) {
-      log.debug("Leaving verifySignature(). It is not signed.");
-      return { ok: false, present: false,
-               why: 'the ' + rootLocalName + ' carries no ds:Signature' };
-    }
-    // **THE idAttribute IS THE WHOLE POINT OF THIS FUNCTION.** SAML 1.1 spells
-    // its ids `AssertionID` and `ResponseID`, and xml-crypto resolves `#_abc`
-    // against `Id`, `ID` and `id` only — so without this the reference resolves
-    // to nothing and a perfectly good signature reports as broken. It is safe to
-    // name them here for the reason `saml2_sso.js` records about NOT naming
-    // `ID`: neither is already on xml-crypto's default list, so nothing is
-    // duplicated onto it and the signature-wrapping guard is not tripped.
-    const sig = new SignedXml({ publicCert: STS.certPem, idAttribute: idAttribute });
-    sig.loadSignature(sigEl);
-    const ok = sig.checkSignature(xml);
-    log.debug("Leaving verifySignature(). ok=" + ok);
-    return { ok: !!ok, present: true, why: ok ? '' : 'the signature did not verify' };
-  } catch (e) {
-    // xml-crypto throws rather than returning false for most failures, and the
-    // message names which of them it was — an unresolvable reference reads quite
-    // differently from a digest mismatch, and that distinction is the diagnosis.
-    log.debug("Leaving verifySignature(). It threw: " + e.message);
-    return { ok: false, present: true, why: e.message };
-  }
+function verifySignature(xml, rootLocalName) {
+  log.debug("Entering verifySignature(). root=" + rootLocalName);
+  // The shared verifier is told WHICH element's signature to check and takes
+  // the one that is that element's own direct child — the question this
+  // function has always been asking, now asked in one place for all four
+  // profiles. It also refuses a signature whose reference names a different
+  // element, which this file could not previously check at all.
+  const result = stsCrypto.verifyXmlSignature(xml, {
+    element: rootLocalName,
+    certPem: STS.certPem
+  });
+  log.debug("Leaving verifySignature(). ok=" + result.ok);
+  return result;
 }
 
 // Every check, in the order a relying party would apply them, each with its own
@@ -1862,7 +1837,7 @@ function verifyResponse(xml, rpId, acsUrl, profile) {
         '(none) — the artifact was resolved by a <samlp:Request>, so the Response should name it');
   }
 
-  const responseSig = verifySignature(xml, 'Response', 'ResponseID');
+  const responseSig = verifySignature(xml, 'Response');
   add('the Response signature verifies', responseSig.ok,
       responseSig.present
         ? (responseSig.ok ? 'RSA-SHA256, and the reference resolved through ResponseID'
@@ -1884,7 +1859,7 @@ function verifyResponse(xml, rpId, acsUrl, profile) {
       '(none) — SAML 1.1 spells it AssertionID, not ID, and a signature reference cannot resolve ' +
       'without it');
 
-  const assertionSig = verifySignature(xml, 'Assertion', 'AssertionID');
+  const assertionSig = verifySignature(xml, 'Assertion');
   add('the assertion signature verifies', assertionSig.ok,
       assertionSig.present
         ? (assertionSig.ok ? 'resolved through the AssertionID attribute — xml-crypto has to be ' +
@@ -2092,7 +2067,7 @@ function mockRelyingParty(req, res) {
     const requestId = genId();
     const response = buildResponse({
       status: STATUS_SUCCESS, assertion: held.assertion,
-      inResponseTo: requestId, recipient: rpId
+      inResponseTo: requestId, recipient: rpId, rp: rpId
     });
     logArtifact('SAML 1.1 Response', 'as resolved from an artifact over SOAP', response.xml);
     const result = verifyResponse(response.xml, rpId, acsUrl, 'artifact');

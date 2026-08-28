@@ -18,8 +18,8 @@ files did not change; the paths did.
 
 | Directory | What is in it |
 |---|---|
-| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. |
-| `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** |
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, **`crypto.js`**, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. **`crypto.js` is THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS since 2026-08-27** — before that it did all four in about twenty places, including six XML signers and four XML signature verifiers. `common/CLAUDE.md` argues it. |
+| `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** Since 2026-08-27 that includes `xmldsig.js`, the parent's own XML Signature and XML Encryption module, which is now the signer behind every signed document this service emits — so both ends of a SAML exchange canonicalize with the same code. |
 | `home/` | The front door: `GET /` and the one image on it. |
 | `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
 | `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles, and **the UserInfo endpoint's four layers** — a claim set of its own configured at `/admin/userinfo-claims`, the scope-driven set, OIDC Core 5.5's claims request, and `sub`. |
@@ -160,7 +160,12 @@ Sign-On service over HTTP Redirect and HTTP POST, the Response over HTTP POST,
 HTTP Redirect or HTTP Artifact, a SOAP Artifact Resolution Service behind the
 third, Single Logout, and **signed metadata PER SERVICE PROVIDER, minted for any
 entityID asked for**. It accepts any entityID and creates the application entry
-on first sight. What it still does not do — encrypt an assertion, verify a
+on first sight. **It ENCRYPTS since 2026-08-27** — an EncryptedAssertion in the
+Response and an EncryptedID in a LogoutRequest, in four block ciphers and two
+key transports, per application — and it DECRYPTS an EncryptedID a service
+provider sends it; `saml/CLAUDE.md` has the design, and the paragraph that said
+otherwise for months is gone rather than qualified. What it still does not do —
+verify a
 request signature, consume SP metadata, or answer an AttributeQuery — is listed
 in `saml/CLAUDE.md` rather than implied.
 
@@ -409,6 +414,7 @@ require can see at a glance whether they are about to break one.
 | 2a | `common/realms` | Loaded BY `app` and by `helpers`, so it has no line of its own in `server.js` — but it is above every setting read and every store in this service, because requiring it is what fills `config.js`'s realm slot (rule 3m) and what installs the reserved-id provider. | `common/CLAUDE.md` |
 | 3–4 | `common/helpers`, `common/config` | `config.js` is below `helpers.js` and requires nothing here. | `common/CLAUDE.md` |
 | 4a | `persistence/persistence` | Below `config`, which it reads, and above everything else: requiring it fills `config.js`'s override-store slot (rule 3q) and subscribes to `realms.onChange()`. A LIBRARY — it registers no route, so its place in the ROUTE order is not a place. **It opens nothing here**: the store is opened and READ from `persistence.start()` in `server.js`, before the listener binds, because a `require` cannot await a connection pool. | `persistence/CLAUDE.md` |
+| 4b | `common/crypto` | Loaded BY `helpers`, so it has no line of its own in `server.js`. A LIBRARY — it registers no route, so its place in the ROUTE order is not a place. It is a LEAF and must stay one: it requires npm packages, `common/vendored/xmldsig.js` and `config`, which requires nothing here, so `helpers` may require it and it may NEVER require `helpers` back. Every function in it takes the key it is to use as a parameter for exactly that reason. | `common/CLAUDE.md` |
 | 5 | `common/claim_attributes` | Ahead of everything that ISSUES, because requiring it fills `setAttributeResolver()`. An empty slot means tokens without their configured attributes. | `common/CLAUDE.md` |
 | 6 | `common/group_claims` | Same reason, for `setGroupResolver()`. | `common/CLAUDE.md` |
 | 6a | `home/home` | No constraint. Two EXACT paths (`/` and `/logo.png`) and nothing but the app behind them; first among the route modules so that the page a person meets first heads the list on `/admin/sts-metadata`. | `home/CLAUDE.md` |
@@ -449,6 +455,7 @@ in every file, including the ones in the source comments. This is the index.
 | 3e | The inverted hooks, and the test for adding one | this file |
 | 3f, 3h, 3i, 3j | `oauth2_bcp.js`, `mtls.js`, `client_auth.js`, `authorization_servers.js` | `oauth-oidc/CLAUDE.md` |
 | 3g | `applications.js` | `common/CLAUDE.md` |
+| 3r | `crypto.js`, why it is a leaf, why the verifier is told which element, and why XML encryption moved rather than being replaced | `common/CLAUDE.md` |
 | 4a | `saml2_sso.js` after `authn.js`, and why it has no screen | `saml/CLAUDE.md` |
 | 4b | `federation_sp.js` after `authn.js`, and why it needs no screen at all | `federation/CLAUDE.md` |
 | 4b | `saml11_sso.js` after `authn.js` and after `saml2_sso.js`, and why the two profiles are separate implementations | `saml/CLAUDE.md` |
@@ -757,6 +764,26 @@ anybody opens it again:
   return the same answer. Seeing it requires varying how the PROCESS was
   started, which a test driving somebody else's running service cannot do.
 
+  **`crypto_module.js` (2026-08-27) is the clearest case of that line yet**, and
+  it is worth reading before arguing about where a test goes. Its central
+  assertion is that a document this service signs is accepted by an INDEPENDENT
+  implementation — xml-crypto, which is what all six signers used before
+  `common/crypto.js` existed — and in the other direction that a document signed
+  the old way still verifies. There is no way to ask either of those of a
+  running service over HTTP: you would have to import xml-crypto and hand it the
+  document, which is exactly this file, in process, with no port. The same
+  applies to the three RFC 7638 thumbprints agreeing and to the algorithm
+  tables. **This is also why `xml-crypto` is still in `package.json` while no
+  module in the service requires it** — it is the only independent reading of
+  XMLDSIG here, and it is what makes "our signature verifies" mean anything.
+
+  What does NOT belong here is the protocol half — that `/saml2/metadata` is
+  signed, that a Browser/POST response carries two separately verifiable
+  signatures, that a federated assertion signed by the wrong key is refused.
+  Every one of those can be driven over HTTP and belongs in the parent suite.
+  **They are not written**, and this paragraph says so rather than implying the
+  refactor is covered end to end.
+
 So the line is: **can it be asserted by driving the running service over HTTP?**
 If yes it goes in the parent suite, where it costs one entry in `run-report.js`
 and runs in three stacks without anything being invented for it. Only if no does
@@ -1046,7 +1073,8 @@ argument in two places is an argument that will disagree with itself.
 | Perform back-channel logout. Front-channel IS implemented; the metadata says which | `oauth-oidc/CLAUDE.md` |
 | Fake WS-Federation's `wauth`, or dereference `wreqptr` | `ws-federation/CLAUDE.md` |
 | Verify a SAML AuthnRequest's signature, or consume SP metadata — both recorded, neither checked | `saml/CLAUDE.md` |
-| Encrypt an assertion in the Web SSO profile — WS-Trust's `?encrypt=1` still does | `saml/CLAUDE.md` |
+| Encrypt an assertion **to a service provider it holds no certificate for** — it sends it in CLEAR and says so loudly, rather than refusing to issue. Encryption itself arrived 2026-08-27 and this row said the opposite until then | `saml/CLAUDE.md` |
+| Dial a service provider's metadata URL WHILE ISSUING — the fetch is an explicit action that writes the certificate onto the entry, so no sign-in waits on somebody else's web server | `saml/CLAUDE.md` |
 
 FOUR exceptions to the whole of that list, and each is worth knowing before
 reading further. **The SCIM endpoints REQUIRE a credential** — in any of the six

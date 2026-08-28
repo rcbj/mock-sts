@@ -207,6 +207,10 @@ const auditLog = require('../common/audit');
 // Nothing is cached on either side: every read here is a directory read, which
 // is what lets this page show an ldapmodify that happened a second ago.
 const applications = require('../common/applications');
+// A LIBRARY (rule 3): it registers no route, and it is required here for the
+// metadata refresh action. It requires helpers, config and applications and
+// nothing that requires this file, so it closes no cycle.
+const spMetadata = require('../saml/sp_metadata');
 // The SAML 2.0 Web Browser SSO profile, for the slug rule, the per-application
 // entityID and the endpoint URLs — so that /admin/saml2 names the same
 // addresses the metadata document publishes rather than rebuilding them here.
@@ -552,9 +556,11 @@ const SECTIONS = [
                    '<code>oauth2.breakIdTokenNonce</code>, which makes this ' +
                    'service return an ID Token whose <code>nonce</code> is ' +
                    'wrong so that a client can find out whether it checks. ' +
-                   'The four lifetimes are here too and have a page of their ' +
-                   'own beside this one, because they are the ones somebody ' +
-                   'sets to a specific number to watch something happen.' },
+                   'The five a CLIENT may answer for itself — the three ' +
+                   'lifetimes, the refresh idle timeout and whether a ' +
+                   'sign-out revokes refresh tokens — moved to ' +
+                   '<a href="/admin/token-lifetimes">Token lifetimes</a> ' +
+                   'on 2026-08-27, which is where their defaults live now.' },
           { path: '/admin/authorization-servers',
             label: 'Authorization servers',
             blurb: 'Several authorization servers in ONE process, told apart ' +
@@ -613,7 +619,11 @@ const SECTIONS = [
           { path: '/admin/saml2', label: 'SAML 2.0 identity provider',
             blurb: 'Every service provider this identity provider has been ' +
                    'asked about, what each one was sent and over which ' +
-                   'binding, and the settings behind the next assertion. ' +
+                   'binding, and what this service calls ITSELF to each of ' +
+                   'them. What goes INTO the next assertion moved to ' +
+                   '<a href="/admin/saml-assertions">SAML assertions</a> ' +
+                   'on 2026-08-27, because those five are per application ' +
+                   'now and this page configures the identity provider. ' +
                    'Metadata is published PER service provider — the ' +
                    'identity provider names itself differently to each one, ' +
                    'the way Okta and Ping do — and it is minted for anything ' +
@@ -631,6 +641,19 @@ const SECTIONS = [
                    'Logout to configure and no request signature to record. ' +
                    'What it has that 2.0 does not is a SOAP responder that ' +
                    'is also an attribute authority.' },
+          { path: '/admin/saml-assertions', label: 'SAML assertions',
+            blurb: 'THE DEFAULTS EVERY SAML APPLICATION INHERITS: how long ' +
+                   'an assertion is valid, whether it and its response are ' +
+                   'signed, the NameID format and the artifact lifetime — ' +
+                   'five per profile — plus the clock skew written into ' +
+                   'both ends of the validity window. Ten of the eleven can ' +
+                   'be overridden PER APPLICATION on ' +
+                   '<a href="/admin/applications">an application entry</a>, ' +
+                   'and this page names the attribute that does it beside ' +
+                   'each row; the skew cannot, because it is a fact about ' +
+                   'the clocks in this estate rather than about one relying ' +
+                   'party. All eleven reach WS-Trust and WS-Federation too — ' +
+                   'their assertions come out of the same two builders.' },
           { path: '/admin/saml-attributes', label: 'Custom SAML attributes',
             blurb: 'The same two halves for the assertions: every SAML 2.0 ' +
                    'and SAML 1.1 attribute added to what the two identity ' +
@@ -1099,6 +1122,41 @@ const SETTING_HOMES = [
   { group: 'SAML', pages: ['/admin/saml2', '/admin/saml11'] },
   { group: 'SAML 2.0', pages: ['/admin/saml2'] },
   { group: 'SAML 1.1', pages: ['/admin/saml11'] },
+  // THE TEN THAT BECAME PER-APPLICATION DEFAULTS ON 2026-08-27, and the two
+  // groups exist to say exactly that. Every one of them was a `SAML 2.0` or
+  // `SAML 1.1` row drawn on that profile's identity provider page, and every
+  // one is now the DEFAULT an application inherits when its own entry says
+  // nothing — `saml2AssertionLifetimeMin` and its nine siblings on the entry
+  // win where they are set. They are off the two identity provider pages
+  // because those pages configure THIS SERVICE as an identity provider, and
+  // these ten no longer describe what it does: they describe what it does for
+  // an application that has not been told otherwise. `/admin/applications` is
+  // where the exception is typed.
+  //
+  // The pages here are what makes them leave those two screens: a group is
+  // drawn where its row says and nowhere else, so moving the rows moved the
+  // settings. Nothing about the KEYS or their environment variables changed,
+  // which is what keeps every appconfig file and every `STS_SAML*` variable
+  // working exactly as it did.
+  { group: 'SAML 2.0 assertions', pages: ['/admin/saml-assertions'] },
+  { group: 'SAML 1.1 assertions', pages: ['/admin/saml-assertions'] },
+  // WS-FEDERATION'S ONE ASSERTION SETTING IS DRAWN WITH THE SAML ONES, and
+  // that is not a filing error. A WS-Federation sign-in response CARRIES a
+  // SAML 1.1 assertion, built by the same function the SAML 1.1 profiles use,
+  // so this row governs the same kind of document as the ten above it. Drawing
+  // it on /admin/wsfed would have put the only setting that decides how long a
+  // WS-Federation token lives on a different page from every other assertion
+  // lifetime in this service. `wsfed.entityId` stays over there because it is
+  // this service's own name and no application can have an opinion about it.
+  { group: 'WS-Federation assertions', pages: ['/admin/saml-assertions'] },
+  // THE FIVE OAUTH SETTINGS A CLIENT MAY ANSWER FOR ITSELF, on the page that
+  // already drew three of them. /admin/token-lifetimes was a bespoke page
+  // naming its four keys and had no row here at all; it has one now because
+  // these five had to LEAVE /admin/oauth2, and a group leaves a page by being
+  // homed on another. The four global oauth2 rows — the issuer, RFC 9700 mode
+  // and the two clock skews — stay in the `OAuth 2.0 / OIDC` group and stay
+  // over there.
+  { group: 'OAuth 2.0 / OIDC per-client', pages: ['/admin/token-lifetimes'] },
   { group: 'WS-Trust', pages: ['/admin/wstrust'] },
   { group: 'WS-Federation', pages: ['/admin/wsfed'] },
   { group: 'TLS', pages: ['/admin/tls'] },
@@ -2161,6 +2219,50 @@ function page(title, active, inner, up, gate, req) {
     '.navsec{display:inline-block;vertical-align:top;min-width:11rem;margin-right:1.2em}' +
     '.navsec.open{margin-left:0;padding-left:0;border-left:0;border-top:3px solid #12107c;' +
     'padding-top:6px}}' +
+    // ---------------------------------------------------------------------
+    // /admin/applications/new's CONDITIONAL FIELDS, and the reason this is CSS
+    // and not a script.
+    //
+    // That page offers a field for every protocol family this service has, and
+    // most of them are irrelevant to any one application: somebody registering
+    // an OAuth client was reading past a SAML entityID, a Kerberos SPN and ten
+    // SAML assertion settings to reach the box they came for. So a field is
+    // shown only when the family it belongs to is TICKED.
+    //
+    // `script-src 'none'` holds. This is `:has()` — the checkbox is already in
+    // the same form as the fields, and already has an id — so the browser does
+    // the whole thing with a selector and this console still ships no script.
+    // It is the same answer the collapsible prose blocks got with `<details>`:
+    // the test for a script is that the page CANNOT work without one, and a
+    // form that shows every field works, it is just longer.
+    //
+    // THE FALLBACK IS TO SHOW EVERYTHING, which is why the rules are inside
+    // `@supports selector(:has(*))`. A browser without `:has()` gets the page
+    // exactly as it was before this existed — every field, all the time — and
+    // the page says so rather than leaving somebody to wonder why nothing
+    // hides. Showing too much is the safe direction: no control a person needs
+    // is ever missing, and nothing they type is ever dropped, because the
+    // SERVER reads whatever was posted and does not care what was visible.
+    //
+    // `display:revert` and not `block`: these rules are applied to <tr> as well
+    // as to <div>, and `block` on a table row makes it a block box that no
+    // longer lines up with the header above it.
+    '@supports selector(:has(*)){' +
+    'form.newapp .pf{display:none}' +
+    // One rule per family, generated from the same PROTOCOLS table the
+    // checkboxes are drawn from — so a family added there gets its rule for
+    // nothing, and cannot get a checkbox without one.
+    applications.PROTOCOLS.map(function (family) {
+      return 'form.newapp:has(#proto-' + family.id + ':checked) .pf-' + family.id +
+             '{display:revert}';
+    }).join('') +
+    // The prompt that replaces the fields until something is ticked, and its
+    // own disappearance. Without it the page below the checkbox table is empty
+    // and reads as broken rather than as waiting.
+    'form.newapp:has(input[name="protocol"]:checked) .pf-hint{display:none}' +
+    '}' +
+    '.pf-hint{color:#555;font-size:.85em;background:#fbfbfd;border:1px dashed #d5d5dd;' +
+    'border-radius:8px;padding:10px 12px;margin:.6em 0}' +
     '</style></head><body><div class="shell">' +
     '<aside class="side">' +
     '<p class="brand">Mock STS admin</p>' +
@@ -10700,6 +10802,26 @@ function applicationsAction(body, protocols) {
     return result;
   }
 
+  // ---------------------------------------------------------------------
+  // THE ONE ACTION HERE THAT IS ASYNCHRONOUS, and the only one in this console
+  // that makes an outbound request.
+  //
+  // It returns a PROMISE where every other action returns an object, which both
+  // dispatchers handle by checking for a `then`. That is a small ugliness and
+  // it is deliberately smaller than the alternatives: making every action async
+  // would put an `await` in front of forty call sites to serve one, and giving
+  // this one its own route would mean a second door onto the applications
+  // resource that the parity rule would then have to describe twice.
+  //
+  // WHY IT IS AN ACTION AND NOT PART OF ISSUING: sp_metadata.js's header argues
+  // it at length — an assertion that had to wait on somebody else's web server
+  // makes every sign-in as reliable as that server. This writes the certificate
+  // onto the entry and issuing reads the entry.
+  if (action === 'refresh-metadata') {
+    log.debug("Leaving applicationsAction(). Fetching metadata for " + identifier + ".");
+    return spMetadata.refresh(identifier);
+  }
+
   if (action === 'revoke-registration') {
     // Not a delete: the entry stays and its history with it. This is RFC 7592's
     // delete reached from the console instead of from the client that holds the
@@ -10738,17 +10860,12 @@ function applicationsAction(body, protocols) {
                                'add, remove, revoke-registration, forget.'] };
 }
 
-app.post('/admin/applications', function (req, res) {
-  log.debug("Entering the admin applications action endpoint.");
-  const body = parseBody(req);
-  // TWO SPELLINGS OF THE DECLARED PROTOCOL LIST, joined, exactly as
-  // /admin/claims takes its two and for the same reason: the create form's
-  // checkbox column is one `protocol` field repeated, and a JSON body carries
-  // one `protocols` array. helpers.parseBody() cannot see a repeat — it builds
-  // a plain object, so the last box ticked would be the only one to arrive —
-  // which is what listField() exists for.
-  const protocols = listField(req, body, 'protocol').concat(listField(req, body, 'protocols'));
-  const result = applicationsAction(body, protocols);
+// WHERE A FINISHED APPLICATION ACTION LANDS. Extracted from the route on
+// 2026-08-27 when `refresh-metadata` became asynchronous and needed the same
+// answer from a callback — two copies of this would be two opinions about
+// where a form goes back to, and the one added later would be the one that
+// forgot the list state.
+function respondToApplicationAction(req, res, body, result) {
   // Back to the drill-down the form was posted from, when there was one, so a
   // reader who has just added a redirect URI is looking at the entry that now
   // carries it rather than at the top of the list — and carrying the list state
@@ -10776,7 +10893,40 @@ app.post('/admin/applications', function (req, res) {
     : '/admin/applications' + queryWith(listView, {});
   respondToAction(req, res, back, result);
   log.debug("Leaving the admin applications action endpoint.");
+}
+
+app.post('/admin/applications', function (req, res) {
+  log.debug("Entering the admin applications action endpoint.");
+  const body = parseBody(req);
+  // TWO SPELLINGS OF THE DECLARED PROTOCOL LIST, joined, exactly as
+  // /admin/claims takes its two and for the same reason: the create form's
+  // checkbox column is one `protocol` field repeated, and a JSON body carries
+  // one `protocols` array. helpers.parseBody() cannot see a repeat — it builds
+  // a plain object, so the last box ticked would be the only one to arrive —
+  // which is what listField() exists for.
+  const protocols = listField(req, body, 'protocol').concat(listField(req, body, 'protocols'));
+  const result = applicationsAction(body, protocols);
+  // `refresh-metadata` answers with a promise; everything else answers with the
+  // object. Resolved here rather than making the whole function async, for the
+  // reason that action's own comment gives.
+  if (result && typeof result.then === 'function') {
+    result.then(function (answer) {
+      respondToApplicationAction(req, res, body, answer);
+    });
+    log.debug("Leaving the admin applications action endpoint. Awaiting a metadata fetch.");
+    return;
+  }
+  respondToApplicationAction(req, res, body, result);
 });
+
+// One value off an application view's fields, whichever shape it is in. The
+// registry hands `multi` attributes back as arrays and `single` ones as
+// strings, and a page that assumed either would be wrong for half the schema.
+function firstFieldValue(row, attribute) {
+  const value = (row && row.fields && row.fields[attribute]);
+  const one = Array.isArray(value) ? value[0] : value;
+  return String(one == null ? '' : one).trim();
+}
 
 // The two selects the edit forms offer, built from applications.js's EDITABLE
 // table so that a form cannot offer a field the action would refuse — the same
@@ -11280,6 +11430,34 @@ function applicationDetailPage(req, identifier) {
     'preventing it. <code>appRegistrationJson</code> is not offered either &mdash; edit the ' +
     'attributes beside it instead, which is what the registration is rebuilt from.') +
 
+    // THE METADATA REFRESH, and the only control on this page that reaches off
+    // this machine. It is a button rather than something issuing does, for the
+    // reason sp_metadata.js argues at length: an assertion that had to wait on
+    // somebody else's web server would make every sign-in as reliable as that
+    // server. It is drawn only for an application that names a URL — a button
+    // whose only possible outcome is "there is no URL" is not a control.
+    (firstFieldValue(row, 'samlSpMetadataUrl')
+      ? '<h2>Service provider metadata</h2>' +
+        note('Fetches <code>' + esc(firstFieldValue(row, 'samlSpMetadataUrl')) + '</code> ' +
+        'and stores what it finds: the document on <code>samlSpMetadata</code> and the ' +
+        '<code>use="encryption"</code> certificate on ' +
+        '<code>samlEncryptionCertificate</code>, which is what an assertion for this ' +
+        'service provider is then encrypted to. A fetch that fails changes NOTHING, so ' +
+        'whatever certificate is in force stays in force. The endpoints in the document ' +
+        'are reported and not applied — a response still goes where the request asks.') +
+        '<form method="post" action="/admin/applications">' + carryBack +
+        '<div class="formrow">' +
+        '<input type="hidden" name="action" value="refresh-metadata">' +
+        '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
+        '<button type="submit">Refresh the metadata</button>' +
+        '<span class="sub">' +
+        (firstFieldValue(row, 'samlEncryptionCertificate')
+          ? 'It already holds an encryption certificate; this replaces it.'
+          : 'It holds no encryption certificate yet.') +
+        ' This is one of two places in this service that dials anything at all.</span>' +
+        '</div></form>'
+      : '') +
+
     '<h2>Take it out of the registry</h2>' +
     (row.registered
       ? '<form method="post" action="/admin/applications">' + carryBack + '<div class="formrow">' +
@@ -11450,6 +11628,20 @@ function protocolChoiceRow(row) {
 // `oauthTlsClientAuthSubjectDn` — and the row says why rather than leaving a
 // reader to notice that one box is a different shape.
 // ---------------------------------------------------------------------------
+// The classes that make a block appear only when one of its families is
+// ticked. `pf` is what the stylesheet hides; each `pf-<id>` is what a checked
+// box shows. A block serving several families carries several, and appears when
+// ANY of them is ticked — which is what `samlEntityId` needs, since it is the
+// identifier of both SAML profiles.
+//
+// A block with NO families is not given `pf` at all: it is unconditional, and
+// tagging it would hide it forever.
+function familyClasses(ids) {
+  const list = (ids || []).filter(function (id) { return !!id; });
+  if (!list.length) return '';
+  return 'pf ' + list.map(function (id) { return 'pf-' + id; }).join(' ');
+}
+
 function declarationFieldRow(row) {
   const families = row.families.map(function (one) {
     return esc(one.label);
@@ -11470,11 +11662,260 @@ function declarationFieldRow(row) {
     : '<span class="state-none">one value only &mdash; an RFC 8705 check compares this ' +
       'string to a certificate\'s subject by exact equality, so it cannot hold a list ' +
       'until somebody decides what &ldquo;any of these&rdquo; should mean to that check</span>';
-  return '<tr><td><label for="field-' + esc(row.attribute) + '"' + hint + '><code>' +
+  // The row is conditional on the families it serves — see familyClasses().
+  return '<tr class="' + esc(familyClasses(row.families.map(function (one) {
+      return one.id;
+    }))) + '"><td><label for="field-' + esc(row.attribute) + '"' + hint + '><code>' +
     esc(row.attribute) + '</code></label></td>' +
     '<td>' + families + '</td>' +
     '<td>' + control + '<br>' + shape + '</td>' +
     '<td class="why">' + note(esc(row.what)) + '</td></tr>';
+}
+
+// ---------------------------------------------------------------------------
+// THE PER-APPLICATION SAML SETTINGS, AS FORM FIELDS.
+//
+// Ten attributes, five per profile, each overriding one `config.js` setting for
+// this application alone. They are drawn from
+// `applications.overridableSettings()` — the same table `saml2_sso.js` resolves
+// through and `/admin/saml-assertions` names the attribute from — so a setting
+// added there reaches this form without anybody editing it.
+//
+// **EVERY FIELD IS EMPTY BY DEFAULT AND EMPTY MEANS INHERIT.** That is the
+// whole of the interaction and it is why there is no "use the default"
+// checkbox beside each one: the absence of the attribute IS the default, so a
+// blank box and an unticked box would be two spellings of one state. The
+// placeholder carries the value that would be used, read live off the setting,
+// so somebody can see what they are overriding without opening another page.
+//
+// A `select` for a bool rather than a checkbox, for `configRow()`'s reason —
+// an unticked checkbox posts NOTHING, which here is indistinguishable from
+// "leave it alone". The empty option is what makes "inherit" expressible.
+function samlOverrideFieldRow(row) {
+  const setting = configSettingFor(row.setting);
+  if (!setting) return '';
+  const described = config.describe(setting);
+  const id = 'field-' + row.attribute;
+  const hint = tip(described.description);
+  const inherits = 'inherit — currently ' + described.text;
+  const control = described.type === 'bool'
+    ? '<select id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint + '>' +
+      '<option value="">' + esc(inherits) + '</option>' +
+      ['true', 'false'].map(function (option) {
+        return '<option value="' + option + '">' + option + '</option>';
+      }).join('') + '</select>'
+    : '<input type="' + (described.type === 'int' ? 'number' : 'text') + '"' +
+      ' id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint +
+      (typeof described.min === 'number' ? ' min="' + described.min + '"' : '') +
+      (typeof described.max === 'number' ? ' max="' + described.max + '"' : '') +
+      (typeof described.step === 'number' ? ' step="' + described.step + '"' : '') +
+      ' size="' + (described.type === 'int' ? '10' : '42') + '"' +
+      ' placeholder="' + esc(inherits) + '">';
+  return '<tr><td><label for="' + esc(id) + '"' + hint + '><code>' +
+    esc(row.attribute) + '</code></label></td>' +
+    '<td><code>' + esc(row.setting) + '</code></td>' +
+    '<td>' + control + '</td>' +
+    '<td class="why">' + note(esc(described.description)) + '</td></tr>';
+}
+
+// WHICH FAMILIES EACH OVERRIDABLE SETTING BELONGS TO, so the section can be
+// grouped and made conditional. Keyed by the setting's PREFIX, which is the one
+// thing a setting key reliably carries — and the group claim is the case that
+// makes this a table rather than a split on the dot: `groups.*` reaches an
+// access token, an ID Token and both SAML assertions, so it belongs to five
+// families at once and appears whenever any of them is ticked.
+const OVERRIDE_SECTIONS = [
+  { prefix: 'oauth2.', heading: 'What OAuth 2.0 / OIDC issues for this client',
+    families: ['oauth2', 'oidc'],
+    intro: 'The three token lifetimes plus the refresh idle timeout and whether ' +
+           'signing out revokes this client\'s refresh tokens. The last two are read ' +
+           'only in RFC 9700 mode.' },
+  { prefix: 'saml2.', heading: 'What SAML 2.0 issues for this service provider',
+    families: ['saml2'],
+    intro: 'The assertion lifetime, the two signature switches, the default NameID ' +
+           'format and the artifact lifetime.' },
+  { prefix: 'saml11.', heading: 'What SAML 1.1 issues for this relying party',
+    families: ['saml11'],
+    intro: 'The same five for the older profiles. They are separate settings ' +
+           'because 1.1 and 2.0 are separate implementations here, so an ' +
+           'application declared for both carries two answers.' },
+  { prefix: 'wsfed.', heading: 'What WS-Federation issues for this relying party',
+    families: ['wsfed'],
+    intro: 'One setting: how long the SAML 1.1 assertion inside a sign-in response ' +
+           'lasts. It also sets the wsu:Lifetime of the RequestSecurityTokenResponse ' +
+           'around it, so the envelope and the assertion cannot disagree.' },
+  { prefix: 'groups.', heading: 'The groups claim for this application',
+    families: ['oauth2', 'oidc', 'saml2', 'saml11', 'wsfed'],
+    intro: 'THE ONE GROUP HERE THAT IS NOT A PROTOCOL\'S. These four reach an ' +
+           'access token, an ID Token, a SAML 2.0 assertion and a SAML 1.1 one at ' +
+           'once, so an application declared for two protocols gets the same claim ' +
+           'name in both — which is what a claim mapping should do. The name is the ' +
+           'one that differs in practice: <code>groups</code>, <code>roles</code> ' +
+           'and <code>memberOf</code> are all ordinary.' }
+];
+
+// ---------------------------------------------------------------------------
+// THE PER-APPLICATION SETTINGS, AS FORM FIELDS.
+//
+// Twenty attributes across five sections, each overriding one `config.js`
+// setting for this application alone. They are drawn from
+// `applications.overridableSettings()` — the same table the protocol modules
+// resolve through and each defaults page names the attribute from — so a
+// setting that becomes per-application reaches this form without anybody
+// editing it. What it DOES need is a row in OVERRIDE_SECTIONS above, and a
+// setting whose prefix matches none of them is drawn in a section of its own
+// at the end rather than silently dropped.
+//
+// **EVERY FIELD IS EMPTY BY DEFAULT AND EMPTY MEANS INHERIT.** That is the
+// whole of the interaction and it is why there is no "use the default" checkbox
+// beside each one: the absence of the attribute IS the default, so a blank box
+// and an unticked box would be two spellings of one state. The placeholder
+// carries the value that would be used, read live off the setting.
+//
+// A `select` for a bool rather than a checkbox, for `configRow()`'s reason — an
+// unticked checkbox posts NOTHING, which here cannot be told from "leave it
+// alone". The empty option is what makes "inherit" expressible.
+function samlOverrideFieldRow(row) {
+  const setting = configSettingFor(row.setting);
+  if (!setting) return '';
+  const described = config.describe(setting);
+  const id = 'field-' + row.attribute;
+  const hint = tip(described.description);
+  const inherits = 'inherit — currently ' + described.text;
+  const control = described.type === 'bool'
+    ? '<select id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint + '>' +
+      '<option value="">' + esc(inherits) + '</option>' +
+      ['true', 'false'].map(function (option) {
+        return '<option value="' + option + '">' + option + '</option>';
+      }).join('') + '</select>'
+    : '<input type="' + (described.type === 'int' ? 'number' : 'text') + '"' +
+      ' id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint +
+      (typeof described.min === 'number' ? ' min="' + described.min + '"' : '') +
+      (typeof described.max === 'number' ? ' max="' + described.max + '"' : '') +
+      (typeof described.step === 'number' ? ' step="' + described.step + '"' : '') +
+      ' size="' + (described.type === 'int' ? '10' : '42') + '"' +
+      ' placeholder="' + esc(inherits) + '">';
+  return '<tr><td><label for="' + esc(id) + '"' + hint + '><code>' +
+    esc(row.attribute) + '</code></label></td>' +
+    '<td><code>' + esc(row.setting) + '</code></td>' +
+    '<td>' + control + '</td>' +
+    '<td class="why">' + note(esc(described.description)) + '</td></tr>';
+}
+
+// THE THREE ATTRIBUTES THAT SAY WHERE A SERVICE PROVIDER'S KEY COMES FROM.
+//
+// They are not setting overrides — nothing in config.js corresponds to them —
+// so they are not in `overridableSettings()` and would otherwise appear on no
+// form at all. They are conditional on SAML 2.0 like everything else in that
+// family.
+//
+// `samlSpMetadata` is a TEXTAREA and the other two are inputs, which is the
+// same shape rule declarationFieldRow() follows: a document is not something
+// anybody types on one line, and offering a single-line box for one invites a
+// paste that loses its newlines.
+const SAML_KEY_SOURCE_FIELDS = [
+  { attribute: 'samlSpMetadataUrl', label: 'Metadata URL',
+    what: 'Where this service provider publishes its metadata. Nothing is fetched until ' +
+          'you press Refresh on the entry — an assertion never waits on somebody else\'s ' +
+          'web server.' },
+  { attribute: 'samlEncryptionCertificate', label: 'Encryption certificate',
+    what: 'The certificate an assertion is encrypted to, base64 or PEM. The metadata ' +
+          'refresh writes this; set it by hand for a service provider whose metadata ' +
+          'cannot be reached. With none here the SIGNING certificate off a signed ' +
+          'AuthnRequest is used, and with neither the assertion goes out in clear.' },
+  { attribute: 'samlSpMetadata', label: 'Metadata document', multi: true,
+    what: 'The metadata itself, cached by the refresh or pasted here. Pasting it is the ' +
+          'way to configure an air-gapped service provider, or one behind a proxy this ' +
+          'service cannot dial.' }
+];
+
+function samlKeySourceSection() {
+  log.debug("Entering samlKeySourceSection().");
+  const rows = SAML_KEY_SOURCE_FIELDS.map(function (row) {
+    const id = 'field-' + row.attribute;
+    const hint = tip(row.what);
+    const control = row.multi
+      ? '<textarea id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint +
+        ' rows="4" cols="42" placeholder="paste the document, or leave it to Refresh"></textarea>'
+      : '<input type="text" id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' +
+        hint + ' size="42" placeholder="optional">';
+    return '<tr><td><label for="' + esc(id) + '"' + hint + '><code>' +
+      esc(row.attribute) + '</code></label></td>' +
+      '<td>' + esc(row.label) + '</td><td>' + control + '</td>' +
+      '<td class="why">' + note(esc(row.what)) + '</td></tr>';
+  }).join('');
+  log.debug("Leaving samlKeySourceSection().");
+  return '<div class="' + esc(familyClasses(['saml2'])) + '">' +
+    '<h3>Where SAML 2.0 encryption gets this service provider\'s key</h3>' +
+    note('Encrypting an assertion needs the RECIPIENT\'S certificate, and this ' +
+    'service does not consume metadata unless it is told to. It looks in two places, most ' +
+    'specific first: <code>samlEncryptionCertificate</code> below, then ' +
+    '<code>samlSigningCertificate</code> — which is captured off a SIGNED AuthnRequest, so ' +
+    'a service provider that signs its requests needs nothing here at all. With neither, ' +
+    'an assertion that was meant to be encrypted goes out <strong>in clear</strong> and ' +
+    'says so in the log.') +
+    '<table><tr><th>Attribute</th><th>What</th><th>Value</th><th>Notes</th></tr>' +
+    rows + '</table></div>';
+}
+
+function samlOverrideFieldsSection() {
+  log.debug("Entering samlOverrideFieldsSection().");
+  const rows = applications.overridableSettings();
+  if (!rows.length) {
+    log.debug("Leaving samlOverrideFieldsSection(). Nothing to offer.");
+    return '';
+  }
+  const placed = {};
+  const sections = OVERRIDE_SECTIONS.map(function (group) {
+    const mine = rows.filter(function (one) {
+      return one.setting.indexOf(group.prefix) === 0;
+    });
+    mine.forEach(function (one) { placed[one.attribute] = true; });
+    if (!mine.length) return '';
+    return '<div class="' + esc(familyClasses(group.families)) + '">' +
+      '<h3>' + esc(group.heading) + '</h3>' + note(group.intro) +
+      '<table><tr><th>Attribute</th><th>Overrides</th><th>Value</th>' +
+      '<th>What it is</th></tr>' +
+      mine.map(samlOverrideFieldRow).join('') +
+      '</table></div>';
+  }).join('');
+
+  // A SETTING THAT MATCHED NO SECTION IS DRAWN ANYWAY, unconditionally, and
+  // that is the safe direction rather than a loose end: the alternative is a
+  // per-application setting that exists, is resolved by some protocol module,
+  // and has no box on the one form meant to offer every one of them. It is
+  // also visible, which is how somebody notices a row is missing from
+  // OVERRIDE_SECTIONS.
+  const leftovers = rows.filter(function (one) { return !placed[one.attribute]; });
+  const extra = leftovers.length
+    ? '<h3>Other per-application settings</h3>' +
+      warn('These ' + leftovers.length + ' override a setting whose family this ' +
+      'page does not know, so they are shown always rather than with a protocol. ' +
+      'Add a row to <code>OVERRIDE_SECTIONS</code> in <code>admin-ui/admin.js</code> ' +
+      'naming the families they belong to.') +
+      '<table><tr><th>Attribute</th><th>Overrides</th><th>Value</th>' +
+      '<th>What it is</th></tr>' +
+      leftovers.map(samlOverrideFieldRow).join('') +
+      '</table>'
+    : '';
+
+  log.debug("Leaving samlOverrideFieldsSection(). " + rows.length + " field(s), " +
+            leftovers.length + " unplaced.");
+  return '<h2>What each protocol issues for this application</h2>' +
+    note('These are OPTIONAL and every one of them means <em>inherit</em> when ' +
+    'left alone. Each overrides one service-wide setting for this application only — the ' +
+    'box says which, and its placeholder says what would be used instead. The defaults ' +
+    'live on <a href="/admin/token-lifetimes">Token lifetimes</a> and ' +
+    '<a href="/admin/saml-assertions">SAML assertions</a>, and changing one there moves ' +
+    'every application that has not been given an answer of its own.') +
+    note('<strong>They apply whether or not the protocol is ticked above.</strong> A ' +
+    'declaration grants and refuses nothing here — an application declared for nothing at ' +
+    'all still gets a token if it asks for one — so these are read whenever this service ' +
+    'issues to this application. Ticking a family only decides what this page SHOWS you. ' +
+    'What ticking SAML 2.0 or SAML 1.1 does do is give the entry a ' +
+    '<code>samlEntityId</code> if you leave that blank, so its metadata is publishable ' +
+    'immediately.') +
+    sections + extra + samlKeySourceSection();
 }
 
 // The two tables, split by what the attribute IS rather than drawn as one list
@@ -11495,12 +11936,22 @@ function declarationFieldsSection(role, heading, intro) {
     log.debug("Leaving declarationFieldsSection(). Nothing to offer.");
     return '';
   }
+  // THE SECTION carries the UNION of its rows' families, so that a table whose
+  // every row is hidden does not leave a heading and a bare header row behind —
+  // which reads as data having gone missing rather than as nothing applying.
+  const families = [];
+  rows.forEach(function (one) {
+    one.families.forEach(function (family) {
+      if (families.indexOf(family.id) < 0) families.push(family.id);
+    });
+  });
   log.debug("Leaving declarationFieldsSection(). " + rows.length + " field(s).");
-  return '<h2>' + heading + '</h2>' + intro +
+  return '<div class="' + esc(familyClasses(families)) + '">' +
+    '<h2>' + heading + '</h2>' + intro +
     '<table><tr><th>Attribute</th><th>Families it serves</th><th>Value</th>' +
     '<th>What it is</th></tr>' +
     rows.map(declarationFieldRow).join('') +
-    '</table>';
+    '</table></div>';
 }
 
 const NEW_APPLICATION_IDENTIFIERS_INTRO =
@@ -11638,7 +12089,7 @@ function newApplicationPage(req) {
     '<code>ldapmodify</code> reach. Two forms over one function are two doors; there is one ' +
     'store behind them and nothing caches it.') +
 
-    '<form method="post" action="/admin/applications">' +
+    '<form method="post" action="/admin/applications" class="newapp">' +
     '<input type="hidden" name="action" value="create">' +
     '<h2>What it is called</h2>' +
     '<div class="formrow">' +
@@ -11674,10 +12125,24 @@ function newApplicationPage(req) {
     applications.PROTOCOLS.map(protocolChoiceRow).join('') +
     '</table>' +
 
+    // THE PROMPT THAT STANDS IN FOR THE HIDDEN FIELDS. It is inside the form so
+    // the `:has()` rule that hides it can reach it, and it is always in the
+    // markup: a browser without `:has()` shows it beside every field, where it
+    // reads as a description of the page rather than as a broken instruction.
+    '<div class="pf-hint">Everything below this line depends on which families ' +
+    'you tick above &mdash; a field appears when the protocol it belongs to is ' +
+    'selected, so an OAuth client is not asked for a SAML entityID. Tick a ' +
+    'family to see its fields. <strong>If you can see the fields already</strong>, ' +
+    'this browser does not support the <code>:has()</code> selector and the form ' +
+    'is showing everything, which is the same form it was before this page could ' +
+    'hide anything &mdash; nothing you type is affected either way, because the ' +
+    'server reads what was posted and not what was visible.</div>' +
+
     declarationFieldsSection('identifier', 'What each protocol will call it',
                              NEW_APPLICATION_IDENTIFIERS_INTRO) +
     declarationFieldsSection('redirect', 'Where responses go back to',
                              NEW_APPLICATION_REDIRECTS_INTRO) +
+    samlOverrideFieldsSection() +
 
     '<div class="formrow"><button type="submit">Create the application</button>' +
     note('It is created with zero counters and a description saying it was made ' +
@@ -16629,7 +17094,8 @@ app.post('/admin/config', function (req, res) {
 // this page and its two API operations is derived from it, so a fifth setting
 // is one entry here.
 const TOKEN_LIFETIME_KEYS = ['oauth2.accessTokenTtlS', 'oauth2.idTokenTtlS',
-                             'oauth2.refreshTokenTtlS', 'oauth2.clockSkewS'];
+                             'oauth2.refreshTokenTtlS', 'oauth2.refreshIdleSeconds',
+                             'oauth2.revokeRefreshOnLogout', 'oauth2.clockSkewS'];
 
 // Which token kind each lifetime governs, so the page can put the count of what
 // is already out there beside the number that decided it. `oauth2.clockSkewS`
@@ -16680,29 +17146,52 @@ function tokenLifetimeRow(setting, snapshot) {
     ? '<span class="state-valid">' + counts.valid + ' valid</span>, ' +
       '<span class="state-expired">' + counts.expired + ' expired</span>, ' +
       '<span class="state-revoked">' + counts.revoked + ' revoked</span>'
-    : '<span class="state-none">—</span>';
+    : '<span class="state-none">&mdash;</span>';
   // The setting's own description, on the label and on the box. It is the same
   // sentence /admin/config carries in the fold under each key, and the reason
   // it is a tooltip HERE and a fold THERE is the two pages' different jobs:
-  // this one is four rows somebody sets a number in, so a paragraph under each
-  // would be most of the page, and there is a link to the full row next door.
+  // this one is a short list of rows somebody sets a number in, so a paragraph
+  // under each would be most of the page, and there is a link to the full row
+  // next door.
   const hint = tip(setting.description);
-  return '<tr>' +
-    '<td><label for="' + esc(id) + '"' + hint + '>' + esc(setting.label) + '</label>' +
-    '<div class="note"><code>' + esc(setting.key) + '</code>' +
-    (setting.env ? ', <code>' + esc(setting.env) + '</code>' : '') + '</div></td>' +
-    '<td><input type="number" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+  // TWO CONTROLS, BY TYPE. It was one — a `number` input — until
+  // `oauth2.revokeRefreshOnLogout` joined this page on 2026-08-27, and a bool
+  // gets the `select` of true/false that /admin/config's configRow() draws
+  // rather than a checkbox: an unticked checkbox posts NOTHING, and this form
+  // would read that as "the field was not sent" rather than as false.
+  //
+  // The bounds on the number input come off the setting itself, so the
+  // browser's own refusal and the server's are the same three numbers. The
+  // server still checks: an input attribute is a convenience for a person and
+  // no constraint at all on a JSON body or a curl.
+  const control = setting.type === 'bool'
+    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' + hint + '>' +
+      ['true', 'false'].map(function (option) {
+        return '<option value="' + option + '"' +
+          (option === setting.text ? ' selected' : '') + '>' + option + '</option>';
+      }).join('') + '</select>'
+    : '<input type="number" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
       hint + ' value="' + esc(setting.text) + '"' +
       (typeof setting.min === 'number' ? ' min="' + setting.min + '"' : '') +
       (typeof setting.max === 'number' ? ' max="' + setting.max + '"' : '') +
       (typeof setting.step === 'number' ? ' step="' + setting.step + '"' : '') +
-      ' size="10"></td>' +
-    '<td>' + esc(humanSeconds(setting.value)) + '</td>' +
-    '<td>' + esc(String(typeof setting.min === 'number' ? setting.min : 0)) + '&ndash;' +
-      esc(String(typeof setting.max === 'number' ? setting.max : '')) +
-      (typeof setting.step === 'number'
-        ? ', in ' + esc(String(setting.step)) + 's'
-        : '') + '</td>' +
+      ' size="10">';
+  // WHICH ATTRIBUTE A CLIENT OVERRIDES THIS WITH, or a plain no. Read from
+  // applications.js's own table rather than listed here, so a setting that
+  // becomes per-client cannot reach this page without this column saying so.
+  const override = applications.overridableSettings().filter(function (row) {
+    return row.setting === setting.key;
+  })[0];
+  const per = override
+    ? '<code>' + esc(override.attribute) + '</code>'
+    : '<span class="state-none">not per client</span>';
+  return '<tr>' +
+    '<td><label for="' + esc(id) + '"' + hint + '>' + esc(setting.label) + '</label>' +
+    '<div class="note"><code>' + esc(setting.key) + '</code>' +
+    (setting.env ? ', <code>' + esc(setting.env) + '</code>' : '') + '</div></td>' +
+    '<td>' + control + '</td>' +
+    '<td>' + esc(setting.type === 'bool' ? '' : humanSeconds(setting.value)) + '</td>' +
+    '<td>' + per + '</td>' +
     '<td>' + (setting.overridden
       ? '<strong>' + esc(sourceNote(setting)) + '</strong>'
       : esc(sourceNote(setting))) + '</td>' +
@@ -16895,7 +17384,7 @@ app.get('/admin/token-lifetimes', function (req, res) {
 
     tokenLifetimeWarnings() +
 
-    '<h2>The four settings</h2>' +
+    '<h2>The six settings</h2>' +
     note('Every lifetime is a whole number of <strong>thirty-second</strong> units. ' +
     'That is not a formatting rule: these exist to be set short and watched, and below half a ' +
     'minute a token expires between the response being written and the client reading it, which ' +
@@ -16905,7 +17394,7 @@ app.get('/admin/token-lifetimes', function (req, res) {
     'and become a lifetime extension nobody asked for.') +
     '<form method="post" action="/admin/token-lifetimes">' +
     '<input type="hidden" name="action" value="set">' +
-    '<table><tr><th>Setting</th><th>Seconds</th><th>Which is</th><th>Allowed</th>' +
+    '<table><tr><th>Setting</th><th>Value</th><th>Which is</th><th>Per client</th>' +
     '<th>Source</th><th>Tokens of that kind held here</th></tr>' +
     settings.map(function (setting) { return tokenLifetimeRow(setting, snapshot); }).join('') +
     '</table>' +
@@ -16993,6 +17482,559 @@ app.post('/admin/token-lifetimes', function (req, res) {
   const result = tokenLifetimesAction(body);
   respondToAction(req, res, '/admin/token-lifetimes', result);
   log.debug("Leaving the admin token lifetimes action endpoint.");
+});
+
+
+// ---------------------------------------------------------------------------
+// /admin/saml-assertions — HOW LONG AN ASSERTION IS VALID, AND HOW FAR THE
+// WINDOW IS WIDENED FOR SOMEBODY ELSE'S CLOCK.
+//
+// Three settings, all of them `config.js` rows, on a page of their own under
+// Protocols > SAML. It is the THIRD page of this shape — /admin/token-lifetimes
+// was the second and argues the form at length — so the test that header sets
+// is the one this page has to pass rather than cite: a page like this earns its
+// place when the reader's task is not the one /admin/config serves, and it
+// costs a reader nothing only while it writes through the same function.
+//
+// It passes on both counts, and the specific reasons are:
+//
+//   * These three are a QUANTITY somebody sets to a number to watch something
+//     happen — "make it a minute and see whether that service provider checks
+//     NotOnOrAfter at all". Two of them are already drawn on /admin/saml2 and
+//     /admin/saml11, one on each, which means comparing them or changing both
+//     costs two pages and a scroll through everything else those pages
+//     configure. This is the one place both are visible at once.
+//   * They INTERACT, and interact in a way a flat table cannot say. A skew as
+//     long as the lifetime is an assertion valid for twice as long as its
+//     lifetime claims; a skew of zero against a relying party whose clock is
+//     behind is an assertion refused as not-yet-valid, which is the single
+//     most misdiagnosed failure in this protocol family because it reads from
+//     both ends as a signature or trust-store problem.
+//   * The two lifetimes are SEPARATE settings, and a page that shows them
+//     together is the only place that fact is visible. SAML 2.0 and SAML 1.1
+//     are separate implementations here, not one with a version flag.
+//
+// THERE IS NO STORE. This page holds nothing and writes through
+// `config.setOverride()` — the same function /admin/config's Save, the two
+// identity provider pages' own forms, and `POST /admin-api/config/set` all
+// call, against the same override map. A change made on any of them is one
+// change. That is what keeps the one-store rule intact while the same setting
+// appears on two pages.
+//
+// WHY THE SKEW IS ONE SETTING AND THE LIFETIMES ARE TWO. The lifetimes are per
+// profile because the two profiles are consumed differently and this
+// repository has argued that at length in config.js. The skew is not about a
+// profile at all: it is how far out the clocks in the estate this service
+// issues into are allowed to be, which a deployment decides once. It is
+// applied in both builders, so WS-Trust and WS-Federation — whose assertions
+// come out of those same two functions — get it without either module knowing
+// it exists.
+//
+// AND IT IS NOT oauth2.clockSkewS. That one is a TOLERANCE applied when this
+// service READS something back, including an inbound federation partner's
+// assertion (federation/federation_sp.js, which argues there that a reading
+// tolerance is decided once). This one is what this service WRITES into a
+// document it issues. A deployment wanting a strict reading and a forgiving
+// issuance has to be able to say so, and with one setting it could not.
+//
+// NOTHING ALREADY ISSUED CHANGES, and the page says so. A validity window is
+// stamped into an assertion when it is signed.
+// ---------------------------------------------------------------------------
+
+// THE ELEVEN SETTINGS THIS PAGE OWNS: five per profile, plus the skew both
+// share. `unit` is what an int row's number means; `kind` is the artifact kind
+// whose count belongs beside it (only the two lifetimes have one, because only
+// they govern how long an assertion lives); `profile` and `field` name the
+// per-application attribute that OVERRIDES the row, which is what makes these
+// ten defaults rather than settings. Written once, and every part of this page,
+// its two API operations and the per-application resolver's documentation is
+// derived from it.
+const SAML_ASSERTION_SETTINGS = [
+  { key: 'saml2.assertionLifetimeMin', unit: 'min', kind: 'SAML 2.0',
+    profile: 'saml2', field: 'saml2AssertionLifetimeMin' },
+  { key: 'saml2.signAssertion', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2SignAssertion' },
+  { key: 'saml2.signResponse', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2SignResponse' },
+  { key: 'saml2.nameIdFormat', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2NameIdFormat' },
+  { key: 'saml2.artifactTtlS', unit: 's', kind: null,
+    profile: 'saml2', field: 'saml2ArtifactTtlS' },
+  // ENCRYPTION, added 2026-08-27. They are `saml2.*` and per application like
+  // the five above, so they are drawn in the same section — a reader deciding
+  // what a service provider receives should not have to visit two pages to see
+  // that it is signed AND encrypted.
+  { key: 'saml2.encryptAssertion', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2EncryptAssertion' },
+  { key: 'saml2.encryptionAlgorithm', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2EncryptionAlgorithm' },
+  { key: 'saml2.keyTransportAlgorithm', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2KeyTransportAlgorithm' },
+  { key: 'saml2.encryptLogoutNameId', unit: '', kind: null,
+    profile: 'saml2', field: 'saml2EncryptLogoutNameId' },
+  { key: 'saml11.assertionLifetimeMin', unit: 'min', kind: 'SAML 1.1',
+    profile: 'saml11', field: 'saml11AssertionLifetimeMin' },
+  { key: 'saml11.signAssertion', unit: '', kind: null,
+    profile: 'saml11', field: 'saml11SignAssertion' },
+  { key: 'saml11.signResponse', unit: '', kind: null,
+    profile: 'saml11', field: 'saml11SignResponse' },
+  { key: 'saml11.nameIdFormat', unit: '', kind: null,
+    profile: 'saml11', field: 'saml11NameIdFormat' },
+  { key: 'saml11.artifactTtlS', unit: 's', kind: null,
+    profile: 'saml11', field: 'saml11ArtifactTtlS' },
+  // WS-FEDERATION'S ONE, and it is on this page rather than on /admin/wsfed
+  // because a WS-Federation sign-in response carries a SAML 1.1 assertion built
+  // by the same function the profile above uses. See SETTING_HOMES, where the
+  // same argument is made about the group.
+  { key: 'wsfed.assertionLifetimeMin', unit: 'min', kind: null,
+    profile: 'wsfed', field: 'wsfedAssertionLifetimeMin' },
+  // The one row with no `profile` and no per-application field, and that is
+  // the whole of what distinguishes it: a skew is a fact about the clocks in
+  // the estate this service issues into, which is decided once and not per
+  // relying party. The ten above are per application because two service
+  // providers in one estate legitimately want different answers.
+  { key: 'saml.clockSkewS', unit: 's', kind: null, profile: '', field: '' }
+];
+
+const SAML_ASSERTION_KEYS = SAML_ASSERTION_SETTINGS.map(function (row) {
+  return row.key;
+});
+
+function samlAssertionRowFor(key) {
+  return SAML_ASSERTION_SETTINGS.filter(function (row) {
+    return row.key === key;
+  })[0] || null;
+}
+
+// The setting's value in SECONDS, whatever unit its row is written in. Every
+// comparison on this page — skew against lifetime, the warnings below — has to
+// be made in one unit, and doing it at each comparison is how two of them come
+// to disagree.
+function samlAssertionSeconds(key) {
+  const row = samlAssertionRowFor(key);
+  const value = Number(config.value(key)) || 0;
+  return row && row.unit === 'min' ? value * 60 : value;
+}
+
+// One row of the form. The same shape tokenLifetimeRow() draws and for the same
+// reasons — a `number` input with `min`, `max` and `step` off the setting
+// itself, so the browser's refusal and the server's are the same three numbers
+// — differing only in that the unit is per row here rather than seconds
+// throughout, and that what sits in the last column is a count of assertions
+// rather than of tokens.
+function samlAssertionSettingRow(setting, snapshot) {
+  const id = 'sa-' + setting.key.replace(/\./g, '-');
+  const row = samlAssertionRowFor(setting.key);
+  const counts = (row && row.kind)
+    ? (snapshot.assertions.byKind.filter(function (k) { return k.kind === row.kind; })[0] || null)
+    : null;
+  const issued = counts
+    ? '<span class="state-valid">' + counts.valid + ' valid</span>, ' +
+      '<span class="state-expired">' + counts.expired + ' expired</span>'
+    : '<span class="state-none">&mdash;</span>';
+  const hint = tip(setting.description);
+  // THREE CONTROLS, BY TYPE, and they are the ones `/admin/config`'s configRow()
+  // draws — a `select` of true/false for a bool rather than a checkbox, because
+  // an unticked checkbox sends NOTHING and this form would then read "sign no
+  // assertion" as "the field was not posted". That is the same reason configRow()
+  // uses a select, and getting it wrong here would be a silent one.
+  // THREE CONTROLS NOW, not two: `enum` joined bool and int when the two
+  // encryption algorithm rows arrived. It draws the setting's own enumValues,
+  // so a value added to that list in config.js appears here without this file
+  // being touched — and a value REMOVED there stops being offerable, which is
+  // what keeps the form from proposing something the action would refuse.
+  const control = setting.type === 'enum'
+    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' + hint + '>' +
+      (setting.enumValues || []).map(function (option) {
+        return '<option value="' + esc(option) + '"' +
+          (option === setting.text ? ' selected' : '') + '>' + esc(option) + '</option>';
+      }).join('') + '</select>'
+    : (setting.type === 'bool'
+    ? '<select name="' + esc(setting.key) + '" id="' + esc(id) + '"' + hint + '>' +
+      ['true', 'false'].map(function (option) {
+        return '<option value="' + option + '"' +
+          (option === setting.text ? ' selected' : '') + '>' + option + '</option>';
+      }).join('') + '</select>'
+    : (setting.type === 'int'
+      ? '<input type="number" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+        hint + ' value="' + esc(setting.text) + '"' +
+        (typeof setting.min === 'number' ? ' min="' + setting.min + '"' : '') +
+        (typeof setting.max === 'number' ? ' max="' + setting.max + '"' : '') +
+        (typeof setting.step === 'number' ? ' step="' + setting.step + '"' : '') +
+        ' size="10"> ' + esc(row ? row.unit : '')
+      : '<input type="text" name="' + esc(setting.key) + '" id="' + esc(id) + '"' +
+        hint + ' size="40" value="' + esc(setting.text) + '">'));
+  // What an application would override this with. Named rather than described,
+  // because the whole point of the column is that somebody reading this page
+  // can go and type the exception on an application entry — and the attribute
+  // name is what they have to type.
+  const per = (row && row.field)
+    ? '<code>' + esc(row.field) + '</code>'
+    : '<span class="state-none">not per application</span>';
+  return '<tr>' +
+    '<td><label for="' + esc(id) + '"' + hint + '>' + esc(setting.label) + '</label>' +
+    '<div class="note"><code>' + esc(setting.key) + '</code>' +
+    (setting.env ? ', <code>' + esc(setting.env) + '</code>' : '') + '</div></td>' +
+    '<td>' + control + '</td>' +
+    '<td>' + esc(setting.type === 'int' && row && row.unit
+      ? humanSeconds(samlAssertionSeconds(setting.key))
+      : '') + '</td>' +
+    '<td>' + per + '</td>' +
+    '<td>' + (setting.overridden
+      ? '<strong>' + esc(sourceNote(setting)) + '</strong>'
+      : esc(sourceNote(setting))) + '</td>' +
+    '<td>' + issued + '</td></tr>';
+}
+
+// The states these settings can legally be in that are worth being told about.
+// Nothing here is refused — this service exists to be pointed at a relying
+// party and made to misbehave on purpose — but a page that showed three
+// numbers and not their consequence would leave the consequence to be found
+// from a relying party that stopped working.
+function samlAssertionWarnings() {
+  const skew = samlAssertionSeconds('saml.clockSkewS');
+  const notes = [];
+  SAML_ASSERTION_SETTINGS.filter(function (row) { return row.kind; }).forEach(function (row) {
+    const lifetime = samlAssertionSeconds(row.key);
+    if (skew > 0 && skew >= lifetime) {
+      notes.push('<strong>The clock skew is at least as long as the ' + esc(row.kind) +
+        ' assertion&rsquo;s own lifetime</strong> (' + esc(humanSeconds(skew)) + ' against ' +
+        esc(humanSeconds(lifetime)) + '). The window written into the assertion is the ' +
+        'lifetime plus the skew at EACH end, so it is valid for at least three times as ' +
+        'long as <code>' + esc(row.key) + '</code> says. If the point was to watch a relying ' +
+        'party refuse a stale assertion, it will not: lower the skew, or raise the lifetime.');
+    }
+  });
+  if (skew === 0) {
+    notes.push('<strong>The skew is 0, which is what this service has always done</strong> ' +
+      '&mdash; <code>NotBefore</code> is stamped at exactly the moment of issue. That is the ' +
+      'strict reading, and it is the one that fails against a relying party whose clock is a ' +
+      'few seconds behind: the assertion is not yet valid when it arrives, and the refusal ' +
+      'reads as a signature or trust-store problem from both ends. If a service provider is ' +
+      'refusing assertions that look correct, this is the first setting to raise.');
+  }
+  if (!notes.length) return '';
+  return notes.map(function (note) { return warn(note); }).join('');
+}
+
+// The action switch. Two actions, both writing through config.js, and both
+// behaving exactly as /admin/token-lifetimes' do — including `set` being
+// ALL-OR-NOTHING, for that page's reason: this form posts three fields at once,
+// and applying two before refusing the third would leave this service issuing
+// assertions with a combination nobody asked for and the page showing it as
+// though it had been chosen.
+function samlAssertionsAction(body) {
+  log.debug("Entering samlAssertionsAction(). action=" + (body && body.action));
+  const action = String((body && body.action) || '').trim();
+
+  if (action === 'set') {
+    // Only the three this page owns, and only the ones actually posted. A field
+    // named here that is not one of them is refused BY NAME rather than
+    // ignored: this action's whole surface is three keys, and a caller that
+    // misspelt one deserves to be told rather than to watch nothing happen.
+    const posted = Object.keys(body || {}).filter(function (name) { return name !== 'action'; });
+    const unknown = posted.filter(function (name) {
+      return SAML_ASSERTION_KEYS.indexOf(name) < 0;
+    });
+    if (unknown.length) {
+      log.debug("Leaving samlAssertionsAction(). Unknown field(s): " + unknown.join(', '));
+      return { ok: false, errors: ['This action sets only ' + SAML_ASSERTION_KEYS.join(', ') +
+        '. It was also given: ' + unknown.join(', ') + '. Every other setting is on ' +
+        '/admin/config and POST /admin-api/config/set.'] };
+    }
+    const wanted = posted.filter(function (name) { return SAML_ASSERTION_KEYS.indexOf(name) >= 0; });
+    if (!wanted.length) {
+      log.debug("Leaving samlAssertionsAction(). Nothing was posted.");
+      return { ok: false, errors: ['No setting was posted. Name at least one of ' +
+        SAML_ASSERTION_KEYS.join(', ') + '.'] };
+    }
+    const errors = [];
+    wanted.forEach(function (key) {
+      const problem = config.checkOverride(key, body[key]);
+      if (problem) errors.push(problem);
+    });
+    if (errors.length) {
+      log.debug("Leaving samlAssertionsAction(). Refused: " + errors.length + " problem(s).");
+      return { ok: false, errors: errors };
+    }
+    const changed = [];
+    wanted.forEach(function (key) {
+      const before = config.text(key);
+      config.setOverride(key, body[key]);
+      if (config.text(key) !== before) changed.push(key);
+    });
+    log.debug("Leaving samlAssertionsAction(). " + changed.length + " changed.");
+    return { ok: true, applied: wanted, changed: changed,
+             settings: wanted.map(function (key) {
+               return config.describe(configSettingFor(key));
+             }),
+             message: (changed.length
+               ? changed.length + ' setting(s) changed: ' + changed.map(function (key) {
+                   const row = samlAssertionRowFor(key);
+                   return key + ' = ' + config.text(key) + (row ? row.unit : '');
+                 }).join(', ') + '.'
+               : 'Nothing changed — every value posted was the one already in force.') +
+               ' It applies to the NEXT assertion signed; nothing already issued is affected, ' +
+               'because a validity window is stamped into an assertion when it is signed. ' +
+               'Gone on restart.' };
+  }
+
+  if (action === 'defaults') {
+    // clearOverride() refuses a key that was never overridden, which is right
+    // for a caller naming one key and wrong for a button meaning "put these
+    // three back". So the refusals are counted rather than returned.
+    const cleared = [];
+    SAML_ASSERTION_KEYS.forEach(function (key) {
+      if (config.clearOverride(key).ok) cleared.push(key);
+    });
+    log.debug("Leaving samlAssertionsAction(). Cleared " + cleared.length + ".");
+    return { ok: true, cleared: cleared,
+             settings: SAML_ASSERTION_KEYS.map(function (key) {
+               return config.describe(configSettingFor(key));
+             }),
+             message: cleared.length
+               ? cleared.length + ' override(s) cleared: ' + cleared.join(', ') + '. Each is ' +
+                 'back to its environment or appconfig value.'
+               : 'None of the sixteen was overridden here, so nothing changed — they are ' +
+                 'already coming from the environment or from one of the two appconfig ' +
+                 'files.' };
+  }
+
+  log.debug("Leaving samlAssertionsAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The two are: set, defaults.'] };
+}
+
+// The JSON view, answered by GET /admin/saml-assertions?format=json and by
+// GET /admin-api/saml-assertions. Built here rather than in the route so the
+// page and the API cannot come to describe different settings.
+function samlAssertionsJson() {
+  log.debug("Entering samlAssertionsJson().");
+  const snapshot = stats.snapshot();
+  const settings = SAML_ASSERTION_KEYS.map(function (key) {
+    return config.describe(configSettingFor(key));
+  });
+  // Only the two SAML kinds. `artifacts.byKind` also carries Kerberos tickets
+  // and verifiable credentials, and a page about assertions reporting those
+  // would be answering a question nobody asked it.
+  const kinds = SAML_ASSERTION_SETTINGS.filter(function (row) { return row.kind; })
+    .map(function (row) {
+      return snapshot.artifacts.byKind.filter(function (k) {
+        return k.kind === row.kind;
+      })[0] || { kind: row.kind, issued: 0, valid: 0, expired: 0, noExpiry: 0 };
+    });
+  const json = {
+    // The effective numbers, flat, for a caller that wants the value and not
+    // the provenance — and `windowS`, which is the thing a caller actually has
+    // to reason about and which no single setting states: the whole width of
+    // the window written into an assertion, skew included at both ends.
+    assertions: {
+      saml2LifetimeMin: config.value('saml2.assertionLifetimeMin'),
+      saml11LifetimeMin: config.value('saml11.assertionLifetimeMin'),
+      clockSkewS: config.value('saml.clockSkewS'),
+      saml2WindowS: samlAssertionSeconds('saml2.assertionLifetimeMin') +
+                    2 * samlAssertionSeconds('saml.clockSkewS'),
+      saml11WindowS: samlAssertionSeconds('saml11.assertionLifetimeMin') +
+                     2 * samlAssertionSeconds('saml.clockSkewS')
+    },
+    // WHICH OF THESE AN APPLICATION MAY OVERRIDE, AND WHAT THE ATTRIBUTE IS
+    // CALLED. Read off the same table the form is drawn from, so a caller that
+    // wants to write the exception does not have to be told the attribute names
+    // in prose somewhere else — and so that a row added to that table cannot
+    // reach the page without reaching this reply.
+    perApplication: SAML_ASSERTION_SETTINGS.filter(function (row) {
+      return row.field;
+    }).map(function (row) {
+      return { setting: row.key, attribute: row.field, profile: row.profile };
+    }),
+    settings: settings,
+    // What is already out there, per profile. Counted against this service's
+    // own clock with no allowance applied — the skew above is written INTO an
+    // assertion rather than applied when one is read here, so an assertion this
+    // calls expired is one whose stated NotOnOrAfter has passed.
+    assertionsIssued: {
+      held: snapshot.artifacts.held, forgotten: snapshot.artifacts.forgotten,
+      cap: snapshot.artifacts.cap, byKind: kinds
+    },
+    now: snapshot.now
+  };
+  log.debug("Leaving samlAssertionsJson(). " + settings.length + " setting(s).");
+  return json;
+}
+
+app.get('/admin/saml-assertions', function (req, res) {
+  log.debug("Entering the admin SAML assertions page.");
+  const json = samlAssertionsJson();
+  const settings = json.settings;
+  const snapshot = { assertions: { byKind: json.assertionsIssued.byKind } };
+  const anyOverridden = settings.some(function (setting) { return setting.overridden; });
+
+  const inner = messagesOf(req) +
+    note('How long an assertion issued here is valid for, and how far its window is ' +
+    'widened at each end to allow for a relying party whose clock disagrees with this one. ' +
+    'All three are <a href="/admin/config">configuration settings</a>: the two lifetimes are ' +
+    'also drawn on <a href="/admin/saml2">SAML 2.0</a> and ' +
+    '<a href="/admin/saml11">SAML 1.1</a>, one on each, and the skew on both. This page is a ' +
+    'shorter way to the same rows and the only place all three are visible at once — it ' +
+    'writes through the same function, so a change made here and one made there are one ' +
+    'change.') +
+
+    warn('<strong>A change applies to the NEXT assertion and to nothing already ' +
+    'issued.</strong> A validity window is stamped into an assertion as ' +
+    '<code>Conditions/NotBefore</code> and <code>NotOnOrAfter</code> when it is signed, so an ' +
+    'assertion already in a relying party&rsquo;s hands cannot be shortened or extended ' +
+    'afterwards by anything on this page. Changes are in memory and are gone on restart; to ' +
+    'make one stick, put it in <code>' + esc(process.env.CONFIG_FILE || 'env/local.js') +
+    '</code>.') +
+
+    samlAssertionWarnings() +
+
+    '<h2>The sixteen settings</h2>' +
+    note('<strong>Ten of these eleven are DEFAULTS, not decisions.</strong> Each is ' +
+    'what an application gets when its own entry says nothing, and the ' +
+    '<em>Per-application</em> column names the attribute that overrides it — set that on an ' +
+    'application under <a href="/admin/applications">Applications</a> and this row stops ' +
+    'governing it. The eleventh, the clock skew, has no per-application form: it is a fact ' +
+    'about the clocks in the estate this service issues into, decided once. ' +
+    '<strong>They moved here from the two identity provider pages on 2026-08-27</strong>, ' +
+    'because those pages configure this service as an identity provider and these describe ' +
+    'what it does for an application nobody has configured.') +
+    note('The two lifetimes are in <strong>minutes</strong> and the skew and the two ' +
+    'artifact lifetimes are in <strong>seconds</strong>, which is not a formatting accident: ' +
+    'a lifetime is set to a number of minutes to watch an assertion go stale, and a skew is a ' +
+    'handful of seconds covering the difference between two machines. The skew is capped at ' +
+    '<strong>300 seconds</strong> for the reason <code>oauth2.clockSkewS</code> is — five ' +
+    'minutes is what Kerberos allows here (<code>krb5.clockSkew</code>), and wider than that ' +
+    'the window has stopped being a tolerance and become a lifetime nobody chose.') +
+    '<form method="post" action="/admin/saml-assertions">' +
+    '<input type="hidden" name="action" value="set">' +
+    ['saml2', 'saml11', 'wsfed', ''].map(function (profile) {
+      const mine = settings.filter(function (setting) {
+        const row = samlAssertionRowFor(setting.key);
+        return row && row.profile === profile;
+      });
+      if (!mine.length) return '';
+      // The heading is the profile's own name, and the empty profile is the
+      // skew — which is headed by what it IS rather than by a profile it does
+      // not belong to, because putting it under either would be the claim this
+      // page spends a section denying.
+      const heading = profile === 'saml2' ? 'SAML 2.0'
+                    : (profile === 'saml11' ? 'SAML 1.1'
+                    : (profile === 'wsfed' ? 'WS-Federation' : 'Every profile'));
+      return '<h3>' + esc(heading) + '</h3>' +
+        '<table><tr><th>Setting</th><th>Value</th><th>Which is</th>' +
+        '<th>Per-application</th><th>Source</th>' +
+        '<th>Assertions held</th></tr>' +
+        mine.map(function (setting) {
+          return samlAssertionSettingRow(setting, snapshot);
+        }).join('') +
+        '</table>';
+    }).join('') +
+    '<p><button>Save assertion settings</button></p>' +
+    note('All sixteen are checked before any is applied — a form that took eleven and ' +
+    'refused the twelfth would leave this service issuing a combination nobody chose.') +
+    '</form>' +
+
+    (anyOverridden
+      ? '<div class="ok">' +
+        esc(String(settings.filter(function (s) { return s.overridden; }).length)) +
+        ' of the sixteen are set here, in memory only. ' +
+        '<form method="post" action="/admin/saml-assertions" class="inline">' +
+        '<input type="hidden" name="action" value="defaults">' +
+        '<button class="secondary">Put these sixteen back</button></form>' +
+        ' It clears the override on these sixteen only, and leaves any other setting alone — ' +
+        '<a href="/admin/config">Configuration</a> has the reset-all.</div>'
+      : note('None of the sixteen is overridden: each is coming from its environment ' +
+        'variable, from <code>' + esc(process.env.CONFIG_FILE || 'the appconfig file') +
+        '</code>, or from <code>' + esc(config.DEFAULTS_FILE) + '</code> under it. ' +
+        'The <em>Source</em> column says which.')) +
+
+    '<h2>What the skew actually does to an assertion</h2>' +
+    note('It is added at BOTH ends of the window and to neither instant that states ' +
+    'when something happened: <code>NotBefore</code> is backdated by it and ' +
+    '<code>NotOnOrAfter</code> is extended by it, while <code>IssueInstant</code> and the ' +
+    'authentication instant are left at the real time &mdash; backdating those would be a lie ' +
+    'about an event rather than an allowance about a clock. So the window an assertion states ' +
+    'is its lifetime <em>plus twice</em> the skew, which is why this page reports ' +
+    '<code>saml2WindowS</code> and <code>saml11WindowS</code> beside the settings ' +
+    'themselves. At the default 0 the documents are byte-for-byte what this service issued ' +
+    'before the setting existed.') +
+    '<table><tr><th>Profile</th><th>NotBefore</th><th>NotOnOrAfter</th>' +
+    '<th class="num">Stated window</th></tr>' +
+    SAML_ASSERTION_SETTINGS.filter(function (row) { return row.kind; }).map(function (row) {
+      const skew = samlAssertionSeconds('saml.clockSkewS');
+      const lifetime = samlAssertionSeconds(row.key);
+      return '<tr><td>' + esc(row.kind) + '</td>' +
+        '<td><code>now' + (skew ? ' &minus; ' + esc(String(skew)) + 's' : '') + '</code></td>' +
+        '<td><code>now + ' + esc(humanSeconds(lifetime)) +
+          (skew ? ' + ' + esc(String(skew)) + 's' : '') + '</code></td>' +
+        '<td class="num">' + esc(humanSeconds(lifetime + 2 * skew)) + '</td></tr>';
+    }).join('') +
+    '</table>' +
+
+    '<h2>It reaches four protocols, and it is not the skew this service reads with</h2>' +
+    note('<strong>Four.</strong> WS-Trust and WS-Federation build their assertions with ' +
+    'the same two functions the browser profiles use, so both settings above reach them ' +
+    'without either module knowing these exist. A WS-Federation sign-in carries a SAML 1.1 ' +
+    'assertion, so it is <code>saml11.assertionLifetimeMin</code> that governs it. What those ' +
+    'two wrap the assertion in — WS-Trust&rsquo;s <code>wsu:Lifetime</code> and the ' +
+    'equivalent in a WS-Federation response — states the LIFETIME without the skew, which is ' +
+    'the conservative reading and is deliberate: the envelope describes what was asked for ' +
+    'and the assertion states what it is actually valid for.') +
+    note('<strong>And it is not <code>oauth2.clockSkewS</code>.</strong> That one is ' +
+    'the allowance applied wherever this service READS something back — including an inbound ' +
+    'federation partner&rsquo;s SAML assertion at <code>/federation/acs/{id}</code>, which ' +
+    'applies it to exactly the two attributes this page writes. This one is what goes INTO a ' +
+    'document this service issues. One is about somebody else&rsquo;s clock and one is about ' +
+    'how much of somebody else&rsquo;s clock this service pays for in advance, and a ' +
+    'deployment wanting a strict reading and a forgiving issuance has to be able to say so. ' +
+    'The reading tolerance is on ' +
+    '<a href="/admin/token-lifetimes">Token lifetimes</a>.') +
+
+    '<h2>What is already out there</h2>' +
+    note('Counted against this service&rsquo;s own clock with no allowance applied — ' +
+    'the skew above is written into an assertion rather than applied when one is read here, ' +
+    'so an assertion this calls expired is one whose stated <code>NotOnOrAfter</code> has ' +
+    'passed. ' + esc(String(json.assertionsIssued.held)) + ' artifact(s) are held, of the most ' +
+    'recent ' + esc(String(json.assertionsIssued.cap)) + '; ' +
+    esc(String(json.assertionsIssued.forgotten)) + ' older one(s) have been forgotten. Every ' +
+    'one of them is on <a href="/admin/tokens">the tokens page</a>, which draws assertions ' +
+    'beside the JWTs and the Kerberos tickets.') +
+    '<table><tr><th>Profile</th><th class="num">Issued</th><th class="num">Valid</th>' +
+    '<th class="num">Expired</th><th class="num">No expiry stated</th></tr>' +
+    (json.assertionsIssued.byKind.map(function (row) {
+      return '<tr><td><code>' + esc(row.kind) + '</code></td>' +
+        '<td class="num">' + row.issued + '</td>' +
+        '<td class="num state-valid">' + row.valid + '</td>' +
+        '<td class="num state-expired">' + row.expired + '</td>' +
+        '<td class="num state-none">' + row.noExpiry + '</td></tr>';
+    }).join('')) +
+    '</table>' +
+
+    '<h2>Two things about a window this page does not set</h2>' +
+    note('A <strong>SAML artifact</strong> is good for ' +
+    '<code>saml2.artifactTtlS</code> and is a different clock entirely — it governs how long ' +
+    'an artifact can be RESOLVED for, not how long the assertion it resolves to is valid. ' +
+    'And the <strong>session</strong> behind an assertion has its own lifetime: an assertion ' +
+    'that has expired does not end the sign-on session that produced it, which is why a ' +
+    'relying party refusing a stale assertion can be sent straight back here and get a fresh ' +
+    'one with no sign-in screen.') +
+
+    note('The same three over JSON are at ' +
+    '<code>/admin/saml-assertions?format=json</code> and ' +
+    '<code>GET /admin-api/saml-assertions</code>; the two actions on this page are ' +
+    '<code>POST /admin-api/saml-assertions/set</code> and <code>/defaults</code>. They are ' +
+    'also three ordinary rows of <code>GET /admin-api/config</code>.');
+
+  respond(req, res, json, 'SAML assertions', '/admin/saml-assertions', inner);
+  log.debug("Leaving the admin SAML assertions page.");
+});
+
+app.post('/admin/saml-assertions', function (req, res) {
+  log.debug("Entering the admin SAML assertions action endpoint.");
+  const body = parseBody(req);
+  const result = samlAssertionsAction(body);
+  respondToAction(req, res, '/admin/saml-assertions', result);
+  log.debug("Leaving the admin SAML assertions action endpoint.");
 });
 
 
@@ -20378,6 +21420,7 @@ module.exports = {
   // would give a caller a door that took any of forty-nine settings under a
   // name that promised four.
   tokenLifetimesAction: tokenLifetimesAction,
+  samlAssertionsAction: samlAssertionsAction,
   // The JSON views, one per page, for the same reason. See the block comment
   // The eight protocol settings pages, through ONE export keyed by path.
   // Rule 7 wants an operation per page and there are eight of them, all
@@ -20493,6 +21536,7 @@ module.exports = {
   // request could only ever name localhost.
   realmsJson: realmsJson,
   tokenLifetimesJson: tokenLifetimesJson,
+  samlAssertionsJson: samlAssertionsJson,
   // A body field that may appear more than once. Exported because the
   // management API takes the same two spellings of a list (`attribute` and
   // `attributes`), and reading a repeated form field is not something

@@ -752,6 +752,272 @@ const SCHEMA = {
             'what a later verification would read, rather than because anything depends on ' +
             'it today. Public key material, so unlike oauthClientSecret it is worth nothing ' +
             'to whoever reads this directory.' },
+    // ---------------------------------------------------------------------
+    // SAML 2.0 ENCRYPTION, added 2026-08-27. Three attributes that are NOT
+    // setting overrides — they are where the recipient's key comes from — and
+    // four that are.
+    //
+    // THE CERTIFICATE IS RESOLVED IN THREE PLACES, MOST SPECIFIC FIRST:
+    // `samlEncryptionCertificate` (extracted from metadata, or typed), then
+    // `samlSigningCertificate`. The last is the one that makes this work with
+    // no configuration at all: it is captured off a SIGNED AuthnRequest's
+    // ds:KeyInfo, so a service provider that signs its requests has already
+    // told this service which key it holds. Using a SIGNING key to encrypt to
+    // is not what a careful deployment does — real metadata carries a separate
+    // `use="encryption"` KeyDescriptor — and it is the right default for a
+    // mock, where the alternative is refusing to demonstrate the feature.
+    { name: 'samlSpMetadataUrl', kind: 'single', from: 'by hand',
+      what: 'WHERE THIS SERVICE PROVIDER\'S METADATA IS PUBLISHED. It is fetched by the ' +
+            '"refresh metadata" action on the application page and by ' +
+            'POST /admin-api/applications/refresh-metadata, and NEVER while a flow is ' +
+            'running — an assertion that had to wait on somebody else\'s web server to be ' +
+            'issued would make every sign-in as reliable as that server. What the fetch ' +
+            'writes is samlSpMetadata and samlEncryptionCertificate below.\n\nThis is the ' +
+            'SECOND outbound-request surface in this service; federation was the first and ' +
+            'is the only other. It follows the same refusals — the URL must be one this ' +
+            'entry carries, the scheme must be http or https, and the request times out.' },
+    { name: 'samlSpMetadata', kind: 'single', from: 'a metadata fetch, or by hand',
+      what: 'THE SERVICE PROVIDER\'S METADATA DOCUMENT, cached verbatim. It is what the ' +
+            'refresh action stores, and it can be pasted instead for a service provider ' +
+            'whose metadata this service cannot reach — an air-gapped test, or one behind ' +
+            'an authenticating proxy. Parsing it is what fills ' +
+            'samlEncryptionCertificate.\n\nIT IS KEPT AS WELL AS THE EXTRACT so that a ' +
+            'reader can see what was actually consumed. A certificate with no document ' +
+            'behind it is a value nobody can check.' },
+    { name: 'samlEncryptionCertificate', kind: 'single',
+      from: 'metadata, or by hand',
+      what: 'THE CERTIFICATE AN ASSERTION IS ENCRYPTED TO, base64 DER or PEM. Written by ' +
+            'the metadata fetch from the <md:KeyDescriptor use="encryption"> — falling ' +
+            'back to an unqualified KeyDescriptor, which the specification says serves ' +
+            'both uses — and settable by hand for a service provider with no metadata at ' +
+            'all.\n\nIt is READ, which distinguishes it from samlSigningCertificate ' +
+            'beside it: that one is recorded and never checked, and this one decides what ' +
+            'goes out. With none here the signing certificate is used, and with neither ' +
+            'the assertion is sent in clear and the page says so.' },
+    { name: 'saml2EncryptAssertion', kind: 'single', from: 'by hand',
+      overrides: 'saml2.encryptAssertion',
+      what: 'TRUE or FALSE: encrypt the assertion issued to THIS service provider, ' +
+            'overriding saml2.encryptAssertion. This is the one of the four most worth ' +
+            'having per application — an estate where one service provider requires ' +
+            'encryption and the others cannot read it is the ordinary case, and a ' +
+            'service-wide switch could not express it.' },
+    { name: 'saml2EncryptionAlgorithm', kind: 'single', from: 'by hand',
+      overrides: 'saml2.encryptionAlgorithm',
+      what: 'The block cipher used for this service provider — aes256-gcm, aes128-gcm, ' +
+            'aes256-cbc or aes128-cbc — overriding saml2.encryptionAlgorithm. A value ' +
+            'that is not one of those four is IGNORED with a warning and the ' +
+            'service-wide choice is used, exactly as an unparseable number would be.' },
+    { name: 'saml2KeyTransportAlgorithm', kind: 'single', from: 'by hand',
+      overrides: 'saml2.keyTransportAlgorithm',
+      what: 'How the content key is wrapped for this service provider — rsa-oaep-mgf1p ' +
+            'or rsa-1_5 — overriding saml2.keyTransportAlgorithm. An appliance that ' +
+            'accepts only rsa-1_5 is the reason this is per application rather than a ' +
+            'decision made once for the whole service.' },
+    { name: 'saml2EncryptLogoutNameId', kind: 'single', from: 'by hand',
+      overrides: 'saml2.encryptLogoutNameId',
+      what: 'TRUE or FALSE: send <saml:EncryptedID> rather than <saml:NameID> in the ' +
+            'LogoutRequest sent to this service provider, overriding ' +
+            'saml2.encryptLogoutNameId. Separate from the assertion switch above ' +
+            'because they are separate capabilities in every service provider library ' +
+            'that has them: one that decrypts assertions may still expect a plain ' +
+            'NameID in a logout message.' },
+
+    // ---------------------------------------------------------------------
+    // THE OAUTH 2.0 / OIDC PER-CLIENT OVERRIDES, added 2026-08-27 in the same
+    // change that generalised the SAML ten below.
+    //
+    // Five settings a real authorization server varies per client and this one
+    // could not: how long each of the three tokens lives, how long a quiet
+    // refresh chain survives, and whether signing out kills the refresh token.
+    // Every one is a DEFAULT on /admin/token-lifetimes and an exception here.
+    //
+    // WHAT IS DELIBERATELY NOT HERE is as much of the point as what is.
+    // `oauth2.issuer` and `oauth2.rfc9700` describe the authorization SERVER —
+    // one answer per realm, and a per-client issuer would produce tokens that
+    // fail discovery. `oauth2.clockSkewS` and `oauth2.clientAssertionSkewS` are
+    // clock tolerances, which the SAML block below argues are a fact about the
+    // estate rather than about one relying party. And `oauth2.redirectUris` is
+    // the SERVICE-WIDE default list; the per-application half of that has
+    // existed since this file was written and is `oauthRedirectUri` above.
+    { name: 'oauthAccessTokenTtlS', kind: 'single', from: 'by hand',
+      overrides: 'oauth2.accessTokenTtlS',
+      what: 'HOW LONG AN ACCESS TOKEN ISSUED TO THIS CLIENT LIVES, in seconds, ' +
+            'overriding oauth2.accessTokenTtlS for it alone. It becomes the token\'s ' +
+            '`exp`, so it is stamped in at signing time and nothing here can shorten a ' +
+            'token already issued. Set it to 30 on one client to watch that client ' +
+            'refresh while every other client carries on.' },
+    { name: 'oauthIdTokenTtlS', kind: 'single', from: 'by hand',
+      overrides: 'oauth2.idTokenTtlS',
+      what: 'The same for the OIDC ID Token, overriding oauth2.idTokenTtlS. Separate ' +
+            'from the access token\'s because the two go to different readers: an ID ' +
+            'Token is consumed once at sign-in and an access token is presented for as ' +
+            'long as it lasts.' },
+    { name: 'oauthRefreshTokenTtlS', kind: 'single', from: 'by hand',
+      overrides: 'oauth2.refreshTokenTtlS',
+      what: 'The same for the refresh token, overriding oauth2.refreshTokenTtlS. A ' +
+            'value at or below oauthAccessTokenTtlS is legal and is a grant that can ' +
+            'never usefully be renewed — /admin/token-lifetimes reports that ' +
+            'combination for the service-wide pair, and it is just as reachable here.' },
+    { name: 'oauthRefreshIdleSeconds', kind: 'single', from: 'by hand',
+      overrides: 'oauth2.refreshIdleSeconds',
+      what: 'RFC 9700 MODE ONLY: how long a refresh chain may sit unused before it is ' +
+            'cut off, overriding oauth2.refreshIdleSeconds for this client. It is ' +
+            'measured from the last time any token in the CHAIN was redeemed rather ' +
+            'than from issuance, so a busy client keeps its grant and a quiet one does ' +
+            'not. Outside RFC 9700 mode nothing reads it, which is a property of the ' +
+            'setting rather than of this attribute.' },
+    { name: 'oauthRevokeRefreshOnLogout', kind: 'single', from: 'by hand',
+      overrides: 'oauth2.revokeRefreshOnLogout',
+      what: 'TRUE or FALSE: does signing out revoke this client\'s refresh tokens, ' +
+            'overriding oauth2.revokeRefreshOnLogout. FALSE is the interesting case ' +
+            'and it is why this is worth having per client — a client that can refresh ' +
+            'its way back after a sign-out is a real defect in real deployments, and ' +
+            'this makes it reproducible for ONE client while the rest behave.' },
+
+    // ---------------------------------------------------------------------
+    // THE GROUP CLAIM, PER APPLICATION, added 2026-08-27.
+    //
+    // The one override group here that is NOT a protocol's: these four reach an
+    // OAuth 2.0 access token, an OIDC ID Token, a SAML 2.0 assertion and a SAML
+    // 1.1 one at once, because `group_claims.js` answers all four claim sets
+    // from one place. So an application that carries them gets its own group
+    // claim in whichever of those four it actually uses, and an application
+    // declared for two protocols gets the same answer in both — which is the
+    // behaviour a claim mapping should have and the reason these are four
+    // attributes rather than eight.
+    { name: 'appGroupsClaim', kind: 'single', from: 'by hand',
+      overrides: 'groups.claim',
+      what: 'TRUE or FALSE: does anything issued to this application carry a groups ' +
+            'claim at all, overriding groups.claim. FALSE on one application is how a ' +
+            'client that breaks on an unexpected claim is exercised without taking the ' +
+            'claim away from everything else.' },
+    { name: 'appGroupsClaimName', kind: 'single', from: 'by hand',
+      overrides: 'groups.claimName',
+      what: 'What the groups claim is CALLED for this application, overriding ' +
+            'groups.claimName. This is the attribute that earns the group its place ' +
+            'here: `groups`, `roles`, `memberOf` and a URI-shaped claim name are all ' +
+            'ordinary, they differ per relying party in every real deployment, and a ' +
+            'single service-wide name meant only one of them could be tested at a time.' },
+    { name: 'appGroupsClaimValue', kind: 'single', from: 'by hand',
+      overrides: 'groups.claimValue',
+      what: 'Whether the claim carries each group\'s name or its whole DN, overriding ' +
+            'groups.claimValue. Relying parties genuinely differ: one matches on `cn` ' +
+            'and the next was written against an LDAP DN.' },
+    { name: 'appGroupsClaimFromMemberOf', kind: 'single', from: 'by hand',
+      overrides: 'groups.claimFromMemberOf',
+      what: 'Where the groups are read from for this application, overriding ' +
+            'groups.claimFromMemberOf — the person\'s memberOf attribute, or a search ' +
+            'of the groups container. The two agree in this directory; they are worth ' +
+            'telling apart because a real directory\'s memberOf can lag.' },
+
+    // ---------------------------------------------------------------------
+    // THE WS-FEDERATION ASSERTION LIFETIME, added 2026-08-27 together with the
+    // setting it overrides — which did not exist either, because wsfed.js
+    // carried a module-level `const lifetimeMin = 60`. A group of one, for the
+    // reason config.js's row gives.
+    { name: 'wsfedAssertionLifetimeMin', kind: 'single', from: 'by hand',
+      overrides: 'wsfed.assertionLifetimeMin',
+      what: 'How long the SAML 1.1 assertion inside a WS-Federation sign-in response ' +
+            'for THIS relying party is valid, in minutes, overriding ' +
+            'wsfed.assertionLifetimeMin. It sets the assertion\'s Conditions and the ' +
+            'wsu:Lifetime of the RequestSecurityTokenResponse around it, so the ' +
+            'envelope and the document inside it cannot disagree. It is separate from ' +
+            'saml11AssertionLifetimeMin: one application may speak both, and a ' +
+            'WS-Federation session and a Browser/POST assertion are not consumed the ' +
+            'same way.' },
+
+    // ---------------------------------------------------------------------
+    // THE TEN PER-APPLICATION OVERRIDES, added 2026-08-27.
+    //
+    // Each one names a `config.js` setting and, where it is set, WINS over it
+    // for this application alone. Absent — which is every application until
+    // somebody types one — the setting decides, exactly as it always did.
+    // `overrides` is the setting's key, and it is on the row rather than in
+    // prose because `/admin/saml-assertions` reads it to name the attribute
+    // beside each default, and saml2_sso.js and saml11_sso.js read it to
+    // resolve a value. Three readers, one table.
+    //
+    // ALL TEN ARE `single`, and that is a decision rather than an oversight.
+    // Every identifier attribute here is `multi` because an application
+    // answering to two client_ids is one application; a SETTING is the
+    // opposite case — an application has one answer to "sign the assertion?",
+    // and a list would be a question with no page to ask it and no rule for
+    // which value won.
+    //
+    // DECLARED, never observed. Nothing in this service writes them: they are
+    // configuration in exactly the way `samlSingleLogoutService` is, and for
+    // the same reason — there is nothing to observe. An application does not
+    // tell this service how long its assertions should live.
+    //
+    // A VALUE THAT WILL NOT PARSE IS IGNORED, not refused, and the resolver
+    // says so in the log. That is this service's rule everywhere a directory
+    // value is read back: an `ldapmodify` can put any string on any attribute,
+    // and an identity provider that refused to issue because somebody typed
+    // "yes" instead of "true" would be a mock that stopped answering.
+    { name: 'saml2AssertionLifetimeMin', kind: 'single', from: 'by hand',
+      overrides: 'saml2.assertionLifetimeMin',
+      what: 'HOW LONG THIS SERVICE PROVIDER\'S ASSERTIONS ARE VALID, in minutes, overriding ' +
+            'saml2.assertionLifetimeMin for it alone. What it becomes is ' +
+            'Conditions/NotOnOrAfter and the bearer SubjectConfirmationData/NotOnOrAfter ' +
+            'alike, widened at both ends by saml.clockSkewS — which is NOT per ' +
+            'application, because it is a fact about the clocks in this estate rather ' +
+            'than about one relying party.' },
+    { name: 'saml2SignAssertion', kind: 'single', from: 'by hand',
+      overrides: 'saml2.signAssertion',
+      what: 'TRUE or FALSE: sign the <saml:Assertion> issued to this service provider, ' +
+            'overriding saml2.signAssertion for it alone. FALSE is a test case rather ' +
+            'than a mistake — a service provider that accepts an unsigned assertion has ' +
+            'a hole in it, and this is how one is found without turning signing off for ' +
+            'every other application at the same time. That is the whole reason this is ' +
+            'per application.' },
+    { name: 'saml2SignResponse', kind: 'single', from: 'by hand',
+      overrides: 'saml2.signResponse',
+      what: 'TRUE or FALSE: sign the <samlp:Response> around the assertion for this ' +
+            'service provider, overriding saml2.signResponse. On the HTTP Redirect ' +
+            'binding it also controls the query-string signature of section 3.4.4.1, ' +
+            'which is the one a redirect response is really verified by.' },
+    { name: 'saml2NameIdFormat', kind: 'single', from: 'by hand',
+      overrides: 'saml2.nameIdFormat',
+      what: 'The NameID Format used for this service provider when its AuthnRequest\'s ' +
+            'NameIDPolicy asks for none, overriding saml2.nameIdFormat. A request that ' +
+            'DOES name a format is still answered with the one it named — this is the ' +
+            'default, not a restriction, and it is deliberately NOT checked against ' +
+            'samlNameIdFormat beside it, which is the list of formats this service ' +
+            'provider has ASKED for.' },
+    { name: 'saml2ArtifactTtlS', kind: 'single', from: 'by hand',
+      overrides: 'saml2.artifactTtlS',
+      what: 'How long an artifact minted for this service provider can be resolved for, ' +
+            'in seconds, overriding saml2.artifactTtlS. An artifact is ALSO one-shot ' +
+            'however long this is — resolving it destroys it, which section 3.6.4.1 ' +
+            'requires and no lifetime can express.' },
+    { name: 'saml11AssertionLifetimeMin', kind: 'single', from: 'by hand',
+      overrides: 'saml11.assertionLifetimeMin',
+      what: 'The SAML 1.1 equivalent of saml2AssertionLifetimeMin, overriding ' +
+            'saml11.assertionLifetimeMin for this relying party. Separate from the 2.0 ' +
+            'attribute for the reason the two SETTINGS are separate: the profiles are ' +
+            'separate implementations consumed differently, and an application declared ' +
+            'for both legitimately wants two answers.' },
+    { name: 'saml11SignAssertion', kind: 'single', from: 'by hand',
+      overrides: 'saml11.signAssertion',
+      what: 'TRUE or FALSE: sign the SAML 1.1 <saml:Assertion> for this relying party, ' +
+            'overriding saml11.signAssertion. The Browser/POST profile REQUIRES a signed ' +
+            'assertion (saml-profile-1.1 section 4.2.1.4), so FALSE here is exactly the ' +
+            'test case: a relying party that accepts it anyway has a hole.' },
+    { name: 'saml11SignResponse', kind: 'single', from: 'by hand',
+      overrides: 'saml11.signResponse',
+      what: 'TRUE or FALSE: sign the SAML 1.1 <samlp:Response> for this relying party, ' +
+            'overriding saml11.signResponse, with the reference naming ResponseID.' },
+    { name: 'saml11NameIdFormat', kind: 'single', from: 'by hand',
+      overrides: 'saml11.nameIdFormat',
+      what: 'The NameIdentifier Format used for this relying party, overriding ' +
+            'saml11.nameIdFormat. SAML 1.1 has no request message, so nothing can ask ' +
+            'for a format and this is the only thing that decides it — which makes it ' +
+            'the more useful of the two per-application format attributes.' },
+    { name: 'saml11ArtifactTtlS', kind: 'single', from: 'by hand',
+      overrides: 'saml11.artifactTtlS',
+      what: 'How long a SAML 1.1 artifact minted for this relying party can be resolved ' +
+            'for, in seconds, overriding saml11.artifactTtlS. The Browser/Artifact ' +
+            'profile\'s SOAP responder is what redeems it, once.' },
     { name: 'samlAuthnRequestSigned', kind: 'single', from: 'SAML 2.0',
       what: 'TRUE when the last AuthnRequest from this service provider carried a signature ' +
             '— an enveloped ds:Signature on the POST binding, or the Signature parameter of ' +
@@ -1089,6 +1355,43 @@ const EDITABLE = {
   // are what HAPPENED.
   samlSigningCertificate: 'set',
   samlSingleLogoutService: 'multi',
+  // THE TEN PER-APPLICATION SETTING OVERRIDES. Every one is `set`, for the
+  // reason their SCHEMA rows give: a setting has one answer, and `multi` would
+  // accumulate two values with no rule for which won. They are editable
+  // because nothing observes them — like samlSingleLogoutService above, if
+  // they cannot be written here they cannot be written at all.
+  saml2AssertionLifetimeMin: 'set',
+  saml2SignAssertion: 'set',
+  saml2SignResponse: 'set',
+  saml2NameIdFormat: 'set',
+  saml2ArtifactTtlS: 'set',
+  saml11AssertionLifetimeMin: 'set',
+  saml11SignAssertion: 'set',
+  saml11SignResponse: 'set',
+  saml11NameIdFormat: 'set',
+  saml11ArtifactTtlS: 'set',
+  // The OAuth 2.0 / OIDC per-client five, the group claim's four and
+  // WS-Federation's one. Same rule as the SAML ten above: `set`, because a
+  // setting has one answer.
+  oauthAccessTokenTtlS: 'set',
+  oauthIdTokenTtlS: 'set',
+  oauthRefreshTokenTtlS: 'set',
+  oauthRefreshIdleSeconds: 'set',
+  oauthRevokeRefreshOnLogout: 'set',
+  appGroupsClaim: 'set',
+  appGroupsClaimName: 'set',
+  appGroupsClaimValue: 'set',
+  appGroupsClaimFromMemberOf: 'set',
+  wsfedAssertionLifetimeMin: 'set',
+  // SAML 2.0 encryption: three that say where the recipient's key comes from,
+  // and four setting overrides. All `set` — one answer each.
+  samlSpMetadataUrl: 'set',
+  samlSpMetadata: 'set',
+  samlEncryptionCertificate: 'set',
+  saml2EncryptAssertion: 'set',
+  saml2EncryptionAlgorithm: 'set',
+  saml2KeyTransportAlgorithm: 'set',
+  saml2EncryptLogoutNameId: 'set',
   wsfedRealm: 'multi',
   wstrustAppliesTo: 'multi',
   krb5ServicePrincipalName: 'multi',
@@ -2266,6 +2569,46 @@ function createApplication(detail) {
   Object.keys(given.fields).forEach(function (name) {
     setField(record, name, given.fields[name]);
   });
+  // ---------------------------------------------------------------------
+  // AN APPLICATION DECLARED FOR SAML GETS AN ENTITYID, added 2026-08-27.
+  //
+  // Ticking SAML 2.0 or SAML 1.1 on /admin/applications/new and typing no
+  // entityID used to produce an entry that could not be used as a service
+  // provider at all: `samlEntityId` is what /saml2 and /saml11 file an
+  // application under and what their per-service-provider metadata is
+  // published for, so without it the declaration was a note and nothing more.
+  //
+  // THE DEFAULT IS THE IDENTIFIER, and that is not an arbitrary pick — it is
+  // what the same application would have got by arriving on its own. A service
+  // provider that turns up with an AuthnRequest is filed under its entityID,
+  // so identifier and entityID are ALREADY one string on every SAML entry this
+  // registry has ever created for itself. Doing anything else here would make
+  // a hand-made entry the odd one out.
+  //
+  // IT IS A DEFAULT AND NOT A RULE. An explicit `samlEntityId` in the create
+  // wins — the loop above has already run — and this only fills a gap. Nothing
+  // is refused: this service accepts any entityID on sight and creates the
+  // entry, so refusing to CREATE one here would be the only place in the SAML
+  // path that turned somebody away, which is the opposite of what the rest of
+  // this file does.
+  //
+  // The metadata is then live immediately, at /saml2/metadata/{slug} and
+  // /saml11/metadata/{rp}, because those endpoints mint a document for
+  // anything asked of them — see saml/CLAUDE.md's decision 1.
+  const declaredSaml = asked.protocols.filter(function (id) {
+    return id === 'saml2' || id === 'saml11';
+  });
+  if (declaredSaml.length && !valuesOf(record.fields.samlEntityId).length) {
+    setField(record, 'samlEntityId', identifier);
+    log.info('applications: "' + identifier + '" is declared for ' +
+             declaredSaml.join(' and ') + ' and carried no entityID, so its ' +
+             'identifier is being used as one. Its per-service-provider ' +
+             'metadata is live from now — /admin/applications names the URL, ' +
+             'which carries a slug this module deliberately does not compute ' +
+             '(slugOf() belongs to saml/saml2_sso.js, and requiring it here ' +
+             'would point this module at a protocol). Set samlEntityId ' +
+             'explicitly to use a different name.');
+  }
   // WHERE IT CAME FROM, said on the entry itself. An application created here
   // has never authenticated anything and its counters are zero; without this
   // line a reader would have to infer that from the zeros, and "created by hand"
@@ -2609,6 +2952,91 @@ function list() {
   rows.sort(function (a, b) { return String(b.lastSeen).localeCompare(String(a.lastSeen)); });
   log.debug("Leaving list().");
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// THE PER-APPLICATION SETTING OVERRIDE, added 2026-08-27.
+//
+// `settingFor('urn:sp', 'saml2.signAssertion', config)` answers what THAT
+// application should get: the value on its entry if it carries one, and the
+// setting's own value if it does not. It is the whole of what makes the ten
+// `saml2*`/`saml11*` attributes above mean anything.
+//
+// THREE PROPERTIES WORTH KNOWING BEFORE CHANGING IT.
+//
+// **The attribute is found from the SCHEMA, not from a second table.** Each of
+// the ten rows carries `overrides: '<setting key>'`, and this scans for it. A
+// map here from key to attribute name would be the second place that mapping
+// lived, and the first thing to disagree with the schema when somebody added an
+// eleventh.
+//
+// **`config` is PASSED IN rather than required.** This module is required by
+// `admin_stats.js` and by six protocol modules, and it deliberately requires
+// almost nothing itself — see the header. Taking the caller's `config` keeps
+// that true and keeps this function testable with a stub, which is how the
+// bounds behaviour below was checked.
+//
+// **A value that will not parse is IGNORED and logged, never thrown.** An
+// `ldapmodify` can put "yes" on `saml2SignAssertion`, and an identity provider
+// that stopped issuing because of it would be a mock that stopped answering.
+// The setting's own value is used and the log names the entry, the attribute
+// and the reason, which is the only way somebody finds out that the exception
+// they typed is not in force.
+function settingFor(identifier, settingKey, config) {
+  log.debug("Entering settingFor(). identifier=" + (identifier || '(none)') +
+            ", setting=" + settingKey);
+  const fallback = config.value(settingKey);
+  if (!identifier) {
+    log.debug("Leaving settingFor(). No application named; the setting decides.");
+    return fallback;
+  }
+  const attribute = OVERRIDE_ATTRIBUTES[settingKey];
+  if (!attribute) {
+    // Not an overridable setting. Not an error: it is what every caller asking
+    // about a setting with no per-application row gets, and the answer is the
+    // setting, which is what it would have used anyway.
+    log.debug("Leaving settingFor(). " + settingKey + " is not per-application.");
+    return fallback;
+  }
+  const record = get(identifier);
+  if (!record) {
+    log.debug("Leaving settingFor(). No entry for it; the setting decides.");
+    return fallback;
+  }
+  const raw = valuesOf(record.fields[attribute])[0];
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    log.debug("Leaving settingFor(). Nothing on the entry; the setting decides.");
+    return fallback;
+  }
+  const parsed = config.parseAs(settingKey, raw);
+  if (!parsed.ok) {
+    log.warn('applications: ' + identifier + ' carries ' + attribute + '="' + raw +
+             '", which is not usable — ' + parsed.problem + '. The service-wide ' +
+             settingKey + ' is being used instead. Fix the attribute or remove it; ' +
+             'nothing here refuses an assertion over it.');
+    log.debug("Leaving settingFor(). Unusable; the setting decides.");
+    return fallback;
+  }
+  log.debug("Leaving settingFor(). " + identifier + " overrides " + settingKey + ".");
+  return parsed.value;
+}
+
+// Which attribute overrides which setting, built ONCE from the schema rows'
+// own `overrides` member. Built rather than written so that adding an
+// eleventh override is a row in SCHEMA and nothing else.
+const OVERRIDE_ATTRIBUTES = {};
+SCHEMA.attributes.forEach(function (attribute) {
+  if (attribute.overrides) {
+    OVERRIDE_ATTRIBUTES[attribute.overrides] = attribute.name;
+  }
+});
+
+// The reverse, for a page that has an application and wants to know which of
+// its settings it is answering for. Both directions come off the one table.
+function overridableSettings() {
+  return Object.keys(OVERRIDE_ATTRIBUTES).map(function (key) {
+    return { setting: key, attribute: OVERRIDE_ATTRIBUTES[key] };
+  });
 }
 
 function get(identifier) {
@@ -3095,6 +3523,8 @@ module.exports = {
   deleteApplication: deleteApplication,
   list: list,
   get: get,
+  settingFor: settingFor,
+  overridableSettings: overridableSettings,
   // The audience lookup, exported for the token endpoint. See its header for
   // why it is a lookup and not a check.
   forAudience: forAudience,

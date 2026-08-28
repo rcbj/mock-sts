@@ -18,10 +18,21 @@
 // with what real identity providers send.
 // ---------------------------------------------------------------------------
 
-const forge = require('node-forge');
-const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
-const { SignedXml } = require('xml-crypto');
 const { log, logArtifact, STS, xmlEscape, genId, iso } = require('../common/helpers');
+// ---------------------------------------------------------------------------
+// EVERY SIGNATURE AND EVERY CIPHER IN THIS SERVICE IS IN ONE MODULE SINCE
+// 2026-08-27, and this file is where two of the four families used to live.
+//
+// The SIGNING moved out and is now the parent project's own signer, vendored
+// and shared, so both ends of a SAML exchange canonicalize with the same code —
+// see `common/crypto.js` for why that is worth having. The ENCRYPTION moved
+// with it unchanged, code and comments both: it was already one implementation
+// with two callers, and what it has that a shared one did not is the diagnosis
+// a mock exists to give. It is re-exported at the bottom of this file, so
+// `ws-trust/wstrust.js` and everything else that took `encryptAssertion` from
+// here still does.
+// ---------------------------------------------------------------------------
+const stsCrypto = require('../common/crypto');
 // saml.issuer, read per assertion rather than captured at require time so
 // that /admin/config can change what the next one says it came from.
 const config = require('../common/config');
@@ -33,24 +44,15 @@ const stats = require('../common/admin_stats');
 function signAssertion(xml) {
   log.debug("Entering signAssertion().");
   logArtifact('SAML assertion', 'before signing', xml);
-  const m = xml.match(/\bID="([^"]+)"/);
-  const id = m ? m[1] : '';
-  const sig = new SignedXml({ privateKey: STS.privateKeyPem, publicCert: STS.certPem });
-  sig.signatureAlgorithm = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256';
-  sig.canonicalizationAlgorithm = 'http://www.w3.org/2001/10/xml-exc-c14n#';
-  sig.addReference({
-    xpath: "/*[local-name(.)='Assertion']",
-    transforms: [
-      'http://www.w3.org/2000/09/xmldsig#enveloped-signature',
-      'http://www.w3.org/2001/10/xml-exc-c14n#'
-    ],
-    digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
-    uri: id ? ('#' + id) : ''
+  // AFTER the <Issuer>, which is where the SAML 2.0 schema puts a signature on
+  // an assertion. The reference is worked out from the root's own `ID` by the
+  // signer; passing one here would only be a second place for it to be wrong.
+  const signed = stsCrypto.signXml(xml, {
+    privateKeyPem: STS.privateKeyPem,
+    certPem: STS.certPem,
+    placement: stsCrypto.PLACEMENT.AFTER_ISSUER,
+    what: 'SAML 2.0 assertion'
   });
-  sig.computeSignature(xml, {
-    location: { reference: "/*[local-name(.)='Assertion']/*[local-name(.)='Issuer']", action: 'after' }
-  });
-  const signed = sig.getSignedXml();
   logArtifact('SAML assertion', 'after signing', signed);
   log.debug("Leaving signAssertion().");
   return signed;
@@ -150,7 +152,16 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   opts = opts || {};
   const id = genId();
   const now = iso(0);
-  const exp = iso(lifetimeMin > 0 ? lifetimeMin : 60);
+  // The validity window, WIDENED AT BOTH ENDS by saml.clockSkewS. `now` is
+  // untouched and is what IssueInstant and the default AuthnInstant carry: those
+  // two state when this service actually did something, and backdating them
+  // would be a lie about an event rather than an allowance about a clock. Only
+  // the Conditions move. With the setting at its default 0 this is byte-for-byte
+  // what this function emitted before the setting existed, which is the property
+  // that keeps every existing caller and every recorded assertion unchanged.
+  const skewS = Math.max(0, Number(config.value('saml.clockSkewS')) || 0);
+  const notBefore = iso(-skewS / 60);
+  const exp = iso((lifetimeMin > 0 ? lifetimeMin : 60) + skewS / 60);
   const audienceEl = audience
     ? '<saml:AudienceRestriction><saml:Audience>' + xmlEscape(audience) + '</saml:Audience></saml:AudienceRestriction>'
     : '';
@@ -216,7 +227,7 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
       '<saml:Subject><saml:NameID Format="' + xmlEscape(nameIdFormat) + '">' +
         xmlEscape(nameIdValue) + '</saml:NameID>' +
       confirmation + '</saml:Subject>' +
-      '<saml:Conditions NotBefore="' + now + '" NotOnOrAfter="' + exp + '">' + audienceEl + '</saml:Conditions>' +
+      '<saml:Conditions NotBefore="' + notBefore + '" NotOnOrAfter="' + exp + '">' + audienceEl + '</saml:Conditions>' +
       '<saml:AuthnStatement AuthnInstant="' + xmlEscape(authnInstant) + '" SessionIndex="' +
         xmlEscape(sessionIndex) + '">' +
       '<saml:AuthnContext><saml:AuthnContextClassRef>' +
@@ -255,48 +266,58 @@ function buildSamlAssertion(subject, audience, lifetimeMin, opts) {
   }
 }
 
-// Encrypt an assertion to a recipient certificate (AES-256-GCM data key wrapped
-// with RSA-OAEP-MGF1P/SHA-1), wrapped in <saml:EncryptedAssertion> — the shape
-// the debugger's decryptXml consumes. Used when a request asks for encryption
-// (?encrypt=1) and carries the recipient cert in its WS-Security signature.
-function encryptAssertion(assertionXml, certPem) {
-  log.debug("Entering encryptAssertion().");
-  logArtifact('SAML assertion', 'before encryption', assertionXml);
-  var XENC = 'http://www.w3.org/2001/04/xmlenc#';
-  var X11 = 'http://www.w3.org/2009/xmlenc11#';
-  var DS = 'http://www.w3.org/2000/09/xmldsig#';
-  var cert = forge.pki.certificateFromPem(certPem);
-  var pub = cert.publicKey;
-  var key = forge.random.getBytesSync(32);
-  var iv = forge.random.getBytesSync(12);
-  var cipher = forge.cipher.createCipher('AES-GCM', key);
-  cipher.start({ iv: iv, tagLength: 128 });
-  cipher.update(forge.util.createBuffer(forge.util.encodeUtf8(assertionXml)));
-  if (!cipher.finish()) throw new Error('assertion encryption failed');
-  var cipherB64 = forge.util.encode64(iv + cipher.output.getBytes() + cipher.mode.tag.getBytes());
-  var wrapped = pub.encrypt(key, 'RSA-OAEP', { md: forge.md.sha1.create(), mgf1: { md: forge.md.sha1.create() } });
-  var wrappedB64 = forge.util.encode64(wrapped);
-  var certB64 = certPem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
-  var encrypted = '<saml:EncryptedAssertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">' +
-    '<xenc:EncryptedData xmlns:xenc="' + XENC + '" Type="' + XENC + 'Element">' +
-      '<xenc:EncryptionMethod Algorithm="' + X11 + 'aes256-gcm"/>' +
-      '<ds:KeyInfo xmlns:ds="' + DS + '">' +
-        '<xenc:EncryptedKey>' +
-          '<xenc:EncryptionMethod Algorithm="' + XENC + 'rsa-oaep-mgf1p">' +
-            '<ds:DigestMethod xmlns:ds="' + DS + '" Algorithm="' + DS + 'sha1"/></xenc:EncryptionMethod>' +
-          '<ds:KeyInfo><ds:X509Data><ds:X509Certificate>' + certB64 + '</ds:X509Certificate></ds:X509Data></ds:KeyInfo>' +
-          '<xenc:CipherData><xenc:CipherValue>' + wrappedB64 + '</xenc:CipherValue></xenc:CipherData>' +
-        '</xenc:EncryptedKey>' +
-      '</ds:KeyInfo>' +
-      '<xenc:CipherData><xenc:CipherValue>' + cipherB64 + '</xenc:CipherValue></xenc:CipherData>' +
-    '</xenc:EncryptedData></saml:EncryptedAssertion>';
-  logArtifact('SAML assertion', 'after encryption (AES-256-GCM, key wrapped with RSA-OAEP-MGF1P)', encrypted);
-  log.debug("Leaving encryptAssertion().");
-  return encrypted;
+// ---------------------------------------------------------------------------
+// XML ENCRYPTION MOVED TO `common/crypto.js` ON 2026-08-27, CODE AND COMMENTS
+// UNCHANGED, AND IS RE-EXPORTED FROM HERE.
+//
+// It did not move because it was duplicated — it never was: one implementation
+// with two callers, this file's SSO profile and WS-Trust's `?encrypt=1`. It
+// moved because the four crypto families are now in one module, and leaving the
+// only cipher in the service inside a SAML file would have meant "all of it
+// except that one" — which is the shape of exception that stops being true.
+//
+// **IT WAS NOT REPLACED BY THE VENDORED `encryptXml()`/`decryptXml()`, and that
+// is argued at the top of Section 2 over there rather than here** — briefly,
+// the two produce byte-compatible documents so there was no interop gap to
+// close, and this one answers rather than throwing, checks the unwrapped key's
+// LENGTH, parses the plaintext before calling CBC a success, and tells a
+// NamespaceError apart from a wrong certificate. Those messages are the product.
+//
+// The re-exports below are not a compatibility shim to be removed later: an
+// assertion is what gets encrypted, so `saml2.encryptAssertion()` is the name
+// this belongs under from a caller's point of view, whatever file the cipher
+// lives in.
+// ---------------------------------------------------------------------------
+// The artifact log is INJECTED HERE rather than asked of every caller, and
+// that is what makes this a move with no behaviour change: at the default
+// `debug` level the before-and-after of an encryption is printed exactly as it
+// was, and none of the three call sites had to learn about a new parameter.
+// `common/crypto.js` cannot reach `logArtifact()` itself — helpers.js requires
+// that file, so requiring it back would close a cycle.
+function encryptElement(xml, certPem, opts) {
+  return stsCrypto.encryptElement(xml, certPem,
+    Object.assign({}, opts, { logArtifact: logArtifact }));
 }
+
+function encryptAssertion(assertionXml, certPem, opts) {
+  return stsCrypto.encryptAssertion(assertionXml, certPem,
+    Object.assign({}, opts, { logArtifact: logArtifact }));
+}
+
+function decryptElement(xml, privateKeyPem, opts) {
+  return stsCrypto.decryptElement(xml, privateKeyPem,
+    Object.assign({}, opts, { logArtifact: logArtifact }));
+}
+
+const BLOCK_CIPHERS = stsCrypto.BLOCK_CIPHERS;
+const KEY_TRANSPORTS = stsCrypto.KEY_TRANSPORTS;
 
 module.exports = {
   signAssertion: signAssertion,
   buildSamlAssertion: buildSamlAssertion,
-  encryptAssertion: encryptAssertion
+  encryptAssertion: encryptAssertion,
+  encryptElement: encryptElement,
+  decryptElement: decryptElement,
+  BLOCK_CIPHERS: BLOCK_CIPHERS,
+  KEY_TRANSPORTS: KEY_TRANSPORTS
 };

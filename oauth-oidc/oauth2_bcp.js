@@ -123,6 +123,12 @@ const config = require('../common/config');
 // requiring it here cannot create a cycle. The split is the usual one — that file
 // is the protocol and this file is the policy: it says whether what arrived
 // PROVES the client, and this says whether the client had to prove anything.
+// A LIBRARY REQUIRING A LIBRARY, which is why this is a plain require and not
+// one of admin_stats.js's inverted slots (rule 3e's test). applications.js
+// registers no route and requires nothing from oauth-oidc/, so this closes no
+// cycle and moves nothing in the router. It is here for the two per-client
+// settings this file resolves — the refresh idle window and revoke-on-logout.
+const applications = require('../common/applications');
 const clientAuth = require('./client_auth');
 
 // ---------------------------------------------------------------------------
@@ -1827,6 +1833,15 @@ function checkClientAuthentication(opts) {
 // — somebody dropping the lifetime to a minute to watch a rotation — from
 // discarding the very bookkeeping they are trying to watch.
 function refreshFamilyWindowMs() {
+  // The SERVICE-WIDE value on purpose, not a per-client one: this window
+  // decides how long the family bookkeeping is KEPT, and a family may hold
+  // tokens from more than one client. The longest lifetime any client could
+  // have is what would be safe to use here, and the service-wide value is
+  // the closest thing to it that does not mean scanning every application on
+  // every sweep. A client configured with a LONGER lifetime than the default
+  // therefore loses its replay bookkeeping early, which is the safe
+  // direction — the check stops happening rather than refusing wrongly — and
+  // is the same trade-off the hour of slack below already makes.
   return Math.max(config.value('oauth2.refreshTokenTtlS') * 1000, 3600 * 1000);
 }
 const MAX_REFRESH_TOKENS = 2000;
@@ -1972,7 +1987,11 @@ function checkRefreshRequest(opts) {
   // went away, not a chain that was copied, and treating the two alike would
   // make the replay refusal — which says something serious — indistinguishable
   // from an afternoon off.
-  const idleSeconds = config.value('oauth2.refreshIdleSeconds');
+  // PER CLIENT: the presented client's own `oauthRefreshIdleSeconds` where it
+  // has one. A deployment giving a background job a long idle window and a
+  // browser client a short one is the ordinary case this serves.
+  const idleSeconds = applications.settingFor(presentedClient,
+                                             'oauth2.refreshIdleSeconds', config);
   if (idleSeconds > 0 && known && known.family) {
     const family = refreshFamilies.get(known.family);
     const idleFor = family ? Math.round((Date.now() - (family.lastUsedAt || 0)) / 1000) : 0;
@@ -2041,8 +2060,17 @@ function checkRefreshRequest(opts) {
 // of a shared browser has every reason to believe that ended their session, and
 // on this service it ended the half that was visible.
 // ---------------------------------------------------------------------------
-function revokeRefreshOnLogout() {
-  return enabled() && !!config.value('oauth2.revokeRefreshOnLogout');
+// PER CLIENT since 2026-08-27: `oauthRevokeRefreshOnLogout` on the application
+// entry overrules the setting for that client alone. The caller asks ONCE PER
+// TOKEN rather than once per sign-out, because the answer is now a property of
+// whoever the token was issued to — a session may hold refresh tokens for three
+// clients, and two of them agreeing to be revoked says nothing about the third.
+//
+// `enabled()` still gates it, so with RFC 9700 mode off this answers false for
+// every client whatever their entry says, exactly as it did.
+function revokeRefreshOnLogout(clientId) {
+  return enabled() &&
+    !!applications.settingFor(clientId || '', 'oauth2.revokeRefreshOnLogout', config);
 }
 
 // Section 2.2 / 2.2.1, and it refuses nothing: whether an access token is

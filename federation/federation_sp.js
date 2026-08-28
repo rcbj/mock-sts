@@ -122,7 +122,8 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const jwt = require('jsonwebtoken');
 const { DOMParser } = require('@xmldom/xmldom');
-const { SignedXml } = require('xml-crypto');
+// One signer and one verifier for the whole service since 2026-08-27.
+const stsCrypto = require('../common/crypto');
 
 const app = require('./../common/app');
 const config = require('./../common/config');
@@ -378,13 +379,18 @@ function certPemOf(record) {
 // ---------------------------------------------------------------------------
 // VERIFYING AN XML SIGNATURE MADE BY SOMEBODY ELSE.
 //
-// The `idAttribute` argument is here for exactly the reason `wsfed.js`'s
-// `verifyAssertionSignature()` documents at length, and that comment is worth
-// reading before touching this one: a SAML 1.1 assertion's id attribute is
-// `AssertionID`, which xml-crypto does not look for; and passing `idAttribute:
-// 'ID'` for SAML 2.0, where it is already a default, makes xml-crypto refuse a
-// perfectly good document with a signature-wrapping error. Symmetry between the
-// two call sites is what produces that bug.
+// **THIS IS A POLICY WRAPPER OVER `common/crypto.js`, AND THE POLICY IS THE
+// PART THAT MATTERS.** The mechanics — which id spellings resolve, which
+// canonicalization, which signature belongs to which element — are the shared
+// verifier's and are the same everywhere. What is decided HERE is what makes
+// this door different from every other one in the service: no configured
+// certificate means nothing is accepted, and the certificate is always the
+// relationship's rather than the document's.
+//
+// This comment used to explain an `idAttribute` argument that had to be passed
+// for SAML 1.1 and withheld for SAML 2.0, because symmetry between the two call
+// sites produced a signature-wrapping error on a perfectly good document. That
+// argument no longer exists; `saml/CLAUDE.md` keeps the story.
 //
 // **THE KEY IS THE CONFIGURED ONE AND ONLY THE CONFIGURED ONE.** `publicCert`
 // is passed explicitly, so a signature carrying its own `<ds:KeyInfo>` with a
@@ -392,49 +398,46 @@ function certPemOf(record) {
 // it brought — which is the difference between a signature check and a
 // decoration. That is the single most important line in this module.
 // ---------------------------------------------------------------------------
-function verifyXmlSignature(xml, record, idAttribute, wanted) {
-  log.debug('Entering verifyXmlSignature(). idAttribute=' + (idAttribute || '(defaults)'));
+function verifyXmlSignature(xml, record, wanted) {
+  log.debug('Entering verifyXmlSignature(). wanted=' + wanted);
   const pem = certPemOf(record);
   if (!pem) {
+    // **THE ONE REFUSAL IN THIS SERVICE THAT IS NOT A MODE**, and it stays here
+    // rather than moving into the shared verifier: `common/crypto.js` answers
+    // "does this signature verify against this key", and "there is no key
+    // configured, so nothing is accepted" is a FEDERATION policy about a
+    // relationship. See `federation/CLAUDE.md` — the gate is on the SIGNER, and
+    // a permissive answer here would be an authentication bypass for every
+    // protocol in the process.
     log.debug('Leaving verifyXmlSignature(). No certificate is configured.');
     return { ok: false, present: false,
              why: 'no fedSigningCertificate is configured on this relationship, so there ' +
                   'is nothing to verify the signature against. Nothing is accepted until ' +
                   'there is' };
   }
-  try {
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    // The signature over the element asked for, rather than the first one in
-    // the document. A Response carrying a signed Assertion has TWO, and taking
-    // whichever came first is how a check ends up verifying the wrong element
-    // — and reporting success for a document whose assertion was swapped.
-    const signatures = doc.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
-    let chosen = null;
-    for (let i = 0; i < signatures.length; i++) {
-      const parent = signatures[i].parentNode;
-      if (parent && parent.localName === wanted) { chosen = signatures[i]; break; }
-    }
-    if (!chosen) {
-      log.debug('Leaving verifyXmlSignature(). No signature on the ' + wanted + '.');
-      return { ok: false, present: false,
-               why: 'the <' + wanted + '> carries no ds:Signature' };
-    }
-    const options = { publicCert: pem };
-    if (idAttribute) options.idAttribute = idAttribute;
-    const sig = new SignedXml(options);
-    sig.loadSignature(chosen);
-    const ok = sig.checkSignature(xml);
-    log.debug('Leaving verifyXmlSignature(). ok=' + ok);
-    return { ok: !!ok, present: true,
-             why: ok ? '' : 'the signature did not verify against fedSigningCertificate' };
-  } catch (e) {
-    // xml-crypto throws rather than returning false for most failures, and the
-    // message names which of them it was — an unresolvable reference reads
-    // quite differently from a digest mismatch, and that distinction is the
-    // whole diagnosis.
-    log.debug('Leaving verifyXmlSignature(). It threw: ' + e.message);
-    return { ok: false, present: true, why: e.message };
-  }
+  // **THE PARTNER'S OWN <ds:KeyInfo> CERTIFICATE IS NEVER USED, AND PASSING
+  // `certPem` IS WHAT ENSURES IT.** The shared verifier falls back to the
+  // certificate inside the document when it is given no other — which is
+  // correct for a general-purpose tool and would be the whole hole here, since
+  // anybody can sign an assertion and attach the key that verifies it. This
+  // call always passes the certificate configured on the RELATIONSHIP, so the
+  // fallback is unreachable from this door.
+  //
+  // The `idAttribute` argument that used to be threaded through three call
+  // sites is gone: SAML 1.1's `AssertionID` and SAML 2.0's `ID` are both
+  // resolved from the document by the verifier, so a partner's version is no
+  // longer something this file has to work out in advance and pass down.
+  const result = stsCrypto.verifyXmlSignature(xml, {
+    element: wanted,
+    certPem: pem
+  });
+  log.debug('Leaving verifyXmlSignature(). ok=' + result.ok);
+  return {
+    ok: result.ok,
+    present: result.present,
+    why: result.ok ? ''
+      : (result.why || 'the signature did not verify against fedSigningCertificate')
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -815,25 +818,17 @@ function authnRequestXml(base, record) {
     log.debug('Leaving authnRequestXml(). Unsigned. id=' + id);
     return { id: id, xml: xml };
   }
-  const sig = new SignedXml({ privateKey: STS.privateKeyPem, publicCert: STS.certPem });
-  sig.signatureAlgorithm = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256';
-  sig.canonicalizationAlgorithm = 'http://www.w3.org/2001/10/xml-exc-c14n#';
-  sig.addReference({
-    xpath: "/*[local-name(.)='AuthnRequest']",
-    transforms: ['http://www.w3.org/2000/09/xmldsig#enveloped-signature',
-                 'http://www.w3.org/2001/10/xml-exc-c14n#'],
-    digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
-    uri: '#' + id
-  });
   // AFTER the Issuer, which is where the schema puts a signature on a request
-  // and where a partner will look for it. xml-crypto with no location option
-  // appends it to the document element, which is schema-invalid and which
-  // several identity providers refuse without saying why.
-  sig.computeSignature(xml, {
-    location: { reference: "/*[local-name(.)='AuthnRequest']/*[local-name(.)='Issuer']",
-                action: 'after' }
+  // and where a partner will look for it. A signer with no placement appends it
+  // to the document element instead, which is schema-invalid and which several
+  // identity providers refuse without saying why.
+  const signed = stsCrypto.signXml(xml, {
+    privateKeyPem: STS.privateKeyPem,
+    certPem: STS.certPem,
+    placement: stsCrypto.PLACEMENT.AFTER_ISSUER,
+    refUri: '#' + id,
+    what: 'federated SAML 2.0 AuthnRequest'
   });
-  const signed = sig.getSignedXml();
   logArtifact('federated SAML 2.0 AuthnRequest', 'after signing', signed);
   log.debug('Leaving authnRequestXml(). Signed. id=' + id);
   return { id: id, xml: signed };
@@ -1165,9 +1160,8 @@ function consumeSamlResponse(req, res, record, params, version) {
   // is enough — which is what every real service provider accepts, because
   // AD FS signs the assertion, Keycloak signs both and Shibboleth signs the
   // response. What is NOT enough is neither.
-  const idAttribute = version === '1.1' ? 'AssertionID' : '';
-  const assertionSig = verifyXmlSignature(xml, record, idAttribute, 'Assertion');
-  const responseSig = verifyXmlSignature(xml, record, idAttribute, 'Response');
+  const assertionSig = verifyXmlSignature(xml, record, 'Assertion');
+  const responseSig = verifyXmlSignature(xml, record, 'Response');
   if (!assertionSig.ok && !responseSig.ok) {
     log.debug('Leaving consumeSamlResponse(). The signature did not verify.');
     return refuse(res, record, 401, 'The signature did not verify',
@@ -1314,10 +1308,9 @@ function consumeWsFedResponse(req, res, record, params) {
       'exactly like this from here; this service does not decrypt one.');
   }
   const version = assertion.namespaceURI === NS_SAML ? '2.0' : '1.1';
-  const idAttribute = version === '1.1' ? 'AssertionID' : '';
   log.debug('consumeWsFedResponse(): the token is a SAML ' + version + ' assertion.');
 
-  const sig = verifyXmlSignature(wresult, record, idAttribute, 'Assertion');
+  const sig = verifyXmlSignature(wresult, record, 'Assertion');
   if (!sig.ok) {
     log.debug('Leaving consumeWsFedResponse(). The signature did not verify.');
     return refuse(res, record, 401, 'The signature did not verify',
@@ -1448,7 +1441,7 @@ function verifyForeignJwt(token, record, keys, options) {
       continue;
     }
     try {
-      const payload = jwt.verify(String(token), pem, Object.assign({
+      const payload = stsCrypto.verifyJws(String(token), pem, Object.assign({
         // THE ALGORITHM FAMILY COMES FROM THE KEY, NOT FROM THE TOKEN. This is
         // `client_auth.js`'s rule and it is the classic JWT forgery: without
         // it, a token nominating HS256 would be verified using the partner's

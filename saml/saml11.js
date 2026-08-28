@@ -50,7 +50,16 @@
 // element is **AudienceRestrictionCondition**, not `AudienceRestriction`.
 // ---------------------------------------------------------------------------
 
-const { SignedXml } = require('xml-crypto');
+// Every signature in this service goes through one module since 2026-08-27.
+// **THE PARAGRAPHS ABOVE ABOUT `idAttribute` ARE HISTORY, NOT INSTRUCTIONS**,
+// and they are kept because the bug they describe is the best argument this
+// repository has for a single signer: xml-crypto could not find SAML 1.1's
+// `AssertionID`, so it INVENTED `Id="_0"` and referenced that instead, and the
+// fix had to be applied to each of the six signers separately. The shared
+// signer resolves `AssertionID`, `ResponseID` and `RequestID` natively — there
+// is no list to be told about and nothing to invent, so the defect cannot
+// recur here or anywhere else.
+const stsCrypto = require('../common/crypto');
 const { log, logArtifact, STS, xmlEscape, genId, iso } = require('../common/helpers');
 // saml.issuer — the same setting the 2.0 assertions carry, because it names
 // the same signer.
@@ -108,29 +117,22 @@ const CONFIRMATION_ARTIFACT = 'urn:oasis:names:tc:SAML:1.0:cm:artifact';
 function signSaml11Assertion(xml) {
   log.debug("Entering signSaml11Assertion().");
   logArtifact('SAML 1.1 assertion', 'before signing', xml);
-  const m = xml.match(/\bAssertionID="([^"]+)"/);
-  const id = m ? m[1] : '';
-  const sig = new SignedXml({ privateKey: STS.privateKeyPem, publicCert: STS.certPem,
-                              idAttribute: 'AssertionID' });
-  sig.signatureAlgorithm = 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256';
-  sig.canonicalizationAlgorithm = 'http://www.w3.org/2001/10/xml-exc-c14n#';
-  sig.addReference({
-    xpath: "/*[local-name(.)='Assertion']",
-    transforms: [
-      'http://www.w3.org/2000/09/xmldsig#enveloped-signature',
-      'http://www.w3.org/2001/10/xml-exc-c14n#'
-    ],
-    digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
-    uri: id ? ('#' + id) : ''
+  // LAST, which is where a SAML 1.1 assertion's signature goes. "After the
+  // Issuer" is not a position that exists here: in 1.1 the issuer is an
+  // ATTRIBUTE of <Assertion>, not a child element.
+  //
+  // Exclusive canonicalization is the shared signer's default and the choice is
+  // load-bearing — the assertion is signed as a standalone document and then
+  // embedded in an RSTR that declares prefixes of its own, so inclusive c14n
+  // would pull those ancestor declarations into the digest at verification time
+  // and the signature would fail for every relying party while verifying
+  // perfectly here. That argument is now made once, over signXml().
+  const signed = stsCrypto.signXml(xml, {
+    privateKeyPem: STS.privateKeyPem,
+    certPem: STS.certPem,
+    placement: stsCrypto.PLACEMENT.LAST,
+    what: 'SAML 1.1 assertion'
   });
-  // Exclusive canonicalization, not inclusive, and this is the load-bearing
-  // choice: the assertion is signed here as a standalone document and then
-  // embedded inside an RSTR that declares prefixes of its own (wst, wsp, wsa).
-  // Inclusive c14n would pull those ancestor declarations into the digest at
-  // verification time and the signature would fail for every relying party while
-  // verifying perfectly here, which is the worst shape of bug to chase.
-  sig.computeSignature(xml);
-  const signed = sig.getSignedXml();
   logArtifact('SAML 1.1 assertion', 'after signing', signed);
   log.debug("Leaving signSaml11Assertion().");
   return signed;
@@ -228,7 +230,15 @@ function buildSaml11Assertion(opts) {
   const id = genId();
   const now = iso(0);
   const lifetimeMin = opts.lifetimeMin > 0 ? opts.lifetimeMin : 60;
-  const exp = iso(lifetimeMin);
+  // Widened at both ends by saml.clockSkewS, for the reason saml2.js gives at
+  // length above its own two lines: `now` still states when this service issued
+  // and when the person authenticated, and only the Conditions move. The
+  // setting is shared with SAML 2.0 rather than being a second row because a
+  // deployment allowing for a relying party's clock has decided that once, and
+  // the two profiles are issued to the same estate.
+  const skewS = Math.max(0, Number(config.value('saml.clockSkewS')) || 0);
+  const notBefore = iso(-skewS / 60);
+  const exp = iso(lifetimeMin + skewS / 60);
   const authnInstant = opts.authnInstant || now;
   const authnMethod = opts.authnMethod || 'urn:oasis:names:tc:SAML:1.0:am:password';
   // The NameIdentifier, and the one thing to know about the defaults: they are
@@ -312,7 +322,7 @@ function buildSaml11Assertion(opts) {
       ' AssertionID="' + id + '"' +
       ' Issuer="' + xmlEscape(opts.issuer || config.value('saml.issuer')) + '"' +
       ' IssueInstant="' + now + '">' +
-      '<saml:Conditions NotBefore="' + now + '" NotOnOrAfter="' + exp + '">' + audienceEl +
+      '<saml:Conditions NotBefore="' + notBefore + '" NotOnOrAfter="' + exp + '">' + audienceEl +
       doNotCacheEl + '</saml:Conditions>' +
       '<saml:AuthenticationStatement AuthenticationMethod="' + xmlEscape(authnMethod) + '"' +
         ' AuthenticationInstant="' + authnInstant + '">' + subjectEl + localityEl +

@@ -1969,6 +1969,24 @@ const ENDPOINTS = [
           'The saml11.* settings are a FORM here since 2026-08-27, with ' +
           'saml.issuer beside them — the same setting the SAML 2.0 page draws, ' +
           'because one Issuer serves both profiles and WS-Federation.' },
+  { path: '/admin/saml-assertions', group: 'Admin', name: 'SAML assertions',
+    specs: ['saml2', 'saml11'],
+    effect: 'changes the validity window written into every FUTURE assertion ' +
+            'this service issues, in both SAML profiles and therefore in ' +
+            'WS-Trust and WS-Federation too',
+    what: 'NON-SPEC. Three of the settings the two identity provider pages ' +
+          'draw, on a page of their own because they are the ones somebody ' +
+          'sets to a specific number to watch something happen: the SAML 2.0 ' +
+          'and SAML 1.1 assertion lifetimes, in minutes, and saml.clockSkewS ' +
+          'in seconds. The skew is added to BOTH ENDS of the window — ' +
+          'Conditions/NotBefore is backdated by it and NotOnOrAfter extended ' +
+          'by it — while IssueInstant and the authentication instant stay at ' +
+          'the real time, because those state when something happened. It is ' +
+          'the only page where both lifetimes are visible at once, and it ' +
+          'writes through the same function /admin/config does, so there is ' +
+          'no second store. saml.clockSkewS is NOT oauth2.clockSkewS: that ' +
+          'one is the tolerance applied when this service READS a document ' +
+          'back, and it is on /admin/token-lifetimes.' },
   { path: '/admin/saml-attributes', group: 'Admin', name: 'Custom SAML attributes',
     specs: ['saml2', 'saml11'],
     effect: 'changes what every FUTURE SAML assertion contains',
@@ -2651,6 +2669,28 @@ const ENDPOINTS = [
           'possible answer. defaults clears the override on these four only, ' +
           'leaving any other setting alone. Nothing already issued changes. ' +
           'Mirrors POST /admin/token-lifetimes.' },
+  { path: '/admin-api/saml-assertions', group: 'Management API',
+    name: 'SAML assertions',
+    specs: ['saml2', 'saml11'],
+    what: 'NON-SPEC. The two assertion lifetimes and the issued-in clock ' +
+          'skew, as full configuration rows (bounds, source, default) and as ' +
+          'plain numbers — including saml2WindowS and saml11WindowS, the ' +
+          'whole width of the stated window, which is the lifetime plus ' +
+          'TWICE the skew and which no single setting states. With a count ' +
+          'of what has already been issued per profile and how much of it ' +
+          'has expired. Mirrors GET /admin/saml-assertions.' },
+  { path: '/admin-api/saml-assertions/:action', group: 'Management API',
+    name: 'SAML assertion actions',
+    specs: ['saml2', 'saml11'],
+    effect: 'changes the validity window of every FUTURE assertion issued here',
+    what: 'NON-SPEC. Two URLs behind one pattern: set and defaults. set is ' +
+          'ALL-OR-NOTHING and, unlike POST /admin-api/config/set-many, ' +
+          'REFUSES a property that is not one of the three rather than ' +
+          'ignoring it, for the reason /admin-api/token-lifetimes/:action ' +
+          'gives. defaults clears the override on these three only, leaving ' +
+          'any other setting alone. Nothing already issued changes — a ' +
+          'window is stamped into an assertion when it is signed. Mirrors ' +
+          'POST /admin/saml-assertions.' },
   { path: '/admin-api/claims', group: 'Management API', name: 'Custom claims',
     specs: ['rfc7519', 'oidc'],
     what: 'NON-SPEC. The two JWT claim sets and the rules that govern them: ' +
