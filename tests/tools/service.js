@@ -166,6 +166,15 @@ async function findPortBlock(preferredBase, log) {
 // caller's choice — `debug` is this service's default and is what a failing
 // job is read from, but it is also about half of its CPU, so a run that is
 // only collecting coverage will usually want less.
+//
+// THE LEVEL TAKES TWO OPTIONS AND NOT ONE, which is easy to get wrong: opts.
+// logLevel reaches the loggers config.js registers, and the six VENDORED
+// modules under common/vendored/ each build their own from
+// `require(process.env.CONFIG_FILE).logLevel` at load and never see it. So a
+// caller that wants a quiet service passes opts.configFile as well —
+// ./env/test.js is ./env/local.js with `logLevel: "info"` and nothing else
+// different. Left empty, the fallback below is the `debug` file and those
+// modules write every canonicalization of every signed document.
 // ---------------------------------------------------------------------------
 function environmentFor(base, opts) {
   log.debug('Entering environmentFor(). base=' + base);

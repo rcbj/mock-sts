@@ -98,7 +98,7 @@ because a typo in a filter must never read as "everything passed".
                                      # the service in a container built from
                                      # this working tree
 ./local-run-tests.sh --no-docker     # the same, with the service run on this
-                                     # machine (and what --coverage uses)
+                                     # machine
 ./local-run-tests.sh --keep-stack    # leave the container up afterwards
 ./local-run-tests.sh --no-protocol   # only the ten in-process files
 ./local-run-tests.sh --only=crypto --open
@@ -106,7 +106,11 @@ because a typo in a filter must never read as "everything passed".
 ./local-run-tests.sh --vendor-sync   # re-copy the parent's files over it
 ./docker-run-tests.sh                # the same 23 jobs with the RUNNER in a
                                      # container too: docker and nothing else
-./run-coverage.sh                    # the same set, with coverage collected
+./run-coverage.sh                    # the same set, with coverage collected —
+                                     # in a container too, with the RUNNER in
+                                     # it rather than the service, because V8
+                                     # collects from inside the process it
+                                     # measures. --no-docker is the host run
 ```
 
 **`./docker-run-tests.sh` IS THE SAME SUITE AND A DIFFERENT ENVIRONMENT**, and

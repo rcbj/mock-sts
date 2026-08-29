@@ -84,6 +84,16 @@ services:
       # header. It is env/local.js with a different comment: `logLevel: debug`,
       # every request and every artifact before and after signing written down,
       # which is what a failing protocol job is read from.
+      #
+      # THAT IS THE DEFAULT FOR THIS FILE DRIVEN DIRECTLY, AND NOT WHAT A
+      # ./docker-run-tests.sh RUN GETS: that launcher chooses the file from the
+      # log level and passes it in here, which is `info` and env/test.js unless
+      # somebody asks for otherwise. The file has to be chosen rather than the
+      # level alone, because the vendored modules under common/vendored/ build
+      # their loggers from CONFIG_FILE and never see STS_LOG_LEVEL — the
+      # launcher's own THE SERVICE'S LOG LEVEL block argues all of it. The
+      # `debug` default stays HERE so that `docker compose -f this up` by hand
+      # is still the loudest way to watch the mock.
       - CONFIG_FILE=${CONFIG_FILE:-./env/docker-tests.js}
       # THE BARE FORM IS LOAD-BEARING and the obvious alternative breaks the
       # container. With no `=`, compose passes this through ONLY if the shell

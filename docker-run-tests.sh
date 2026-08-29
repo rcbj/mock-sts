@@ -57,8 +57,12 @@
 #   ./docker-run-tests.sh --only=crypto --no-browser
 #                                             # anything else is passed straight
 #                                             # to tests/tools/run-report.js
-#   STS_LOG_LEVEL=info ./docker-run-tests.sh  # quieten the service; see below
-#   CONFIG_FILE=./env/local.js ./docker-run-tests.sh
+#   STS_LOG_LEVEL=debug ./docker-run-tests.sh # the service's full record back;
+#                                             # this stack runs it at info. See
+#                                             # below
+#   CONFIG_FILE=./env/docker-tests.js ./docker-run-tests.sh
+#                                             # or name the file, which then
+#                                             # decides the level by itself
 #
 # Exit code is the suite's.
 #
@@ -85,10 +89,14 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose-run-tests.yml}"
 COMPOSE_PROJECT="${STS_DOCKER_TEST_PROJECT:-mock-sts-docker-tests}"
 STS_CONTAINER_NAME="${STS_CONTAINER_NAME:-sts-docker-tests}"
 STS_TESTS_CONTAINER_NAME="${STS_TESTS_CONTAINER_NAME:-mock-sts-test-runner}"
-# The appconfig layer the SERVICE reads. env/docker-tests.js exists for this
-# stack and names it in its own header; it is env/local.js with the log level
-# kept at debug, which is what a failing protocol job is read from.
-CONFIG_FILE="${CONFIG_FILE:-./env/docker-tests.js}"
+# The appconfig layer the SERVICE reads. EMPTY here and resolved after the
+# arguments are parsed, by THE SERVICE'S LOG LEVEL below: which file this stack
+# wants is decided by the level, because the candidates differ in nothing else.
+# env/docker-tests.js exists for this stack and names it in its own header —
+# env/local.js with the log level kept at debug, which is what a failing
+# protocol job is read from — and env/test.js is the same file at `info`.
+# Setting CONFIG_FILE in the environment pins one and that block leaves it be.
+CONFIG_FILE="${CONFIG_FILE:-}"
 
 BUILD=1
 KEEP_STACK=0
@@ -177,6 +185,74 @@ preflight()
 
 preflight || exit 1
 
+# ---------------------------------------------------------------------------
+# THE SERVICE'S LOG LEVEL, WHICH IS `info` ON THIS STACK, AND TAKES TWO KNOBS.
+#
+# THIS BLOCK ARGUED THE OPPOSITE UNTIL IT WAS CHANGED. It forwarded
+# STS_LOG_LEVEL only when somebody had set it and said that quietening the
+# service was "a choice a run makes rather than one that should be made for
+# it". What that missed is that this stack makes the choice cost something a
+# hand run does not: the mock logs every request, every response and every
+# artifact both before and after signing at `debug`, which is about half of its
+# CPU, and on a run that passes the whole record goes into a container that is
+# removed at the end. So `info` is the default of THIS SCRIPT and of nothing
+# else — no appconfig file is edited and a service started any other way is
+# untouched — and `STS_LOG_LEVEL=debug ./docker-run-tests.sh` is the run that
+# is being read asking for the record back.
+#
+# THE SECOND KNOB IS THE APPCONFIG FILE, AND WITHOUT IT THIS WOULD LOOK LIKE IT
+# WORKED WHILE DOING ALMOST NOTHING. STS_LOG_LEVEL reaches the loggers
+# config.js registers — its own, and the `sts` logger in helpers.js that every
+# protocol module destructures. It does NOT reach the six VENDORED modules
+# under common/vendored/, which each build a bunyan logger at load from
+# `require(process.env.CONFIG_FILE).logLevel` and cannot be edited here. On the
+# run that measured this, the level alone left 3,869 debug lines of 3,951 —
+# 3,582 of them from `xmldsig`, which is every canonicalization of every signed
+# document. `common/config.js`'s registerLogger() header says the same thing
+# about the krb5_* codec modules.
+#
+# So the level picks the FILE too: trace or debug gets env/docker-tests.js and
+# therefore the whole record, anything else gets env/test.js, and those two
+# differ in one key and a header comment. And it goes the other way round as
+# well — a CONFIG_FILE named in the environment with no level beside it turns
+# this default OFF rather than being half-overridden, because naming a file
+# says something more specific than a level does and a service logging at
+# `info` out of a file that says `debug` is nobody's idea of an answer.
+#
+# The branches rather than a `:-`: an EMPTY STS_LOG_LEVEL is not a harmless
+# default, because bunyan throws `unknown level name: ""` from config.js while
+# the service is still loading its modules — so it never listens, and on this
+# stack that arrives as a healthcheck timeout that names nothing. An exported
+# empty one is therefore treated as unset.
+#
+# LOG_LEVEL — the SUITE's, forwarded below — gets no default because it already
+# has one that is `info`: run-report.js reads it as
+# `process.env.LOG_LEVEL || 'info'`, so there is nothing here to set.
+# ---------------------------------------------------------------------------
+STS_LEVEL="${STS_LOG_LEVEL:-}"
+if [ -n "${STS_LEVEL}" ];
+then
+  # A level was asked for. It decides the file too, so that debug means the
+  # WHOLE record rather than two thirds of it.
+  if [ -z "${CONFIG_FILE}" ];
+  then
+    case "${STS_LEVEL}" in
+      trace|debug) CONFIG_FILE="./env/docker-tests.js" ;;
+      *)           CONFIG_FILE="./env/test.js" ;;
+    esac
+  fi
+elif [ -n "${CONFIG_FILE}" ];
+then
+  # A FILE was named and no level was. The file decides, both halves of it, and
+  # this script forwards no level of its own — otherwise pinning the debug file
+  # would have produced a service logging at info out of one that says debug,
+  # which is the confusing half-answer this whole block exists to avoid.
+  :
+else
+  STS_LEVEL="info"
+  CONFIG_FILE="./env/test.js"
+fi
+
 COMPOSE_ENV=(
   "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT}"
   "STS_CONTAINER_NAME=${STS_CONTAINER_NAME}"
@@ -184,26 +260,12 @@ COMPOSE_ENV=(
   "CONFIG_FILE=${CONFIG_FILE}"
   "STS_TEST_ARGS=${STS_TEST_ARGS}"
 )
-# ---------------------------------------------------------------------------
-# THE TWO LOG LEVELS, FORWARDED ONLY WHEN THEY HAVE A VALUE.
-#
-# STS_LOG_LEVEL is the SERVICE's and LOG_LEVEL is the SUITE's. The guard is not
-# decoration: an EMPTY STS_LOG_LEVEL is not a harmless default, because bunyan
-# throws `unknown level name: ""` from config.js while the service is still
-# loading its modules — so it never listens, and on this stack that arrives as
-# a healthcheck timeout that names nothing.
-#
-# WHY YOU WOULD SET IT: the mock logs every request, every response and every
-# artifact before and after signing, at debug, which is its default and the
-# point of a mock — when a test fails, that log is the only record of what was
-# issued. It is also about half of that service's CPU. `STS_LOG_LEVEL=info`
-# trades the record for throughput, and that is a choice a run makes rather
-# than one that should be made for it.
-# ---------------------------------------------------------------------------
-if [ -n "${STS_LOG_LEVEL:-}" ];
+if [ -n "${STS_LEVEL}" ];
 then
-  COMPOSE_ENV+=("STS_LOG_LEVEL=${STS_LOG_LEVEL}")
+  COMPOSE_ENV+=("STS_LOG_LEVEL=${STS_LEVEL}")
 fi
+# The SUITE's level, forwarded only when it has one; see the block above for
+# why it needs no default of its own.
 if [ -n "${LOG_LEVEL:-}" ];
 then
   COMPOSE_ENV+=("LOG_LEVEL=${LOG_LEVEL}")

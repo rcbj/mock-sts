@@ -162,6 +162,13 @@
 //                   every signed artifact written down, which is what a
 //                   failing protocol job is read from, and about half of that
 //                   service's CPU.
+//   STS_TEST_CONFIG_FILE
+//                   the appconfig file that service reads (default
+//                   ./env/local.js, resolved by tests/tools/service.js). It is
+//                   the OTHER half of the log level: the vendored modules
+//                   under common/vendored/ build their loggers from this file
+//                   and never see STS_LOG_LEVEL, so a quiet run needs both.
+//                   ./local-run-tests.sh sets it from --sts-log-level.
 //   COVERAGE=true   collect V8 coverage from every job AND from the throwaway
 //                   service, then render it. `./run-coverage.sh` is the way in.
 //   COVERAGE_DIR    where the raw data and the rendered report go
@@ -961,14 +968,21 @@ async function main() {
     return j.suite === 'protocol';
   });
   if (haveProtocolJobs && opts.serviceUrl) {
-    // COVERAGE CANNOT COME OUT OF A CONTAINER, and saying so here is the whole
-    // handling. V8 writes its data from INSIDE the process being measured, to
-    // a directory that process can write — so an instrumented run has to be
-    // one this runner started. `./run-coverage.sh` never passes --service-url
-    // for exactly this reason; somebody who set STS_TEST_SERVICE_URL in their
-    // shell and then asked for coverage would otherwise get a report whose
-    // protocol column was silently empty, which reads as "the protocols are
-    // untested" rather than as "this run could not look".
+    // COVERAGE CANNOT COME OUT OF A SERVICE THIS RUNNER ONLY SPEAKS HTTP TO,
+    // and saying so here is the whole handling. V8 writes its data from INSIDE
+    // the process being measured, to a directory that process can write — so an
+    // instrumented run has to be one this runner started. `./run-coverage.sh`
+    // never passes --service-url for exactly this reason; somebody who set
+    // STS_TEST_SERVICE_URL in their shell and then asked for coverage would
+    // otherwise get a report whose protocol column was silently empty, which
+    // reads as "the protocols are untested" rather than as "this run could not
+    // look".
+    //
+    // IT IS NOT A STATEMENT ABOUT CONTAINERS, which is a distinction
+    // ./run-coverage.sh's own containerized mode rests on: that run puts THIS
+    // RUNNER in a container and lets it start the service as a child process
+    // in there, so everything measured is again something this process
+    // started. What cannot be measured is the service container NEXT DOOR.
     if (wantCoverage) {
       log.warn('coverage was asked for AND a service was handed in with ' +
                '--service-url. The protocol half of the coverage will be ' +
@@ -995,6 +1009,13 @@ async function main() {
         log: log,
         logFile: path.join(logsDir, '00-mock-sts-service.log'),
         logLevel: process.env.STS_LOG_LEVEL || '',
+        // The appconfig file that service reads, when the caller named one.
+        // STS_LOG_LEVEL alone does NOT quieten a run: the six vendored modules
+        // under common/vendored/ each build their own bunyan logger at load
+        // from the CONFIG_FILE's logLevel, so a `debug` file goes on writing
+        // every canonicalization however low this level is. ./local-run-tests.sh
+        // picks the file from the level and exports it under this name.
+        configFile: process.env.STS_TEST_CONFIG_FILE || '',
         coverageDir: wantCoverage ? rawProtocol : '',
         portBase: process.env.STS_TEST_PORT_BASE || ''
       });

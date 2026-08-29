@@ -38,7 +38,11 @@ CONFIG_FILE=./env/local.js node server.js
 `CONFIG_FILE` selects a file in `env/` — `local.js`, `test.js` or
 `docker-tests.js`. At the default `debug` level every endpoint call and every
 artifact before and after signing is logged. That is the point of a mock, so
-resist quietening it; `env/test.js` is the quiet one if you need it.
+resist quietening it; `env/test.js` is the quiet one if you need it — and it is
+what the three test launchers select for themselves, since a suite that passes
+throws its log away and the level is about half of this service's CPU. Ask any
+of them for `--sts-log-level=debug` (or `STS_LOG_LEVEL=debug`) and the whole
+record comes back, appconfig file and all.
 
 The path is relative to the repository root, wherever you run node from and
 whichever module reads it. That has been true since the modules moved into

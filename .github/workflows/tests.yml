@@ -44,11 +44,12 @@ permissions:
 jobs:
   tests:
     runs-on: ubuntu-latest
-    # The suite itself is about a minute, the two images are several more, and
-    # a hung browser job is caught by run-report.js's own per-job watchdog. This
-    # is the outer bound for a runner that has wedged — without it a stuck job
-    # holds a runner for six hours.
-    timeout-minutes: 45
+    # The suite itself is about a minute, the two images are several more, the
+    # instrumented second pass is another suite plus a render, and a hung
+    # browser job is caught by run-report.js's own per-job watchdog. This is the
+    # outer bound for a runner that has wedged — without it a stuck job holds a
+    # runner for six hours. It went from 45 when the coverage pass was added.
+    timeout-minutes: 60
     steps:
       # submodules: recursive is LOAD-BEARING, and `true` is not enough. The
       # embedded directory's library is `"ldapjs": "file:node-ldapjs"` — a git
@@ -81,13 +82,39 @@ jobs:
       - name: Run the containerized test suite
         run: ./docker-run-tests.sh
 
-      # The tests container writes tests/report as root through a bind mount;
-      # hand it back to the runner user before the upload step reads it. `|| true`
-      # because a run that failed before writing anything must not fail HERE and
-      # hide why.
+      # ---------------------------------------------------------------------
+      # THE SAME SUITE AGAIN, INSTRUMENTED. What this adds is the only question
+      # the step above cannot answer: WHICH LINES of this tree the twenty-three
+      # jobs actually reached. It is the second half of the picture for anybody
+      # deciding what to test next, and it is worth a CI run because the report
+      # is the thing nobody generates by hand.
+      #
+      # IT RUNS IN A CONTAINER TOO, which is what makes it possible here at all:
+      # ./run-coverage.sh puts the RUNNER in docker-compose-run-tests.yml's
+      # `tests` image and lets it start the service it measures as a child
+      # process in there — V8 writes coverage from inside the process being
+      # measured, so the service container next door could never have been the
+      # thing under the report. So this runner still needs docker and nothing
+      # else: no node, no `npm install`, no Chrome.
+      #
+      # --no-build because the step above has just built that image from this
+      # very checkout; rebuilding it would be several minutes to produce the
+      # same layers. Anywhere else the rebuild is the default, and deliberately.
+      #
+      # NOT if: always(). A red suite fails this the same way and for the same
+      # reason, so running it would spend the time to report a second copy of
+      # one failure — and the report from the step above is already uploaded.
+      # ---------------------------------------------------------------------
+      - name: Collect coverage, in containers
+        run: ./run-coverage.sh --no-build
+
+      # The tests container writes tests/report AND coverage as root through
+      # bind mounts; hand them back to the runner user before the upload steps
+      # read them. `|| true` because a run that failed before writing anything
+      # must not fail HERE and hide why.
       - name: Normalize report permissions
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" tests/report || true
+        run: sudo chown -R "$(id -u):$(id -g)" tests/report coverage || true
 
       # if: always() — the report is at its most useful when the run went red.
       # `latest` is a symlink into the timestamped directory beside it, and
@@ -98,5 +125,19 @@ jobs:
         with:
           name: test-report
           path: tests/report/latest
+          if-no-files-found: warn
+          retention-days: 30
+
+      # The rendered coverage — index.html with a page per file, lcov.info for
+      # anything that reads that, summary.json for the totals, and raw/ so that
+      # somebody who would rather point c8 at the same data can. `warn` rather
+      # than `error` because a run that went red before the coverage step is a
+      # run with no coverage to upload, and that must not be a second failure.
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage
           if-no-files-found: warn
           retention-days: 30
