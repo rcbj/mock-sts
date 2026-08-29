@@ -27,7 +27,7 @@ instance.
 
 **IT LISTS NO ENDPOINTS AND MUST NOT START.** `GET /admin/sts-metadata` builds
 that list by walking the running Express router, so it cannot go stale by
-omission, and the parent project's `tests/sts_metadata.js` fails on drift in
+omission, and this repository's own `tests/vendored/sts_metadata.js` fails on drift in
 either direction. A hand-written set of highlights here would be a second,
 unchecked copy of it — wrong within a month, on the page most likely to be read
 first and least likely to be re-read. `docs/endpoints.md` makes the same
@@ -72,7 +72,7 @@ that costs somebody ten minutes.
   down, and a missing decoration is the least important thing that could go
   wrong here. With no image the page is drawn without one and the route answers
   **404 in its own words**. That last part is load-bearing for the link check in
-  `tests/sts_metadata.js`, which fails on Express's `Cannot GET` and passes on an
+  `tests/vendored/sts_metadata.js`, which fails on Express's `Cannot GET` and passes on an
   endpoint answering for itself.
 * **It sits on a BLACK band, and that is not a style choice.** The artwork is
   white lettering with a dark outline, a green wordmark and a pale-blue mark,

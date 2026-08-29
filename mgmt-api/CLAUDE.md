@@ -76,7 +76,7 @@ about that line had to change.
      wrong within a month.
    * **What no code here can check is a new console control with no row.**
      Nothing in this service can see a form appear on a page. So the parity is
-     asserted from outside, by the parent project's `tests/admin_api.js`, and it
+     asserted from outside, by this repository's own `tests/vendored/admin_api.js`, and it
      reads the facts off the SERVICE rather than off a list in the test: the
      console's page list comes back in `GET /admin-api/status`, and each action
      handler, asked for an action that does not exist, replies naming the ones
@@ -319,7 +319,7 @@ matches on segment boundaries, so `/admin-api` never matched it.
 
 Three reasons, and the third is the one to read before "fixing" this:
 
-* **A test drives this API.** The parent project's `tests/admin_api.js` walks
+* **A test drives this API.** The parent project's `tests/vendored/admin_api.js` walks
   every operation over HTTP with no browser and no cookie jar. A credential here
   would be the only one a test had to hold a secret for, in a service whose
   premise is that it authenticates nobody.
@@ -407,7 +407,7 @@ rule does not hold.** Parity says every console action has an operation and both
 go through one function, which is what stops the two DOORS drifting — and it
 worked: neither door was more permissive than the other. What it cannot catch is
 a field the API accepts and the console's form does not HAVE, because there is
-then no second implementation to disagree with. `tests/admin_api.js` over there
+then no second implementation to disagree with. `tests/vendored/admin_api.js`
 checks every documented schema property against a live reply, which is the check
 that would have caught this had it covered request bodies as well: a documented
 request property that changes nothing is the same class of defect as a

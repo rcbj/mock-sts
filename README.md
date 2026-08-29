@@ -2211,7 +2211,7 @@ it still carry the clause"* rather than *"is it the value I set"*, so the five l
 relaxations are untouched.
 
 The 404 **body** is left exactly as Express writes it. `Cannot GET /path` is how the
-parent project's `tests/sts_metadata.js` tells an unrouted path from an endpoint
+parent project's `tests/vendored/sts_metadata.js` tells an unrouted path from an endpoint
 legitimately answering 404, and a prettier 404 here would have broken that distinction
 without anything saying so.
 
@@ -3386,7 +3386,7 @@ more.
 
 **Thirteen protocol cards sit at the top of it**, which is the one part of the page that cannot be derived: a family is on the router only if it is HTTP, and SAML 2.0 and SAML 1.1 register **no route at all** (their assertions travel inside a WS-Trust RSTR or a WS-Federation wresult), while Kerberos, LDAP, PKI and SPIFFE live mostly on raw sockets. So that list is hand-written, and three drift checks keep a hand-written list on a derived page honest: a card naming an endpoint group that has no rows, a card citing a specification id that does not exist, and — the direction nothing else catches — **a group of endpoints no card claims**, which is what a fourteenth family added without a card looks like. They are reported beside the other three and asserted by the same test.
 
-**The endpoint list is read from the running Express router, not written down.** That is the whole design: a hand-kept list of endpoints in a file beside the endpoints goes stale the first time somebody adds a route, and the failure is silent in the worst direction — the page still looks complete. `app._router.stack` is walked **per request** (not at require time, where the answer would depend on module load order) and the table in `sts_metadata.js` only supplies the *name* and the *description* for a path the router reports. Both kinds of drift are then reported on the page itself and fail the parent project's `tests/sts_metadata.js`:
+**The endpoint list is read from the running Express router, not written down.** That is the whole design: a hand-kept list of endpoints in a file beside the endpoints goes stale the first time somebody adds a route, and the failure is silent in the worst direction — the page still looks complete. `app._router.stack` is walked **per request** (not at require time, where the answer would depend on module load order) and the table in `sts_metadata.js` only supplies the *name* and the *description* for a path the router reports. Both kinds of drift are then reported on the page itself and fail this repository's own `tests/vendored/sts_metadata.js`:
 
 * a route **registered and undescribed** is listed as UNDOCUMENTED — it still appears, with its methods, because the page's first duty is to be a true list of what is callable. Adding an endpoint to this service therefore costs one entry in `sts_metadata.js`, which is the point.
 * a description whose path is **not registered** is the more dangerous half: the page would advertise an endpoint that answers 404, which is what a rename produces, and a rename is exactly when nobody thinks to check the index.
@@ -3987,7 +3987,7 @@ The first is that **this API decides nothing**. Every POST calls the same action
 
 The second is that **the OpenAPI document is generated from the table that registers the routes**. `admin_api.js` holds one row per resource — the handler, the parameters, the request bodies with their examples, the prose — and `admin_api_spec.js` turns that into the document. An operation therefore cannot exist and be undocumented, nor be documented and not exist. A specification file kept beside the code it describes is wrong within a month, and the way it goes wrong is silent: somebody adds an action to the console, adds it to the API, and does not touch the YAML.
 
-The third is the direction neither of those can check. **Nothing in this service can see a form appear on a page**, so a new console control with no operation here would go unnoticed by everything above. That is asserted from outside, by the parent project's `tests/admin_api.js`, and it reads the facts off this service rather than off a list in the test: the console's own page list comes back in `GET /admin-api/status`, and each action handler, asked to perform an action that does not exist, replies with the names of the ones that do — "Unknown action "x". The four are: add, remove, clear, replace." Add an action to a switch and that sentence grows; the test then fails until there is an operation for it. The same test checks every property the document describes against a live reply, which has already caught two names that were wrong and unnoticeable: an `expiresAt` that is really `expiresAtMs`, and a group drill-down documented with its members at the top level when they are inside `group`.
+The third is the direction neither of those can check. **Nothing in this service can see a form appear on a page**, so a new console control with no operation here would go unnoticed by everything above. That is asserted from outside, by this repository's own `tests/vendored/admin_api.js`, and it reads the facts off this service rather than off a list in the test: the console's own page list comes back in `GET /admin-api/status`, and each action handler, asked to perform an action that does not exist, replies with the names of the ones that do — "Unknown action "x". The four are: add, remove, clear, replace." Add an action to a switch and that sentence grows; the test then fails until there is an operation for it. The same test checks every property the document describes against a live reply, which has already caught two names that were wrong and unnoticeable: an `expiresAt` that is really `expiresAtMs`, and a group drill-down documented with its members at the top level when they are inside `group`.
 
 **Eight POST routes serve thirty-nine URLs**, and the shape is deliberate. Express registers `/admin-api/tokens/:action` once; the document lists `/admin-api/tokens/revoke`, `/restore`, `/revoke-kind`, `/revoke-subject`, `/revoke-user` and `/revoke-all` as the six operations they are, each with its own body schema and its own example. One pattern keeps `GET /admin/sts-metadata` to one row per resource showing the parameter — the router is what that page reads, and twenty-four rows of near-identical prose there would bury the rest of the service — while the document describes URLs a caller can actually use. An action nobody has heard of is not a 404: it reaches the console's own handler and comes back as its refusal, naming the ones that exist, which is both the friendliest error and the sentence the parity check reads.
 
@@ -5656,9 +5656,10 @@ this existed is reported in full by it.
 The tests that drive this service over HTTP are authored in the parent project,
 and that suite drives the `sts/` gitlink over there — which is pinned, so a
 change made in this working tree is not covered by it until somebody bumps the
-pin. The thirteen of those jobs that a lone mock can satisfy are VENDORED into
-`tests/vendored/` as byte-identical copies, and every `./local-run-tests.sh`
-runs them: the metadata drift checks, the management API and every one of its
+pin. The thirteen of those jobs that a lone mock can satisfy live in
+`tests/vendored/` — nine of them byte-identical copies, and FOUR this
+repository's own since 2026-08-28, the ones that drive `/admin` and
+`/admin-api` — and every `./local-run-tests.sh` runs them: the metadata drift checks, the management API and every one of its
 operations, the whole admin console in a real browser, DPoP, the authorization
 server's endpoints, the DID-named issuer, SAML 1.1, SAML encryption, the
 UserInfo endpoint and the Linked-Data credential jobs. About a minute, most of

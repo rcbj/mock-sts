@@ -8,7 +8,7 @@
 // The console and the management API both answer "did that setting change?"
 // out of memory, so a value that round-trips through either of them proves that
 // something is holding it and nothing more. The parent project's
-// `tests/sts_admin_console.js` and `tests/sts_admin_api_operations.js` go as far
+// `tests/vendored/sts_admin_console.js` and `tests/vendored/sts_admin_api_operations.js` go as far
 // as an HTTP client can — they watch `/admin-api/persistence`'s write counter
 // move, its dirty flag clear and its failure counter stay put — and that is
 // still an assertion about a number the service computed about itself.

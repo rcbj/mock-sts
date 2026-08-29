@@ -30,7 +30,7 @@ stale by omission. Each row carries the method, the path, a sentence about what
 the endpoint is for, and a link to the specification it implements.
 
 It also reports **drift**, in six arrays, and the parent project's
-`tests/sts_metadata.js` fails on all six:
+`tests/vendored/sts_metadata.js` fails on all six:
 
 | Field | Means |
 |---|---|

@@ -24,7 +24,7 @@
 //     to the sign-in screen and a caller asking for `?format=json` is refused
 //     401 rather than redirected. That is a change of behaviour for anything
 //     that fetched the old path unauthenticated, and the parent project's
-//     `tests/sts_metadata.js` now signs in the way `tests/admin_api.js` does.
+//     `tests/vendored/sts_metadata.js` now signs in the way `tests/vendored/admin_api.js` does.
 //   * **REQUIRING `admin.js` FROM HERE MOVES NOTHING.** That is the question to
 //     ask of any require in this service, because require order is route order
 //     — and this one is safe in both directions: server.js requires the console
@@ -60,7 +60,7 @@
 //   * a description for a path that is NOT registered is listed as a stale entry.
 //     That is the direction that catches a route being renamed or removed.
 //
-// `tests/sts_metadata.js` fails on either, which is what makes the page's claim to
+// `tests/vendored/sts_metadata.js` fails on either, which is what makes the page's claim to
 // completeness worth something. It is also why the route walk happens per request
 // instead of at require time: at require time the answer would depend on module
 // load order, and a module loaded after this one would be missing.
@@ -920,7 +920,7 @@ const ENDPOINTS = [
   { path: '/KdcProxy', group: 'Kerberos', name: 'KDC Proxy (MS-KKDCP)',
     // rfc3961 belongs here because every message this relays has enc-parts encrypted under
     // that framework by the KDC behind it — and because a specification nothing links to is
-    // an IDLE CLAIM, which tests/sts_metadata.js fails the page for. It was listed and
+    // an IDLE CLAIM, which tests/vendored/sts_metadata.js fails the page for. It was listed and
     // unlinked when the Kerberos rows were first added.
     specs: ['ms-kkdcp', 'rfc4120', 'rfc3961'],
     what: 'Relays a KDC-PROXY-MESSAGE to the KDC listening on TCP and UDP port 88 in this ' +

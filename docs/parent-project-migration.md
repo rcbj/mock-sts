@@ -104,27 +104,32 @@ require the result to be a subset of what is copied.
 
 ---
 
-## What the next bump needs: exactly one file
+## What the next bump needs: nothing, as of 2026-08-29
 
-As of 2026-08-28 the walk has one outstanding answer, and it is the live example
-of everything above.
+The walk is clean. Seeded from the three entry points against the pin the parent
+carries today — `c3b4294` on `feature/201` — the closure is **thirty files and
+every one of them is COPYd**.
 
-**`common/pq_jose.js`.** `common/crypto.js` requires it for the post-quantum and
-composite signatures, and `crypto.js` is deep in the closure — so every
-in-process Kerberos job loads it. The parent's **working tree** already carries
-the line, with the reasoning at it:
+**`common/pq_jose.js` was the outstanding one and it is paid**, which is worth
+keeping here rather than deleting, because it is the live example of everything
+above and of the one rule that matters. `common/crypto.js` requires it for the
+post-quantum and composite signatures, and `crypto.js` is deep in the closure,
+so every in-process Kerberos job loads it. For a few days the parent's WORKING
+TREE carried the line while its COMMITTED `tests/Dockerfile` did not and the
+pinned commit had no such file — three facts consistent with each other and with
+a green build, which is exactly why this is easy to get wrong. They stop being
+consistent the moment one moves alone: bump the pin without the COPY line and
+the Kerberos jobs die at load; commit the COPY line without the pin bump and the
+image fails to build with `COPY … not found`. **They land together or not at
+all** — and on 2026-08-28 they did, in the parent's `ab6b9cc`:
 
 ```dockerfile
 COPY sts/common/pq_jose.js ./sts/common/
 ```
 
-Its **committed** `tests/Dockerfile` does not, and the pinned commit `d2345c3`
-has no such file — those two facts are consistent with each other and with a
-green build today, which is exactly why this is easy to get wrong. They stop
-being consistent the moment either one moves alone: bump the pin without the
-COPY line and the Kerberos jobs die at load; commit the COPY line without the
-pin bump and the image fails to build with `COPY … not found`. **They land
-together or not at all.**
+**The obligation is the WALK, not any particular file.** Rerun it after every
+bump, and after any commit here that adds a require reachable from `krb5_kdc.js`,
+`krb5_service.js` or `spnego.js`.
 
 ---
 

@@ -96,7 +96,7 @@ undocumented, nor be documented and not exist.
 
 What no code here can check is a new console control with **no** row. Nothing in
 this service can see a form appear on a page, so the parity is asserted from
-outside by the parent project's `tests/admin_api.js`, which reads the facts off
+outside by this repository's own `tests/vendored/admin_api.js`, which reads the facts off
 the *service* rather than off a list in the test.
 
 ## Tests
