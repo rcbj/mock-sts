@@ -105,6 +105,25 @@ RUN npm install --omit=dev && npm cache clean --force
 # .dockerignore; node-ldapjs is copied above, ahead of the install, and copying
 # it again here is a no-op on identical content.
 COPY . ./
+# ---------------------------------------------------------------------------
+# AND THE SUITE BACK OUT AGAIN, WHICH .dockerignore USED TO DO.
+#
+# `tests/` is in the build context since 2026-08-29 and it is not here by
+# choice: ONE context serves two images — this one and the test runner
+# (tests/Dockerfile, built by docker-compose-run-tests.yml), which is nothing
+# BUT the suite and needs the whole source tree besides, because ten of its
+# jobs require this service's own modules. A context has one ignore file, and
+# the per-Dockerfile ignore file that would give it two is a BuildKit feature
+# that the legacy builder silently ignores. See .dockerignore, where the
+# failure that taught this is written down.
+#
+# So the exclusion moved here, where the reason sits beside the instruction.
+# The tests assert this repository's MODULE CONTRACTS by requiring the modules
+# directly — they are a property of the source tree rather than of the running
+# service, this image exists to run `server.js`, and nothing in it would ever
+# call them. `npm test` inside this image therefore does not work, exactly as
+# deliberately as before; package.json is copied for its dependency list.
+RUN rm -rf ./tests
 # The service selects its configuration (log level) with CONFIG_FILE, the same
 # way api and client do. The compose files override this per stack.
 #

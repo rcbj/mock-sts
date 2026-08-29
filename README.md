@@ -5588,6 +5588,9 @@ Two consequences worth knowing before changing this:
 ```bash
 npm test                          # the in-process suite: one process, under
                                   # two seconds, no port and no container
+./docker-run-tests.sh             # ALL 23 jobs, ENTIRELY IN CONTAINERS: the
+                                  # service AND the runner, on a host that has
+                                  # docker and nothing else. What CI runs
 ./local-run-tests.sh              # ALL 23 jobs, with a report written: that
                                   # suite AND the protocol jobs, the latter
                                   # against a CONTAINER built from this tree
@@ -5599,6 +5602,26 @@ npm test                          # the in-process suite: one process, under
                                     # read /admin or re-run one job by hand
 ./run-coverage.sh                 # the same run, with coverage collected
 ```
+
+**THE TWO LAUNCHERS RUN THE SAME TWENTY-THREE JOBS AND DIFFER ONLY IN WHERE THE
+TESTS THEMSELVES RUN**, which is the whole reason both exist.
+`./local-run-tests.sh` is the development loop: the service is a container, the
+jobs are plain node processes on your machine driving your Chrome, so editing a
+test and re-running it costs nothing. `./docker-run-tests.sh` puts the runner in
+a container too — node, the browser and this working tree, built from
+`tests/Dockerfile` — brings both up from `docker-compose-run-tests.yml` on a
+private network, and exits with the suite's status. It needs **docker and
+nothing else**: no node, no `npm install`, no Chrome, no checkout of the parent
+project. That makes it what `.github/workflows/tests.yml` runs on every push,
+and what to reach for when a run passes on one machine and not on another —
+a difference between the two launchers is a difference in the environment and
+in nothing else.
+
+Neither can disturb a mock you are already running. Each is its own compose
+project with its own container names, `./local-run-tests.sh` publishes a free
+port found at start and `./docker-run-tests.sh` publishes none at all, so
+`docker compose up`'s `sts` on 8081 is untouched by both — including by their
+teardowns.
 
 `npm test` is what `tests/` is for and is unchanged by everything below it: it
 needs `npm install` to have been run and nothing else — no port, no container,

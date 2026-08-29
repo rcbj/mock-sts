@@ -104,8 +104,26 @@ because a typo in a filter must never read as "everything passed".
 ./local-run-tests.sh --only=crypto --open
 ./local-run-tests.sh --vendor-check  # is tests/vendored/ still in sync?
 ./local-run-tests.sh --vendor-sync   # re-copy the parent's files over it
+./docker-run-tests.sh                # the same 23 jobs with the RUNNER in a
+                                     # container too: docker and nothing else
 ./run-coverage.sh                    # the same set, with coverage collected
 ```
+
+**`./docker-run-tests.sh` IS THE SAME SUITE AND A DIFFERENT ENVIRONMENT**, and
+the three files in this directory that serve it are not tests: `Dockerfile`
+(node, a Chrome and this working tree), `Dockerfile.dockerignore` (which exists
+only because the repository root's excludes `tests`, since the SERVICE image
+must not carry the suite) and `run-tests-in-container.sh` (the image's CMD —
+wait for the service, then `tools/run-report.js --service-url=http://sts:8081`).
+`../docker-compose-run-tests.yml` brings the pair up.
+
+Which to reach for: **this one when the question is the environment**, because
+it needs docker and nothing else and is what CI runs, so a failure here and a
+pass locally is a difference in node, in an installed package or in the image;
+**`./local-run-tests.sh` when the question is a test**, because there the jobs
+are node processes on this machine and re-running one costs nothing where here
+it costs an image build. The jobs, the runner and the report are the same in
+both.
 
 `./local-run-tests.sh` is this repository's answer to the parent project's
 launcher of the same name, and `tests/tools/run-report.js` is what it drives.
