@@ -223,7 +223,7 @@ function href(path) {
 // and null otherwise — including for a path that opens with the SEGMENT and an
 // undefined realm. That case deliberately falls through to Express's own 404
 // rather than being answered here: `Cannot GET /realm/nope/oauth2/token` is
-// what the parent project's tests/sts_metadata.js uses to tell an unrouted path
+// what this repository's own tests/vendored/sts_metadata.js uses to tell an unrouted path
 // from an endpoint legitimately answering 404, and a prettier refusal for
 // unknown realms would break that distinction for every path under the segment.
 // `GET /realms` is where somebody finds out what the realms actually are.

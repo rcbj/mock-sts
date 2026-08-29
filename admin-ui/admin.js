@@ -62,7 +62,7 @@
 //
 // **AND `/admin-api` IS NOT GATED**, deliberately: it is how a test drives this
 // console, it is the way back in when nobody holds a role, and gating it would
-// have broken the parent project's `tests/admin_api.js`. So the sentence below
+// have broken this repository's own `tests/vendored/admin_api.js`. So the sentence below
 // is still true of this PORT even though it is no longer true of this PAGE —
 // which is why it stays rather than being deleted:
 //
@@ -2426,7 +2426,7 @@ function respondToAction(req, res, target, result) {
 // (`mgmt-api/CLAUDE.md` rule 7 covers what that costs) and is therefore the way
 // back in for somebody who has locked themselves out of the console, which is a
 // state `admin.openWhenEmpty: false` makes reachable. It is also why turning
-// this on does not break the parent project's `tests/admin_api.js`.
+// this on does not break this repository's own `tests/vendored/admin_api.js`.
 //
 // **A REFUSAL IS A PAGE AND NOT A BARE STATUS.** 403 with an empty body is the
 // single least useful thing this could answer: the reader is signed in, the
@@ -6956,7 +6956,7 @@ function delegationEdgeRow(edge, lookOf) {
 // **THERE IS NO SCRIPT AND THERE MUST NOT BE ONE**, which is why this is not a
 // type-ahead. `script-src 'none'` holds over the whole service (common/app.js)
 // and the parent suite asserts it against this console's live headers
-// (tests/admin_api.js) — so there is no keystroke handler, no fetch and no
+// (tests/vendored/admin_api.js) — so there is no keystroke handler, no fetch and no
 // debounce to build one out of, and anything written as though there were would
 // be a control that silently does nothing rather than one that half works. What
 // a browser gives for free is a GET form submitted by the Enter key: type,
@@ -10880,7 +10880,7 @@ function applicationsAction(body, protocols) {
   // THE LIST IS BUILT FROM THE SWITCH ABOVE RATHER THAN TYPED, and the reason
   // is that it was typed and went stale: `refresh-metadata` was added on
   // 2026-08-27 and this sentence still said "The six are" and named six. That
-  // is not a cosmetic drift — the parent project's tests/admin_api.js READS
+  // is not a cosmetic drift — this repository's own tests/vendored/admin_api.js READS
   // this sentence to check that every console action has an /admin-api
   // operation, so an action missing from it is an action the parity check
   // cannot see, and the API could lose the operation entirely with nothing
@@ -19873,7 +19873,7 @@ function spiffeCommaList(value) {
 }
 
 // The known actions, as a list, so that an unknown one can be answered by
-// NAMING the ones that exist. The parent project's tests/admin_api.js reads
+// NAMING the ones that exist. The parent project's tests/vendored/admin_api.js reads
 // exactly that reply to assert console/API parity — it asks each handler for an
 // action that does not exist and compares what comes back with the API's
 // operations — so this list is not decoration.
@@ -21428,7 +21428,7 @@ module.exports = {
   // The sign-out page's view and its four actions, for admin_api.js. Rule 7:
   // the API calls exactly these, so an action added to that switch is most of
   // adding it there — and the refusal sentence that names the four is what the
-  // parent project's tests/admin_api.js reads to check the parity.
+  // parent project's tests/vendored/admin_api.js reads to check the parity.
   logoutView: logoutView,
   logoutAction: logoutAction,
   jtiFrom: jtiFrom,

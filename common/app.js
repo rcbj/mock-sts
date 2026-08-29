@@ -100,7 +100,7 @@ app.use(function (req, res, next) {
   // Not in a realm — including a path that opens with the realm SEGMENT and an
   // id nobody defined. That case deliberately falls through to Express's own
   // 404 rather than being refused here: `Cannot GET /realm/nope/oauth2/token`
-  // is how the parent project's tests/sts_metadata.js tells an unrouted path
+  // is how this repository's own tests/vendored/sts_metadata.js tells an unrouted path
   // from an endpoint legitimately answering 404, and a friendlier refusal for
   // unknown realms would break that distinction for every path under the
   // segment. `GET /realms` is where somebody finds out what the realms are.
@@ -352,7 +352,7 @@ app.use(function (req, res, next) {
   //
   // Wrapping writeHead rather than adding a final 404 handler is deliberate
   // too. A handler would have to reproduce Express's body byte for byte:
-  // `Cannot GET /path` is how the parent project's tests/sts_metadata.js tells
+  // `Cannot GET /path` is how this repository's own tests/vendored/sts_metadata.js tells
   // an unrouted path from an endpoint legitimately answering 404, and a
   // prettier 404 here would silently break that distinction.
   // ---------------------------------------------------------------------

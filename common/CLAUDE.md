@@ -516,7 +516,7 @@ realm may carry the setting it was refusing. The whole page was unusable inside
 a realm. `checkOverride()` now defaults the argument from `realmFor(key)`, which
 fixes all four call sites at once and leaves an explicit `true` and an explicit
 `false` meaning exactly what they did. The parent project's
-`tests/sts_admin_console.js` presses that Save button and is the guard; the
+`tests/vendored/sts_admin_console.js` presses that Save button and is the guard; the
 in-process half is `tests/appconfig_persistence.js`, which asserts the rule
 itself.
 

@@ -32,7 +32,8 @@
 #     protocol  — a throwaway copy of THIS WORKING TREE (of the tests IMAGE
 #                 built from it, in a containerized run — which is the same
 #                 tree one `COPY . ./` later), driven over HTTP by
-#                 the thirteen VENDORED jobs in tests/vendored/. This is where
+#                 the thirteen jobs in tests/vendored/ (nine vendored from the
+#                 parent, four this repository's own). This is where
 #                 the sixteen protocol families are actually exercised, and it
 #                 is ON BY DEFAULT since 2026-08-28. It used to need
 #                 --protocol, on the argument that it wanted the parent

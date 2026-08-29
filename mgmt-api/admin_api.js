@@ -33,7 +33,7 @@
 //     an operation cannot exist and be undocumented, and cannot be documented
 //     and not exist. What no code can check is the direction that matters — a
 //     new console control with no row here — and that is what the parent
-//     project's tests/admin_api.js asserts, by walking the console's own NAV
+//     project's tests/vendored/admin_api.js asserts, by walking the console's own NAV
 //     and the action names each of its four handlers accepts.
 //
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@
 // and one of two roles. It does NOT gate anything here, and that is three
 // decisions rather than an omission:
 //
-//   * **A test drives this API.** The parent project's tests/admin_api.js walks
+//   * **A test drives this API.** The parent project's tests/vendored/admin_api.js walks
 //     every operation over HTTP with no browser and no cookie jar. A credential
 //     on this surface would be the only one a test had to hold a secret for, in
 //     a service whose premise is that it authenticates nobody.

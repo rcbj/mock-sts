@@ -319,7 +319,7 @@ theirs.
 
 **What no code here can check is still the same gap rule 7 names.** Nothing in
 this service can see a form appear on a page, so the parity is asserted from
-outside by the parent project's `tests/admin_api.js` — and that test's page
+outside by this repository's own `tests/vendored/admin_api.js` — and that test's page
 list comes back in `GET /admin-api/status`, which now names eight more.
 
 ### What this cost on the pages that already existed
@@ -1406,7 +1406,7 @@ server is seeing tokens it did not expect.
   and the first is the one that decides the rest:
   * **There is no script and there must not be one.** `script-src 'none'` holds
     over the whole service (`../common/app.js`) and the parent suite asserts it
-    against this console's live headers (`tests/admin_api.js`), so there is no
+    against this console's live headers (`tests/vendored/admin_api.js`), so there is no
     keystroke handler, no fetch and no debounce to build a type-ahead out of —
     and anything written as though there were would be a control that silently
     does nothing rather than one that half works. What a browser gives free is a
@@ -1957,7 +1957,7 @@ would cost an afternoon:
   single-slash-rooted path with no whitespace — `//host` and `https://host` are
   refused rather than corrected — and the realm id is looked up in the registry
   rather than trusted, with `/admin` as the answer to both refusals. It is not
-  in `NAV`, so it is not one of the console's pages and `tests/admin_api.js`'s
+  in `NAV`, so it is not one of the console's pages and `tests/vendored/admin_api.js`'s
   page parity does not ask for a `/admin-api` operation mirroring it.
 * **A SETTINGS FORM WRITES THE REALM IT IS READ IN, wherever it is drawn.**
   `config.setOverride()` lands on the ambient realm — see rule 3m — so the Save

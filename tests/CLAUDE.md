@@ -9,14 +9,33 @@ first or the rest of this file will read as though it contradicts itself:
 | | What it is | Where it is authored |
 |---|---|---|
 | `tests/*.js` | the IN-PROCESS half — this repository's own module contracts, no port, no container, under a second | here |
-| `tests/vendored/` | the PROTOCOL half — thirteen byte-identical copies of the parent's mock-only jobs, driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against | **the parent project**; not edited here |
+| `tests/vendored/` | the PROTOCOL half — thirteen jobs driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent's mock-only jobs; **FOUR are this repository's own** | the nine: **the parent project**, not edited here. the four: **here**, and only here |
 
-Everything this file says about what belongs HERE is about the first row. The
-second row is copies, `tests/vendored/MANIFEST.js` argues them, and the rule
-that governs them is `common/vendored/`'s: **edit the parent's copy, then
+Everything this file says about what belongs HERE is about the first row. MOST
+of the second row is copies, `tests/vendored/MANIFEST.js` argues them, and the
+rule that governs them is `common/vendored/`'s: **edit the parent's copy, then
 `./local-run-tests.sh --vendor-sync`.** A fix made in `tests/vendored/` is
 overwritten by the next sync and never reaches the stack that gates that
 project.
+
+**THE FOUR JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
+RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
+`sts_admin_api_operations.js` and `sts_admin_console.js` drive this service's OWN
+`/admin` console and its `/admin-api`. They ran from the parent's suite until
+2026-08-28 and were deleted there that day, on the argument that a test
+asserting something about this console belongs in the tree where a control is
+ADDED to that console — the tree that should go red when the control loses its
+operation. **There is no copy of them over there to sync from**, which is what
+the flag is for: `allFiles()` leaves them out, so `--vendor-check` cannot report
+them GONE UPSTREAM and `--vendor-sync` cannot overwrite them. They are edited
+HERE, and only here.
+
+They still SIT in `tests/vendored/` rather than beside this file, and the reason
+is how they RUN rather than where they belong: `tools/run-report.js` spawns them
+as processes with that directory as their cwd and they
+`require('./random_username.js')` and the rest out of it, where `run.js`
+discovers `tests/*.js` and runs it IN PROCESS against `harness.js`. Moving them
+would have been a rewrite of four files to buy a tidier path.
 
 Why they are copies at all: this repository's launcher could previously run
 those jobs only when the parent checkout happened to sit beside it, so on a
@@ -34,12 +53,13 @@ the hard way: `tests/saml11_sso.js` was written here on 2026-08-25, the first
 test this repository ever had, and moved to the parent project the same day
 before a second one could be written beside it.
 
-**What lives here is a test that CANNOT live over there**, and there are now two
-kinds:
+**What lives here is mostly a test that CANNOT live over there**, and there are
+now two kinds of that plus one that is a different claim entirely:
 
-| Kind | Where | Why it cannot be in the parent suite |
+| Kind | Where | Why it is not in the parent suite |
 |---|---|---|
 | An IN-PROCESS test of this repository's own MODULE CONTRACTS | here | It requires this repository's modules and `node_modules` directly, and some of what it asserts is invisible to any caller over HTTP |
+| A test of this service's OWN `/admin` console or `/admin-api` | `tests/vendored/`, marked `local: true` | **Nothing stops it running over there, and it did until 2026-08-28.** It is here because the tree that ADDS a control to that console is the tree that should fail when the control loses its operation — an ownership argument rather than a capability one |
 
 There was a second row until 2026-08-26 — *an INTEGRATION test that needs
 several copies of this service*, which was `../federation-e2e/` and its own
@@ -64,6 +84,13 @@ HTTP?** If yes, it belongs in the parent suite, where it costs one entry in
 `run-report.js` and runs in the containerized stack, the host stack and the
 narrowed launchers without anything being invented for it. Only if no does it
 belong here.
+
+**ONE QUESTION COMES BEFORE THAT ONE SINCE 2026-08-28**, and it is the second
+row of the table above: is the thing under test this service's own `/admin`
+console or its `/admin-api`? If it is, it belongs here whatever the answer about
+HTTP — all four of those jobs are driven over HTTP and could have stayed over
+there. The line above is about CAPABILITY; this one is about OWNERSHIP, and it
+is the only place the two disagree.
 
 ## Running it
 
@@ -465,7 +492,7 @@ caught here and is not meant to be. `setOverride()` passes that argument
 explicitly because it has the realm in hand, so in process the default is
 unreachable; what it fixes is the three call sites in `admin-ui/admin.js` that
 pre-validate a whole section before writing any of it, and those are only
-reachable over HTTP. That mutant is caught by `tests/sts_admin_console.js` in
+reachable over HTTP. That mutant is caught by `tests/vendored/sts_admin_console.js` in
 the parent suite, which presses the Save button those call sites are behind.
 **Two halves of one fix, each guarded where it is observable**, is what this
 directory's line looks like when it is working.

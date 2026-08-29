@@ -89,10 +89,11 @@
 # Those thirteen jobs used to be READ OUT OF the parent project's tests/ — the
 # decision the root CLAUDE.md argues — so this script could only run them on a
 # machine that had both checkouts, and a machine with only this repository on
-# it silently ran ten in-process files instead. They are VENDORED now:
-# byte-identical copies under tests/vendored/, this repository's own files,
-# with tests/vendored/MANIFEST.js recording where each came from and which are
-# jobs. Nothing in a test run reaches outside this checkout any more.
+# it silently ran ten in-process files instead. They are under tests/vendored/
+# now — nine byte-identical copies plus the four this repository OWNS, with
+# tests/vendored/MANIFEST.js recording where each came from, which are jobs,
+# and which four have no upstream at all. Nothing in a test run reaches outside
+# this checkout any more.
 #
 # AND THEY RUN BY DEFAULT, which reverses what this script did for its first
 # three days. They used to need `--protocol`, so the bare run was ten files in
@@ -107,9 +108,17 @@
 # the summary counts as passing — so a run in which nothing was checked exited
 # zero and said so in small grey text.
 #
-# THE PARENT IS STILL THE SOURCE OF TRUTH FOR THOSE FILES. They are not edited
-# here — the rule `common/vendored/` carries. Fix the parent's copy, then
-# `--vendor-sync`. `--vendor-check` reports drift and needs both checkouts.
+# THE PARENT IS STILL THE SOURCE OF TRUTH FOR NINE OF THE THIRTEEN. Those are
+# not edited here — the rule `common/vendored/` carries. Fix the parent's copy,
+# then `--vendor-sync`. `--vendor-check` reports drift and needs both checkouts.
+#
+# THE OTHER FOUR ARE OURS AND THE RULE IS INVERTED. sts_metadata.js,
+# admin_api.js, sts_admin_api_operations.js and sts_admin_console.js drive this
+# service's own /admin console and /admin-api. They left the parent's suite on
+# 2026-08-28 — a test of this console belongs in the tree where a control is
+# added to it — so there is nothing over there to sync from. MANIFEST.js marks
+# them `local: true`, which keeps them out of both the check and the sync, and
+# they are edited HERE.
 #
 # Options:
 #   --only=<substr>[,<substr>...]
