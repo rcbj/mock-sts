@@ -1,0 +1,102 @@
+# Runs this repository's whole test suite, in containers.
+#
+# One job, and it wraps ./docker-run-tests.sh — which builds
+# docker-compose-run-tests.yml (the service from this repository's Dockerfile,
+# and a test runner with node and a Chrome in it), runs all twenty-three jobs
+# against the service over the compose network, and always tears the stack
+# down. The runner needs docker and NOTHING ELSE: no node, no npm install, no
+# Chrome, no checkout of the parent project. That is the property this workflow
+# exists to use, and it is why the suite was made self-contained on 2026-08-28.
+#
+# WHAT THIS COVERS THAT build-container.yml DOES NOT. That workflow builds the
+# image and waits for /healthcheck, which proves every module resolved and the
+# port bound — the failure mode this repository has actually had most often.
+# This one drives the running service: the ten in-process jobs that assert
+# module contracts, and the thirteen protocol jobs that exercise OAuth 2.0,
+# OIDC, DPoP, SAML 1.1 and 2.0, the credential issuer, the DID chain, the
+# management API and — in a real browser — the admin console. The two overlap
+# only in that both start the image.
+#
+# WHY IT IS NOT THE PARENT PROJECT'S SUITE. Most of what covers this service is
+# authored in ../id-proto-debugger/tests/ (the root CLAUDE.md argues that
+# decision), and their CI drives the `sts/` gitlink — which is a PIN. A change
+# made here is not covered by that run until somebody bumps it. Thirteen of
+# those jobs are vendored into tests/vendored/ precisely so that this repository
+# can run them against its own working tree; this workflow is where that
+# happens on every push. It does not replace bumping the pin, because that is
+# what gates the other project.
+name: Tests
+
+on:
+  # Every push to main — which is what a merged pull request is — and every PR
+  # aimed at it. A protocol job here takes about a minute and the two image
+  # builds are most of the wall clock; that is affordable per push and is the
+  # only way a suite gets trusted.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # The suite itself is about a minute, the two images are several more, and
+    # a hung browser job is caught by run-report.js's own per-job watchdog. This
+    # is the outer bound for a runner that has wedged — without it a stuck job
+    # holds a runner for six hours.
+    timeout-minutes: 45
+    steps:
+      # submodules: recursive is LOAD-BEARING, and `true` is not enough. The
+      # embedded directory's library is `"ldapjs": "file:node-ldapjs"` — a git
+      # SUBMODULE — and this repository is itself a submodule of the parent
+      # project, so there are submodules inside submodules and `true` stops one
+      # level short. An uninitialised submodule is an EMPTY DIRECTORY, so
+      # nothing fails loudly: the COPY succeeds, npm installs a package with no
+      # `main`, both images build, and the container dies at startup with
+      # `Cannot find module 'ldapjs'` — a message naming a package rather than a
+      # checkout. Both Dockerfiles and the launcher's preflight guard it too;
+      # asking for it here keeps a fetch failure on the checkout step, where it
+      # reads as one.
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ubuntu-latest runners ship docker and the compose plugin, so nothing is
+      # installed here. This is where the parent project's workflow installs
+      # docker-compose, and the difference is that its launcher supports the v1
+      # standalone binary as well; tests/tools/compose.sh finds either.
+      - name: Show docker and compose versions
+        run: |
+          docker --version
+          docker compose version
+
+      # The whole suite. The script resolves compose itself (and never prompts
+      # for a sudo password), builds both images from this checkout, and exits
+      # with the test container's status.
+      - name: Run the containerized test suite
+        run: ./docker-run-tests.sh
+
+      # The tests container writes tests/report as root through a bind mount;
+      # hand it back to the runner user before the upload step reads it. `|| true`
+      # because a run that failed before writing anything must not fail HERE and
+      # hide why.
+      - name: Normalize report permissions
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" tests/report || true
+
+      # if: always() — the report is at its most useful when the run went red.
+      # `latest` is a symlink into the timestamped directory beside it, and
+      # upload-artifact follows it.
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: tests/report/latest
+          if-no-files-found: warn
+          retention-days: 30

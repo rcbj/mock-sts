@@ -1,0 +1,177 @@
+# docker-compose-run-tests.yml — THE WHOLE SUITE, IN CONTAINERS.
+#
+# Two services on a private bridge network: `sts`, this repository built from
+# its own Dockerfile, and `tests`, this repository's suite built from
+# tests/Dockerfile with a Chrome in it. The tests container drives the service
+# by its compose DNS name and exits with the suite's status;
+# ./docker-run-tests.sh brings the pair up with --exit-code-from tests and takes
+# them down again.
+#
+# THE HOST NEEDS DOCKER AND NOTHING ELSE — no node, no npm install, no Chrome,
+# no checkout of the parent project. That is the whole reason this file exists
+# beside ./local-run-tests.sh, which is the fast development loop and needs all
+# four.
+#
+# ---------------------------------------------------------------------------
+# THE THREE COMPOSE FILES IN THIS REPOSITORY, AND WHICH ONE TO REACH FOR.
+#
+#   docker-compose.yml            an operator's mock: the service plus postgres,
+#                                 persisting, on 8081, container `sts`. What
+#                                 `docker compose up` in this directory gives.
+#   docker-compose.yml + a free   ./local-run-tests.sh — the SERVICE in a
+#   port, project mock-sts-tests  container, the tests as plain node processes
+#                                 on the developer's machine, driving the
+#                                 machine's own Chrome.
+#   THIS FILE                     ./docker-run-tests.sh — service AND tests in
+#                                 containers. What CI runs.
+#
+# The three never collide, and that is by construction rather than by luck:
+# each run is its own compose PROJECT with its own container names, and this
+# one publishes NO PORTS AT ALL (see the `sts` service). A test run must never
+# be able to take down, or take the port of, a mock somebody is using.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS STACK DELIBERATELY DOES NOT HAVE.
+#
+#   NO POSTGRES. `persistence.mode=memory`, so nothing is written down and the
+#   second run cannot start from the first run's leavings. The one job that
+#   would need a database — the parent suite's sts_persistence_postgres.js — is
+#   not vendored here, because it starts its own database with docker and this
+#   container has no docker in it.
+#   NO KEYCLOAK, NO walt.id, NO api, NO client. The thirteen vendored protocol
+#   jobs are exactly the ones a LONE mock can satisfy; that is the rule
+#   tests/vendored/MANIFEST.js records and the reason this file is two services
+#   where the parent project's equivalent is ten.
+#   NO PUBLISHED PORTS. See below.
+#
+# Compose format 2.4, matching docker-compose.yml in this directory: nothing
+# here needs it, but docker-compose v1 treats a file with no `version:` as the
+# v1 format that has no `healthcheck` at all, and this file's whole ordering
+# rests on one. Compose v2 prints "the attribute `version` is obsolete" and
+# ignores the line; that warning is the entire cost.
+version: '2.4'
+
+services:
+  # ---------------------------------------------------------------------------
+  # THE SERVICE UNDER TEST, AND THE POINT IS THAT IT IS THE IMAGE.
+  #
+  # Built from the repository root's Dockerfile with the committed lock, the
+  # pinned node and `.dockerignore` deciding what is in the context — so this
+  # run can see the class of failure that a suite running the source out of a
+  # developer's node_modules cannot: an uninitialised nested submodule that
+  # installs a package with no `main`, a module present in the tree and excluded
+  # from the build context, a dependency `omit=dev` quietly did not install.
+  # ---------------------------------------------------------------------------
+  sts:
+    # Named, so that a `docker logs` while a run is going has something to name,
+    # and DIFFERENT from docker-compose.yml's `sts` so that a test run can never
+    # touch a mock somebody left up. Overridable for a CI agent running two
+    # workspaces at once.
+    container_name: ${STS_CONTAINER_NAME:-sts-docker-tests}
+    # The name the tests container dials, and the one in the certificate's SANs
+    # (see common/crypto.js: localhost, sts, sts-mock, sts.example.com,
+    # 127.0.0.1). A different hostname here would be a certificate error in
+    # every job that verifies one.
+    hostname: sts
+    image: rcbj/sts
+    build:
+      # The repository root, and the root .dockerignore applies — the SERVICE
+      # image carries no tests. The tests image is built from the same context
+      # with a per-Dockerfile ignore file; see tests/Dockerfile.
+      context: .
+    environment:
+      # env/docker-tests.js, which exists for this file and says so in its own
+      # header. It is env/local.js with a different comment: `logLevel: debug`,
+      # every request and every artifact before and after signing written down,
+      # which is what a failing protocol job is read from.
+      - CONFIG_FILE=${CONFIG_FILE:-./env/docker-tests.js}
+      # THE BARE FORM IS LOAD-BEARING and the obvious alternative breaks the
+      # container. With no `=`, compose passes this through ONLY if the shell
+      # that ran the launcher has it, and leaves it unset otherwise, so the
+      # appconfig file's own level applies when nobody asked for anything.
+      # Written `STS_LOG_LEVEL=${STS_LOG_LEVEL:-}` it would be set to the EMPTY
+      # STRING instead, and bunyan throws `unknown level name: ""` from
+      # config.js at require time — so the service never listens and the run
+      # reports a healthcheck timeout rather than anything naming a log level.
+      # `docker compose config` tells the two apart: bare renders null.
+      - STS_LOG_LEVEL
+      # NOT A TUNING CHOICE. A suite that persisted would be a suite whose
+      # second run started from the first run's leavings, which is the failure
+      # that looks like a flaky test and is not one. It is also why there is no
+      # postgres service in this file and no volume on this one.
+      - STS_PERSISTENCE_MODE=memory
+    # NO `ports:`, DELIBERATELY. Everything that talks to this service is on the
+    # bridge with it, so publishing would buy nothing and cost the two things a
+    # test stack must not cost: a run would fail to start whenever a dev stack
+    # already held 8081, and a run that DID bind it would be reachable from
+    # outside while it is being reconfigured by the admin jobs. `docker compose
+    # -f docker-compose-run-tests.yml run --service-ports sts` is the way to
+    # look at one by hand.
+    healthcheck:
+      # The scheme follows the mode in this service — oauth2.rfc9700 derives
+      # global.https — so the probe decides which module to use the same way
+      # config.js does rather than assuming http. `rejectUnauthorized: false`
+      # because the certificate is regenerated on every start and nothing can
+      # have an anchor for it: liveness is this check's question, not trust.
+      test: ["CMD-SHELL", "node -e \"var tls=process.env.STS_HTTPS==='true'||(process.env.STS_HTTPS===undefined&&process.env.STS_OAUTH2_RFC9700==='true');var m=tls?require('https'):require('http');m.get({host:'localhost',port:8081,path:'/healthcheck',rejectUnauthorized:false},function(r){process.exit(r.statusCode===200?0:1)}).on('error',function(){process.exit(1)})\""]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      # The image starts node, loads sixteen protocol families and generates a
+      # signing key before it listens. Two minutes of retries is generous on
+      # purpose: a CI runner building two images at once is slower than any
+      # developer's machine, and a healthcheck that gives up early fails the
+      # run with "unhealthy" rather than with anything about what went wrong.
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # THE SUITE. Twenty-three jobs — ten in-process and thirteen protocol,
+  # including the Selenium admin-console one — run by
+  # tests/run-tests-in-container.sh against the service above.
+  # ---------------------------------------------------------------------------
+  tests:
+    container_name: ${STS_TESTS_CONTAINER_NAME:-mock-sts-test-runner}
+    image: rcbj/mock-sts-tests
+    build:
+      # The same context as the service, with tests/Dockerfile.dockerignore
+      # deciding what is in it — see tests/Dockerfile's header for why the two
+      # images need different answers from one context.
+      context: .
+      dockerfile: tests/Dockerfile
+    environment:
+      # Where the service is. The image defaults this to the same value; both
+      # exist so that a hand-run `docker run` on this network needs no
+      # environment and a rename needs one edit.
+      - STS_TEST_SERVICE_URL=http://sts:8081
+      # Passed to run-report.js, split by the entrypoint. `STS_TEST_ARGS=
+      # "--only=crypto --no-browser" ./docker-run-tests.sh` is the way to
+      # narrow a containerized run; unset, the whole suite runs.
+      - STS_TEST_ARGS=${STS_TEST_ARGS:-}
+      # The suite's own bunyan level (the jobs', not the service's). Bare, for
+      # the same reason STS_LOG_LEVEL is bare on the service above.
+      - LOG_LEVEL
+    # Chrome crashes tabs on heavy pages when limited to Docker's default 64MB
+    # /dev/shm. The console job also passes --disable-dev-shm-usage; this raises
+    # the cap as well, because the two mitigations fail differently and the
+    # symptom of either is a session that dies mid-page with no message.
+    shm_size: '2gb'
+    volumes:
+      # THE REPORT, OUT ONTO THE HOST. tests/report/ is gitignored and is where
+      # ./local-run-tests.sh writes too, so a containerized run and a local one
+      # leave the same thing in the same place — including `latest`, which is
+      # what CI uploads. Written by root inside the container, which is why the
+      # workflow chowns it before the upload step reads it.
+      - ./tests/report:/usr/src/sts/tests/report
+    depends_on:
+      sts:
+        # The whole ordering of this file. `up` reports success for a container
+        # that was created and then exited, so "started" is not the question —
+        # a suite that begins against a service which is not listening reports
+        # thirteen protocol failures that are all one fact.
+        condition: service_healthy
+
+# One bridge, and nothing published on it. `docker compose` gives the network a
+# name from the project, so two projects cannot share one.
+networks:
+  default:
+    driver: bridge

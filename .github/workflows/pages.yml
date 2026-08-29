@@ -36,13 +36,35 @@
 #     enabled and configured to build using GitHub Actions
 #     HttpError: Not Found - .../rest/pages/pages#get-a-apiname-pages-site
 #
-# `enablement: true` below is the fix, and it is preferred over doing it once by
-# hand for the reason the hand version already demonstrated: a setting nobody can
-# see from the repository is a setting that does not get made. The action creates
-# the Pages site with `build_type: workflow` on the first run and is a no-op on
-# every run after, which is also what makes a fork or a re-created repository
-# work with no out-of-band step. It needs no secret — `pages: write` below is the
-# permission it uses.
+# `enablement: true` BELOW WAS PUT HERE AS THE FIX AND IT IS NOT ONE, WHICH
+# TOOK ANOTHER FOUR FAILED RUNS AND FOUR DAYS TO ESTABLISH. The paragraph that
+# used to be here said the action would create the Pages site on the first run
+# and be a no-op afterwards, so that no out-of-band step was needed. What it
+# actually does with this repository's GITHUB_TOKEN is ask, fail, try to
+# create, and fail differently:
+#
+#     Get Pages site failed. Error: Not Found
+#     Create Pages site failed. Error: Resource not accessible by integration
+#     HttpError: Resource not accessible by integration
+#
+# The second line is the one that matters and it is not about `enablement`:
+# creating a Pages site is an ADMINISTRATIVE write, and the token a workflow
+# runs with cannot make it however its permissions are set — `pages: write`
+# authorises deploying to a site that exists, not bringing one into being.
+#
+# SO THE SITE WAS CREATED ONCE, OUT OF BAND, on 2026-08-29, with a credential
+# that has admin on the repository:
+#
+#     gh api -X POST repos/rcbj/mock-sts/pages -f build_type=workflow
+#
+# (Settings → Pages → Source: GitHub Actions is the same thing through the web
+# interface.) The next run went green and https://rcbj.github.io/mock-sts/ is
+# the site. `enablement: true` is KEPT rather than removed because it costs one
+# warning line and is what makes a FORK — where the person running it may well
+# have the rights this token does not — work with no step at all; it is simply
+# not what fixed this repository, and this paragraph exists so that the next
+# `Not Found` here is read as "the site does not exist" rather than as
+# something about the workflow.
 name: Deploy docs to GitHub Pages
 
 on:

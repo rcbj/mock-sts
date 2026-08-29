@@ -336,76 +336,30 @@ fi
 # ---------------------------------------------------------------------------
 # THE CONTAINER'S LIFECYCLE.
 #
-# Six functions, and the shape is the parent project's — resolve the compose
-# command once, forward the variables compose substitutes EXPLICITLY, bring the
-# service up, prove it is answering before anything is run against it, collect
-# its log, take it down. What is deliberately NOT copied from over there is the
+# Six functions — four here and TWO SOURCED from tests/tools/compose.sh since
+# 2026-08-29, because ./docker-run-tests.sh needs the same two — and the shape
+# is the parent project's: resolve the compose command once, forward the
+# variables compose substitutes EXPLICITLY, bring the service up, prove it is
+# answering before anything is run against it, collect its log, take it down. What is deliberately NOT copied from over there is the
 # unconditional `sudo`: that stack needs it because its CI runs as a user with
 # no docker group, and paying a sudo prompt on a machine where docker already
 # answers is a cost for nothing.
 # ---------------------------------------------------------------------------
 
-# Which docker compose, and does it need sudo? Both answered by RUNNING the
-# thing rather than by looking for a group in `id -nG`, which is neither
-# necessary (a rootless daemon needs no group) nor sufficient (a group added
-# since this shell logged in is not in this shell's credentials).
-resolveCompose()
-{
-  if docker info > /dev/null 2>&1;
-  then
-    DOCKER_SUDO=""
-  elif sudo -n docker info > /dev/null 2>&1;
-  then
-    # PASSWORDLESS sudo only. An interactive `sudo` here would sit waiting for
-    # a password in the middle of what a person started and walked away from,
-    # and would hang a CI agent outright.
-    DOCKER_SUDO="yes"
-  else
-    return 1
-  fi
-
-  if [ -n "${DOCKER_SUDO}" ];
-  then
-    if sudo -n docker compose version > /dev/null 2>&1;
-    then
-      COMPOSE_CMD="docker compose"
-      return 0
-    fi
-  elif docker compose version > /dev/null 2>&1;
-  then
-    COMPOSE_CMD="docker compose"
-    return 0
-  fi
-  # The v1 standalone binary, still what some machines have.
-  if command -v docker-compose > /dev/null 2>&1;
-  then
-    COMPOSE_CMD="docker-compose"
-    return 0
-  fi
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# One compose command, with the variables docker-compose.yml substitutes.
-#
-# THEY ARE NAMED ON THE COMMAND LINE RATHER THAN EXPORTED, and that is two
-# decisions in one. `sudo` EMPTIES the environment, so an exported variable
-# reaches compose as unset and the file substitutes its default with nothing
-# said — which is how the parent project's stack spent months ignoring every
-# tuning variable it was handed. And `CONFIG_FILE` is a variable the tests in
-# this repository read too, so exporting the container's copy of it would
-# change what every in-process job loads.
-# ---------------------------------------------------------------------------
-docker_compose()
-{
-  if [ -n "${DOCKER_SUDO}" ];
-  then
-    sudo ${COMPOSE_ENV[@]+"${COMPOSE_ENV[@]}"} ${COMPOSE_CMD} "$@"
-    return $?
-  fi
-  env ${COMPOSE_ENV[@]+"${COMPOSE_ENV[@]}"} ${COMPOSE_CMD} "$@"
-  return $?
-}
+# resolveCompose() and docker_compose() are SHARED with ./docker-run-tests.sh
+# and live in tests/tools/compose.sh. They were written here and moved there on
+# 2026-08-29, when the second launcher arrived needing the same two answers:
+# which compose command this machine has, and how to hand it the variables a
+# compose file substitutes. A second copy of the `sudo` reasoning is a second
+# copy that can be fixed in one place and stay broken in the other.
+COMPOSE_SH="${CURRENT_DIR}/tests/tools/compose.sh"
+if [ ! -r "${COMPOSE_SH}" ];
+then
+  echo "Cannot find ${COMPOSE_SH}, which defines resolveCompose() and"
+  echo "docker_compose(). Without it nothing here can bring a container up."
+  exit 1
+fi
+. "${COMPOSE_SH}"
 
 # A free TCP port at or above $1, answered by BINDING it — the only question
 # that matters, and the one tests/tools/service.js asks for the same reason.

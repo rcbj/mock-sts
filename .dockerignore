@@ -43,25 +43,46 @@ COVERAGE.md
 SECURITY.md
 LICENSE.md
 clean.sh
-# The federation end-to-end test: three containers, a driver and a web
-# application of its own. It BUILDS this image (its compose file's context is
-# the repo root) and must not be INSIDE it — the harness is not part of the
-# service, and the webapp has a separate build context of its own, so nothing
-# here needs it. Excluding it also keeps a change to the test from busting the
-# image layer cache.
-# The in-process contract tests, excluded for the same two reasons and a third.
-# They assert this repository's MODULE CONTRACTS by requiring the modules
-# directly, so they are a property of the source tree rather than of the running
-# service: the image exists to run `server.js`, and nothing in it would ever
-# call them. `npm test` is run from a checkout — which is where the modules
-# being asserted are edited — and excluding them keeps an edit to a guard from
-# busting the image layer cache. The `test` script in package.json therefore
-# does not work inside the image, deliberately; package.json itself is copied
-# for its dependency list.
-tests
+# ---------------------------------------------------------------------------
+# `tests` IS NOT EXCLUDED HERE, AND IT WAS UNTIL 2026-08-29. THIS FILE IS SHARED
+# BY TWO IMAGES NOW AND THEY WANT OPPOSITE THINGS FROM IT.
+#
+# The service image must not carry the suite; the TESTS image
+# (tests/Dockerfile, built by docker-compose-run-tests.yml) is nothing but the
+# suite. Both are built from THIS context — the tests image needs the whole
+# source tree, because ten of its jobs require the service's own modules — and
+# a build context has exactly one ignore file.
+#
+# BuildKit would allow two: it reads <dockerfile>.dockerignore in preference to
+# this one. That was the first arrangement here and it lasted one build. The
+# LEGACY builder ignores such a file completely, and a machine with no `docker
+# buildx` plugin — docker 29 with the plugin not installed, which is an
+# ordinary machine and was the one this was written on — silently uses it. The
+# failure is `COPY failed: no source files were specified` on a COPY of a
+# directory that is right there in the checkout, which names neither the ignore
+# file nor the builder.
+#
+# So there is one rule set, `tests/` is in the context, and the SERVICE image
+# removes the directory itself in one line of its Dockerfile — where the reason
+# is next to the instruction rather than three files away. What that costs is
+# the one thing the old comment here claimed: editing a test now busts the
+# service image's final `COPY . ./` layer. That layer is a copy and an `rm`,
+# below both `npm install`s, so it is seconds — and it buys a test suite that
+# builds on every builder.
+#
+# The `test` script in package.json still does not work inside the service
+# image, deliberately, because that image has no tests directory by the time it
+# is finished.
 docker-compose.yml
+docker-compose-run-tests.yml
 Dockerfile
 .dockerignore
+
+# The test REPORT, which `tests` no longer covers. It is generated, timestamped
+# and gitignored, and a previous run's answer has no business being baked into
+# either image — least of all the tests image, where the container mounts the
+# host's directory over the top of it.
+tests/report
 
 # The persistent store — see .gitignore. A local `data/` directory from a host
 # run must not be baked into the image: the container mounts a VOLUME at
