@@ -5620,6 +5620,17 @@ and what to reach for when a run passes on one machine and not on another —
 a difference between the two launchers is a difference in the environment and
 in nothing else.
 
+**CI RUNS BOTH LAUNCHERS, IN TWO JOBS THAT DO NOT DEPEND ON EACH OTHER** —
+`tests` wraps `./docker-run-tests.sh` and `coverage` wraps `./run-coverage.sh`,
+and three artifacts come out of a run: `test-report` (the plain suite's
+`tests/report/latest`), `coverage-report` (the rendered `coverage/`) and
+`coverage-test-report` (the instrumented run's own report). They are two jobs
+rather than two steps because both launchers move the `tests/report/latest`
+symlink, so in one workspace the second run would quietly relabel the first
+run's artifact; two jobs are two workspaces. It also means the coverage pass
+still runs when the suite goes red, which is when its report is worth most, and
+that the two run in parallel. All three uploads are `if: always()`.
+
 Neither can disturb a mock you are already running. Each is its own compose
 project with its own container names, `./local-run-tests.sh` publishes a free
 port found at start and `./docker-run-tests.sh` publishes none at all, so

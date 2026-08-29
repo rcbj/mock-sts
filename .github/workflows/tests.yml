@@ -1,12 +1,34 @@
-# Runs this repository's whole test suite, in containers.
+# Runs this repository's whole test suite, in containers — TWICE, in two jobs
+# that do not depend on each other: the plain suite, and the same suite with
+# coverage collected.
 #
-# One job, and it wraps ./docker-run-tests.sh — which builds
-# docker-compose-run-tests.yml (the service from this repository's Dockerfile,
-# and a test runner with node and a Chrome in it), runs all twenty-three jobs
-# against the service over the compose network, and always tears the stack
-# down. The runner needs docker and NOTHING ELSE: no node, no npm install, no
-# Chrome, no checkout of the parent project. That is the property this workflow
-# exists to use, and it is why the suite was made self-contained on 2026-08-28.
+# Both wrap a launcher that needs docker and NOTHING ELSE: no node, no npm
+# install, no Chrome, no checkout of the parent project. That is the property
+# this workflow exists to use, and it is why the suite was made self-contained
+# on 2026-08-28 and why ./run-coverage.sh was containerized on 2026-08-29.
+#
+#   tests     ./docker-run-tests.sh — builds docker-compose-run-tests.yml (the
+#             service from this repository's Dockerfile, and a test runner with
+#             node and a Chrome in it), runs all twenty-three jobs against the
+#             service over the compose network, and always tears the stack down.
+#   coverage  ./run-coverage.sh — HALF of that same compose file. It puts the
+#             RUNNER in the `tests` image and lets it start the service it
+#             measures as a child process in there, because V8 writes coverage
+#             from inside the process being measured and a service container
+#             next door can never be under the report.
+#
+# WHY THEY ARE TWO JOBS RATHER THAN TWO STEPS, which is the shape
+# ../id-proto-debugger/.github/workflows/tests.yml uses and the reason to copy
+# it here. Both launchers write tests/report/ and point tests/report/latest at
+# their own timestamped directory. In one job the second run moves that symlink
+# before either upload reads it, so an artifact named for the plain suite would
+# hold the coverage run's report — wrong, and wrong silently. Two jobs are two
+# workspaces, so each `latest` is its own. Two more things fall out of it: the
+# coverage pass still runs when the plain suite goes red, which is when its
+# report is most worth having, and the two run in PARALLEL, so the wall clock
+# is the slower of them rather than the sum. What it costs is a second image
+# build, since nothing is shared between jobs — that is the trade, and it is
+# the one the parent project made.
 #
 # WHAT THIS COVERS THAT build-container.yml DOES NOT. That workflow builds the
 # image and waits for /healthcheck, which proves every module resolved and the
@@ -29,9 +51,9 @@ name: Tests
 
 on:
   # Every push to main — which is what a merged pull request is — and every PR
-  # aimed at it. A protocol job here takes about a minute and the two image
-  # builds are most of the wall clock; that is affordable per push and is the
-  # only way a suite gets trusted.
+  # aimed at it. A protocol job here takes about a minute and the image builds
+  # are most of the wall clock; that is affordable per push and is the only way
+  # a suite gets trusted.
   push:
     branches: [main]
   pull_request:
@@ -42,14 +64,18 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # THE PLAIN SUITE. All twenty-three jobs, service and runner both in
+  # containers, nothing instrumented. This is the one whose status means "the
+  # tree is green".
+  # ---------------------------------------------------------------------------
   tests:
     runs-on: ubuntu-latest
-    # The suite itself is about a minute, the two images are several more, the
-    # instrumented second pass is another suite plus a render, and a hung
-    # browser job is caught by run-report.js's own per-job watchdog. This is the
-    # outer bound for a runner that has wedged — without it a stuck job holds a
-    # runner for six hours. It went from 45 when the coverage pass was added.
-    timeout-minutes: 60
+    # The suite itself is about a minute and the two images are several more; a
+    # hung browser job is caught by run-report.js's own per-job watchdog. This
+    # is the outer bound for a runner that has wedged — without it a stuck job
+    # holds a runner for six hours.
+    timeout-minutes: 45
     steps:
       # submodules: recursive is LOAD-BEARING, and `true` is not enough. The
       # embedded directory's library is `"ldapjs": "file:node-ldapjs"` — a git
@@ -82,39 +108,13 @@ jobs:
       - name: Run the containerized test suite
         run: ./docker-run-tests.sh
 
-      # ---------------------------------------------------------------------
-      # THE SAME SUITE AGAIN, INSTRUMENTED. What this adds is the only question
-      # the step above cannot answer: WHICH LINES of this tree the twenty-three
-      # jobs actually reached. It is the second half of the picture for anybody
-      # deciding what to test next, and it is worth a CI run because the report
-      # is the thing nobody generates by hand.
-      #
-      # IT RUNS IN A CONTAINER TOO, which is what makes it possible here at all:
-      # ./run-coverage.sh puts the RUNNER in docker-compose-run-tests.yml's
-      # `tests` image and lets it start the service it measures as a child
-      # process in there — V8 writes coverage from inside the process being
-      # measured, so the service container next door could never have been the
-      # thing under the report. So this runner still needs docker and nothing
-      # else: no node, no `npm install`, no Chrome.
-      #
-      # --no-build because the step above has just built that image from this
-      # very checkout; rebuilding it would be several minutes to produce the
-      # same layers. Anywhere else the rebuild is the default, and deliberately.
-      #
-      # NOT if: always(). A red suite fails this the same way and for the same
-      # reason, so running it would spend the time to report a second copy of
-      # one failure — and the report from the step above is already uploaded.
-      # ---------------------------------------------------------------------
-      - name: Collect coverage, in containers
-        run: ./run-coverage.sh --no-build
-
-      # The tests container writes tests/report AND coverage as root through
-      # bind mounts; hand them back to the runner user before the upload steps
-      # read them. `|| true` because a run that failed before writing anything
-      # must not fail HERE and hide why.
+      # The tests container writes tests/report as root through a bind mount;
+      # hand it back to the runner user before the upload step reads it.
+      # `|| true` because a run that failed before writing anything must not
+      # fail HERE and hide why.
       - name: Normalize report permissions
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" tests/report coverage || true
+        run: sudo chown -R "$(id -u):$(id -g)" tests/report || true
 
       # if: always() — the report is at its most useful when the run went red.
       # `latest` is a symlink into the timestamped directory beside it, and
@@ -128,16 +128,78 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  # ---------------------------------------------------------------------------
+  # THE SAME SUITE AGAIN, INSTRUMENTED. What this adds is the only question the
+  # job above cannot answer: WHICH LINES of this tree the twenty-three jobs
+  # actually reached. It is the second half of the picture for anybody deciding
+  # what to test next, and it is worth a CI run because the report is the thing
+  # nobody generates by hand.
+  #
+  # It builds its own images — this job shares no workspace and no docker cache
+  # with the one above, so --no-build would have nothing to reuse. Its compose
+  # project is mock-sts-coverage, which is what keeps the two runs from reaching
+  # each other's containers even when they land on one machine.
+  # ---------------------------------------------------------------------------
+  coverage:
+    runs-on: ubuntu-latest
+    # The instrumented pass is a suite plus a render on top of the image build,
+    # so it gets more room than the plain one.
+    timeout-minutes: 60
+    steps:
+      # See the tests job: recursive, for the nested node-ldapjs submodule.
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show docker and compose versions
+        run: |
+          docker --version
+          docker compose version
+
+      # `docker compose run --rm --no-deps` on the tests service alone: the
+      # runner is in the container and the service it measures is a child
+      # process beside it, so everything V8 writes is written by processes this
+      # run started. ./coverage and ./tests/report are bind mounts, so both come
+      # out onto the host.
+      - name: Run the suite with coverage, in containers
+        run: ./run-coverage.sh
+
+      # Belt and braces: run-coverage.sh already hands both directories back
+      # with a throwaway root container of its own (it has to — the NEXT HOST
+      # run of that script dies clearing coverage/raw otherwise), but that step
+      # is best-effort and says so. If it worked this chown is a no-op; if it
+      # did not, the uploads below can still read what they were given.
+      # `|| true` for the tests job's reason.
+      - name: Normalize coverage permissions
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" coverage tests/report || true
+
       # The rendered coverage — index.html with a page per file, lcov.info for
       # anything that reads that, summary.json for the totals, and raw/ so that
       # somebody who would rather point c8 at the same data can. `warn` rather
-      # than `error` because a run that went red before the coverage step is a
-      # run with no coverage to upload, and that must not be a second failure.
+      # than `error` because a run that went red before the render is a run with
+      # no coverage to upload, and that must not be a second failure.
       - name: Upload the coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage
+          if-no-files-found: warn
+          retention-days: 30
+
+      # The instrumented run's OWN test report, under a name of its own —
+      # artifact names must be unique across a workflow run, and this is a
+      # different run of the suite from the one the tests job uploaded. Worth
+      # keeping both: a job that passes plain and fails under coverage is a real
+      # thing (the throwaway service is a child process here, not a container),
+      # and without this there would be no report to read it from.
+      - name: Upload the coverage run's test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-test-report
+          path: tests/report/latest
           if-no-files-found: warn
           retention-days: 30
