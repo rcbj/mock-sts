@@ -2161,9 +2161,12 @@ const ENDPOINTS = [
             'the next start for five of the six settings',
     what: 'NON-SPEC. The six persistence.* settings, plus a status block ' +
           'saying what the store is actually DOING: the mode in force, ' +
-          'whether it fell back to memory because it could not be opened, ' +
           'where it writes, how much it holds, when it last wrote and the ' +
-          'error if that failed. THREE THINGS PERSIST when a store is on — ' +
+          'error if that failed. A store that was CONFIGURED and could not ' +
+          'be opened does not reach this page at all — this service refuses ' +
+          'to start rather than answer out of a seeded directory while ' +
+          'presenting itself as the one that was configured. THREE THINGS ' +
+          'PERSIST when a store is on — ' +
           'the embedded directory (which is also the applications registry, ' +
           'the federation register and the SPIFFE registry), the trust realm ' +
           'registry, and the runtime appconfig overrides. NOTHING THIS ' +

@@ -171,6 +171,46 @@ answered 200, `/ldap` reported `healthy: false` with the connection error, and
 when the database came back the next change wrote the entry made during the
 outage along with the new one.
 
+### AND A FAILED OPEN IS FATAL, WHICH IS THE OPPOSITE AND IS NOT AN INCONSISTENCY
+
+`start()` rejects, and `server.js` exits non-zero without binding a listener,
+when a CONFIGURED store cannot be opened or read — a database that is not
+there, a data directory that cannot be written, a driver that will not load.
+The heading above still holds for every write AFTER that.
+
+The two are opposite because the states are. **A running service that loses its
+database has already restored everything it was going to restore and is still
+telling the truth about what it holds**; refusing its LDAP operations would take
+down sixteen protocol families that do not need a database, which is the
+paragraph above. **A process that never opened its store is answering out of a
+SEEDED directory while presenting itself as the one that was configured** —
+every endpoint works, the console draws, and the realms, applications and
+federation partners somebody creates are thrown away by the next restart, which
+is the restart they will do precisely because they expected the work to survive
+it. The fallback was reported on `/admin/persistence` and in the log, and
+neither is where anybody is looking while the service appears to be working.
+
+This REVERSES what this repository said until 2026-08-28 — *a mock that refused
+to start because a database blinked would be the one failure mode a mock must
+not have* — at rcbj's ask, and the reversal is scoped: it applies to a store
+that was CONFIGURED, so `persistence.mode=memory` (the default) reaches none of
+it and a service nobody asked to persist behaves exactly as it always has.
+There is deliberately NO setting to turn the refusal off: the way to run
+without a store is to say so, which is the same one setting.
+
+The failure message is built rather than thrown bare, because it is the last
+thing an operator sees: it names the mode, what actually went wrong, and that
+`persistence.mode=memory` is the way to run without one. `server.js` logs it at
+FATAL and exits 1 rather than letting the rejection escape, so a stack trace
+does not print over the sentence that says what to do.
+
+**The compose file's `depends_on: condition: service_healthy` is what keeps
+this from being a startup race**, and it was already there — its comment had
+anticipated exactly this and argued for the wait on the other half of the
+reason. The parent project's `tests/sts_persistence_postgres.js` asserts the
+whole of this: that the process exits non-zero, that it never answered a
+request first, and that the message names the mode, the cause and the way out.
+
 ## The wiring: two slots, one event, one plain require
 
 Rule 3e says a slot is what you reach for when a require would close a cycle or

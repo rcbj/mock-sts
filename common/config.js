@@ -3210,13 +3210,33 @@ function applyLogLevel() {
 // reason those rows are restart-only is not a reason a REALM cannot carry them.
 // The process-wide form is unchanged and still refuses.
 function checkOverride(key, raw, forRealm) {
-  log.debug("Entering checkOverride(). forRealm=" + !!forRealm);
+  // `forRealm` OMITTED MEANS "WHEREVER THIS WRITE WOULD LAND", which is what
+  // every caller inside this service means and what none of them was saying.
+  //
+  // The third argument admits the `realmRuntime` rows — restart-only for the
+  // process, settable on a realm, because a realm binds no socket. realms.js
+  // passes `true` explicitly, because it is validating a realm's overrides
+  // before any realm is ambient. The FIVE OTHER CALLERS pass nothing: three in
+  // admin-ui/admin.js, which pre-validate a whole section before writing any of
+  // it, and setOverride() here. All of them are inside a request, so the realm
+  // the write lands in is the ambient one — and by not saying so they made the
+  // marker unreachable through every door a person actually uses.
+  //
+  // What that looked like: the console draws `oauth2.rfc9700` as an EDITABLE
+  // control inside a realm, correctly, and the section's Save posts `set-many`,
+  // which is ALL-OR-NOTHING — so pressing Save on /realm/acme/admin/oauth2 was
+  // refused by name every time, including when nothing had been changed, with
+  // a refusal that explained that a realm may carry the setting it was
+  // refusing. Defaulting here fixes all four call sites at once and leaves the
+  // explicit `true` and the explicit `false` meaning exactly what they did.
+  const inRealm = forRealm === undefined ? !!realmFor(key) : !!forRealm;
+  log.debug("Entering checkOverride(). forRealm=" + inRealm);
   const setting = byKey[key];
   if (!setting) {
     log.debug("Leaving checkOverride().");
     return 'Unknown setting "' + key + '".';
   }
-  if (!setting.runtime && !(forRealm && setting.realmRuntime)) {
+  if (!setting.runtime && !(inRealm && setting.realmRuntime)) {
     log.debug("Leaving checkOverride().");
     return '"' + key + '" cannot be changed while this service is running: ' +
       setting.restartReason + '. Set it in the appconfig file or as ' +
@@ -3229,7 +3249,30 @@ function checkOverride(key, raw, forRealm) {
 
 function setOverride(key, raw) {
   log.debug("Entering setOverride(). key=" + key);
-  const problem = checkOverride(key, raw);
+  // WHICH REALM THIS WRITE LANDS IN IS DECIDED FIRST, BECAUSE THE CHECK
+  // DEPENDS ON IT.
+  //
+  // `checkOverride()` takes a third argument — `forRealm` — that admits the
+  // `realmRuntime` rows: restart-only for the PROCESS, because they decide
+  // something a listener was bound with, and settable on a REALM, because a
+  // realm binds no socket. This function computed the realm four lines further
+  // down and called the check WITHOUT it, so a realm could never carry one.
+  //
+  // What that looked like from outside is worse than the rule being absent: the
+  // console draws `oauth2.rfc9700` as an EDITABLE control inside a realm (it is
+  // right to — a realm may carry it) and the section's Save posts `set-many`,
+  // which is all-or-nothing, so pressing Save on /realm/acme/admin/oauth2 was
+  // refused BY NAME every time — including when nothing on the page had been
+  // changed. The whole page was unusable inside a realm and the refusal
+  // explained, correctly, that a realm may carry the setting it was refusing.
+  //
+  // `realmFor()` answers null when realms are off, when the ambient realm is
+  // the default one, and always for the two `realms.*` rows — so this is the
+  // process-wide behaviour unchanged everywhere else.
+  const realm = realmFor(key);
+  const problem = checkOverride(key, raw, !!realm);
+  // (Passed explicitly here because the realm is already in hand; the default
+  // above would compute the same answer.)
   if (problem) {
     log.debug("Leaving setOverride(). Refused: " + problem);
     return { ok: false, errors: [problem] };
@@ -3251,7 +3294,6 @@ function setOverride(key, raw) {
   // turn realms off, or move its own prefix, would be doing it from inside the
   // request that found it.
   // ---------------------------------------------------------------------
-  const realm = realmFor(key);
   if (realm) {
     realm.overrides[key] = raw;
   } else {

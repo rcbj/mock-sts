@@ -140,7 +140,7 @@
 
 const crypto = require('crypto');
 const config = require('./config');
-const { log, nowSec, randomId } = require('./helpers');
+const { log, nowSec, randomId, numberWord } = require('./helpers');
 const audit = require('./audit');
 
 // ---------------------------------------------------------------------------
@@ -2511,9 +2511,13 @@ function createApplication(detail) {
   const kind = String(info.kind || '').trim();
   if (kind && KIND_IDS.indexOf(kind) < 0) {
     log.debug("Leaving createApplication(). Unknown kind.");
-    log.debug("Leaving createApplication().");
+    // The count comes from the list, not from a word typed beside it. It said
+    // "eight" over nine kinds from the day `kerberos-service` was added — a
+    // sentence that is wrong about the one thing it exists to explain, in the
+    // reply somebody reads precisely when they are guessing at the vocabulary.
     return { ok: false, errors: ['"' + kind + '" is not one of the kinds this registry knows. ' +
-                                 'The eight are: ' + KIND_IDS.join(', ') + '.'] };
+                                 'The ' + numberWord(KIND_IDS.length) +
+                                 ' are: ' + KIND_IDS.join(', ') + '.'] };
   }
   // THE DECLARED PROTOCOL FAMILIES, validated before anything is written, for
   // the reason the kind above is: a create that half-succeeded — the entry

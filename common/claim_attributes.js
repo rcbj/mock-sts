@@ -180,9 +180,21 @@ const SET_IDS = stats.CLAIM_SET_IDS;
 // unchanged and every one of them is now realm-correct. In the default realm,
 // and in a service with no realms defined, there is exactly one partition and
 // this behaves as the plain object it replaced. See common/realms.js.
-const selections = realms.obj();
-SET_IDS.forEach(function (id) {
-  selections[id] = new Set();
+// SEEDED BY THE FACTORY, ONCE PER REALM, AND THAT IS NOT A STYLE CHOICE.
+// `realms.obj()` builds a partition the first time a realm asks for one, so
+// seeding the five set ids AFTER the call seeds exactly one partition — the
+// realm that happened to be ambient at require time, which is none, which is
+// the default realm's. Every other realm then got an EMPTY object, and
+// `isKnownSet()` answered false for every set id in it: the three `attributes`
+// actions on all three claim-set doors refused every set in every trust realm,
+// with a sentence that listed the set it was refusing, because the list is
+// read from the process-wide table and the lookup is not.
+const selections = realms.obj(function () {
+  const fresh = {};
+  SET_IDS.forEach(function (id) {
+    fresh[id] = new Set();
+  });
+  return fresh;
 });
 
 function isKnownSet(setId) {

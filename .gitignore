@@ -14,3 +14,13 @@ node_modules/
 # something out would otherwise arrive in the repository and become everybody's
 # default. `persistence.dataDir` moves it; in a container it is a volume.
 data/
+
+# THE TEST REPORT and the coverage report, both generated and both timestamped.
+# `./local-run-tests.sh` writes tests/report/<run>/ and points tests/report/latest
+# at it; `./run-coverage.sh` writes coverage/, including coverage/raw/ — V8's own
+# JSON, which is tens of megabytes per run. Neither is committed for the reason
+# the data directory above is not: a report is a claim about ONE run on ONE
+# machine, and a stale one in the repository would be read as a claim about the
+# code it sits beside.
+tests/report/
+coverage/

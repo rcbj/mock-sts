@@ -1301,33 +1301,65 @@ const RESERVED_JWT_CLAIMS = [
   'claims'
 ];
 
-const CLAIM_SETS = {
-  access_token: { label: 'OAuth 2.0 access token', kind: 'jwt', claims: [] },
-  id_token: { label: 'OIDC ID Token', kind: 'jwt', claims: [] },
-  // THE FIFTH SET, ADDED 2026-08-26, AND IT IS NOT A JWT SET EVEN THOUGH ITS
-  // CONTENT IS JSON AND ITS SIGNED FORM IS A JWT.
-  //
-  // `kind` here answers one question and one only: WHICH CONSOLE PAGE AND WHICH
-  // /admin-api RESOURCE CARRIES THIS SET. The UserInfo response has a page of
-  // its own — /admin/userinfo-claims — because the thing it configures is a
-  // different artefact from either token: it is fetched rather than issued, it
-  // is re-read on every call so a change here is visible without a new sign-in,
-  // and OIDC Core 5.4 makes a SCOPE decide half of what is in it, which is true
-  // of nothing else on this list. Giving it `kind: 'jwt'` would have put it on
-  // /admin/claims automatically, which is exactly the accident JWT_CLAIM_SET_IDS
-  // being DERIVED is meant to make impossible in the other direction.
-  //
-  // What it does share with a JWT set is the RESERVED LIST — see setClaimSet(),
-  // which checks `reservedNames()` rather than `kind === 'jwt'`. A UserInfo
-  // response carries `sub` (5.3.2, and a client MUST check it), and when the
-  // client registered a `userinfo_signed_response_alg` the whole thing is a JWT
-  // carrying `iss` and `aud` as well. Every name on that list is load-bearing in
-  // at least one of the two shapes, so the list applies whole.
-  userinfo: { label: 'OIDC UserInfo response', kind: 'userinfo', claims: [] },
-  saml2: { label: 'SAML 2.0 Attribute', kind: 'saml2', claims: [] },
-  saml11: { label: 'SAML 1.1 Attribute (WS-Federation)', kind: 'saml11', claims: [] }
-};
+// PER TRUST REALM, AND IT WAS NOT UNTIL 2026-08-28.
+//
+// `realms.obj(factory)` builds one of these per realm, so `CLAIM_SETS[id]` is
+// the ambient realm's table and every one of the readers below is unchanged
+// and now realm-correct — the shape CLAUDE.md's realm rule 2 asks for: *a
+// store becomes per realm at its declaration and nowhere else*.
+//
+// **IT WAS A PLAIN OBJECT, AND THAT WAS A LEAK RATHER THAN A SIMPLIFICATION.**
+// A custom claim added at `/realm/acme/admin/claims` was added to the ONE
+// table, so it was carried by every access token this process minted — the
+// DEFAULT realm's included, and every other realm's — while each realm's
+// console showed it as though it were that realm's own configuration. The
+// other half of the same claim set was already per realm
+// (`common/claim_attributes.js` holds the DIRECTORY ATTRIBUTES a set carries),
+// so one set disagreed with itself about whether it belonged to a realm.
+//
+// The LABEL and the KIND are constants and are duplicated into every
+// partition, which costs five strings per realm and keeps the table one shape:
+// splitting the metadata from the state would have been two tables to keep in
+// step, and the thing that goes wrong with two tables is a set in one and not
+// the other.
+//
+// `CLAIM_SET_IDS` below reads `Object.keys()` off this, which the proxy
+// answers from the ambient realm's partition — every partition carries the
+// same five ids, because they come from this one factory.
+function freshClaimSets() {
+  return {
+    access_token: { label: 'OAuth 2.0 access token', kind: 'jwt', claims: [] },
+    id_token: { label: 'OIDC ID Token', kind: 'jwt', claims: [] },
+    userinfo: { label: 'OIDC UserInfo response', kind: 'userinfo', claims: [] },
+    saml2: { label: 'SAML 2.0 Attribute', kind: 'saml2', claims: [] },
+    saml11: { label: 'SAML 1.1 Attribute (WS-Federation)', kind: 'saml11',
+              claims: [] }
+  };
+}
 
+const CLAIM_SETS = realms.obj(freshClaimSets);
+
+// The prose that used to sit on the members of the literal above, kept because
+// it is the reasoning for what is in the table rather than for how it is held:
+//
+//   `userinfo` IS THE FIFTH SET AND IT IS NOT A JWT SET even though its
+//   content is JSON and its signed form is a JWT. `kind` answers one question
+//   only: WHICH CONSOLE PAGE AND WHICH /admin-api RESOURCE CARRIES THIS SET.
+//   The UserInfo response has a page of its own — /admin/userinfo-claims —
+//   because the thing it configures is a different artefact from either token:
+//   it is fetched rather than issued, it is re-read on every call so a change
+//   is visible without a new sign-in, and OIDC Core 5.4 makes a SCOPE decide
+//   half of what is in it, which is true of nothing else on this list. Giving
+//   it `kind: 'jwt'` would have put it on /admin/claims automatically, which
+//   is exactly the accident JWT_CLAIM_SET_IDS being DERIVED is meant to make
+//   impossible in the other direction.
+//
+//   What it DOES share with a JWT set is the RESERVED LIST — see
+//   setClaimSet(), which checks `reservedNames()` rather than `kind === 'jwt'`.
+//   A UserInfo response carries `sub` (5.3.2, and a client MUST check it), and
+//   when the client registered a `userinfo_signed_response_alg` the whole
+//   thing is a JWT carrying `iss` and `aud` as well. Every name on that list is
+//   load-bearing in at least one of the two shapes, so the list applies whole.
 const CLAIM_SET_IDS = Object.keys(CLAIM_SETS);
 
 // THE FOUR SETS ARE ONE STORE AND TWO CONSOLE PAGES, and these two lists are
