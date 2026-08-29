@@ -70,7 +70,8 @@ const jwt = require('jsonwebtoken');
 const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
-        xmlEscape, parseBody, bodyValues, oauthError, signJwt, userFor,
+        xmlEscape, parseBody, bodyValues, oauthError, signJwt, signJwtAs,
+        allSigningKeys, userFor,
         hasScope } = require('../common/helpers');
 const dpop = require('./dpop');
 // RFC 8705 — certificate-bound access tokens, the other mechanism RFC 9700
@@ -317,7 +318,13 @@ function asMetadata(req, raw) {
     token_endpoint_auth_methods_supported: clientAuth.METHODS.filter(function (method) {
       return mtls.available() || method.indexOf('tls_client_auth') < 0;
     }),
-    token_endpoint_auth_signing_alg_values_supported: ['RS256', 'RS384', 'RS512', 'ES256', 'PS256', 'HS256'],
+    // Every algorithm the shared verifier accepts, which since 2026-08-28 is
+    // every one in the table: client_auth.js verifies through
+    // stsCrypto.verifyJws(), and that gained EdDSA and ES256K when the shared
+    // verifier did. A list written out here would have gone stale the moment
+    // it did.
+    token_endpoint_auth_signing_alg_values_supported:
+      stsCrypto.JWS_SIGNING_ALGS,
     service_documentation: base + '/docs',
     // One locale, because there is one: the login screen is the only UI this
     // server renders and it is written in English, and nothing here reads the
@@ -328,10 +335,12 @@ function asMetadata(req, raw) {
     op_tos_uri: base + '/tos',
     revocation_endpoint: at + '/oauth2/revoke',
     revocation_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post', 'private_key_jwt'],
-    revocation_endpoint_auth_signing_alg_values_supported: ['RS256', 'ES256', 'PS256'],
+    revocation_endpoint_auth_signing_alg_values_supported:
+      stsCrypto.JWS_SIGNING_ALGS,
     introspection_endpoint: at + '/oauth2/introspect',
     introspection_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post', 'private_key_jwt'],
-    introspection_endpoint_auth_signing_alg_values_supported: ['RS256', 'ES256', 'PS256'],
+    introspection_endpoint_auth_signing_alg_values_supported:
+      stsCrypto.JWS_SIGNING_ALGS,
     code_challenge_methods_supported: ['S256', 'plain'],
     // RFC 9207. redirectBack() puts `iss` on every authorization response this
     // server sends, success and error alike, so this is simply true — and it was
@@ -615,11 +624,27 @@ function oidcMetadata(req, issuer) {
     // them — it verifies the token before answering, because a profile is a
     // statement about somebody this server authenticated.
     userinfo_endpoint: at + '/oauth2/userinfo',
-    // Section 5.3.2's signed response, offered because RFC 7591 registration is
-    // offered: a client that registers `userinfo_signed_response_alg: "RS256"`
-    // gets `application/jwt` back, signed with the same key as everything else.
+    // Section 5.3.2's signed and ENCRYPTED responses, offered because RFC 7591
+    // registration is offered: a client that registers
+    // `userinfo_signed_response_alg` gets `application/jwt` back instead of
+    // JSON, and one that registers `userinfo_encrypted_response_alg` gets a
+    // JWE. Register both and it is signed THEN encrypted — a Nested JWT, which
+    // is the order section 5.3.2 requires and the only order that lets a
+    // recipient know who signed it.
+    //
+    // The signing list is what this service can actually do with the key
+    // material it holds: one RSA key, so the RSASSA-PKCS1 and RSASSA-PSS
+    // families, plus the HMAC family, whose key is the client_secret this
+    // service already issued to that client (OIDC Core section 10.1's symmetric
+    // case — it needs no published key, which is exactly why it works here).
+    // ES* and EdDSA are absent because there is no EC key in the JWKS to verify
+    // them against, and advertising an algorithm whose key a client cannot
+    // fetch would be worse than not offering it.
+    //
     // `none` is the default and means the plain JSON of section 5.3.2.
-    userinfo_signing_alg_values_supported: ['RS256', 'none'],
+    userinfo_signing_alg_values_supported: USERINFO_SIGNING_ALGS,
+    userinfo_encryption_alg_values_supported: stsCrypto.JWE_ALGS,
+    userinfo_encryption_enc_values_supported: Object.keys(stsCrypto.JWE_ENCS),
     //
     // `public`: the `sub` userFor() mints is urn:sts-mock:user:<username> and is
     // the same value for every client that asks, which is what public MEANS.
@@ -628,7 +653,11 @@ function oidcMetadata(req, issuer) {
     subject_types_supported: ['public'],
     // Every JWT this service signs goes through signJwt(), which is RS256 and
     // only RS256. The id_token is not encrypted, so there is no *_enc member.
-    id_token_signing_alg_values_supported: ['RS256'],
+    // OIDC Core section 3.1.3.7: a client may register
+    // `id_token_signed_response_alg`. This service holds a key for every
+    // asymmetric algorithm in the table and can use a client's own secret for
+    // the symmetric ones, so the advertised list is the table.
+    id_token_signing_alg_values_supported: ID_TOKEN_SIGNING_ALGS,
 
     // --- RECOMMENDED / OPTIONAL, and true of this server --------------------
     // WHAT THE PROTOCOL ITSELF PUTS IN AN ID TOKEN, in the order idToken() puts
@@ -802,11 +831,47 @@ function jwksEndpoint(req, res) {
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     };
     res.status(200).type('application/json').set('Cache-Control', 'no-store').send(JSON.stringify({
+      // NO `alg` MEMBER, and its absence is deliberate. RFC 7517 section 4.4
+      // makes `alg` OPTIONAL and says it identifies the algorithm INTENDED for
+      // use with the key — and this one key now signs the whole RSA family:
+      // RS256/384/512 for id_tokens and access tokens, and any of those or
+      // PS256/384/512 for a UserInfo response the client registered for.
+      //
+      // It said `alg: 'RS256'` until 2026-08-28, and that was a promise the
+      // service had stopped keeping. Web Crypto REFUSES to import a JWK whose
+      // `alg` disagrees with the operation asked of it — so a PS512 UserInfo
+      // response, correctly signed with this very key, could not be verified by
+      // a conforming client at all. The error it produces names the JWK and not
+      // the algorithm ("JWK alg does not match the requested algorithm"), which
+      // reads as a broken key rather than an over-narrow advertisement.
+      //
+      // Omitting it leaves the key usable for every algorithm it can actually
+      // perform, which is what is true. Selection is by `kid` — every token
+      // this service signs carries one — so nothing depended on `alg` to find
+      // this key in the first place.
+      // THE RSA KEY IS FIRST AND MUST STAY FIRST. Everything this service signs
+      // by default is RS256 with it, and more than one test here reads
+      // `jwks.keys[0]` to verify a token — a JWKS whose first entry became an
+      // EC key would fail those in a way that names the signature rather than
+      // the ordering. New keys go on the END.
+      //
+      // The others exist so that ES256/384/512 and EdDSA are things a client
+      // can actually VERIFY, not merely things this service can sign. A signing
+      // algorithm advertised with no published key to check it against is worse
+      // than one not offered at all: the client gets a signature it cannot
+      // verify and reports a broken issuer.
       keys: [{
-        kty: 'RSA', use: 'sig', alg: 'RS256', kid: STS.kid,
+        kty: 'RSA', use: 'sig', kid: STS.kid,
         n: b64u(pub.n.toString(16)), e: b64u(pub.e.toString(16)),
         x5c: [STS.certB64]
-      }]
+      // allSigningKeys() and not STS.extraKeys: the post-quantum keys are made
+      // on FIRST USE (see helpers.js), and this is the call that brings them
+      // into being. That makes the first JWKS fetch on a realm slow — about
+      // two seconds, nearly all of it one SLH-DSA keygen — and every one after
+      // it free. Publishing them lazily one at a time would be worse: a client
+      // that cached the JWKS before a key existed would be missing exactly the
+      // key it later needs.
+      }].concat(allSigningKeys().map(function (k) { return k.publicJwk; }))
     }, null, 2));
     log.debug("Leaving the JWKS endpoint.");
   } catch (e) {
@@ -1316,8 +1381,29 @@ function idToken(base, opts) {
                                           customClaimContext(base, payload, user),
                                           'requested claim(s)'));
   }
-  const token = signJwt(payloadWithCustom, issuanceContext(opts));
-  log.debug("Leaving idToken().");
+  // OIDC Core section 3.1.3.7: an ID Token is signed with the algorithm the
+  // client REGISTERED as `id_token_signed_response_alg`, and with RS256 when it
+  // registered none — which is what every client here does unless it says
+  // otherwise, so the common path is unchanged.
+  //
+  // Refused rather than downgraded, for the reason the UserInfo endpoint
+  // refuses: a client that registered an algorithm and got RS256 has no way to
+  // notice, and would verify against a key that was never going to match.
+  const registered = applications.registrationOf(opts.client_id) || {};
+  const idAlg = String(registered.id_token_signed_response_alg || 'RS256');
+  if (ID_TOKEN_SIGNING_ALGS.indexOf(idAlg) === -1) {
+    log.debug("Leaving idToken(). Unsupported id_token_signed_response_alg.");
+    throw new Error('This client registered id_token_signed_response_alg="' +
+      idAlg + '" and this service signs ID Tokens with ' +
+      ID_TOKEN_SIGNING_ALGS.join(', ') +
+      ' (see id_token_signing_alg_values_supported).');
+  }
+  const token = idAlg === 'RS256'
+    // The default keeps going through signJwt(), which is what records the
+    // token in the admin console's count — see the note on that function.
+    ? signJwt(payloadWithCustom, issuanceContext(opts))
+    : signJwtAs(payloadWithCustom, idAlg, registered.client_secret);
+  log.debug("Leaving idToken(). alg=" + idAlg);
   return token;
 }
 
@@ -3262,6 +3348,178 @@ function tokenFailure(token) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SECTION 5.3.2's PROTECTED USERINFO RESPONSE — signed, encrypted, or both.
+//
+// What a client registers decides the shape of the answer:
+//
+//   neither                     application/json, the claims as they are
+//   ..._signed_response_alg     application/jwt, a JWS over the claims
+//   ..._encrypted_response_alg  application/jwt, a JWE
+//   both                        application/jwt, a JWS INSIDE a JWE
+//
+// THE ORDER IS SIGN THEN ENCRYPT and it is not a preference. Encrypting first
+// and signing the ciphertext would let anyone who can decrypt strip the
+// signature and re-encrypt to somebody else, and the recipient would have no
+// way to tell. Section 5.3.2 says signed then encrypted, JWT section 5.2 says
+// the outer header carries `cty: "JWT"` to announce it, and both are done here.
+//
+// A SIGNED RESPONSE GAINS `iss` AND `aud`, which is the whole reason to want
+// one. Without them a signed profile of Alice issued for client A is a signed
+// profile of Alice that client B will also believe — the signature proves who
+// wrote it and says nothing about who it was written for.
+// ---------------------------------------------------------------------------
+
+// What this service can sign a UserInfo response with. The RSA families use the
+// one key in the JWKS; the HMAC family uses that client's own client_secret,
+// which is why it needs no published key.
+const USERINFO_RSA_ALGS = ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'];
+const USERINFO_HMAC_ALGS = ['HS256', 'HS384', 'HS512'];
+// The curve algorithms, each with a key of its own in the JWKS. They were
+// absent until 2026-08-28 and the reason was only ever that no EC key was
+// generated — see makeStsKeys(). A capability withheld because of a missing key
+// pair is the wrong kind of gap in a tool people point at real identity
+// providers, since ES256 is what a great many of them use.
+// ES256K is in here with the rest and is the one that needed an implementation
+// rather than only a key: `jsonwebtoken` has no secp256k1, so stsCrypto signs
+// and verifies it directly on node's OpenSSL, converting the DER signature
+// OpenSSL returns into the R||S concatenation RFC 7518 section 3.4 requires.
+const USERINFO_EC_ALGS = ['ES256', 'ES384', 'ES512', 'ES256K', 'EdDSA'];
+// The post-quantum and composite signatures, taken from the shared table so
+// this list cannot fall behind it. signJwtAs() already knows which key each
+// one needs, so nothing else here had to change to gain them.
+const USERINFO_PQ_ALGS = stsCrypto.JWS_SIGNING_ALGS.filter(function (alg) {
+  return stsCrypto.JWS_ALGS[alg].family === 'pq';
+});
+const USERINFO_SIGNING_ALGS = USERINFO_RSA_ALGS
+  .concat(USERINFO_EC_ALGS)
+  .concat(USERINFO_PQ_ALGS)
+  .concat(USERINFO_HMAC_ALGS)
+  .concat(['none']);
+
+// What an ID Token may be signed with. OIDC Core section 3.1.3.7 lets a client
+// register `id_token_signed_response_alg`, and this service can sign with
+// anything in the shared table — so the advertised list is that table rather
+// than a subset, and `none` is absent because an unsigned ID Token is not
+// something this service will produce: the ID Token is the one artifact whose
+// whole purpose is to be verified.
+const ID_TOKEN_SIGNING_ALGS = stsCrypto.JWS_SIGNING_ALGS;
+
+// The recipient's encryption key, out of the registration document. Inline
+// `jwks` only: a `jwks_uri` would have this service make an outbound HTTPS call
+// to a URL the client chose, at the moment it answers a request, and a mock
+// that can be made to fetch arbitrary URLs is a mock somebody will point at
+// something interesting. The refusal below says so and says what to send
+// instead, because "no key" with no reason reads as a bug here.
+function recipientEncryptionKey(registered, alg) {
+  log.debug("Entering recipientEncryptionKey(). alg=" + alg);
+  if (!registered.jwks || !Array.isArray(registered.jwks.keys) ||
+      !registered.jwks.keys.length) {
+    log.debug("Leaving recipientEncryptionKey(). No inline jwks.");
+    throw new Error(registered.jwks_uri
+      ? 'This client registered a jwks_uri, and this service reads an INLINE ' +
+        '"jwks" member only — it will not fetch a URL a client chose while ' +
+        'answering that client\'s request. Re-register with the key material ' +
+        'in a "jwks" member.'
+      : 'This client registered userinfo_encrypted_response_alg="' + alg +
+        '" and no "jwks" member, so there is no key to encrypt to.');
+  }
+  // A key marked for encryption if there is one, otherwise the first key of the
+  // right type — `use` is optional, and a client that published one key for
+  // both purposes has still told us which key it holds.
+  const wantEc = alg.indexOf('ECDH') === 0;
+  const candidates = registered.jwks.keys.filter(function (key) {
+    if (key.use && key.use !== 'enc') return false;
+    return wantEc ? key.kty === 'EC' : key.kty === 'RSA';
+  });
+  if (!candidates.length) {
+    log.debug("Leaving recipientEncryptionKey(). No usable key.");
+    throw new Error('This client registered userinfo_encrypted_response_alg="' +
+      alg + '", which needs ' + (wantEc ? 'an EC' : 'an RSA') + ' key, and its ' +
+      'jwks has none that can be used for encryption.');
+  }
+  log.debug("Leaving recipientEncryptionKey(). kid=" + (candidates[0].kid || '(none)'));
+  return candidates[0];
+}
+
+function signUserinfo(body, alg, registered, base, claims) {
+  log.debug("Entering signUserinfo(). alg=" + alg);
+  // `iss` and `aud` are section 5.3.2's requirement and are added HERE rather
+  // than by the caller, so that a response cannot be signed without them.
+  const payload = Object.assign({ iss: issuerOf(base), aud: claims.client_id,
+                                  typ: 'UserInfo' }, body);
+  // WHICH KEY signs which algorithm is helpers.js's answer and not this
+  // endpoint's — see signJwtAs(). It was written out here first and the ID
+  // Token endpoint would have copied it.
+  log.debug("Leaving signUserinfo().");
+  return signJwtAs(payload, alg, registered.client_secret);
+}
+
+// Returns { contentType, body } or throws with a sentence fit to hand back as
+// an error_description.
+function protectUserinfo(body, registered, base, claims) {
+  log.debug("Entering protectUserinfo().");
+  const signAlg = String(registered.userinfo_signed_response_alg || 'none');
+  const encAlg = registered.userinfo_encrypted_response_alg
+    ? String(registered.userinfo_encrypted_response_alg) : '';
+  // Section 2 of the registration spec: `enc` DEFAULTS to A128CBC-HS256 when an
+  // `alg` was registered without one. Defaulting it here rather than refusing is
+  // the difference between reading the registration as written and making every
+  // client spell out something the spec already decided.
+  const encEnc = encAlg
+    ? String(registered.userinfo_encrypted_response_enc || 'A128CBC-HS256') : '';
+
+  if (signAlg === 'none' && !encAlg) {
+    log.debug("Leaving protectUserinfo(). Plain JSON.");
+    return { contentType: 'application/json',
+             body: JSON.stringify(body, null, 2) };
+  }
+  if (signAlg !== 'none' && USERINFO_SIGNING_ALGS.indexOf(signAlg) === -1) {
+    // Refused rather than downgraded to JSON: silently ignoring the algorithm a
+    // client registered would leave it verifying a signature that is not there.
+    log.debug("Leaving protectUserinfo(). Unsupported signing alg.");
+    throw new Error('This client registered userinfo_signed_response_alg="' +
+      signAlg + '" and this service signs with ' +
+      USERINFO_SIGNING_ALGS.join(', ') + ' (see ' +
+      'userinfo_signing_alg_values_supported).');
+  }
+  if (encAlg && stsCrypto.JWE_ALGS.indexOf(encAlg) === -1) {
+    log.debug("Leaving protectUserinfo(). Unsupported encryption alg.");
+    throw new Error('This client registered userinfo_encrypted_response_alg="' +
+      encAlg + '" and this service encrypts with ' +
+      stsCrypto.JWE_ALGS.join(', ') + ' (see ' +
+      'userinfo_encryption_alg_values_supported).');
+  }
+  if (encAlg && !stsCrypto.JWE_ENCS[encEnc]) {
+    throw new Error('This client asked for userinfo_encrypted_response_enc="' +
+      encEnc + '" and this service encrypts with ' +
+      Object.keys(stsCrypto.JWE_ENCS).join(', ') + ' (see ' +
+      'userinfo_encryption_enc_values_supported).');
+  }
+
+  const inner = signAlg === 'none'
+    ? JSON.stringify(body, null, 2)
+    : signUserinfo(body, signAlg, registered, base, claims);
+
+  if (!encAlg) {
+    log.debug("Leaving protectUserinfo(). Signed only.");
+    return { contentType: 'application/jwt', body: inner };
+  }
+  const jwe = stsCrypto.encryptJweCompact(inner, {
+    alg: encAlg,
+    enc: encEnc,
+    jwk: recipientEncryptionKey(registered, encAlg),
+    // RFC 7519 section 5.2: the outer header announces a JWS inside with
+    // cty:"JWT". Without it a recipient that decrypts finds a dot-separated
+    // string where it expected a claims object, and has to guess.
+    cty: signAlg === 'none' ? undefined : 'JWT',
+    typ: 'JWT'
+  });
+  log.debug("Leaving protectUserinfo(). " +
+            (signAlg === 'none' ? 'Encrypted.' : 'Signed then encrypted.'));
+  return { contentType: 'application/jwt', body: jwe };
+}
+
 function userinfoResponse(req, res) {
   log.debug("Entering userinfoResponse(). method=" + req.method);
   const base = baseUrlOf(req);
@@ -3412,33 +3670,30 @@ function userinfoResponse(req, res) {
   logArtifact('UserInfo response', 'as returned', body);
 
   // Section 5.3.2: the response is JSON unless the client registered a
-  // `userinfo_signed_response_alg`, in which case it is a JWT of the same claims
-  // with `iss` and `aud` added — the two members that make a signed response
-  // worth having, since without them it could be replayed to another client.
-  // This is read from the RFC 7591 registration the client already did here, so
-  // the two features meet where they should: register asking for a signed
-  // response and this endpoint starts signing for that client.
+  // `userinfo_signed_response_alg` or a `userinfo_encrypted_response_alg`, in
+  // which case it is a JWT. This is read from the RFC 7591 registration the
+  // client already did here, so the two features meet where they should:
+  // register asking for a signed or encrypted response and this endpoint starts
+  // producing one for that client. See protectUserinfo() above.
   const registered = applications.registrationOf(claims.client_id) || {};
-  const alg = String(registered.userinfo_signed_response_alg || 'none');
-  if (alg !== 'none') {
-    if (alg !== 'RS256') {
-      // Refused rather than downgraded to JSON: silently ignoring the algorithm
-      // a client registered would leave it verifying a signature that is not
-      // there, and this key signs RS256 only.
-      log.debug("Leaving userinfoResponse(). The client registered an alg this server cannot sign.");
-      return oauthError(res, 500, 'server_error',
-        'This client registered userinfo_signed_response_alg="' + alg + '", and this server signs ' +
-        'RS256 only (see userinfo_signing_alg_values_supported).');
-    }
-    const signed = signJwt(Object.assign(
-      { iss: issuerOf(base), aud: claims.client_id, typ: 'UserInfo' }, body));
-    res.status(200).type('application/jwt').set('Cache-Control', 'no-store').send(signed);
-    log.debug("Leaving userinfoResponse(). A signed UserInfo response for " + body.sub + ".");
-    return;
+  let protectedResponse;
+  try {
+    protectedResponse = protectUserinfo(body, registered, base, claims);
+  } catch (e) {
+    // Everything protectUserinfo() throws is a sentence about what this client
+    // registered, so it goes back as the error_description rather than being
+    // collapsed into "server_error" with the reason in a log the client cannot
+    // read. It is a 500 because the registration was accepted and cannot now be
+    // honoured, which is this service's fault and not this request's.
+    log.error('userinfoResponse(): the registered response protection could not be ' +
+              'applied: ' + e.message);
+    log.debug("Leaving userinfoResponse(). The registered protection could not be applied.");
+    return oauthError(res, 500, 'server_error', e.message);
   }
-  res.status(200).type('application/json').set('Cache-Control', 'no-store')
-     .send(JSON.stringify(body, null, 2));
-  log.debug("Leaving userinfoResponse(). " + Object.keys(body).length + " claim(s) for " + body.sub + ".");
+  res.status(200).type(protectedResponse.contentType)
+     .set('Cache-Control', 'no-store').send(protectedResponse.body);
+  log.debug("Leaving userinfoResponse(). " + Object.keys(body).length +
+            " claim(s) for " + body.sub + " as " + protectedResponse.contentType + ".");
 }
 
 app.get('/oauth2/userinfo', userinfoResponse);

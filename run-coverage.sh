@@ -29,17 +29,35 @@
 #     unit      — the in-process suite in tests/. Deep coverage of a few
 #                 modules: the realm layer, the LDIF codec, the two map
 #                 renderers, the crypto module.
-#     protocol  — a throwaway copy of THIS WORKING TREE, driven by the parent
-#                 project's mock-only jobs over HTTP. This is where the
-#                 sixteen protocol families are actually exercised, and it is
-#                 off unless --protocol is passed, because it needs the parent
-#                 checkout beside this one.
+#     protocol  — a throwaway copy of THIS WORKING TREE, driven over HTTP by
+#                 the thirteen VENDORED jobs in tests/vendored/. This is where
+#                 the sixteen protocol families are actually exercised, and it
+#                 is ON BY DEFAULT since 2026-08-28. It used to need
+#                 --protocol, on the argument that it wanted the parent
+#                 checkout beside this one — an argument that expired the same
+#                 day, when those jobs were vendored and stopped needing one.
+#                 A coverage report whose default omitted the half where the
+#                 protocols actually run is a report that gets read wrongly.
+#                 --no-protocol is the way back.
 #   The report has a column per domain, so "which half of the run reached this
 #   file" is answerable — which is the question somebody deciding what to test
 #   next actually has.
 #
+#   THIS SCRIPT DOES NOT USE THE CONTAINER, AND THAT IS A CONSEQUENCE RATHER
+#   THAN A CHOICE. Since 2026-08-28 `./local-run-tests.sh` drives the protocol
+#   jobs against a container built from this tree by docker-compose.yml — see
+#   its header for what that buys. Coverage cannot come out of one: V8 writes
+#   its data from INSIDE the process being measured, into a directory that
+#   process can write, so an instrumented service has to be one this run
+#   started. So the `protocol` domain here is the in-process throwaway copy,
+#   exactly as it always was, and `./local-run-tests.sh --coverage` says so on
+#   its way here rather than leaving the difference to be noticed. It is also
+#   the right instrument for the question being asked, since what is being
+#   measured is which LINES OF THIS TREE ran.
+#
 # Options: the same as ./local-run-tests.sh, which is what usually calls this.
-#   --only=<substr>[,...]  --protocol[=on|only]  --parent=<dir>
+#   --only=<substr>[,...]  --protocol[=on|off|only]  --no-protocol / --unit-only
+#   --parent=<dir>
 #   --log-level=L  --sts-log-level=L  --quiet  --open  --verbose  -h|--help
 #
 set -u -o pipefail
@@ -48,7 +66,7 @@ CURRENT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 cd "${CURRENT_DIR}" || exit 1
 
 ONLY=""
-PROTOCOL=""
+PROTOCOL="on"
 PARENT=""
 LOG_LEVEL_ARG=""
 STS_LOG_LEVEL_ARG=""
@@ -67,6 +85,8 @@ do
     --protocol)        PROTOCOL="on" ;;
     --protocol=*)      PROTOCOL="${1#--protocol=}" ;;
     --protocol-only)   PROTOCOL="only" ;;
+    --no-protocol)     PROTOCOL="off" ;;
+    --unit-only)       PROTOCOL="off" ;;
     --parent=*)        PARENT="${1#--parent=}" ;;
     --log-level=*)     LOG_LEVEL_ARG="${1#--log-level=}" ;;
     --sts-log-level=*) STS_LOG_LEVEL_ARG="${1#--sts-log-level=}" ;;
@@ -91,6 +111,14 @@ fi
 
 export COVERAGE=true
 export COVERAGE_DIR="${COVERAGE_DIR:-${CURRENT_DIR}/coverage}"
+
+# UNSET rather than merely not set: run-report.js reads STS_TEST_SERVICE_URL as
+# the environment fallback for --service-url, so one left exported in somebody's
+# shell (by an interrupted --keep-stack run, say) would point this run at a
+# CONTAINER — and the protocol half of the coverage would come out empty, which
+# reads as "the protocols are untested" rather than as "this run could not
+# look". The runner warns when it happens; this makes it not happen.
+unset STS_TEST_SERVICE_URL
 
 # ---------------------------------------------------------------------------
 # THE SERVICE'S LOG LEVEL UNDER --protocol, and why this run wants it lower
@@ -126,11 +154,15 @@ ARGS=()
 [ -n "${PARENT}" ] && ARGS+=("--parent=${PARENT}")
 [ "${QUIET}" = "1" ] && ARGS+=("--quiet")
 
-if [ -z "${PROTOCOL}" ];
+# The check is against "off" and not against an empty string, because the
+# default is "on" now: an unset PROTOCOL is no longer how somebody says they
+# want half a report.
+if [ "${PROTOCOL}" = "off" ];
 then
-  echo "Collecting coverage from the in-process suite only."
-  echo "The sixteen protocol families are reached by --protocol, which drives"
-  echo "the parent project's jobs against a throwaway copy of this tree."
+  echo "Collecting coverage from the in-process suite only, because"
+  echo "--no-protocol was passed. The sixteen protocol families are NOT"
+  echo "reached by this run, so every number below is about ten files' worth"
+  echo "of module contracts and not about this service."
   echo ""
 fi
 

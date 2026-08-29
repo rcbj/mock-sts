@@ -3,7 +3,7 @@
 **Every file in this directory is somebody else's. DO NOT EDIT THEM HERE.**
 
 They are byte-identical copies of files in the parent project
-(`../oauth2-oidc-debugger`), and two of the parent's tests exist to keep them
+(`../id-proto-debugger`), and two of the parent's tests exist to keep them
 that way — `tests/krb5_codec_sync.js` compares the Kerberos codec, and
 `tests/bbs2023_cryptosuite.js` drives BOTH implementations of the cryptosuite
 against the same vectors. A local "improvement" here is not a change to this

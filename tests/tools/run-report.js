@@ -68,6 +68,34 @@
 // not have. That is information rather than a fault in this runner, and the
 // report says which side each job came from so it can be read that way.
 //
+// ---------------------------------------------------------------------------
+// THE DEFAULT IS THE WHOLE SET, SINCE 2026-08-28, AND THAT REVERSES WHAT THIS
+// FILE DID FOR ITS FIRST THREE DAYS.
+//
+// The protocol half used to be off unless `--protocol` was passed, on the
+// argument that it needs the parent checkout beside this one and a run that
+// needs nothing installed is a better default. That argument was wrong in the
+// way that costs the most: the in-process half is TEN FILES about the realm
+// layer, the LDIF codec, the two map renderers and the crypto module, and it
+// finishes in under three seconds. So the default run answered in five
+// seconds, said "Tests passed", and had exercised NO protocol endpoint, NO
+// admin console and NO browser — which reads as a green suite and is a green
+// tenth of one. Somebody has to already know about a flag to find that out,
+// and a default that hides the other thirteen jobs behind one is a default
+// that will be trusted wrongly.
+//
+// So the whole set runs unless it is turned off. What that costs is about a
+// minute instead of three seconds, and — until the same day — a parent
+// checkout beside this one. THAT SECOND COST IS GONE: the thirteen protocol
+// jobs are VENDORED into tests/vendored/ and are this repository's own files
+// now, so there is no checkout that can be missing and no job that can
+// silently not run. See tests/vendored/MANIFEST.js for what is copied and
+// why the copies are not edited here.
+//
+// `--no-protocol` is the way back to the old default, and the report says so
+// in its own banner rather than leaving a green page to be read as more than
+// it is.
+//
 // Usage:
 //   node tests/tools/run-report.js [options]
 //
@@ -75,16 +103,60 @@
 //   --list                 name the jobs that would run; run none
 //   --protocol[=on|off|only]
 //                          also (or only) run the parent project's mock-only
-//                          jobs against a throwaway instance. Default off.
-//   --parent=<dir>         where the parent project is (default: the sibling
-//                          ../id-proto-debugger, then ../oauth2-oidc-debugger)
+//                          jobs against a throwaway instance. DEFAULT ON, as
+//                          of 2026-08-28 — see THE DEFAULT IS THE WHOLE SET
+//                          above. `--protocol=off` (or --no-protocol) leaves
+//                          them out.
+//   --no-protocol          the same as --protocol=off.
+//   --parent=<dir>         ACCEPTED AND IGNORED. It named the checkout the
+//                          protocol jobs were read out of, and since they are
+//                          vendored into tests/vendored/ there is no such
+//                          checkout. It is still parsed so that a script or a
+//                          habit passing it does not die on an unknown option;
+//                          tools/vendor-check.js is what takes it now.
+//   --service-url=<url>    DRIVE A SERVICE SOMEBODY ELSE STARTED, at this URL,
+//                          instead of starting a throwaway one. This is how
+//                          ./local-run-tests.sh hands over the CONTAINER it
+//                          brought up with docker-compose.yml — see THE
+//                          SERVICE UNDER THE PROTOCOL JOBS below. The URL is
+//                          checked before any job runs, and a service that
+//                          does not answer FAILS the protocol jobs rather
+//                          than skipping them, exactly as a throwaway one
+//                          that would not start does.
 //   --report-dir=<dir>     where to write (default tests/report)
 //   --timeout=<ms>         per-job watchdog (default 300000; 0 disables)
 //   --quiet                do not echo each job's output as it runs
 //   --help
 //
+// ---------------------------------------------------------------------------
+// THE SERVICE UNDER THE PROTOCOL JOBS COMES FROM ONE OF TWO PLACES, AND THIS
+// RUNNER STARTS ONLY THE SECOND.
+//
+//   A CONTAINER, brought up from docker-compose.yml by ./local-run-tests.sh
+//   and handed here as --service-url (or STS_TEST_SERVICE_URL). This is the
+//   DEFAULT way the launcher runs, since 2026-08-28, and what it buys is that
+//   the thing under test is the IMAGE — the same Dockerfile, the same
+//   `npm install --omit=dev`, the same node — rather than whatever the
+//   developer's own `node_modules` and node version happen to be. Several
+//   things this service does are properties of its image and not of its
+//   source, and a suite that never builds one cannot see them.
+//
+//   A THROWAWAY PROCESS, started by tools/service.js on nine ports of its
+//   own. Still here, still what --no-docker uses, and still what a COVERAGE
+//   run uses — because V8 writes its coverage from inside the process being
+//   measured, and this runner cannot reach inside a container to collect it.
+//
+// The lifetime rule is the same one that governs everything else here: WHOEVER
+// STARTED IT STOPS IT. A service handed in through --service-url is never
+// stopped by this file, because the launcher's teardown owns it and two owners
+// of one container is how a run ends by killing a stack somebody was reading.
+// ---------------------------------------------------------------------------
+//
 // Environment:
 //   LOG_LEVEL       this runner's and the unit jobs' bunyan level.
+//   STS_TEST_SERVICE_URL
+//                   the same thing --service-url says, for a caller that would
+//                   rather export than pass an argument. The option wins.
 //   STS_LOG_LEVEL   the throwaway service's level. Unset means its appconfig
 //                   file decides, and that is `debug` — every request and
 //                   every signed artifact written down, which is what a
@@ -103,6 +175,7 @@ const path = require('path');
 const bunyan = require('bunyan');
 
 const service = require('./service');
+const manifest = require('../vendored/MANIFEST.js');
 const coverage = require('./coverage-report');
 const { testFiles } = require('../run');
 
@@ -111,13 +184,9 @@ const log = bunyan.createLogger({ name: 'run-report',
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const TESTS_DIR = path.join(REPO_ROOT, 'tests');
+const VENDORED_DIR = path.join(TESTS_DIR, 'vendored');
 // A filesystem-safe ISO stamp, the parent project's shape: 2026-08-28T17-45-00.
 const RUN_ID = new Date().toISOString().replace(/:/g, '-').replace(/\..+$/, '');
-
-// The parent project, which is where every protocol test for this service
-// lives. Two names because the directory has had two: the repository is
-// `oauth2-oidc-debugger` and the working copy here is `id-proto-debugger`.
-const PARENT_CANDIDATES = ['id-proto-debugger', 'oauth2-oidc-debugger'];
 
 // ---------------------------------------------------------------------------
 // Arguments. Hand-parsed, like tests/run.js's, and for the same reason: this
@@ -125,10 +194,15 @@ const PARENT_CANDIDATES = ['id-proto-debugger', 'oauth2-oidc-debugger'];
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
   log.debug('Entering parseArgs().');
-  const opts = { only: [], list: false, protocol: 'off', parent: '',
+  const opts = { only: [], list: false, protocol: 'on', parent: '',
                  reportDir: path.join(TESTS_DIR, 'report'),
                  timeoutMs: 300000, quiet: false, help: false,
-                 browser: true, unknown: [] };
+                 browser: true,
+                 // The environment is the FALLBACK and the option is the
+                 // answer, which is the same precedence every other setting
+                 // in this repository has.
+                 serviceUrl: process.env.STS_TEST_SERVICE_URL || '',
+                 unknown: [] };
   argv.forEach(function (a) {
     if (a === '--list') {
       opts.list = true;
@@ -140,10 +214,18 @@ function parseArgs(argv) {
       opts.browser = false;
     } else if (a === '--protocol') {
       opts.protocol = 'on';
+    } else if (a === '--no-protocol') {
+      opts.protocol = 'off';
     } else if (a.indexOf('--protocol=') === 0) {
       opts.protocol = a.slice('--protocol='.length);
     } else if (a.indexOf('--parent=') === 0) {
+      // Accepted and ignored — see the usage note above.
       opts.parent = a.slice('--parent='.length);
+    } else if (a.indexOf('--service-url=') === 0) {
+      // Trailing slashes are stripped because every job appends an absolute
+      // path to this and `http://host:1/` + `/oauth2/token` is a 404 whose
+      // message names a path that looks right.
+      opts.serviceUrl = a.slice('--service-url='.length).replace(/\/+$/, '');
     } else if (a.indexOf('--report-dir=') === 0) {
       opts.reportDir = path.resolve(a.slice('--report-dir='.length));
     } else if (a.indexOf('--timeout=') === 0) {
@@ -164,40 +246,6 @@ function parseArgs(argv) {
   return opts;
 }
 
-// ---------------------------------------------------------------------------
-// Where the parent project is. Named explicitly, or the sibling directory
-// under either of its two names — and it must have its tests' node_modules,
-// because those jobs use `commander` and `@xmldom/xmldom` and this repository
-// does not carry either.
-// ---------------------------------------------------------------------------
-function findParent(named) {
-  log.debug('Entering findParent().');
-  const tries = [];
-  if (named) {
-    tries.push(path.resolve(named));
-  } else {
-    PARENT_CANDIDATES.forEach(function (n) {
-      tries.push(path.resolve(REPO_ROOT, '..', n));
-    });
-  }
-  for (const dir of tries) {
-    if (fs.existsSync(path.join(dir, 'tests', 'run-report.js'))) {
-      if (!fs.existsSync(path.join(dir, 'tests', 'node_modules'))) {
-        log.debug('Leaving findParent(). No node_modules.');
-        return { dir: dir, usable: false,
-                 why: 'found ' + dir + ' but its tests/node_modules is not ' +
-                      'installed; run `npm install` in ' +
-                      path.join(dir, 'tests') };
-      }
-      log.debug('Leaving findParent(). ' + dir);
-      return { dir: dir, usable: true, why: '' };
-    }
-  }
-  log.debug('Leaving findParent(). Not found.');
-  return { dir: '', usable: false,
-           why: 'no parent project beside this one (looked for ' +
-                PARENT_CANDIDATES.join(', ') + '); --parent=<dir> names it' };
-}
 
 // The environments of the OTHER services in the parent's stack. A job naming
 // any of them needs more than a lone mock, so it is not one of ours.
@@ -230,55 +278,21 @@ const NEEDS_THE_MOCK = /WSTRUST_STS_URL|OID4VCI_ISSUER_URL/;
 // their own runner — the file that already decides what a job is over there —
 // so a test added or renamed in that suite arrives here with nothing edited.
 // ---------------------------------------------------------------------------
-function parentJobs(parentDir, options) {
-  log.debug('Entering parentJobs().');
+function vendoredJobs(options) {
+  log.debug('Entering vendoredJobs().');
   // A caller with no options gets the default, which is that browser jobs RUN.
   // This function is exported, so a second caller passing nothing must not
   // silently mean "leave the console's only coverage out".
   const opts = options || { browser: true };
   const skippedBrowserJobs = [];
-  const theirTests = path.join(parentDir, 'tests');
-  let runner;
-  try {
-    runner = fs.readFileSync(path.join(theirTests, 'run-report.js'), 'utf8');
-  } catch (e) {
-    log.warn('cannot read the parent runner: ' + e.message);
-    log.debug('Leaving parentJobs(). Unreadable.');
-    return [];
-  }
-  const names = {};
-  const re = /script:\s*"([^"]+\.js)"/g;
-  let m;
-  while ((m = re.exec(runner)) !== null) {
-    names[m[1]] = true;
-  }
   const jobs = [];
-  Object.keys(names).sort().forEach(function (file) {
-    let src;
-    try {
-      src = fs.readFileSync(path.join(theirTests, file), 'utf8');
-    } catch (e) {
-      // Registered over there and not present here — a job their image COPYs
-      // that this checkout does not have. Silently not ours.
+  manifest.JOBS.forEach(function (entry) {
+    if (entry.browser && !opts.browser) {
+      skippedBrowserJobs.push(entry.file);
       return;
     }
-    if (DEBUGGER_SITE.test(src)) {
-      // Drives the debugger's own pages, which need the client and the api.
-      return;
-    }
-    const needsABrowser = SELENIUM_REQUIRE.test(src);
-    if (needsABrowser && !opts.browser) {
-      skippedBrowserJobs.push(file);
-      return;
-    }
-    if (!NEEDS_THE_MOCK.test(src)) {
-      return;
-    }
-    if (OTHER_SERVICE_ENV.test(src)) {
-      return;
-    }
-    jobs.push({ suite: 'protocol', name: file.replace(/\.js$/, ''),
-                file: file, dir: theirTests, browser: needsABrowser });
+    jobs.push({ suite: 'protocol', name: entry.file.replace(/\.js$/, ''),
+                file: entry.file, dir: VENDORED_DIR, browser: !!entry.browser });
   });
   const browserJobs = jobs.filter(function (j) { return j.browser; });
   if (browserJobs.length) {
@@ -291,11 +305,49 @@ function parentJobs(parentDir, options) {
   if (skippedBrowserJobs.length) {
     log.warn('SKIPPING ' + skippedBrowserJobs.length + ' browser job(s) on ' +
              '--no-browser: ' + skippedBrowserJobs.join(', ') + '. The admin ' +
-             'console has no other coverage against this working tree, so a ' +
-             'run without them says nothing about it.');
+             'console has NO other coverage against this working tree, so ' +
+             'this run says nothing about /admin.');
   }
-  log.debug('Leaving parentJobs(). ' + jobs.length + ' found.');
+  log.debug('Leaving vendoredJobs(). ' + jobs.length + ' job(s).');
   return jobs;
+}
+
+// ---------------------------------------------------------------------------
+// THE TEST DEPENDENCIES, and why their absence is a FAILURE rather than a skip.
+//
+// The vendored jobs need `commander` and `selenium-webdriver`, which live in
+// tests/package.json rather than the root one — see that file for the .npmrc
+// reason. A checkout that has not run `npm install --prefix tests` therefore
+// has jobs that cannot LOAD, and node reports that as MODULE_NOT_FOUND at
+// startup: a non-zero exit, so the runner already calls it a failure.
+//
+// This check exists to make that failure READABLE. Thirteen jobs each dying
+// with a stack trace about `commander` is a wall of noise that names a package
+// and not a command; one line naming the command, before anything is spawned,
+// is the difference between a five-second fix and an afternoon.
+//
+// It does NOT skip the jobs and does not stop the run. They are still spawned,
+// they still fail, and the report still counts thirteen failures — because a
+// run that quietly declined to check anything is the exact thing this file was
+// changed on 2026-08-28 to stop doing.
+// ---------------------------------------------------------------------------
+function checkTestDependencies() {
+  log.debug('Entering checkTestDependencies().');
+  const missing = [];
+  ['commander', 'selenium-webdriver'].forEach(function (m) {
+    if (!fs.existsSync(path.join(TESTS_DIR, 'node_modules', m))) {
+      missing.push(m);
+    }
+  });
+  if (missing.length) {
+    log.error('the vendored protocol jobs need ' + missing.join(' and ') +
+              ', which is not installed. They will FAIL to load. Fix it with:' +
+              '\n\n    npm install --prefix tests\n\n' +
+              '(those packages are in tests/package.json and not the root one ' +
+              'because .npmrc carries omit=dev — see tests/package.json.)');
+  }
+  log.debug('Leaving checkTestDependencies(). ' + missing.length + ' missing.');
+  return missing;
 }
 
 // ---------------------------------------------------------------------------
@@ -577,8 +629,8 @@ function writeHtml(runDir, results, meta) {
   });
   const SUITE_TITLE = {
     unit: 'In-process module contracts (this repository\'s tests/)',
-    protocol: 'Protocol jobs from the parent project, against a throwaway ' +
-              'copy of this working tree'
+    protocol: 'Protocol jobs from the parent project, against this working ' +
+              'tree'
   };
   let html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -613,19 +665,25 @@ function writeHtml(runDir, results, meta) {
                                    : '') +
     (meta.tree.dirty ? ', <span class="fail">with uncommitted changes</span>'
                      : ', clean') + '.';
-  if (meta.parentDir) {
-    html += ' Protocol jobs from <code>' + escapeHtml(meta.parentDir) +
-      '</code> at <code>' + escapeHtml(meta.parentTree.commit || 'unknown') +
-      '</code>, driven against a throwaway instance on <code>' +
-      escapeHtml(meta.serviceUrl || '?') + '</code>.' +
-      ' A job of theirs can be AHEAD of this tree — that suite is developed ' +
-      'against its own checkout of this service — in which case it fails ' +
-      'here naming the feature this tree does not have.';
+  if (meta.vendored) {
+    html += ' Protocol jobs are the VENDORED copies in <code>' +
+      escapeHtml(meta.vendored) + '</code> — this tree\'s own files, at the ' +
+      'commit above — driven against ' +
+      (meta.serviceKind === 'container'
+        ? 'a CONTAINER built from this tree by <code>docker-compose.yml</code>'
+        : 'a throwaway in-process instance') +
+      ' on <code>' +
+      escapeHtml(meta.serviceUrl || '?') + '</code>. They are byte-identical ' +
+      'copies of the parent project\'s jobs and are not edited here; ' +
+      '<code>./local-run-tests.sh --vendor-check</code> reports drift when ' +
+      'both checkouts are present.';
   } else if (meta.protocolWhy) {
     html += ' Protocol jobs were not run: ' + escapeHtml(meta.protocolWhy) +
       '.';
   } else {
-    html += ' Protocol jobs were not asked for (<code>--protocol</code>).';
+    html += ' Protocol jobs were TURNED OFF for this run ' +
+      '(<code>--no-protocol</code>), so nothing here says anything about ' +
+      'this service\'s protocol surface or its admin console.';
   }
   html += '</div>';
 
@@ -766,6 +824,56 @@ const USAGE = (function () {
   return out.join('\n');
 })();
 
+// ---------------------------------------------------------------------------
+// IS THE SERVICE SOMEBODY ELSE STARTED ACTUALLY ANSWERING?
+//
+// The launcher already waited for its container to answer before it got here,
+// so this ordinarily returns on its first request — and it is not therefore
+// decoration. It answers a DIFFERENT question from the one the launcher asked,
+// and the difference has cost the parent project a whole run: the launcher
+// asked whether something answers on that port, and this asks whether it is
+// still answering NOW, from this process, with the environment these jobs will
+// actually use. A container that aborted between the two, a URL typed by hand
+// into --service-url, a stale STS_TEST_SERVICE_URL exported in a shell weeks
+// ago and forgotten — each of those reaches the jobs as thirteen failures
+// about tokens and metadata, and reaches this as one line naming the URL.
+//
+// A NON-200 IS AS GOOD AS AN ANSWER, deliberately. /healthcheck is what a
+// caller usually points at and it answers 200, but the URL handed in is the
+// service's ROOT and this asks for `/`, which any of the redirects and shells
+// this service serves may answer with. What is being distinguished here is a
+// socket that answers from one that does not.
+// ---------------------------------------------------------------------------
+async function waitForExternalService(url, log, timeoutMs) {
+  log.debug('Entering waitForExternalService().');
+  const deadline = Date.now() + (timeoutMs || 30000);
+  let lastError = 'it never answered';
+  while (Date.now() < deadline) {
+    try {
+      /* eslint-disable no-await-in-loop */
+      const res = await fetch(url + '/', { redirect: 'manual' });
+      /* eslint-enable no-await-in-loop */
+      if (res.status > 0) {
+        log.debug('Leaving waitForExternalService(). Answering.');
+        return true;
+      }
+    } catch (e) {
+      // The ordinary case for as long as it takes the socket to come up, and
+      // the loop is the whole handling. The message is kept for the ONE time
+      // it matters — the failure below, where a bare "did not answer" would
+      // hide an ECONNREFUSED behind a DNS failure behind a bad scheme.
+      lastError = e && e.message ? e.message : String(e);
+    }
+    /* eslint-disable no-await-in-loop */
+    await new Promise(function (r) { setTimeout(r, 500); });
+    /* eslint-enable no-await-in-loop */
+  }
+  log.debug('Leaving waitForExternalService(). It did not answer.');
+  throw new Error('the service at ' + url + ' did not answer (' + lastError +
+                  '). It was handed to this runner with --service-url, so ' +
+                  'nothing here started it and nothing here can restart it.');
+}
+
 async function main() {
   log.debug('Entering main().');
   const opts = parseArgs(process.argv.slice(2));
@@ -787,19 +895,22 @@ async function main() {
                   dir: TESTS_DIR });
     });
   }
-  let parent = { dir: '', usable: false, why: '' };
+  // THE PROTOCOL JOBS ARE VENDORED HERE SINCE 2026-08-28 and are no longer
+  // read out of a parent checkout, so there is no longer any way for them to
+  // be absent: the files are in this repository. What used to be a warning
+  // that thirteen jobs would be skipped is gone with the condition that
+  // produced it.
+  let missingDeps = [];
   if (wantProtocol) {
-    parent = findParent(opts.parent);
-    if (parent.usable) {
-      let theirs = parentJobs(parent.dir, opts);
-      if (opts.only.length) {
-        theirs = theirs.filter(function (j) {
-          return opts.only.some(function (p) { return j.file.indexOf(p) >= 0; });
-        });
-      }
-      jobs.push.apply(jobs, theirs);
-    } else {
-      log.warn('protocol jobs will be SKIPPED: ' + parent.why);
+    let theirs = vendoredJobs(opts);
+    if (opts.only.length) {
+      theirs = theirs.filter(function (j) {
+        return opts.only.some(function (p) { return j.file.indexOf(p) >= 0; });
+      });
+    }
+    jobs.push.apply(jobs, theirs);
+    if (theirs.length && !opts.list) {
+      missingDeps = checkTestDependencies();
     }
   }
   if (!jobs.length) {
@@ -837,13 +948,48 @@ async function main() {
     log.info('collecting V8 coverage into ' + path.join(coverageDir, 'raw'));
   }
 
-  // ---- the throwaway service, if there are protocol jobs ----------------
+  // ---- the service the protocol jobs drive ------------------------------
+  //
+  // Two shapes, and only the second is started here — see THE SERVICE UNDER
+  // THE PROTOCOL JOBS in the header. `external` is what the rest of this
+  // function reads to decide who stops it and what the report should say the
+  // jobs ran against, because "a container the launcher owns" and "a process
+  // this runner owns" are different sentences to a person reading a failure.
   let instance = null;
-  let protocolWhy = parent.usable ? '' : parent.why;
+  let protocolWhy = '';
   const haveProtocolJobs = jobs.some(function (j) {
     return j.suite === 'protocol';
   });
-  if (haveProtocolJobs) {
+  if (haveProtocolJobs && opts.serviceUrl) {
+    // COVERAGE CANNOT COME OUT OF A CONTAINER, and saying so here is the whole
+    // handling. V8 writes its data from INSIDE the process being measured, to
+    // a directory that process can write — so an instrumented run has to be
+    // one this runner started. `./run-coverage.sh` never passes --service-url
+    // for exactly this reason; somebody who set STS_TEST_SERVICE_URL in their
+    // shell and then asked for coverage would otherwise get a report whose
+    // protocol column was silently empty, which reads as "the protocols are
+    // untested" rather than as "this run could not look".
+    if (wantCoverage) {
+      log.warn('coverage was asked for AND a service was handed in with ' +
+               '--service-url. The protocol half of the coverage will be ' +
+               'EMPTY: V8 collects from inside the process it measures, and ' +
+               'this runner cannot reach into a container. Drop ' +
+               '--service-url (or use ./run-coverage.sh, which does not pass ' +
+               'it) for a coverage run.');
+    }
+    try {
+      await waitForExternalService(opts.serviceUrl, log,
+                                   Number(process.env.STS_TEST_SERVICE_WAIT_MS ||
+                                          30000));
+      instance = { url: opts.serviceUrl, external: true };
+      log.info('driving the mock STS at ' + opts.serviceUrl +
+               ' (started elsewhere; this runner will not stop it)');
+    } catch (e) {
+      log.error(e.message);
+      protocolWhy = e.message;
+      instance = null;
+    }
+  } else if (haveProtocolJobs) {
     try {
       instance = await service.start({
         log: log,
@@ -869,10 +1015,20 @@ async function main() {
     const logName = String(n).padStart(2, '0') + '-' + slug(job.name) + '.log';
     job.logFile = path.join(logsDir, logName);
     job.logName = logName;
+    // A JOB THAT COULD NOT BE RUN IS A FAILURE, NOT A SKIP, and this used to
+    // be the other way round. The throwaway service failing to start left
+    // thirteen jobs marked `skipped`, which the summary counts as passing —
+    // so a run in which NOTHING was checked exited zero and said so in small
+    // grey text. A skip is for something deliberately left out (--no-browser,
+    // --only); an intended job that did not run is a failure, because the
+    // thing it was going to check is unchecked either way and only one of
+    // those two words makes somebody look.
     if (job.suite === 'protocol' && !instance) {
+      const why = protocolWhy || 'no service to drive';
       results.push(Object.assign({}, job, {
-        status: 'skipped', ms: 0, code: null, assertions: [], failures: [],
-        why: protocolWhy || 'no service to drive'
+        status: 'failed', ms: 0, code: null, assertions: [],
+        failures: ['did not run: ' + why],
+        why: why
       }));
       continue;
     }
@@ -888,10 +1044,32 @@ async function main() {
       job.cwd = job.dir;
       job.cmd = [process.execPath, path.join(job.dir, job.file)];
       job.env = Object.assign({}, process.env, {
-        // Their tests read an appconfig file of their own for a log level,
-        // and `./env/local.js` resolves against their tests directory, which
-        // is the cwd above.
+        // These jobs read an appconfig file of their own for a log level, and
+        // `./env/local.js` resolves against the cwd above — which is
+        // tests/vendored/, where the vendored copy of that file sits.
         CONFIG_FILE: process.env.PARENT_CONFIG_FILE || './env/local.js',
+        // THE MOCK UNDER TEST IS THIS REPOSITORY, WHICH IS THE ONE THING
+        // VENDORING CHANGED FOR THESE JOBS.
+        //
+        // Five of them load the service's own modules in process rather than
+        // driving them over HTTP — vc_did.js and the two ldp_vc jobs read the
+        // DID and credential modules, sts_jws_verification.js the crypto one.
+        // `module_paths.js` finds those by looking for an `sts/` directory
+        // BESIDE the tests, because over there this repository is a submodule
+        // at that path. Vendored here, there is no such directory: the modules
+        // are at the repository root, one level up from tests/.
+        //
+        // `MOCK_STS_DIR` is that module's own documented override and takes
+        // precedence over the submodule search, so this needs no edit to a
+        // vendored file — which matters, because an edit here is overwritten
+        // by the next --vendor-sync and would come back as four jobs failing
+        // at load with a message about a gitlink.
+        //
+        // It warns that a run with this set "reflects a working copy rather
+        // than the commit the gitlink points at". That sentence is written for
+        // the parent's stack and reads oddly here, where a working copy is
+        // exactly what is under test — ignore it rather than editing it out.
+        MOCK_STS_DIR: REPO_ROOT,
         WSTRUST_STS_URL: instance.url,
         OID4VCI_ISSUER_URL: instance.url
       });
@@ -915,7 +1093,14 @@ async function main() {
   // The service goes down BEFORE the coverage is rendered, because under
   // coverage it writes its data as it exits and rendering before that would
   // report a protocol half that had not been written yet.
-  if (instance) {
+  //
+  // AN EXTERNAL ONE IS NOT STOPPED HERE. Whoever started it stops it — the
+  // launcher's own teardown, which also collects the container's log into
+  // this run's logs directory. A second owner is how a run ends by taking
+  // down a stack somebody had asked to keep (`--keep-stack`), and the
+  // coverage ordering this comment is about does not apply to it anyway,
+  // since nothing instrumented is inside it.
+  if (instance && !instance.external) {
     await service.stop(instance, log);
   }
 
@@ -947,9 +1132,20 @@ async function main() {
     node: process.version,
     wallMs: wallMs,
     tree: describeTree(REPO_ROOT),
-    parentDir: instance ? parent.dir : '',
-    parentTree: parent.usable ? describeTree(parent.dir) : { commit: '' },
+    // The protocol jobs are VENDORED COPIES in tests/vendored/ since
+    // 2026-08-28, so they are at this tree's commit like everything else and
+    // there is no second checkout to describe. `parentDir` and `parentTree`
+    // are kept as empty strings rather than removed, so that an older
+    // summary.json and this one have the same shape for anything reading both.
+    parentDir: '',
+    parentTree: { commit: '' },
+    vendored: instance ? path.relative(REPO_ROOT, VENDORED_DIR) : '',
     serviceUrl: instance ? instance.url : '',
+    // WHICH OF THE TWO SHAPES ran, so that a report read a week later says
+    // what the jobs were actually pointed at rather than leaving it to be
+    // inferred from a port number.
+    serviceKind: instance ? (instance.external ? 'container' : 'in-process')
+                          : '',
     protocolWhy: protocolWhy,
     coverage: coverageLink,
     commandLine: [path.basename(process.argv[0])].concat(
@@ -999,4 +1195,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parentJobs: parentJobs, assertionOf: assertionOf };
+module.exports = { vendoredJobs: vendoredJobs, assertionOf: assertionOf };

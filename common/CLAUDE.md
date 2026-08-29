@@ -700,11 +700,12 @@ with `CONFIG_FILE` pointing at the TEST suite's config.
 **`tests/Dockerfile` in the parent project copies this file.** It is under
 `helpers.js` in the graph, so every in-process job that loads `krb5_kdc.js`,
 `app.js` or `spnego.js` needs it; missing, the failure is `Cannot find module
-'./config'` before any test has run. **IT NOW NEEDS `env/defaults.js` TOO**, and
-that is a new line in a file the pin bump has to touch anyway (see
-`docs/parent-project-migration.md`): this module requires it by absolute path off
-the package root, so without it every in-process job dies at load with `Cannot
-find module` naming a file the operator never mentioned.
+'./config'` before any test has run. **IT NEEDS `env/` AS A WHOLE DIRECTORY
+TOO**, and that line is in place over there since the 2026-08-28 repair (see
+`docs/parent-project-migration.md`): this module requires `env/defaults.js` by
+absolute path off the package root whatever `CONFIG_FILE` says, so narrowing the
+copy to the one file a job names puts every in-process job back to dying at load
+with `Cannot find module` naming a file the operator never mentioned.
 
 
 ---

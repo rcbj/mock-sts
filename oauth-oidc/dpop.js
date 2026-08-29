@@ -88,21 +88,32 @@ const PROOF_TYP = 'dpop+jwt';
 // list is deliberately explicit rather than "whatever the JWT library accepts":
 // an allow-list is the only thing that stops an `alg` the client chose from
 // selecting a verification path the server did not intend.
-const ALGS = {
-  ES256: { hash: 'sha256', kty: 'EC', crv: 'P-256', dsaEncoding: 'ieee-p1363' },
-  ES384: { hash: 'sha384', kty: 'EC', crv: 'P-384', dsaEncoding: 'ieee-p1363' },
-  ES512: { hash: 'sha512', kty: 'EC', crv: 'P-521', dsaEncoding: 'ieee-p1363' },
-  RS256: { hash: 'sha256', kty: 'RSA' },
-  RS384: { hash: 'sha384', kty: 'RSA' },
-  RS512: { hash: 'sha512', kty: 'RSA' },
-  PS256: { hash: 'sha256', kty: 'RSA', padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-           saltLength: 32 },
-  PS384: { hash: 'sha384', kty: 'RSA', padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-           saltLength: 48 },
-  PS512: { hash: 'sha512', kty: 'RSA', padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-           saltLength: 64 }
-};
-const SIGNING_ALGS = Object.keys(ALGS);
+// THE ALGORITHMS COME FROM `common/crypto.js` AND ARE NOT LISTED AGAIN HERE.
+//
+// This file used to carry its own nine-row table — the node hash name, key
+// type, curve, PSS salt length and `dsaEncoding` for each — beside its own
+// `crypto.verify()` call. It was a second implementation of "verify a compact
+// JWS with a key somebody handed us", and the cost was not the duplicated
+// lines: it was that DPoP silently accepted a DIFFERENT SET of algorithms from
+// everything else in this service, so a client whose key was Ed25519 or
+// secp256k1 could register it, sign an ID Token request with it, and then find
+// its DPoP proof refused with no explanation that named the real reason.
+//
+// RFC 9449 section 4.2 requires an ASYMMETRIC algorithm — never a MAC, whose
+// key both parties would have to know, and never `none` — which is exactly
+// what `JWS_ASYMMETRIC_ALGS` is.
+//
+// NOT THE POST-QUANTUM ONES, and this exclusion is a SPECIFICATION limit
+// rather than anything this service cannot do. DPoP binds a token to a key
+// through `cnf.jkt`, which is the RFC 7638 JWK Thumbprint — and RFC 7638
+// defines the required members for `RSA`, `EC`, `OKP` and `oct` and for
+// nothing else. An ML-DSA or SLH-DSA key is `kty: "AKP"` (RFC 9964), for which
+// no thumbprint is registered, so a proof signed with one would verify
+// perfectly and bind to nothing. The debugger's own dpop.js excludes them for
+// the same reason and says so in the same words.
+const SIGNING_ALGS = stsCrypto.JWS_ASYMMETRIC_ALGS.filter(function (alg) {
+  return stsCrypto.JWS_ALGS[alg].family !== 'pq';
+});
 
 // RFC 9449 section 11.1: the acceptable window for a proof's `iat`. Short,
 // because the window is how long a captured proof stays useful for the same
@@ -324,8 +335,11 @@ function verifyProof(rawHeader, opts) {
                 'signed with the same key would be accepted as a proof.');
   }
 
-  // Check 5: a supported asymmetric algorithm, not none and not a MAC.
-  const spec = ALGS[header.alg];
+  // Check 5: a supported asymmetric algorithm, not none and not a MAC. The
+  // table is common/crypto.js's, so this list and what the verifier below will
+  // actually accept cannot drift apart.
+  const spec = SIGNING_ALGS.indexOf(header.alg) === -1 ? null
+    : stsCrypto.JWS_ALGS[header.alg];
   if (!spec) {
     return fail('The DPoP proof is signed with ' + JSON.stringify(header.alg) +
                 ', which this server does not accept. RFC 9449 requires a registered ' +
@@ -361,34 +375,22 @@ function verifyProof(rawHeader, opts) {
   }
 
   // Check 6: the signature verifies with the key in the header.
-  let publicKey;
+  //
+  // Delegated to the one verifier in common/crypto.js. The algorithm list is
+  // passed EXPLICITLY — RFC 8725 section 3.1, and doubly so here, because the
+  // key being verified against is the one the token itself supplied: a
+  // verifier that also took the algorithm from the token would be letting the
+  // proof choose both halves.
   try {
-    publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    stsCrypto.verifyCompactJws(raw, jwk, { algorithms: SIGNING_ALGS });
   } catch (e) {
-    return fail('The DPoP proof header key could not be read: ' + e.message);
-  }
-  const signingInput = Buffer.from(parts[0] + '.' + parts[1], 'ascii');
-  let signature;
-  try {
-    signature = Buffer.from(parts[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-  } catch (e) {
-    return fail('The DPoP proof signature is not base64url.');
-  }
-  const verifyKey = { key: publicKey };
-  if (spec.dsaEncoding) verifyKey.dsaEncoding = spec.dsaEncoding;
-  if (spec.padding) verifyKey.padding = spec.padding;
-  if (spec.saltLength !== undefined) verifyKey.saltLength = spec.saltLength;
-  let signatureOk = false;
-  try {
-    signatureOk = crypto.verify(spec.hash, signingInput, verifyKey, signature);
-  } catch (e) {
-    // A malformed signature makes node throw rather than return false. Same
-    // outcome for the client, but say so rather than letting it become a 500.
-    log.debug('the DPoP proof signature could not be checked: ' + e.message);
-    signatureOk = false;
-  }
-  if (!signatureOk) {
-    return fail('The DPoP proof signature does not verify with the key in its own header.');
+    // Everything it throws is a sentence about this proof — a malformed
+    // signature, a wrong length, a key that will not load, or a signature that
+    // simply does not verify. A malformed one makes node throw rather than
+    // return false, and this is what keeps that from becoming a 500.
+    log.debug('the DPoP proof did not verify: ' + e.message);
+    return fail('The DPoP proof signature does not verify with the key in ' +
+                'its own header: ' + e.message);
   }
 
   // Check 8: htm matches this request's method.

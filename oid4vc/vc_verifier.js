@@ -194,8 +194,14 @@ function buildVpRequest(req, opts) {
       // what the Verifier CAN accept, not what it wants this time — the DCQL
       // query is what says that.
       vp_formats_supported: {
-        'dc+sd-jwt': { 'sd-jwt_alg_values': ['RS256', 'ES256'], 'kb-jwt_alg_values': ['ES256'] },
-        'jwt_vc_json': { alg_values: ['RS256', 'ES256'] },
+        // From the shared table, not written out: the KB-JWT is checked by
+        // stsCrypto.verifyCompactJws() against JWS_ASYMMETRIC_ALGS, and a
+        // narrower list here would tell a wallet its perfectly acceptable
+        // algorithm was unwelcome. The `sd-jwt_alg_values` are what the
+        // ISSUER may have signed the credential with, which is the same set.
+        'dc+sd-jwt': { 'sd-jwt_alg_values': stsCrypto.JWS_ASYMMETRIC_ALGS,
+                       'kb-jwt_alg_values': stsCrypto.JWS_ASYMMETRIC_ALGS },
+        'jwt_vc_json': { alg_values: stsCrypto.JWS_ASYMMETRIC_ALGS },
         'ldp_vc': { cryptosuites: ['bbs-2023'] }
       }
     }
@@ -659,14 +665,17 @@ function verifyVpJwt(presentation, record) {
   } else {
     let holderOk = false;
     try {
-      const holderKey = crypto.createPublicKey({ key: cnfJwk, format: 'jwk' });
-      holderOk = crypto.verify(
-        vpHeader.alg === 'RS256' ? 'sha256' : null,
-        Buffer.from(vpParts[0] + '.' + vpParts[1]),
-        vpHeader.alg === 'RS256'
-          ? holderKey
-          : { key: holderKey, dsaEncoding: 'ieee-p1363' },
-        Buffer.from(vpParts[2], 'base64url'));
+      // The one verifier in common/crypto.js. What was here chose the digest
+      // by testing `alg === 'RS256'` and passed a NULL hash for everything
+      // else — right for Ed25519 by accident and wrong for every ECDSA
+      // algorithm, which is most of what a wallet signs with.
+      //
+      // Asymmetric only: the credential names the holder's key in `cnf.jwk`
+      // and the presentation has to be signed by the matching private one. A
+      // MAC there would mean the verifier held the holder's secret.
+      stsCrypto.verifyCompactJws(raw, cnfJwk,
+        { algorithms: stsCrypto.JWS_ASYMMETRIC_ALGS });
+      holderOk = true;
     } catch (e) {
       vpCheck(checks, 'Holder binding', false, 'the presentation signature could not be checked: ' + e.message);
     }

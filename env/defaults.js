@@ -64,6 +64,7 @@ var config = {
     breakIdTokenNonce: false,    // Break the ID Token nonce
     refreshIdleSeconds: 86400,   // Refresh token idle timeout (s)
     revokeRefreshOnLogout: true, // Revoke refresh tokens on sign-out
+    eddsaCurve: "Ed25519",       // EdDSA curve
     clientAssertionSkewS: 60,    // Client assertion clock skew (s)
     accessTokenTtlS: 3600,       // Access token lifetime (s)
     idTokenTtlS: 3600,           // ID Token lifetime (s)

@@ -175,6 +175,20 @@ function keysFrom(jwksText) {
   for (let i = 0; i < jwks.length; i++) {
     const jwk = jwks[i];
     try {
+      if (jwk.kty === 'AKP') {
+        // RFC 9964's post-quantum key type. node's createPublicKey() has no
+        // idea what one is — and must not be asked, or the key is dropped as
+        // unreadable and the client is told none of its keys could be read,
+        // which names nothing a person could act on. The JWK travels WHOLE to
+        // stsCrypto.verifyCompactJws(), which routes an AKP to pq_jose.js.
+        //
+        // Without this branch the eleven post-quantum algorithms this service
+        // advertises for client authentication were advertised and
+        // unverifiable — found by tests/sts_jws_verification.js on its first
+        // run, which is what that file is for.
+        keys.push({ kid: jwk.kid ? String(jwk.kid) : '', key: jwk });
+        continue;
+      }
       keys.push({ kid: jwk.kid ? String(jwk.kid) : '',
                   key: crypto.createPublicKey({ key: jwk, format: 'jwk' }) });
     } catch (e) {

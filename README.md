@@ -62,10 +62,13 @@ that is where the engineering notes below have been distributed to. `CLAUDE.md` 
 the root keeps only what is cross-cutting: the require order, the library and hook
 rules, the two CSP rules, the code style and the state of the tests.
 
-**One consequence for the parent project**, which reaches in here by flat path in
-its `tests/Dockerfile` and `tests/module_paths.js`: those paths are now wrong.
-Nothing over there was changed, because its `sts/` gitlink is pinned before any of
-this; what the pin bump needs is written down in
+**One consequence for the parent project**, which reaches in here by path in its
+`tests/Dockerfile` and `tests/module_paths.js`: those paths were broken by the
+move and were repaired over there on 2026-08-28, with the `sts/` gitlink bumped
+past the reorganisation. What remains is a standing obligation rather than a
+migration — that Dockerfile copies the transitive closure of what the in-process
+Kerberos jobs require, so a new `require()` here can oblige it to add a line. It
+is written down in
 [`docs/parent-project-migration.md`](docs/parent-project-migration.md).
 
 ## What it speaks
@@ -552,6 +555,7 @@ are refused at both ends.
 | `oauth2.refreshIdleSeconds` | `STS_OAUTH2_REFRESH_IDLE_SECONDS` | `86400` | yes | In RFC 9700 mode, how long a refresh CHAIN may go unused before it stops working — section 2.2.2 says a refresh token SHOULD expire after a period of client inactivity, and says the period is deployment-dependent, which is why this is a setting rather than a constant. |
 | `oauth2.revokeRefreshOnLogout` | `STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT` | `true` | yes | In RFC 9700 mode, end a browser sign-on session and every refresh token issued ON that session is revoked — the section MAY that names logout and a password change as the examples. |
 | `oauth2.frontchannelLogout` | `STS_OAUTH2_FRONTCHANNEL_LOGOUT` | `true` | yes | OpenID Connect Front-Channel Logout 1.0: the two discovery members, the `sid` claim on an ID Token issued on a browser sign-on session, and a hidden iframe per registered `frontchannel_logout_uri` on every sign-out — with `iss` and `sid` where the client registered `frontchannel_logout_session_required`. Off, none of the three happens and the tokens are byte-for-byte what this service issued before the feature existed. |
+| `oauth2.eddsaCurve` | `STS_OAUTH2_EDDSA_CURVE` | `Ed25519` | yes | Which Edwards curve an `EdDSA` signature is made on (`Ed25519` or `Ed448`). RFC 8037 registers ONE algorithm value for both curves and puts the curve in the key itself, so a client registering `id_token_signed_response_alg="EdDSA"` has no way to say which it wants — this is that way. BOTH keys are published in the JWKS whatever this is set to, with different kids, so a verifier follows the kid and needs to know nothing about this setting. |
 | `oauth2.clientAssertionSkewS` | `STS_OAUTH2_CLIENT_ASSERTION_SKEW_S` | `60` | yes | How far out a client assertion's exp, nbf and iat may be and still be accepted (RFC 7523 section 3, private_key_jwt and client_secret_jwt). Sixty seconds is the usual allowance for two machines that are not synchronised. |
 | `oauth2.accessTokenTtlS` | `STS_OAUTH2_ACCESS_TOKEN_TTL_S` | `3600` | yes | How long an access token is good for: its `exp` is this many seconds after it was signed, and it is the `expires_in` of every token response that carries one. One hour by default. |
 | `oauth2.idTokenTtlS` | `STS_OAUTH2_ID_TOKEN_TTL_S` | `3600` | yes | How long an ID Token is good for. |
@@ -1068,7 +1072,7 @@ Three things it holds that are worth knowing as a *user* of this service rather 
 as a maintainer:
 
 * **The XML signer is the debugger's own**, vendored byte-identical from
-  `../oauth2-oidc-debugger/common/xmldsig.js`. Both ends of a SAML or WS-Federation
+  `../id-proto-debugger/common/xmldsig.js`. Both ends of a SAML or WS-Federation
   exchange with this service now canonicalize with the same code — which matters
   because a disagreement about canonicalization is invisible until it is a signature
   that verifies on one side and not the other.
@@ -2381,6 +2385,81 @@ profile to return. Missing scopes are the usual reason a working exchange looks 
 access token from an OIDC flow and get back the claims about the person it was issued
 for. Two things about it are deliberate and are the opposite of how the rest of this
 service behaves.
+
+**The response can be SIGNED, ENCRYPTED, or both**, and what a client gets is decided
+entirely by what it registered at `/oauth2/register` — so the RFC 7591 support and
+section 5.3.2 meet where they should. `userinfo_signed_response_alg` produces a JWS
+(any of RS256/384/512 and PS256/384/512 against the RSA key, ES256/384/512, **ES256K**
+and EdDSA against the P-256, P-384, P-521, secp256k1 and Ed25519 keys generated beside
+it, or HS256/384/512 against that client's own `client_secret`, which is why the
+symmetric ones need no published key — **fourteen** algorithms, which is every signing
+algorithm the JWS registry defines, each with something in the JWKS to verify it except
+the symmetric three, which need nothing); `userinfo_encrypted_response_alg` produces a JWE (RSA-OAEP, RSA-OAEP-256,
+ECDH-ES and its three key-wrapping variants, over any of the six RFC 7518 content
+encryption algorithms — the three AES-GCM and the three AES-CBC-HMAC); registering
+both produces a **Nested JWT**, signed and THEN encrypted, with `cty: "JWT"` on the
+outer header. All three lists are advertised in the metadata as
+`userinfo_signing_alg_values_supported`, `userinfo_encryption_alg_values_supported`
+and `userinfo_encryption_enc_values_supported`.
+
+Four details are worth knowing. **`enc` defaults to A128CBC-HS256** when a client
+registers an encryption `alg` and no `enc`, because section 2 of the registration
+specification says so — which is why this service implements the CBC-HMAC family at
+all, since that default is the commonest encrypted response there is. **The recipient
+key is read from an INLINE `jwks` member only**, not from a `jwks_uri`: fetching a URL
+a client chose, at the moment this service answers that client's request, is a
+capability a mock should not have. **Every signing algorithm has a KEY, AND AN IMPLEMENTATION**: this service generates an
+RSA key, P-256, P-384, P-521, secp256k1 and Ed25519 at startup and publishes all six in
+`/oauth2/jwks` (the RSA one first, because tokens signed by default are RS256 and more
+than one test reads `keys[0]`). ES\*, ES256K and EdDSA were all absent until 2026-08-28, for two
+reasons that were each the wrong kind: no EC key was being generated, and
+`jsonwebtoken` — the library that signs everything else here — has neither EdDSA nor
+ES256K. Both are now signed directly on node's OpenSSL in `stsCrypto.signJws()`, which
+for ES256K means converting the DER SEQUENCE OpenSSL returns into the **R||S**
+concatenation RFC 7518 section 3.4 requires; hand a verifier the DER and it reports a
+bad signature over a perfectly good one. A library's gaps are not this service's. **Twenty-five signing algorithms, and eleven of them are post-quantum.** Beside the
+RSA, EC and Edwards keys sit ML-DSA at three parameter sets (FIPS 204, RFC 9964),
+SLH-DSA at two (FIPS 205), and the six **composite** ML-DSA + traditional algorithms of
+draft-ietf-jose-pq-composite-sigs — published as `kty: "AKP"` JWKs in the same JWKS.
+Three things about them are worth knowing.
+
+**They are written out in `common/pq_jose.js` rather than vendored from the debugger,
+and that is the whole point of them.** This service exists to be the far end of the
+debugger's JOSE code, and the value of that is INDEPENDENCE: a misunderstanding both
+sides share is one neither can see. So the primitive is `@noble/post-quantum` — there is
+no second implementation of ML-DSA to be had — while everything around it is written
+here from the specifications, and the traditional half of every composite runs on
+**node's OpenSSL** rather than on the curve library the debugger uses. The framing is
+what has been wrong every time.
+
+**They are generated LAZILY.** All eleven cost about 1.9 seconds, nearly all of it one
+SLH-DSA-SHAKE keygen — twelve times the RSA key this service already makes, per realm.
+So the first thing that needs one pays for it and everything else pays nothing; in
+practice that is the first JWKS fetch on a realm, which is slow once and free after.
+
+**Ed448 needed a setting.** RFC 8037 registers one `alg` for both Edwards curves and
+puts the curve in the key, so a client registering `EdDSA` has no way to ask for Ed448.
+`oauth2.eddsaCurve` is that way. Both keys are published whatever it says, with
+different kids, so a verifier follows the kid and never reads the setting — a JWKS that
+changed shape with a setting would strand every client holding a cached copy.
+
+**These algorithms are not the UserInfo endpoint's.** The keys and the table behind
+them are `common/crypto.js`'s, and every JOSE surface in this service reads them: ID
+Tokens honour a registered `id_token_signed_response_alg` across the same fourteen, and
+DPoP proofs, OID4VCI proofs of possession, Key Binding JWTs and client assertions accept
+the eleven asymmetric ones. Each of those kept its own list before — and `dpop.js` its
+own nine-row table and `crypto.verify()` call, while the OID4VCI proof check hardcoded
+SHA-256, so ES384 and ES512 would have been checked against the WRONG DIGEST and
+reported as bad signatures. There is now one table, one signer, one signature verifier,
+one claim-checking verifier and one key-selection function, and every advertised
+metadata list is DERIVED from them rather than written out — which is how
+`proof_signing_alg_values_supported` came to advertise eleven while the code accepted
+two. **A signed
+response gains `iss` and `aud`**, which is the entire reason to want one — without them a signed profile issued for one client
+is one any other client would also believe. And **an algorithm this service cannot
+perform is REFUSED rather than downgraded to JSON**: a client that registered
+protection and got an unprotected 200 has no way to notice, and would go on believing
+it had verified something.
 
 **It verifies the token.** The Credential, Deferred Credential and Notification
 endpoints accept a token they cannot verify, because OID4VCI lets the authorization
@@ -5509,12 +5588,16 @@ Two consequences worth knowing before changing this:
 ```bash
 npm test                          # the in-process suite: one process, under
                                   # two seconds, no port and no container
-./local-run-tests.sh              # the same suite, with a report written
+./local-run-tests.sh              # ALL 23 jobs, with a report written: that
+                                  # suite AND the protocol jobs, the latter
+                                  # against a CONTAINER built from this tree
 ./local-run-tests.sh --only=crypto --open
-./local-run-tests.sh --protocol   # AND the protocol jobs from the parent
-                                  # project, against a throwaway copy of this
-                                  # working tree
-./run-coverage.sh --protocol      # the same run, with coverage collected
+./local-run-tests.sh --no-protocol  # the in-process suite alone, 3 seconds
+./local-run-tests.sh --no-docker    # the protocol jobs against a service run
+                                    # on this machine instead of a container
+./local-run-tests.sh --keep-stack   # leave the container up afterwards, to
+                                    # read /admin or re-run one job by hand
+./run-coverage.sh                 # the same run, with coverage collected
 ```
 
 `npm test` is what `tests/` is for and is unchanged by everything below it: it
@@ -5532,20 +5615,42 @@ rather than a run with no report at all. The per-assertion detail in the report
 is read out of what the tests already print, so a test written before any of
 this existed is reported in full by it.
 
-**`--protocol` is the one to know about.** The tests that drive this service
-over HTTP live in the parent project, and that suite drives the `sts/` gitlink
-over there — which is pinned, so a change made in this working tree is not
-covered by it until somebody bumps the pin. `--protocol` starts a throwaway copy
-of THIS tree (nine ports of its own, both SPIFFE Unix sockets off, stopped by
-the pid it started) and runs the jobs a lone mock can satisfy against it: the
-metadata drift checks, the management API and every one of its operations, the
-whole admin console, DPoP, the authorization server's endpoints, the DID-named
-issuer, SAML encryption, and the Linked-Data credential jobs. About fifteen
-seconds, no docker. Which jobs run is derived from the parent's own runner
-rather than listed here, so a test added over there arrives with nothing edited.
-A job of theirs can also be AHEAD of this tree and then fails here naming a
-feature this tree has not got — which is a fact about two checkouts, and the
-report says which side every job came from.
+**THE PROTOCOL JOBS ARE THE HALF TO KNOW ABOUT, AND THEY RUN BY DEFAULT.**
+The tests that drive this service over HTTP are authored in the parent project,
+and that suite drives the `sts/` gitlink over there — which is pinned, so a
+change made in this working tree is not covered by it until somebody bumps the
+pin. The thirteen of those jobs that a lone mock can satisfy are VENDORED into
+`tests/vendored/` as byte-identical copies, and every `./local-run-tests.sh`
+runs them: the metadata drift checks, the management API and every one of its
+operations, the whole admin console in a real browser, DPoP, the authorization
+server's endpoints, the DID-named issuer, SAML 1.1, SAML encryption, the
+UserInfo endpoint and the Linked-Data credential jobs. About a minute, most of
+it the browser job. `--no-protocol` is the way back to the in-process suite
+alone, and it says in the report that nothing was checked about any protocol
+surface.
+
+**What they drive is a CONTAINER, built from this working tree by this
+repository's own `docker-compose.yml`.** The launcher builds the image, brings
+up one container — its own compose project, its own container name, a free host
+port, `persistence.mode=memory`, no database — hands the runner its URL, and
+takes it down again; the tests themselves are ordinary node scripts on this
+machine. What that buys is that the thing under test is the IMAGE: the same
+`npm install --omit=dev` against the committed lock, the same node, the same
+`COPY . ./` with `.dockerignore` deciding what is in it — so a module missing
+from the build context or a submodule that was never initialised fails HERE
+rather than in somebody's deployment. `--no-docker` runs the service on this
+machine instead (nine ports of its own, both SPIFFE Unix sockets off, stopped
+by the pid it started), which is what a machine with no docker falls back to
+and what `./run-coverage.sh` uses of necessity — V8 writes its coverage from
+inside the process being measured, and nothing here can reach into a container
+to collect it.
+
+A vendored job can be AHEAD of this tree — those jobs are developed against the
+parent's own checkout of this service — and it then fails here naming a feature
+this tree has not got. That is a fact about when the copy was taken rather than
+a fault in the runner; `./local-run-tests.sh --vendor-check` reports the drift
+when both checkouts are present, and `--vendor-sync` is the only sanctioned way
+those copies change.
 
 **`./run-coverage.sh` collects coverage with nothing installed.** It uses node's
 own `NODE_V8_COVERAGE` and renders the result with `tests/tools/coverage-report.js`

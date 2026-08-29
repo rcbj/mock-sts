@@ -80,6 +80,7 @@ const forge = require('node-forge');
 const jwt = require('jsonwebtoken');
 const bunyan = require('bunyan');
 const config = require('./config');
+const pqJose = require('./pq_jose');
 const xmldom = require('@xmldom/xmldom');
 
 const log = bunyan.createLogger({
@@ -899,15 +900,170 @@ function decryptElement(xml, privateKeyPem, opts) {
 const SIGN_OPTIONS = ['keyid', 'header', 'expiresIn', 'notBefore', 'noTimestamp',
                       'issuer', 'audience', 'subject', 'jwtid'];
 
+// ---------------------------------------------------------------------------
+// THE ONE JWS ALGORITHM TABLE FOR THIS SERVICE.
+//
+// Every algorithm this service signs with or verifies is a row here, and every
+// module that touches a JWS reads this rather than keeping a table of its own.
+// `oauth-oidc/dpop.js` had the second one — nine rows, node-crypto parameters,
+// its own verifier — which is how DPoP came to accept a different set of
+// algorithms from everything else in the service for no reason anybody chose.
+//
+// TWO ROWS EXIST BECAUSE A LIBRARY CANNOT DO THEM. `jsonwebtoken`'s `algorithm`
+// is a string enum with no EdDSA and no ES256K, so those two are signed and
+// verified directly on node's OpenSSL below. That is a limit of the library and
+// never of this service: a client may legitimately register either.
+//
+// THE ECDSA SIGNATURE FORMAT IS NODE'S JOB AND NOT OURS. RFC 7518 section 3.4
+// wants the R||S concatenation, while a general-purpose API returns the DER
+// SEQUENCE of two INTEGERs — and `dsaEncoding: 'ieee-p1363'` is node asking
+// OpenSSL for the former. This file briefly carried a hand-written DER
+// converter for ES256K; it worked, and it was a second implementation of
+// something the runtime already does, so it is gone. Anything that needs the
+// raw form passes that option.
+// ---------------------------------------------------------------------------
+const JWS_ALGS = {
+  HS256: { family: 'hmac', hash: 'sha256' },
+  HS384: { family: 'hmac', hash: 'sha384' },
+  HS512: { family: 'hmac', hash: 'sha512' },
+  RS256: { family: 'rsa', hash: 'sha256', kty: 'RSA' },
+  RS384: { family: 'rsa', hash: 'sha384', kty: 'RSA' },
+  RS512: { family: 'rsa', hash: 'sha512', kty: 'RSA' },
+  PS256: { family: 'rsa', hash: 'sha256', kty: 'RSA',
+           padding: nodeCrypto.constants.RSA_PKCS1_PSS_PADDING,
+           saltLength: 32 },
+  PS384: { family: 'rsa', hash: 'sha384', kty: 'RSA',
+           padding: nodeCrypto.constants.RSA_PKCS1_PSS_PADDING,
+           saltLength: 48 },
+  PS512: { family: 'rsa', hash: 'sha512', kty: 'RSA',
+           padding: nodeCrypto.constants.RSA_PKCS1_PSS_PADDING,
+           saltLength: 64 },
+  ES256: { family: 'ec', hash: 'sha256', kty: 'EC', crv: 'P-256',
+           namedCurve: 'prime256v1', sigBytes: 64 },
+  ES384: { family: 'ec', hash: 'sha384', kty: 'EC', crv: 'P-384',
+           namedCurve: 'secp384r1', sigBytes: 96 },
+  ES512: { family: 'ec', hash: 'sha512', kty: 'EC', crv: 'P-521',
+           namedCurve: 'secp521r1', sigBytes: 132 },
+  // RFC 8812. `jsonwebtoken` has no ES256K, so this one is signed here.
+  ES256K: { family: 'ec', hash: 'sha256', kty: 'EC', crv: 'secp256k1',
+            namedCurve: 'secp256k1', sigBytes: 64, ownSigner: true },
+  // RFC 8037. `jsonwebtoken` has no EdDSA either. Ed25519 hashes internally,
+  // so there is no digest to name — which is what `crypto.sign(null, ...)`
+  // means.
+  EdDSA: { family: 'okp', hash: null, kty: 'OKP', crv: 'Ed25519',
+           sigBytes: 64, ownSigner: true }
+};
+
+// The post-quantum and composite algorithms join the same table rather than
+// living in one of their own — `common/pq_jose.js` performs them, and this is
+// what makes them ordinary here: `signJws()` routes to it, `verifyCompactJws()`
+// routes to it, and every metadata list that reads JWS_SIGNING_ALGS gained
+// eleven entries without being touched.
+//
+// `kty: 'AKP'` is RFC 9964's key type for all of them, which is also why they
+// are absent from DPoP: RFC 7638 defines a JWK Thumbprint for RSA, EC, OKP and
+// oct and not for AKP, so a DPoP proof signed with one could not be bound to
+// anything. See oauth-oidc/dpop.js.
+pqJose.PQ_ALGS.forEach(function (alg) {
+  JWS_ALGS[alg] = { family: 'pq', hash: null, kty: 'AKP', alg: alg,
+                    ownSigner: true };
+});
+
+// Every signing algorithm, and the asymmetric ones — the split matters because
+// several specifications say "an asymmetric algorithm, never a MAC and never
+// none": DPoP proofs (RFC 9449 section 4.2), OID4VCI proofs of possession, and
+// request objects are all in that class.
+const JWS_SIGNING_ALGS = Object.keys(JWS_ALGS);
+const JWS_ASYMMETRIC_ALGS = JWS_SIGNING_ALGS.filter(function (alg) {
+  return JWS_ALGS[alg].family !== 'hmac';
+});
+
+function jwsSpec(alg) {
+  log.debug('Entering jwsSpec(). alg=' + alg);
+  const spec = JWS_ALGS[alg];
+  if (!spec) {
+    log.debug('Leaving jwsSpec(). Unknown.');
+    throw new Error('unsupported JWS algorithm "' + alg + '"; this service ' +
+      'implements ' + JWS_SIGNING_ALGS.join(', ') + '.');
+  }
+  log.debug('Leaving jwsSpec().');
+  return spec;
+}
+
+// The node parameters for one verification or signature. One place, so the PSS
+// salt length and the ECDSA encoding cannot disagree between two call sites.
+function nodeParamsFor(spec, key) {
+  log.debug('Entering nodeParamsFor().');
+  const params = { key: key };
+  if (spec.padding !== undefined) {
+    params.padding = spec.padding;
+    params.saltLength = spec.saltLength;
+  }
+  if (spec.family === 'ec') {
+    // RFC 7518 section 3.4 wants R||S; this is node asking OpenSSL for it
+    // rather than for the DER SEQUENCE it returns by default.
+    params.dsaEncoding = 'ieee-p1363';
+  }
+  log.debug('Leaving nodeParamsFor().');
+  return params;
+}
+
 function signJws(payload, key, opts) {
   const options = opts || {};
   log.debug('Entering signJws(). alg=' + (options.algorithm || 'RS256') +
             ', typ=' + (payload && payload.typ ? payload.typ : '(none)'));
+  // b64u() is defined further down this file with the JWE helpers; it is used
+  // here too rather than written twice.
   if (!key) {
     log.debug('Leaving signJws(). No key.');
     throw new Error('signJws: a signing key is required.');
   }
-  const signOptions = { algorithm: options.algorithm || 'RS256' };
+  const algorithm = options.algorithm || 'RS256';
+  const spec = jwsSpec(algorithm);
+  if (spec.family === 'pq') {
+    // The same JWS framing as the branch below — header, signing input,
+    // base64url — with pq_jose.js supplying the signature. Written out here
+    // rather than shared with the debugger's copy ON PURPOSE: see the header
+    // of common/pq_jose.js.
+    const pqHeader = { alg: algorithm, typ: 'JWT' };
+    if (options.keyid) {
+      pqHeader.kid = options.keyid;
+    }
+    const pqBody = Object.assign({}, payload);
+    if (pqBody.iat === undefined) {
+      pqBody.iat = Math.floor(Date.now() / 1000);
+    }
+    const pqInput = b64u(Buffer.from(JSON.stringify(pqHeader), 'utf8')) + '.' +
+                    b64u(Buffer.from(JSON.stringify(pqBody), 'utf8'));
+    const pqSig = pqJose.sign(algorithm, key, Buffer.from(pqInput, 'ascii'));
+    const pqOut = pqInput + '.' + b64u(pqSig);
+    log.debug('Leaving signJws(). ' + algorithm + ', ' + pqOut.length +
+              ' characters.');
+    return pqOut;
+  }
+  if (spec.ownSigner) {
+    // EdDSA and ES256K — the two `jsonwebtoken` refuses. Assembled here, on
+    // node's OpenSSL, with the same claim conveniences the library gives the
+    // others so that a token does not gain or lose `iat` depending on which
+    // algorithm signed it.
+    const header = { alg: algorithm, typ: 'JWT' };
+    if (options.keyid) {
+      header.kid = options.keyid;
+    }
+    const body = Object.assign({}, payload);
+    if (body.iat === undefined) {
+      body.iat = Math.floor(Date.now() / 1000);
+    }
+    const input = b64u(Buffer.from(JSON.stringify(header), 'utf8')) + '.' +
+                  b64u(Buffer.from(JSON.stringify(body), 'utf8'));
+    const signature = nodeCrypto.sign(spec.hash, Buffer.from(input, 'ascii'),
+        nodeParamsFor(spec, key));
+    const out = input + '.' + b64u(signature);
+    log.debug('Leaving signJws(). ' + algorithm + ', ' + out.length +
+              ' characters.');
+    return out;
+  }
+  const signOptions = { algorithm: algorithm };
   for (let i = 0; i < SIGN_OPTIONS.length; i++) {
     const name = SIGN_OPTIONS[i];
     if (options[name] !== undefined) {
@@ -956,9 +1112,179 @@ function tokenClockSkew() {
 // `TokenExpiredError` from `JsonWebTokenError`, which is a distinction an
 // answer-shaped return would have flattened.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// VERIFY A COMPACT JWS SOMEBODY ELSE SIGNED — the one implementation.
+//
+// This is for a JWS this service did NOT produce: a DPoP proof, an OID4VCI
+// proof of possession, a Key Binding JWT, a client assertion, a request object.
+// Its counterpart `verifyJws()` below is for the service's OWN tokens and does
+// the claim checking (`exp`, `nbf`, `aud`, clock skew) that `jsonwebtoken`
+// gives; this one checks a SIGNATURE and leaves the claims to the caller,
+// because each of those five profiles checks different claims for different
+// reasons and a shared "verify everything" would be right for none of them.
+//
+// THE CALLER NAMES THE ACCEPTABLE ALGORITHMS AND THE TOKEN DOES NOT — RFC 8725
+// section 3.1. Reading `alg` out of the header and doing as it says is the
+// algorithm-confusion defect, and it is the reason `algorithms` has no default
+// here: a verifier that let the token choose would accept `none`, or an HS256
+// signature made with the RSA public key everybody has.
+//
+// `key` may be a node KeyObject, a JWK, or a PEM. All three occur — a JWK from
+// a proof's own header, a PEM from a registration, a KeyObject already parsed.
+// ---------------------------------------------------------------------------
+function verifyCompactJws(token, key, opts) {
+  const options = opts || {};
+  log.debug('Entering verifyCompactJws().');
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) {
+    log.debug('Leaving verifyCompactJws(). Not three parts.');
+    throw new Error('a compact JWS has three dot-separated parts; this has ' +
+      parts.length + '.');
+  }
+  let header;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+  } catch (e) {
+    log.debug('Leaving verifyCompactJws(). The header is not JSON.');
+    throw new Error('the JWS protected header is not readable base64url ' +
+      'JSON: ' + e.message);
+  }
+  const allowed = options.algorithms;
+  if (!Array.isArray(allowed) || !allowed.length) {
+    log.debug('Leaving verifyCompactJws(). No algorithm list.');
+    throw new Error('verifyCompactJws: the caller must name the acceptable ' +
+      'algorithms. A verifier that takes them from the token is the ' +
+      'algorithm-confusion defect (RFC 8725 section 3.1).');
+  }
+  if (allowed.indexOf(header.alg) === -1) {
+    log.debug('Leaving verifyCompactJws(). Algorithm not accepted.');
+    throw new Error('this JWS is signed with "' + header.alg + '" and only ' +
+      allowed.join(', ') + ' ' + (allowed.length === 1 ? 'is' : 'are') +
+      ' accepted here.');
+  }
+  const spec = jwsSpec(header.alg);
+
+  const signingInput = Buffer.from(parts[0] + '.' + parts[1], 'ascii');
+  const signature = Buffer.from(parts[2], 'base64url');
+  let ok;
+  if (spec.family === 'pq') {
+    // `key` is the AKP `pub` value — bytes, or the base64url of them off a
+    // JWK, which is what a verifier is handed in practice.
+    const pub = (key && key.pub) ? Buffer.from(key.pub, 'base64url')
+      : (typeof key === 'string' ? Buffer.from(key, 'base64url')
+                                 : Buffer.from(key));
+    ok = pqJose.verify(header.alg, pub, signingInput, signature);
+  } else if (spec.family === 'hmac') {
+    const expected = nodeCrypto.createHmac(spec.hash, key)
+      .update(signingInput).digest();
+    ok = expected.length === signature.length &&
+         nodeCrypto.timingSafeEqual(expected, signature);
+  } else {
+    // A raw ECDSA signature is a fixed length; a wrong one reaches OpenSSL as
+    // a buffer it will refuse in a way that names nothing, so it is checked
+    // here where the reason can be given.
+    if (spec.sigBytes && spec.family === 'ec' &&
+        signature.length !== spec.sigBytes) {
+      log.debug('Leaving verifyCompactJws(). Wrong signature length.');
+      throw new Error('an ' + header.alg + ' signature is ' + spec.sigBytes +
+        ' bytes — the R||S concatenation of RFC 7518 section 3.4 — and this ' +
+        'one is ' + signature.length + '. A ~70-byte one is the DER SEQUENCE ' +
+        'a general-purpose crypto API returns, sent without converting it.');
+    }
+    let publicKey;
+    try {
+      publicKey = (key && key.type === 'public') ? key
+        : nodeCrypto.createPublicKey(
+            (key && key.kty) ? { key: key, format: 'jwk' } : key);
+    } catch (e) {
+      log.debug('Leaving verifyCompactJws(). The key would not load.');
+      throw new Error('the verification key could not be read: ' + e.message);
+    }
+    ok = nodeCrypto.verify(spec.hash, signingInput,
+        nodeParamsFor(spec, publicKey), signature);
+  }
+  if (!ok) {
+    log.debug('Leaving verifyCompactJws(). The signature does not verify.');
+    throw new Error('the ' + header.alg + ' signature does not verify.');
+  }
+  let claims;
+  try {
+    claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch (e) {
+    log.debug('Leaving verifyCompactJws(). The payload is not JSON.');
+    throw new Error('the JWS payload is not readable base64url JSON: ' +
+      e.message);
+  }
+  log.debug('Leaving verifyCompactJws(). ' + header.alg + ' verified.');
+  return { header: header, claims: claims };
+}
+
+// The claim checks `jsonwebtoken` performs, for the two algorithms it cannot
+// verify. Written once, here, so that an EdDSA or ES256K token is held to
+// exactly the same rules as an RS256 one — a token that skipped `exp` because
+// of the curve it was signed on would be the worst kind of inconsistency.
+function checkJwtClaims(claims, options) {
+  log.debug('Entering checkJwtClaims().');
+  const now = Math.floor(Date.now() / 1000);
+  const skew = options.clockTolerance === undefined ? tokenClockSkew()
+                                                    : options.clockTolerance;
+  if (claims.exp !== undefined && now > Number(claims.exp) + skew) {
+    const e = new Error('jwt expired');
+    e.name = 'TokenExpiredError';
+    e.expiredAt = new Date(Number(claims.exp) * 1000);
+    log.debug('Leaving checkJwtClaims(). Expired.');
+    throw e;
+  }
+  if (claims.nbf !== undefined && now + skew < Number(claims.nbf)) {
+    const e = new Error('jwt not active');
+    e.name = 'NotBeforeError';
+    log.debug('Leaving checkJwtClaims(). Not yet valid.');
+    throw e;
+  }
+  if (options.issuer !== undefined && claims.iss !== options.issuer) {
+    log.debug('Leaving checkJwtClaims(). Wrong issuer.');
+    throw new Error('jwt issuer invalid. expected: ' + options.issuer);
+  }
+  if (options.audience !== undefined) {
+    // `aud` may be a string or an array, and the expectation may be either
+    // too; a match on ANY member is a match, which is the rule RFC 7519
+    // section 4.1.3 states and the one jsonwebtoken applies.
+    const wanted = Array.isArray(options.audience) ? options.audience
+                                                   : [options.audience];
+    const held = Array.isArray(claims.aud) ? claims.aud
+                                           : [claims.aud];
+    const hit = wanted.some(function (one) { return held.indexOf(one) !== -1; });
+    if (wanted.length && !hit) {
+      log.debug('Leaving checkJwtClaims(). Wrong audience.');
+      throw new Error('jwt audience invalid. expected: ' + wanted.join(' or '));
+    }
+  }
+  log.debug('Leaving checkJwtClaims().');
+  return claims;
+}
+
 function verifyJws(token, key, opts) {
   const options = opts || {};
   log.debug('Entering verifyJws().');
+  // THE TWO ALGORITHMS `jsonwebtoken` CANNOT VERIFY GO THE OTHER WAY, and they
+  // are held to the same claim rules — see checkJwtClaims(). This keeps ONE
+  // entry point for "verify a JWS and check its claims": every caller in this
+  // service gained EdDSA and ES256K the day this branch was added, without
+  // any of them changing, which is the whole point of there being one.
+  let peeked = null;
+  try {
+    peeked = JSON.parse(Buffer.from(String(token || '').split('.')[0],
+      'base64url').toString('utf8'));
+  } catch (e) {
+    peeked = null;
+  }
+  if (peeked && JWS_ALGS[peeked.alg] && JWS_ALGS[peeked.alg].ownSigner) {
+    const allowed = options.algorithms || [peeked.alg];
+    const verified = verifyCompactJws(token, key, { algorithms: allowed });
+    log.debug('Leaving verifyJws(). ' + peeked.alg + ' via the shared ' +
+              'verifier.');
+    return checkJwtClaims(verified.claims, options);
+  }
   const verifyOptions = Object.assign({}, options);
   if (verifyOptions.algorithms === undefined) {
     // Naming the algorithms is not decoration: jsonwebtoken will otherwise
@@ -999,20 +1325,50 @@ function verifyJws(token, key, opts) {
 // and `x509.js`, which SPIFFE reaches through.
 // ---------------------------------------------------------------------------
 
-// The content encryption algorithms, by their JWE `enc` value. `bits` is the
-// AES key length; the IV is 96 bits and the tag 128 for every GCM mode, which
-// is why neither is a column.
+// The content encryption algorithms this service speaks, in both families RFC
+// 7518 section 5 defines. `bits` is the AES key size; `cekBytes` is the size of
+// the CONTENT ENCRYPTION KEY, which for the CBC-HMAC family is twice the AES
+// key because the CEK carries a MAC key in front of it.
+//
+// The CBC-HMAC three are here because A128CBC-HS256 is what an OpenID Connect
+// client gets by DEFAULT: register `userinfo_encrypted_response_alg` and say
+// nothing about `enc` and section 2 of the registration spec has chosen
+// A128CBC-HS256 for you. A service that spoke only AES-GCM would refuse the
+// commonest encrypted response there is, and would look to the client like it
+// had refused the request.
 const JWE_ENCS = {
-  A128GCM: { bits: 128, cipher: 'aes-128-gcm' },
-  A192GCM: { bits: 192, cipher: 'aes-192-gcm' },
-  A256GCM: { bits: 256, cipher: 'aes-256-gcm' }
+  A128GCM: { bits: 128, cipher: 'aes-128-gcm', cekBytes: 16, mode: 'gcm' },
+  A192GCM: { bits: 192, cipher: 'aes-192-gcm', cekBytes: 24, mode: 'gcm' },
+  A256GCM: { bits: 256, cipher: 'aes-256-gcm', cekBytes: 32, mode: 'gcm' },
+  'A128CBC-HS256': { bits: 128, cipher: 'aes-128-cbc', cekBytes: 32,
+                     mode: 'cbc-hmac', hash: 'sha256', halfBytes: 16 },
+  'A192CBC-HS384': { bits: 192, cipher: 'aes-192-cbc', cekBytes: 48,
+                     mode: 'cbc-hmac', hash: 'sha384', halfBytes: 24 },
+  'A256CBC-HS512': { bits: 256, cipher: 'aes-256-cbc', cekBytes: 64,
+                     mode: 'cbc-hmac', hash: 'sha512', halfBytes: 32 }
 };
 
-// The one key management algorithm this service speaks. RSA-OAEP-256 is
+// The key management algorithms this service can ENCRYPT with. RSA-OAEP-256 is
 // RSA-OAEP with SHA-256, which is what node calls RSA_PKCS1_OAEP_PADDING plus
 // an explicit oaepHash — the default is SHA-1 and would interoperate with
 // nothing that reads the `alg` header.
+//
+// RSA-OAEP (SHA-1) is offered beside it because it is what a recipient whose
+// stack predates the -256 variant registers, and this is a service for testing
+// other people's clients. ECDH-ES and its three key-wrapping variants are here
+// because a recipient with an EC key has no RSA one to offer.
 const JWE_ALG = 'RSA-OAEP-256';
+const JWE_ALGS = ['RSA-OAEP-256', 'RSA-OAEP', 'ECDH-ES', 'ECDH-ES+A128KW',
+                  'ECDH-ES+A192KW', 'ECDH-ES+A256KW'];
+// The one this service can DECRYPT with, which is a shorter list on purpose:
+// what it receives is encrypted to the RSA key it publishes, and it holds no EC
+// private key to agree with.
+const JWE_DECRYPT_ALGS = ['RSA-OAEP-256'];
+const ECDH_KW_BYTES = { 'ECDH-ES+A128KW': 16, 'ECDH-ES+A192KW': 24,
+                        'ECDH-ES+A256KW': 32 };
+// JWK curve name -> the name node's OpenSSL knows it by.
+const EC_CURVES = { 'P-256': 'prime256v1', 'P-384': 'secp384r1',
+                    'P-521': 'secp521r1' };
 
 function b64u(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -1026,9 +1382,166 @@ function b64u(buf) {
 //          recipient has told you what they can read.
 //   typ    the protected header's `typ`, if the profile wants one.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE CONTENT ENCRYPTION HALF, FOR BOTH FAMILIES.
+//
+// AES-GCM is one primitive and node does the whole of it. AES-CBC-HMAC is the
+// composite of RFC 7518 section 5.2 and has to be assembled: the CEK splits
+// MAC-KEY FIRST then ENC-KEY, the MAC covers AAD || IV || CIPHERTEXT || AL
+// where AL is the AAD length IN BITS as a 64-bit big-endian integer, and the
+// tag is the FIRST HALF of the HMAC output. Each of those four is a place a
+// wrong reading round-trips against itself perfectly and interoperates with
+// nothing.
+// ---------------------------------------------------------------------------
+function cbcHmacKeys(spec, cek) {
+  return { macKey: cek.subarray(0, spec.halfBytes),
+           encKey: cek.subarray(spec.halfBytes) };
+}
+
+function cbcHmacTag(spec, cek, iv, aad, ciphertext) {
+  const keys = cbcHmacKeys(spec, cek);
+  const al = Buffer.alloc(8);
+  al.writeBigUInt64BE(BigInt(aad.length * 8));
+  return nodeCrypto.createHmac(spec.hash, keys.macKey)
+    .update(Buffer.concat([aad, iv, ciphertext, al]))
+    .digest().subarray(0, spec.halfBytes);
+}
+
+function sealContent(spec, cek, iv, aad, plaintext) {
+  log.debug('Entering sealContent(). mode=' + spec.mode);
+  if (spec.mode === 'cbc-hmac') {
+    const keys = cbcHmacKeys(spec, cek);
+    const cipher = nodeCrypto.createCipheriv(spec.cipher, keys.encKey, iv);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    log.debug('Leaving sealContent(). CBC-HMAC.');
+    return { ciphertext: ciphertext,
+             tag: cbcHmacTag(spec, cek, iv, aad, ciphertext) };
+  }
+  const cipher = nodeCrypto.createCipheriv(spec.cipher, cek, iv);
+  // The protected header is the additional authenticated data, per RFC 7516
+  // section 5.1 step 14 — as its ASCII base64url text, not as the JSON. Getting
+  // that wrong produces a tag the far end cannot verify and no other symptom.
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  log.debug('Leaving sealContent(). GCM.');
+  return { ciphertext: ciphertext, tag: cipher.getAuthTag() };
+}
+
+function openContent(spec, cek, iv, aad, ciphertext, tag) {
+  log.debug('Entering openContent(). mode=' + spec.mode);
+  if (spec.mode === 'cbc-hmac') {
+    const expected = cbcHmacTag(spec, cek, iv, aad, ciphertext);
+    // timingSafeEqual throws on a length mismatch, so the length is checked
+    // first — and a wrong length is a wrong tag either way.
+    if (expected.length !== tag.length ||
+        !nodeCrypto.timingSafeEqual(expected, tag)) {
+      log.debug('Leaving openContent(). The tag did not verify.');
+      throw new Error('the authentication tag does not verify');
+    }
+    const keys = cbcHmacKeys(spec, cek);
+    const decipher = nodeCrypto.createDecipheriv(spec.cipher, keys.encKey, iv);
+    const out = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    log.debug('Leaving openContent(). CBC-HMAC.');
+    return out;
+  }
+  const decipher = nodeCrypto.createDecipheriv(spec.cipher, cek, iv);
+  decipher.setAAD(aad);
+  decipher.setAuthTag(tag);
+  const out = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  log.debug('Leaving openContent(). GCM.');
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// THE KEY MANAGEMENT HALF. Returns the encrypted_key segment's bytes and, for
+// the ECDH-ES variants, writes the ephemeral public key into the header — the
+// recipient cannot agree the secret without it.
+//
+// The Concat KDF here REPEATS: NIST SP 800-56A produces 32 bytes per SHA-256
+// round, and A192CBC-HS384 and A256CBC-HS512 need 48 and 64. A single round
+// truncated to length would agree with a matching bug at the far end and with
+// nothing else.
+// ---------------------------------------------------------------------------
+function concatKdf(z, keyBytes, algId) {
+  log.debug('Entering concatKdf(). algId=' + algId);
+  const u32 = function (n) {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n >>> 0);
+    return b;
+  };
+  const alg = Buffer.from(algId, 'utf8');
+  const otherInfo = Buffer.concat([u32(alg.length), alg, u32(0), u32(0),
+                                   u32(keyBytes * 8)]);
+  const rounds = Math.ceil(keyBytes / 32);
+  const blocks = [];
+  for (let i = 1; i <= rounds; i++) {
+    blocks.push(nodeCrypto.createHash('sha256')
+      .update(Buffer.concat([u32(i), z, otherInfo])).digest());
+  }
+  log.debug('Leaving concatKdf(). ' + rounds + ' round(s).');
+  return Buffer.concat(blocks).subarray(0, keyBytes);
+}
+
+const AES_KW_IV = Buffer.from('A6A6A6A6A6A6A6A6', 'hex');
+
+function aesKeyWrap(kek, plaintextKey) {
+  log.debug('Entering aesKeyWrap().');
+  const cipher = nodeCrypto.createCipheriv('id-aes' + (kek.length * 8) +
+      '-wrap', kek, AES_KW_IV);
+  const out = Buffer.concat([cipher.update(plaintextKey), cipher.final()]);
+  log.debug('Leaving aesKeyWrap().');
+  return out;
+}
+
+function wrapCek(alg, recipientJwk, cek, header) {
+  log.debug('Entering wrapCek(). alg=' + alg);
+  if (JWE_ALGS.indexOf(alg) === -1) {
+    log.debug('Leaving wrapCek(). Unknown alg.');
+    throw new Error('encryptJweCompact: unsupported alg "' + alg +
+      '"; this service encrypts with ' + JWE_ALGS.join(', ') + '.');
+  }
+  const publicKey = nodeCrypto.createPublicKey({ key: recipientJwk, format: 'jwk' });
+
+  if (alg === 'RSA-OAEP' || alg === 'RSA-OAEP-256') {
+    const wrapped = nodeCrypto.publicEncrypt({
+      key: publicKey,
+      padding: nodeCrypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: alg === 'RSA-OAEP' ? 'sha1' : 'sha256'
+    }, cek);
+    log.debug('Leaving wrapCek(). RSA.');
+    return { cek: cek, encryptedKey: wrapped };
+  }
+
+  // ECDH-ES, direct or with AES key wrapping.
+  const curve = EC_CURVES[recipientJwk.crv];
+  if (!curve) {
+    log.debug('Leaving wrapCek(). Unknown curve.');
+    throw new Error('encryptJweCompact: the recipient key names curve "' +
+      recipientJwk.crv + '", and this service agrees over ' +
+      Object.keys(EC_CURVES).join(', ') + '.');
+  }
+  const ephemeral = nodeCrypto.generateKeyPairSync('ec', { namedCurve: curve });
+  const z = nodeCrypto.diffieHellman({ privateKey: ephemeral.privateKey,
+                                       publicKey: publicKey });
+  const epk = ephemeral.publicKey.export({ format: 'jwk' });
+  header.epk = { kty: epk.kty, crv: epk.crv, x: epk.x, y: epk.y };
+  if (alg === 'ECDH-ES') {
+    // Direct agreement: the derived key IS the CEK and encrypted_key is empty.
+    // The AlgorithmID is the content encryption `enc`, and the key data length
+    // is the WHOLE CEK — both halves, for a CBC-HMAC enc.
+    log.debug('Leaving wrapCek(). ECDH-ES direct.');
+    return { cek: concatKdf(z, cek.length, header.enc),
+             encryptedKey: Buffer.alloc(0) };
+  }
+  const kek = concatKdf(z, ECDH_KW_BYTES[alg], alg);
+  log.debug('Leaving wrapCek(). ' + alg + '.');
+  return { cek: cek, encryptedKey: aesKeyWrap(kek, cek) };
+}
+
 function encryptJweCompact(plaintext, opts) {
   const options = opts || {};
-  log.debug('Entering encryptJweCompact(). enc=' + options.enc);
+  log.debug('Entering encryptJweCompact(). alg=' + (options.alg || JWE_ALG) +
+            ', enc=' + options.enc);
   const spec = JWE_ENCS[options.enc];
   if (!spec) {
     log.debug('Leaving encryptJweCompact(). Unknown enc.');
@@ -1036,33 +1549,30 @@ function encryptJweCompact(plaintext, opts) {
                     '"; this service encrypts with ' +
                     Object.keys(JWE_ENCS).join(', ') + '.');
   }
-  const cek = nodeCrypto.randomBytes(spec.bits / 8);
-  const iv = nodeCrypto.randomBytes(12);
-  const header = { alg: JWE_ALG, enc: options.enc, typ: options.typ || 'JWT' };
+  const alg = options.alg || JWE_ALG;
+  const random = nodeCrypto.randomBytes(spec.cekBytes);
+  // Sixteen octets — one AES block — for CBC, twelve for GCM. A CBC-HMAC JWE
+  // carrying a 12-byte IV is refused by every other implementation.
+  const iv = nodeCrypto.randomBytes(spec.mode === 'cbc-hmac' ? 16 : 12);
+  const header = { alg: alg, enc: options.enc, typ: options.typ || 'JWT' };
+  if (options.cty) {
+    header.cty = options.cty;
+  }
   if (options.jwk && options.jwk.kid) {
     header.kid = options.jwk.kid;
   }
+  // wrapCek() may WRITE to the header (the ECDH-ES variants add `epk`), so the
+  // header is serialised after it and not before — the AAD has to be the bytes
+  // that actually go out, and an epk added after the AAD was taken would make
+  // every tag fail at the far end.
+  const wrapped = wrapCek(alg, options.jwk, random, header);
   const headerB64 = b64u(Buffer.from(JSON.stringify(header), 'utf8'));
 
-  const publicKey = nodeCrypto.createPublicKey({ key: options.jwk, format: 'jwk' });
-  const encryptedKey = nodeCrypto.publicEncrypt({
-    key: publicKey,
-    padding: nodeCrypto.constants.RSA_PKCS1_OAEP_PADDING,
-    oaepHash: 'sha256'
-  }, cek);
+  const sealed = sealContent(spec, wrapped.cek, iv,
+      Buffer.from(headerB64, 'ascii'), Buffer.from(plaintext, 'utf8'));
 
-  const cipher = nodeCrypto.createCipheriv(spec.cipher, cek, iv);
-  // The protected header is the additional authenticated data, per RFC 7516
-  // section 5.1 step 14 — as its ASCII base64url text, not as the JSON. Getting
-  // that wrong produces a tag the far end cannot verify and no other symptom.
-  cipher.setAAD(Buffer.from(headerB64, 'ascii'));
-  const ciphertext = Buffer.concat([
-    cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()
-  ]);
-  const tag = cipher.getAuthTag();
-
-  const compact = [headerB64, b64u(encryptedKey), b64u(iv),
-                   b64u(ciphertext), b64u(tag)].join('.');
+  const compact = [headerB64, b64u(wrapped.encryptedKey), b64u(iv),
+                   b64u(sealed.ciphertext), b64u(sealed.tag)].join('.');
   log.debug('Leaving encryptJweCompact(). ' + compact.length + ' characters.');
   return compact;
 }
@@ -1098,10 +1608,13 @@ function decryptJweCompact(compact, opts) {
     log.debug('Leaving decryptJweCompact(). The header is not JSON.');
     throw new Error('the JWE protected header is not valid base64url JSON: ' + e.message);
   }
-  if (header.alg !== JWE_ALG) {
+  if (JWE_DECRYPT_ALGS.indexOf(header.alg) === -1) {
+    // Shorter than the list this service ENCRYPTS with, and deliberately so:
+    // what arrives here is encrypted to the RSA key this service publishes, and
+    // there is no EC private key here to agree an ECDH-ES secret with.
     log.debug('Leaving decryptJweCompact(). Wrong alg.');
-    throw new Error('this service decrypts with alg ' + JWE_ALG + '; the request used "' +
-      header.alg + '".');
+    throw new Error('this service decrypts with alg ' + JWE_DECRYPT_ALGS.join(' or ') +
+      '; the request used "' + header.alg + '".');
   }
   const allowed = options.allowedEnc || Object.keys(JWE_ENCS);
   if (allowed.indexOf(header.enc) === -1) {
@@ -1136,25 +1649,22 @@ function decryptJweCompact(compact, opts) {
       'private key: ' + e.message);
   }
   const spec = JWE_ENCS[header.enc];
-  if (cek.length !== spec.bits / 8) {
+  if (cek.length !== spec.cekBytes) {
     // The wrong-key case, and it is checked rather than left to the cipher for
     // the reason the XML decryption above checks the same thing: an unwrap that
     // succeeds with the wrong length is a wrong key, and saying so beats a
-    // cipher error about a buffer size.
+    // cipher error about a buffer size. Note a CBC-HMAC CEK is TWICE the AES
+    // key size, which is why this reads cekBytes and not bits/8.
     log.debug('Leaving decryptJweCompact(). The key is the wrong size.');
     throw new Error('the unwrapped content encryption key is ' + cek.length + ' bytes; ' +
-      header.enc + ' needs ' + (spec.bits / 8) + '.');
+      header.enc + ' needs ' + spec.cekBytes + '.');
   }
 
   let plaintext;
   try {
-    const decipher = nodeCrypto.createDecipheriv(spec.cipher, cek,
-      Buffer.from(parts[2], 'base64url'));
-    decipher.setAAD(Buffer.from(parts[0], 'ascii'));
-    decipher.setAuthTag(Buffer.from(parts[4], 'base64url'));
-    plaintext = Buffer.concat([
-      decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()
-    ]).toString('utf8');
+    plaintext = openContent(spec, cek, Buffer.from(parts[2], 'base64url'),
+      Buffer.from(parts[0], 'ascii'), Buffer.from(parts[3], 'base64url'),
+      Buffer.from(parts[4], 'base64url')).toString('utf8');
   } catch (e) {
     // An authentication tag failure lands here, and it is the interesting case:
     // the ciphertext or the header was altered in flight.
@@ -1382,7 +1892,17 @@ module.exports = {
   verifyJws: verifyJws,
   tokenClockSkew: tokenClockSkew,
   // --- JWE ---
+  // The one JWS algorithm table and the operations built on it.
+  b64u: b64u,
+  JWS_ALGS: JWS_ALGS,
+  JWS_SIGNING_ALGS: JWS_SIGNING_ALGS,
+  JWS_ASYMMETRIC_ALGS: JWS_ASYMMETRIC_ALGS,
+  jwsSpec: jwsSpec,
+  verifyCompactJws: verifyCompactJws,
+  checkJwtClaims: checkJwtClaims,
   JWE_ALG: JWE_ALG,
+  JWE_ALGS: JWE_ALGS,
+  JWE_DECRYPT_ALGS: JWE_DECRYPT_ALGS,
   JWE_ENCS: JWE_ENCS,
   encryptJweCompact: encryptJweCompact,
   decryptJweCompact: decryptJweCompact,
