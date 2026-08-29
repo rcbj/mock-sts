@@ -5600,7 +5600,10 @@ npm test                          # the in-process suite: one process, under
                                     # on this machine instead of a container
 ./local-run-tests.sh --keep-stack   # leave the container up afterwards, to
                                     # read /admin or re-run one job by hand
-./run-coverage.sh                 # the same run, with coverage collected
+./run-coverage.sh                 # the same run, with coverage collected —
+                                  # in containers too, with the RUNNER in the
+                                  # container rather than the service
+./run-coverage.sh --no-docker     # ...and the same collection on this machine
 ```
 
 **THE TWO LAUNCHERS RUN THE SAME TWENTY-THREE JOBS AND DIFFER ONLY IN WHERE THE
@@ -5663,10 +5666,18 @@ machine. What that buys is that the thing under test is the IMAGE: the same
 from the build context or a submodule that was never initialised fails HERE
 rather than in somebody's deployment. `--no-docker` runs the service on this
 machine instead (nine ports of its own, both SPIFFE Unix sockets off, stopped
-by the pid it started), which is what a machine with no docker falls back to
-and what `./run-coverage.sh` uses of necessity — V8 writes its coverage from
-inside the process being measured, and nothing here can reach into a container
-to collect it.
+by the pid it started), which is what a machine with no docker falls back to.
+
+**A coverage run is the one that cannot drive that container**, and the reason
+is worth keeping straight from a claim about containers in general: V8 writes
+its coverage from inside the process being measured, so a service reached over
+HTTP can never be under the report. `./run-coverage.sh` therefore moves the
+RUNNER into a container instead — `docker compose run --rm --no-deps` on
+`docker-compose-run-tests.yml`'s `tests` service, which never starts the `sts`
+service — and lets it start the service it measures as a child process in
+there, with `./coverage` and `./tests/report` bind-mounted out. So a coverage
+run needs docker and nothing else too; `./run-coverage.sh --no-docker` is the
+host run, and a machine without docker falls back to it loudly.
 
 A vendored job can be AHEAD of this tree — those jobs are developed against the
 parent's own checkout of this service — and it then fails here naming a feature

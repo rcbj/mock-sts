@@ -893,7 +893,10 @@ npm test                          # unchanged: one process, bunyan, under 2s
 ./local-run-tests.sh --keep-stack # leave the container up to read /admin
 ./local-run-tests.sh --no-protocol  # the in-process suite alone, 3 seconds
 ./run-coverage.sh                 # the same run, with coverage collected —
-                                  # in process, of necessity (see 4 below)
+                                  # IN CONTAINERS TOO since 2026-08-29, with
+                                  # the RUNNER in the container rather than the
+                                  # service (see 4 below). --no-docker is the
+                                  # host run
 ```
 
 `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` are this
@@ -991,11 +994,25 @@ REST IS ARGUED.**
    exception being a machine with NO DOCKER, where the fallback is loud and
    `--docker` turns even that into an error.
 
-   **`./run-coverage.sh` deliberately does NOT use it**, and that is not an
-   omission to be fixed by somebody tidying: V8 writes coverage from INSIDE
-   the process being measured, so an instrumented run has to be one the runner
-   started. A coverage run says so as it starts rather than leaving a silently
-   empty protocol column to be read as "the protocols are untested".
+   **`./run-coverage.sh` STILL DOES NOT DRIVE THAT CONTAINER, AND SINCE
+   2026-08-29 IT RUNS IN ONE ANYWAY — the two are not the same sentence and
+   this paragraph collapsed them for a day.** The physics is unchanged: V8
+   writes coverage from INSIDE the process being measured, so an instrumented
+   run has to be one the runner started, and a service reached over HTTP can
+   never be under the report. What that rules out is measuring the SERVICE
+   CONTAINER NEXT DOOR — not containers. So the coverage run puts the RUNNER in
+   `docker-compose-run-tests.yml`'s `tests` image (`run --rm --no-deps`, which
+   never starts the `sts` service) and lets it start the service it measures as
+   a CHILD PROCESS in there; `./coverage` and `./tests/report` are bind mounts,
+   so both come out onto the host. `--no-docker` is the old host run, unchanged
+   and still the fast loop, and a machine with no docker falls back to it
+   loudly.
+
+   **What it buys is what item 5 buys the suite**: the host needs docker and
+   nothing else, which is why `.github/workflows/tests.yml` can run a coverage
+   pass beside the suite. What it costs is an image build and output written by
+   root through the bind mounts — the script says so once rather than leaving
+   it to be met as a permission error on the next host run.
 
 5. **`./docker-run-tests.sh` PUTS THE RUNNER IN A CONTAINER TOO, AND IT IS WHAT
    CI RUNS (2026-08-29).** Item 4 containerized the SERVICE and said out loud
@@ -1035,9 +1052,14 @@ REST IS ARGUED.**
    the wrong ignore file is caught by a guard in the Dockerfile that says so
    rather than failing later inside node.
 
-   **A COVERAGE RUN STILL CANNOT BE THIS**, for the same reason it cannot be
-   item 4: V8 writes from inside the process it measures, and this runner only
-   speaks HTTP to the container.
+   **A COVERAGE RUN CANNOT BE THIS EXACT STACK, AND IS NOW A CONTAINERIZED RUN
+   OF ITS OWN.** The reason it cannot be this one is item 4's: the two services
+   here are a runner and a service that only speak HTTP to each other, and V8
+   writes from inside the process it measures. `./run-coverage.sh` therefore
+   uses HALF of this file — `run --rm --no-deps` on the `tests` service alone,
+   with the runner starting the service it measures inside that container. Same
+   image, same compose file, different shape, and its own compose project so
+   that the two runs cannot reach each other's containers.
 
 Eight tests in the parent project need only this service. **Thirteen of that
 suite's jobs are VENDORED into `tests/vendored/` since 2026-08-28** — the ones

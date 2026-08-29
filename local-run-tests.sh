@@ -134,7 +134,10 @@
 #                    own, out of this working tree and this machine's
 #                    node_modules. Faster by however long an image build takes,
 #                    and blind to everything about the image — see the section
-#                    above. It is also what --coverage uses, of necessity.
+#                    above. Passed on to --coverage, which has the same two
+#                    modes: a coverage run never drives the `sts` container
+#                    (V8 collects from inside the process it measures), but it
+#                    runs in one of its own by default.
 #   --docker         The default, spelt. What it adds is that a missing or
 #                    broken docker is then an ERROR rather than a fall back to
 #                    --no-docker: pass it in CI, where a silent change of what
@@ -161,7 +164,10 @@
 #   --parent=<dir>   Where the parent project is, for the two commands above.
 #                    Default: the sibling ../id-proto-debugger, then
 #                    ../oauth2-oidc-debugger. It no longer affects a test run.
-#   --coverage       Hand over to ./run-coverage.sh, passing everything else on.
+#   --coverage       Hand over to ./run-coverage.sh, passing everything else on
+#                    — including --no-docker / --docker / --no-build when they
+#                    were asked for. That script runs the whole instrumented
+#                    suite in a container of its own by default.
 #   --no-report      Plain `npm test`: one process, bunyan on the terminal, no
 #                    report written. The fastest loop there is. It runs the
 #                    in-process suite only — starting and stopping a service is
@@ -169,12 +175,17 @@
 #                    rather than refusing, and says so as it goes.
 #   --log-level=L    LOG_LEVEL for the tests (trace|debug|info|warn|error|fatal).
 #   --sts-log-level=L
-#                    STS_LOG_LEVEL for the service the protocol jobs drive —
-#                    the container or, under --no-docker, the in-process copy;
-#                    it reaches both. Unset, its appconfig file decides and
-#                    that is `debug` — every request and every signed artifact
-#                    written down, which is what a failing protocol job is read
-#                    from, and about half of that service's CPU.
+#                    The log level of the service the protocol jobs drive — the
+#                    container or, under --no-docker, the in-process copy; it
+#                    reaches both. DEFAULT `info`, which is this script's and
+#                    not the service's: run by hand it still logs at `debug` —
+#                    every request and every signed artifact written down,
+#                    which is what a failing protocol job is read from, and
+#                    about half of its CPU. --sts-log-level=debug asks for that
+#                    whole record back, and gets it: the level picks the
+#                    appconfig file (env/local.js or env/test.js) as well as
+#                    STS_LOG_LEVEL, because the vendored crypto modules read
+#                    only the file. See THE SERVICE'S LOG LEVEL below.
 #   --timeout=MS     Per-job watchdog. Default 300000. 0 disables it.
 #   --quiet          Do not echo each job's output as it runs; the logs still
 #                    have all of it.
@@ -226,10 +237,21 @@ COMPOSE_FILE="docker-compose.yml"
 COMPOSE_PROJECT="${STS_TEST_COMPOSE_PROJECT:-mock-sts-tests}"
 STS_TEST_CONTAINER="sts-tests"
 STS_TEST_PG_CONTAINER="sts-tests-postgres"
-# The appconfig layer the CONTAINER reads. Deliberately not exported into this
-# shell: `CONFIG_FILE` is a variable the in-process tests read too, and one
-# exported here would reach every unit job as well as compose.
-STS_TEST_CONFIG_FILE="${STS_TEST_CONFIG_FILE:-./env/local.js}"
+# The appconfig layer the SERVICE reads — the container, and since the log
+# level below became a default of this script, the --no-docker copy too.
+#
+# EMPTY here on purpose and resolved after the arguments have been parsed, by
+# THE SERVICE'S LOG LEVEL further down: which of env/local.js and env/test.js
+# this run wants is decided by the level, because those two files differ in
+# nothing else. Set STS_TEST_CONFIG_FILE in the environment to pin a file and
+# that block leaves it alone.
+#
+# `CONFIG_FILE` itself is deliberately never exported into this shell: it is a
+# variable the in-process tests read too, and one exported here would reach
+# every unit job as well as compose. This one carries its own name for exactly
+# that reason, and run-report.js reads it under that name for the host-mode
+# service.
+STS_TEST_CONFIG_FILE="${STS_TEST_CONFIG_FILE:-}"
 # Filled in by the lifecycle below. STACK_UP gates the teardown, so that a run
 # that never started a container cannot tear down somebody else's.
 STACK_UP=0
@@ -306,19 +328,22 @@ fi
 # ---------------------------------------------------------------------------
 if [ "${COVERAGE}" = "1" ];
 then
-  # COVERAGE RUNS THE SERVICE ON THIS MACHINE, NOT IN THE CONTAINER, AND IT IS
-  # NOT AN OVERSIGHT. V8 writes its coverage from INSIDE the process being
-  # measured, into a directory that process can write; there is no way to
-  # collect it from a container this script only talks HTTP to. So a coverage
-  # run uses the in-process service — which is also the right instrument for
-  # the question, since what is being measured is which LINES OF THIS TREE ran.
-  # Said out loud because the two runs otherwise differ in what they test and
-  # nothing would say which one you got.
-  if [ "${SERVICE}" = "docker" ] && [ "${PROTOCOL}" != "off" ];
+  # A COVERAGE RUN NEVER DRIVES THE `sts` CONTAINER, AND SINCE 2026-08-29 THAT
+  # IS NOT THE SAME AS RUNNING ON THIS MACHINE. V8 writes its coverage from
+  # INSIDE the process being measured, into a directory that process can write,
+  # so a service this script only talks HTTP to can never be under the report —
+  # that much is unchanged and is why the container started below is not
+  # handed over. What run-coverage.sh does instead is put the RUNNER in a
+  # container and let it start the service it measures in there, so `docker`
+  # and `host` are still both available and mean what they mean everywhere
+  # else. --no-docker is therefore passed on when somebody asked for it, and
+  # nothing is said when nobody did: the default is a container either way, and
+  # a line explaining a difference that no longer exists is worse than silence.
+  if [ "${SERVICE}" = "host" ] && [ "${SERVICE_ASKED}" = "1" ] \
+     && [ "${PROTOCOL}" != "off" ];
   then
-    echo "Coverage collects from a service started on THIS machine, not from"
-    echo "the container: V8 writes its data from inside the process it"
-    echo "measures. The protocol jobs will drive an in-process instance."
+    echo "Collecting coverage on this machine (--no-docker). The container"
+    echo "form of the same run is ./run-coverage.sh with no flag."
     echo ""
   fi
   ARGS=()
@@ -330,6 +355,15 @@ then
   [ "${QUIET}" = "1" ] && ARGS+=("--quiet")
   [ "${BROWSER}" = "0" ] && ARGS+=("--no-browser")
   [ "${OPEN}" = "1" ] && ARGS+=("--open")
+  # WHERE, and only when it was ASKED for. An unasked default here would pin
+  # that script's own default rather than passing a request through, and the
+  # two scripts must be free to have different ones.
+  if [ "${SERVICE_ASKED}" = "1" ];
+  then
+    [ "${SERVICE}" = "host" ] && ARGS+=("--no-docker")
+    [ "${SERVICE}" = "docker" ] && ARGS+=("--docker")
+  fi
+  [ "${BUILD}" = "0" ] && ARGS+=("--no-build")
   exec "${CURRENT_DIR}/run-coverage.sh" ${ARGS[@]+"${ARGS[@]}"}
 fi
 
@@ -451,7 +485,10 @@ composeUp()
   # Only when it HAS a value: an empty STS_LOG_LEVEL makes bunyan throw
   # `unknown level name: ""` while this service is still loading its modules,
   # so it never listens and the run reports a service that would not answer
-  # rather than a log level.
+  # rather than a log level. Since the default above it is `info` this is
+  # always taken on a run started by this script; the guard stays because
+  # startStack() is also reachable with the variable exported empty by
+  # somebody's shell, which is the case it was written for.
   if [ -n "${STS_LOG_LEVEL:-}" ];
   then
     COMPOSE_ENV+=("STS_LOG_LEVEL=${STS_LOG_LEVEL}")
@@ -741,14 +778,77 @@ ARGS+=("--protocol=${PROTOCOL}")
 [ "${BROWSER}" = "0" ] && ARGS+=("--no-browser")
 
 [ -n "${LOG_LEVEL_ARG}" ] && export LOG_LEVEL="${LOG_LEVEL_ARG}"
-# EXPORTED ONLY WHEN IT HAS A VALUE, and the guard is not decoration: an EMPTY
-# STS_LOG_LEVEL is not a harmless default. bunyan throws `unknown level name:
-# ""` while the service is still loading its modules, so it never starts, and
-# the run then reports a service that would not answer rather than a log level.
-if [ -n "${STS_LOG_LEVEL_ARG}" ];
+# ---------------------------------------------------------------------------
+# THE SERVICE'S LOG LEVEL, WHICH DEFAULTS TO `info` FOR A TEST RUN AND TO
+# NOTHING OF THE KIND ANYWHERE ELSE — AND TAKES TWO KNOBS, NOT ONE.
+#
+# This script used to pass STS_LOG_LEVEL through only when somebody had set it,
+# so a plain run drove the service at its appconfig level — `debug`, every
+# request, every response and every artifact both before and after signing.
+# That is the point of a mock and it is what a failing job is read from; it is
+# also about half of that service's CPU, and under this runner almost none of
+# it is ever read, because the jobs pass and the log goes away with the
+# container. So `info` is the default HERE and nowhere else: no appconfig file
+# is edited, no default moves, and a service run by hand or by
+# `docker compose up` is untouched.
+#
+# THE SECOND KNOB IS THE APPCONFIG FILE, AND LEAVING IT OUT WOULD HAVE MADE
+# THIS CHANGE LOOK LIKE IT WORKED WHILE DOING ALMOST NOTHING. STS_LOG_LEVEL
+# reaches the loggers `config.js` registers — its own, and the `sts` logger in
+# helpers.js that every protocol module destructures. It does NOT reach the six
+# VENDORED modules under common/vendored/, which each build a bunyan logger at
+# load from `require(process.env.CONFIG_FILE).logLevel` and cannot be edited
+# here (they are the parent project's files). On the run that measured this,
+# STS_LOG_LEVEL=info alone left 3,869 debug lines of 3,951 — 3,582 of them from
+# `xmldsig`, which is every canonicalization of every signed document. The
+# krb5_* codec modules do the same and `common/config.js` says so in its
+# `registerLogger()` header.
+#
+# So the level picks the FILE as well: env/test.js is env/local.js with
+# `logLevel: "info"` and nothing else different (`diff` them — it is one key
+# and the header comment), so choosing between them changes the log and no
+# behaviour. A run that asks for trace or debug gets env/local.js and therefore
+# the WHOLE record, which is what --sts-log-level=debug is asking for; anything
+# else gets env/test.js. And it goes the other way round as well —
+# STS_TEST_CONFIG_FILE named in the environment with no level beside it turns
+# this default OFF rather than being half-overridden, because naming a file
+# says something more specific than a level does and a service logging at
+# `info` out of a file that says `debug` is nobody's idea of an answer.
+#
+# The three branches rather than a `:-`: an EMPTY STS_LOG_LEVEL is not a
+# harmless default. bunyan throws `unknown level name: ""` while the service is
+# still loading its modules, so it never starts, and the run then reports a
+# service that would not answer rather than a log level. One exported empty is
+# therefore treated as unset.
+# ---------------------------------------------------------------------------
+[ -n "${STS_LOG_LEVEL_ARG}" ] && STS_LOG_LEVEL="${STS_LOG_LEVEL_ARG}"
+if [ -n "${STS_LOG_LEVEL:-}" ];
 then
-  export STS_LOG_LEVEL="${STS_LOG_LEVEL_ARG}"
+  # A level was asked for. It decides the file too, so that debug means the
+  # WHOLE record rather than two thirds of it.
+  export STS_LOG_LEVEL
+  if [ -z "${STS_TEST_CONFIG_FILE}" ];
+  then
+    case "${STS_LOG_LEVEL}" in
+      trace|debug) STS_TEST_CONFIG_FILE="./env/local.js" ;;
+      *)           STS_TEST_CONFIG_FILE="./env/test.js" ;;
+    esac
+  fi
+elif [ -n "${STS_TEST_CONFIG_FILE}" ];
+then
+  # A FILE was named and no level was. The file decides, both halves of it, and
+  # this script exports no level of its own — otherwise pinning the debug file
+  # would have produced a service logging at info out of one that says debug,
+  # which is the confusing half-answer this whole block exists to avoid.
+  :
+else
+  export STS_LOG_LEVEL="info"
+  STS_TEST_CONFIG_FILE="./env/test.js"
 fi
+# EXPORTED, unlike CONFIG_FILE itself: run-report.js reads this name for the
+# service it starts under --no-docker, where the vendored modules would
+# otherwise read the ./env/local.js that tests/tools/service.js falls back to.
+export STS_TEST_CONFIG_FILE
 
 # ---------------------------------------------------------------------------
 # THE SERVICE, IF THIS RUN HAS ANYTHING TO POINT AT IT.
