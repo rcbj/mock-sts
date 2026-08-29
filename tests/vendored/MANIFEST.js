@@ -42,6 +42,11 @@ const path = require('path');
 // `./local-run-tests.sh --vendor-sync` does the copy and
 // `--vendor-check` reports what differs.
 //
+// THE EXCEPTION IS THE FOUR JOBS MARKED `local: true` BELOW — this service's
+// own `/admin` console and `/admin-api`. Those are NOT copies of anything: the
+// parent deleted its own on 2026-08-28 and they are edited here and only here.
+// The rule above applies to every other file in this directory.
+//
 // What vendoring buys is that this repository's suite RUNS with no parent
 // checkout beside it. Before 2026-08-28 a machine with only this repository on
 // it ran ten in-process files and reported the other thirteen jobs as absent;
@@ -85,16 +90,38 @@ const CLIENT_SOURCE_DIR = path.join('client', 'src');
 // is exactly one, and it is the admin console's ONLY coverage against this
 // working tree, which is why `--no-browser` names it when it leaves it out.
 // ---------------------------------------------------------------------------
+//
+// `local: true` means THIS REPOSITORY OWNS THE FILE and there is no copy of it
+// over there to compare against. Four jobs are marked so, and they are the
+// four that drive this service's OWN `/admin` console and its `/admin-api`:
+// `sts_metadata.js`, `admin_api.js`, `sts_admin_api_operations.js` and
+// `sts_admin_console.js`. They ran from the parent project's `tests/` until
+// 2026-08-28 and were removed there on that date, on the argument that a test
+// asserting something about this console belongs in the tree where a control
+// is added to that console — the tree that should go red when the control
+// loses its operation. They still SIT here rather than in `tests/` because
+// nothing about how they run changed: they are spawned as processes by
+// `tools/run-report.js` with this directory as their cwd, and they
+// `require('./random_username.js')` and the rest out of it. `run.js` discovers
+// `tests/*.js` and runs it IN PROCESS against harness.js, which is a different
+// kind of file entirely.
+//
+// What `local` buys is that `tools/vendor-check.js` does not compare them:
+// `allFiles()` leaves them out, so a parent checkout beside this one reports
+// clean instead of four GONE UPSTREAM, and `--vendor-sync` cannot overwrite
+// them. THE EDITING RULE IS THEREFORE INVERTED FOR THESE FOUR — they are
+// changed HERE, and only here.
+// ---------------------------------------------------------------------------
 const JOBS = [
-  { file: 'admin_api.js',                browser: false },
+  { file: 'admin_api.js',                browser: false, local: true },
   { file: 'ldp_vc_issuance.js',          browser: false },
   { file: 'ldp_vc_refresh.js',           browser: false },
   { file: 'oauth2_sts_endpoints.js',     browser: false },
-  { file: 'sts_admin_api_operations.js', browser: false },
-  { file: 'sts_admin_console.js',        browser: true  },
+  { file: 'sts_admin_api_operations.js', browser: false, local: true },
+  { file: 'sts_admin_console.js',        browser: true,  local: true },
   { file: 'sts_dpop.js',                 browser: false },
   { file: 'sts_jws_verification.js',     browser: false },
-  { file: 'sts_metadata.js',             browser: false },
+  { file: 'sts_metadata.js',             browser: false, local: true },
   { file: 'sts_saml11.js',               browser: false },
   { file: 'sts_saml_encryption.js',      browser: false },
   { file: 'sts_userinfo_protected.js',   browser: false },
@@ -149,12 +176,17 @@ const CLIENT_MODULES = [
   'vci_metadata.js'
 ];
 
-// Everything under version control here, for the drift check: each entry says
-// which of the parent's directories it came from, because the two halves are
-// copied from different places into one flat directory.
+// Everything under version control here THAT CAME FROM OVER THERE, for the
+// drift check: each entry says which of the parent's directories it came from,
+// because the two halves are copied from different places into one flat
+// directory. A `local` job is skipped — it has no upstream to differ from, and
+// listing it would report it GONE UPSTREAM for ever. See the note on JOBS.
 function allFiles() {
   const out = [];
   JOBS.forEach(function (j) {
+    if (j.local) {
+      return;
+    }
     out.push({ rel: j.file, source: SOURCE_DIR });
   });
   HELPERS.forEach(function (h) {
