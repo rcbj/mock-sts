@@ -1358,11 +1358,21 @@ function respond(req, res) {
   const raw = typeof req.body === 'string' ? req.body : '';
   logArtifact('SAML 1.1 Request', 'as received over SOAP', raw);
 
-  const answer = function (status, message, assertion, inResponseTo, recipient) {
+  // `rp` is the relying party whose per-application settings govern the
+  // response — buildResponse() reads saml11.signResponse off it. It is a
+  // PARAMETER and not a variable of respond(), because the four request types
+  // work it out from four different places: an artifact carries the identifier
+  // it was minted for, a query may name one in `Resource`, and a refusal has
+  // only the path segment. Omitting it falls back to that segment, which is
+  // the right answer for every refusal and for the unscoped endpoint, where it
+  // is '' and settingFor() reads the service-wide value.
+  const answer = function (status, message, assertion, inResponseTo, recipient,
+                           rp) {
     log.debug("Entering answer().");
     const response = buildResponse({
       status: status, statusMessage: message, assertion: assertion || '',
-      inResponseTo: inResponseTo, recipient: recipient, rp: rpId
+      inResponseTo: inResponseTo, recipient: recipient,
+      rp: rp || scoped.id || ''
     });
     const envelope = soapEnvelope(response.xml);
     logArtifact('SAML 1.1 Response', 'as returned over SOAP', envelope);
@@ -1419,7 +1429,8 @@ function respond(req, res) {
     log.debug("Leaving respond(). An artifact was resolved and destroyed.");
     // Decision 3: the Response is built HERE, so it carries InResponseTo naming
     // this SOAP request and a Recipient naming whoever asked.
-    return answer(STATUS_SUCCESS, '', held.assertion, requestId, scoped.id || held.rpId);
+    return answer(STATUS_SUCCESS, '', held.assertion, requestId,
+                  scoped.id || held.rpId, scoped.id || held.rpId);
   }
 
   // --- an assertion by id --------------------------------------------------
@@ -1498,7 +1509,7 @@ function respond(req, res) {
     });
     rememberAssertion(assertion);
     log.debug("Leaving respond(). A query was answered about " + username + ".");
-    return answer(STATUS_SUCCESS, '', assertion, requestId, rpId);
+    return answer(STATUS_SUCCESS, '', assertion, requestId, rpId, rpId);
   }
 
   log.debug("Leaving respond(). The request asked for nothing this responder has.");

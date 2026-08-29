@@ -31,6 +31,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const stsCrypto = require('../common/crypto');
 // The service's shared logger when this module is loaded inside the service, and
 // a silent fallback when it is loaded ON ITS OWN — which the debugger's
 // cross-implementation test does, copying this one file next to its own scripts.
@@ -164,9 +165,9 @@ const COSE_ALGS = {
   '-257': 'RS256', '-258': 'RS384', '-259': 'RS512',
 };
 
-function b64u(buf) {
-  return Buffer.from(buf).toString('base64url');
-}
+// base64url, from common/crypto.js — see the note beside helpers.js's. This
+// was the third copy of the same three lines in this service.
+const b64u = stsCrypto.b64u;
 
 function coseKeyToJwk(coseKey) {
   log.debug('Entering coseKeyToJwk().');

@@ -36,6 +36,23 @@
 // `persistence.mode` is left at its default of `memory` deliberately: a run
 // that persisted would be a run whose second pass started from the first
 // pass's leavings.
+//
+// ---------------------------------------------------------------------------
+// THIS IS NO LONGER THE ORDINARY WAY THAT SERVICE IS STARTED, SINCE 2026-08-28.
+//
+// `./local-run-tests.sh` brings up a CONTAINER from the repository's own
+// docker-compose.yml and hands run-report.js its URL, so that the thing under
+// test is the IMAGE rather than this machine's node_modules — its header
+// argues that at length and it is not repeated here. This module is what
+// `--no-docker` uses, what a machine with no docker falls back to, and what a
+// COVERAGE run uses of necessity: V8 writes its data from inside the process
+// being measured, into a directory that process can write, so an instrumented
+// service has to be one this runner started.
+//
+// So the three numbered decisions above are still live — a coverage run and a
+// dockerless run both take every one of them — and the lifetime rule is
+// unchanged in both directions: this module's caller stops what this module
+// started, and never touches a service it was merely handed.
 // ===========================================================================
 
 const { spawn } = require('child_process');

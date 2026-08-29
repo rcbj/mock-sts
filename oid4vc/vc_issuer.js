@@ -122,7 +122,7 @@ function vciMetadata(req) {
     cryptographic_binding_methods_supported: ['jwk'],
     credential_signing_alg_values_supported: ['RS256'],
     proof_types_supported: {
-      jwt: { proof_signing_alg_values_supported: ['ES256', 'RS256'] }
+      jwt: { proof_signing_alg_values_supported: stsCrypto.JWS_ASYMMETRIC_ALGS }
     },
     display: [{
       name: 'Identity Credential',
@@ -151,7 +151,7 @@ function vciMetadata(req) {
     cryptographic_binding_methods_supported: ['jwk'],
     credential_signing_alg_values_supported: ['RS256'],
     proof_types_supported: {
-      jwt: { proof_signing_alg_values_supported: ['ES256', 'RS256'] }
+      jwt: { proof_signing_alg_values_supported: stsCrypto.JWS_ASYMMETRIC_ALGS }
     },
     display: [{
       name: 'Identity Credential (JWT VC, no selective disclosure)',
@@ -173,7 +173,7 @@ function vciMetadata(req) {
     cryptographic_binding_methods_supported: ['did:key'],
     credential_signing_alg_values_supported: ['bbs-2023'],
     proof_types_supported: {
-      jwt: { proof_signing_alg_values_supported: ['ES256'] }
+      jwt: { proof_signing_alg_values_supported: stsCrypto.JWS_ASYMMETRIC_ALGS }
     },
     display: [{
       name: 'Identity Credential (ldp_vc, BBS selective disclosure)',
@@ -352,8 +352,15 @@ function verifyProofJwt(proofJwt, credentialIssuer) {
     throw new Error('the proof typ must be openid4vci-proof+jwt, got "' + header.typ + '".');
   }
   if (!header.jwk) throw new Error('the proof header carries no jwk (this issuer binds to a JWK).');
-  if (['ES256', 'RS256'].indexOf(header.alg) < 0) {
-    throw new Error('unsupported proof alg "' + header.alg + '".');
+  // THE SAME LIST THE METADATA ADVERTISES, from the same place — this said
+  // ['ES256','RS256'] while the metadata had grown to eleven, so a wallet that
+  // read the metadata, chose EdDSA and signed a perfectly good proof was told
+  // its algorithm was unsupported by the very issuer that had just advertised
+  // it. Two lists describing one capability is how that happens; there is now
+  // one, in common/crypto.js.
+  if (stsCrypto.JWS_ASYMMETRIC_ALGS.indexOf(header.alg) < 0) {
+    throw new Error('unsupported proof alg "' + header.alg + '"; this issuer ' +
+      'accepts ' + stsCrypto.JWS_ASYMMETRIC_ALGS.join(', ') + '.');
   }
   if (claims.aud !== credentialIssuer) {
     throw new Error('the proof aud ("' + claims.aud + '") is not this credential issuer ("' +
@@ -374,19 +381,22 @@ function verifyProofJwt(proofJwt, credentialIssuer) {
     throw new Error('the proof nonce has expired.');
   }
 
-  let key;
+  // Delegated to the one verifier in common/crypto.js, with the algorithm list
+  // named explicitly (RFC 8725 section 3.1). What was here before hardcoded
+  // 'sha256' and special-cased ES256 alone for the ECDSA encoding, so ES384 and
+  // ES512 would have been checked against the WRONG DIGEST — a signature this
+  // issuer would reject as bad while it was perfectly good — and EdDSA and
+  // ES256K could not be verified at all.
+  //
+  // A proof of possession must be signed with a key the wallet holds, so the
+  // algorithm has to be asymmetric: a MAC would need the issuer to know the
+  // wallet's secret, which would make the proof prove nothing.
   try {
-    key = crypto.createPublicKey({ key: header.jwk, format: 'jwk' });
+    stsCrypto.verifyCompactJws(String(proofJwt || ''), header.jwk,
+      { algorithms: stsCrypto.JWS_ASYMMETRIC_ALGS });
   } catch (e) {
-    throw new Error('the proof header jwk is not a usable public key: ' + e.message);
-  }
-  const data = Buffer.from(parts[0] + '.' + parts[1], 'ascii');
-  const sig = b64uDecode(parts[2]);
-  const opts = (header.alg === 'ES256')
-    ? { key: key, dsaEncoding: 'ieee-p1363' }
-    : { key: key };
-  if (!crypto.verify('sha256', data, opts, sig)) {
-    throw new Error('the proof signature does not verify with the key in its own header.');
+    throw new Error('the proof signature does not verify with the key in ' +
+      'its own header: ' + e.message);
   }
   logArtifact('OID4VCI proof of possession', 'verified', { header: header, payload: claims });
   log.debug("Leaving verifyProofJwt(). The proof is good.");

@@ -727,6 +727,18 @@ const SETTINGS = [
                  'found by the session it was ISSUED on, which is recorded ' +
                  'beside it rather than carried as a claim.' },
 
+  { key: 'oauth2.eddsaCurve', group: 'OAuth 2.0 / OIDC',
+    label: 'EdDSA curve', env: 'STS_OAUTH2_EDDSA_CURVE', type: 'string',
+    dflt: 'Ed25519', runtime: true, choices: ['Ed25519', 'Ed448'],
+    description: 'Which Edwards curve an EdDSA signature is made on. RFC 8037 ' +
+                 'registers ONE algorithm value for both curves and puts the ' +
+                 'curve in the key itself, so a client that registers ' +
+                 'id_token_signed_response_alg="EdDSA" has no way to say ' +
+                 'which it wants — this is that way. BOTH keys are published ' +
+                 'in the JWKS whatever this is set to, with different kids, ' +
+                 'so a verifier follows the kid in the header and needs to ' +
+                 'know nothing about this setting; changing it would ' +
+                 'otherwise strand every client holding a cached JWKS.' },
   { key: 'oauth2.clientAssertionSkewS', group: 'OAuth 2.0 / OIDC',
     label: 'Client assertion clock skew (s)',
     env: 'STS_OAUTH2_CLIENT_ASSERTION_SKEW_S', type: 'int', dflt: 60,

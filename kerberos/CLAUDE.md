@@ -302,13 +302,25 @@ anybody tries it.
 and `tests/krb5_delegation_interop.js` require `krb5_kdc.js` and
 `krb5_service.js` directly, through `tests/module_paths.js`'s `mockStsModule()`,
 and `tests/Dockerfile` copies the transitive closure of what those two require
-into its image. **The 2026-08-23 reorganisation broke both**, because they name
-flat paths (`sts/krb5_kdc.js`). Nothing was changed in that repository; what it
-needs is written down in `docs/parent-project-migration.md`, and it has to land
-together with the `sts/` gitlink bump.
+into its image. The 2026-08-23 reorganisation broke both, because they named flat
+paths (`sts/krb5_kdc.js`); **both were repaired over there on 2026-08-28** and
+this paragraph described the breakage as open until then.
 
-`MOCK_STS_DIR=/path/to/mock-sts` still points those tests at a working copy, and
-it will keep working once `mockStsModule()` knows about the subdirectories.
+**Those four callers still pass BARE filenames, and that is correct — do not add
+directories to them.** `mockStsModule()` was fixed by making the RESOLVER search
+the mock's subdirectories rather than by making every caller name one, so
+`mockStsModule("krb5_kdc.js")` finds `kerberos/krb5_kdc.js` on its own and a
+future move of a module between directories here costs that project nothing.
+
+What is still live is the CLOSURE rather than the paths: give any module those
+three reach a new `require()`, and `tests/Dockerfile` needs a COPY line in the
+commit that bumps the `sts/` gitlink across the change, or the four jobs die at
+load with `Cannot find module` naming a file nobody edited. See
+`docs/parent-project-migration.md`.
+
+`MOCK_STS_DIR=/path/to/mock-sts` still points those tests at a working copy,
+unchanged; below it there is now a sibling-checkout candidate that resolves and
+says loudly that the run reflects an unpushed working copy.
 
 ---
 

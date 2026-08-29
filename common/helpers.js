@@ -66,6 +66,7 @@ const bbs2023 = require('./vendored/bbs2023.js');
 // is below and stays here.
 // ---------------------------------------------------------------------------
 const stsCrypto = require('./crypto');
+const pqJose = require('./pq_jose');
 // TRUST REALMS. Two things in this file are per realm and both are here rather
 // than in twenty modules for the same reason: this is where every one of them
 // already looks. `baseUrlOf()` is how eighty call sites build a URL, and `STS`
@@ -187,11 +188,86 @@ function makeStsKeys() {
     serialNumber: '02',
     years: 5
   });
-  log.debug("Leaving makeStsKeys().");
+  // -------------------------------------------------------------------------
+  // THE OTHER SIGNING KEYS, AND WHY THEY ARE GENERATED UNCONDITIONALLY.
+  //
+  // This service advertised RS* and PS* for a signed UserInfo response and NOT
+  // ES* or EdDSA, and the reason was never that it could not perform them — it
+  // was that the only key here was RSA, so there was nothing for a client to
+  // verify an ES256 signature against. That is a capability withheld because a
+  // key pair was not generated, which is the wrong reason for a debugging tool
+  // to refuse anything: the algorithm a person came here to reproduce is
+  // exactly the one their real identity provider uses.
+  //
+  // So every curve the JOSE registry names for a signature gets a key, at
+  // startup, always. The cost is the argument for doing it rather than against:
+  // the RSA key above is ~100ms and these four together are under a
+  // millisecond, so they are free beside what this function already spends.
+  // They are NOT lazy for the same reason — a lazily-made key is one that might
+  // not exist when the JWKS is published, and a JWKS that varies by what has
+  // been asked for is a JWKS a client cannot cache.
+  //
+  // Each gets a `kid` of its own derived from its own public key, so the
+  // reasoning about kid collisions above holds per key rather than per service.
+  // -------------------------------------------------------------------------
+  const extraKeys = [
+    { alg: 'ES256', kty: 'EC', gen: ['ec', { namedCurve: 'prime256v1' }] },
+    { alg: 'ES384', kty: 'EC', gen: ['ec', { namedCurve: 'secp384r1' }] },
+    { alg: 'ES512', kty: 'EC', gen: ['ec', { namedCurve: 'secp521r1' }] },
+    // secp256k1 (RFC 8812). Its curve is not one of the three NIST ones and
+    // node's OpenSSL has it anyway; what it costs is a signature FORMAT
+    // conversion at signing time, in stsCrypto.signJws(), because the library
+    // that signs everything else here has no ES256K at all.
+    { alg: 'ES256K', kty: 'EC', gen: ['ec', { namedCurve: 'secp256k1' }] },
+    { alg: 'EdDSA', kty: 'OKP', gen: ['ed25519', undefined] },
+    // ED448, AND WHY IT NEEDS A SECOND ENTRY UNDER THE SAME `alg`.
+    //
+    // RFC 8037 registers ONE algorithm value for both Edwards curves — the
+    // curve lives in the key's `crv` — so a client that registers
+    // `id_token_signed_response_alg: "EdDSA"` has not said which it wants and
+    // there is no member for it to say so with. Both keys are therefore
+    // published, with different `kid`s, and `oauth2.eddsaCurve` decides which
+    // one signs. A verifier follows the `kid` in the header and needs to know
+    // nothing about the setting.
+    //
+    // Publishing both rather than only the configured one is deliberate: a
+    // JWKS that changed shape when a setting changed would strand every client
+    // holding a cached copy.
+    { alg: 'EdDSA', curve: 'Ed448', kty: 'OKP', gen: ['ed448', undefined] }
+  ].map(function (spec) {
+    const pair = spec.gen[1]
+      ? crypto.generateKeyPairSync(spec.gen[0], spec.gen[1])
+      : crypto.generateKeyPairSync(spec.gen[0]);
+    const publicJwk = pair.publicKey.export({ format: 'jwk' });
+    // The kid is derived from the key's own public material, the way the RSA
+    // one is derived from its certificate: two instances of this mock must not
+    // publish one name over two different keys.
+    const material = JSON.stringify([publicJwk.crv, publicJwk.x,
+                                     publicJwk.y || '']);
+    return {
+      alg: spec.alg,
+      privateKey: pair.privateKey,
+      // The kid names the CURVE as well as the algorithm, because the two
+      // EdDSA entries share an `alg` and a kid that did not tell them apart
+      // would be one name over two keys — the collision this whole scheme
+      // exists to avoid.
+      publicJwk: Object.assign({ use: 'sig', alg: spec.alg }, publicJwk,
+        { kid: 'sts-mock-' +
+          (spec.curve || spec.alg).toLowerCase() + '-' +
+          forge.md.sha256.create().update(material).digest().toHex().slice(0, 8) })
+    };
+  });
+
+  log.debug("Leaving makeStsKeys(). " + (extraKeys.length + 1) + " key(s).");
   return {
     privateKeyPem: keys.privateKeyPem,
     certPem: keys.certPem,
     certB64: keys.certB64,
+    // Keyed by JOSE `alg` so a signer can ask for what it needs by name. The
+    // RSA key is deliberately NOT in here: it is `privateKey`/`kid` above,
+    // where eight modules already read it, and moving it would have been a
+    // change to every one of them for no gain.
+    extraKeys: extraKeys,
     // A `kid` names a KEY, so it is derived from the key material rather than
     // hard-coded. This key is regenerated on every start, and the kid was
     // previously a constant — so two instances of this mock (a stale container
@@ -333,10 +409,13 @@ function iso(offsetMin) {
 
 // base64url, in both directions. Deliberately without entering/leaving logs:
 // these are called several times per token and would drown the log.
-function b64u(buf) {
-  return Buffer.from(buf).toString('base64')
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+// base64url, from common/crypto.js and not written again here. This file had
+// its own — a base64 encode plus three replaces, which is what you write before
+// node had `'base64url'` — and authn/webauthn.js had a third. They agreed, so
+// nothing was ever wrong; what a third copy costs is that the next person to
+// need one writes a fourth, and one of the four eventually forgets the padding
+// strip. The name is kept because a dozen call sites in this file use it.
+const b64u = stsCrypto.b64u;
 
 function b64uDecode(s) {
   return Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
@@ -469,6 +548,144 @@ function oauthError(res, status, error, description) {
 // front-channel logout and adding claims to every token to make an admin page easier
 // to draw would change what every client receives. A caller that passes nothing is
 // unaffected, which is why the parameter is at the end and optional.
+// ---------------------------------------------------------------------------
+// WHICH KEY SIGNS A GIVEN ALGORITHM — the one answer, for the whole service.
+//
+// `signJwt()` below signs RS256 with the service key, which is what almost
+// everything here wants. This is for the places where a CLIENT chose the
+// algorithm: a registered `userinfo_signed_response_alg`, a registered
+// `id_token_signed_response_alg`, and anything else a specification lets a
+// relying party ask for.
+//
+// It lives here rather than beside any one of those because the mapping from
+// algorithm to key is a property of THIS SERVICE'S KEY MATERIAL and not of the
+// endpoint doing the signing — it was written once inside the UserInfo
+// endpoint and a second caller would have copied it.
+//
+// HMAC is deliberately not here: its key is the CLIENT'S secret, which this
+// function has no way to know and no business holding. A caller wanting an
+// HS\* signature passes the secret itself.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE POST-QUANTUM KEYS, GENERATED LAZILY AND KEPT.
+//
+// Eleven of them — ML-DSA at three sizes, SLH-DSA at two, and the six
+// composite ML-DSA + traditional algorithms — and together they cost about
+// **1.9 seconds**, nearly all of it one SLH-DSA-SHAKE keygen. That is twelve
+// times the RSA key this service already makes at startup, PER REALM, and a
+// realm exists to be cheap.
+//
+// So they are made on first use and cached, which is the opposite of the
+// decision made for the EC keys a few lines up — those are microseconds and
+// making them eagerly keeps the JWKS constant from the first request. Here the
+// cost is real, so the first thing that actually wants a post-quantum key pays
+// for it and everything else pays nothing.
+//
+// What that trades away is honest and small: the FIRST JWKS fetch on a realm
+// generates all eleven, so it is slow once. A JWKS that grew a key later would
+// be far worse — a client that cached it would be missing the key it needs —
+// which is why the JWKS triggers the whole set rather than one at a time.
+// ---------------------------------------------------------------------------
+function pqKeysFor(keys) {
+  log.debug("Entering pqKeysFor().");
+  if (!keys.pqKeys) {
+    const started = Date.now();
+    keys.pqKeys = pqJose.PQ_ALGS.map(function (alg) {
+      const pair = pqJose.generate(alg);
+      const material = Buffer.from(pair.pub).toString('base64');
+      return {
+        alg: alg,
+        privateKey: pair.priv,
+        publicJwk: pqJose.akpPublicJwk(alg, pair.pub,
+          'sts-mock-' + alg.toLowerCase() + '-' +
+          forge.md.sha256.create().update(material).digest().toHex()
+            .slice(0, 8))
+      };
+    });
+    log.info('The post-quantum signing keys were generated for the "' +
+             keys.realm + '" realm: ' + keys.pqKeys.length + ' key(s) in ' +
+             (Date.now() - started) + 'ms.');
+  }
+  log.debug("Leaving pqKeysFor(). " + keys.pqKeys.length + " key(s).");
+  return keys.pqKeys;
+}
+
+// Every signing key this realm can publish — the RSA one, the curve ones, and
+// the post-quantum ones, which this call brings into being.
+function allSigningKeys() {
+  log.debug("Entering allSigningKeys().");
+  const keys = stsKeysFor();
+  const out = (keys.extraKeys || []).concat(pqKeysFor(keys));
+  log.debug("Leaving allSigningKeys(). " + out.length + " key(s).");
+  return out;
+}
+
+function signingKeyFor(alg) {
+  log.debug("Entering signingKeyFor(). alg=" + alg);
+  const spec = stsCrypto.JWS_ALGS[alg];
+  if (!spec) {
+    log.debug("Leaving signingKeyFor(). Unknown algorithm.");
+    throw new Error('this service cannot sign with "' + alg + '"; it signs ' +
+      'with ' + stsCrypto.JWS_SIGNING_ALGS.join(', ') + '.');
+  }
+  if (spec.family === 'hmac') {
+    log.debug("Leaving signingKeyFor(). HMAC has no key here.");
+    throw new Error('an HS* signature is made with the client\'s own secret, ' +
+      'which this service does not choose. Pass the secret to signJws() ' +
+      'directly.');
+  }
+  if (spec.family === 'rsa') {
+    log.debug("Leaving signingKeyFor(). The service RSA key.");
+    return { key: STS.privateKey, kid: STS.kid };
+  }
+  const found = allSigningKeys().filter(function (one) {
+    // The two EdDSA entries share an `alg`, so the CURVE decides between them
+    // — `oauth2.eddsaCurve`, which defaults to Ed25519 and is the only way a
+    // client can end up with an Ed448 signature (RFC 8037 gives it no member
+    // to ask with).
+    if (one.alg !== alg) {
+      return false;
+    }
+    if (alg !== 'EdDSA') {
+      return true;
+    }
+    const wanted = String(config.value('oauth2.eddsaCurve') || 'Ed25519');
+    return (one.publicJwk.crv || 'Ed25519') === wanted;
+  })[0];
+  if (!found) {
+    // This is a defect here rather than anything the caller did: the algorithm
+    // is in the table, so something advertises it, and no key was generated.
+    log.debug("Leaving signingKeyFor(). No key for " + alg + ".");
+    throw new Error('this service names "' + alg + '" as a signing algorithm ' +
+      'and has generated no key for it. That is a defect in makeStsKeys(), ' +
+      'not in the request.');
+  }
+  log.debug("Leaving signingKeyFor(). " + alg + ".");
+  return { key: found.privateKey, kid: found.publicJwk.kid };
+}
+
+// Sign with whichever key the algorithm needs. `secret` is required for HS\*
+// and ignored otherwise.
+function signJwtAs(payload, alg, secret) {
+  log.debug("Entering signJwtAs(). alg=" + alg);
+  const spec = stsCrypto.JWS_ALGS[alg];
+  if (spec && spec.family === 'hmac') {
+    if (!secret) {
+      log.debug("Leaving signJwtAs(). No secret for an HMAC algorithm.");
+      throw new Error(alg + ' is signed with the client_secret, and this ' +
+        'client has none — a public client cannot use a symmetric algorithm.');
+    }
+    // No `kid`: the key is the client_secret, which is in no JWK Set, and a
+    // kid pointing into the JWKS would send the client to the wrong key.
+    log.debug("Leaving signJwtAs(). HMAC.");
+    return stsCrypto.signJws(payload, secret, { algorithm: alg });
+  }
+  const signer = signingKeyFor(alg);
+  log.debug("Leaving signJwtAs(). " + alg + ".");
+  return stsCrypto.signJws(payload, signer.key,
+                           { algorithm: alg, keyid: signer.kid });
+}
+
 function signJwt(payload, context) {
   log.debug("Entering signJwt(). typ=" + (payload.typ || '(none)'));
   logArtifact('OAuth token (' + (payload.typ || 'unknown') + ')', 'before signing',
@@ -739,6 +956,9 @@ function numberWord(count) {
 }
 
 module.exports = {
+  signingKeyFor: signingKeyFor,
+  allSigningKeys: allSigningKeys,
+  signJwtAs: signJwtAs,
   log: log,
   logArtifact: logArtifact,
   headersOf: headersOf,

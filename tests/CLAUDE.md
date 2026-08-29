@@ -2,8 +2,32 @@
 
 ## What this directory is for, and what it is NOT for
 
-**This is not the suite for this service.** The suite for this service is the
-parent project's `../oauth2-oidc-debugger/tests/`, and a test that drives this
+**THIS DIRECTORY HAS HELD BOTH HALVES OF THIS SERVICE'S COVERAGE SINCE
+2026-08-28, AND EVERYTHING BELOW WAS WRITTEN WHEN IT HELD ONE.** Read the split
+first or the rest of this file will read as though it contradicts itself:
+
+| | What it is | Where it is authored |
+|---|---|---|
+| `tests/*.js` | the IN-PROCESS half — this repository's own module contracts, no port, no container, under a second | here |
+| `tests/vendored/` | the PROTOCOL half — thirteen byte-identical copies of the parent's mock-only jobs, driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against | **the parent project**; not edited here |
+
+Everything this file says about what belongs HERE is about the first row. The
+second row is copies, `tests/vendored/MANIFEST.js` argues them, and the rule
+that governs them is `common/vendored/`'s: **edit the parent's copy, then
+`./local-run-tests.sh --vendor-sync`.** A fix made in `tests/vendored/` is
+overwritten by the next sync and never reaches the stack that gates that
+project.
+
+Why they are copies at all: this repository's launcher could previously run
+those jobs only when the parent checkout happened to sit beside it, so on a
+machine where it did not, thirteen of twenty-three jobs were quietly absent from
+a run that said "Tests passed". The suite is self-contained now — it needs no
+other checkout to run any of it.
+
+---
+
+**This is not where the protocol suite is WRITTEN.** The suite for this service is the
+parent project's `../id-proto-debugger/tests/`, and a test that drives this
 service's PROTOCOL SURFACE goes there — see the "Tests" section of the
 repository root's `CLAUDE.md` for the decision and how it was made. It was made
 the hard way: `tests/saml11_sso.js` was written here on 2026-08-25, the first
@@ -56,6 +80,12 @@ and **nothing else** — no port, no container, no browser, no network. The whol
 suite is under a second. If a test here ever needs a listener, that is the
 signal that it belongs in the parent suite instead.
 
+**That paragraph is about `npm test` and the files in this directory, and it
+stays exactly true.** The VENDORED half does need a port, a browser and a second
+npm package (`tests/package.json` — see below); it is reached by
+`./local-run-tests.sh` and never by `npm test`, which is byte for byte the run it
+always was.
+
 **`--only` IS A FILTER OVER THE DISCOVERED LIST, NOT A LIST**, which is the
 distinction the design of `run.js` turns on — there is still nothing to keep up
 to date — and a pattern matching nothing is an ERROR rather than an empty pass,
@@ -64,10 +94,17 @@ because a typo in a filter must never read as "everything passed".
 ### The report, and where the tooling lives
 
 ```bash
-./local-run-tests.sh              # the suite, with a report written
+./local-run-tests.sh                 # ALL 23 jobs, with a report written —
+                                     # the service in a container built from
+                                     # this working tree
+./local-run-tests.sh --no-docker     # the same, with the service run on this
+                                     # machine (and what --coverage uses)
+./local-run-tests.sh --keep-stack    # leave the container up afterwards
+./local-run-tests.sh --no-protocol   # only the ten in-process files
 ./local-run-tests.sh --only=crypto --open
-./local-run-tests.sh --protocol   # AND the parent project's mock-only jobs
-./run-coverage.sh --protocol      # the same, with coverage collected
+./local-run-tests.sh --vendor-check  # is tests/vendored/ still in sync?
+./local-run-tests.sh --vendor-sync   # re-copy the parent's files over it
+./run-coverage.sh                    # the same set, with coverage collected
 ```
 
 `./local-run-tests.sh` is this repository's answer to the parent project's
@@ -97,14 +134,55 @@ Three things about the report runner are decisions rather than mechanics:
   the bunyan record whose `msg` begins with a tick or a cross. No new protocol,
   no change to `harness.js`, and every file written before the report existed
   is reported in full by it.
-* **`--protocol` runs the PARENT PROJECT'S jobs against this working tree.**
-  Most of what tests this service is over there by the rule at the top of this
-  file, and their suite drives the pinned `sts/` gitlink — so those jobs do not
-  normally run against what you just edited. This starts a throwaway copy of
-  this tree on nine ports of its own, runs the jobs a lone mock can satisfy,
-  and stops it by the pid it started. About fifteen seconds, no docker. Which
-  jobs is DERIVED from their own runner rather than listed here, for this
-  directory's usual reason.
+* **THE PROTOCOL JOBS RUN BY DEFAULT AND A JOB THAT CANNOT RUN IS A FAILURE.**
+  Both changed on 2026-08-28 and both were the same mistake seen twice. The
+  default used to be the ten in-process files, so a bare run answered in three
+  seconds having driven no protocol endpoint, no admin console and no browser —
+  and said "Tests passed". And a throwaway service that failed to start left
+  thirteen jobs marked `skipped`, which the summary counts as passing, so a run
+  in which nothing was checked exited zero. A skip is now only for something
+  deliberately left out (`--no-browser`, `--only`); an intended job that did not
+  run is red, with the reason in the row.
+* **THE TEST DEPENDENCIES ARE A SECOND npm PACKAGE**, `tests/package.json`,
+  carrying `commander`, `selenium-webdriver` and the `@noble`/`node-forge`
+  packages the vendored wallet modules need. They are not root
+  `devDependencies` because `.npmrc` carries `omit=dev` — the same trap the
+  coverage renderer below was written around — and not root `dependencies`
+  because a browser driver has no business in the service's production image.
+  `./local-run-tests.sh` installs them when they are missing; a job that cannot
+  load because they are absent FAILS naming the command, rather than skipping.
+* **The VENDORED jobs run against a copy of THIS working tree, IN A CONTAINER
+  since 2026-08-28.** Most of what tests this service is authored over there by
+  the rule at the top of this file, and their suite drives the pinned `sts/`
+  gitlink — so those jobs do not otherwise run against what you just edited.
+  `./local-run-tests.sh` builds an image from this tree, brings up one
+  container from the repository's own `docker-compose.yml`, and hands this
+  runner its URL with `--service-url`; the jobs themselves are still plain node
+  processes on this machine. About a minute plus the image build, most of the
+  minute being the browser job.
+
+  **THE LIFETIME RULE IS THAT WHOEVER STARTED IT STOPS IT**, and it is why
+  `--service-url` exists rather than this runner learning to speak compose. A
+  service handed in that way is never stopped here: the launcher's own trap
+  owns it, which is what makes `--keep-stack` possible and what stops a run
+  from tearing down a stack somebody asked to keep. `tools/service.js` — the
+  throwaway process on nine ports of its own, stopped by the pid it started —
+  is still what `--no-docker` uses and still the whole of what a COVERAGE run
+  can use, because V8 writes its data from inside the process being measured
+  and nothing here can reach into a container to collect it.
+
+  **WHICH jobs is a LIST now, in `tests/vendored/MANIFEST.js`, and that reverses
+  what this bullet said.** It used to be DERIVED — parsed out of the parent's
+  own runner, so a job added or renamed over there arrived here with nothing
+  edited, which is this directory's usual preference and was right while the
+  files were read from over there. It stopped working when they became copies:
+  the derivation's rule was "does the file mention `WSTRUST_STS_URL` or
+  `OID4VCI_ISSUER_URL`", and of the nineteen files copied, `sts_applications.js`
+  matches and is a HELPER while `sts_saml_encryption.js` is a job that declares
+  no `--url` option at all. Two wrong answers in nineteen, and each wrong answer
+  is a job that silently never runs — which is the exact failure the same day's
+  other two changes were made to stop. The list is the price of vendoring; it is
+  not a precedent for listing anything else here.
 
 **A protocol job can be AHEAD of this tree** — that suite is developed against
 its own checkout of this service — in which case it fails here naming a feature
@@ -213,9 +291,19 @@ Two rules that are not optional here:
 | `ldif_codec.js` | that every value this service can put in an attribute survives the RFC 2849 round trip `persistence.mode=ldif` writes — the base64 rules, the folding, `origin` riding as a comment, and a URL-valued attribute being refused rather than dereferenced |
 | `appconfig_persistence.js` | that a setting change reaches the store ON DISK, comes back the way the next start puts it back, and that a realm's settings and the process's are two different files |
 
+**`vendored/` is not in that table either, and for the opposite reason: it is
+ALL tests.** Thirteen jobs and the twenty files they need, copied from the
+parent project, listed and argued in `tests/vendored/MANIFEST.js`. They are not
+described here one by one because they are not this repository's to describe —
+`docs/test-suite-map.md` over there is where each is written down, and a
+paragraph here would be a second copy of it that drifts.
+
 `tools/` is not in that table because nothing in it is a test:
 `run-report.js` (the report generator), `coverage-report.js` (the V8 coverage
-renderer), `service.js` (one throwaway copy of this service, started and
+renderer), `vendor-check.js` (the drift check over `vendored/`, and a TOOL
+rather than a job on purpose — its own header argues why a check that needs the
+other checkout must not be what decides whether this repository is green),
+`service.js` (one throwaway copy of this service, started and
 stopped by pid, on nine ports of its own) and `coverage_entry.js` (`server.js`
 started so that its coverage survives being stopped — V8 writes on a CLEAN
 exit, and a service is stopped with a signal, so without this the protocol half

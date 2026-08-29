@@ -36,11 +36,16 @@
 # swap the two environment variables below to use it, and the postgres service
 # becomes dead weight rather than a requirement.
 #
-# THE TEST SUITE DOES NOT USE ANY OF THIS. The parent project's stack starts
-# this service with its own configuration and no persistence at all
-# (`persistence.mode` defaults to `memory`), which is what every job there has
-# always got and is why not one of them had to be changed. A test that persisted
-# would be a test whose second run started from the first run's leavings.
+# THE TEST SUITE USES THIS FILE AND NOT ONE WORD OF THIS PARAGRAPH'S SUBJECT,
+# AND THE DISTINCTION IS THE WHOLE POINT. Since 2026-08-28
+# `./local-run-tests.sh` brings the `sts` service below up as the thing its
+# protocol jobs drive — so this file is now on the path of every test run — but
+# it does so with `STS_PERSISTENCE_MODE=memory` and `--no-deps`, which means no
+# database, no volume that matters and nothing carried from one run to the
+# next. A test that persisted would be a test whose second run started from the
+# first run's leavings. The parent project's stack is unchanged and unaffected:
+# it starts this service with its own configuration and `persistence.mode` at
+# its default of `memory`, which is why not one job there had to change either.
 #
 # THE THREE VOLUMES, and why the third is a bind mount rather than a named one:
 #
@@ -60,6 +65,51 @@
 #              file is what a person EDITS and the store is what the console
 #              WRITES, and neither overwrites the other — the store's values sit
 #              above the file's in the same five-layer order they always did.
+# ---------------------------------------------------------------------------
+# EVERY VALUE A CALLER MIGHT HAVE TO MOVE IS A `${VAR:-default}` SINCE
+# 2026-08-28, AND THE DEFAULTS ARE WHAT THIS FILE ALWAYS HAD.
+#
+# `docker compose up --build` in this directory is byte-for-byte the stack it
+# was: container `sts` on host port 8081, `sts-postgres` beside it, persistence
+# in postgres. Nothing below changes for an operator who sets nothing.
+#
+# What the substitutions buy is a SECOND caller: `./local-run-tests.sh` brings
+# this same file up as the service its protocol jobs drive. That run needs four
+# things to differ, and every one of them is a thing that would otherwise break
+# somebody else's work on this machine:
+#
+#   STS_HOST_PORT               a free port, chosen per run, because 8081 is
+#                               where a person's own stack already is — and
+#                               under a fixed mapping compose does not merely
+#                               share it, it FAILS to bind and the run reports
+#                               a stack that never came up.
+#   STS_CONTAINER_NAME          `container_name` is a machine-wide name, so a
+#   STS_POSTGRES_CONTAINER_NAME test run reusing `sts` would refuse to start
+#                               while a dev container held it — and, worse,
+#                               `down` at the end would remove the dev one.
+#   STS_PERSISTENCE_MODE        `memory` for a test run. THIS IS NOT A TUNING
+#                               CHOICE: a suite that persisted would be a suite
+#                               whose second run started from the first run's
+#                               leavings, which is the failure that looks like
+#                               a flaky test and is not one. The launcher also
+#                               passes `--no-deps`, so the postgres service
+#                               below is never started for a test run at all.
+#   CONFIG_FILE                 the appconfig layer, for the same reason it is
+#                               settable everywhere else.
+#
+# `STS_LOG_LEVEL` is a BARE entry rather than a substitution, and that is not a
+# style difference: an EMPTY value is not a harmless default here. bunyan
+# throws `unknown level name: ""` while this service is still loading its
+# modules, so it never listens, and the run then reports a service that would
+# not answer rather than a log level. A bare key is passed through only when
+# the host environment actually has it, so unset means unset.
+#
+# NOTE FOR ANYONE ADDING A VALUE HERE: `sudo` empties the environment, so a
+# launcher that needs sudo for docker has to name each variable on the sudo
+# command line. `local-run-tests.sh`'s COMPOSE_FORWARDED_VARS is that list, and
+# a substitution added below with no row there substitutes to its DEFAULT with
+# nothing said — which is how the parent project's stack spent months ignoring
+# every tuning variable it was given.
 # ---------------------------------------------------------------------------
 version: '2.4'
 services:
@@ -83,7 +133,7 @@ services:
   # parsed out of it, because those two answers are one fetch away from a log.
   # -------------------------------------------------------------------------
   postgres:
-    container_name: sts-postgres
+    container_name: ${STS_POSTGRES_CONTAINER_NAME:-sts-postgres}
     hostname: postgres
     image: postgres:16-alpine
     environment:
@@ -117,7 +167,7 @@ services:
       start_period: 5s
 
   sts:
-    container_name: sts
+    container_name: ${STS_CONTAINER_NAME:-sts}
     hostname: sts
     # Same image name the parent project builds, so a local `docker compose up`
     # here and the suite there produce the one image rather than two that drift.
@@ -141,7 +191,7 @@ services:
     # published URL from the Host header of the request, so it does not need to be
     # told which address it was reached at.
     ports:
-      - "8081:8081"
+      - "${STS_HOST_PORT:-8081}:8081"
       # The directory's two sockets are NOT published by default, and that is a
       # choice about collisions rather than about usefulness: 389 and 636 are the
       # assigned LDAP ports, so a host already running slapd — which is the host
@@ -186,7 +236,13 @@ services:
       # The log level, and nothing else. debug is the point of a mock: every
       # endpoint call, and every assertion, JWT and SD-JWT VC both before and
       # after signing. Swap to ./env/test.js for a quiet run.
-      - CONFIG_FILE=./env/local.js
+      - CONFIG_FILE=${CONFIG_FILE:-./env/local.js}
+      # The service's own bunyan level, passed through ONLY when the host
+      # environment has it — see the note about the empty value in the
+      # header. Unset means the appconfig file decides, and that is
+      # `debug`: every request and every artifact before and after
+      # signing, which is the point of a mock and about half of its CPU.
+      - STS_LOG_LEVEL
       # ---------------------------------------------------------------------
       # PERSISTENCE. The directory, the trust realms and the runtime setting
       # changes survive `docker compose down` and come back on the next `up`.
@@ -202,8 +258,8 @@ services:
       # service had before 2026-08-27, which is still the default when nothing
       # says otherwise.
       # ---------------------------------------------------------------------
-      - STS_PERSISTENCE_MODE=postgres
-      - STS_DATABASE_URL=postgres://sts:sts@postgres:5432/sts
+      - STS_PERSISTENCE_MODE=${STS_PERSISTENCE_MODE:-postgres}
+      - STS_DATABASE_URL=${STS_DATABASE_URL:-postgres://sts:sts@postgres:5432/sts}
       # Where ldif mode would write. Set even in postgres mode so that the
       # volume above has a meaning and switching modes changes one line.
       - STS_PERSISTENCE_DATA_DIR=/usr/src/sts/data

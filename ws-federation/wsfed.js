@@ -206,6 +206,13 @@ const PASSIVE_PATH = '/wsfed';
 
 const RP_PATH = '/wsfed/rp';
 
+// How long the MOCK RELYING PARTY below keeps a wctx it minted. It is the
+// only state that relying party holds, and it is nothing to do with the
+// identity provider's own stores above — which is why it survived the
+// deletion of SIGNIN_TTL_MS and pendingSignIns and has to be declared here
+// rather than folded into them.
+const RP_CONTEXT_TTL_MS = 30 * 60 * 1000;
+
 // THIS PROFILE NO LONGER HOLDS AN INTERRUPTED SIGN-IN, and the store that did
 // is worth a line rather than a silent deletion. `pendingSignIns` was a
 // per-realm map from a sign-in id to the parameters the request arrived with,
