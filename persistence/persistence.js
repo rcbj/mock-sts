@@ -652,12 +652,17 @@ function start() {
   if (!directory) {
     // ldap_server.js was never required, which happens in a test that loads
     // this module alone. Reported rather than thrown for that reason.
-    log.error('persistence: no directory is installed — ldap/ldap_server.js ' +
-              'has not been required, so there is nothing to persist. ' +
-              'Falling back to memory mode.');
     activeMode = 'memory';
+    lastError = 'no directory is installed';
     log.debug('Leaving start(). No directory.');
-    return Promise.resolve({ mode: 'memory' });
+    return Promise.reject(new Error(
+      'persistence.mode is "' + chosen + '" and no directory is installed: ' +
+      'ldap/ldap_server.js has not been required, so there is nothing to ' +
+      'persist. This is a module-assembly problem rather than a store ' +
+      'problem — server.js requires that module long before this runs — and ' +
+      'it is fatal for the same reason an unreachable store is: a process ' +
+      'configured to persist and persisting nothing is the state this ' +
+      'refusal exists to prevent.'));
   }
 
   try {
@@ -669,14 +674,16 @@ function start() {
     // an image built without the dependency. Named, because "cannot find
     // module pg" arriving from inside a mock identity service is a sentence
     // nobody expects.
-    log.error('persistence: the "' + chosen + '" store could not be opened: ' +
-              err.message + '. Falling back to memory mode; nothing will be ' +
-              'written down.');
     driver = null;
     activeMode = 'memory';
     lastError = err.message;
     log.debug('Leaving start(). The driver would not load.');
-    return Promise.resolve({ mode: 'memory', error: err.message });
+    // The driver's own message already names the mode and says what to do —
+    // it is written for exactly this moment — so it is passed through rather
+    // than wrapped. A wrapper here produced "persistence.mode is postgres and
+    // its driver could not be loaded: persistence.mode is postgres but the pg
+    // package is not installed", which is the sentence twice.
+    return Promise.reject(err);
   }
 
   activeMode = chosen;
@@ -731,10 +738,38 @@ function start() {
     restoring = false;
     activeMode = 'memory';
     lastError = err.message;
-    log.error('persistence: the ' + chosen + ' store could not be read: ' +
-              err.message + '. Falling back to memory mode — this service is ' +
-              'running with its seeded directory and will not write anything ' +
-              'down. Nothing in the store was changed.' +
+    // ---------------------------------------------------------------------
+    // FATAL SINCE 2026-08-28, AND THIS REVERSES WHAT THIS BLOCK USED TO DO.
+    //
+    // It caught, logged, fell back to memory and RESOLVED, on the argument
+    // that a database outage must not take down sixteen protocol families and
+    // that the whole point of this service is that a client has something to
+    // talk to. That argument is still true of a store that breaks WHILE
+    // RUNNING — see flush(), which still records a failure and carries on —
+    // and it is the wrong answer at STARTUP, for a reason the old behaviour
+    // made worse rather than better:
+    //
+    //   **A PROCESS THAT WAS TOLD TO PERSIST AND IS NOT PERSISTING LOOKS
+    //   EXACTLY LIKE ONE THAT IS.** Every endpoint answers. The console draws.
+    //   A person creates realms, registers applications and configures a
+    //   federation partner, and all of it is thrown away on the next restart —
+    //   which is the restart they will do precisely because they expected the
+    //   work to survive it. The fallback was reported on /admin/persistence
+    //   and in the log, and neither is where somebody is looking while the
+    //   service appears to be working.
+    //
+    // So a store that was CONFIGURED and cannot be opened or read now stops
+    // the process. `persistence.mode=memory` — the default — reaches none of
+    // this and is unaffected, so a service nobody asked to persist behaves
+    // exactly as it always has.
+    //
+    // The message is built rather than thrown bare because it is the last
+    // thing the operator will see, and "connect ECONNREFUSED" on its own does
+    // not say which of the six settings to look at.
+    // ---------------------------------------------------------------------
+    const explanation = 'persistence.mode is "' + chosen + '" and the store ' +
+              'could not be read: ' + err.message + '. Nothing in the store ' +
+              'was changed.' +
               // -------------------------------------------------------------
               // AND IF THE CONNECTION STRING IS THE BUILT-IN ONE, SAY SO.
               //
@@ -757,12 +792,9 @@ function start() {
                   describeDefaultTarget() + '). Set STS_DATABASE_URL, or ' +
                   'persistence.databaseUrl in your appconfig file, to point ' +
                   'at the database you meant.'
-                : ''));
-    // Deliberately not rethrown: a database that is not there must not stop a
-    // mock identity service from starting. The whole point of this service is
-    // that a client has something to talk to.
+                : '');
     log.debug('Leaving start(). The store could not be read.');
-    return { mode: 'memory', error: err.message };
+    throw new Error(explanation);
   });
 }
 

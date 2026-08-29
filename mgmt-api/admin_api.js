@@ -86,6 +86,11 @@
 const app = require('../common/app');
 const { log, parseBody, baseUrlOf } = require('../common/helpers');
 const admin = require('../admin-ui/admin');
+// The setting table, for the two narrow doors' request schemas: their
+// properties are BUILT from the keys those doors refuse against, and the
+// TYPE of each comes from the row config.js already holds for it. See
+// narrowDoorProperties() below.
+const config = require('../common/config');
 // The two console roles, for the `enum` on the role parameter and on both
 // request bodies. A library that registers nothing, so requiring it here moves
 // no route; taking the ids from it rather than writing them twice is what stops
@@ -678,6 +683,36 @@ const PROTOCOL_SETTINGS_OPERATIONS = [
              log.debug("Leaving the management API " + row.console + " endpoint.");
            } };
 });
+
+// ---------------------------------------------------------------------------
+// THE REQUEST SCHEMA OF A NARROW DOOR, BUILT FROM THE LIST THAT DOOR ACTUALLY
+// REFUSES AGAINST.
+//
+// `/token-lifetimes/set` and `/saml-assertions/set` exist to give a caller one
+// refusal the wide `/config/set-many` cannot: a key outside their own list is
+// refused BY NAME rather than ignored. That makes the list load-bearing in the
+// document — a caller reads it to know what may be sent — and it was written
+// out here BY HAND beside a list held in admin.js. Both had drifted: this
+// document named four token-lifetime settings against six, and THREE assertion
+// settings against sixteen. So it is derived, the way every operation in this
+// file is derived from the table that registers it.
+//
+// The TYPE comes from config.js's own row for the setting, so a boolean does
+// not arrive in the document as an integer.
+function narrowDoorProperties(keys) {
+  log.debug("Entering narrowDoorProperties(). " + keys.length + " key(s).");
+  const out = {};
+  const byKey = {};
+  config.SETTINGS.forEach(function (setting) { byKey[setting.key] = setting; });
+  keys.forEach(function (key) {
+    const setting = byKey[key] || {};
+    const type = setting.type === 'bool' ? 'boolean'
+        : (setting.type === 'int' ? 'integer' : 'string');
+    out[key] = { type: type, description: setting.label || '' };
+  });
+  log.debug("Leaving narrowDoorProperties().");
+  return out;
+}
 
 const ROUTES = [
   { method: 'GET', path: BASE, tag: 'Service',
@@ -1910,14 +1945,17 @@ const ROUTES = [
         requestBodyRequired: true,
         requestBody: {
           type: 'object',
-          description: 'One property per lifetime, named by its dot path. ' +
-                       'Any subset of the four.',
-          properties: {
-            'oauth2.accessTokenTtlS': { type: 'integer' },
-            'oauth2.idTokenTtlS': { type: 'integer' },
-            'oauth2.refreshTokenTtlS': { type: 'integer' },
-            'oauth2.clockSkewS': { type: 'integer' }
-          },
+          description: 'One property per setting, named by its dot path. ' +
+                       'THESE AND NO OTHERS, and the list below is BUILT ' +
+                       'from the one this action refuses against rather than ' +
+                       'typed beside it: the door refuses anything outside ' +
+                       'it BY NAME, which is the whole reason it exists ' +
+                       'beside `POST /config/set-many` — that one IGNORES a ' +
+                       'key it does not know, which is right for a form ' +
+                       'posting a section and wrong for a caller who ' +
+                       'misspelt a lifetime. A document short by one is then ' +
+                       'a caller refused for following it.',
+          properties: narrowDoorProperties(admin.tokenLifetimeKeys()),
           examples: [{ 'oauth2.accessTokenTtlS': 60,
                        'oauth2.idTokenTtlS': 60,
                        'oauth2.refreshTokenTtlS': 86400,
@@ -2021,7 +2059,7 @@ const ROUTES = [
     },
     actions: [
       { action: 'set', operationId: 'setSamlAssertions',
-        summary: 'Set one or more of the three',
+        summary: 'Set one or more of the SAML assertion settings',
         description: 'A RUNTIME OVERRIDE, like every other change made ' +
                      'through this API: gone on restart in the default ' +
                      'memory mode, and written down and re-applied at the ' +
@@ -2051,14 +2089,14 @@ const ROUTES = [
         requestBodyRequired: true,
         requestBody: {
           type: 'object',
-          description: 'One property per setting, named by its dot path. ' +
-                       'Any subset of the three. The two lifetimes are in ' +
-                       'minutes; the skew is in seconds.',
-          properties: {
-            'saml2.assertionLifetimeMin': { type: 'integer' },
-            'saml11.assertionLifetimeMin': { type: 'integer' },
-            'saml.clockSkewS': { type: 'integer' }
-          },
+          description: 'One property per setting, named by its dot path, ' +
+                       'BUILT from the list this action refuses against ' +
+                       'rather than typed here — it named three of them for ' +
+                       'months while the action accepted sixteen. The ' +
+                       'lifetimes are in MINUTES and the skew and the ' +
+                       'artifact lifetimes are in SECONDS; each row of the ' +
+                       'GET carries its own unit and bounds.',
+          properties: narrowDoorProperties(admin.samlAssertionKeys()),
           examples: [{ 'saml2.assertionLifetimeMin': 1,
                        'saml11.assertionLifetimeMin': 1,
                        'saml.clockSkewS': 30 }],

@@ -1195,8 +1195,13 @@ to have several services quietly overwrite each other. One process per store.
 checklist for closing it.
 
 `/admin/persistence` in the console and `GET /admin-api/persistence` report which
-mode is in force, whether it fell back to memory because the store could not be
-opened, how much it holds, when it last wrote and what went wrong if that failed.
+mode is in force, how much it holds, when it last wrote and what went wrong if
+that failed. **A store that was configured and could not be OPENED does not get
+that far**: since 2026-08-28 this service refuses to start rather than running
+as something it is not — see *Persistence* below — so `mode` and
+`configuredMode` disagreeing is a state a running process cannot be in. What
+those pages still report is a store that broke afterwards, which is recorded
+and is not fatal.
 `GET /ldap` carries the same object and is not behind the console gate.
 
 ### The JSON-LD contexts are not optional
@@ -5498,6 +5503,73 @@ Two consequences worth knowing before changing this:
 
 * **Absent is not empty.** No `claims` member means "whatever you issue" and every authorization made before this existed means exactly that, so `requestedClaimPaths()` returns `null` rather than `[]` and the full configured set goes out. An empty array is not expressible at all — A.1 requires a non-empty one — so a caller that could not tell the two apart would issue an empty credential to every wallet that authorized with a scope.
 * **The Token Request accepts `authorization_details` too**, which is the only route the **pre-authorized code flow** has: it has no authorization request to have sent them in. Section 6.1.1 allows it in both flows. What the **offer** was for bounds it — a detail naming a configuration the Credential Offer did not is refused — and the refresh grant carries the granted details forward, because an access token that dropped them would make the section 14.5 refresh fail at the credential endpoint with "that identifier was not granted".
+
+## Running the tests
+
+```bash
+npm test                          # the in-process suite: one process, under
+                                  # two seconds, no port and no container
+./local-run-tests.sh              # the same suite, with a report written
+./local-run-tests.sh --only=crypto --open
+./local-run-tests.sh --protocol   # AND the protocol jobs from the parent
+                                  # project, against a throwaway copy of this
+                                  # working tree
+./run-coverage.sh --protocol      # the same run, with coverage collected
+```
+
+`npm test` is what `tests/` is for and is unchanged by everything below it: it
+needs `npm install` to have been run and nothing else — no port, no container,
+no browser, no network — and it asserts this repository's own module contracts,
+which no caller over HTTP could check. `tests/CLAUDE.md` argues where the line
+is.
+
+**`./local-run-tests.sh` adds a report** — `tests/report/<timestamp>/` with
+`report.html`, JUnit `report.xml`, `summary.json` and one log per job, and
+`tests/report/latest` pointing at the newest. It runs each test file in a
+process of its own, so a file that hangs is a job that times out rather than a
+suite that never finishes, and a file that takes its process down is one red job
+rather than a run with no report at all. The per-assertion detail in the report
+is read out of what the tests already print, so a test written before any of
+this existed is reported in full by it.
+
+**`--protocol` is the one to know about.** The tests that drive this service
+over HTTP live in the parent project, and that suite drives the `sts/` gitlink
+over there — which is pinned, so a change made in this working tree is not
+covered by it until somebody bumps the pin. `--protocol` starts a throwaway copy
+of THIS tree (nine ports of its own, both SPIFFE Unix sockets off, stopped by
+the pid it started) and runs the jobs a lone mock can satisfy against it: the
+metadata drift checks, the management API and every one of its operations, the
+whole admin console, DPoP, the authorization server's endpoints, the DID-named
+issuer, SAML encryption, and the Linked-Data credential jobs. About fifteen
+seconds, no docker. Which jobs run is derived from the parent's own runner
+rather than listed here, so a test added over there arrives with nothing edited.
+A job of theirs can also be AHEAD of this tree and then fails here naming a
+feature this tree has not got — which is a fact about two checkouts, and the
+report says which side every job came from.
+
+**`./run-coverage.sh` collects coverage with nothing installed.** It uses node's
+own `NODE_V8_COVERAGE` and renders the result with `tests/tools/coverage-report.js`
+— written here rather than being `c8` because `.npmrc` carries `omit=dev` and the
+Dockerfile passes `--omit=dev`, so a `devDependency` added for coverage would be
+silently not installed and the script would fail for everybody. It writes
+`coverage/index.html` with a page per file showing which lines ran and how often,
+`coverage/lcov.info` in the standard format, and `coverage/raw/` — V8's own JSON,
+kept so that anybody who would rather use c8 can point it at the same data. The
+report has a column per domain (the in-process suite, the protocol jobs), because
+"which half of the run reached this file" is the question somebody deciding what
+to test next actually has.
+
+What those numbers mean is stated on the report itself and at the top of the
+renderer: **function coverage is exact** — V8 counted the calls — **line
+coverage is derived**, a line taking the count of the innermost V8 range over
+its first non-blank character and counting as code when it is neither blank nor
+wholly a comment, and **there are no branch numbers at all**, because V8's block
+ranges are not branch arms and a percentage with no definition is worse than
+none.
+
+Both reports and `coverage/` are gitignored: a report is a claim about one run on
+one machine, and a stale one committed beside the code would be read as a claim
+about the code.
 
 ## Where this came from, and what did not come with it
 

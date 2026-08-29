@@ -47,12 +47,70 @@ belong here.
 npm test              # from the repository root
 LOG_LEVEL=debug npm test
 node tests/run.js     # the same thing
+node tests/run.js --only=ldif      # one file, by any part of its name
+node tests/run.js --list           # what there is
 ```
 
 It needs `npm install` to have been run (it uses `bunyan`, a normal dependency)
 and **nothing else** — no port, no container, no browser, no network. The whole
 suite is under a second. If a test here ever needs a listener, that is the
 signal that it belongs in the parent suite instead.
+
+**`--only` IS A FILTER OVER THE DISCOVERED LIST, NOT A LIST**, which is the
+distinction the design of `run.js` turns on — there is still nothing to keep up
+to date — and a pattern matching nothing is an ERROR rather than an empty pass,
+because a typo in a filter must never read as "everything passed".
+
+### The report, and where the tooling lives
+
+```bash
+./local-run-tests.sh              # the suite, with a report written
+./local-run-tests.sh --only=crypto --open
+./local-run-tests.sh --protocol   # AND the parent project's mock-only jobs
+./run-coverage.sh --protocol      # the same, with coverage collected
+```
+
+`./local-run-tests.sh` is this repository's answer to the parent project's
+launcher of the same name, and `tests/tools/run-report.js` is what it drives.
+It writes `tests/report/<timestamp>/` — `report.html`, JUnit `report.xml`,
+`summary.json` and one log per job — and points `tests/report/latest` at it.
+Both are gitignored.
+
+**THE TOOLING IS IN `tools/`, AND THAT IS THE ONE DECISION IN IT WORTH
+ARGUING.** `run.js` discovers a test as *any `.js` file in this directory that
+is not itself or `harness.js`*, so a report generator sitting beside them would
+have to be added to that exclusion list — and then so would the next tool, and
+the list would be exactly the "second place to forget" this directory was
+designed not to have. `readdirSync` is not recursive and `/\.js$/` does not
+match a directory, so a subdirectory costs the discovery rule nothing.
+
+Three things about the report runner are decisions rather than mechanics:
+
+* **It runs each test file in a PROCESS OF ITS OWN**, where `npm test` runs
+  them all in one. That buys three things — a file that HANGS is a job that
+  times out rather than a suite that never finishes, a file that takes the
+  process down is one red job rather than a run with no report, and the
+  process-wide state rule below stops being able to make ANOTHER file fail.
+  The rule still holds, because `npm test` is what CI runs and it still shares
+  one process.
+* **The assertion detail is PARSED out of what the harness already prints** —
+  the bunyan record whose `msg` begins with a tick or a cross. No new protocol,
+  no change to `harness.js`, and every file written before the report existed
+  is reported in full by it.
+* **`--protocol` runs the PARENT PROJECT'S jobs against this working tree.**
+  Most of what tests this service is over there by the rule at the top of this
+  file, and their suite drives the pinned `sts/` gitlink — so those jobs do not
+  normally run against what you just edited. This starts a throwaway copy of
+  this tree on nine ports of its own, runs the jobs a lone mock can satisfy,
+  and stops it by the pid it started. About fifteen seconds, no docker. Which
+  jobs is DERIVED from their own runner rather than listed here, for this
+  directory's usual reason.
+
+**A protocol job can be AHEAD of this tree** — that suite is developed against
+its own checkout of this service — in which case it fails here naming a feature
+this tree does not have. That is information about the two checkouts and not a
+fault in the runner, which is why the report says which side every job came
+from.
 
 ## Adding one
 
@@ -128,9 +186,19 @@ Two rules that are not optional here:
   persistent store could leave it visible to the next RUN as well. In practice
   it cannot, because `persistence.mode` defaults to `memory` and every test here
   deletes `CONFIG_FILE` before requiring anything — so nothing in this directory
-  opens a store. **A test that deliberately turned one on would be the first,
-  and it would have to clean up a directory or a database rather than a Map**;
-  the codec test avoids that by testing the codec rather than the driver.
+  opens a store — with ONE exception since 2026-08-28. **A test that
+  deliberately turned one on would be the first, and it would have to clean up
+  a directory or a database rather than a Map**; the codec test avoids that by
+  testing the codec rather than the driver.
+
+  **`appconfig_persistence.js` IS that test, and it took the condition this
+  paragraph set.** It writes into a directory of its own under the system
+  temporary directory, made per run with `mkdtemp`, and removes it in a
+  `finally` — including when an assertion has failed, since a failing run is
+  exactly the one that would otherwise leave the litter behind. It also puts
+  back the five `STS_PERSISTENCE_*` variables, the override it sets and the
+  realm it creates, and it STOPS the store before removing the realm, so a
+  scheduled flush cannot fire against a table the realm has already gone from.
 
 ## What is in here
 
@@ -143,6 +211,15 @@ Two rules that are not optional here:
 | `federation_map_bands.js` | that the federation picture is THREE BANDS — left asks, right authenticates — that the four relationship states are four distinguishable strokes, that a brokered partner is ONE arrow which keeps that pair's counts, and that the per-application counts either add up or report the difference |
 | `spnego_identity.js` | what a SPNEGO sign-in claims: which part of a Kerberos principal becomes the session's username, and the `amr`/`acr` read off the ticket's own flags |
 | `ldif_codec.js` | that every value this service can put in an attribute survives the RFC 2849 round trip `persistence.mode=ldif` writes — the base64 rules, the folding, `origin` riding as a comment, and a URL-valued attribute being refused rather than dereferenced |
+| `appconfig_persistence.js` | that a setting change reaches the store ON DISK, comes back the way the next start puts it back, and that a realm's settings and the process's are two different files |
+
+`tools/` is not in that table because nothing in it is a test:
+`run-report.js` (the report generator), `coverage-report.js` (the V8 coverage
+renderer), `service.js` (one throwaway copy of this service, started and
+stopped by pid, on nine ports of its own) and `coverage_entry.js` (`server.js`
+started so that its coverage survives being stopped — V8 writes on a CLEAN
+exit, and a service is stopped with a signal, so without this the protocol half
+of a coverage run is silently empty).
 
 Both realm files bend the rule at the top of this file, and each says so in
 its own header rather than leaving a reader to catch it.
@@ -224,7 +301,67 @@ is still perfectly valid LDIF. The codec is also a pure function of a string, so
 a test that started a listener to reach it would be slower and no more
 convincing.
 
-**Its mutation record is the one to read before writing the next file here**,
+`appconfig_persistence.js` passes on the same clause one step further along,
+and it is the file that says what the line is FOR. The parent suite's
+`sts_admin_console.js` and `sts_admin_api_operations.js` go as far as anything
+driving the running service from outside can — the first of them in a real
+browser since 2026-08-28, which changes nothing about this line: they watch `/admin-api/persistence`'s write counter move, its dirty
+flag clear and its failure counter stay put. That is still an assertion about a
+number the service computed about itself. **What is IN the file cannot be asked
+over HTTP at all**, and the failure is invisible until a restart, in a different
+process — a value written with the wrong type, or not written, is correct on
+every endpoint for the whole life of the process that made it, and the damage
+appears on the next start as a setting that has quietly gone back to its
+default. So this file drives the real modules in process against a temporary
+directory and then READS the files.
+
+**It drives `ldif` and not `postgres`, and that is this directory's rule rather
+than an omission.** Both modes sit behind ONE driver interface, so everything
+asserted there — which of the three things is dirty, which store it belongs in,
+what `applyPersistedOverrides()` does with what comes back — is the same code
+path either way; what differs is the driver's own SQL, and reaching that needs a
+database, which is the one thing the *Running it* section says a test here may
+not need. The postgres driver is covered by
+`tests/sts_persistence_postgres.js` in the parent suite, which stands up a
+database and a mock of its own and RESTARTS it — the assertion no test in
+either directory could make before, because every other job drives a service
+somebody else started.
+
+It fills `persistence.setDirectory()` with two functions rather than requiring
+`ldap/ldap_server.js`, and that is a decision rather than a shortcut: the
+directory half has its own coverage in `ldif_codec.js`, what is under test here
+is the APPCONFIG and REALM halves, and requiring the real directory would mean
+requiring the console, which requires the authorization server, which is most of
+the service.
+
+**Its mutation record carries the same lesson `ldif_codec.js`'s does, and found
+it the same way.** Four mutants, and one of them survived the first version
+TWICE, for two different reasons. `setOverride()` writing into the process-wide
+map regardless of the realm was caught (2 assertions red), and `clearOverride()`
+not telling the store was caught (1). The realm branch of `configChanged()`
+switched off entirely was caught by NOTHING: the first version set the realm's
+value through `realms.setOverride()`, which writes the realm row directly and
+fires the realm change event, so it never reaches `configChanged()` at all. The
+write goes through `config.setOverride()` with the realm AMBIENT now, which is
+what every door a person uses actually does — and that still was not enough,
+because creating a realm makes the registry dirty on its own, so the create's
+write and the override's write coalesced into one and the assertion passed
+whether or not the override had scheduled anything. **The line that catches it
+is a `flush()` between the two**, and it is commented as such, because it reads
+like tidiness and is the whole guard.
+
+The fourth mutant — `checkOverride()` losing its `forRealm` default — is NOT
+caught here and is not meant to be. `setOverride()` passes that argument
+explicitly because it has the realm in hand, so in process the default is
+unreachable; what it fixes is the three call sites in `admin-ui/admin.js` that
+pre-validate a whole section before writing any of it, and those are only
+reachable over HTTP. That mutant is caught by `tests/sts_admin_console.js` in
+the parent suite, which presses the Save button those call sites are behind.
+**Two halves of one fix, each guarded where it is observable**, is what this
+directory's line looks like when it is working.
+
+**`ldif_codec.js`'s mutation record is the one to read before writing the next
+file here**,
 because one of its four mutants SURVIVED the first version and the reason is
 general. Three were caught immediately: dropping the trailing-space rule from
 `needsBase64()` (1 assertion red), folding one column too wide (3), and ignoring
@@ -240,6 +377,33 @@ round is mandatory here.
 
 ## What it does not do
 
-No framework, no `describe`/`it`, no coverage, no reporter plug-in, no
-`devDependencies`. The moment this needs a dependency to run, it stops being
-cheaper than the parent suite and the argument for its existence goes with it.
+No framework, no `describe`/`it`, no assertion library, no `devDependencies`.
+The moment this needs a dependency to RUN, it stops being cheaper than the
+parent suite and the argument for its existence goes with it.
+
+**THAT SENTENCE SAID "no coverage, no reporter plug-in" UNTIL 2026-08-28, AND
+BOTH OF THOSE NOW EXIST — WITH THE RULE ITSELF UNCHANGED**, which is the only
+reason they were allowed. `npm test` is byte for byte the run it always was:
+`bunyan` and node, nothing added, nothing to install. The report generator and
+the coverage renderer are separate entry points in `tools/` that use node
+builtins and the same one dependency, and NOTHING requires them.
+
+The coverage renderer is the case that had to be argued rather than assumed.
+The obvious answer is `c8`, which is what the parent project renders two of its
+three domains with — and it is the wrong answer HERE for a specific reason:
+`.npmrc` in this repository carries `omit=dev` and the Dockerfile passes
+`--omit=dev` besides (it is what keeps ldapjs's ~200 test packages out), so a
+`devDependency` added for coverage would be **silently not installed** by the
+ordinary `npm install` and the script would fail for everybody with a message
+about a missing binary. So the collection is node's own `NODE_V8_COVERAGE` —
+no wrapper binary in the spawn path, nothing for a test to opt into — and
+`tools/coverage-report.js` renders V8's data directly. The raw JSON is left in
+`coverage/raw/` for anybody who would rather point c8 at it themselves.
+
+**What that report can and cannot say is written at the top of that file and is
+worth reading before quoting a number from it.** Function coverage is exact:
+V8 counted the calls. Line coverage is DERIVED — a line's count is that of the
+innermost V8 range containing its first non-blank character, and a line counts
+as code when it is neither blank nor wholly a comment. There are no branch
+numbers at all, because V8's block ranges are not branch arms and a percentage
+with no definition is worse than none.

@@ -493,12 +493,32 @@ when the socket is bound. **A realm binds no socket.** It answers on the port
 this process already opened, in the scheme that port was opened in, so nothing
 about a realm was consumed at startup and `oauth2_bcp.js`'s `enabled()` reads
 the setting per request through the realm layer like any runtime row. So
-`checkOverride(key, raw, forRealm)` takes a third argument, `realms.js`'s
-`checkRealmOverride()` is the only caller that passes it, and the refusal a
+`checkOverride(key, raw, forRealm)` takes a third argument, and the refusal a
 person meets at `/admin/oauth2` in the default realm — and at `POST
 /admin-api/config/set` outside a realm — is unchanged. `describe()` decides
 `editable` the same way, so the console under a realm's prefix offers the
 control the same page in the default realm correctly refuses.
+
+**OMITTING THAT ARGUMENT MEANS "WHEREVER THIS WRITE WOULD LAND", SINCE
+2026-08-28, AND UNTIL THEN IT MEANT "NOWHERE".** `realms.js`'s
+`checkRealmOverride()` passes `true` explicitly, because it validates a realm's
+overrides before any realm is ambient — it is the only caller that can know the
+answer without asking. Every OTHER caller is inside a request, so the realm is
+the ambient one, and every one of them passed nothing: `setOverride()` here,
+and the three places in `admin-ui/admin.js` that pre-validate a whole section
+before writing any of it. **So the exemption was unreachable through the four
+doors a person actually uses**, and the symptom was worse than the rule being
+absent. The console draws this control ENABLED inside a realm — correctly — and
+a settings section's Save posts `set-many`, which is ALL-OR-NOTHING, so pressing
+Save on `/realm/acme/admin/oauth2` was refused BY NAME every time, including
+when nothing on the page had been changed, with a refusal that explained that a
+realm may carry the setting it was refusing. The whole page was unusable inside
+a realm. `checkOverride()` now defaults the argument from `realmFor(key)`, which
+fixes all four call sites at once and leaves an explicit `true` and an explicit
+`false` meaning exactly what they did. The parent project's
+`tests/sts_admin_console.js` presses that Save button and is the guard; the
+in-process half is `tests/appconfig_persistence.js`, which asserts the rule
+itself.
 
 What that buys is the thing two processes used to be needed for: `/oauth2/authorize`
 permissive and `/realm/<id>/oauth2/authorize` enforcing the BCP, in one service.

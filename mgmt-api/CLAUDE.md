@@ -251,12 +251,28 @@ which is the argument `/admin/scim` and `groups.claim` both already make for
 having no operation of their own.
 
 **`/admin-api/saml-assertions` IS THAT THIRD RESOURCE, added 2026-08-27**, and
-it was put to the test above rather than admitted by analogy. It sets three
-settings — the two assertion lifetimes and `saml.clockSkewS` — and a caller of
-`set-many` does get a wrong answer here: `saml2.assertionLifetimeMins` succeeds,
-changes nothing and reports success, and the caller finds out from an assertion
-that expired when it should not have. So it refuses anything outside its three
-by name, exactly as the token lifetimes door does.
+it was put to the test above rather than admitted by analogy. It sets the
+assertion settings — the two lifetimes, the signing and NameID choices, the
+artifact lifetimes, the SAML 2.0 encryption rows and `saml.clockSkewS` — and a
+caller of `set-many` does get a wrong answer here: `saml2.assertionLifetimeMins`
+succeeds, changes nothing and reports success, and the caller finds out from an
+assertion that expired when it should not have. So it refuses anything outside
+its own list by name, exactly as the token lifetimes door does.
+
+**BOTH NARROW DOORS' REQUEST SCHEMAS ARE GENERATED FROM THAT LIST NOW, AND THAT
+IS A FIX RATHER THAN A TIDY-UP.** They were typed out here beside a list held in
+`admin.js`, and both had drifted — this document named FOUR token-lifetime
+settings against six, and THREE assertion settings against sixteen, and the
+paragraph above said "three" with them. On a resource whose whole claim is that
+it refuses anything outside its own list BY NAME, that is the worst place for a
+second copy to go stale: a caller reading the document is refused for following
+it, and a caller reading the refusal finds settings the document never mentioned.
+`admin.js` exports `tokenLifetimeKeys()` and `samlAssertionKeys()` — the same
+arrays the refusals are built from — and `narrowDoorProperties()` here turns
+either into `properties`, taking each type from `config.js`'s own row. A row
+added to either table adds the property. **A fourth narrow door must do the
+same**: the test above is still "does a caller of the general operation get a
+wrong answer here", and the list is still not something to write down twice.
 
 **Its GET earns its place beyond the parity**, which is the same thing to check
 here as everywhere: it reports `saml2WindowS` and `saml11WindowS`, the whole

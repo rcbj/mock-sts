@@ -95,12 +95,20 @@ services:
     # ports:
     #   - "5432:5432"
     # `pg_isready` rather than a psql query: it is what the image ships for
-    # exactly this, and the sts service below waits on it. Without the wait the
-    # STS starts first about half the time, fails to connect, LOGS THE FAILURE
-    # AND CARRIES ON with an empty in-memory directory — which is the right
-    # behaviour for a mock (a database outage must not take down sixteen
-    # protocol families) and the wrong way to start a stack, because the
-    # restored directory would silently not be there.
+    # exactly this, and the sts service below waits on it. THE WAIT IS NOT
+    # OPTIONAL. Without it the STS starts first about half the time and fails
+    # to connect — and since 2026-08-28 that is FATAL: a configured store that
+    # cannot be opened stops the process rather than letting it run out of a
+    # seeded directory while presenting itself as the one that was configured.
+    # So the stack would come up with the sts container in a restart loop.
+    #
+    # This comment used to say the opposite half of that — that the STS logged
+    # the failure and CARRIED ON, which was "the right behaviour for a mock (a
+    # database outage must not take down sixteen protocol families) and the
+    # wrong way to start a stack, because the restored directory would silently
+    # not be there". The second clause is why the rule changed; the first is
+    # still true of an outage that happens while the service is RUNNING, which
+    # is recorded and survivable.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sts -d sts"]
       interval: 5s

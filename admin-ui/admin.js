@@ -83,7 +83,11 @@ const { log, xmlEscape, baseUrlOf, parseBody, b64uDecode, userFor,
         // ONE named realm's signing key, for /admin/realms — which lists every
         // realm's `kid` and is therefore the one page here that needs a key
         // belonging to a realm other than the one it is being read in.
-        stsKeysFor } = require('../common/helpers');
+        stsKeysFor,
+        // The count as a word, for the refusal sentence at the bottom of
+        // applicationsAction() — which is built from its own table now rather
+        // than typed, because a typed one was short by an action.
+        numberWord } = require('../common/helpers');
 const config = require('../common/config');
 // What this service writes down, and whether it is working. A PLAIN REQUIRE in
 // the ordinary direction: that module is a library — it registers no route, so
@@ -5190,12 +5194,21 @@ function logoutAction(body) {
   if (action === 'restore-token') {
     // NON-SPEC, and it is /admin/tokens' restore reached from here rather than a
     // second one: stats.restore() is the same function against the same set.
-    const jti = jtiFrom(String(body.jti || body.target || ''));
-    if (!jti) {
+    // `jtiFrom()` answers an OBJECT — `{ jti, how }` — because it also accepts
+    // a whole JWT and has to say where the jti came from. This read the object
+    // itself as the jti: `stats.restore()` was handed one and matched nothing,
+    // so the action ALWAYS reported "was not revoked, so nothing changed" and
+    // put `[object Object]` in the sentence where the jti belongs. It is the
+    // same call tokenAction() makes two hundred lines up, where it is spelt
+    // `found.jti`, which is what makes /admin/tokens' restore work and this
+    // one not.
+    const found = jtiFrom(String(body.jti || body.target || ''));
+    if (!found.jti) {
       return { ok: false, errors: ['Name the token to restore in `jti`.'] };
     }
-    const was = stats.restore(jti);
-    return { ok: true, message: 'NON-SPEC: the token with jti ' + jti +
+    const was = stats.restore(found.jti);
+    return { ok: true, jti: found.jti,
+             message: 'NON-SPEC: the token with jti ' + found.jti +
              (was ? ' is no longer revoked.' : ' was not revoked, so nothing changed.') +
              ' No authorization server could offer this — RFC 7009 has no such operation and a ' +
              'resource server may already have cached the refusal.' };
@@ -10729,6 +10742,14 @@ function applicationFieldsFrom(body) {
   return fields;
 }
 
+// The actions this handler answers, in the order the switch below takes them.
+// It exists so that the refusal at the bottom of that switch can be BUILT from
+// it rather than typed beside it — see the comment there, and rule 7 in
+// ../mgmt-api/CLAUDE.md, which is the rule that sentence serves.
+const APPLICATION_ACTIONS = ['create', 'set', 'add', 'remove',
+                             'revoke-registration', 'refresh-metadata',
+                             'forget'];
+
 function applicationsAction(body, protocols) {
   log.debug("Entering applicationsAction(). action=" + (body.action || '(none)'));
   const action = String(body.action || '');
@@ -10856,8 +10877,17 @@ function applicationsAction(body, protocols) {
   }
 
   log.debug("Leaving applicationsAction(). Unknown action.");
-  return { ok: false, errors: ['Unknown action "' + action + '". The six are: create, set, ' +
-                               'add, remove, revoke-registration, forget.'] };
+  // THE LIST IS BUILT FROM THE SWITCH ABOVE RATHER THAN TYPED, and the reason
+  // is that it was typed and went stale: `refresh-metadata` was added on
+  // 2026-08-27 and this sentence still said "The six are" and named six. That
+  // is not a cosmetic drift — the parent project's tests/admin_api.js READS
+  // this sentence to check that every console action has an /admin-api
+  // operation, so an action missing from it is an action the parity check
+  // cannot see, and the API could lose the operation entirely with nothing
+  // failing. A generated list cannot be short by one.
+  return { ok: false, errors: ['Unknown action "' + action + '". The ' +
+                               numberWord(APPLICATION_ACTIONS.length) +
+                               ' are: ' + APPLICATION_ACTIONS.join(', ') + '.'] };
 }
 
 // WHERE A FINISHED APPLICATION ACTION LANDS. Extracted from the route on
@@ -18575,7 +18605,12 @@ function persistenceStatusBlock() {
           ? ' — though <code>persistence.mode</code> is set to <code>' +
             esc(info.configuredMode) + '</code>. IT FELL BACK, which means ' +
             'the store could not be opened or read; the reason is below and ' +
-            'in the log. Nothing is being written down.'
+            'in the log. Nothing is being written down. <strong>THIS SHOULD ' +
+            'NOT BE REACHABLE</strong>: since 2026-08-28 a configured store ' +
+            'that cannot be opened stops the process at startup rather than ' +
+            'letting it run as something it is not, so a service drawing ' +
+            'this page has one. Seeing it means something re-introduced the ' +
+            'fallback — the row is kept as the net under that.'
           : '')],
     ['Where', off ? 'nowhere'
       : info.mode === 'ldif'
@@ -21421,6 +21456,19 @@ module.exports = {
   // name that promised four.
   tokenLifetimesAction: tokenLifetimesAction,
   samlAssertionsAction: samlAssertionsAction,
+  // THE TWO NARROW DOORS' KEY LISTS, for mgmt-api/admin_api.js to BUILD their
+  // request schemas from rather than to keep a second copy of.
+  //
+  // Both had gone stale in exactly the way a second copy does. The document
+  // named four token-lifetime settings where the handler accepted six, and
+  // THREE assertion settings where it accepted sixteen — and these are the two
+  // operations whose whole claim is that they refuse anything outside their
+  // own list BY NAME, so a caller reading the document is refused for
+  // following it, and a caller reading the refusal finds settings the document
+  // never mentioned. Derived, that cannot happen: adding a row to either table
+  // adds the property.
+  tokenLifetimeKeys: function () { return TOKEN_LIFETIME_KEYS.slice(); },
+  samlAssertionKeys: function () { return SAML_ASSERTION_KEYS.slice(); },
   // The JSON views, one per page, for the same reason. See the block comment
   // The eight protocol settings pages, through ONE export keyed by path.
   // Rule 7 wants an operation per page and there are eight of them, all

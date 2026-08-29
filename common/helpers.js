@@ -710,6 +710,34 @@ function dnRfc4514(dn) {
   return parts.reverse().join(',');
 }
 
+// ---------------------------------------------------------------------------
+// A SMALL COUNT AS THE WORD FOR IT, for the refusal sentences that name what
+// they know: "Unknown action \"x\". The seven are: …".
+//
+// It exists because those sentences used to carry the number as prose beside a
+// list built from a table, and the two parted company exactly where it hurts —
+// `applicationsAction()` said "The six are" over seven actions after
+// `refresh-metadata` was added, and `createApplication()` said "The eight are"
+// over nine kinds after `kerberos-service` was. Neither is cosmetic: the parent
+// project's tests/admin_api.js READS the first of those sentences to check that
+// every console action has an /admin-api operation, so a list short by one
+// turns that check off for the missing one.
+//
+// Beyond fifteen it hands back the digits, because "twenty-three" reads worse
+// than "23" in a sentence somebody is scanning for a name.
+// ---------------------------------------------------------------------------
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six',
+                      'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+                      'thirteen', 'fourteen', 'fifteen'];
+
+function numberWord(count) {
+  const n = Number(count);
+  if (!Number.isInteger(n) || n < 0 || n >= NUMBER_WORDS.length) {
+    return String(count);
+  }
+  return NUMBER_WORDS[n];
+}
+
 module.exports = {
   log: log,
   logArtifact: logArtifact,
@@ -750,5 +778,8 @@ module.exports = {
   // each realm's kid, and the logout that has to know whose token it is looking
   // at. Everything else reads `STS` and gets the ambient realm's, which is what
   // it wanted.
-  stsKeysFor: stsKeysFor
+  stsKeysFor: stsKeysFor,
+  // The count as a word, for the refusal sentences that name what they
+  // know. See the block above it for the two sentences that went stale.
+  numberWord: numberWord
 };

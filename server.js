@@ -615,14 +615,38 @@ process.on('SIGINT', function () { shutdown('SIGINT'); });
 // federated sign-in is not a race anybody should have to think about, so there
 // is no window in which it can happen.
 //
-// **A STORE THAT CANNOT BE OPENED OR READ DOES NOT STOP THE SERVICE.**
-// start() catches its own failures, logs them, falls back to memory mode and
-// resolves — so a Postgres container that is not up yet leaves a mock identity
-// service running with its seeded directory rather than a container that
-// exits. The whole point of this service is that a client has something to talk
-// to; refusing to start because a database blinked would be the one failure
-// mode a mock must not have. `/admin/persistence` and `GET /ldap` both report
-// that it fell back, so it is loud without being fatal.
+// **A CONFIGURED STORE THAT CANNOT BE OPENED OR READ STOPS THE SERVICE, AND
+// THIS PARAGRAPH SAID THE OPPOSITE UNTIL 2026-08-28.**
+//
+// It used to say that start() caught its own failures, fell back to memory and
+// resolved — that a Postgres container which was not up yet left a mock
+// running with its seeded directory rather than a container that exited, and
+// that refusing to start because a database blinked would be the one failure
+// mode a mock must not have.
+//
+// The half of that which was right is still right and is still the behaviour:
+// a store that breaks WHILE RUNNING is recorded and the service carries on
+// answering — see flush(), which puts the dirty bits back and retries on the
+// next change. What was wrong was doing the same thing at STARTUP, because the
+// two states are not alike. A running service that loses its database has
+// already restored everything it was going to restore and is still telling the
+// truth about what it holds. A service that never opened the store is
+// answering out of a SEEDED directory while presenting itself as the one that
+// was configured — every endpoint works, the console draws, and the realms,
+// applications and federation partners somebody creates are thrown away by the
+// next restart, which is the restart they will do because they expected the
+// work to survive it.
+//
+// So: `persistence.mode=memory`, the default, reaches none of this and behaves
+// exactly as it always has. Any OTHER mode is a statement that this process is
+// supposed to persist, and a process that cannot keep that statement exits
+// non-zero and says which setting to look at, rather than running as something
+// it is not. The compose file's `depends_on: condition: service_healthy` is
+// what stops that being a startup race, and it was already there.
+//
+// A NON-ZERO EXIT rather than a throw: this is the last thing an operator
+// sees, and an unhandled rejection would print a stack trace over the sentence
+// that says what to do about it.
 // ---------------------------------------------------------------------------
 persistence.start().then(function (started) {
   if (started.mode !== 'memory') {
@@ -635,12 +659,21 @@ persistence.start().then(function (started) {
   }
   bind();
 }).catch(function (err) {
-  // start() is written not to reject. This is the net under that claim: a
-  // programming error in the restore path must not leave a process with no
-  // listener and no message.
-  log.error('sts: persistence could not start (' + err.message + '). ' +
-            'Starting anyway with nothing persisted.');
-  bind();
+  // Both kinds of failure arrive here and both are fatal: a store that was
+  // configured and could not be opened or read, and a programming error in the
+  // restore path. They are not told apart on purpose — either way this process
+  // was told to persist and cannot, and the difference is in the message
+  // start() built rather than in what is done about it.
+  log.fatal('sts: NOT STARTING. ' + err.message +
+            '\n\nThis service is configured to persist (persistence.mode=' +
+            persistence.mode() + '), so it will not run without its store: a ' +
+            'process answering out of a seeded directory while presenting ' +
+            'itself as the one that was configured loses everything anybody ' +
+            'does with it at the next restart. Fix the store, or set ' +
+            'persistence.mode=memory (STS_PERSISTENCE_MODE) to run without ' +
+            'one — which is the default and what this service did before ' +
+            'persistence existed.');
+  process.exit(1);
 });
 
 // Built rather than started above, because the two shapes differ only in this
