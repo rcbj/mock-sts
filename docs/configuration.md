@@ -51,6 +51,11 @@ written in a file: `global.https` from `oauth2.rfc9700`, `oid4vp.walletUrl` from
 `oid4vci.walletUrl`, and `krb5.serviceDomains` from `krb5.realm`. Each still has
 its own key and its own variable, and setting either replaces the derivation.
 
+A DERIVED DEFAULT IS NOT THE SAME AS AN ABSENT VALUE, and `global.https` is the
+one where the difference is visible: the appconfig files in `env/` all set it
+explicitly, so the derivation is what a service reading some OTHER file falls
+back to and not what any stack here runs on. See its own section below.
+
 The README carries the full table: every appconfig key, its environment variable,
 its default and whether it can be changed without a restart.
 
@@ -107,14 +112,42 @@ observes can tell a client that checks from one that does not.
 
 ### `global.https` — TLS on the main port
 
-Derives its default from `oauth2.rfc9700`. When it is on there is **no plain HTTP
-listener in this process**, which costs one thing that is stated on the page
-rather than left to be met as a handshake failure: `POST /tls/trust` and
-`GET /tls/server-certificate` exist to be reachable *before* anything is trusted,
-so the first call to each has to be made with verification off.
+**ON in every appconfig file this repository ships, since 2026-08-30.** That is
+a statement about `env/local.js`, `env/test.js` and `env/docker-tests.js`, which
+each carry `global.https: true`, and NOT about the setting's own default — that
+still derives from `oauth2.rfc9700` and is still `false`, which is what a
+service handed somebody else's appconfig file (the parent project's Kerberos
+jobs, say) gets. Both compose files here set `STS_HTTPS` to the same answer, so
+the container's healthcheck probes the scheme its service is actually bound in.
+
+Why it was turned on: 8443, 9443 and LDAPS 636 were TLS and the main port —
+the one every one of the sixteen protocol families actually answers on — was
+not, so a caller who had already trusted this service's key for three sockets
+still met an unencrypted fourth. One certificate, one trust decision, every
+port.
+
+`STS_HTTPS=false` is the way back to a plain listener, and it is a supported
+configuration rather than an escape hatch: a client that cannot be taught to
+trust a certificate regenerated on every start is exactly what this service
+exists to exercise.
+
+When it is on there is **no plain HTTP listener in this process**, which costs
+one thing that is stated on the page rather than left to be met as a handshake
+failure: `POST /tls/trust` and `GET /tls/server-certificate` exist to be
+reachable *before* anything is trusted, so the first call to each has to be made
+with verification off:
+
+```bash
+curl -k https://localhost:8081/tls/server-certificate > /tmp/sts.pem
+export NODE_EXTRA_CA_CERTS=/tmp/sts.pem      # node trusts it from here on
+```
 
 It uses the same per-start certificate as 8443, 9443 and LDAPS 636, so a caller
-trusts this service once per start rather than four times.
+trusts this service once per start rather than four times. `NODE_EXTRA_CA_CERTS`
+accepts it despite its `basicConstraints CA:FALSE` — OpenSSL takes a self-signed
+leaf found in the trust store as an anchor — and without it a node client fails
+with `DEPTH_ZERO_SELF_SIGNED_CERT`, or, through `fetch()`, with a bare
+`TypeError: fetch failed` that names nothing.
 
 ### `ldap.autocreateUsers`
 

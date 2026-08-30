@@ -55,7 +55,7 @@ will not bind on an ordinary user account.
 
 | Port | What | Setting | Environment |
 |---|---|---|---|
-| 8081 | The HTTP service — every protocol endpoint, the console, the API | `global.port` | `STS_PORT` |
+| 8081 | The main service — every protocol endpoint, the console, the API. **HTTPS**, since every appconfig file here sets `global.https`; `STS_HTTPS=false` makes it plain HTTP | `global.port` | `STS_PORT` |
 | 88 (TCP+UDP) | The Kerberos KDC | `krb5.kdcPort` | `KRB5_KDC_PORT` |
 | 8888 | The Kerberos-protected test service | `krb5.servicePort` | `KRB5_SERVICE_PORT` |
 | 389 | The LDAP directory | `ldap.port` | `LDAP_PORT` |
@@ -119,9 +119,24 @@ alternative and needs the client pointed at `tcp://host:8092` explicitly.
 ## Confirming it works
 
 ```bash
-curl -s localhost:8081/healthcheck
-curl -s -L localhost:8081/admin/sts-metadata | head -40
+curl -sk https://localhost:8081/healthcheck
+curl -sk -L https://localhost:8081/admin/sts-metadata | head -40
 ```
+
+**The `-k` is the bootstrap and not a shrug.** The main port is TLS on a
+self-signed certificate this service generates at every start, so nothing that
+existed before this process can verify it — and with `global.https` on there is
+no plain listener left to fetch it from either. One unverified call gets it, and
+everything after that can be verified:
+
+```bash
+curl -k https://localhost:8081/tls/server-certificate > /tmp/sts.pem
+curl --cacert /tmp/sts.pem https://localhost:8081/healthcheck
+export NODE_EXTRA_CA_CERTS=/tmp/sts.pem      # for a node client
+```
+
+It is the same certificate 8443, 9443 and LDAPS 636 serve, so that is one trust
+decision for the whole service rather than four.
 
 The second one is **behind the console gate** (`admin.authRequired`, on by
 default): with no session it answers a 302 to the sign-in screen, which is why
@@ -131,10 +146,10 @@ password — or read the same service through `/admin-api`, which is not gated.
 `ADMIN_AUTH_REQUIRED=false` turns the gate off entirely.
 
 A protocol you can drive end to end in a browser with nothing else installed is
-**SAML 2.0**: open `localhost:8081/saml2/sp`, pick one of the three bindings, sign
+**SAML 2.0**: open `https://localhost:8081/saml2/sp`, pick one of the three bindings, sign
 in with any username, and the mock service provider verifies the response it gets
-back check by check. `localhost:8081/saml2/metadata` is the identity provider
-metadata; `localhost:8081/saml2/metadata/anything-you-like` is a document of its
+back check by check. `https://localhost:8081/saml2/metadata` is the identity provider
+metadata; `https://localhost:8081/saml2/metadata/anything-you-like` is a document of its
 own for a service provider by that name, minted on the spot.
 
 `/admin/sts-metadata` is the sharper of the two. It reads the endpoint list off the

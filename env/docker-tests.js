@@ -13,6 +13,26 @@ var config = {
     host: "0.0.0.0", // restart to apply
     port: 8081,      // restart to apply
 
+    // TLS ON THE MAIN PORT, SET HERE RATHER THAN LEFT TO DERIVE (2026-08-30).
+    // `global.https` is `derived: true` in common/config.js and its default is
+    // whatever `oauth2.rfc9700` is — which is `false` below — so every service
+    // started with an appconfig file of this repository's own served PLAIN HTTP
+    // on this port while 8443, 9443 and LDAPS 636 were all TLS. That is one
+    // trust decision too many for a mock whose whole certificate story is "one
+    // self-signed pair per start, shared by every listener": a caller that had
+    // already trusted the key for three sockets still met an unencrypted fourth.
+    //
+    // WHAT IT COSTS is what config.js's own row says it costs: there is then NO
+    // plain listener left in this process, and `GET /tls/server-certificate`
+    // and `POST /tls/trust` are the two endpoints a caller reaches BEFORE it
+    // trusts anything — so the first fetch of the certificate has to be made
+    // with verification off (`curl -k`). That is the ordinary bootstrap for a
+    // service that regenerates its key every start, and /tls says so.
+    //
+    // STS_HTTPS still wins over this file, so `STS_HTTPS=false` is the way back
+    // to a plain port without editing anything.
+    https: true,
+
     // Believe X-Forwarded-Proto and X-Forwarded-Host. OFF: with nothing in
     // front of this service they are headers any client can set, and believing
     // them lets a caller choose what this service thinks its own issuer,

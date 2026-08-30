@@ -259,6 +259,23 @@ COMPOSE_ENV=(
   "STS_TESTS_CONTAINER_NAME=${STS_TESTS_CONTAINER_NAME}"
   "CONFIG_FILE=${CONFIG_FILE}"
   "STS_TEST_ARGS=${STS_TEST_ARGS}"
+  # ---------------------------------------------------------------------
+  # TLS ON THE MAIN PORT (2026-08-30), and the URL the runner dials with it.
+  #
+  # BOTH, because they are two variables in the compose file and a stack where
+  # they disagree is a stack where thirteen protocol jobs fail on a closed
+  # socket. The compose file defaults each to the same answer; naming them
+  # here is what makes an operator's `STS_HTTPS=false ./docker-run-tests.sh`
+  # actually reach compose, since `sudo` empties the environment — see
+  # tests/tools/compose.sh.
+  #
+  # `sts` and not `localhost`: this runner publishes no port at all, and that
+  # hostname is one of the certificate's SANs (common/crypto.js: localhost,
+  # sts, sts-mock, sts.example.com, 127.0.0.1). A different name here would be
+  # a certificate error in every job rather than a connection error in one.
+  # ---------------------------------------------------------------------
+  "STS_HTTPS=${STS_HTTPS:-true}"
+  "STS_TEST_SERVICE_URL=$([ "${STS_HTTPS:-true}" = "true" ] && echo https || echo http)://sts:8081"
 )
 if [ -n "${STS_LEVEL}" ];
 then

@@ -370,7 +370,7 @@ else
   # build and a healthcheck to produce a service nothing in this run talks to.
   #
   # STS_TEST_SERVICE_URL is emptied for exactly that reason — the compose file
-  # AND the image both set it to http://sts:8081, and run-report.js reads it as
+  # AND the image both set it to https://sts:8081, and run-report.js reads it as
   # the environment fallback for --service-url. Left alone, this run would
   # drive a container that --no-deps never started, and the protocol half of
   # the report would come out empty: "the protocols are untested" rather than
@@ -394,7 +394,7 @@ else
     # EMPTY ON PURPOSE, and the opposite of the case above: run-report.js reads
     # this as `process.env.STS_TEST_SERVICE_URL || ''`, so empty is how this
     # run says "start your own service" over the compose file's and the image's
-    # own http://sts:8081.
+    # own https://sts:8081.
     -e STS_TEST_SERVICE_URL=
     -e "STS_TEST_CONFIG_FILE=${STS_TEST_CONFIG_FILE}"
     -e "LOG_LEVEL=${LOG_LEVEL:-info}"
@@ -402,6 +402,16 @@ else
   if [ -n "${STS_LOG_LEVEL:-}" ];
   then
     RUN_ENV+=(-e "STS_LOG_LEVEL=${STS_LOG_LEVEL}")
+  fi
+  # TLS ON THE SERVICE THIS RUN STARTS FOR ITSELF, forwarded ONLY when the
+  # operator asked for something. tests/tools/service.js defaults it to `true`
+  # exactly as every appconfig file and both compose files do, so an ordinary
+  # coverage run needs nothing here; `-e STS_HTTPS=` would set it to the EMPTY
+  # STRING, which is neither `true` nor an absent variable and would quietly
+  # produce a plain-HTTP service under a report that says nothing about it.
+  if [ -n "${STS_HTTPS:-}" ];
+  then
+    RUN_ENV+=(-e "STS_HTTPS=${STS_HTTPS}")
   fi
 
   docker_compose -f "${COMPOSE_FILE}" run --rm --no-deps \

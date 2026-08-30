@@ -26,11 +26,18 @@ npm install
 CONFIG_FILE=./env/local.js node server.js
 ```
 
-Then open <http://localhost:8081/> — a front page with the four things worth
+**https, and your browser will warn you once.** Every appconfig file here sets
+`global.https`, so the main port is TLS on the same self-signed certificate the
+8443, 9443 and LDAPS 636 listeners use — one pair, regenerated on every start,
+so nothing can have trusted it in advance. Accept it, or fetch it with
+`curl -k https://localhost:8081/tls/server-certificate`; `STS_HTTPS=false` runs
+the plain port this used to be.
+
+Then open <https://localhost:8081/> — a front page with the four things worth
 having on one: this repository, its issues, this site, and the admin console on
 that instance.
 
-The page worth going to next is <http://localhost:8081/admin/sts-metadata> —
+The page worth going to next is <https://localhost:8081/admin/sts-metadata> —
 every protocol this service speaks, and every endpoint it registers, read off
 the live Express router, with a sentence about each and a link to the
 specification it implements. It is a page of the admin console, so it asks you

@@ -12,8 +12,8 @@ statistics and audit log. Every realm answers on the same ports as every other,
 and they are told apart by a segment at the front of the path.
 
 ```
-http://localhost:8081/oauth2/token                the DEFAULT realm
-http://localhost:8081/realm/acme/oauth2/token     the realm `acme`
+https://localhost:8081/oauth2/token                the DEFAULT realm
+https://localhost:8081/realm/acme/oauth2/token     the realm `acme`
 ```
 
 The point is what a client sees. Two realms are two authorization servers with
@@ -31,7 +31,7 @@ identity provider beside a production-shaped one on the same laptop.
 ## Defining one
 
 ```bash
-curl -X POST http://localhost:8081/admin-api/realms/create \
+curl -k -X POST https://localhost:8081/admin-api/realms/create \
      -H 'content-type: application/json' \
      -d '{"id":"acme","name":"Acme Corporation"}'
 ```
@@ -62,15 +62,15 @@ realm cannot build a single URL without it.
   "active": true,
   "current": "default",
   "realms": [
-    { "id": "default", "pathPrefix": "",            "baseUrl": "http://localhost:8081" },
-    { "id": "acme",    "pathPrefix": "/realm/acme", "baseUrl": "http://localhost:8081/realm/acme" }
+    { "id": "default", "pathPrefix": "",            "baseUrl": "https://localhost:8081" },
+    { "id": "acme",    "pathPrefix": "/realm/acme", "baseUrl": "https://localhost:8081/realm/acme" }
   ],
   "support": [ "…which families a realm separates, and which are shared…" ]
 }
 ```
 
 Everything follows from `baseUrl`. Point a client at
-`http://localhost:8081/realm/acme` as its issuer and its discovery, token,
+`https://localhost:8081/realm/acme` as its issuer and its discovery, token,
 authorization, userinfo, JWKS, SAML and OpenID4VCI endpoints all fall out of the
 metadata that base URL publishes — with no per-endpoint configuration on your
 side and none on this service's.

@@ -97,6 +97,16 @@ jobs:
           docker run -d --name sts-ci -p 8081:8081 \
             -e ADMIN_AUTH_REQUIRED=false rcbj/sts:ci
 
+      # https AND `-k` SINCE 2026-08-30, and both halves are load-bearing. The
+      # image's CONFIG_FILE is ./env/local.js, which carries
+      # `global.https: true`, so the main port is a TLS listener and there is
+      # NO plain one left in the process — an http probe here would loop for
+      # sixty seconds and report a container that never started. `-k` because
+      # the certificate is self-signed and regenerated on every start of the
+      # container, so nothing that existed before this step can verify it; the
+      # question these two steps ask is whether every module resolved and the
+      # router registered, not whether the certificate is trustworthy.
+      #
       # The compose healthcheck's probe, in a shell loop instead of Docker's
       # retry schedule so the failure is visible in the log rather than in a
       # container's health state. Roughly 60 seconds: the image is a full apt
@@ -106,7 +116,7 @@ jobs:
       - name: Wait for /healthcheck
         run: |
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8081/healthcheck; then
+            if curl -fsSk https://localhost:8081/healthcheck; then
               echo
               echo "STS answered /healthcheck after ${i} attempt(s)."
               exit 0
@@ -132,8 +142,8 @@ jobs:
       # container's ADMIN_AUTH_REQUIRED above.
       - name: Check /admin/sts-metadata answers
         run: |
-          code=$(curl -fsS -o /dev/null -w '%{http_code}' \
-            http://localhost:8081/admin/sts-metadata)
+          code=$(curl -fsSk -o /dev/null -w '%{http_code}' \
+            https://localhost:8081/admin/sts-metadata)
           echo "sts-metadata: ${code}"
           test "${code}" = "200"
 

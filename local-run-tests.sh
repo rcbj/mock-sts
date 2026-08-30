@@ -425,6 +425,40 @@ freePort()
   ' "$1"
 }
 
+# ---------------------------------------------------------------------------
+# IS THE MAIN PORT TLS ON THIS RUN, AND WHAT SCHEME DOES THAT MAKE ITS URL.
+#
+# ONE answer, read in four places — the URL handed to every protocol job, the
+# variable forwarded to compose, the readiness probe and the diagnosis when it
+# fails — because four independent guesses is how a launcher comes to print a
+# URL nothing is listening on.
+#
+# TRUE BY DEFAULT since 2026-08-30, matching every appconfig file in env/ and
+# the ${STS_HTTPS:-true} in both compose files. `STS_HTTPS=false
+# ./local-run-tests.sh` is the whole of the way back to a plain port, and it
+# works for the container run and the --no-docker one alike: tests/tools/
+# service.js reads the same variable with the same default.
+# ---------------------------------------------------------------------------
+stsHttps()
+{
+  if [ "${STS_HTTPS:-true}" = "true" ];
+  then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+stsScheme()
+{
+  if [ "$(stsHttps)" = "true" ];
+  then
+    echo "https"
+  else
+    echo "http"
+  fi
+}
+
 # The HTTP status the service gives, or 000 if the socket said nothing. node
 # rather than curl, because this suite already requires node 18 and requires
 # curl nowhere; `rejectUnauthorized: false` because the certificate is
@@ -478,7 +512,12 @@ composeUp()
       return 1
     fi
   fi
-  STS_URL="http://localhost:${STS_HOST_PORT}"
+  # https since 2026-08-30: every appconfig file in env/ carries
+  # `global.https: true` and docker-compose.yml sets STS_HTTPS, so the
+  # container's main port is TLS. STS_HTTPS in this shell overrides both and is
+  # forwarded below, so the scheme here is read off the same answer the
+  # container will get rather than assumed twice.
+  STS_URL="$(stsScheme)://localhost:${STS_HOST_PORT}"
 
   COMPOSE_ENV=(
     "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT}"
@@ -490,6 +529,14 @@ composeUp()
     # persisted would be a suite whose second run started from the first run's
     # leavings.
     "STS_PERSISTENCE_MODE=memory"
+    # TLS ON THE MAIN PORT. Named EXPLICITLY rather than left to the compose
+    # file's own `${STS_HTTPS:-true}` default, and the reason is the one the
+    # header of tests/tools/compose.sh gives: `sudo` empties the environment,
+    # so an operator's `STS_HTTPS=false` in this shell would reach compose as
+    # unset and the file would substitute `true` with nothing said. Passing it
+    # here is what makes the override real on a machine where docker needs
+    # sudo — which is this one.
+    "STS_HTTPS=$(stsHttps)"
   )
   # Only when it HAS a value: an empty STS_LOG_LEVEL makes bunyan throw
   # `unknown level name: ""` while this service is still loading its modules,
@@ -554,17 +601,28 @@ composeUp()
       echo "ERROR: the mock STS container is not answering on ${STS_URL}"
       echo "       (last status: ${code:-000})."
       # The one diagnosis worth making by hand, because it reaches a test as a
-      # closed socket and never names itself: in this service the scheme
-      # follows the mode — oauth2.rfc9700 derives global.https — so an
-      # appconfig file with RFC 9700 on serves HTTPS where this asked http.
-      local other
-      other="$(stsProbe "https://localhost:${STS_HOST_PORT}/healthcheck")"
+      # closed socket and never names itself: in this service the scheme is a
+      # property of the LISTENER, so a container bound in one scheme and probed
+      # in the other is silent in exactly the way a container that never
+      # started is. Since 2026-08-30 the default is https, so the mistake to
+      # catch is an appconfig file that does not set global.https — which is
+      # the reverse of what it used to be, hence the swap rather than a
+      # hard-coded scheme.
+      local other otherScheme
+      if [ "$(stsScheme)" = "https" ];
+      then
+        otherScheme="http"
+      else
+        otherScheme="https"
+      fi
+      other="$(stsProbe "${otherScheme}://localhost:${STS_HOST_PORT}/healthcheck")"
       if [ "${other}" = "200" ];
       then
-        echo "       SOMETHING IS ANSWERING HTTPS THERE INSTEAD. In this"
-        echo "       service the scheme follows the mode: oauth2.rfc9700"
-        echo "       derives global.https, so an instance in RFC 9700 mode"
-        echo "       serves HTTPS on the port a permissive one serves HTTP on."
+        echo "       SOMETHING IS ANSWERING ${otherScheme} THERE INSTEAD. In"
+        echo "       this service the scheme is a property of the LISTENER:"
+        echo "       global.https, which every file in env/ now sets to true"
+        echo "       and which STS_HTTPS overrides. This run asked for"
+        echo "       $(stsScheme)."
         echo "       ${STS_TEST_CONFIG_FILE} is what this container was told to read."
       fi
       return 1
@@ -590,8 +648,22 @@ stackTeardown()
     echo "  service:  ${STS_URL}    console: ${STS_URL}/admin"
     echo "  logs:     ${COMPOSE_CMD} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} logs -f sts"
     echo "  stop it:  ${COMPOSE_CMD} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} down -v"
+    # THE CERTIFICATE IS PART OF THE RECIPE NOW. With the main port on TLS a
+    # job run by hand meets a self-signed certificate this machine has no
+    # anchor for and fails with DEPTH_ZERO_SELF_SIGNED_CERT, which names
+    # neither this service nor the fix. run-report.js writes the PEM into the
+    # run's own report directory; `curl -k ${STS_URL}/tls/server-certificate`
+    # fetches it again from the container that is still up.
+    if [ "$(stsHttps)" = "true" ];
+    then
+      echo "  cert:     curl -k ${STS_URL}/tls/server-certificate > /tmp/sts.pem"
+    fi
     echo "  one job:  (cd tests/vendored && WSTRUST_STS_URL=${STS_URL} \\"
     echo "             OID4VCI_ISSUER_URL=${STS_URL} MOCK_STS_DIR=${CURRENT_DIR} \\"
+    if [ "$(stsHttps)" = "true" ];
+    then
+      echo "             NODE_EXTRA_CA_CERTS=/tmp/sts.pem \\"
+    fi
     echo "             CONFIG_FILE=./env/local.js node sts_metadata.js)"
     return 0
   fi
