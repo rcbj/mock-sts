@@ -1171,15 +1171,30 @@ const SETTINGS = [
 
   { key: 'federation.outboundTimeoutMs', group: 'Federation',
     label: 'Back-channel timeout (ms)',
-    env: 'STS_FEDERATION_OUTBOUND_TIMEOUT_MS', type: 'int', dflt: 5000,
+    env: 'STS_FEDERATION_OUTBOUND_TIMEOUT_MS', type: 'int', dflt: 15000,
     min: 250, max: 60000, runtime: true,
     description: 'How long to wait for a partner to answer before giving up. ' +
                  'It matters more than a timeout usually does because the ' +
                  'browser is WAITING on it — a federated sign-in is a person ' +
                  'looking at a blank tab while this service redeems a code — ' +
-                 'so the default is short enough that a dead partner produces ' +
-                 'an error page rather than a hang, and the error names the ' +
-                 'timeout.' },
+                 'so it is short enough that a dead partner produces an ' +
+                 'error page rather than a hang, and the error names the ' +
+                 'timeout. ' +
+                 'It was 5000 until 2026-08-30, and what changed is that the ' +
+                 'partner here is USUALLY THIS PROCESS: a trust realm is a ' +
+                 'logical copy of this service, and the first thing anybody ' +
+                 'asks a brand-new realm for is its JWKS — which is what ' +
+                 'brings that realm\'s eleven post-quantum keys into being, ' +
+                 'one of which is an SLH-DSA-SHAKE-128s key generation of ' +
+                 'about five seconds. 5000 was a budget that only ever ' +
+                 'worked because this service USED TO BLOCK while it ' +
+                 'answered: with the event loop stopped, the timer ' +
+                 'enforcing that budget could not fire until the response ' +
+                 'was already made. The keys are ' +
+                 'generated in worker processes now (common/worker.js) and ' +
+                 'warmed when a realm is created, so the ordinary fetch is ' +
+                 'milliseconds — this is the budget for the one that arrives ' +
+                 'while a realm is still being born.' },
 
   { key: 'federation.outboundAllowInsecure', group: 'Federation',
     label: 'Allow http:// and untrusted TLS to a partner',
