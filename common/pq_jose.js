@@ -397,6 +397,112 @@ function verify(alg, pub, message, signature) {
   return mlOk && tradOk;
 }
 
+// ---------------------------------------------------------------------------
+// THE SAME THREE OPERATIONS, OFF THIS PROCESS'S THREAD.
+//
+// Everything above is synchronous and stays that way — it is a specification
+// written out, and where it RUNS is not a property of the specification. What
+// is below is the other question: this service is one node process owning six
+// listener families on one thread, and an SLH-DSA signature takes SECONDS
+// during which it answers nobody at all, the KDC on port 88 included. See
+// common/worker.js, which is where the measurements are.
+//
+// So a pool of child processes computes them, and these three are how a caller
+// asks for that. They resolve with exactly what their synchronous namesakes
+// return, because the pool runs THE SAME FUNCTIONS — `common/worker.js`'s job
+// table calls sign(), verify() and generate() above, in a child, and hands the
+// bytes back. There is no second implementation to disagree with this one.
+//
+// ---------------------------------------------------------------------------
+// THE POOL IS HANDED TO THIS FILE RATHER THAN REQUIRED BY IT, AND THAT IS NOT
+// STYLE.
+//
+// `worker_pool.js` requires `worker.js`, which requires THIS FILE — so a
+// require in the obvious direction closes a cycle, and a cycle in node does not
+// fail loudly: it hands back a half-initialised module whose exports are
+// undefined, and the symptom arrives later as something that is not a function.
+// That is rule 2 in the root CLAUDE.md, and rule 3e's test for when an inverted
+// slot is the right answer is exactly this case.
+//
+// It buys a second thing that matters more than the cycle. **A WORKER PROCESS
+// NEVER FILLS THIS SLOT** — a child requires this file and nothing else of the
+// service — so `signAsync()` inside a worker computes in the worker, which is
+// what a worker is for. A lazy require would have let a child fork a pool of
+// its own, recursively, and the first symptom would have been a machine out of
+// processes.
+//
+// `common/crypto.js` fills it, because that is the module that routes an `alg`
+// to this file in the first place.
+// ---------------------------------------------------------------------------
+let workerPool = null;
+
+function setWorkerPool(pool) {
+  log.debug('Entering setWorkerPool(). pool=' + (pool ? 'given' : 'null'));
+  workerPool = pool;
+  log.debug('Leaving setWorkerPool().');
+}
+
+// With no pool — a worker process, a test that required this file on its own,
+// or `workers.count` at 0 — the work is done HERE and the promise is already
+// resolved when it is returned. That is the same answer, arrived at by
+// blocking, and it is why every caller can be written one way.
+function withoutPool(compute) {
+  log.debug('Entering withoutPool().');
+  try {
+    const value = compute();
+    log.debug('Leaving withoutPool(). Computed in this process.');
+    return Promise.resolve(value);
+  } catch (e) {
+    log.debug('Leaving withoutPool(). It threw.');
+    return Promise.reject(e);
+  }
+}
+
+// `opts.session` names an authenticated session, so that one session's
+// signatures go to one worker. It is a routing preference and never a
+// correctness requirement — a worker remembers nothing — so a caller with no
+// session to name simply omits it.
+function signAsync(alg, priv, message, opts) {
+  log.debug('Entering signAsync(). alg=' + alg);
+  if (!workerPool) {
+    log.debug('Leaving signAsync(). No pool.');
+    return withoutPool(function () { return sign(alg, priv, message); });
+  }
+  log.debug('Leaving signAsync(). Handed to the pool.');
+  return workerPool.run('pq.sign',
+    { alg: alg, priv: Buffer.from(priv), message: Buffer.from(message) },
+    opts).then(function (result) {
+      return result.signature;
+    });
+}
+
+function verifyAsync(alg, pub, message, signature, opts) {
+  log.debug('Entering verifyAsync(). alg=' + alg);
+  if (!workerPool) {
+    log.debug('Leaving verifyAsync(). No pool.');
+    return withoutPool(function () {
+      return verify(alg, pub, message, signature);
+    });
+  }
+  log.debug('Leaving verifyAsync(). Handed to the pool.');
+  return workerPool.run('pq.verify',
+    { alg: alg, pub: Buffer.from(pub), message: Buffer.from(message),
+      signature: Buffer.from(signature) },
+    opts).then(function (result) {
+      return result.ok;
+    });
+}
+
+function generateAsync(alg, opts) {
+  log.debug('Entering generateAsync(). alg=' + alg);
+  if (!workerPool) {
+    log.debug('Leaving generateAsync(). No pool.');
+    return withoutPool(function () { return generate(alg); });
+  }
+  log.debug('Leaving generateAsync(). Handed to the pool.');
+  return workerPool.run('pq.generate', { alg: alg }, opts);
+}
+
 // RFC 9964 section 3: the key type is AKP, the parameters are `pub` and
 // `priv`, and `alg` is REQUIRED — an AKP JWK without it names no algorithm
 // and there is no way to guess one from the key material.
@@ -420,5 +526,9 @@ module.exports = {
   sign: sign,
   verify: verify,
   akpPublicJwk: akpPublicJwk,
-  compositeMessage: compositeMessage
+  compositeMessage: compositeMessage,
+  setWorkerPool: setWorkerPool,
+  signAsync: signAsync,
+  verifyAsync: verifyAsync,
+  generateAsync: generateAsync
 };

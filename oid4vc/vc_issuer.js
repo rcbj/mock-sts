@@ -335,7 +335,13 @@ app.post('/oid4vci/nonce', function (req, res) {
 // A JWT proof (OID4VCI): typ openid4vci-proof+jwt, the holder's public key in
 // the header as a JWK, and claims binding it to this issuer and to a c_nonce
 // this issuer handed out. Returns the holder JWK on success.
-function verifyProofJwt(proofJwt, credentialIssuer) {
+// ASYNCHRONOUS SINCE THE WORKER POOL EXISTED. This is the third surface that
+// takes a JWS the CLIENT signed, and `proof_signing_alg_values_supported`
+// advertises every asymmetric algorithm in the shared table — the eleven
+// post-quantum and composite ones included. Verifying one of those takes
+// SECONDS on the thread that owns every listener here, and a wallet may send a
+// batch of them. See common/worker.js.
+async function verifyProofJwt(proofJwt, credentialIssuer) {
   log.debug("Entering verifyProofJwt().");
   logArtifact('OID4VCI proof of possession', 'as received', proofJwt);
   const parts = String(proofJwt || '').split('.');
@@ -392,7 +398,7 @@ function verifyProofJwt(proofJwt, credentialIssuer) {
   // algorithm has to be asymmetric: a MAC would need the issuer to know the
   // wallet's secret, which would make the proof prove nothing.
   try {
-    stsCrypto.verifyCompactJws(String(proofJwt || ''), header.jwk,
+    await stsCrypto.verifyCompactJwsAsync(String(proofJwt || ''), header.jwk,
       { algorithms: stsCrypto.JWS_ASYMMETRIC_ALGS });
   } catch (e) {
     throw new Error('the proof signature does not verify with the key in ' +
@@ -1294,9 +1300,13 @@ app.post('/oid4vci/credential', async function (req, res) {
 
   let holderJwks = [];
   try {
-    holderJwks = proofJwts.map(function (jwt) {
+    // Promise.all, so a BATCH of proofs is verified across the pool at once
+    // rather than one after another. A wallet may send up to
+    // batch_credential_issuance.batch_size of them, and with post-quantum
+    // proofs that is the difference between one wait and several.
+    holderJwks = await Promise.all(proofJwts.map(function (jwt) {
       return verifyProofJwt(jwt, vciMetadata(req).credential_issuer);
-    });
+    }));
   } catch (e) {
     log.error('the proof of possession was refused: ' + e.message);
     return vciError(res, 400, 'invalid_proof', e.message);

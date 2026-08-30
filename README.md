@@ -544,6 +544,7 @@ are refused at both ends.
 | `global.https` *(derived)* | `STS_HTTPS` | `false` | **restart** — the listener is bound when the process starts, and its scheme is decided there | Serve the main port over HTTPS, with the SAME certificate and key the 8443, 9443 and LDAPS 636 listeners use — one self-signed pair generated per start, so a caller trusts this service once rather than four times. |
 | `global.trustProxy` | `STS_TRUST_PROXY` | `false` | yes | Believe X-Forwarded-Proto and X-Forwarded-Host — which is what a TLS-terminating reverse proxy sets to say what the CLIENT used. |
 | `logLevel` | `STS_LOG_LEVEL` | `info` | yes | debug is the useful level for a mock whose job is to show what it did: every endpoint call, and every token and assertion both before and after it was signed. |
+| `workers.count` | `STS_WORKERS_COUNT` | `2` | yes — the pool is reconciled on the next signature | How many child processes the post-quantum signing, verification and key generation are handed to, so that the process holding the sockets is never the one computing an SLH-DSA signature — which takes SECONDS, during which node answers nothing at all, the KDC on port 88 included. `0` means compute in this process, which is what this service did before the pool existed: correct, identical byte for byte, and blocking for as long as each signature takes. Nothing is forked until the first post-quantum job, so a process that never signs one never pays for a pool. **A realm may not carry this**: a pool belongs to the OS process. |
 
 #### OAuth 2.0 / OIDC
 

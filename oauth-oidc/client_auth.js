@@ -218,7 +218,19 @@ function keysFrom(jwksText) {
 // wrote — which is why the client_id comes from the caller, and the assertion
 // has to agree with it rather than establish it.
 // ---------------------------------------------------------------------------
-function verifyAssertion(opts) {
+// ASYNCHRONOUS SINCE THE WORKER POOL EXISTED, and this is one of the three
+// surfaces that take a JWS the CLIENT signed. All eleven post-quantum and
+// composite algorithms are advertised in
+// `token_endpoint_auth_signing_alg_values_supported`, and verifying a composite
+// ML-DSA assertion took 17.8 and 23.3 seconds on 2026-08-29 — on the one thread
+// that also answers the KDC. See common/worker.js.
+//
+// Nothing else about it changed: the order of the checks is the order it was,
+// the signature is still verified BEFORE the claims for the reason stated
+// below, and every algorithm that is not post-quantum is verified here in this
+// process because a check that takes microseconds has nothing to gain from a
+// child.
+async function verifyAssertion(opts) {
   log.debug("Entering verifyAssertion(). method=" + opts.method);
   const assertion = String(opts.assertion || '');
   const clientId = String(opts.clientId || '');
@@ -305,7 +317,7 @@ function verifyAssertion(opts) {
       // back a token WE signed; this one is about how far a CLIENT'S clock may
       // be out. Collapsing them would be easy and wrong, which is why this call
       // passes its own rather than taking the default.
-      claims = stsCrypto.verifyJws(assertion, attempts[i], {
+      claims = await stsCrypto.verifyJwsAsync(assertion, attempts[i], {
         algorithms: [alg],
         // The audience and the issuer are checked here rather than by hand
         // below, so that a library that knows the rules applies them: `aud` may
@@ -466,7 +478,11 @@ function verifyCertificate(opts) {
 // 2.5's policy question and it lives in `oauth2_bcp.js`. This answers only
 // "does what arrived prove this client", which is protocol.
 // ---------------------------------------------------------------------------
-function verify(opts) {
+// ASYNCHRONOUS BECAUSE verifyAssertion() IS. The four methods that are not an
+// assertion — the two secret ones and the two RFC 8705 certificate ones —
+// resolve without leaving this process; nothing about what any of them decides
+// changed.
+async function verify(opts) {
   log.debug("Entering verify().");
   const info = opts || {};
   const method = String(info.method || '');
@@ -507,7 +523,7 @@ function verify(opts) {
                                        '" (RFC 7523 section 2.2). This request says "' +
                                        (info.assertionType || '') + '".' };
     }
-    const checked = verifyAssertion({
+    const checked = await verifyAssertion({
       method: method, assertion: info.assertion, clientId: info.clientId,
       clientSecret: info.clientSecret, jwks: info.jwks, jwksUri: info.jwksUri,
       audiences: info.audiences

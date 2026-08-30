@@ -610,6 +610,73 @@ function pqKeysFor(keys) {
   return keys.pqKeys;
 }
 
+// ---------------------------------------------------------------------------
+// THE SAME ELEVEN KEYS, MADE IN CHILD PROCESSES.
+//
+// Nearly all of the ~1.9 seconds above is one SLH-DSA-SHAKE keygen, and it is
+// spent on the FIRST JWKS FETCH of a realm — a request that, until the worker
+// pool existed, stopped this whole service for two seconds while it was
+// answered. See common/worker.js.
+//
+// TWO THINGS HERE ARE NOT DECORATION.
+//
+//   * `keys.pqKeysPromise` — the generation in flight. Without it two requests
+//     arriving together each start eleven keygens, and the second set
+//     overwrites the first: a client that fetched the JWKS in between then
+//     holds keys that verify nothing. With it, the second caller waits on the
+//     first caller's work.
+//   * FIRST WRITER WINS on `keys.pqKeys`. The synchronous pqKeysFor() above is
+//     still reachable — signingKeyFor() calls it for an ES256 signature, which
+//     needs the key list and not the post-quantum half of it — so the two can
+//     race. Whichever finishes first is the set this realm keeps and BOTH
+//     return it, so the JWKS and the signature can never be from different
+//     sets. The loser's work is thrown away, which costs a second of a child
+//     process and nothing that anybody can observe.
+//
+// A failure clears the in-flight promise rather than remembering it, so a realm
+// whose first attempt failed can be asked again instead of being permanently
+// without post-quantum keys.
+// ---------------------------------------------------------------------------
+function pqKeysForAsync(keys) {
+  log.debug("Entering pqKeysForAsync().");
+  if (keys.pqKeys) {
+    log.debug("Leaving pqKeysForAsync(). Already made.");
+    return Promise.resolve(keys.pqKeys);
+  }
+  if (keys.pqKeysPromise) {
+    log.debug("Leaving pqKeysForAsync(). One is already in flight.");
+    return keys.pqKeysPromise;
+  }
+  const started = Date.now();
+  keys.pqKeysPromise = Promise.all(pqJose.PQ_ALGS.map(function (alg) {
+    return pqJose.generateAsync(alg).then(function (pair) {
+      const material = Buffer.from(pair.pub).toString('base64');
+      return {
+        alg: alg,
+        privateKey: pair.priv,
+        publicJwk: pqJose.akpPublicJwk(alg, pair.pub,
+          'sts-mock-' + alg.toLowerCase() + '-' +
+          forge.md.sha256.create().update(material).digest().toHex()
+            .slice(0, 8))
+      };
+    });
+  })).then(function (made) {
+    if (!keys.pqKeys) {
+      keys.pqKeys = made;
+      log.info('The post-quantum signing keys were generated for the "' +
+               keys.realm + '" realm: ' + made.length + ' key(s) in ' +
+               (Date.now() - started) + 'ms, in worker processes, so this ' +
+               'service went on answering throughout.');
+    }
+    return keys.pqKeys;
+  }).catch(function (err) {
+    keys.pqKeysPromise = null;
+    throw err;
+  });
+  log.debug("Leaving pqKeysForAsync(). Generating.");
+  return keys.pqKeysPromise;
+}
+
 // Every signing key this realm can publish — the RSA one, the curve ones, and
 // the post-quantum ones, which this call brings into being.
 function allSigningKeys() {
@@ -620,25 +687,56 @@ function allSigningKeys() {
   return out;
 }
 
-function signingKeyFor(alg) {
-  log.debug("Entering signingKeyFor(). alg=" + alg);
+// The same list, with the post-quantum half generated in the pool. It is what
+// the JWKS endpoint calls, because that endpoint is the one that brings those
+// eleven keys into being.
+function allSigningKeysAsync() {
+  log.debug("Entering allSigningKeysAsync().");
+  const keys = stsKeysFor();
+  log.debug("Leaving allSigningKeysAsync().");
+  return pqKeysForAsync(keys).then(function (pq) {
+    return (keys.extraKeys || []).concat(pq);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The two halves of signingKeyFor(), split so that the asynchronous twin below
+// is the SAME decision made about the same list. What is checked before the
+// list is needed — an unknown algorithm, an HMAC, the RSA key — is one
+// function; picking the key out of the list is the other. Two copies of either
+// would be two places for "which key signs which algorithm" to be answered,
+// which is the very thing this function was written to have one of.
+//
+// It returns null when the answer is "the list decides", so that the caller
+// knows whether it has to build the list at all — which for the asynchronous
+// path is the difference between an RS256 signature that resolves immediately
+// and one that waits on eleven post-quantum keygens it will not use.
+// ---------------------------------------------------------------------------
+function signingKeyWithoutList(alg) {
+  log.debug("Entering signingKeyWithoutList(). alg=" + alg);
   const spec = stsCrypto.JWS_ALGS[alg];
   if (!spec) {
-    log.debug("Leaving signingKeyFor(). Unknown algorithm.");
+    log.debug("Leaving signingKeyWithoutList(). Unknown algorithm.");
     throw new Error('this service cannot sign with "' + alg + '"; it signs ' +
       'with ' + stsCrypto.JWS_SIGNING_ALGS.join(', ') + '.');
   }
   if (spec.family === 'hmac') {
-    log.debug("Leaving signingKeyFor(). HMAC has no key here.");
+    log.debug("Leaving signingKeyWithoutList(). HMAC has no key here.");
     throw new Error('an HS* signature is made with the client\'s own secret, ' +
       'which this service does not choose. Pass the secret to signJws() ' +
       'directly.');
   }
   if (spec.family === 'rsa') {
-    log.debug("Leaving signingKeyFor(). The service RSA key.");
+    log.debug("Leaving signingKeyWithoutList(). The service RSA key.");
     return { key: STS.privateKey, kid: STS.kid };
   }
-  const found = allSigningKeys().filter(function (one) {
+  log.debug("Leaving signingKeyWithoutList(). The list decides.");
+  return null;
+}
+
+function signingKeyFromList(alg, list) {
+  log.debug("Entering signingKeyFromList(). alg=" + alg);
+  const found = list.filter(function (one) {
     // The two EdDSA entries share an `alg`, so the CURVE decides between them
     // — `oauth2.eddsaCurve`, which defaults to Ed25519 and is the only way a
     // client can end up with an Ed448 signature (RFC 8037 gives it no member
@@ -655,13 +753,44 @@ function signingKeyFor(alg) {
   if (!found) {
     // This is a defect here rather than anything the caller did: the algorithm
     // is in the table, so something advertises it, and no key was generated.
-    log.debug("Leaving signingKeyFor(). No key for " + alg + ".");
+    log.debug("Leaving signingKeyFromList(). No key for " + alg + ".");
     throw new Error('this service names "' + alg + '" as a signing algorithm ' +
       'and has generated no key for it. That is a defect in makeStsKeys(), ' +
       'not in the request.');
   }
-  log.debug("Leaving signingKeyFor(). " + alg + ".");
+  log.debug("Leaving signingKeyFromList(). " + alg + ".");
   return { key: found.privateKey, kid: found.publicJwk.kid };
+}
+
+function signingKeyFor(alg) {
+  log.debug("Entering signingKeyFor(). alg=" + alg);
+  const direct = signingKeyWithoutList(alg);
+  if (direct) {
+    log.debug("Leaving signingKeyFor(). No list needed.");
+    return direct;
+  }
+  log.debug("Leaving signingKeyFor(). " + alg + ".");
+  return signingKeyFromList(alg, allSigningKeys());
+}
+
+// The same key, with the post-quantum half of the list generated in the pool.
+function signingKeyForAsync(alg) {
+  log.debug("Entering signingKeyForAsync(). alg=" + alg);
+  let direct;
+  try {
+    direct = signingKeyWithoutList(alg);
+  } catch (e) {
+    log.debug("Leaving signingKeyForAsync(). Refused.");
+    return Promise.reject(e);
+  }
+  if (direct) {
+    log.debug("Leaving signingKeyForAsync(). No list needed.");
+    return Promise.resolve(direct);
+  }
+  log.debug("Leaving signingKeyForAsync(). Waiting on the key list.");
+  return allSigningKeysAsync().then(function (list) {
+    return signingKeyFromList(alg, list);
+  });
 }
 
 // Sign with whichever key the algorithm needs. `secret` is required for HS\*
@@ -684,6 +813,40 @@ function signJwtAs(payload, alg, secret) {
   log.debug("Leaving signJwtAs(). " + alg + ".");
   return stsCrypto.signJws(payload, signer.key,
                            { algorithm: alg, keyid: signer.kid });
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME SIGNATURE, OFF THIS PROCESS'S THREAD, and the two call sites that
+// use it are the two a CLIENT can point at a post-quantum algorithm: the ID
+// Token (`id_token_signed_response_alg`) and the signed UserInfo response
+// (`userinfo_signed_response_alg`). An SLH-DSA-SHAKE-128s token took 14.6 and
+// 15.4 seconds on 2026-08-29, and for those seconds this service answered
+// nobody — see common/worker.js.
+//
+// Everything else it can be asked for resolves with the value signJwtAs()
+// computed, unchanged and not deferred: an HS256 or RS256 signature is
+// microseconds, and an IPC round trip to save that would be a cost with no
+// saving. `opts.session` is the pool's routing hint and may be omitted.
+// ---------------------------------------------------------------------------
+function signJwtAsAsync(payload, alg, secret, opts) {
+  const options = opts || {};
+  log.debug("Entering signJwtAsAsync(). alg=" + alg);
+  const spec = stsCrypto.JWS_ALGS[alg];
+  if (spec && spec.family === 'hmac') {
+    try {
+      const signed = signJwtAs(payload, alg, secret);
+      log.debug("Leaving signJwtAsAsync(). HMAC, in process.");
+      return Promise.resolve(signed);
+    } catch (e) {
+      log.debug("Leaving signJwtAsAsync(). Refused.");
+      return Promise.reject(e);
+    }
+  }
+  log.debug("Leaving signJwtAsAsync(). " + alg + ".");
+  return signingKeyForAsync(alg).then(function (signer) {
+    return stsCrypto.signJwsAsync(payload, signer.key,
+      { algorithm: alg, keyid: signer.kid, session: options.session });
+  });
 }
 
 function signJwt(payload, context) {
@@ -957,8 +1120,11 @@ function numberWord(count) {
 
 module.exports = {
   signingKeyFor: signingKeyFor,
+  signingKeyForAsync: signingKeyForAsync,
   allSigningKeys: allSigningKeys,
+  allSigningKeysAsync: allSigningKeysAsync,
   signJwtAs: signJwtAs,
+  signJwtAsAsync: signJwtAsAsync,
   log: log,
   logArtifact: logArtifact,
   headersOf: headersOf,

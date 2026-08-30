@@ -552,6 +552,48 @@ const SETTINGS = [
                  'with. That is ASN.1 and crypto tracing rather than this ' +
                  'service\'s account of what it did.' },
 
+  // --- The worker pool -----------------------------------------------------
+  //
+  // THE ONLY SETTING HERE THAT CHANGES HOW MANY PROCESSES THIS SERVICE IS.
+  //
+  // Node runs this service's six listener families on one thread, so a
+  // synchronous computation does not slow it down, it STOPS it — and
+  // post-quantum signing is that computation. Stalls of 14.6, 15.4, 17.8 and
+  // 23.3 seconds were measured on 2026-08-29, during which this service
+  // answered nobody at all: not another HTTP caller, not the KDC on port 88.
+  // See common/worker.js.
+  //
+  // TWO, and not the core count. The property being bought is that the front
+  // process's event loop stays FREE, and one worker buys all of it; the second
+  // is what stops a caller's SLH-DSA signature queueing behind a stranger's.
+  // Beyond that the return falls off quickly and the cost does not — each
+  // worker is a node process — and this is a mock that commonly runs several
+  // to a machine under a test suite. Raising it is one setting, and the pool
+  // resizes on the next signature rather than at the next restart.
+  //
+  // NOTHING IS FORKED UNTIL THE FIRST POST-QUANTUM JOB, whatever this says, so
+  // a process that never signs one never pays for a pool. That is what keeps
+  // the parent project's in-process Kerberos jobs, this repository's own tests
+  // and `node env/generate_defaults.js` free of child processes they would
+  // never use and would have to wait for.
+  { key: 'workers.count', group: 'Global', label: 'Worker processes',
+    env: 'STS_WORKERS_COUNT', type: 'int', dflt: 2, min: 0, max: 32,
+    runtime: true, perProcess: true,
+    description: 'How many child processes the post-quantum signing, ' +
+                 'verification and key generation are handed to, so that the ' +
+                 'process holding the sockets is never the one computing an ' +
+                 'SLH-DSA signature — which takes SECONDS, during which node ' +
+                 'answers nothing at all. 0 means compute in this process, ' +
+                 'which is what this service did before the pool existed: ' +
+                 'correct, identical byte for byte, and blocking for as long ' +
+                 'as each signature takes. The pool is forked lazily, so a ' +
+                 'process that never signs post-quantum never forks anything ' +
+                 'whatever this is set to, and it is re-read per job, so ' +
+                 'changing it here takes effect on the next signature. A ' +
+                 'REALM MAY NOT CARRY THIS: a pool belongs to the process, ' +
+                 'and a realm resizing it would be resizing every other ' +
+                 'realm\'s too.' },
+
   // --- Trust realms --------------------------------------------------------
   // Two settings, and they are the only two in this table that a realm cannot
   // set on itself: a realm that could turn realms off, or move the prefix it
@@ -2980,16 +3022,43 @@ function setRealmContext(fn) {
 }
 
 // The realm whose overrides apply right now, or null: outside a request, with
-// realms off, in the default realm, for one of the two settings a realm may not
-// carry, or while processValue() is resolving something the PROCESS is being
-// asked about. Every reader and every writer below goes through this, so the
-// exemption cannot be true in one direction and false in the other.
+// realms off, in the default realm, for a setting a realm may not carry, or
+// while processValue() is resolving something the PROCESS is being asked about.
+// Every reader and every writer below goes through this, so the exemption
+// cannot be true in one direction and false in the other.
+//
+// THERE ARE NOW TWO REASONS A REALM MAY NOT CARRY A SETTING, and they are
+// different rules rather than one spelt twice.
+//
+//   * the `realms.*` PREFIX — whether realms exist and where they are found. A
+//     realm carrying one of those would be changing how it was reached half way
+//     through the request that reached it. It matches by prefix on purpose, so
+//     that a third `realms.*` setting is exempt the day it is added rather than
+//     the day somebody remembers this function.
+//   * `perProcess` on the row — a setting that is a property of the OS PROCESS
+//     rather than of the service's behaviour, so that one realm's value would
+//     silently be every realm's. `workers.count` is the first: a pool of child
+//     processes is forked once, by this process, and a realm resizing it would
+//     be resizing every other realm's too.
+//
+// The flag is read off the table rather than matched by name, which is what
+// makes the second rule as forgettable as the first. `byKey` rather than
+// settingFor(), because this is on the read path for every setting in the
+// service and an unknown key here is not this function's to refuse.
 function realmFor(key) {
   if (!realmContext || suppressRealmLayer ||
-      String(key).indexOf('realms.') === 0) {
+      String(key).indexOf('realms.') === 0 || isPerProcess(key)) {
     return null;
   }
   return realmContext() || null;
+}
+
+// Whether a realm may carry this setting at all. Exported, because the WRITING
+// end of the rule is in realms.js — see checkRealmOverride() there — and two
+// copies of a predicate is how the two ends come to disagree.
+function isPerProcess(key) {
+  const setting = byKey[key];
+  return !!(setting && setting.perProcess);
 }
 
 function realmOverrideOf(key) {
@@ -3803,5 +3872,6 @@ module.exports = {
   describe: describe,
   groups: groups,
   snapshot: snapshot,
-  auditAppconfig: auditAppconfig
+  auditAppconfig: auditAppconfig,
+  isPerProcess: isPerProcess
 };

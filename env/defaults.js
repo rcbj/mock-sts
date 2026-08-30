@@ -51,6 +51,11 @@ var config = {
     trustProxy: false  // Trust forwarded headers
   },
 
+  // --- Global ----------------------------------------------------------
+  workers: {
+    count: 2  // Worker processes
+  },
+
   // --- Trust realms ----------------------------------------------------
   realms: {
     enabled: true,        // Trust realms enabled
