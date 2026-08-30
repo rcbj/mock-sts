@@ -521,6 +521,71 @@ trip over convenient data is the shape that passes while proving nothing**, and
 the only reason that was found before it was committed is that the mutation
 round is mandatory here.
 
+## TWO CI-ONLY FAILURES, AND WHAT EACH ONE TEACHES (2026-08-30)
+
+Both were found by a manual `workflow_dispatch` of `.github/workflows/tests.yml`
+on `develop`, both were invisible on a developer machine, and neither was a
+defect in the service. They are recorded together because the lesson is the
+same one twice: **a test that is timing-dependent passes on the machine it was
+written on and fails on the machine that matters.**
+
+### `sts_admin_console` — a 60ms sleep where a wait belonged
+
+The gate section presses a real form POST with the cookie jar emptied under it
+and asserts the console REFUSES rather than redirects. On the runner it failed
+with `expected exactly one POST while posting a form with no session; the
+browser made 0: []`.
+
+Nothing about the console was wrong. `settleAfterSubmit()` waited for
+`document.readyState === "complete"` and then slept 60ms "so the BiDi events
+for what just loaded have been delivered" — and `readyState` and BiDi event
+delivery are **two different clocks**. On a two-core runner the
+`responseCompleted` event for the POST arrived after the sleep expired.
+
+**The fix was already written in the same file, one function up.** `go()` had
+met this race for GETs and refused to sleep through it: it calls
+`waitForResponse(url, from)`. The POST path now has the sibling —
+`waitForMethod(method, from)` — and `fillAndPress()` reads the form's own
+`method` so that all 35 call sites, GET forms included, wait for the response
+they caused instead of guessing how long it takes.
+
+**IT WAS MUTATION-TESTED IN BOTH DIRECTIONS**, which for a timing bug means
+making the machine slow rather than making the code wrong: a probe that delayed
+every recorded BiDi event by 400ms was installed, the fixed file passed under
+it, and the same probe with the wait disabled reproduced the runner's message
+byte for byte. A timing fix that has only been seen to pass on a fast machine
+has not been shown to fix anything.
+
+**The rule to take from it**: in this file, `readyState`, `driver.get()`
+resolving and an element being clickable say nothing about when the network
+event describing that navigation reaches this process. Wait for the event.
+
+### `sts_userinfo_protected` — a watchdog that was a property of the job
+
+The per-job watchdog in `tools/run-report.js` was a flat 300s. That job signs
+and verifies twenty-five algorithms, several of them lattice or hash-based, and
+under `NODE_V8_COVERAGE` on a two-core runner its **signing section alone took
+four minutes** — against about thirty seconds for the whole job, uninstrumented,
+on a developer machine. The watchdog killed it mid-run.
+
+**What made it expensive to read is what it did next.** The killed job left the
+throwaway service still working through what it had been given, so `vc_did` —
+the job after it — failed with a connect timeout. The run reported TWO failures
+of which one was real. **A watchdog that fires on a healthy job does not merely
+lose that job; it corrupts the ones behind it**, and that is the reason to give
+it headroom rather than trim it to fit.
+
+So the watchdog scales with the RUN: `COVERAGE_TIMEOUT_FACTOR` (4) is applied
+when `COVERAGE=true` and only when the caller passed no `--timeout=`. The plain
+suite keeps its 300s, which is the number that catches a genuinely hung browser
+in reasonable time; a coverage run gets 1200s, well inside the workflow's own
+`timeout-minutes: 60`. A caller who names a timeout still gets exactly it.
+
+**Neither of these is a reason to weaken an assertion.** The gate check still
+demands exactly one POST and still demands a refusal; the userinfo job still
+drives every advertised algorithm. What changed is how long the harness is
+willing to wait to find out.
+
 ## What it does not do
 
 No framework, no `describe`/`it`, no assertion library, no `devDependencies`.
