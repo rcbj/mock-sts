@@ -618,3 +618,35 @@ innermost V8 range containing its first non-blank character, and a line counts
 as code when it is neither blank nor wholly a comment. There are no branch
 numbers at all, because V8's block ranges are not branch arms and a percentage
 with no definition is worse than none.
+
+## THE CRYPTO REPORT'S GUARD IS IN `tests/vendored/admin_api.js` (2026-08-30)
+
+`/admin/crypto-metadata` claims that every algorithm table on it is READ FROM
+THE MODULE THAT PERFORMS THE ALGORITHM rather than written down. That claim is
+the whole reason the page is worth having, and it is exactly the kind of claim
+that is true the day it is made and quietly false a month later.
+
+It went in `tests/vendored/admin_api.js` — this repository's own file — rather
+than in `tests/` here, by the line the root `CLAUDE.md` draws: **every one of
+the assertions can be made by driving the running service over HTTP.** Three
+things are checked and each answers a different way of the page going wrong:
+
+* **The drift report, in all three directions** — a protocol family this mock
+  advertises with no crypto profile, a profile naming a family that is not
+  advertised, and a family citing an envelope with no row in the standards
+  table. The page reports all three on itself; this is what makes them FAIL.
+* **Every coverage note starts `full`, `partial` or `mock`**, the rule
+  `sts_metadata.js`'s specification list already follows.
+* **Five algorithm lists are compared against the SERVICE'S OWN DISCOVERY
+  DOCUMENTS** — the ID Token and UserInfo signing lists, the two JWE lists and
+  the DPoP list, read off `/.well-known/openid-configuration` and
+  `/.well-known/oauth-authorization-server`. **This is the check that makes
+  "derived" mean something**: reading the report on its own says nothing,
+  because a hand-written list is well-formed too. It needs two doors onto one
+  table, and this is the only place in the suite where both exist.
+
+**All three were mutation-tested before they were committed**, which is not
+optional here: a renamed family row (caught, naming SCIM in both directions), a
+hand-written ID Token list of two algorithms (caught, naming the discovery
+document), and a coverage note rewritten to open with "we do all of this"
+(caught, naming the `jws` row).

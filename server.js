@@ -287,6 +287,39 @@ require('./mgmt-api/admin_api');
 // would load it here whatever this line said. Saying it explicitly is what
 // keeps "the order in this file is the route order" true.
 const tlsServer = require('./tls/tls_server');
+// ---------------------------------------------------------------------------
+// GET /admin/crypto-metadata — the console's report on what this service does
+// with cryptography, for every identity service it advertises.
+//
+// ITS POSITION IS A DEPENDENCY AND NOT A PREFERENCE, and it is an unusual one:
+// this module reads an algorithm table out of eleven other modules, and
+// requiring one of them that this file has not yet loaded would REGISTER ITS
+// ROUTES HERE (rule 1). Here, everything it reaches for is already loaded, so
+// every one of its requires is a cache hit that registers nothing and moves
+// nothing:
+//
+//   after ./admin-ui/admin        for the console SHELL and its gate — express
+//                                 applies middleware only to routes added after
+//                                 it, so this page is behind the sign-on and
+//                                 the two roles by construction
+//   after ./oauth-oidc/oauth2     the ID Token and UserInfo signing lists, and
+//                                 dpop.js's DPoP filter over the shared table
+//   after ./authn/authn           webauthn.js's COSE tables
+//   after ./kerberos/krb5_kdc     the encryption type codec
+//   after ./tls/tls_server        the server certificate — THE ONE THAT DECIDES
+//                                 THIS LINE'S PLACE. Every other dependency is
+//                                 satisfied several requires earlier; this is
+//                                 the last of them, which is why the module
+//                                 sits immediately below that one.
+//
+// It fills admin.js's setCryptoReporter() so that GET /admin-api/crypto can
+// mirror the page without the management API requiring this file — a require in
+// that direction would drag this page's route and tls_server's three ahead of
+// the management API's own. And ./sts_metadata.js, last in this file, hands it
+// the protocol family list so that the two pages' idea of what this service
+// advertises is checked rather than agreed by hand.
+// ---------------------------------------------------------------------------
+require('./admin-ui/crypto_metadata');
 // The embedded LDAPv3 directory (RFC 4511), built on the node-ldapjs submodule.
 // Like the two Kerberos modules it registers its HTTP views at require time
 // (/ldap, /ldap/directory) and starts its TCP listener from listen() below, for
