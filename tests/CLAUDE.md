@@ -561,26 +561,61 @@ has not been shown to fix anything.
 resolving and an element being clickable say nothing about when the network
 event describing that navigation reaches this process. Wait for the event.
 
-### `sts_userinfo_protected` — a watchdog that was a property of the job
+### `sts_userinfo_protected` — a watchdog that was already fixed, on a branch that had it
 
-The per-job watchdog in `tools/run-report.js` was a flat 300s. That job signs
-and verifies twenty-five algorithms, several of them lattice or hash-based, and
-under `NODE_V8_COVERAGE` on a two-core runner its **signing section alone took
-four minutes** — against about thirty seconds for the whole job, uninstrumented,
-on a developer machine. The watchdog killed it mid-run.
+**THIS SECTION RECORDS A MISTAKE AS WELL AS A BUG, and the mistake is the more
+useful half.**
+
+The bug: `run-report.js`'s per-job watchdog is a flat 300s. That job signs and
+verifies twenty-five algorithms, several of them lattice or hash-based, and
+under `NODE_V8_COVERAGE` on a two-core runner it takes about eleven minutes —
+against roughly thirty seconds for the whole job, uninstrumented, on a developer
+machine. A 300s watchdog kills it partway through.
 
 **What made it expensive to read is what it did next.** The killed job left the
 throwaway service still working through what it had been given, so `vc_did` —
 the job after it — failed with a connect timeout. The run reported TWO failures
 of which one was real. **A watchdog that fires on a healthy job does not merely
-lose that job; it corrupts the ones behind it**, and that is the reason to give
-it headroom rather than trim it to fit.
+lose that job; it corrupts the ones behind it**, which is the reason to give it
+headroom rather than trim it to fit.
 
-So the watchdog scales with the RUN: `COVERAGE_TIMEOUT_FACTOR` (4) is applied
-when `COVERAGE=true` and only when the caller passed no `--timeout=`. The plain
-suite keeps its 300s, which is the number that catches a genuinely hung browser
-in reasonable time; a coverage run gets 1200s, well inside the workflow's own
-`timeout-minutes: 60`. A caller who names a timeout still gets exactly it.
+**THE FIX ALREADY EXISTED.** `run-coverage.sh` has passed
+`--timeout=${STS_COVERAGE_JOB_TIMEOUT_MS:-900000}` since `d6459da`, *Scale the
+coverage run's per-job watchdog to what instrumentation costs* — and that is
+where it belongs: instrumentation is what makes a job slow, and the LAUNCHER is
+what knows a run is instrumented. `run-report.js` is handed a number and has no
+business inferring one.
+
+What went wrong on 2026-08-30 is that `d6459da` was on `main` and not on
+`develop`, a manual `workflow_dispatch` was run on `develop`, and the failure
+was diagnosed correctly and then fixed a SECOND time — a `COVERAGE_TIMEOUT_FACTOR`
+in `run-report.js` that read `COVERAGE` out of the environment and multiplied
+the default. It worked, and it was still wrong: on `main` it was DEAD CODE,
+because it only fires when no `--timeout=` was passed and `run-coverage.sh`
+always passes one. It was removed as soon as that was noticed.
+
+**Two rules come out of it, and the second is the one that cost the time:**
+
+* **The launcher owns the timeout.** A run that needs a different watchdog says
+  so on the command line. Nothing downstream of `--timeout=` may infer one from
+  the environment, or there are two answers to one question and only one of them
+  is read.
+* **BEFORE FIXING A CI FAILURE ON ONE BRANCH, CHECK WHETHER ANOTHER BRANCH
+  ALREADY FIXED IT.** `main` was eleven commits ahead of `develop` at the time,
+  and among them were this watchdog, the `stsFetch` retry in
+  `vendored/sts_userinfo_protected.js`, four vendored `xmldsig.js` syncs and the
+  worker pool that moves post-quantum signing off the thread owning every
+  socket. A failure seen on the branch that is BEHIND is very often a fix that
+  has not been merged forward, and `git log origin/develop..origin/main` is the
+  whole of the check.
+
+**AND THE ROOT CAUSE HAS ITS OWN FIX, WHICH IS NOT A TIMEOUT.** A job waiting on
+this service under coverage is waiting on an event loop blocked by a signature;
+`common/worker_pool.js` is the answer to that, and widening a client-side window
+is not. `vendored/sts_userinfo_protected.js`'s `BUSY_WINDOW_MS` is a hard-coded
+90s and has been seen to be exceeded once on a contended runner even with the
+pool in place — but that file is VENDORED, so the fix for it is upstream and a
+sync, never an edit here.
 
 **Neither of these is a reason to weaken an assertion.** The gate check still
 demands exactly one POST and still demands a refusal; the userinfo job still

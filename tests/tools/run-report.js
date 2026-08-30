@@ -124,7 +124,11 @@
 //                          than skipping them, exactly as a throwaway one
 //                          that would not start does.
 //   --report-dir=<dir>     where to write (default tests/report)
-//   --timeout=<ms>         per-job watchdog (default 300000; 0 disables)
+//   --timeout=<ms>         per-job watchdog (default 300000; 0 disables).
+//                          `./run-coverage.sh` passes one of its own —
+//                          see STS_COVERAGE_JOB_TIMEOUT_MS there — because
+//                          instrumentation is what makes a job slow and
+//                          the launcher is what knows a run is instrumented.
 //   --quiet                do not echo each job's output as it runs
 //   --help
 //
@@ -186,13 +190,6 @@ const trust = require('./trust');
 const manifest = require('../vendored/MANIFEST.js');
 const coverage = require('./coverage-report');
 
-// How much longer a job may take when V8 coverage is on. Four rather than two
-// because the observed worst case was already over 4x the plain figure and a
-// watchdog that only just fits is one that will fire on a slower runner —
-// which is the failure this exists to stop, not a delay to be trimmed. The
-// outer bound is the workflow's own `timeout-minutes: 60`, which this stays
-// well inside: 23 jobs cannot each take the maximum.
-const COVERAGE_TIMEOUT_FACTOR = 4;
 const { testFiles } = require('../run');
 
 const log = bunyan.createLogger({ name: 'run-report',
@@ -212,8 +209,7 @@ function parseArgs(argv) {
   log.debug('Entering parseArgs().');
   const opts = { only: [], list: false, protocol: 'on', parent: '',
                  reportDir: path.join(TESTS_DIR, 'report'),
-                 timeoutMs: 300000, timeoutGiven: false,
-                 quiet: false, help: false,
+                 timeoutMs: 300000, quiet: false, help: false,
                  browser: true,
                  // The environment is the FALLBACK and the option is the
                  // answer, which is the same precedence every other setting
@@ -247,10 +243,6 @@ function parseArgs(argv) {
       opts.reportDir = path.resolve(a.slice('--report-dir='.length));
     } else if (a.indexOf('--timeout=') === 0) {
       opts.timeoutMs = Number(a.slice('--timeout='.length));
-      // Recorded so that the coverage scaling below can tell "the default"
-      // from "the caller asked for exactly this". A caller who passes
-      // --timeout= means it, including under coverage.
-      opts.timeoutGiven = true;
     } else if (a.indexOf('--only=') === 0) {
       a.slice('--only='.length).split(',').forEach(function (p) {
         if (p.trim()) {
@@ -1017,39 +1009,6 @@ async function main() {
   // ---- coverage, if it was asked for ------------------------------------
   const wantCoverage = String(process.env.COVERAGE || '') === 'true';
 
-  // ---------------------------------------------------------------------
-  // THE PER-JOB WATCHDOG SCALES WITH COVERAGE, AND A CI RUN IS WHY.
-  //
-  // V8 coverage instruments every function in every process this runner
-  // starts, and the cost is not spread evenly: a job that spends its time in
-  // HTTP round trips barely notices, while one that spends it inside node's
-  // own crypto — signing twenty-five algorithms, several of them lattice or
-  // hash-based — pays it on every call. `sts_userinfo_protected` is that job.
-  // It is about thirty seconds plain on a developer machine and it took FOUR
-  // MINUTES to get through its signing section alone on a two-core GitHub
-  // runner under coverage, so the flat 300s watchdog killed it in the middle
-  // of the ID Token section that follows.
-  //
-  // What made that failure expensive to read is what it did NEXT: the killed
-  // job left the throwaway service being torn down, so `vc_did` — the job
-  // after it — failed with a connect timeout, and the run reported TWO
-  // failures of which only one was real. A watchdog that fires on a healthy
-  // job does not merely lose that job; it corrupts the ones behind it.
-  //
-  // So the watchdog is a property of the RUN rather than of the job, and it
-  // is multiplied here rather than raised for everybody: the plain suite
-  // keeps its 300s, which is the number that catches a genuinely hung browser
-  // in reasonable time. `--timeout=` still wins outright, because a caller
-  // who names one means it.
-  if (wantCoverage && !opts.timeoutGiven && opts.timeoutMs > 0) {
-    const plain = opts.timeoutMs;
-    opts.timeoutMs = plain * COVERAGE_TIMEOUT_FACTOR;
-    log.info('coverage is on, so the per-job watchdog is ' + opts.timeoutMs +
-             'ms rather than ' + plain + 'ms. Instrumentation makes the ' +
-             'crypto-heavy jobs several times slower, and a watchdog that ' +
-             'fires on a healthy job also breaks the job behind it. Pass ' +
-             '--timeout= to override.');
-  }
   const coverageDir = path.resolve(process.env.COVERAGE_DIR ||
                                    path.join(REPO_ROOT, 'coverage'));
   const rawUnit = path.join(coverageDir, 'raw', 'unit');
