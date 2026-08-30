@@ -513,6 +513,32 @@ Five things are worth knowing before touching any of it.
    ends of the `realms.*` rule were written separately and disagreed within the
    hour.
 
+**A REALM'S ELEVEN KEYS ARE MADE WHEN THE REALM IS**, and that is the pool's
+second consequence rather than a sixth thing to know about it. One of the
+eleven is expensive out of all proportion: an SLH-DSA-SHAKE-128s KEY GENERATION
+is about 5.1 of the 5.8 seconds the whole set takes, and it is one indivisible
+job that no pool size divides. That put a realm's first JWKS fetch a little
+over five seconds — and `federation.outboundTimeoutMs` is FIVE, deliberately,
+because a browser is waiting on that request.
+
+It never failed, and why it never failed is the part worth keeping: while the
+generation was SYNCHRONOUS it blocked this process's event loop, so the timer
+enforcing that budget could not fire until the keys were already made. **The
+response won a race the timeout was never allowed to run in.** The moment the
+computation moved to a worker and the loop stayed free, the timer fired
+correctly at five seconds and aborted a fetch three tenths of a second from
+finishing — one federated sign-in in the parent project's suite, reporting
+"the JWKS could not be fetched", which is a sentence about a service that was
+working perfectly.
+
+So `helpers.js` warms a realm's post-quantum keys on `realms.onChange`'s
+`create`, through `stsKeysFor.of(id)` because a watcher has no ambient realm.
+That was not affordable before — eager generation meant 5.8 seconds of a
+stopped service per realm, which is exactly why they were lazy — and it is the
+point rather than a workaround: **the pool does not merely move the cost off
+the request that pays it, it makes paying it EARLY free.** Measured: a realm
+created through `/admin-api/realms/create` answers its first JWKS in 8ms.
+
 `common/CLAUDE.md` has the module-level argument; `tests/worker_pool.js` has the
 four contracts and the measurement that shows the loop is free.
 

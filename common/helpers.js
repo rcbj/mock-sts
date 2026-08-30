@@ -677,6 +677,76 @@ function pqKeysForAsync(keys) {
   return keys.pqKeysPromise;
 }
 
+// ---------------------------------------------------------------------------
+// A REALM'S ELEVEN KEYS ARE MADE WHEN THE REALM IS, NOT WHEN SOMEBODY FIRST
+// ASKS FOR THEM — AND THIS IS THE FIX FOR A FAILURE THE WORKER POOL EXPOSED
+// RATHER THAN CAUSED.
+//
+// One of these eleven is expensive out of all proportion to the rest: an
+// SLH-DSA-SHAKE-128s KEY GENERATION is about 5.1 of the 5.8 seconds the whole
+// set takes, and it is one indivisible job, so a pool of any size still waits
+// for it. That put the first JWKS fetch of a realm at a little over five
+// seconds — and `federation.outboundTimeoutMs` is FIVE, deliberately, because
+// a browser is waiting on that request.
+//
+// It never failed, and the reason it never failed is the interesting part:
+// while the generation was SYNCHRONOUS it blocked this process's event loop,
+// so the timer enforcing that five-second budget could not fire until the
+// keys were already made. The response always won a race the timeout was
+// never allowed to run in. The moment the computation moved to a worker and
+// the loop stayed free, the timer fired correctly at five seconds and aborted
+// a fetch that was three tenths of a second from finishing — one federated
+// sign-in in the parent project's suite, reporting "the JWKS could not be
+// fetched", which is a sentence about a service that was working.
+//
+// So the keys are made when the realm is created, in the pool, where nothing
+// is waiting on them. That was not affordable before: eager generation used to
+// mean 5.8 seconds of a stopped service per realm, which is why they were lazy
+// in the first place. It is affordable now, and it is the whole point — the
+// pool does not merely move the cost off the request that pays it, it makes
+// paying it EARLY free.
+//
+// `stsKeysFor.of(id)` rather than `stsKeysFor()`: this runs from a change
+// watcher, outside any request, so there is no ambient realm to read. See
+// realms.js's keyed().
+// ---------------------------------------------------------------------------
+function warmPqKeys(realmId) {
+  log.debug("Entering warmPqKeys(). realm=" + realmId);
+  let keys;
+  try {
+    keys = stsKeysFor.of(realmId);
+  } catch (e) {
+    // A realm that has gone between the change and this line. Nothing to warm
+    // and nothing wrong: the next request to it would make its keys anyway.
+    log.debug("Leaving warmPqKeys(). No keys for that realm.");
+    return Promise.resolve(null);
+  }
+  log.debug("Leaving warmPqKeys(). Generating.");
+  return pqKeysForAsync(keys).catch(function (err) {
+    // Swallowed and named, because this is nobody's request: a realm whose
+    // warm-up failed still makes its keys on the first JWKS fetch, the slow
+    // way. A throw here would be an unhandled rejection from a watcher.
+    log.warn('helpers: the post-quantum keys for the "' + realmId +
+             '" realm could not be generated ahead of time (' + err.message +
+             '); the first JWKS fetch on it will make them instead.');
+    return null;
+  });
+}
+
+// ONE WATCHER, on `create` alone. An update, an override or a removal does not
+// change a realm's key material — the keys are made once and kept for the life
+// of the process, which is the property `docs/mock-sts.md` states as "the
+// signing key is regenerated on every start".
+realms.onChange(function (id, what) {
+  log.debug("Entering the realm key warm-up watcher. what=" + what);
+  if (what !== 'create') {
+    log.debug("Leaving the realm key warm-up watcher. Not a creation.");
+    return;
+  }
+  warmPqKeys(id);
+  log.debug("Leaving the realm key warm-up watcher.");
+});
+
 // Every signing key this realm can publish — the RSA one, the curve ones, and
 // the post-quantum ones, which this call brings into being.
 function allSigningKeys() {
@@ -1125,6 +1195,7 @@ module.exports = {
   allSigningKeysAsync: allSigningKeysAsync,
   signJwtAs: signJwtAs,
   signJwtAsAsync: signJwtAsAsync,
+  warmPqKeys: warmPqKeys,
   log: log,
   logArtifact: logArtifact,
   headersOf: headersOf,
