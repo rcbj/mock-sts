@@ -60,6 +60,8 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const dgram = require('dgram');
+const http = require('http');
+const https = require('https');
 
 const bunyan = require('bunyan');
 
@@ -185,6 +187,26 @@ function environmentFor(base, opts) {
   env.STS_SPIFFE_WORKLOAD_SOCKET_ENABLED = 'false';
   env.STS_SPIFFE_SERVER_SOCKET_ENABLED = 'false';
   env.CONFIG_FILE = opts.configFile || './env/local.js';
+  // ---------------------------------------------------------------------
+  // TLS ON THE MAIN PORT, DECIDED HERE RATHER THAN LEFT TO THE APPCONFIG
+  // FILE (2026-08-30) — and the difference is not tidiness.
+  //
+  // start() below has to build a URL, and a URL has a SCHEME in it. If this
+  // were left to `global.https` in whichever file `opts.configFile` names,
+  // this module would be guessing what that file says: a caller pointing at
+  // an appconfig file of their own would get a service on https and a URL
+  // saying http, which reaches every one of the thirteen protocol jobs as a
+  // closed socket. Setting it makes the environment variable — which wins
+  // over every appconfig file — the single statement, and schemeFor() below
+  // reads back exactly what was set.
+  //
+  // The DEFAULT is on, matching env/local.js, env/test.js and
+  // env/docker-tests.js, and a caller's own STS_HTTPS still wins so that
+  // `STS_HTTPS=false ./local-run-tests.sh --no-docker` is a plain-port run.
+  // ---------------------------------------------------------------------
+  env.STS_HTTPS = String(process.env.STS_HTTPS === undefined
+    ? 'true'
+    : process.env.STS_HTTPS);
   if (opts.logLevel) {
     // The mock's own level. An EMPTY value is not a harmless default here:
     // bunyan throws `unknown level name: ""` while the service is still
@@ -196,6 +218,47 @@ function environmentFor(base, opts) {
   }
   log.debug('Leaving environmentFor().');
   return env;
+}
+
+// The scheme the environment above just decided on. One reader of one
+// variable, so that the URL this module publishes and the listener the child
+// binds can never disagree.
+function schemeFor(env) {
+  return String(env.STS_HTTPS) === 'true' ? 'https' : 'http';
+}
+
+// Liveness over either scheme, with the certificate unjudged — see the note at
+// the call site. `https.get`/`http.get` rather than fetch() because fetch's
+// dispatcher takes no per-request `rejectUnauthorized`, and a service that
+// regenerates its key every start can be trusted by nothing that ran before it.
+function probe(url) {
+  return new Promise(function (resolve) {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (e) {
+      resolve(0);
+      return;
+    }
+    const mod = target.protocol === 'https:' ? https : http;
+    const req = mod.get({
+      host: target.hostname,
+      port: target.port,
+      path: target.pathname + target.search,
+      rejectUnauthorized: false,
+      timeout: 5000
+    }, function (res) {
+      res.resume();
+      resolve(res.statusCode || 0);
+    });
+    req.on('error', function () {
+      resolve(0);
+    });
+    req.on('timeout', function () {
+      req.destroy();
+      resolve(0);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +277,7 @@ async function start(opts) {
                     ' free ports could be found for a throwaway instance');
   }
   const env = environmentFor(base, opts);
-  const url = 'http://localhost:' + base;
+  const url = schemeFor(env) + '://localhost:' + base;
   // Under coverage the entry point is a WRAPPER rather than server.js, and the
   // reason is in that file: V8 writes its coverage when the process exits
   // cleanly, and a service killed with SIGTERM does not exit cleanly, so the
@@ -242,15 +305,15 @@ async function start(opts) {
                       exited.code + ', signal ' + exited.signal + '); see ' +
                       opts.logFile);
     }
-    let answered = false;
-    try {
-      const res = await fetch(url + '/', { redirect: 'manual' });
-      answered = res.status > 0;
-    } catch (e) {
-      // Not up yet. This is the ordinary case for the first second or two and
-      // the loop below is the whole handling; a stack here would be noise.
-      answered = false;
-    }
+    // `fetch()` until 2026-08-30, and it could not survive this service
+    // serving TLS: the certificate is self-signed and regenerated on every
+    // start, so the first request would fail verification for the whole
+    // timeout and the service would be reported as never having answered.
+    // The question here is whether the port answers, not whether it is
+    // trustworthy — the JOBS get a real anchor, from tests/tools/trust.js.
+    /* eslint-disable no-await-in-loop */
+    const answered = (await probe(url + '/')) > 0;
+    /* eslint-enable no-await-in-loop */
     if (answered) {
       log.info('the throwaway mock STS is answering on ' + url);
       log.debug('Leaving start(). Up.');
@@ -325,6 +388,7 @@ module.exports = {
   REPO_ROOT: REPO_ROOT,
   findPortBlock: findPortBlock,
   environmentFor: environmentFor,
+  schemeFor: schemeFor,
   start: start,
   stop: stop
 };

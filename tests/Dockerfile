@@ -212,6 +212,12 @@ ENV CONFIG_FILE=./env/local.js
 # it to run-report.js as --service-url and waits for it first; the compose file
 # sets it too, and this default is what makes a hand-run `docker run` on the
 # same network work with nothing else said.
-ENV STS_TEST_SERVICE_URL=http://sts:8081
+# https since 2026-08-30: the service's main port is TLS on every stack in this
+# repository. The certificate is regenerated on every start of that service, so
+# there is deliberately no anchor for it in this image — run-report.js fetches
+# it once the service answers and hands it to each job as NODE_EXTRA_CA_CERTS
+# and STS_SPKI_PIN (tests/tools/trust.js). Baking one in would be a truststore
+# that is wrong for every run after the one that built it.
+ENV STS_TEST_SERVICE_URL=https://sts:8081
 
 CMD [ "./tests/run-tests-in-container.sh" ]

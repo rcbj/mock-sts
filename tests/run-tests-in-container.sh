@@ -4,7 +4,7 @@
 #
 # IT RUNS INSIDE THE `tests` CONTAINER, on the compose network brought up by
 # ../docker-compose-run-tests.yml, where the service under test answers at its
-# compose DNS name (http://sts:8081) and this container has a Chrome of its own.
+# compose DNS name (https://sts:8081) and this container has a Chrome of its own.
 # Do NOT run it from a host shell: there is no `sts` name there, the report would
 # be written into the working tree by whatever user ran it, and the browser job
 # would drive the machine's own Chrome — which is ./local-run-tests.sh's job and
@@ -37,9 +37,13 @@ cd "$(dirname "$(realpath "$0")")/.." || exit 1
 # both say the same thing, and the duplication is deliberate — a `docker run`
 # on the same network with no environment at all still finds the service, and
 # a stack that renames the service only has to say so in one place.
-STS_URL="${STS_TEST_SERVICE_URL:-http://sts:8081}"
+# https since 2026-08-30: the service's main port is TLS on every stack in this
+# repository (env/*.js carry `global.https: true`, and STS_HTTPS is set on the
+# `sts` service in both compose files). `sts` and not an address, because that
+# name is one of the certificate's SANs — see common/crypto.js.
+STS_URL="${STS_TEST_SERVICE_URL:-https://sts:8081}"
 # Trailing slashes off: every job appends an absolute path to this, and
-# `http://sts:8081/` + `/oauth2/token` is a 404 whose message names a path that
+# `https://sts:8081/` + `/oauth2/token` is a 404 whose message names a path that
 # looks right.
 STS_URL="${STS_URL%/}"
 
@@ -91,16 +95,25 @@ waitForTheService()
       echo "ERROR: nothing is answering at ${STS_URL}/healthcheck (last" >&2
       echo "       status ${code:-000}). Nothing was run." >&2
       # The one diagnosis worth making by hand, because it reaches a test as a
-      # closed socket and never names itself: in this service the SCHEME
-      # follows the mode — oauth2.rfc9700 derives global.https — so a service
-      # configured for RFC 9700 serves HTTPS on the port a permissive one
-      # serves HTTP on.
-      if [ "$(probe "https://${STS_URL#http://}/healthcheck")" = "200" ];
+      # closed socket and never names itself: in this service the SCHEME is a
+      # property of the LISTENER, so a URL naming the wrong one produces
+      # exactly the same silence as a service that never started. Since
+      # 2026-08-30 the default here is https and the mistake to catch is a
+      # stale http one, which is the reverse of what it used to be — hence
+      # the swap below rather than a hard-coded scheme.
+      local other
+      case "${STS_URL}" in
+        https://*) other="http://${STS_URL#https://}" ;;
+        *)         other="https://${STS_URL#http://}" ;;
+      esac
+      if [ "$(probe "${other}/healthcheck")" = "200" ];
       then
-        echo "       SOMETHING IS ANSWERING HTTPS THERE INSTEAD. In this" >&2
-        echo "       service the scheme follows the mode: oauth2.rfc9700" >&2
-        echo "       derives global.https. Check CONFIG_FILE / STS_HTTPS on" >&2
-        echo "       the sts service in docker-compose-run-tests.yml." >&2
+        echo "       SOMETHING IS ANSWERING AT ${other} INSTEAD. In this" >&2
+        echo "       service the scheme is a property of the LISTENER:" >&2
+        echo "       global.https, which every file in env/ sets to true and" >&2
+        echo "       which STS_HTTPS overrides. Check CONFIG_FILE, STS_HTTPS" >&2
+        echo "       and STS_TEST_SERVICE_URL on the two services in" >&2
+        echo "       docker-compose-run-tests.yml — they must agree." >&2
       fi
       return 1
     fi

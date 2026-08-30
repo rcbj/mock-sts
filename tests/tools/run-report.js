@@ -182,6 +182,7 @@ const path = require('path');
 const bunyan = require('bunyan');
 
 const service = require('./service');
+const trust = require('./trust');
 const manifest = require('../vendored/MANIFEST.js');
 const coverage = require('./coverage-report');
 const { testFiles } = require('../run');
@@ -832,6 +833,56 @@ const USAGE = (function () {
 })();
 
 // ---------------------------------------------------------------------------
+// LIVENESS, OVER EITHER SCHEME, WITH THE CERTIFICATE UNJUDGED.
+//
+// It was `fetch(url + '/')` until 2026-08-30, and that stopped working the day
+// the mock's main port became TLS in every stack here: the certificate is
+// self-signed and regenerated on every start, so the very first request this
+// runner makes to a service it has not yet learned the key of would fail
+// verification — and the wait below would spend its whole thirty seconds on it
+// and report a service that "did not answer", naming a certificate error the
+// caller cannot act on because the fix is the fetch this runner is about to
+// make.
+//
+// `rejectUnauthorized: false` is right HERE and nowhere else in this suite: the
+// question is whether the port answers, not whether it is trustworthy. The jobs
+// themselves get a real anchor — see tests/tools/trust.js — so an assertion
+// about a certificate is still made against one.
+//
+// The status is what comes back rather than a boolean, because the caller
+// distinguishes "answered with something" from "nothing there" and 0 is how
+// the second says so.
+function probe(url) {
+  return new Promise(function (resolve) {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (e) {
+      resolve(0);
+      return;
+    }
+    const mod = target.protocol === 'https:' ? require('https') : require('http');
+    const req = mod.get({
+      host: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      rejectUnauthorized: false,
+      timeout: 5000
+    }, function (res) {
+      res.resume();
+      resolve(res.statusCode || 0);
+    });
+    req.on('error', function () {
+      resolve(0);
+    });
+    req.on('timeout', function () {
+      req.destroy();
+      resolve(0);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // IS THE SERVICE SOMEBODY ELSE STARTED ACTUALLY ANSWERING?
 //
 // The launcher already waited for its container to answer before it got here,
@@ -850,34 +901,45 @@ const USAGE = (function () {
 // service's ROOT and this asks for `/`, which any of the redirects and shells
 // this service serves may answer with. What is being distinguished here is a
 // socket that answers from one that does not.
-// ---------------------------------------------------------------------------
 async function waitForExternalService(url, log, timeoutMs) {
   log.debug('Entering waitForExternalService().');
   const deadline = Date.now() + (timeoutMs || 30000);
-  let lastError = 'it never answered';
   while (Date.now() < deadline) {
-    try {
-      /* eslint-disable no-await-in-loop */
-      const res = await fetch(url + '/', { redirect: 'manual' });
-      /* eslint-enable no-await-in-loop */
-      if (res.status > 0) {
-        log.debug('Leaving waitForExternalService(). Answering.');
-        return true;
-      }
-    } catch (e) {
-      // The ordinary case for as long as it takes the socket to come up, and
-      // the loop is the whole handling. The message is kept for the ONE time
-      // it matters — the failure below, where a bare "did not answer" would
-      // hide an ECONNREFUSED behind a DNS failure behind a bad scheme.
-      lastError = e && e.message ? e.message : String(e);
+    /* eslint-disable no-await-in-loop */
+    const status = await probe(url + '/');
+    /* eslint-enable no-await-in-loop */
+    if (status > 0) {
+      log.debug('Leaving waitForExternalService(). Answering.');
+      return true;
     }
     /* eslint-disable no-await-in-loop */
     await new Promise(function (r) { setTimeout(r, 500); });
     /* eslint-enable no-await-in-loop */
   }
   log.debug('Leaving waitForExternalService(). It did not answer.');
-  throw new Error('the service at ' + url + ' did not answer (' + lastError +
-                  '). It was handed to this runner with --service-url, so ' +
+  // THE OTHER SCHEME IS THE ONE DIAGNOSIS WORTH MAKING BY HAND, and it is the
+  // failure this whole file's 2026-08-30 change could produce: the mock serves
+  // TLS on the port a permissive one served plain HTTP on, so a stale
+  // STS_TEST_SERVICE_URL exported in somebody's shell weeks ago reaches this
+  // runner as a closed socket that names nothing. A bare "did not answer"
+  // would send them to look at the service.
+  //
+  // The probe above no longer collects an error MESSAGE, and that is not a
+  // loss: with `rejectUnauthorized: false` every remaining cause is "nothing
+  // is listening on that scheme, host and port", which is what the sentence
+  // now says instead of quoting an ECONNREFUSED.
+  const swapped = /^https:/i.test(url)
+    ? url.replace(/^https:/i, 'http:')
+    : url.replace(/^http:/i, 'https:');
+  let hint = '';
+  if (swapped !== url && (await probe(swapped + '/')) > 0) {
+    hint = ' SOMETHING IS ANSWERING AT ' + swapped + ' INSTEAD: in this ' +
+           'service the scheme is a property of the LISTENER (global.https, ' +
+           'which every appconfig file here now sets and STS_HTTPS overrides), ' +
+           'so this is a URL that names the wrong one.';
+  }
+  throw new Error('nothing answered at ' + url + '.' + hint +
+                  ' It was handed to this runner with --service-url, so ' +
                   'nothing here started it and nothing here can restart it.');
 }
 
@@ -1027,6 +1089,36 @@ async function main() {
     }
   }
 
+  // ---- the certificate the jobs will meet -------------------------------
+  //
+  // SINCE 2026-08-30 THE MOCK'S MAIN PORT IS TLS ON EVERY STACK HERE, and its
+  // certificate is self-signed and regenerated on every start — so this is the
+  // first moment at which the key can be known and the last one before a job
+  // meets it. Both shapes of instance go through here: a container the launcher
+  // brought up and a throwaway this runner started have exactly the same
+  // problem, and having one of them trusted by the launcher's shell and the
+  // other here would be two mechanisms to keep in agreement.
+  //
+  // A FAILURE TO FETCH IT IS NOT FATAL, deliberately. The jobs then run and
+  // fail on the certificate, which is a worse message than this one — so this
+  // one is logged at warn and says what it was doing. It is not made fatal
+  // because the alternative failure mode is worse than the one it prevents: a
+  // run aborted here reports nothing at all about a service that is answering
+  // perfectly, and `STS_HTTPS=false` is a supported configuration in which
+  // there is nothing to fetch and this whole block is a no-op.
+  let trusted = { variables: {} };
+  if (instance) {
+    try {
+      trusted = await trust.trustTheService(instance.url, runDir, log);
+    } catch (e) {
+      log.warn('could not fetch the mock STS\'s certificate from ' +
+               instance.url + trust.CERTIFICATE_PATH + ' (' + e.message +
+               '). The protocol jobs will run WITHOUT an anchor for it, so a ' +
+               'failure naming DEPTH_ZERO_SELF_SIGNED_CERT or a browser ' +
+               'interstitial is this and not the service.');
+    }
+  }
+
   // ---- run them ---------------------------------------------------------
   const started = Date.now();
   const results = [];
@@ -1093,7 +1185,15 @@ async function main() {
         MOCK_STS_DIR: REPO_ROOT,
         WSTRUST_STS_URL: instance.url,
         OID4VCI_ISSUER_URL: instance.url
-      });
+      // THE TWO TRUST VARIABLES, AND THEY GO LAST SO NOTHING ABOVE CAN SHADOW
+      // THEM. `NODE_EXTRA_CA_CERTS` is read by node ONCE at child start, which
+      // is why it can only be handed to a job and never set for this runner;
+      // `STS_SPKI_PIN` is read by tests/vendored/browser_flags.js and becomes
+      // Chrome's --ignore-certificate-errors-spki-list, so the one browser job
+      // is covered by the same two lines as the eleven node ones. An empty
+      // object on a plain-http run, which adds nothing rather than adding an
+      // empty variable — see tests/tools/trust.js.
+      }, trusted.variables);
       // OURS, not theirs: NODE_V8_COVERAGE on a protocol job would collect the
       // coverage of the parent project's own test code, which is not what this
       // report is about. The service is the instrumented process there.

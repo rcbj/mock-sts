@@ -69,9 +69,12 @@
 # EVERY VALUE A CALLER MIGHT HAVE TO MOVE IS A `${VAR:-default}` SINCE
 # 2026-08-28, AND THE DEFAULTS ARE WHAT THIS FILE ALWAYS HAD.
 #
-# `docker compose up --build` in this directory is byte-for-byte the stack it
-# was: container `sts` on host port 8081, `sts-postgres` beside it, persistence
-# in postgres. Nothing below changes for an operator who sets nothing.
+# `docker compose up --build` in this directory is the stack it was in every
+# respect but one: container `sts` on host port 8081, `sts-postgres` beside it,
+# persistence in postgres. THE ONE EXCEPTION IS THE SCHEME — that port is HTTPS
+# since 2026-08-30, so `curl http://localhost:8081/...` no longer answers and
+# `curl -k https://localhost:8081/...` does. The row on the service argues it;
+# `STS_HTTPS=false` is the way back.
 #
 # What the substitutions buy is a SECOND caller: `./local-run-tests.sh` brings
 # this same file up as the service its protocol jobs drive. That run needs four
@@ -96,6 +99,12 @@
 #                               below is never started for a test run at all.
 #   CONFIG_FILE                 the appconfig layer, for the same reason it is
 #                               settable everywhere else.
+#
+# `STS_HTTPS` was added to that set on 2026-08-30 and is NOT one of the four
+# above: nothing needs it to differ, and its default is what every caller
+# wants. It is a substitution so that `STS_HTTPS=false` is available to a
+# client that cannot be taught to trust a certificate regenerated on every
+# start — see the row on the service itself, which is where the argument is.
 #
 # `STS_LOG_LEVEL` is a BARE entry rather than a substitution, and that is not a
 # style difference: an EMPTY value is not a harmless default here. bunyan
@@ -243,6 +252,35 @@ services:
       # `debug`: every request and every artifact before and after
       # signing, which is the point of a mock and about half of its CPU.
       - STS_LOG_LEVEL
+      # ---------------------------------------------------------------------
+      # TLS ON THE MAIN PORT (2026-08-30). Until then this stack was the one
+      # place in this ecosystem where the mock answered 8081 over plain HTTP:
+      # `global.https` is derived from `oauth2.rfc9700`, which env/local.js
+      # sets to false, and the parent project's three compose files each set
+      # STS_HTTPS=true while this one — the repository's own — never did. So a
+      # caller who trusted this service's certificate for 8443, 9443 and LDAPS
+      # 636 still met an unencrypted fourth listener, on the port every one of
+      # the sixteen protocol families actually answers on.
+      #
+      # It is a SUBSTITUTION and not a bare `STS_HTTPS=true`, so
+      # `STS_HTTPS=false docker compose up` is the way back to a plain port for
+      # a client that cannot be taught to trust a certificate regenerated on
+      # every start. env/local.js carries `global.https: true` as well and the
+      # two agree on purpose: the file is what a bare `node server.js` reads,
+      # this is what the HEALTHCHECK below reads, and a container whose probe
+      # spoke the wrong scheme would go `unhealthy` while answering every
+      # request perfectly.
+      #
+      # NOT `STS_OAUTH2_RFC9700`, which would also do it: that one turns on the
+      # BCP's refusals as well, and this stack is the permissive mock.
+      #
+      # THE FIRST FETCH OF THE CERTIFICATE IS UNVERIFIED, necessarily — there
+      # is no plain listener left in the process and the key does not exist
+      # until this container starts:
+      #
+      #   curl -k https://localhost:8081/tls/server-certificate
+      # ---------------------------------------------------------------------
+      - STS_HTTPS=${STS_HTTPS:-true}
       # ---------------------------------------------------------------------
       # PERSISTENCE. The directory, the trust realms and the runtime setting
       # changes survive `docker compose down` and come back on the next `up`.

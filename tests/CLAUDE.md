@@ -79,6 +79,15 @@ the fixed code return the same answer. The bug is only visible with that
 variable UNSET, which means varying how the process itself was started — and a
 test over HTTP against a service somebody else launched cannot do that.
 
+**SINCE 2026-08-30 THAT IS TRUE OF THIS REPOSITORY'S LAUNCHERS AS WELL** — every
+appconfig file in `env/` carries `global.https: true` and both compose files set
+`STS_HTTPS` — so there is now no stack ANYWHERE that could catch it, and the
+only reason it is caught is that `config_realm_layer.js` deletes `CONFIG_FILE`
+and varies the environment for itself. That makes the argument for this
+directory stronger rather than stale, and it is the clearest example of what the
+argument actually is: the thing a test here can do that no other test can is
+choose how the process was started.
+
 **So the line is: can this be asserted by driving the running service over
 HTTP?** If yes, it belongs in the parent suite, where it costs one entry in
 `run-report.js` and runs in the containerized stack, the host stack and the
@@ -145,7 +154,7 @@ the three files in this directory that serve it are not tests: `Dockerfile`
 (node, a Chrome and this working tree), `Dockerfile.dockerignore` (which exists
 only because the repository root's excludes `tests`, since the SERVICE image
 must not carry the suite) and `run-tests-in-container.sh` (the image's CMD —
-wait for the service, then `tools/run-report.js --service-url=http://sts:8081`).
+wait for the service, then `tools/run-report.js --service-url=https://sts:8081`).
 `../docker-compose-run-tests.yml` brings the pair up.
 
 Which to reach for: **this one when the question is the environment**, because

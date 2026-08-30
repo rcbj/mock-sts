@@ -110,6 +110,23 @@ services:
       # that looks like a flaky test and is not one. It is also why there is no
       # postgres service in this file and no volume on this one.
       - STS_PERSISTENCE_MODE=memory
+      # TLS ON THE MAIN PORT (2026-08-30), so that the suite drives the mock
+      # over the scheme every stack in this ecosystem drives it over. It was
+      # http here and https in the parent project's three compose files, which
+      # is the difference this launcher exists to eliminate: a run green here
+      # and red over there is supposed to be a difference in the ENVIRONMENT,
+      # and a different scheme made it a difference in the service.
+      #
+      # WHAT IT COSTS THE RUNNER is one certificate it cannot know in advance —
+      # this service regenerates a self-signed pair on every start, so no image,
+      # CA bundle or browser profile can hold an anchor for it. run-report.js
+      # fetches it once the service answers and hands every protocol job
+      # NODE_EXTRA_CA_CERTS and STS_SPKI_PIN; see tests/tools/trust.js.
+      #
+      # A substitution, so `STS_HTTPS=false ./docker-run-tests.sh` runs the
+      # whole suite against a plain port — which is the first thing to try if a
+      # job fails with something that names a certificate.
+      - STS_HTTPS=${STS_HTTPS:-true}
     # NO `ports:`, DELIBERATELY. Everything that talks to this service is on the
     # bridge with it, so publishing would buy nothing and cost the two things a
     # test stack must not cost: a run would fail to start whenever a dev stack
@@ -152,7 +169,11 @@ services:
       # Where the service is. The image defaults this to the same value; both
       # exist so that a hand-run `docker run` on this network needs no
       # environment and a rename needs one edit.
-      - STS_TEST_SERVICE_URL=http://sts:8081
+      # https since 2026-08-30, matching STS_HTTPS on the service above. The
+      # two are set independently and must agree: this is the URL every job is
+      # handed, and a scheme mismatch reaches a test as a closed socket that
+      # names nothing.
+      - STS_TEST_SERVICE_URL=${STS_TEST_SERVICE_URL:-https://sts:8081}
       # Passed to run-report.js, split by the entrypoint. `STS_TEST_ARGS=
       # "--only=crypto --no-browser" ./docker-run-tests.sh` is the way to
       # narrow a containerized run; unset, the whole suite runs.

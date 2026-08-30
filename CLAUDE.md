@@ -203,6 +203,25 @@ CONFIG_FILE=./env/local.js node server.js      # 8081; STS_PORT overrides
 call and every artifact before and after signing is logged — that is the point of
 a mock, so do not quieten it by default.
 
+**THAT PORT IS HTTPS SINCE 2026-08-30, AND THE INVOCATION ABOVE IS UNCHANGED.**
+All three appconfig files in `env/` carry `global.https: true`, and both compose
+files set `STS_HTTPS` to the same answer so a container's healthcheck probes the
+scheme its service is bound in. The SETTING is untouched — it is still `derived:
+true` with `oauth2.rfc9700` as its default, so a service handed somebody else's
+appconfig file (the parent's in-process Kerberos jobs) still gets plain HTTP, and
+`tests/config_realm_layer.js` still asserts what it always did. What changed is
+what the files SAY. The argument is one sentence: 8443, 9443 and LDAPS 636 were
+TLS on a certificate the main port did not use, so a caller who had trusted this
+service's key for three sockets still met an unencrypted fourth on the port every
+protocol family actually answers on. `STS_HTTPS=false` is the way back and is a
+supported configuration, not an escape hatch.
+
+What it costs is that the FIRST fetch of the certificate cannot be verified —
+there is no plain listener left and the key does not exist until the process
+starts — which is `docs/configuration.md`'s `global.https` section and is not
+repeated here. For a test run, `tests/tools/trust.js` is what makes that fetch
+once and hands every job `NODE_EXTRA_CA_CERTS` and `STS_SPKI_PIN`; see *Tests*.
+
 **THAT FILE IS A LAYER, NOT THE WHOLE CONFIGURATION, AND A SETTING WITH NO VALUE
 ANYWHERE STOPS THE SERVICE FROM STARTING.** Since 2026-08-24 the appconfig layer
 is `env/defaults.js` with the selected file unioned over it, the selected file
@@ -849,7 +868,12 @@ anybody opens it again:
   does not thereby inherit `global.https`, and the parent suite could not have
   caught that in ANY form, because its launchers always start this service with
   `STS_HTTPS=true` and with the scheme pinned the broken and the fixed code
-  return the same answer. Seeing it requires varying how the PROCESS was
+  return the same answer. **THAT IS NOW TRUE OF THIS REPOSITORY'S LAUNCHERS
+  TOO** — since 2026-08-30 they set `STS_HTTPS` and every appconfig file carries
+  `global.https: true` — which makes the argument STRONGER rather than stale:
+  there is no longer a stack anywhere that could catch it, and the only reason
+  it is caught is that this file deletes `CONFIG_FILE` and varies the
+  environment itself. Seeing it requires varying how the PROCESS was
   started, which a test driving somebody else's running service cannot do.
 
   **`crypto_module.js` (2026-08-27) is the clearest case of that line yet**, and
@@ -923,6 +947,23 @@ client, any entityID and any username on first sight.
 `tests/tools/run-report.js` is what all three drive;
 `tests/report/<timestamp>/` and `coverage/` are what comes out, and both are
 gitignored.
+
+**THE SERVICE THOSE JOBS DRIVE IS TLS SINCE 2026-08-30, AND THAT COST THE SUITE
+EXACTLY ONE NEW MODULE.** `tests/tools/trust.js` fetches the mock's certificate
+once the service answers — with verification off, necessarily, since the key is
+regenerated on every start and nothing that ran before it can have an anchor —
+and `run-report.js` hands every protocol job `NODE_EXTRA_CA_CERTS` and
+`STS_SPKI_PIN`. The second of those needed no new code at all:
+`tests/vendored/browser_flags.js` has read that variable for months, because the
+parent project's stacks have been https for months. **The PEM is written into
+the run's own report directory**, so the certificate a run trusted is beside
+that run's logs — when a job fails on a certificate the question is always which
+certificate. Everything that PROBES rather than tests — the two launchers'
+`stsProbe`, `run-report.js`'s own wait, `service.js`'s readiness loop, both
+compose healthchecks — asks with `rejectUnauthorized: false`, because the
+question there is whether the port answers and not whether it is trusted; the
+JOBS get a real anchor, which is what keeps an assertion about a certificate
+meaningful.
 
 **FIVE THINGS ABOUT THEM REACH OUTSIDE `tests/CLAUDE.md`, WHICH IS WHERE THE
 REST IS ARGUED.**

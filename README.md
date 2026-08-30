@@ -148,6 +148,28 @@ npm install --omit=dev
 CONFIG_FILE=./env/local.js node server.js      # 8081, LDAP on 389, LDAPS on 636
 ```
 
+**THE MAIN PORT IS HTTPS**, and has been since 2026-08-30: every appconfig file
+in `env/` carries `global.https: true`, so 8081 answers on the same self-signed
+certificate 8443, 9443 and LDAPS 636 already served — one pair, regenerated on
+every start. That is one trust decision for the whole service instead of four,
+and it is what closed the gap where a caller who had trusted this key for three
+sockets still met an unencrypted fourth on the port every protocol family
+actually answers on.
+
+It costs one unverified call, necessarily: with it on there is no plain listener
+left in this process, and the key does not exist until the process starts, so
+nothing can hold an anchor for it in advance.
+
+```bash
+curl -k https://localhost:8081/tls/server-certificate > /tmp/sts.pem
+curl --cacert /tmp/sts.pem https://localhost:8081/healthcheck    # verified from here on
+export NODE_EXTRA_CA_CERTS=/tmp/sts.pem                          # for a node client
+```
+
+`STS_HTTPS=false` restores the plain port, and it is a supported configuration
+rather than an escape hatch — a client that cannot be taught to trust a
+per-start certificate is exactly the thing this service exists to exercise.
+
 **Ports 389 and 636 are both privileged**, so a host run that is not root will fail to
 bind them — which is reported and is not fatal, the rest of the service being
 unaffected. Set `LDAP_PORT` and `LDAPS_PORT` to something unprivileged for a host run,
@@ -414,10 +436,11 @@ purpose. Only the identifier moves: every endpoint in the discovery document
 stays on the request's base URL, because an endpoint has to be reachable and a
 pinned issuer may not be.
 
-**Seven listeners, not one.** 8081 is the HTTP service — or the HTTPS one, if
-`global.https` or the `oauth2.rfc9700` it defaults from is set, in which case it
-serves the same certificate as the three TLS sockets below and there is no plain
-port left in the process; the KDC also binds **TCP and
+**Seven listeners, not one.** 8081 is the main service, and it is **HTTPS** with
+every appconfig file this repository ships — `global.https`, which is also what
+`oauth2.rfc9700` derives — serving the same certificate as the three TLS sockets
+below, with no plain port left in the process. `STS_HTTPS=false` makes it plain
+HTTP, which is what it was before 2026-08-30; the KDC also binds **TCP and
 UDP 88**, the Kerberos-protected service a TCP socket of its own (8888), the
 directory **TCP 389** and — the same directory over TLS — **TCP 636**, and the TLS
 endpoint **8443** and **9443**. Every one of them
@@ -459,7 +482,7 @@ which is the whole reason that endpoint exists.
 
 The OIDC Discovery Metadata Endpoint:
 ```
-http://localhost:8081/server001/.well-known/openid-configuration
+https://localhost:8081/server001/.well-known/openid-configuration
 ```
 
 Via Docker-Compose:
@@ -541,7 +564,7 @@ are refused at both ends.
 |---|---|---|---|---|
 | `global.host` | `STS_HOST` | `0.0.0.0` | **restart** — the listener is bound when the process starts | The address the HTTP listener binds. 0.0.0.0 is every interface, which is what a container needs; 127.0.0.1 confines this service to the machine it runs on. |
 | `global.port` | `STS_PORT` | `8081` | **restart** — the listener is bound when the process starts | The port everything HTTP here answers on: the protocol endpoints, the console and this API. The two TLS listeners are separate and are under TLS below. |
-| `global.https` *(derived)* | `STS_HTTPS` | `false` | **restart** — the listener is bound when the process starts, and its scheme is decided there | Serve the main port over HTTPS, with the SAME certificate and key the 8443, 9443 and LDAPS 636 listeners use — one self-signed pair generated per start, so a caller trusts this service once rather than four times. |
+| `global.https` *(derived)* | `STS_HTTPS` | `false`, but **`true` in every appconfig file shipped here** — see *Running it* | **restart** — the listener is bound when the process starts, and its scheme is decided there | Serve the main port over HTTPS, with the SAME certificate and key the 8443, 9443 and LDAPS 636 listeners use — one self-signed pair generated per start, so a caller trusts this service once rather than four times. |
 | `global.trustProxy` | `STS_TRUST_PROXY` | `false` | yes | Believe X-Forwarded-Proto and X-Forwarded-Host — which is what a TLS-terminating reverse proxy sets to say what the CLIENT used. |
 | `logLevel` | `STS_LOG_LEVEL` | `info` | yes | debug is the useful level for a mock whose job is to show what it did: every endpoint call, and every token and assertion both before and after it was signed. |
 
@@ -901,7 +924,7 @@ reading here and nothing about this service has changed.
 #### Defining one
 
 ```bash
-curl -X POST http://localhost:8081/admin-api/realms/create \
+curl -k -X POST https://localhost:8081/admin-api/realms/create \
      -H 'content-type: application/json' \
      -d '{"id":"acme","name":"Acme Corporation"}'
 ```
@@ -935,15 +958,15 @@ pointed at a realm cannot construct a single URL without it.
   "active": true,
   "current": "default",
   "realms": [
-    { "id": "default", "pathPrefix": "",            "baseUrl": "http://localhost:8081" },
-    { "id": "acme",    "pathPrefix": "/realm/acme", "baseUrl": "http://localhost:8081/realm/acme" }
+    { "id": "default", "pathPrefix": "",            "baseUrl": "https://localhost:8081" },
+    { "id": "acme",    "pathPrefix": "/realm/acme", "baseUrl": "https://localhost:8081/realm/acme" }
   ],
   "support": [ ... ]
 }
 ```
 
 Everything follows from `baseUrl`: `…/realm/acme/.well-known/openid-configuration`
-publishes an `issuer` of `http://localhost:8081/realm/acme` and endpoints under
+publishes an `issuer` of `https://localhost:8081/realm/acme` and endpoints under
 it, `…/realm/acme/oauth2/jwks` publishes that realm's own key, and
 `…/realm/acme/saml2/metadata` publishes an entityID of its own.
 
@@ -1412,7 +1435,7 @@ answers on the port this process already opened, in the scheme that port was
 opened in. So `oauth2.rfc9700` is the single row marked `realmRuntime`, and
 
 ```bash
-curl -X POST http://localhost:8081/admin-api/realms/create \
+curl -k -X POST https://localhost:8081/admin-api/realms/create \
      -H 'Content-Type: application/json' \
      -d '{"id":"rfc9700","name":"RFC 9700 mode",
           "overrides":{"oauth2.rfc9700":true}}'
@@ -2023,7 +2046,8 @@ opinions about; an authorization server profile is this service's own configurat
 terminates at a proxy, secure the proxy-to-application hop and make the proxy
 sanitize inbound security-sensitive headers.*
 
-The first two are `global.https`, which RFC 9700 mode turns on: every endpoint here —
+The first two are `global.https`, which every appconfig file here sets and which
+RFC 9700 mode would turn on anyway: every endpoint here —
 authorization, token, both discovery documents, and the resource server at
 `/oauth2/userinfo` and the three credential endpoints — is on one listener, so *end to
 end* is true of everything inside this process. What it cannot be true of is a hop this
@@ -3321,8 +3345,12 @@ assertion's `AuthenticationMethod` says multiple factors *because the session re
 knowing is that the cookie is `SameSite=Lax`, so a sign-in request that arrives as a
 cross-site form POST — which 13.2.1 permits — carries no cookie and is shown the login
 screen even though a session exists; the alternative is `SameSite=None`, which
-requires `Secure`, which this service cannot be over `http://localhost`. The screen
-says so rather than leaving it to look like a broken session.
+requires `Secure` and is a change that needs its own argument rather than one
+that falls out of the port's scheme. That distinction used to be hidden by the
+scheme: the cookie is `Secure` when and only when the port is TLS, which every
+appconfig file here now makes it, so `Secure` is no longer the obstacle — the
+`Lax` is a decision, and `authn.js` says so where the cookie is set. The screen
+says so too, rather than leaving it to look like a broken session.
 
 `wauth` is the one thing this profile **refuses** that it could easily have faked. A
 relying party asking for multi-factor against a password-only session is answered with
@@ -4262,7 +4290,7 @@ failing with `unable to get local issuer certificate` — an error that names no
 reads as a broken directory. Fetch it from `GET /tls/server-certificate`:
 
 ```bash
-curl -s http://localhost:8081/tls/server-certificate > /tmp/sts.pem
+curl -k -s https://localhost:8081/tls/server-certificate > /tmp/sts.pem
 LDAPTLS_CACERT=/tmp/sts.pem ldapsearch -H ldaps://localhost:636 -x \
   -D "cn=admin,dc=example,dc=com" -w 'password!' \
   -b "dc=example,dc=com" "(objectClass=*)"

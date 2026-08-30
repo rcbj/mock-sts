@@ -42,13 +42,13 @@ default and the point of the endpoint:
 
 ```bash
 # global logout for whoever holds this cookie
-curl -b cookies.txt -X POST http://localhost:8081/logout
+curl -k -b cookies.txt -X POST https://localhost:8081/logout
 
 # global logout for somebody named, no cookie needed
-curl -X POST http://localhost:8081/logout -d 'username=alice&scope=global'
+curl -k -X POST https://localhost:8081/logout -d 'username=alice&scope=global'
 
 # just two things
-curl -X POST http://localhost:8081/logout \
+curl -k -X POST https://localhost:8081/logout \
      -d 'username=alice&select=session:8Qk3…&select=token:abc…'
 ```
 
@@ -113,7 +113,7 @@ Front-Channel Logout 1.0** for any client that registered a
 `frontchannel_logout_uri`:
 
 ```bash
-curl -X POST http://localhost:8081/oauth2/register \
+curl -k -X POST https://localhost:8081/oauth2/register \
   -H 'Content-Type: application/json' -d '{
     "client_name": "demo",
     "redirect_uris": ["http://localhost:3000/callback"],
