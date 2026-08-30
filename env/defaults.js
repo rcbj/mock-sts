@@ -299,6 +299,7 @@ var config = {
     mode: "memory",                                       // Persistence mode; restart to apply
     dataDir: "./data",                                    // Data directory; restart to apply
     databaseUrl: "postgres://sts:sts@localhost:5432/sts", // Database connection string; restart to apply
+    databaseTlsRejectUnauthorized: false,                 // Verify the database certificate; restart to apply
     writeDelay: 1500,                                     // Write delay (ms)
     realms: true,                                         // Persist the realm registry; restart to apply
     appconfig: true                                       // Persist runtime setting changes; restart to apply

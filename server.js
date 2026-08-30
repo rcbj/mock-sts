@@ -96,7 +96,12 @@ require('./common/config_file').resolveConfigFile();
 
 const https = require('https');
 const app = require('./common/app');
-const { log, PORT, HOST } = require('./common/helpers');
+// `warmPqKeys` joins the three destructured names for one call in announce()
+// below; `realms` for the id of the realm it warms. Both modules are already
+// loaded by this line — app.js requires realms, and helpers is this line —
+// so neither adds a require to the order.
+const { log, PORT, HOST, warmPqKeys } = require('./common/helpers');
+const realms = require('./common/realms');
 const config = require('./common/config');
 // A LIBRARY, rule 3's shape: it registers no route and its position in the
 // require order is not a position at all. It is named here for one thing — the
@@ -441,6 +446,40 @@ const useHttps = config.value('global.https');
 
 function announce() {
   log.debug('Entering announce().');
+  // ---------------------------------------------------------------------
+  // THE DEFAULT REALM'S POST-QUANTUM KEYS, WARMED ONCE THE PORT IS OPEN.
+  //
+  // `helpers.js` watches `realms.onChange(… 'create')` and warms a realm's
+  // eleven post-quantum keys as it is made — which was `5d9b51b`'s whole
+  // point, that a realm should not pay for its keys inside the first request
+  // that needs them. **THE DEFAULT REALM IS NEVER CREATED**: it exists
+  // implicitly, so it never fired that watcher and kept the lazy behaviour
+  // the commit set out to remove.
+  //
+  // What that cost was measured rather than guessed. The first
+  // `/oauth2/jwks` fetch made all eleven keys inside the request, two of them
+  // SLH-DSA — 297ms and 2.3s here uninstrumented, 1.9s and 14.7s under
+  // NODE_V8_COVERAGE, a 6.4x factor — so under coverage on a two-core CI
+  // runner the first caller waited for the lot. `tests/vendored/
+  // sts_userinfo_protected.js` gives up on a request after 90s and did,
+  // intermittently, in about half of the coverage runs on `main`. The
+  // service was never wrong; the work was simply in the wrong place.
+  //
+  // IT IS HERE AND NOT AT REQUIRE TIME, which matters: `workers.count`'s own
+  // description promises that nothing is forked until the first post-quantum
+  // job, so that the parent project's in-process Kerberos jobs, this
+  // repository's own `npm test` and `node env/generate_defaults.js` never pay
+  // for a pool they will not use. Warming from `helpers.js` would have broken
+  // that for every one of them. A process that has bound a socket is a
+  // SERVICE, and a service is exactly the thing that will be asked for a
+  // JWKS.
+  //
+  // NOT AWAITED, and failure is not fatal. The port is already open; this is
+  // work moved off the first request's path, not a precondition for
+  // answering. `warmPqKeys()` logs its own failure and the keys are still
+  // made on first use if this does not finish — the slow path is the one
+  // that existed before, which is a fallback rather than a fault.
+  warmPqKeys(realms.DEFAULT_ID);
   log.info('WS-Trust STS mock listening on ' + (useHttps ? 'https' : 'http') +
            '://' + HOST + ':' + PORT +
            ' (WS-Trust issuer ' + config.value('wstrust.issuer') +

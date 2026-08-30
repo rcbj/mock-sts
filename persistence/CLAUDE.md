@@ -371,3 +371,83 @@ rewrite with no change is still a new mtime.
 requires `pg`. A person running `ldif` — or the default `memory`, which is
 everybody who has not asked for any of this — must not be stopped by the absence
 of a package they will never use.
+
+## TLS TO THE DATABASE, REQUIRED AT BOTH ENDS (2026-08-30)
+
+The postgres mode dialled its database in the clear until this date, on a
+compose bridge, while every other socket in this stack had been TLS since
+2026-08-30 that morning. It is encrypted now, and **required rather than
+merely available** — which is the distinction that matters, because `ssl=on`
+alone lets a client use TLS and does not make one.
+
+### Both ends say it, so neither can be quietly relaxed
+
+* **The server refuses plaintext.** `postgres/require-tls.sh` runs as an initdb
+  script and rewrites every `host` rule in `pg_hba.conf` to `hostssl`. A
+  plaintext client is then refused BY THE DATABASE with `no pg_hba.conf entry
+  for host …, no encryption`, which names the cause. `local` rules are left
+  alone deliberately: they are unix-socket connections inside the container,
+  which is what `pg_isready` and the entrypoint use, and TLS on a socket that
+  never leaves the filesystem buys nothing and would break the healthcheck the
+  stack waits on.
+* **The client refuses to make one.** `?sslmode=require` is in the compose
+  default for `STS_DATABASE_URL`, and `persistence_postgres.js` passes `ssl` to
+  the pool only when the URL asked for it — because passing `ssl` regardless
+  would make `sslmode=disable` mean its opposite, a connection string saying
+  one thing while the client does another.
+
+### The key pair is generated at container start
+
+`postgres/generate-tls.sh`, and it is the decision `helpers.js` and
+`tls_server.js` already make about every other key here: nothing about a mock
+is worth persisting, and a certificate committed to a repository is a private
+key committed to a repository.
+
+**IT IS NOT REGENERATED PER START**, and that is the one place it differs from
+the STS's own keys. Those are remade every boot on purpose — the `kid` is
+derived from the material and clients are expected to refetch. A database
+client is not: `sslmode=verify-*` pins this certificate, and a stack that
+handed out a different one every morning would be teaching people to turn
+verification off, which is the habit this change exists to break. Delete the
+volume for a new pair.
+
+**It is openssl and not the STS's own generator**, which could mint it — but
+would have to be RUNNING to do it, and this key is needed by the database the
+STS refuses to start without. A circular dependency at boot is worse to own
+than four lines of openssl in an image that already ships it.
+
+### ENCRYPTION AND AUTHENTICATION ARE TWO ANSWERS
+
+`persistence.databaseTlsRejectUnauthorized` is **off by default**, and that is
+a statement about the stack rather than a weakened default: the certificate is
+generated in the container and signed by nobody, so there is no anchor to
+verify it against and turning it on would refuse every connection with a
+message about a self-signed certificate. **The connection is encrypted either
+way.** `/admin/persistence` draws them as one *Transport* row saying both,
+because "encrypted" and "authenticated" are different facts and a single tick
+would have to round one of them.
+
+The flag is READ in `persistence.js` and PASSED IN to the driver, rather than
+read there: that module takes its url and its logger as options and reaches for
+nothing, which is what lets a test construct one against any database without
+this file's settings existing.
+
+### The upgrade to 18, and the mount that changed with it
+
+`postgres:16-alpine` became `postgres:18` — Debian rather than alpine, because
+the two scripts are bash and alpine ships busybox.
+
+**THE VOLUME MOUNT MOVED FROM `/var/lib/postgresql/data` TO
+`/var/lib/postgresql`, and getting that wrong is fatal rather than untidy.**
+From 18 these images keep the cluster in a major-version-specific directory
+(`/var/lib/postgresql/18/docker`) so `pg_upgrade --link` works across one mount
+point; a volume at the old path makes the container REFUSE TO START with a
+message about an "unused mount/volume", which reads as a warning. See
+docker-library/postgres#1259. The TLS pair lives inside that single volume for
+the same reason — a second mount underneath it is the shape the image refuses.
+
+**A major upgrade does not read the old data directory.** A `sts-db` volume
+written by 16 stops an 18 container with "database files are incompatible with
+server". `docker compose down -v` is the answer and costs nothing here: that
+volume holds the directory, the realm registry and the appconfig overrides —
+the three things somebody TYPED — and never anything this service minted.

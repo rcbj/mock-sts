@@ -2887,6 +2887,42 @@ const SETTINGS = [
                  'database and user parsed out of it and never the string ' +
                  'itself.' },
 
+  // ---------------------------------------------------------------------
+  // TLS TO THE DATABASE, and the one knob that is about TRUST rather than
+  // about encryption.
+  //
+  // The connection string carries `sslmode`, which is postgres's own spelling
+  // and is where the ENCRYPTION decision belongs — `?sslmode=require` is in
+  // the compose default and the database refuses a plaintext connection
+  // anyway, because every `host` rule in its pg_hba.conf is `hostssl`.
+  //
+  // What a connection string cannot say is whether to BELIEVE the certificate,
+  // because node's `pg` takes that as a TLS option rather than as a URL
+  // parameter. That is this setting, and it is separate on purpose: encryption
+  // and authentication are two decisions, a self-signed pair gives the first
+  // and not the second, and a service that conflated them would be one where
+  // turning verification off looked like turning TLS off.
+  // ---------------------------------------------------------------------
+  { key: 'persistence.databaseTlsRejectUnauthorized', group: 'Persistence',
+    label: 'Verify the database certificate',
+    env: 'STS_DATABASE_TLS_REJECT_UNAUTHORIZED', type: 'bool', dflt: false,
+    runtime: false,
+    restartReason: 'the connection pool is opened before the listener binds',
+    description: 'Whether the PostgreSQL server\'s certificate must verify ' +
+                 'against a trust anchor this process holds. OFF by default, ' +
+                 'and that is a statement about the STACK rather than a ' +
+                 'weakened default: the certificate is generated inside the ' +
+                 'postgres container on its first start and is signed by ' +
+                 'nobody, so there is nothing for a client to verify it ' +
+                 'against and turning this on would refuse every connection ' +
+                 'with a message about a self-signed certificate. THE ' +
+                 'CONNECTION IS STILL ENCRYPTED either way — `sslmode` in ' +
+                 'persistence.databaseUrl decides that, the database\'s own ' +
+                 'pg_hba.conf requires it, and this decides only whether the ' +
+                 'server is AUTHENTICATED. Turn it on when you point this at ' +
+                 'a real database whose certificate chains to something ' +
+                 'NODE_EXTRA_CA_CERTS names.' },
+
   { key: 'persistence.writeDelay', group: 'Persistence',
     label: 'Write delay (ms)',
     env: 'STS_PERSISTENCE_WRITE_DELAY', type: 'int', dflt: 1500,
