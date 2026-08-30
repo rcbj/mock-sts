@@ -421,3 +421,32 @@ is handed to it as `data-realm-prefix` on the root element and it prepends it.
 Without that, pressing "Try it" inside a realm would call the DEFAULT realm's
 API — the page would look right, the call would succeed, and it would have
 changed the wrong service.
+
+## `GET /admin-api/crypto` MIRRORS A PAGE THIS FILE CANNOT REQUIRE
+
+Added 2026-08-30 beside the crypto report at `/admin/crypto-metadata`. The
+operation calls `admin.cryptoView(req)` and computes nothing of its own, which
+is rule 7 read strictly: the page and the operation must not be able to disagree
+about what this service's cryptography is, and the way to make that impossible
+is for there to be one function.
+
+**The reason it goes through the console rather than through a require is the
+route order.** `admin-ui/crypto_metadata.js` is required at 20a — after
+`tls/tls_server`, whose certificate it reports — and this module is required at
+19. A require in the obvious direction would drag that page's route and
+`tls_server`'s three ahead of every route in this file and ahead of ldap, scim
+and spiffe. So that module fills `admin.setCryptoReporter()` at its own require
+time and this one reads it, exactly as `/admin-api/logout` reaches
+`logout/logout.js` through `admin.logoutView()`. Rule 3e's test in the root
+`CLAUDE.md` answers yes in both directions.
+
+**It answers 503 and not 404 when the reporter was never installed**, and the
+two are different facts: a route that exists and cannot answer is a wiring
+mistake somebody can fix, and a route that does not exist is not. The message
+names the module rather than saying "unavailable".
+
+**Nothing in the reply is a secret** — key types, key identifiers, curve names,
+certificate fingerprints and validity dates, all of them already readable from
+`/oauth2/jwks`, `/tls/server-certificate` and the SPIFFE bundle endpoint — and
+that is a rule for anything added to it later rather than an observation about
+what is in it now.

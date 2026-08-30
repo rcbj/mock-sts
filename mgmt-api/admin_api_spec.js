@@ -788,6 +788,91 @@ const SCHEMAS = {
       rows: { type: 'array', items: { $ref: '#/components/schemas/LogoutRow' } }
     }),
 
+  CryptoMetadata: openObject(
+    'What this service does when it signs, verifies, encrypts or decrypts — ' +
+    'for every identity service it advertises, with the algorithms each ' +
+    'really uses. Every algorithm list in it is READ FROM THE MODULE THAT ' +
+    'PERFORMS THE ALGORITHM rather than written down, so it cannot claim ' +
+    'something this service does not do. Mirrors GET /admin/crypto-metadata.',
+    {
+      issuer: { type: 'string',
+                description: 'This service as the request reached it.' },
+      realm: { type: 'string',
+               description: 'The trust realm the key material below belongs ' +
+                            'to. The ALGORITHM tables are process-wide; the ' +
+                            'SIGNING KEYS are per realm, and the TLS ' +
+                            'certificate and the SPIFFE authorities are ' +
+                            'neither — those three socket families have no ' +
+                            'path to put a realm segment in.' },
+      generatedAt: { type: 'string' },
+      oneModule: { type: 'string',
+                   description: 'Where all of this happens. One module since ' +
+                                '2026-08-27; about twenty places before it.' },
+      drift: openObject(
+        'The family list here, checked against the one ' +
+        '/admin/sts-metadata advertises, in BOTH directions — a family ' +
+        'advertised with no crypto profile, and a profile naming a family ' +
+        'that is not advertised, which is what a rename produces. `checked` ' +
+        'is false when that module never handed its list over, which is said ' +
+        'rather than rendered as two empty lists that look like a clean bill ' +
+        'of health.', {
+          checked: { type: 'boolean' },
+          undescribed: { type: 'array', items: { type: 'string' } },
+          stale: { type: 'array', items: { type: 'string' } },
+          envelopes: { type: 'array', items: { type: 'string' } }
+        }),
+      keys: openObject(
+        'The key material this process holds. TYPES, IDENTIFIERS, CURVE ' +
+        'NAMES, FINGERPRINTS AND DATES ONLY — everything here is already ' +
+        'readable from /oauth2/jwks, /tls/server-certificate and the SPIFFE ' +
+        'bundle endpoint, and no private key or secret is ever in this ' +
+        'reply.', {}),
+      families: { type: 'array', items: openObject(
+        'One identity service, and what it does with cryptography. The four ' +
+        'verbs are separate because they are four different exposures: an ' +
+        'empty one means this service does not do it in that family, and ' +
+        'every one of those is a documented non-goal.', {
+          name: { type: 'string' },
+          signs: { type: 'string' },
+          verifies: { type: 'string' },
+          encrypts: { type: 'string' },
+          decrypts: { type: 'string' },
+          hashes: { type: 'string' },
+          whatItDoesNot: { type: 'string' },
+          envelopes: { type: 'array', items: { type: 'string' },
+                       description: 'Keys into `standards` below.' },
+          algorithms: { type: 'array', items: openObject(
+            'One labelled list, read live from the module that performs it.',
+            { what: { type: 'string' },
+              values: { type: 'array', items: { type: 'string' } } }) }
+        }) },
+      hashing: openObject('Every digest this service computes, and what for.',
+                          {}),
+      signatures: openObject(
+        'JWS, XML SignatureMethod, canonicalization, COSE, and the rest.', {}),
+      encryption: openObject(
+        'JWE, XML Encryption, the Kerberos encryption types and TLS. The ' +
+        'encrypt and decrypt lists differ on purpose in both JOSE and XML.',
+        {}),
+      postQuantum: openObject(
+        'THE SIGNATURES ARE PARTLY POST-QUANTUM AND THE KEY ESTABLISHMENT IS ' +
+        'ENTIRELY CLASSICAL, and those two halves are reported separately ' +
+        'because they are in very different positions: a signature is ' +
+        'checked when it is presented, while captured ciphertext can be kept ' +
+        'and opened later. Symmetric cryptography is a third category ' +
+        'again.', {}),
+      standards: { type: 'array', items: openObject(
+        'One higher-level envelope, with an honest coverage note. Every ' +
+        '`coverage` starts `full`, `partial` or `mock` and says what is ' +
+        'missing.', {
+          key: { type: 'string' },
+          name: { type: 'string' },
+          specs: { type: 'array', items: { type: 'string' } },
+          coverage: { type: 'string' },
+          what: { type: 'string' }
+        }) }
+    }),
+
   LogoutInventory: openObject(
     'What this service is still holding for one identity, across every ' +
     'protocol family — or, with no `user`, the list of families a logout ' +

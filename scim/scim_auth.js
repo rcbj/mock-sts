@@ -1788,6 +1788,13 @@ log.info('scim: the SCIM endpoints authenticate through ' +
 
 module.exports = {
   SCHEMES: SCHEMES,
+  // The two algorithm tables, for `admin-ui/crypto_metadata.js`. DIGEST_ALGORITHMS
+  // is already filtered by what this node build can actually compute, which is
+  // exactly what that page should report — a console that listed SHA-512-256 on
+  // a build without it would be naming an algorithm no challenge will ever
+  // offer.
+  DIGEST_ALGORITHMS: DIGEST_ALGORITHMS,
+  HOBA_ALG_RSA_SHA256: HOBA_ALG_RSA_SHA256,
   REFUSED_PASSWORD: REFUSED_PASSWORD,
   authRequired: authRequired,
   authDiscovery: authDiscovery,

@@ -86,6 +86,26 @@ const config = require('./common/config');
 // off the router — one route serves all of them — so they are listed by hand,
 // the same way the Kerberos and LDAP listeners are.
 const authorizationServers = require('./oauth-oidc/authorization_servers');
+// ---------------------------------------------------------------------------
+// THE CRYPTO PAGE, FOR ONE THING AND IN ONE DIRECTION: it reports on the same
+// identity services this page draws cards for, and two hand-kept lists of
+// fourteen protocol families are two lists that will disagree the first time a
+// fifteenth arrives — invisibly, because each page would look complete on its
+// own.
+//
+// So PROTOCOLS is handed over here rather than read there, and the direction is
+// forced: a `require('./sts_metadata')` from that module would load THIS one at
+// its position (20a), and this module's one constraint is that it is required
+// LAST — so the require would take the last module in server.js and make it not
+// last. The require below is the safe direction and is a cache hit: server.js
+// loads that module long before this one, so it registers nothing here.
+//
+// It is a `setX()` rather than an export that module reads for the reason
+// `logout/logout.js` fills `admin.setLogoutReader()`: the reader has to run
+// after the writer, and this is the only point in the process where that is
+// guaranteed.
+// ---------------------------------------------------------------------------
+const cryptoMetadata = require('./admin-ui/crypto_metadata');
 
 // ---------------------------------------------------------------------------
 // The specifications this service implements, and how far.
@@ -1376,6 +1396,22 @@ const ENDPOINTS = [
           'key that will verify credentials, is a server-side request forgery with a ' +
           'citation attached. Push one in with POST /admin-api/spiffe/federation-set or ' +
           'BatchSetFederatedBundle.' },
+  { path: '/admin/crypto-metadata', group: 'Admin', name: 'Cryptography',
+    specs: [],
+    what: 'NON-SPEC. The companion to this page, one layer down: what this ' +
+          'service does when it SIGNS, VERIFIES, ENCRYPTS or DECRYPTS ' +
+          'something, for every identity service the cards above name — ' +
+          'which digest, which signature algorithm, which cipher, which key, ' +
+          'and which higher-level envelope each is wrapped in (JOSE, XMLDSIG ' +
+          'and XML Encryption, WS-Security, COSE, X.509, Kerberos). EVERY ' +
+          'ALGORITHM TABLE ON IT IS READ FROM THE MODULE THAT PERFORMS THE ' +
+          'ALGORITHM, exactly as this page reads its endpoint list off the ' +
+          'live router, and it checks its family list against THIS page\'s ' +
+          'in both directions. It carries a post-quantum section whose ' +
+          'headline is not the flattering one: the signatures are partly ' +
+          'post-quantum and the key establishment is entirely classical. It ' +
+          'publishes no private key and no secret. Add ?format=json, which ' +
+          'is also what the Download button hands you.' },
   { path: '/admin/sts-metadata', group: 'Admin', name: 'This page',
     specs: [],
     what: 'NON-SPEC. Every protocol this service speaks, every endpoint it ' +
@@ -2303,6 +2339,15 @@ const ENDPOINTS = [
           'totals — calls, tokens held and revoked, other artifacts, users, ' +
           'sign-on sessions. The cheapest call here and the one to poll. Mirrors ' +
           'GET /admin.' },
+  { path: '/admin-api/crypto', group: 'Management API', name: 'Cryptography',
+    specs: [],
+    what: 'NON-SPEC. Everything /admin/crypto-metadata reports, as JSON: every ' +
+          'identity service with what it signs, verifies, encrypts and ' +
+          'decrypts; the JWS, JWE, XML signature, XML encryption, ' +
+          'canonicalization, COSE and Kerberos algorithm tables; the key ' +
+          'material this process holds; the post-quantum posture; and the ' +
+          'standards list with an honest coverage note on each. Mirrors GET ' +
+          '/admin/crypto-metadata.' },
   { path: '/admin-api/metrics', group: 'Management API', name: 'Metrics',
     specs: [],
     what: 'NON-SPEC. Everything /admin/metrics counts, as JSON: calls by matched ' +
@@ -3788,6 +3833,20 @@ const PROTOCOLS = [
           '— every disclosure digest, the key binding, and whether what was ' +
           'asked for arrived.' }
 ];
+
+// ---------------------------------------------------------------------------
+// HAND THE FAMILY LIST TO THE CRYPTO PAGE, at require time, so that its report
+// on "every identity service this mock advertises" is checked against the list
+// this page actually advertises rather than agreeing with it by hand. Both
+// directions of drift are then reported THERE, the way both directions of
+// endpoint drift are reported here. See the note above the require.
+//
+// It is done here, immediately below the table, rather than at the bottom of
+// the file: a second edit that has to be remembered is the thing this whole
+// arrangement exists to remove, and beside the data is where somebody adding a
+// fifteenth family will be looking.
+// ---------------------------------------------------------------------------
+cryptoMetadata.setProtocolFamilies(PROTOCOLS);
 
 // Groups of endpoints that are NOT a protocol family, and so are not expected
 // to be claimed by a row above. Four, and each is the service talking about

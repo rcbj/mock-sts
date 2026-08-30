@@ -7,6 +7,7 @@ The admin console at `/admin`. Four files now:
 | `admin.js` | Every page, every form, the shell they are drawn in, and the GATE in front of all of them. The largest file in the repository, because every page's HTML and every page's JSON view are built in the same function — deliberately, for the reason `../mgmt-api/CLAUDE.md` gives. |
 | `admin_rbac.js` | **Who may use it.** Two roles, held as two ordinary groups in the embedded directory. A library (rule 3): it registers nothing. |
 | `delegation_map.js` | **The delegation picture**, at `/admin/delegation/map` — and, since 2026-08-26, one person's whole picture at `/admin/delegation/user`, which is the same renderer over a graph carrying two more kinds of line. Layout with `@dagrejs/dagre`, every shape its own SVG. A library (rule 3): it registers nothing, requires nothing in this service but `helpers.js`, and is HANDED what each box is. |
+| `crypto_metadata.js` | **The crypto report**, at `/admin/crypto-metadata` — what this service does when it signs, verifies, encrypts or decrypts, for every identity service it advertises. It draws its own page (like `../sts_metadata.js`, not like everything else here) and fills `setCryptoReporter()` so `/admin-api/crypto` can mirror it. See the section below. |
 | `federation_diagram.js` | **The federation picture**, at `/admin/federation/map`. The SECOND drawing in this console and a SEPARATE renderer — see the section below, where the case for not reusing the one above it is made. A library on the same terms, and the only thing it takes from this service beyond `helpers.js` is `delegation_map.js`'s palette, hexagon and text metric. |
 
 **It IS protected now, and it holds nothing on disk.** It is also the one surface
@@ -756,6 +757,11 @@ misremembering.
 
 ## ONE PAGE OF THIS CONSOLE IS NOT IN THIS DIRECTORY
 
+(Two, since 2026-08-30 — `/admin/crypto-metadata` is drawn by
+`./crypto_metadata.js`, which is in this directory but is not `admin.js`. It
+borrows the shell on exactly the terms below and the section above argues the
+rest.)
+
 `/admin/sts-metadata` — *Service metadata*, the last item in the sidebar — is
 built by `../sts_metadata.js`. It moved under `/admin` on 2026-08-24 from
 `/sts-metadata`, and the split of labour is worth knowing before either half is
@@ -907,7 +913,146 @@ turned `&apos;` into `&amp;apos;` and printed the entity. `tip()` is the
 exception and resolves entities instead, because a `title` is text rather than
 markup. The rule is in the comment above `plainTextOf()`.
 
-## Four reader slots and two writer slots point INTO this module
+## `/admin/crypto-metadata` IS THE SECOND PAGE OF THIS CONSOLE THIS FILE DOES NOT DRAW
+
+Added 2026-08-30, in `crypto_metadata.js`, under **Server configuration** beside
+*Service metadata* — and the two sit together because each is a REPORT about the
+whole service rather than a control over one part of it.
+
+`/admin/sts-metadata` answers *what can I call, and what specification is it
+pretending to implement*. This answers the question underneath it, which nothing
+here could answer before: **when this service signs, verifies, encrypts or
+decrypts something, what does it actually use** — which digest, which signature
+algorithm, which cipher, which key, and which of the several envelopes (JOSE,
+XMLDSIG and XML Encryption, WS-Security, COSE, X.509, Kerberos, SPIFFE) that
+primitive is wrapped in.
+
+**It was worth a page because `common/crypto.js` centralised the CODE and not
+the DESCRIPTION.** Since 2026-08-27 there is one module that signs, verifies,
+encrypts and decrypts; *which algorithms does this thing speak* was still
+answered by reading six tables in four files, and this console — which exists so
+that nobody has to — said nothing about any of them.
+
+### EVERY TABLE IS READ FROM THE MODULE THAT PERFORMS THE ALGORITHM
+
+That is `sts_metadata.js`'s argument one layer down, and it is the design rather
+than a nicety. That page walks the live router because a hand-kept list of
+routes goes stale the first time somebody adds one and the failure is silent in
+the worst direction — the page still looks complete. An algorithm table is the
+same shape of thing. So the JWS rows are `stsCrypto.JWS_ALGS`, the XML ones are
+the vendored `xmldsig.js`'s three tables, the Kerberos encryption types are read
+back through the codec's own `etypeName()` (those modules are VENDORED and
+cannot be edited to export a list), the SPIFFE key types are `spiffeCa.KEY_TYPES`,
+and so on for eleven modules.
+
+**Only two things on the page are written by hand, and both are things no table
+can hold**: the per-family prose in `FAMILIES` (what each identity service signs,
+and why) and `STANDARDS` (which document an envelope comes from, and how much of
+it is really implemented). Both follow `sts_metadata.js`'s rule — every
+`coverage` starts `full`, `partial` or `mock` and says what is missing — and it
+is worth more here than there, because a page about cryptography that overstates
+what it implements is actively dangerous to somebody using it to learn.
+
+### THE FAMILY LIST IS CHECKED AGAINST `sts_metadata.js` RATHER THAN AGREED WITH IT
+
+The page reports on the identity services this mock ADVERTISES, so the list of
+them has to be the list `/admin/sts-metadata` draws its cards from. Two tables
+naming fourteen protocol families are two tables that will disagree the first
+time a fifteenth arrives — invisibly, because each page would look complete on
+its own. So `sts_metadata.js` requires this module and hands `PROTOCOLS` over at
+its own require time (`setProtocolFamilies()`), and the page reports BOTH
+directions of drift the way that page reports both directions of endpoint drift:
+a family advertised with no crypto profile, a profile naming a family that is
+not advertised, and — a third direction that page has no equivalent of — a
+family citing an envelope with no row in `STANDARDS`.
+
+**A slot rather than a require, and the direction is forced.** A
+`require('../sts_metadata')` from here would load, at 20a, the one module whose
+whole constraint is that it is required LAST. With the slot unfilled the page
+draws its own table and SAYS the check did not run, rather than rendering two
+empty lists that look like a clean bill of health.
+
+### THE FOUR VERBS ARE SEPARATE COLUMNS, AND THAT IS THE POINT OF THE TABLE
+
+Signing is minting something a relying party will believe; verifying is a
+decision that can be got wrong; encrypting uses somebody else's key; decrypting
+means holding a private key a caller can aim ciphertext at. Those are four
+different exposures and this service does a different amount of each — federation
+verifies and barely signs, SAML 2.0 does all four, SCIM and LDAP and WebAuthn
+sign nothing at all. A column that collapsed them into *uses cryptography* would
+hide the one distinction a reader came for. An empty cell is drawn as *does not*
+rather than blank, because every one of them is a documented non-goal and a
+blank cell and an unwritten cell look identical.
+
+### THE POST-QUANTUM SECTION, AND WHY IT IS IN THREE PARTS
+
+Asked for on the day the page was written, and the headline is deliberately not
+the flattering one: **the signatures are partly post-quantum and the key
+establishment is entirely classical.** A page that said "supports ML-DSA"
+without separating them would be making exactly the claim this repository exists
+not to make.
+
+The two halves are reported apart because the THREAT differs, not the effort. A
+signature is verified at the moment it is presented, so a signature algorithm
+that falls in 2035 is a problem in 2035; a key agreement is not, because
+ciphertext captured today can be kept and opened when the machine arrives. So
+the surface that most needs a post-quantum answer here is the one that has none
+— there is no ML-KEM in this process, in JWE, in XML Encryption or on any TLS
+socket — and that row says so rather than letting the post-quantum signatures
+above it imply otherwise.
+
+**Symmetric cryptography is a third category and is the one people get wrong.**
+Grover costs a square root rather than breaking anything outright, so the answer
+is key length: AES-256 and SHA-384 are unaffected in any practical sense, and
+what is wrong with RC4-HMAC, MD5 and MD4 has nothing to do with quantum
+computers. **Kerberos is therefore the family here least affected by any of it**
+— the only one with no public-key cryptography in it at all — which is the
+opposite of what its reputation suggests, and is the sentence most likely to be
+"corrected" by somebody skimming.
+
+**The most instructive row is DPoP.** Its list excludes the post-quantum
+algorithms deliberately: a proof is bound through `cnf.jkt`, the RFC 7638
+thumbprint, which is defined for RSA, EC, OKP and oct and not for `AKP` — so a
+proof signed with ML-DSA would verify perfectly and bind to NOTHING. The gap is
+in the BINDING, not in the signature, and the page says which.
+
+### FOUR SMALLER DECISIONS
+
+* **IT PUBLISHES NO PRIVATE KEY AND NO SECRET.** Key types, key identifiers,
+  curve names, certificate fingerprints and validity dates — everything already
+  readable from `/oauth2/jwks`, `/tls/server-certificate` and the SPIFFE bundle
+  endpoint. That is a rule for anything added here later rather than an
+  observation about what is here now: this is exactly the page somebody would
+  think to put a private key on.
+* **IT DOES NOT CALL `allSigningKeys()`.** The post-quantum keys are made on
+  FIRST USE — one SLH-DSA keygen is most of two seconds — so a metadata page
+  that reached for them would spend that on every view, in a realm where nobody
+  had asked for a post-quantum signature. It reads `keys.pqKeys`, which exists
+  only once something has brought them into being, and reports honestly which
+  of the two states the realm is in.
+* **NO SCRIPT, and it did not need the argument made again.** Everything on it
+  is a table and prose through `note()`/`warn()`, so `script-src 'none'` is
+  untouched and this is not a candidate for the exception at all — unlike the
+  two drawings, which had to argue it twice.
+* **The prose carries `backticks` and the RENDERER turns them into `<code>`.**
+  The same strings are served as JSON at `?format=json` and on
+  `/admin-api/crypto`, where markdown is the convention every description in
+  this service follows. Escaping happens FIRST and the substitution second,
+  which is the order that matters.
+
+### WHAT IT COSTS TO ADD A PROTOCOL FAMILY, NOW
+
+A card in `sts_metadata.js`'s `PROTOCOLS`, an entry in its `ENDPOINTS`, **and a
+row in `crypto_metadata.js`'s `FAMILIES`**. The third is enforced:
+`tests/vendored/admin_api.js` — this repository's own — fails on the drift
+report being non-empty in either direction, on a coverage note that does not
+start `full`/`partial`/`mock`, and on any of five algorithm lists differing from
+what this service advertises in its own discovery documents. That last check is
+the one that makes "every table is derived" mean something: reading the report
+on its own says nothing, because a hand-written list is well-formed too. All
+three assertions were mutation-tested before they were committed.
+
+## Four reader slots and THREE writer slots point INTO this module
 
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,
 `../scim/scim.js` and `../spiffe/spiffe_server.js`, so this module cannot require
@@ -916,7 +1061,18 @@ express router ahead of every `/admin` route, and `GET /admin/sts-metadata` is b
 walking that router. So this module OFFERS slots and they fill them at their own
 require time — `setDirectoryReader()`, `setGroupReader()`, `setDirectoryWriter()`,
 `setSpiffeReader()`, `setScimReader()`. The pattern and its entry test are rule 3e
-in the root `CLAUDE.md`; do not add a sixth by analogy.
+in the root `CLAUDE.md`; do not add another by analogy.
+
+**`setLogoutReader()` is the sixth and `setCryptoReporter()` is the seventh**,
+and both passed that test in BOTH directions rather than one — which is the bar
+a proposal should be held to. The crypto one: a require from
+`../mgmt-api/admin_api.js` (19) to `./crypto_metadata.js` (20a) would move that
+page's route and `../tls/tls_server.js`'s three ahead of the management API's
+own and of ldap, scim and spiffe; and a require from THIS file to it would close
+a cycle, because it requires this one for the shell. `cryptoView(req)` is what
+`admin_api.js` calls, and it carries the WHOLE report as one function so that
+the page and the API cannot come to disagree about what this service's
+cryptography is.
 
 It DOES require `../spiffe/spiffe_ca.js`, `../spiffe/spiffe_id.js` and
 `../spiffe/spiffe_registry.js` directly, because they register nothing, so neither
