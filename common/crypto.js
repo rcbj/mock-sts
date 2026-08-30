@@ -81,6 +81,19 @@ const jwt = require('jsonwebtoken');
 const bunyan = require('bunyan');
 const config = require('./config');
 const pqJose = require('./pq_jose');
+
+// ---------------------------------------------------------------------------
+// REQUIRED FOR ITS EFFECT, and the effect is the point: loading the pool is
+// what hands pq_jose.js the pool to use, so this line is why signJwsAsync()
+// below computes in a child process rather than in this one. See the foot of
+// common/worker_pool.js, which explains why the reference goes that way round
+// and why a worker process is never armed by it.
+//
+// This module is where the line belongs because this module is what routes an
+// `alg` to pq_jose.js in the first place — every path that can reach a
+// post-quantum signature comes through here.
+// ---------------------------------------------------------------------------
+require('./worker_pool');
 const xmldom = require('@xmldom/xmldom');
 
 const log = bunyan.createLogger({
@@ -1008,6 +1021,30 @@ function nodeParamsFor(spec, key) {
   return params;
 }
 
+// ---------------------------------------------------------------------------
+// The JWS framing a post-quantum signature goes over: header, payload,
+// base64url. The same shape as the `ownSigner` branch of signJws() below —
+// written out here rather than shared with the debugger's copy ON PURPOSE, see
+// the header of common/pq_jose.js — and factored out of it because the
+// SYNCHRONOUS and the ASYNCHRONOUS signer must produce the same bytes, and two
+// copies of a framing is one copy that will drift.
+// ---------------------------------------------------------------------------
+function pqSigningInput(payload, algorithm, options) {
+  log.debug('Entering pqSigningInput(). alg=' + algorithm);
+  const header = { alg: algorithm, typ: 'JWT' };
+  if (options.keyid) {
+    header.kid = options.keyid;
+  }
+  const body = Object.assign({}, payload);
+  if (body.iat === undefined) {
+    body.iat = Math.floor(Date.now() / 1000);
+  }
+  const input = b64u(Buffer.from(JSON.stringify(header), 'utf8')) + '.' +
+                b64u(Buffer.from(JSON.stringify(body), 'utf8'));
+  log.debug('Leaving pqSigningInput(). ' + input.length + ' characters.');
+  return input;
+}
+
 function signJws(payload, key, opts) {
   const options = opts || {};
   log.debug('Entering signJws(). alg=' + (options.algorithm || 'RS256') +
@@ -1021,20 +1058,7 @@ function signJws(payload, key, opts) {
   const algorithm = options.algorithm || 'RS256';
   const spec = jwsSpec(algorithm);
   if (spec.family === 'pq') {
-    // The same JWS framing as the branch below — header, signing input,
-    // base64url — with pq_jose.js supplying the signature. Written out here
-    // rather than shared with the debugger's copy ON PURPOSE: see the header
-    // of common/pq_jose.js.
-    const pqHeader = { alg: algorithm, typ: 'JWT' };
-    if (options.keyid) {
-      pqHeader.kid = options.keyid;
-    }
-    const pqBody = Object.assign({}, payload);
-    if (pqBody.iat === undefined) {
-      pqBody.iat = Math.floor(Date.now() / 1000);
-    }
-    const pqInput = b64u(Buffer.from(JSON.stringify(pqHeader), 'utf8')) + '.' +
-                    b64u(Buffer.from(JSON.stringify(pqBody), 'utf8'));
+    const pqInput = pqSigningInput(payload, algorithm, options);
     const pqSig = pqJose.sign(algorithm, key, Buffer.from(pqInput, 'ascii'));
     const pqOut = pqInput + '.' + b64u(pqSig);
     log.debug('Leaving signJws(). ' + algorithm + ', ' + pqOut.length +
@@ -1073,6 +1097,62 @@ function signJws(payload, key, opts) {
   const signed = jwt.sign(payload, key, signOptions);
   log.debug('Leaving signJws(). ' + signed.length + ' characters.');
   return signed;
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME SIGNATURE, WITHOUT HOLDING THE EVENT LOOP.
+//
+// Post-quantum signing is the one thing this service does that takes SECONDS —
+// 14.6 and 15.4 of them were measured for a single SLH-DSA-SHAKE-128s token on
+// 2026-08-29 — and node runs this service's six listener families on one
+// thread, so for those seconds it answers nobody: not another HTTP caller, not
+// the KDC on port 88. See common/worker.js.
+//
+// So the four call paths that can reach a post-quantum `alg` — the ID Token,
+// the signed UserInfo response, a client assertion and an OID4VCI proof — call
+// this instead, and it hands the computation to the pool. **EVERY OTHER
+// ALGORITHM IS UNCHANGED AND IS NOT DEFERRED**: an RS256 signature is
+// microseconds, so sending it to a child process would cost an IPC round trip
+// to save nothing. Those resolve with the value signJws() computed, which is
+// what lets a caller be written one way and not two.
+//
+// `opts.session` is passed through as the routing hint — see worker_pool.js.
+// It is a preference and never a correctness requirement, so a caller with no
+// session to name simply omits it.
+// ---------------------------------------------------------------------------
+function signJwsAsync(payload, key, opts) {
+  const options = opts || {};
+  const algorithm = options.algorithm || 'RS256';
+  log.debug('Entering signJwsAsync(). alg=' + algorithm);
+  let spec;
+  try {
+    if (!key) {
+      throw new Error('signJwsAsync: a signing key is required.');
+    }
+    spec = jwsSpec(algorithm);
+  } catch (e) {
+    log.debug('Leaving signJwsAsync(). Refused.');
+    return Promise.reject(e);
+  }
+  if (spec.family !== 'pq') {
+    // Not deferred, and the throw is turned into a rejection so that a caller
+    // never has to know which algorithms go to the pool.
+    try {
+      const signed = signJws(payload, key, opts);
+      log.debug('Leaving signJwsAsync(). ' + algorithm + ', in process.');
+      return Promise.resolve(signed);
+    } catch (e) {
+      log.debug('Leaving signJwsAsync(). It threw.');
+      return Promise.reject(e);
+    }
+  }
+  const input = pqSigningInput(payload, algorithm, options);
+  log.debug('Leaving signJwsAsync(). ' + algorithm + ', handed to the pool.');
+  return pqJose.signAsync(algorithm, key, Buffer.from(input, 'ascii'),
+                          { session: options.session })
+    .then(function (signature) {
+      return input + '.' + b64u(signature);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,12 +1212,32 @@ function tokenClockSkew() {
 // `key` may be a node KeyObject, a JWK, or a PEM. All three occur — a JWK from
 // a proof's own header, a PEM from a registration, a KeyObject already parsed.
 // ---------------------------------------------------------------------------
-function verifyCompactJws(token, key, opts) {
-  const options = opts || {};
-  log.debug('Entering verifyCompactJws().');
+// ---------------------------------------------------------------------------
+// SPLIT IN THREE, AND THE SPLIT IS WHAT LETS THE POST-QUANTUM BRANCH GO TO A
+// CHILD PROCESS.
+//
+// Reading the token, choosing the algorithm and refusing an unacceptable one
+// are the same in both directions; only the one line that actually checks the
+// bytes differs, and for a composite ML-DSA verification that line took 17.8
+// and 23.3 seconds on 2026-08-29 (see common/worker.js). So:
+//
+//   prepareVerification()  everything up to the check — and every refusal that
+//                          is about the TOKEN rather than about the signature
+//   verifyBytes()          the check itself, for everything but post-quantum
+//   finishVerification()   the refusal for a signature that did not hold up,
+//                          and the payload
+//
+// `verifyCompactJws()` below runs the three in a row exactly as it always did.
+// `verifyCompactJwsAsync()` runs the same three with the post-quantum check
+// handed to the pool. THE ORDER OF THE REFUSALS IS PART OF THE CONTRACT: a
+// token whose `alg` is not in the caller's list is refused for that and never
+// for its signature, whichever entry point was used.
+// ---------------------------------------------------------------------------
+function prepareVerification(token, key, options) {
+  log.debug('Entering prepareVerification().');
   const parts = String(token || '').split('.');
   if (parts.length !== 3) {
-    log.debug('Leaving verifyCompactJws(). Not three parts.');
+    log.debug('Leaving prepareVerification(). Not three parts.');
     throw new Error('a compact JWS has three dot-separated parts; this has ' +
       parts.length + '.');
   }
@@ -1145,78 +1245,150 @@ function verifyCompactJws(token, key, opts) {
   try {
     header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
   } catch (e) {
-    log.debug('Leaving verifyCompactJws(). The header is not JSON.');
+    log.debug('Leaving prepareVerification(). The header is not JSON.');
     throw new Error('the JWS protected header is not readable base64url ' +
       'JSON: ' + e.message);
   }
   const allowed = options.algorithms;
   if (!Array.isArray(allowed) || !allowed.length) {
-    log.debug('Leaving verifyCompactJws(). No algorithm list.');
+    log.debug('Leaving prepareVerification(). No algorithm list.');
     throw new Error('verifyCompactJws: the caller must name the acceptable ' +
       'algorithms. A verifier that takes them from the token is the ' +
       'algorithm-confusion defect (RFC 8725 section 3.1).');
   }
   if (allowed.indexOf(header.alg) === -1) {
-    log.debug('Leaving verifyCompactJws(). Algorithm not accepted.');
+    log.debug('Leaving prepareVerification(). Algorithm not accepted.');
     throw new Error('this JWS is signed with "' + header.alg + '" and only ' +
       allowed.join(', ') + ' ' + (allowed.length === 1 ? 'is' : 'are') +
       ' accepted here.');
   }
   const spec = jwsSpec(header.alg);
-
-  const signingInput = Buffer.from(parts[0] + '.' + parts[1], 'ascii');
-  const signature = Buffer.from(parts[2], 'base64url');
-  let ok;
+  const prepared = {
+    header: header,
+    spec: spec,
+    payload: parts[1],
+    signingInput: Buffer.from(parts[0] + '.' + parts[1], 'ascii'),
+    signature: Buffer.from(parts[2], 'base64url')
+  };
   if (spec.family === 'pq') {
     // `key` is the AKP `pub` value — bytes, or the base64url of them off a
-    // JWK, which is what a verifier is handed in practice.
-    const pub = (key && key.pub) ? Buffer.from(key.pub, 'base64url')
+    // JWK, which is what a verifier is handed in practice. Read HERE rather
+    // than at the check, so that a key that cannot be read is refused in the
+    // same place whichever entry point was used.
+    prepared.pub = (key && key.pub) ? Buffer.from(key.pub, 'base64url')
       : (typeof key === 'string' ? Buffer.from(key, 'base64url')
                                  : Buffer.from(key));
-    ok = pqJose.verify(header.alg, pub, signingInput, signature);
-  } else if (spec.family === 'hmac') {
+  }
+  log.debug('Leaving prepareVerification(). alg=' + header.alg);
+  return prepared;
+}
+
+// Everything but post-quantum, which is every algorithm whose check is
+// microseconds and belongs in the process that is holding the request open.
+function verifyBytes(prepared, key) {
+  log.debug('Entering verifyBytes(). alg=' + prepared.header.alg);
+  const spec = prepared.spec;
+  const signingInput = prepared.signingInput;
+  const signature = prepared.signature;
+  if (spec.family === 'hmac') {
     const expected = nodeCrypto.createHmac(spec.hash, key)
       .update(signingInput).digest();
-    ok = expected.length === signature.length &&
-         nodeCrypto.timingSafeEqual(expected, signature);
-  } else {
-    // A raw ECDSA signature is a fixed length; a wrong one reaches OpenSSL as
-    // a buffer it will refuse in a way that names nothing, so it is checked
-    // here where the reason can be given.
-    if (spec.sigBytes && spec.family === 'ec' &&
-        signature.length !== spec.sigBytes) {
-      log.debug('Leaving verifyCompactJws(). Wrong signature length.');
-      throw new Error('an ' + header.alg + ' signature is ' + spec.sigBytes +
-        ' bytes — the R||S concatenation of RFC 7518 section 3.4 — and this ' +
-        'one is ' + signature.length + '. A ~70-byte one is the DER SEQUENCE ' +
-        'a general-purpose crypto API returns, sent without converting it.');
-    }
-    let publicKey;
-    try {
-      publicKey = (key && key.type === 'public') ? key
-        : nodeCrypto.createPublicKey(
-            (key && key.kty) ? { key: key, format: 'jwk' } : key);
-    } catch (e) {
-      log.debug('Leaving verifyCompactJws(). The key would not load.');
-      throw new Error('the verification key could not be read: ' + e.message);
-    }
-    ok = nodeCrypto.verify(spec.hash, signingInput,
-        nodeParamsFor(spec, publicKey), signature);
+    log.debug('Leaving verifyBytes(). HMAC.');
+    return expected.length === signature.length &&
+           nodeCrypto.timingSafeEqual(expected, signature);
   }
+  // A raw ECDSA signature is a fixed length; a wrong one reaches OpenSSL as
+  // a buffer it will refuse in a way that names nothing, so it is checked
+  // here where the reason can be given.
+  if (spec.sigBytes && spec.family === 'ec' &&
+      signature.length !== spec.sigBytes) {
+    log.debug('Leaving verifyBytes(). Wrong signature length.');
+    throw new Error('an ' + prepared.header.alg + ' signature is ' +
+      spec.sigBytes + ' bytes — the R||S concatenation of RFC 7518 section ' +
+      '3.4 — and this one is ' + signature.length + '. A ~70-byte one is the ' +
+      'DER SEQUENCE a general-purpose crypto API returns, sent without ' +
+      'converting it.');
+  }
+  let publicKey;
+  try {
+    publicKey = (key && key.type === 'public') ? key
+      : nodeCrypto.createPublicKey(
+          (key && key.kty) ? { key: key, format: 'jwk' } : key);
+  } catch (e) {
+    log.debug('Leaving verifyBytes(). The key would not load.');
+    throw new Error('the verification key could not be read: ' + e.message);
+  }
+  log.debug('Leaving verifyBytes(). ' + spec.family + '.');
+  return nodeCrypto.verify(spec.hash, signingInput,
+      nodeParamsFor(spec, publicKey), signature);
+}
+
+function finishVerification(prepared, ok) {
+  log.debug('Entering finishVerification(). ok=' + ok);
   if (!ok) {
-    log.debug('Leaving verifyCompactJws(). The signature does not verify.');
-    throw new Error('the ' + header.alg + ' signature does not verify.');
+    log.debug('Leaving finishVerification(). It does not verify.');
+    throw new Error('the ' + prepared.header.alg +
+      ' signature does not verify.');
   }
   let claims;
   try {
-    claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    claims = JSON.parse(Buffer.from(prepared.payload, 'base64url')
+      .toString('utf8'));
   } catch (e) {
-    log.debug('Leaving verifyCompactJws(). The payload is not JSON.');
+    log.debug('Leaving finishVerification(). The payload is not JSON.');
     throw new Error('the JWS payload is not readable base64url JSON: ' +
       e.message);
   }
-  log.debug('Leaving verifyCompactJws(). ' + header.alg + ' verified.');
-  return { header: header, claims: claims };
+  log.debug('Leaving finishVerification(). ' + prepared.header.alg +
+            ' verified.');
+  return { header: prepared.header, claims: claims };
+}
+
+function verifyCompactJws(token, key, opts) {
+  const options = opts || {};
+  log.debug('Entering verifyCompactJws().');
+  const prepared = prepareVerification(token, key, options);
+  const ok = prepared.spec.family === 'pq'
+    ? pqJose.verify(prepared.header.alg, prepared.pub, prepared.signingInput,
+                    prepared.signature)
+    : verifyBytes(prepared, key);
+  const out = finishVerification(prepared, ok);
+  log.debug('Leaving verifyCompactJws(). ' + prepared.header.alg +
+            ' verified.');
+  return out;
+}
+
+// The same verification with the post-quantum check handed to the pool. Every
+// other algorithm resolves with what verifyCompactJws() computed, for the
+// reason signJwsAsync() gives: an RS256 check is microseconds, and an IPC round
+// trip to save that would be a cost with no saving.
+function verifyCompactJwsAsync(token, key, opts) {
+  const options = opts || {};
+  log.debug('Entering verifyCompactJwsAsync().');
+  let prepared;
+  try {
+    prepared = prepareVerification(token, key, options);
+  } catch (e) {
+    log.debug('Leaving verifyCompactJwsAsync(). Refused.');
+    return Promise.reject(e);
+  }
+  if (prepared.spec.family !== 'pq') {
+    try {
+      const out = finishVerification(prepared, verifyBytes(prepared, key));
+      log.debug('Leaving verifyCompactJwsAsync(). In process.');
+      return Promise.resolve(out);
+    } catch (e) {
+      log.debug('Leaving verifyCompactJwsAsync(). It did not verify.');
+      return Promise.reject(e);
+    }
+  }
+  log.debug('Leaving verifyCompactJwsAsync(). Handed to the pool.');
+  return pqJose.verifyAsync(prepared.header.alg, prepared.pub,
+                            prepared.signingInput, prepared.signature,
+                            { session: options.session })
+    .then(function (ok) {
+      return finishVerification(prepared, ok);
+    });
 }
 
 // The claim checks `jsonwebtoken` performs, for the two algorithms it cannot
@@ -1299,6 +1471,51 @@ function verifyJws(token, key, opts) {
   const claims = jwt.verify(token, key, verifyOptions);
   log.debug('Leaving verifyJws(). sub=' + (claims.sub || '(none)'));
   return claims;
+}
+
+// ---------------------------------------------------------------------------
+// The same entry point, with a post-quantum signature checked in a child
+// process. It is a SEPARATE FUNCTION rather than verifyJws() made async,
+// because every one of that function's callers is synchronous and turning the
+// return value of all of them into a promise would be a change to code that
+// verifies RS256 in microseconds and has nothing to gain from it.
+//
+// The two share `checkJwtClaims()` and the peek that chooses between the
+// library and the shared verifier, so an AKP assertion is held to exactly the
+// same `exp`, `nbf`, `aud` and clock-skew rules as an RS256 one. A token that
+// skipped a claim check because of the algorithm it was signed with would be
+// the worst kind of inconsistency, and it is the reason this is a wrapper of
+// the same three steps rather than a second reading of them.
+// ---------------------------------------------------------------------------
+function verifyJwsAsync(token, key, opts) {
+  const options = opts || {};
+  log.debug('Entering verifyJwsAsync().');
+  let peeked = null;
+  try {
+    peeked = JSON.parse(Buffer.from(String(token || '').split('.')[0],
+      'base64url').toString('utf8'));
+  } catch (e) {
+    peeked = null;
+  }
+  if (peeked && JWS_ALGS[peeked.alg] && JWS_ALGS[peeked.alg].family === 'pq') {
+    const allowed = options.algorithms || [peeked.alg];
+    log.debug('Leaving verifyJwsAsync(). Handed to the pool.');
+    return verifyCompactJwsAsync(token, key,
+        { algorithms: allowed, session: options.session })
+      .then(function (verified) {
+        return checkJwtClaims(verified.claims, options);
+      });
+  }
+  // Everything else — including EdDSA and ES256K, which go through the shared
+  // verifier but are microseconds — is what verifyJws() already does.
+  try {
+    const claims = verifyJws(token, key, opts);
+    log.debug('Leaving verifyJwsAsync(). In process.');
+    return Promise.resolve(claims);
+  } catch (e) {
+    log.debug('Leaving verifyJwsAsync(). It did not verify.');
+    return Promise.reject(e);
+  }
 }
 
 // ===========================================================================
@@ -1890,6 +2107,12 @@ module.exports = {
   // --- JWS / JWT ---
   signJws: signJws,
   verifyJws: verifyJws,
+  // The three that hand a post-quantum computation to the worker pool and
+  // resolve with exactly what their synchronous namesakes return. See
+  // signJwsAsync() for which callers use them and why the others do not.
+  signJwsAsync: signJwsAsync,
+  verifyJwsAsync: verifyJwsAsync,
+  verifyCompactJwsAsync: verifyCompactJwsAsync,
   tokenClockSkew: tokenClockSkew,
   // --- JWE ---
   // The one JWS algorithm table and the operations built on it.

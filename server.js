@@ -98,6 +98,11 @@ const https = require('https');
 const app = require('./common/app');
 const { log, PORT, HOST } = require('./common/helpers');
 const config = require('./common/config');
+// A LIBRARY, rule 3's shape: it registers no route and its position in the
+// require order is not a position at all. It is named here for one thing — the
+// drain in shutdown() below — and it is already loaded by then, because
+// common/crypto.js requires it. See common/worker_pool.js.
+const workerPool = require('./common/worker_pool');
 
 // ---------------------------------------------------------------------------
 // WHERE THIS SERVICE WRITES ITSELF DOWN — #4a, AND THE FIRST TIME IT EVER HAS.
@@ -614,7 +619,21 @@ function shutdown(signal) {
            'down, then exiting. Sessions, tokens, codes, artifacts and ' +
            'tickets are not persisted and are going with this process, which ' +
            'is what they have always done.');
-  persistence.stop().then(function () {
+  // THE WORKER POOL GOES FIRST, and it is a drain rather than a kill: a child
+  // part way through an SLH-DSA signature is answering a request this process
+  // still has open, and thirteen seconds of computation thrown away is a
+  // request that gets nothing back. It gives them five seconds and kills what
+  // is left, which costs nothing — a worker holds no state. It resolves rather
+  // than rejects for the same reason persistence.stop() does: the only move
+  // left here is to exit, and a rejection would replace the sentence that says
+  // what was flushed with a stack trace. See common/worker_pool.js.
+  workerPool.stop().then(function (drained) {
+    if (drained.stopped || drained.killed) {
+      log.info('sts: ' + drained.stopped + ' worker process(es) finished and ' +
+               drained.killed + ' had to be killed.');
+    }
+    return persistence.stop();
+  }).then(function () {
     log.info('sts: stopped.');
     process.exit(0);
   }).catch(function (err) {

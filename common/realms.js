@@ -514,12 +514,28 @@ function update(id, changes) {
 // It matches by PREFIX rather than naming the two settings, so a third
 // `realms.*` setting is refused the day it is added rather than the day
 // somebody remembers this function.
+//
+// THE SECOND REFUSAL IS `perProcess`, AND IT IS A DIFFERENT RULE. A setting
+// carrying that flag is a property of the OS PROCESS rather than of the
+// service's behaviour — `workers.count`, the size of the child-process pool the
+// post-quantum signing is handed to, is the first — so one realm's value would
+// silently be every realm's. The predicate is config.js's own
+// `isPerProcess()` and not a copy of it, for the reason this whole function
+// exists: the reading end and the writing end of one rule, written separately,
+// disagreed within the hour.
 function checkRealmOverride(key, raw) {
   if (String(key || '').indexOf('realms.') === 0) {
     return '"' + key + '" cannot be set on one realm: it is what decides ' +
       'whether realms exist and where they are found, so a realm carrying it ' +
       'would be changing how it was reached half way through the request that ' +
       'reached it. Set it on the service as a whole — /admin/oauth2, or POST ' +
+      '/admin-api/config/set.';
+  }
+  if (config.isPerProcess(key)) {
+    return '"' + key + '" cannot be set on one realm: it is a property of ' +
+      'this OS PROCESS rather than of how a realm behaves, so a realm ' +
+      'carrying it would be setting it for every other realm as well. Set it ' +
+      'on the service as a whole — /admin/config, or POST ' +
       '/admin-api/config/set.';
   }
   // `true` is the `forRealm` argument, and it is what admits the one setting

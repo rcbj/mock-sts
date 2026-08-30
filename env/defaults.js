@@ -51,6 +51,11 @@ var config = {
     trustProxy: false  // Trust forwarded headers
   },
 
+  // --- Global ----------------------------------------------------------
+  workers: {
+    count: 2  // Worker processes
+  },
+
   // --- Trust realms ----------------------------------------------------
   realms: {
     enabled: true,        // Trust realms enabled
@@ -96,7 +101,7 @@ var config = {
     usernamePrefix: "",           // Prefix for federated usernames
     loginButtons: true,           // Offer partners at the sign-in screen
     outbound: true,               // Make back-channel requests to partners
-    outboundTimeoutMs: 5000,      // Back-channel timeout (ms)
+    outboundTimeoutMs: 15000,     // Back-channel timeout (ms)
     outboundAllowInsecure: false, // Allow http:// and untrusted TLS to a partner
     requestTtlMin: 10             // Outbound request lifetime (minutes)
   },

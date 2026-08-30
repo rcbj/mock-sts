@@ -1692,7 +1692,13 @@ function checkClientRegistration(metadata) {
 // somebody will copy them.
 // ---------------------------------------------------------------------------
 
-function checkClientAuthentication(opts) {
+// ASYNCHRONOUS BECAUSE clientAuth.verify() IS, which is because a
+// `private_key_jwt` assertion may be signed with one of the eleven
+// post-quantum algorithms this service advertises for client authentication —
+// seconds of computation on the thread that owns every listener here. See
+// common/worker.js. What this function DECIDES is unchanged: the policy is
+// still this module's and the mechanics are still client_auth.js's.
+async function checkClientAuthentication(opts) {
   log.debug("Entering checkClientAuthentication().");
   const registered = opts.registered;
   if (!enabled() || !registered || !registered.known) {
@@ -1731,7 +1737,7 @@ function checkClientAuthentication(opts) {
   // is the same split every other check here follows. What this file decides is
   // whether authentication is REQUIRED of this client at all (section 2.5's
   // "where feasible"); what that file decides is whether what arrived proves it.
-  const checked = clientAuth.verify({
+  const checked = await clientAuth.verify({
     method: method,
     clientId: opts.clientId,
     request: opts.request,

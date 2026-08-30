@@ -18,7 +18,7 @@ files did not change; the paths did.
 
 | Directory | What is in it |
 |---|---|
-| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, **`crypto.js`**, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`. **`crypto.js` is THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS since 2026-08-27** — before that it did all four in about twenty places, including six XML signers and four XML signature verifiers. `common/CLAUDE.md` argues it. |
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, **`crypto.js`**, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`, and — since 2026-08-30 — **`worker.js` and `worker_pool.js`, the child-process pool the post-quantum signing runs in** (see *One listener process, N stateless workers* below). **`crypto.js` is THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS since 2026-08-27** — before that it did all four in about twenty places, including six XML signers and four XML signature verifiers. `common/CLAUDE.md` argues it. |
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** Since 2026-08-27 that includes `xmldsig.js`, the parent's own XML Signature and XML Encryption module, which is now the signer behind every signed document this service emits — so both ends of a SAML exchange canonicalize with the same code. |
 | `home/` | The front door: `GET /` and the one image on it. |
 | `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
@@ -455,6 +455,133 @@ reaches outside that file:
    marker and says why there must not be a second row carrying it;
    `oauth-oidc/CLAUDE.md` argues what it means for the mode.
 
+
+## One listener process, N stateless workers
+
+**This service is one node process and it owns six listener families** — the
+express app, the KDC on TCP and UDP 88, the Kerberos service on 8888, the LDAP
+directory, two gRPC surfaces and two HTTPS endpoints. Node runs all of them on
+ONE THREAD, so a synchronous computation does not slow this service down, it
+STOPS it.
+
+Post-quantum signing is that computation, and until 2026-08-30 it ran on that
+thread. Stalls measured on 2026-08-29 while the parent project's suite ran:
+
+| Stall | Operation |
+|---|---|
+| 23.3s | a composite `verify()` |
+| 17.8s | a composite `verify()` |
+| 15.4s | `signJwtAs()` SLH-DSA-SHAKE-128s |
+| 14.6s | `signJwtAs()` SLH-DSA-SHAKE-128s |
+
+For those seconds this service answered nobody, and **a KDC that does not answer
+looks from the outside exactly like a KDC that is not there** — which is why not
+one of the failures they caused named one. They were a Kerberos reply that never
+came, a Populate button never drawn, a login screen that never arrived, and a
+refresh request whose socket this service closed on its way back out. The parent
+project marked two of its jobs `EXCLUSIVE` to work around it (its issue #268)
+and this is what that marking was interim to.
+
+**The design is one front process and N stateless children.** This process keeps
+every socket AND ALL THE STATE; a child is handed everything it needs in the job
+and hands back everything it produced.
+
+**Workers hold no state, and that is load-bearing rather than a
+simplification.** The state here is read and written ACROSS sessions, not within
+one: `operatorConfig`, `realms`, the KDC `replayCache`, `digestNonces` /
+`hobaChallenges` / `hobaSeen`, `principals`, the SPIFFE registry, and the tokens
+this service mints — minted on one worker and introspected from another. Split
+N ways those fail SILENTLY: replay detection that stops detecting, a config
+change that lands on one worker of four, an introspection 404 for a token that
+exists. Session affinity narrows that window; it does not close it. So nothing
+is split, and **two workers can never disagree about anything because neither
+remembers anything.**
+
+Five things are worth knowing before touching any of it.
+
+1. **NOTHING IS FORKED UNTIL THE FIRST POST-QUANTUM JOB.** A process that never
+   signs one never pays for a pool, which is what keeps the parent project's
+   in-process Kerberos jobs, this repository's own `npm test` and
+   `node env/generate_defaults.js` free of children they would never use and
+   would then have to wait for. It also makes `workers.count` genuinely runtime:
+   the pool is reconciled with the setting on the NEXT job, so raising it forks
+   the difference and setting it to 0 drains the pool and computes here.
+
+2. **`workers.count = 0` IS A SUPPORTED CONFIGURATION AND PRODUCES THE SAME
+   BYTES.** The pool runs the SAME job table in this process — `worker.js`
+   exports it, and the child wiring below it is guarded on
+   `require.main === module` — so "a pooled signature and an unpooled one agree"
+   is true by construction rather than by a test that happens to pass. Nine of
+   the eleven algorithms sign deterministically and `tests/worker_pool.js`
+   asserts byte equality for those; the three composite ECDSA ones cannot be
+   equal (node's ECDSA is randomized, and it must be) and are held to
+   cross-verification instead.
+
+3. **REQUIRING `common/worker_pool.js` IS WHAT ARMS `common/pq_jose.js`.** The
+   pool requires `worker.js`, which requires `pq_jose.js`, so pq_jose.js cannot
+   require the pool back without closing a cycle (rule 2) — the reference is
+   handed DOWN, from the foot of worker_pool.js. That also means **a worker
+   process is never armed**, because a child requires worker.js and worker.js
+   does not require the pool: `signAsync()` inside a worker computes in the
+   worker, which is what a worker is for and what stops a child forking a pool
+   of its own. `common/crypto.js` filled that slot for one afternoon, and a
+   process that required pq_jose.js WITHOUT crypto.js then computed everything
+   in itself while reporting no pool and no error.
+
+4. **FOUR CALL PATHS ARE ASYNCHRONOUS BECAUSE OF THIS AND NO OTHERS.** They are
+   the four a CLIENT can point at a post-quantum algorithm: the ID Token
+   (`id_token_signed_response_alg`), the signed UserInfo response
+   (`userinfo_signed_response_alg`), a `private_key_jwt` client assertion, and
+   an OID4VCI proof of possession — plus the JWKS, which is where a realm's
+   eleven post-quantum keys are GENERATED. Everything else still signs and
+   verifies synchronously on purpose: an RS256 signature is microseconds, and an
+   IPC round trip to save that would be a cost with no saving. The token
+   endpoint and `issueAuthorizationResponse()` became `async` as a consequence,
+   and the token endpoint is now registered through **a wrapper that catches** —
+   express 4 does not look at what a handler returns, so an `async` handler's
+   throw is an unhandled rejection and a request that hangs where it used to be
+   a 500.
+
+5. **A REALM MAY NOT CARRY `workers.count`.** It is the first setting marked
+   `perProcess`, which is a SECOND rule beside the `realms.*` prefix rather than
+   the same one spelt twice: a pool belongs to the OS process, and one realm
+   resizing it would resize every other realm's too. Both ends go through
+   `config.isPerProcess()` — the reading end in `config.js`'s `realmFor()` and
+   the writing end in `realms.js`'s `checkRealmOverride()` — because the two
+   ends of the `realms.*` rule were written separately and disagreed within the
+   hour.
+
+**A REALM'S ELEVEN KEYS ARE MADE WHEN THE REALM IS**, and that is the pool's
+second consequence rather than a sixth thing to know about it. One of the
+eleven is expensive out of all proportion: an SLH-DSA-SHAKE-128s KEY GENERATION
+is about 5.1 of the 5.8 seconds the whole set takes, and it is one indivisible
+job that no pool size divides. That put a realm's first JWKS fetch a little
+over five seconds — and `federation.outboundTimeoutMs` is FIVE, deliberately,
+because a browser is waiting on that request.
+
+It never failed, and why it never failed is the part worth keeping: while the
+generation was SYNCHRONOUS it blocked this process's event loop, so the timer
+enforcing that budget could not fire until the keys were already made. **The
+response won a race the timeout was never allowed to run in.** The moment the
+computation moved to a worker and the loop stayed free, the timer fired
+correctly at five seconds and aborted a fetch three tenths of a second from
+finishing — one federated sign-in in the parent project's suite, reporting
+"the JWKS could not be fetched", which is a sentence about a service that was
+working perfectly.
+
+So `helpers.js` warms a realm's post-quantum keys on `realms.onChange`'s
+`create`, through `stsKeysFor.of(id)` because a watcher has no ambient realm.
+That was not affordable before — eager generation meant 5.8 seconds of a
+stopped service per realm, which is exactly why they were lazy — and it is the
+point rather than a workaround: **the pool does not merely move the cost off
+the request that pays it, it makes paying it EARLY free.** Measured: a realm
+created through `/admin-api/realms/create` answers its first JWKS in 8ms.
+
+`common/CLAUDE.md` has the module-level argument; `tests/worker_pool.js` has the
+four contracts and the measurement that shows the loop is free.
+
+
+---
 
 ## The require order in `server.js` IS the route order
 

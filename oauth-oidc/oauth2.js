@@ -71,7 +71,7 @@ const stsCrypto = require('../common/crypto');
 const app = require('../common/app');
 const { log, logArtifact, STS, baseUrlOf, b64u, jsonFromB64u, nowSec, randomId,
         xmlEscape, parseBody, bodyValues, oauthError, signJwt, signJwtAs,
-        allSigningKeys, userFor,
+        allSigningKeys, allSigningKeysAsync, signJwtAsAsync, userFor,
         hasScope } = require('../common/helpers');
 const dpop = require('./dpop');
 // RFC 8705 — certificate-bound access tokens, the other mechanism RFC 9700
@@ -822,8 +822,29 @@ app.get('/*/.well-known/openid-configuration', function (req, res) {
 
 // The JWKS the metadata advertises, so jwks_uri actually resolves: the STS
 // signing key as a single RS256 JWK.
+//
+// ASYNCHRONOUS SINCE THE WORKER POOL EXISTED, and this endpoint is the reason
+// the pool reaches key GENERATION at all. The eleven post-quantum keys are made
+// on first use and this is the call that brings them into being — about 1.9
+// seconds, nearly all of it one SLH-DSA-SHAKE keygen — so until they were made
+// in child processes, the first JWKS fetch on a realm stopped this whole
+// service for two seconds. It is the one request here that was slow BY DESIGN
+// and stopped everything else as a side effect.
 function jwksEndpoint(req, res) {
   log.debug("Entering the JWKS endpoint.");
+  allSigningKeysAsync().then(function (signingKeys) {
+    sendJwks(req, res, signingKeys);
+  }).catch(function (e) {
+    log.error('could not publish the JWKS: ' + e.message);
+    res.status(500).type('application/json')
+      .send(JSON.stringify({ error: e.message }));
+    log.debug("Leaving the JWKS endpoint. The keys could not be made.");
+  });
+  log.debug("Leaving the JWKS endpoint. Answering.");
+}
+
+function sendJwks(req, res, signingKeys) {
+  log.debug("Entering sendJwks().");
   try {
     const pub = forge.pki.certificateFromPem(STS.certPem).publicKey;
     const b64u = function (hex) {
@@ -864,20 +885,20 @@ function jwksEndpoint(req, res) {
         kty: 'RSA', use: 'sig', kid: STS.kid,
         n: b64u(pub.n.toString(16)), e: b64u(pub.e.toString(16)),
         x5c: [STS.certB64]
-      // allSigningKeys() and not STS.extraKeys: the post-quantum keys are made
-      // on FIRST USE (see helpers.js), and this is the call that brings them
-      // into being. That makes the first JWKS fetch on a realm slow — about
-      // two seconds, nearly all of it one SLH-DSA keygen — and every one after
-      // it free. Publishing them lazily one at a time would be worse: a client
-      // that cached the JWKS before a key existed would be missing exactly the
-      // key it later needs.
-      }].concat(allSigningKeys().map(function (k) { return k.publicJwk; }))
+      // The whole key list and not STS.extraKeys: the post-quantum keys are
+      // made on FIRST USE (see helpers.js), and the call above is what brings
+      // them into being. That makes the first JWKS fetch on a realm slow —
+      // about two seconds, nearly all of it one SLH-DSA keygen — and every one
+      // after it free. Publishing them lazily one at a time would be worse: a
+      // client that cached the JWKS before a key existed would be missing
+      // exactly the key it later needs.
+      }].concat(signingKeys.map(function (k) { return k.publicJwk; }))
     }, null, 2));
-    log.debug("Leaving the JWKS endpoint.");
+    log.debug("Leaving sendJwks().");
   } catch (e) {
     log.error('could not publish the JWKS: ' + e.message);
     res.status(500).type('application/json').send(JSON.stringify({ error: e.message }));
-    log.debug("Leaving the JWKS endpoint. It failed.");
+    log.debug("Leaving sendJwks(). It failed.");
   }
 }
 
@@ -1281,7 +1302,17 @@ function halfHash(value) {
   return b64u(h.subarray(0, h.length / 2));
 }
 
-function idToken(base, opts) {
+// ASYNCHRONOUS, AND THIS IS THE SECOND OF THE TWO SIGNING CALL SITES A CLIENT
+// CAN POINT AT A POST-QUANTUM ALGORITHM. `id_token_signed_response_alg` is
+// chosen out of `id_token_signing_alg_values_supported`, which is the WHOLE
+// shared table — all eleven post-quantum and composite entries included — and
+// one of those signatures takes seconds on the thread that owns every listener
+// this service has. See common/worker.js.
+//
+// The RS256 default below does not go near the pool and is not deferred: it is
+// microseconds, and it is the branch that records the token in the console's
+// count.
+async function idToken(base, opts) {
   log.debug("Entering idToken().");
   const iat = nowSec();
   const user = opts.user || userFor(opts.username);
@@ -1402,12 +1433,17 @@ function idToken(base, opts) {
     // The default keeps going through signJwt(), which is what records the
     // token in the admin console's count — see the note on that function.
     ? signJwt(payloadWithCustom, issuanceContext(opts))
-    : signJwtAs(payloadWithCustom, idAlg, registered.client_secret);
+    // `session` is the pool's routing hint — this person's `sub`, so that one
+    // session's signatures queue behind each other rather than across the pool.
+    : await signJwtAsAsync(payloadWithCustom, idAlg, registered.client_secret,
+                           { session: opts.user && opts.user.sub });
   log.debug("Leaving idToken(). alg=" + idAlg);
   return token;
 }
 
-function tokenSet(base, opts) {
+// ASYNCHRONOUS BECAUSE idToken() IS, and for no other reason: everything else
+// it mints is RS256 and stays in this process.
+async function tokenSet(base, opts) {
   log.debug("Entering tokenSet(). scope=" + (opts.scope || '(none)'));
   // A SCOPE NAMING ANOTHER APPLICATION BECOMES THE AUDIENCE — see
   // audienceScopes(). Here rather than inside accessToken(), because the
@@ -1498,7 +1534,8 @@ function tokenSet(base, opts) {
     // its audience is the CLIENT, so neither of the two things above applies to
     // it. Passing the derived audience here would readdress it to the resource
     // server and every relying party would refuse its own ID Token.
-    body.id_token = idToken(base, Object.assign({}, opts, { access_token: access }));
+    body.id_token = await idToken(base,
+      Object.assign({}, opts, { access_token: access }));
   }
   log.debug("Leaving tokenSet(). Issued: " + Object.keys(body).join(', '));
   return body;
@@ -2251,7 +2288,11 @@ function withOwnResource(base, audiences, scope) {
   return audiences.concat([own]);
 }
 
-function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
+// ASYNCHRONOUS BECAUSE idToken() IS — the implicit and hybrid flows mint one
+// here rather than at the token endpoint, and a client may have registered a
+// post-quantum `id_token_signed_response_alg` for either.
+async function issueAuthorizationResponse(req, res, query, user, authTime,
+                                          authInfo) {
   log.debug("Entering issueAuthorizationResponse().");
   // Everything minted below is this authorization server's, so the base it is
   // built from is this authorization server's.
@@ -2459,7 +2500,7 @@ function issueAuthorizationResponse(req, res, query, user, authTime, authInfo) {
     out.scope = named.scope;
   }
   if (types.indexOf('id_token') >= 0) {
-    out.id_token = idToken(base, {
+    out.id_token = await idToken(base, {
       user: user, client_id: String(query.client_id), nonce: query.nonce, auth_time: authTime,
       amr: amr, acr: acr, session_id: sessionId, grant: flow,
       access_token: out.access_token, code: out.code,
@@ -2894,7 +2935,19 @@ function authorizeEndpoint(req, res) {
   const forcePrompt = String(q.prompt || '').split(/\s+/).indexOf('login') >= 0;
   if (session && !forcePrompt) {
     log.debug("Leaving the authorization endpoint. The session stands, so the response goes out now.");
-    return issueAuthorizationResponse(req, res, q, session.user, session.authTime, session);
+    // A CATCH RATHER THAN AN `async` HANDLER. That function became
+    // asynchronous when the ID Token's signature moved to the worker pool, and
+    // its return value was never used — but a promise nobody catches is a
+    // request that hangs where a throw used to be a 500, so the rejection is
+    // turned back into an answer here. Everything else in this handler still
+    // throws synchronously, which express still catches.
+    return issueAuthorizationResponse(req, res, q, session.user,
+                                      session.authTime, session)
+      .catch(function (e) {
+        log.error('the authorization response could not be issued: ' +
+                  e.message);
+        return fail('server_error', e.message);
+      });
   }
   if (String(q.prompt || '').split(/\s+/).indexOf('none') >= 0) {
     // OIDC: prompt=none must not show any UI.
@@ -3442,7 +3495,15 @@ function recipientEncryptionKey(registered, alg) {
   return candidates[0];
 }
 
-function signUserinfo(body, alg, registered, base, claims) {
+// ASYNCHRONOUS, AND THIS IS ONE OF THE TWO CALL SITES THE WORKER POOL WAS
+// BUILT FOR. `userinfo_signed_response_alg` is a CLIENT'S choice out of
+// `userinfo_signing_alg_values_supported`, which advertises all eleven
+// post-quantum and composite algorithms — and an SLH-DSA-SHAKE-128s signature
+// took 14.6 and 15.4 seconds on 2026-08-29, during which this service answered
+// nobody at all. See common/worker.js. Every other algorithm resolves without
+// leaving this process; signJwtAsAsync() decides which is which, not this
+// endpoint.
+async function signUserinfo(body, alg, registered, base, claims) {
   log.debug("Entering signUserinfo(). alg=" + alg);
   // `iss` and `aud` are section 5.3.2's requirement and are added HERE rather
   // than by the caller, so that a response cannot be signed without them.
@@ -3451,13 +3512,22 @@ function signUserinfo(body, alg, registered, base, claims) {
   // WHICH KEY signs which algorithm is helpers.js's answer and not this
   // endpoint's — see signJwtAs(). It was written out here first and the ID
   // Token endpoint would have copied it.
+  //
+  // `session` is the pool's routing hint: this token's own `sub`, so that one
+  // person's signatures queue behind each other rather than across the pool.
+  const signed = await signJwtAsAsync(payload, alg, registered.client_secret,
+                                      { session: claims.sub });
   log.debug("Leaving signUserinfo().");
-  return signJwtAs(payload, alg, registered.client_secret);
+  return signed;
 }
 
 // Returns { contentType, body } or throws with a sentence fit to hand back as
 // an error_description.
-function protectUserinfo(body, registered, base, claims) {
+// ASYNCHRONOUS BECAUSE signUserinfo() IS. Everything it refuses, it refuses
+// before signing, so a client that registered an algorithm this service does
+// not have still gets that sentence back and not a rejected promise from
+// somewhere deeper.
+async function protectUserinfo(body, registered, base, claims) {
   log.debug("Entering protectUserinfo().");
   const signAlg = String(registered.userinfo_signed_response_alg || 'none');
   const encAlg = registered.userinfo_encrypted_response_alg
@@ -3499,7 +3569,7 @@ function protectUserinfo(body, registered, base, claims) {
 
   const inner = signAlg === 'none'
     ? JSON.stringify(body, null, 2)
-    : signUserinfo(body, signAlg, registered, base, claims);
+    : await signUserinfo(body, signAlg, registered, base, claims);
 
   if (!encAlg) {
     log.debug("Leaving protectUserinfo(). Signed only.");
@@ -3676,24 +3746,30 @@ function userinfoResponse(req, res) {
   // register asking for a signed or encrypted response and this endpoint starts
   // producing one for that client. See protectUserinfo() above.
   const registered = applications.registrationOf(claims.client_id) || {};
-  let protectedResponse;
-  try {
-    protectedResponse = protectUserinfo(body, registered, base, claims);
-  } catch (e) {
-    // Everything protectUserinfo() throws is a sentence about what this client
-    // registered, so it goes back as the error_description rather than being
-    // collapsed into "server_error" with the reason in a log the client cannot
-    // read. It is a 500 because the registration was accepted and cannot now be
-    // honoured, which is this service's fault and not this request's.
+  // A PROMISE CHAIN RATHER THAN AN `async` HANDLER, deliberately. Everything
+  // above this line throws synchronously on a defect and express catches a
+  // synchronous throw out of a handler; an `async function` turns every one of
+  // those into a rejected promise that express 4 does not see at all, which
+  // would swap a 500 with a stack trace in the log for a request that hangs.
+  // So the await is confined to the one expression that needs it.
+  protectUserinfo(body, registered, base, claims).then(function (protectedOut) {
+    res.status(200).type(protectedOut.contentType)
+       .set('Cache-Control', 'no-store').send(protectedOut.body);
+    log.debug("Leaving userinfoResponse(). " + Object.keys(body).length +
+              " claim(s) for " + body.sub + " as " +
+              protectedOut.contentType + ".");
+  }).catch(function (e) {
+    // Everything protectUserinfo() rejects with is a sentence about what this
+    // client registered, so it goes back as the error_description rather than
+    // being collapsed into "server_error" with the reason in a log the client
+    // cannot read. It is a 500 because the registration was accepted and cannot
+    // now be honoured, which is this service's fault and not this request's.
     log.error('userinfoResponse(): the registered response protection could not be ' +
               'applied: ' + e.message);
     log.debug("Leaving userinfoResponse(). The registered protection could not be applied.");
-    return oauthError(res, 500, 'server_error', e.message);
-  }
-  res.status(200).type(protectedResponse.contentType)
-     .set('Cache-Control', 'no-store').send(protectedResponse.body);
-  log.debug("Leaving userinfoResponse(). " + Object.keys(body).length +
-            " claim(s) for " + body.sub + " as " + protectedResponse.contentType + ".");
+    oauthError(res, 500, 'server_error', e.message);
+  });
+  log.debug("Leaving userinfoResponse(). Answering.");
 }
 
 app.get('/oauth2/userinfo', userinfoResponse);
@@ -3922,7 +3998,18 @@ function replayOrRefuseRedemption(res, code, fingerprint, respond) {
   return respond(done.response);
 }
 
-function tokenEndpoint(req, res) {
+// ASYNCHRONOUS, AND THE TWO REASONS ARE THE TWO SLOW THINGS A CLIENT CAN ASK
+// THIS ENDPOINT FOR: an ID Token signed with a post-quantum algorithm it
+// registered, and a `private_key_jwt` client assertion signed with one. Both
+// take SECONDS of pure computation, and until they were moved to the worker
+// pool this service answered nothing at all — not another caller, not the KDC
+// on port 88 — for the length of each. See common/worker.js.
+//
+// It is registered through a wrapper that catches, at the foot of this section:
+// an `async` handler's throw is a rejected promise, which express 4 does not
+// see, so without one a defect here would be a request that hangs where it used
+// to be a 500.
+async function tokenEndpoint(req, res) {
   log.debug("Entering the token endpoint.");
   const base = asBaseOf(req);
   const body = parseBody(req);
@@ -4010,7 +4097,7 @@ function tokenEndpoint(req, res) {
   // was about to ask for. 401 rather than 400: invalid_client is the one OAuth
   // error RFC 6749 section 5.2 gives that status, and a client_secret_basic
   // caller needs the WWW-Authenticate header to know what to retry with.
-  const clientAuth = bcp.checkClientAuthentication({
+  const clientAuth = await bcp.checkClientAuthentication({
     clientId: String(client.client_id || ''),
     clientSecret: client.client_secret,
     assertion: client.assertion,
@@ -4267,7 +4354,7 @@ function tokenEndpoint(req, res) {
         'additionally for: ' + extra.join(', ') + '.');
     }
     const forResources = narrowed.length ? narrowed : granted;
-    const issued = issue({
+    const issued = await issue({
       jkt: dpopJkt,
       // One value where there is one, an array where the client asked for the
       // "small set" section 2.3 allows. `aud` takes either, and a single-element
@@ -4370,7 +4457,7 @@ function tokenEndpoint(req, res) {
         notOffered.map(function (d) { return '"' + d.credential_configuration_id + '"'; }).join(', ') +
         ' cannot be authorized by it.');
     }
-    const issued = issue({
+    const issued = await issue({
       jkt: dpopJkt,
       user: record.user, client_id: client.client_id, scope: VCI_SCOPE, withRefresh: false,
       // RFC 8707 on an OpenID4VCI Token Request, which OID4VCI section 6.1
@@ -4481,7 +4568,7 @@ function tokenEndpoint(req, res) {
     const refreshResources = requestedResources.length
       ? requestedResources : grantedResources;
 
-    const refreshed = issue({
+    const refreshed = await issue({
       // The presented token's jti, so the one it mints belongs to the same
       // FAMILY. Only this grant sets it; a root refresh token has none.
       parent_refresh_jti: claims.jti,
@@ -4581,7 +4668,7 @@ function tokenEndpoint(req, res) {
     const clientSubject = bcp.enabled()
       ? 'urn:sts-mock:client:' + (client.client_id || 'unknown-client')
       : (client.client_id || 'unknown-client');
-    return respond(issue({
+    return respond(await issue({
       jkt: dpopJkt,
       sub: clientSubject, username: client.client_id,
       client_id: client.client_id, scope: String(body.scope || ''), withRefresh: false,
@@ -4618,7 +4705,7 @@ function tokenEndpoint(req, res) {
       note: 'No password is checked here either, except the reserved string "invalid". ' +
             'A password grant creates no browser session.'
     });
-    return respond(issue({
+    return respond(await issue({
       jkt: dpopJkt,
       user: userFor(username), client_id: client.client_id, scope: String(body.scope || 'openid'),
       // RFC 8707 again. This grant DOES issue a refresh token, so the list goes
@@ -4711,7 +4798,7 @@ function tokenEndpoint(req, res) {
       requestedResources.filter(function (one) {
         return askedAudiences.indexOf(one) < 0;
       }));
-    const exchanged = issue({
+    const exchanged = await issue({
       jkt: dpopJkt,
       sub: subject.sub || 'urn:sts-mock:exchanged',
       user: Object.assign(userFor(subject.username), subject.sub ? { sub: subject.sub } : {}),
@@ -4882,7 +4969,29 @@ function tokenEndpoint(req, res) {
   return oauthError(res, 400, 'unsupported_grant_type', 'grant_type "' + grant + '" is not supported.');
 }
 
-app.post('/oauth2/token', tokenEndpoint);
+// ---------------------------------------------------------------------------
+// THE WRAPPER, AND IT IS NOT CEREMONY.
+//
+// `tokenEndpoint` is an `async function` (see its header). Express 4 does not
+// look at what a handler returns, so a promise that rejects — from a defect
+// anywhere in those 900 lines, from a worker process that died mid-signature —
+// would be an unhandled rejection and a request that never gets an answer,
+// where the same throw used to be a 500 with the reason in it. This puts that
+// back, and puts it back for the asynchronous half as well.
+//
+// `oauthError` and not `res.status(500).send()`: a token endpoint's failures
+// are OAuth errors all the way down, and a client that gets HTML back from this
+// URL has to guess.
+app.post('/oauth2/token', function (req, res) {
+  log.debug("Entering the token endpoint wrapper.");
+  tokenEndpoint(req, res).catch(function (e) {
+    log.error('the token endpoint failed: ' + (e && e.stack ? e.stack : e));
+    if (!res.headersSent) {
+      oauthError(res, 500, 'server_error', e.message);
+    }
+  });
+  log.debug("Leaving the token endpoint wrapper.");
+});
 
 // ---------------------------------------------------------------------------
 // THE SAME ENDPOINTS, UNDER EVERY AUTHORIZATION SERVER'S OWN NAME.

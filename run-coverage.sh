@@ -278,6 +278,33 @@ ARGS=()
 [ -n "${PARENT}" ] && ARGS+=("--parent=${PARENT}")
 [ "${QUIET}" = "1" ] && ARGS+=("--quiet")
 
+# ---------------------------------------------------------------------------
+# A LONGER PER-JOB WATCHDOG, BECAUSE INSTRUMENTATION IS WHY THIS RUN IS SLOW.
+#
+# run-report.js defaults to 300000ms, and that is the right number for the
+# PLAIN suite: it is far above the slowest real job and it catches one that has
+# genuinely hung. This run is the same jobs under V8 coverage collection on
+# whatever CI gives us — two cores on a GitHub runner — where every one of them
+# takes several times longer for a reason that is not a hang.
+#
+# `sts_userinfo_protected` is the job that made this necessary and it is worth
+# naming. It asks the service for a signed UserInfo response for EVERY
+# algorithm the metadata advertises, and two of those are SLH-DSA: about two
+# seconds for the SHA-2 parameter set and twelve for the SHAKE one, of
+# straight-line CPU, per signature. The worker pool moved that cost off the
+# service's event loop — which is what stopped it failing OTHER jobs — but it
+# did not make it smaller, and it cannot: that is the algorithm. Instrumented,
+# on two cores, the job went past 300000ms and was killed, and a job that is
+# killed asserts nothing.
+#
+# The caller's own --timeout wins, so a run that wants the short watchdog back
+# can still ask for it.
+# ---------------------------------------------------------------------------
+case " ${ARGS[*]-} ${STS_COVERAGE_EXTRA_ARGS-} " in
+  *--timeout=*) ;;
+  *) ARGS+=("--timeout=${STS_COVERAGE_JOB_TIMEOUT_MS:-900000}") ;;
+esac
+
 # The check is against "off" and not against an empty string, because the
 # default is "on" now: an unset PROTOCOL is no longer how somebody says they
 # want half a report.

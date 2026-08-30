@@ -167,6 +167,75 @@ is there for `tests/crypto_module.js`, which is the only independent reading of
 XMLDSIG in this repository — the thing that makes "our signature verifies"
 mean something. Removing it saves a package and costs that.
 
+## `worker.js` and `worker_pool.js`: the computation that must not run here
+
+Node runs this service's six listener families on ONE THREAD, so a synchronous
+computation does not slow it down, it STOPS it. Post-quantum signing is that
+computation — stalls of 14.6, 15.4, 17.8 and 23.3 seconds were measured on
+2026-08-29 — and the root `CLAUDE.md` has the argument, the table and the five
+things to know. This is the module-level half.
+
+**`worker.js` is the child process AND the job table**, and it is one file for
+that reason: the table it exports is what the pool runs in THIS process when
+`workers.count` is 0, so "a pooled signature and an unpooled one are the same
+bytes" is true by construction rather than by a test that happens to pass. The
+wiring that makes a process a worker is guarded on `require.main === module`, so
+requiring this file to reach the table does not turn the requiring process into
+a worker. Three jobs: `pq.sign`, `pq.verify`, `pq.generate`. Each is
+**synchronous on purpose** — blocking is what a worker is for, and a table of
+promises would invite a second job onto a process that is already computing,
+which does not make it finish sooner and makes the pool's idea of "least loaded"
+a fiction.
+
+**`worker_pool.js` is fork, route, restart and drain**, and four of its
+decisions are worth knowing before changing any of them.
+
+* **The pool is lazy and re-read per job.** Nothing is forked until the first
+  post-quantum job, which is what keeps every in-process loader of this tree —
+  the parent project's Kerberos jobs, `npm test`, `env/generate_defaults.js` —
+  free of children they would never use. Re-reading `workers.count` on every
+  call is what makes it genuinely runtime rather than runtime-in-the-table.
+
+* **A worker is REFERENCED only while it is owed an answer, and BOTH halves have
+  to be** — the child process handle and the IPC channel. This is the one that
+  cost an afternoon: with the process handle left unreferenced, node drained its
+  event loop the instant a worker was SIGKILLed, so the `exit` that fails that
+  worker's jobs was never delivered and the promise never settled. It looked
+  like a hang, and it was **LOG-LEVEL DEPENDENT** — at `debug`, bunyan's writes
+  to a piped stdout were themselves enough to hold the loop open, so the same
+  code passed at one level and hung at another.
+
+* **A worker that dies FAILS its jobs, with a sentence.** A promise nobody
+  settles is a request that hangs, which is the symptom this whole module
+  exists to remove. The replacement is forked by the next job rather than
+  immediately, and after `QUICK_EXIT_LIMIT` short-lived exits in a row the pool
+  **gives up on children and computes here** — a child that cannot start is a
+  broken `CONFIG_FILE` or a machine out of memory, and forking it forever would
+  turn a service that works slowly into one that does nothing but fork. One
+  finished job resets the count.
+
+* **Affinity is a preference and never a correctness requirement.** A worker
+  remembers nothing, so forgetting a session costs a re-route and nothing else —
+  which is why the map is capped and drops its oldest entry rather than growing
+  for as long as a test suite mints sessions.
+
+**Requiring `worker_pool.js` is what arms `pq_jose.js`.** The reference is
+handed down from the foot of that file, because the pool requires `worker.js`
+which requires `pq_jose.js` and a require back up would close a cycle (rule 2).
+The side effect is the point, and it is the same shape as rule 1 — requiring a
+protocol module is what registers its routes. **A worker is never armed**,
+because a child requires `worker.js` and `worker.js` does not require the pool.
+
+`common/crypto.js` is what requires it, because that is the module that routes
+an `alg` to `pq_jose.js` in the first place. `crypto.js` gained
+`signJwsAsync()`, `verifyCompactJwsAsync()` and `verifyJwsAsync()` beside their
+synchronous namesakes rather than in place of them: every other caller in this
+service verifies RS256 in microseconds and has nothing to gain from a promise.
+`verifyCompactJws()` was split into `prepareVerification()` / `verifyBytes()` /
+`finishVerification()` so that both entry points run the same reading of the
+token and refuse in the same ORDER — a token whose `alg` is not in the caller's
+list is refused for that and never for its signature, whichever was used.
+
 ## `realms.js`: several logical copies of this service, in one process
 
 A **trust realm** is a whole mock identity service — its own configuration, its

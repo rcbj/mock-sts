@@ -2689,6 +2689,17 @@ function runtimeIntegerSetting(table) {
       if (chosen || setting.editable !== true || setting.overridden) {
         return;
       }
+      // AND IT MUST BE ONE A REALM MAY CARRY. The walk below drives a realm
+      // override with whatever it picks, and two kinds of setting are refused
+      // there by design: the `realms.*` pair, and anything marked `perProcess`
+      // (a pool of child processes belongs to the OS process, not to a realm).
+      // `workers.count` is a runtime integer in the Global group, so it became
+      // the first candidate the day it was added and this walk drove it
+      // straight into that refusal — the failure named the source column
+      // rather than the setting.
+      if (setting.realmSettable === false) {
+        return;
+      }
       if (setting.type !== "int" && setting.type !== "integer" &&
           typeof setting.value !== "number") {
         return;
