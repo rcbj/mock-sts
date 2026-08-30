@@ -1890,3 +1890,21 @@ follows:
 screen for every application whether or not one declares this, so what the
 attribute changes is the DEFAULT ROUTE and nothing about what is then
 accepted — exactly what `appFederationRelationship` changes.
+
+## WHERE THE ONE CRYPTO MODULE IS DESCRIBED TO A READER
+
+`crypto.js` is the one place this service signs, verifies, encrypts and
+decrypts (rule 3r above). Since 2026-08-30 there is a console page that REPORTS
+it — `/admin/crypto-metadata`, built by `admin-ui/crypto_metadata.js` — and the
+one thing worth knowing here is the direction: **that page reads this module's
+tables and this module knows nothing about it.** `JWS_ALGS`, `JWE_ALGS`,
+`JWE_ENCS`, `BLOCK_CIPHERS`, `KEY_TRANSPORTS` and the re-exported `xmldsig`
+tables are already exported, so nothing here changed for it, and nothing here
+should: `crypto.js` is a LEAF and a require back would end that.
+
+The rule it puts on this file is small and worth stating, because it is the one
+that will be broken by accident: **an algorithm this service performs must be in
+a TABLE here rather than in a literal at a call site.** A `switch` in a
+protocol module is invisible to that page, so the page would go on looking
+complete while being wrong — which is the failure `sts_metadata.js` exists to
+prevent for endpoints and this arrangement extends to algorithms.

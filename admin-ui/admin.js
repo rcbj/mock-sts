@@ -1017,7 +1017,30 @@ const SECTIONS = [
                'undescribed, and a description whose path is not registered ' +
                '— which is what a rename produces. A protocol that registers ' +
                'no route at all is its one blind spot, so the KDC\'s raw ' +
-               '88 and the directory\'s 389 and 636 are described by hand.' }
+               '88 and the directory\'s 389 and 636 are described by hand.' },
+      // THE SECOND PAGE IN THIS CONSOLE THIS FILE DOES NOT DRAW, and it sits
+      // beside the first for the reason they are both here: each is a REPORT
+      // about the whole service rather than a control over one part of it, and
+      // a reader who wants "what does this thing do" wants them together.
+      // `admin-ui/crypto_metadata.js` builds it, calls `respond()` for this
+      // shell, and fills setCryptoReporter() below so that `/admin-api/crypto`
+      // can mirror it. Nothing about the nav knows any of that — a page here
+      // is a `path` and a `label` whoever builds it.
+      { path: '/admin/crypto-metadata', label: 'Cryptography',
+        blurb: 'What this service does when it SIGNS, VERIFIES, ENCRYPTS or ' +
+               'DECRYPTS something — for every identity service it ' +
+               'advertises, with the algorithms each really uses and the ' +
+               'envelope each is wrapped in (JOSE, XMLDSIG and XML ' +
+               'Encryption, WS-Security, COSE, X.509, Kerberos). Every ' +
+               'algorithm table is READ FROM THE MODULE THAT PERFORMS THE ' +
+               'ALGORITHM, the way Service metadata reads its endpoint list ' +
+               'off the live router, so none of it can claim something this ' +
+               'service does not do — and it reports drift against that ' +
+               'page\'s own family list in both directions. It carries a ' +
+               'POST-QUANTUM section whose headline is not the flattering ' +
+               'one: the signatures are partly post-quantum and the key ' +
+               'establishment is entirely classical. It publishes no private ' +
+               'key and no secret.' }
     ] }
 ];
 
@@ -9191,6 +9214,59 @@ function spiffeListeners() {
 // gives one screen up: a module that filled a combined slot with only the
 // readers would silently disable the action with nothing reporting it, so the
 // object is checked whole and refused whole.
+// ---------------------------------------------------------------------------
+// THE SEVENTH SLOT, filled by `./crypto_metadata.js` at its own require time,
+// and rule 3e's test answers yes in both directions at once.
+//
+//   * a require from `mgmt-api/admin_api.js` (19) to that module (20a) would
+//     MOVE ROUTES — its own page, and `tls/tls_server.js`'s three, which it
+//     requires for the server certificate — ahead of the management API's own
+//     routes and of ldap, scim and spiffe.
+//   * a require from THIS file to it would CLOSE A CYCLE: it requires this one
+//     for the shell, exactly as `../sts_metadata.js` does.
+//
+// So `/admin-api/crypto` reaches it the way `/admin-api/logout` reaches the
+// sign-out inventory: through a function this console holds. What is carried is
+// ONE function — the whole report — because the page and the API must not be
+// able to disagree about what this service's cryptography is, which is the
+// parity rule's entire subject.
+//
+// A build where nothing fills it draws no page here and answers the API with a
+// 503 that says which module is missing. That is deliberate rather than a 404:
+// a route that is registered and cannot answer is a different fact from a route
+// that does not exist, and only one of them is a wiring mistake somebody can
+// fix.
+// ---------------------------------------------------------------------------
+let cryptoReporter = null;
+
+function setCryptoReporter(reporter) {
+  log.debug("Entering setCryptoReporter().");
+  if (typeof reporter !== 'function') {
+    log.error('admin: setCryptoReporter() was given ' + typeof reporter +
+              ' rather than a function, and was ignored. GET ' +
+              '/admin-api/crypto will answer 503.');
+    log.debug("Leaving setCryptoReporter(). Refused.");
+    return;
+  }
+  cryptoReporter = reporter;
+  log.debug("Leaving setCryptoReporter(). Installed.");
+}
+
+// The crypto report as JSON, for `admin_api.js`. It calls exactly this, so the
+// API cannot compute an answer the console does not draw — which is what makes
+// "every /admin page has an /admin-api operation" a property of the code.
+function cryptoView(req) {
+  log.debug("Entering cryptoView().");
+  if (!cryptoReporter) {
+    log.debug("Leaving cryptoView(). No reporter.");
+    return null;
+  }
+  const report = cryptoReporter(baseUrlOf(req));
+  log.debug("Leaving cryptoView(). " +
+            ((report.families || []).length) + " identity service(s).");
+  return report;
+}
+
 let logoutReader = null;
 
 function setLogoutReader(reader) {
@@ -21424,6 +21500,13 @@ module.exports = {
   // 3e's test answers yes for the same two reasons at once. See the block above
   // setLogoutReader().
   setLogoutReader: setLogoutReader,
+  // Filled by ./crypto_metadata.js at ITS require time — the seventh, and the
+  // third to pass rule 3e's test both ways round. See the block above
+  // setCryptoReporter().
+  setCryptoReporter: setCryptoReporter,
+  // The crypto report, for admin_api.js. One function, so the page and the API
+  // cannot disagree about what this service's cryptography is.
+  cryptoView: cryptoView,
   usersAction: usersAction,
   // The sign-out page's view and its four actions, for admin_api.js. Rule 7:
   // the API calls exactly these, so an action added to that switch is most of

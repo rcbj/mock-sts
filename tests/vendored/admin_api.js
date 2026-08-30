@@ -1112,6 +1112,142 @@ function healthcheckCalls(metrics) {
   return total;
 }
 
+// ---------------------------------------------------------------------------
+// THE CRYPTO REPORT, CHECKED AGAINST WHAT THIS SERVICE ADVERTISES ELSEWHERE.
+//
+// /admin/crypto-metadata claims that every algorithm list on it is READ FROM
+// THE MODULE THAT PERFORMS THE ALGORITHM rather than written down. That claim
+// is the whole reason the page is worth having, and it is exactly the kind of
+// claim that is true on the day it is made and quietly false a month later —
+// somebody adds a curve to `JWS_ALGS`, the discovery document gains it, and a
+// list typed into a console page does not.
+//
+// So this compares the report against the SERVICE'S OWN DISCOVERY DOCUMENT,
+// which is a different door onto the same tables. It is the only check that
+// can see the two disagree: reading the report on its own says nothing about
+// whether it was derived, because a hand-written list is well-formed too.
+//
+// It also asserts the page's DRIFT REPORT is clean, in both directions. That
+// one is about the FILE rather than the service — a protocol family this mock
+// advertises with no crypto profile, or a profile naming a family that does
+// not exist, which is what a rename produces. The page says so on itself; this
+// is what makes it fail rather than merely be said.
+// ---------------------------------------------------------------------------
+async function theCryptoReportAgreesWithTheServiceItDescribes() {
+  log.debug("Entering theCryptoReportAgreesWithTheServiceItDescribes().");
+  log.info("=== The crypto report ===");
+  const report = await get("/crypto");
+
+  // --- the drift report, both directions --------------------------------
+  assert.ok(report.drift && report.drift.checked === true,
+    "the crypto page checks its family list against /admin/sts-metadata's, " +
+    "and `checked` false means sts_metadata.js never handed that list over — " +
+    "so the page is drawing its own word for what this service advertises. " +
+    "That is a wiring failure (setProtocolFamilies) and not a disagreement; " +
+    "got " + JSON.stringify(report.drift));
+  assert.deepStrictEqual(report.drift.undescribed, [],
+    "every protocol family this mock advertises must have a crypto profile " +
+    "on /admin/crypto-metadata. These have none: " +
+    report.drift.undescribed.join(", ") + ". A family added to " +
+    "sts_metadata.js's PROTOCOLS needs a row in crypto_metadata.js's " +
+    "FAMILIES in the same commit.");
+  assert.deepStrictEqual(report.drift.stale, [],
+    "and every crypto profile must name a family that is advertised. These " +
+    "name one that is not: " + report.drift.stale.join(", ") + " — which is " +
+    "what a rename on one side and not the other produces.");
+  assert.deepStrictEqual(report.drift.envelopes, [],
+    "and every envelope a family cites must have a row in the standards " +
+    "table, or the page renders a dead cross-reference. Missing: " +
+    report.drift.envelopes.join(", "));
+
+  // --- the coverage notes -----------------------------------------------
+  report.standards.forEach(function (row) {
+    assert.ok(/^(full|partial|mock)\b/.test(row.coverage),
+      "every coverage note must start `full`, `partial` or `mock` and say " +
+      "what is missing — the rule /admin/sts-metadata's specification list " +
+      "follows, and worth more on a page about cryptography, which somebody " +
+      "may be using to learn these specifications. `" + row.key +
+      "` starts: " + JSON.stringify(String(row.coverage).slice(0, 60)));
+  });
+
+  // --- against the discovery document -----------------------------------
+  const oidc = await common.httpJson(base + "/.well-known/openid-configuration");
+  assert.ok(oidc.ok, "the OpenID Provider metadata should answer 200; got " +
+            oidc.status);
+  const oauthFamily = report.families.filter(function (row) {
+    return row.name === "OAuth2 / OIDC";
+  })[0];
+  assert.ok(oauthFamily, "the report should carry the OAuth2 / OIDC family.");
+  const listNamed = function (what) {
+    const group = oauthFamily.algorithms.filter(function (row) {
+      return row.what === what;
+    })[0];
+    assert.ok(group, "the OAuth2 / OIDC family should carry a `" + what +
+              "` algorithm list; it carries " +
+              JSON.stringify(oauthFamily.algorithms.map(function (row) {
+                return row.what;
+              })));
+    return group.values;
+  };
+  assert.deepStrictEqual(listNamed("ID Token, when a client registers one"),
+    oidc.body.id_token_signing_alg_values_supported,
+    "the crypto page's ID Token signing list must BE the one the discovery " +
+    "document advertises, because both are meant to be the same table read " +
+    "twice. A difference means one of them is a copy.");
+  assert.deepStrictEqual(listNamed("UserInfo response"),
+    oidc.body.userinfo_signing_alg_values_supported,
+    "and so must the UserInfo signing list. It is deliberately NOT the same " +
+    "list as the ID Token's — it adds the HMAC family and `none` — which is " +
+    "why it is checked separately rather than assumed to follow.");
+  assert.deepStrictEqual(listNamed("JWE key management (out)"),
+    oidc.body.userinfo_encryption_alg_values_supported,
+    "and so must the JWE key management list.");
+  assert.deepStrictEqual(listNamed("JWE content encryption"),
+    oidc.body.userinfo_encryption_enc_values_supported,
+    "and the content encryption list.");
+  const as = await common.httpJson(base +
+      "/.well-known/oauth-authorization-server");
+  assert.ok(as.ok, "the RFC 8414 metadata should answer 200; got " + as.status);
+  assert.deepStrictEqual(listNamed("DPoP proof"),
+    as.body.dpop_signing_alg_values_supported,
+    "and the DPoP list must be the one RFC 8414 advertises. It is a FILTER " +
+    "over the shared JWS table — asymmetric, and not post-quantum, because " +
+    "RFC 7638 registers no thumbprint for `AKP` — so a report that listed " +
+    "the whole table here would be describing a proof this service refuses.");
+
+  // --- the post-quantum split -------------------------------------------
+  const pq = report.postQuantum;
+  assert.ok(pq && pq.algorithms.mlDsa.length && pq.algorithms.slhDsa.length &&
+            pq.algorithms.composite.length,
+    "the post-quantum section should name the ML-DSA, SLH-DSA and composite " +
+    "algorithms this service holds; got " + JSON.stringify(pq &&
+    pq.algorithms));
+  pq.algorithms.mlDsa.concat(pq.algorithms.slhDsa)
+    .concat(pq.algorithms.composite.map(function (row) { return row.alg; }))
+    .forEach(function (alg) {
+      assert.ok(oidc.body.id_token_signing_alg_values_supported
+                    .indexOf(alg) >= 0,
+        "every post-quantum algorithm the report names must be one this " +
+        "service will really sign an ID Token with — a post-quantum section " +
+        "listing an algorithm no endpoint accepts is the one thing on that " +
+        "page that would be worse than not having it. `" + alg + "` is not " +
+        "in id_token_signing_alg_values_supported.");
+    });
+  assert.strictEqual(pq.keyEstablishment.state, "classical",
+    "and the key establishment half must still report itself as classical. " +
+    "There is no ML-KEM in this process — not in JWE, not in XML Encryption " +
+    "and not on any TLS socket — and the page's whole argument is that the " +
+    "two halves are in different positions. If this ever changes, it is the " +
+    "sentence to change first.");
+
+  log.info("[crypto] OK — " + report.families.length +
+           " identity services profiled with no drift, " +
+           report.standards.length +
+           " standards each with a coverage note, and 5 algorithm list(s) " +
+           "identical to what this service advertises in its own metadata.");
+  log.debug("Leaving theCryptoReportAgreesWithTheServiceItDescribes().");
+}
+
 async function test() {
   log.debug("Entering test().");
   log.info("Running the management API checks against " + api);
@@ -1136,6 +1272,7 @@ async function test() {
   await theBulkRevocationsWorkAndAreUndone();
   await theExplorerIsServedUnderAScopedPolicy(session);
   await successfulHealthchecksAreNotInTheAuditLog();
+  await theCryptoReportAgreesWithTheServiceItDescribes();
   log.info("Test completed successfully.");
   log.debug("Leaving test().");
 }

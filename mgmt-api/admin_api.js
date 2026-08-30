@@ -759,6 +759,63 @@ const ROUTES = [
       log.debug("Leaving the OpenAPI document endpoint.");
     } },
 
+  // ---------------------------------------------------------------------
+  // THE CRYPTO REPORT. It calls `admin.cryptoView()` and computes nothing of
+  // its own, which is rule 7 read strictly: the page and this operation must
+  // not be able to disagree about what this service's cryptography is, and the
+  // way to make that impossible is for there to be one function.
+  //
+  // It answers 503 rather than 404 when the reporter was never installed —
+  // which happens only if `admin-ui/crypto_metadata.js` was not required — and
+  // the two are different facts: a route that exists and cannot answer is a
+  // wiring mistake somebody can fix, and a route that does not exist is not.
+  // The message names the module rather than saying "unavailable".
+  // ---------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/crypto', tag: 'Service',
+    operationId: 'getCryptoMetadata',
+    summary: 'Every algorithm this service signs, verifies and encrypts with',
+    description: 'What this service does with cryptography, for every ' +
+                 'identity service it advertises: which digest, which ' +
+                 'signature algorithm, which cipher, which key, and which ' +
+                 'higher-level envelope each is wrapped in — JOSE, XMLDSIG ' +
+                 'and XML Encryption, WS-Security, COSE, X.509, Kerberos.\n\n' +
+                 'EVERY ALGORITHM LIST IN THE REPLY IS READ FROM THE MODULE ' +
+                 'THAT PERFORMS THE ALGORITHM, the way GET ' +
+                 '/admin/sts-metadata reads its endpoint list off the live ' +
+                 'express router — so it cannot claim something this service ' +
+                 'does not do, and it reports drift against that page\'s own ' +
+                 'family list in both directions.\n\nThe `postQuantum` member ' +
+                 'is the one to read before quoting this reply: the ' +
+                 'signatures are partly post-quantum and the key ' +
+                 'establishment is entirely classical, and those are ' +
+                 'reported separately because a signature is checked when it ' +
+                 'is presented while captured ciphertext can be kept and ' +
+                 'opened later.\n\nNOTHING HERE IS A SECRET: key types, key ' +
+                 'identifiers, curve names, certificate fingerprints and ' +
+                 'validity dates only, all of them already readable from ' +
+                 '/oauth2/jwks, /tls/server-certificate and the SPIFFE bundle ' +
+                 'endpoint. Nothing changes anything.',
+    mirrors: 'GET /admin/crypto-metadata',
+    responseDescription: 'The whole report.',
+    responseSchema: { $ref: '#/components/schemas/CryptoMetadata' },
+    handler: function (req, res) {
+      log.debug("Entering the management API crypto metadata endpoint.");
+      const report = admin.cryptoView(req);
+      if (!report) {
+        sendJson(res, 503, { ok: false, errors: [
+          'The crypto report is not installed in this process. ' +
+          'admin-ui/crypto_metadata.js fills it at its own require time, and ' +
+          'server.js requires that module after tls/tls_server. This is a ' +
+          '503 and not a 404 because the route exists — what is missing is ' +
+          'the module behind it.'] });
+        log.debug("Leaving the management API crypto metadata endpoint. " +
+                  "No reporter.");
+        return;
+      }
+      sendJson(res, 200, report);
+      log.debug("Leaving the management API crypto metadata endpoint.");
+    } },
+
   { method: 'GET', path: BASE + '/docs', tag: 'Service',
     operationId: 'getDocs',
     summary: 'The explorer: every operation, with a form that calls it',

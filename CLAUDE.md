@@ -35,7 +35,7 @@ files did not change; the paths did.
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
-| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, **every setting drawn on the page for the protocol it configures** (2026-08-27 — `SETTING_HOMES` is the table, `/admin/config` keeps the rows belonging to no protocol and the index of the rest), and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. |
+| `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, **every setting drawn on the page for the protocol it configures** (2026-08-27 — `SETTING_HOMES` is the table, `/admin/config` keeps the rows belonging to no protocol and the index of the rest), and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. **And since 2026-08-30 the CRYPTO REPORT** (`crypto_metadata.js`, `/admin/crypto-metadata`): what this service does when it signs, verifies, encrypts or decrypts, for every identity service it advertises, with every algorithm table READ FROM THE MODULE THAT PERFORMS THE ALGORITHM — the same argument `sts_metadata.js` makes about the router, one layer down. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
 | `tests/` | **THE ONLY TEST DIRECTORY HERE**, and since 2026-08-28 it holds BOTH halves of this service's coverage. `tests/*.js` is the in-process half — assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. **`tests/vendored/` is the protocol half**: thirteen jobs driven over HTTP against a CONTAINER built from this tree by `docker-compose.yml` (a throwaway in-process copy under `--no-docker`, and under coverage), plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent project's mock-only jobs and are NOT edited here; **FOUR are this repository's own** — the ones that drive this service's `/admin` console and `/admin-api`, marked `local: true` since 2026-08-28, with no copy over there to sync from and the editing rule inverted for them. `tests/vendored/MANIFEST.js` says which is which and where each copy came from, and `--vendor-check` reports drift in the nine. See *Tests* below for what changed and `tests/CLAUDE.md` for the rules that are not optional there. **`tests/tools/` is not tests**: the report generator, the coverage renderer, the compose-stack helpers (`compose.sh`, shared by both launchers) and the throwaway-service launcher `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` drive — in a subdirectory precisely so that `run.js`'s discovery rule needs no exclusion list. **`tests/Dockerfile`, its own `.dockerignore` and `tests/run-tests-in-container.sh` are not tests either**: they are the RUNNER as a container, which `docker-compose-run-tests.yml` brings up beside the service so that a host with docker and nothing else runs all twenty-three jobs — see *Tests* item 5. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
@@ -301,6 +301,25 @@ what each module is for is that directory's `CLAUDE.md`.
    ONE object, validated whole when it is installed, because a partial one
    would leave `/admin/logout` listing what is live and unable to end any of
    it. See `logout/CLAUDE.md` and `admin-ui/CLAUDE.md`.
+
+   **`admin.js`'s SEVENTH SLOT IS `setCryptoReporter()`, filled by
+   `admin-ui/crypto_metadata.js`, and it is the third to pass that test both
+   ways round.** A require from `mgmt-api/admin_api.js` (19) to that module
+   (20a) would MOVE ROUTES — its own page's, and `tls/tls_server.js`'s three,
+   which it requires for the server certificate — ahead of the management
+   API's own and of ldap, scim and spiffe; and a require from `admin.js` to it
+   would CLOSE A CYCLE, because it requires `admin.js` for the shell. It
+   carries ONE function, the whole report, so that the page and
+   `/admin-api/crypto` cannot disagree about what this service's cryptography
+   is.
+
+   **THAT MODULE OFFERS A SLOT OF ITS OWN, `setProtocolFamilies()`, AND
+   `sts_metadata.js` FILLS IT** — the only slot in this service that is not on
+   `admin.js`. Same test, one direction: a `require('./sts_metadata')` from
+   `crypto_metadata.js` would load at 20a the one module whose whole constraint
+   is that it is required LAST. What crosses it is the protocol family list, so
+   that "every identity service this mock advertises" means the same fourteen
+   on both pages and a disagreement is REPORTED rather than reconciled.
 
    **`setUserObserver()` NOW CARRIES THREE KINDS OF EVENT AND IS STILL ONE
    SLOT**, which is the same rule read the other way: `ldap_server.js` is
@@ -596,6 +615,7 @@ require can see at a glance whether they are about to break one.
 | 18 | `admin-ui/admin` | **After `oauth2`** — rule 5. And before `ldap`, `scim` and `spiffe`, which is why it offers five slots rather than requiring them. | `admin-ui/CLAUDE.md` |
 | 19 | `mgmt-api/admin_api` | **After `admin-ui/admin`** — rule 7. It calls that module's action functions and JSON views. | `mgmt-api/CLAUDE.md` |
 | 20 | `tls/tls_server` | **Before `ldap/ldap_server`**, which serves its certificate and key on 636. | `tls/CLAUDE.md` |
+| 20a | `admin-ui/crypto_metadata` | **After `tls/tls_server`, and that is the constraint that decides the line.** It reads an algorithm table out of eleven modules — `common/crypto`, `pq_jose`, the vendored `xmldsig`, `krb5_crypto`, `webauthn`, `oauth2`/`dpop`/`client_auth`/`mtls`, `spiffe_ca`, `scim_auth` and `tls_server` — and requiring one this file has not yet loaded would REGISTER ITS ROUTES HERE (rule 1). Here every one of them is a cache hit. Also after `admin-ui/admin` for the shell and the gate. Fills `admin.setCryptoReporter()`; `sts_metadata.js` fills ITS `setProtocolFamilies()`. | `admin-ui/CLAUDE.md` |
 | 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills five slots at require time. | `ldap/CLAUDE.md` |
 | 22 | `scim/scim` | **After `ldap/ldap_server`** — a plain require, and rule 3e's test is why. | `scim/CLAUDE.md` |
 | 23 | `spiffe/spiffe_server` | **After `ldap/ldap_server` and `tls/tls_server`.** Its registry's store is the directory. | `spiffe/CLAUDE.md` |
@@ -841,6 +861,18 @@ builds the body and `admin.respond()` supplies the shell. Adding a PROTOCOL
 family costs a card in that file's `PROTOCOLS` as well as the entry above —
 the page reports an endpoint group no card claims, so leaving it out fails the
 same test rather than going quietly.
+
+**THERE IS A SECOND METADATA PAGE SINCE 2026-08-30 AND IT IS NOT A SUMMARY OF
+THIS ONE.** `/admin/crypto-metadata` answers the question underneath the
+endpoint list: when this service SIGNS, VERIFIES, ENCRYPTS or DECRYPTS
+something, which digest, which algorithm, which cipher, which key, and which
+envelope. It follows the same design — every algorithm table is read from the
+module that performs the algorithm rather than written down — and it checks its
+family list against THIS page's `PROTOCOLS` in both directions, which is why
+`sts_metadata.js` requires it and hands that list over. Adding a protocol family
+therefore costs a card here, an entry in `ENDPOINTS`, AND a row in
+`crypto_metadata.js`'s `FAMILIES`; `tests/vendored/admin_api.js` fails on the
+third being missing. See `admin-ui/CLAUDE.md`.
 
 Reading the router has one blind spot: **a protocol that registers no route is
 invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are — and

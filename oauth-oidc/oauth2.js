@@ -5213,6 +5213,16 @@ app.get('/tos', function (req, res) {
 
 module.exports = {
   asMetadata: asMetadata,
+  // THE TWO ADVERTISED SIGNING LISTS, for `admin-ui/crypto_metadata.js`.
+  // They are already in the discovery document, so exporting them publishes
+  // nothing new; what it buys is that the crypto page reports the list this
+  // module ENFORCES rather than a copy of it. `ID_TOKEN_SIGNING_ALGS` is the
+  // shared table itself and `USERINFO_SIGNING_ALGS` is not — it adds the HMAC
+  // family, which is signed with the client's own secret, and `none` — and a
+  // page that showed one where it meant the other would be wrong in the
+  // direction nobody checks.
+  ID_TOKEN_SIGNING_ALGS: ID_TOKEN_SIGNING_ALGS,
+  USERINFO_SIGNING_ALGS: USERINFO_SIGNING_ALGS,
   accessToken: accessToken,
   tokenSet: tokenSet,
   // The outstanding authorization codes, for the protocol-independent logout.

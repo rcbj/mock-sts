@@ -323,6 +323,47 @@ async function waitForResponse(url, from) {
         })));
 }
 
+// The first response of a given METHOD since `from`. The sibling of
+// waitForResponse() above, and it exists for the same race read from the other
+// end: that one knows the URL and not the method, and a form submission knows
+// the method and not the URL — a POST to /admin/users may be answered where it
+// was sent, or 303'd somewhere the caller cannot predict.
+//
+// **THIS REPLACED A 60ms SLEEP AND A CI RUN IS WHY.** `settleAfterSubmit()`
+// used to wait for `document.readyState === "complete"` and then pause 60ms
+// "so the BiDi events for what just loaded have been delivered". That is the
+// same assumption `go()` already refused to make, and on a two-core GitHub
+// runner it is false often enough to matter: the gate section's form POST
+// completed, the error page rendered, readyState went complete, and the
+// `responseCompleted` event for the POST arrived after the pause had expired.
+// The job then failed with `expected exactly one POST ...; the browser made
+// 0: []` — an assertion about the CONSOLE that was really about the test's own
+// timing, which is the worst shape of flake because it reads as a real
+// refusal having gone missing.
+//
+// It RETURNS NULL rather than throwing when nothing arrives. A caller that
+// needs the response asserts on it and says what it wanted (`thePostIn()`
+// does, by name); a caller that pressed a GET form and only wants the page to
+// have settled does not, and a throw here would turn a slow-but-correct
+// submission into a failure naming the wrong thing.
+async function waitForMethod(method, from, timeoutMs) {
+  log.debug("Entering waitForMethod(). method=" + method);
+  const wanted = String(method || "").toUpperCase();
+  const deadline = Date.now() + (timeoutMs || 10000);
+  while (Date.now() < deadline) {
+    const stretch = since(from);
+    for (let i = 0; i < stretch.length; i += 1) {
+      if (stretch[i].method === wanted) {
+        log.debug("Leaving waitForMethod(). Found.");
+        return stretch[i];
+      }
+    }
+    await pause(25);
+  }
+  log.debug("Leaving waitForMethod(). Never arrived.");
+  return null;
+}
+
 function pause(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
@@ -482,7 +523,14 @@ async function fillAndPress(driver, formIndex, values, options) {
         firstText = e.name || '';
       }
     });
-    return { set: set, firstText: firstText };
+    // THE FORM'S OWN METHOD, so that settleAfterSubmit() below can wait for
+    // the response rather than sleeping. The DOM normalises f.method to lower
+    // case and defaults it to "get", which is exactly the question being
+    // asked: 35 call sites press both kinds through this function.
+    // (No backticks in this comment: it is inside a template literal, and one
+    // would end the script string here rather than at the intended line.)
+    return { set: set, firstText: firstText,
+             method: String(f.method || 'get').toUpperCase() };
   `, formIndex, values || {});
   assert.ok(!typed.error, "fillAndPress: " + typed.error);
 
@@ -501,7 +549,7 @@ async function fillAndPress(driver, formIndex, values, options) {
   const from = mark();
   const button = await submitButtonOf(driver, formIndex, opts.buttonText);
   await button.click();
-  await settleAfterSubmit(driver);
+  await settleAfterSubmit(driver, from, typed.method);
   log.debug("Leaving fillAndPress().");
   return { from: from, responses: since(from) };
 }
@@ -558,14 +606,34 @@ async function submitButtonOf(driver, formIndex, buttonText) {
 // After a submit the console answers 303 and the browser follows it. This waits
 // for the document that lands rather than for a fixed time — a sleep long
 // enough to be safe on a loaded machine is a sleep that doubles the suite.
-async function settleAfterSubmit(driver) {
-  log.debug("Entering settleAfterSubmit().");
+async function settleAfterSubmit(driver, from, method) {
+  log.debug("Entering settleAfterSubmit(). method=" + (method || "?"));
   await driver.wait(async function () {
     const state = await driver.executeScript("return document.readyState;");
     return state === "complete";
   }, 15000, "the page never finished loading after a form was submitted");
-  // One more turn of the event loop, so the BiDi events for what just loaded
-  // have been delivered before a caller reads them.
+  // THE SUBMISSION'S OWN RESPONSE, WAITED FOR RATHER THAN SLEPT THROUGH.
+  // readyState going `complete` says the DOCUMENT is loaded; it says nothing
+  // about when the BiDi `responseCompleted` event for that navigation reaches
+  // this process, and those are two different clocks. See waitForMethod() for
+  // the CI failure that made the difference visible.
+  if (from !== undefined && method) {
+    const seen = await waitForMethod(method, from);
+    if (!seen) {
+      // Not a failure here, deliberately. Every caller that needs the response
+      // asserts on it by name, and one that pressed a filter form and only
+      // wanted the page to redraw is entitled to a slow event. What it must
+      // not do is return in less time than the old sleep did.
+      log.warn("settleAfterSubmit: no " + method + " response was reported " +
+               "within the wait; a caller asserting on it will say so.");
+      await pause(60);
+    }
+    log.debug("Leaving settleAfterSubmit(). Response seen=" + !!seen);
+    return;
+  }
+  // The signIn() path, which presses a form this function is not told about.
+  // It asserts on the URL afterwards rather than on a status, so the pause is
+  // all it ever needed.
   await pause(60);
   log.debug("Leaving settleAfterSubmit().");
 }
