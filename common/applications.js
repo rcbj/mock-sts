@@ -300,10 +300,14 @@ const PROTOCOLS = [
   { id: 'oauth2', label: 'OAuth 2.0', kind: 'oauth2-client',
     kinds: ['oauth2-client', 'oidc-relying-party'],
     identifierAttribute: 'oauthClientId', redirectAttribute: 'oauthRedirectUri',
+    logoutAttribute: 'oauthPostLogoutRedirectUri',
+    secretAttribute: 'oauthClientSecret',
     what: 'A client_id at the authorization and token endpoints.' },
   { id: 'oidc', label: 'OpenID Connect', kind: 'oidc-relying-party',
     kinds: ['oidc-relying-party'],
     identifierAttribute: 'oauthClientId', redirectAttribute: 'oauthRedirectUri',
+    logoutAttribute: 'oauthPostLogoutRedirectUri',
+    secretAttribute: 'oauthClientSecret',
     what: 'The same client_id asking for the openid scope, and therefore for an ID Token. ' +
           'A relying party IS an OAuth client, so these two are usually ticked together; ' +
           'ticking this one alone is legal and says the entry is for an OIDC flow.' },
@@ -311,6 +315,7 @@ const PROTOCOLS = [
     kinds: ['saml2-service-provider'],
     identifierAttribute: 'samlEntityId',
     redirectAttribute: 'samlAssertionConsumerService',
+    logoutAttribute: 'samlSingleLogoutService',
     what: 'A service provider entityID in the Web Browser SSO profile at /saml2, or the ' +
           'audience of a SAML 2.0 assertion issued anywhere else here.' },
   { id: 'saml11', label: 'SAML 1.1', kind: 'saml11-relying-party',
@@ -323,6 +328,7 @@ const PROTOCOLS = [
   { id: 'wsfed', label: 'WS-Federation', kind: 'wsfed-relying-party',
     kinds: ['wsfed-relying-party'],
     identifierAttribute: 'wsfedRealm', redirectAttribute: 'wsfedReplyUrl',
+    logoutAttribute: 'wsfedSignOutUri',
     what: 'A wtrealm in a wsignin1.0 request (section 13.2.1).' },
   { id: 'wstrust', label: 'WS-Trust', kind: 'wstrust-relying-party',
     kinds: ['wstrust-relying-party'],
@@ -1041,6 +1047,24 @@ const SCHEMA = {
             'RECORDED AND NOT CHECKED: nothing here refuses a wreply that is not on the ' +
             'list, because a mock that refused would remove a test case rather than add ' +
             'one.' },
+    { name: 'wsfedSignOutUri', kind: 'multi', from: 'by hand',
+      what: 'WHERE A wsignoutcleanup1.0 PING IS SENT for this application — ' +
+            'WS-Federation\'s logout URI, and the one this table did not have ' +
+            'until 2026-08-30. DECLARED, not observed, which makes it the ' +
+            'sibling of samlSingleLogoutService rather than of wsfedReplyUrl: ' +
+            'a cleanup is sent when a SESSION ends, and by then the request ' +
+            'that would have carried a wreply is long over.\n\n**IT IS NOT ' +
+            'READ BY THE SIGN-OUT YET**, and that is stated rather than ' +
+            'implied. `cleanupTargetsFor()` builds its list from ' +
+            '`session.wsfedRealms`, which records the wreply each sign-in ' +
+            'response actually went to — so what this service pings today is ' +
+            'what it OBSERVED, and this attribute is what an operator ' +
+            'DECLARED. They are two different facts and the second is the one ' +
+            'a person setting an application up can state in advance. Wiring ' +
+            'it in as the fallback for a realm signed into with no wreply is ' +
+            'the obvious next step and is deliberately not taken here: this ' +
+            'change adds the field and the storage, and changing where a ' +
+            'cleanup goes is a change to what the protocol does.' },
     { name: 'wstrustAppliesTo', kind: 'multi', from: 'WS-Trust',
       identifier: true,
       identifierName: 'AppliesTo',
@@ -1431,6 +1455,7 @@ const EDITABLE = {
   // WS-Federation's return address, which used to be recorded in the attribute
   // above. Its own row says why the two were split.
   wsfedReplyUrl: 'multi',
+  wsfedSignOutUri: 'multi',
   description: 'multi'
 };
 
@@ -1512,6 +1537,20 @@ function declarationAttributes() {
   PROTOCOLS.forEach(function (family) {
     note(family.identifierAttribute, 'identifier', family);
     note(family.redirectAttribute, 'redirect', family);
+    // WHERE A SIGN-OUT GOES, for the four families that have one. SAML 1.1 is
+    // the interesting absence and it is not an oversight: 1.1 has no Single
+    // Logout at all — that arrived with SAML 2.0 — so a field for it would be
+    // a control whose value nothing could ever read. The same is true of
+    // WS-Trust, Kerberos, LDAP, SCIM, SPIFFE, mTLS and the two OID4VC
+    // families, and of federation, which does not consume a federated
+    // sign-out either.
+    note(family.logoutAttribute, 'logout', family);
+    // The client secret, which only the two OAuth families have. It is on this
+    // walk rather than being special-cased on the form for the reason the
+    // redirect URI is: the form, `GET /admin-api/applications/new` and
+    // `createApplication()`'s accepted set all read this one list, so a field
+    // that exists on one of them exists on all three.
+    note(family.secretAttribute, 'secret', family);
   });
   log.debug("Leaving declarationAttributes(). " + rows.length + " attribute(s) for " +
             PROTOCOLS.length + " family/families.");

@@ -125,7 +125,8 @@
 // ---------------------------------------------------------------------------
 
 const app = require('../common/app');
-const { log, xmlEscape, baseUrlOf, stsKeysFor } = require('../common/helpers');
+const { log, xmlEscape, baseUrlOf, stsKeysFor, parseBody } =
+  require('../common/helpers');
 const config = require('../common/config');
 const realms = require('../common/realms');
 // The console's SHELL and its prose helpers, exactly as `../sts_metadata.js`
@@ -2122,6 +2123,90 @@ app.get('/admin/crypto-metadata', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
+// THE KEY PAGE'S TWO ROUTES. Behind the console's gate for the same reason the
+// page above is — admin.js's one `app.use('/admin', ...)` is registered at 18
+// and express applies middleware only to routes added after it.
+//
+// The POST is the one form in this console whose answer is a FILE rather than a
+// page. Everything else here goes through `respondToAction()`, which 303s back
+// to where the reader was with a notice on the query string; a download cannot,
+// because the thing that was asked for IS the response body. A refusal DOES go
+// back as a page, so a bad password or an impossible format reads like every
+// other refusal in this console.
+// ---------------------------------------------------------------------------
+app.get('/admin/keys', function (req, res) {
+  log.debug("Entering the key pairs endpoint.");
+  const report = keysJson(baseUrlOf(req));
+  admin.respond(req, res, report, 'Key pairs', '/admin/keys',
+                renderKeyPairs(report));
+  log.debug("Leaving the key pairs endpoint. " + report.keys.length + " key(s).");
+});
+
+app.post('/admin/keys/export', function (req, res) {
+  log.debug("Entering the key export endpoint.");
+  // ADMIN WRITE, asked for explicitly. Every other read on this console needs
+  // Admin Read; this one hands over a private key, so it is held to the
+  // stronger of the two roles — and it is a GET-shaped act done as a POST for
+  // exactly that reason.
+  if (!admin.mayWrite(req)) {
+    res.status(403).type('text/plain').set('Cache-Control', 'no-store')
+       .send('Exporting a key pair needs the Admin Write role. Reading this ' +
+             'console needs Admin Read; taking a private key out of it needs ' +
+             'the other one.');
+    log.debug("Leaving the key export endpoint. Refused: no Admin Write.");
+    return;
+  }
+  const body = parseBody(req);
+  exportKey(String(body.key || ''), String(body.format || 'pem'),
+            String(body.password || '')).then(function (result) {
+    if (!result.ok) {
+      // A refusal is a PAGE, so it reads like every other refusal here.
+      respondToKeyRefusal(req, res, result.errors[0]);
+      log.debug("Leaving the key export endpoint. Refused.");
+      return;
+    }
+    // ONE FILE IS THE BODY; SEVERAL ARE A ZIP THIS SERVICE WILL NOT BUILD. The
+    // DER export is two files (private and public), and rather than take a zip
+    // dependency for it the private half is sent and the page says the public
+    // half is derivable from it — which it is, with one openssl command that
+    // the status line names.
+    const file = result.files[0];
+    const data = Buffer.isBuffer(file.data) ? file.data
+      : (typeof file.data === 'string' ? Buffer.from(file.data, 'utf8')
+         : Buffer.from(file.data));
+    res.status(200)
+       .set('Content-Type', file.mime || 'application/octet-stream')
+       .set('Content-Disposition', 'attachment; filename="' +
+            String(file.name).replace(/[^A-Za-z0-9._-]/g, '_') + '"')
+       .set('Cache-Control', 'no-store')
+       .send(data);
+    log.debug("Leaving the key export endpoint. Sent " + file.name + ", " +
+              data.length + " bytes.");
+  }).catch(function (e) {
+    respondToKeyRefusal(req, res, 'The export failed: ' + e.message);
+    log.debug("Leaving the key export endpoint. Threw: " + e.message);
+  });
+});
+
+// A refusal from the export, answered the way the caller asked. A JSON caller
+// gets JSON; a browser gets sent back to the page with the reason on the query
+// string, which is what `respondToAction()` does for every other form here.
+function respondToKeyRefusal(req, res, message) {
+  log.debug("Entering respondToKeyRefusal().");
+  const type = String(req.headers['content-type'] || '');
+  if (/json/i.test(type)) {
+    res.status(400).type('application/json').set('Cache-Control', 'no-store')
+       .send(JSON.stringify({ ok: false, errors: [message] }, null, 2));
+    log.debug("Leaving respondToKeyRefusal(). Answered JSON.");
+    return;
+  }
+  res.set('Cache-Control', 'no-store')
+     .redirect(303, '/admin/keys?error=' +
+               encodeURIComponent(String(message).slice(0, 500)));
+  log.debug("Leaving respondToKeyRefusal(). Redirected.");
+}
+
+// ---------------------------------------------------------------------------
 // THE SLOT THIS MODULE FILLS, so that `/admin-api/crypto` can mirror this page
 // without `mgmt-api/admin_api.js` requiring this file. Rule 3e's test answers
 // yes in both directions and that is why it is a slot rather than a require:
@@ -2139,7 +2224,15 @@ app.get('/admin/crypto-metadata', function (req, res) {
 // that rule exists to make impossible.
 // ---------------------------------------------------------------------------
 if (typeof admin.setCryptoReporter === 'function') {
-  admin.setCryptoReporter(cryptoJson);
+  // ONE OBJECT, VALIDATED WHOLE by the setter, which is the shape
+  // `setLogoutReader()` uses and for the same reason: a filler that installed
+  // the report and not the export would leave `/admin-api/keys` answering and
+  // `/admin-api/keys/export` not, which is the parity rule failing silently.
+  admin.setCryptoReporter({
+    report: cryptoJson,
+    keys: keysJson,
+    exportKey: exportKey
+  });
 } else {
   // An older copy of admin.js, which is a real possibility while this
   // repository is vendored into another one. The PAGE still works — it is
@@ -2166,5 +2259,443 @@ module.exports = {
   signatures: signatures,
   encryption: encryption,
   postQuantum: postQuantum,
-  cryptoJson: cryptoJson
+  cryptoJson: cryptoJson,
+  keyInventory: keyInventory,
+  keysJson: keysJson,
+  exportKey: exportKey
 };
+
+// ===========================================================================
+// THE KEY PAIRS, AND TAKING THEM AWAY (2026-08-30)
+// ===========================================================================
+//
+// `/admin/keys` is the page, and it is the deliberate opposite of the one
+// above it. `/admin/crypto-metadata` publishes NO private key and says so
+// twice; this one exists to hand them over. Both statements are true and the
+// distinction is the whole design: a report about what this service can do is
+// something to leave lying around, and a private key is not.
+//
+// **WHY IT IS DEFENSIBLE HERE AND WOULD NOT BE ANYWHERE ELSE.** Every key in
+// this process is generated at start, lives only in memory, and dies with the
+// process. None of them protects anything: the service checks no password,
+// validates no token it did not mint, and says so on every page. What a person
+// actually needs, constantly, is the far end of an exchange — a keystore to
+// put in a Java truststore, a PEM for `openssl s_client`, a JWK to paste into
+// a client. Making them re-derive that from `/oauth2/jwks` and a screenshot is
+// the friction this page removes.
+//
+// It is behind the console gate and needs **Admin Write**, which is a stronger
+// requirement than any other read on this console — because this is the one
+// page where reading IS taking.
+//
+// **THE EXPORT IS `common/vendored/key_material.js`'s, NOT A SECOND ONE.**
+// That is the debugger's own keystore code, vendored here, and it already does
+// the four formats with a password: PEM, DER, JWK and PKCS#12. Writing a
+// second exporter beside it would be the thing this repository argues against
+// everywhere — and it would be the WORSE copy, because that one is what the
+// debugger's PKI page has been exercised through.
+//
+// **PKCS#12 IS OFFERED ONLY WHERE THERE IS A CERTIFICATE**, and the refusal is
+// the vendored module's own rather than a rule invented here: a .p12 wraps a
+// private key in a certificate, and this service holds one for the RSA signing
+// key and the TLS key and for nothing else. The alternative — minting a
+// throwaway self-signed certificate so the format "works" — would hand
+// somebody a keystore containing a certificate this service has never used and
+// will never present, which is worse than a clear no.
+//
+// **THE POST-QUANTUM KEYS ARE JWK-ONLY, and that is RFC 9964 rather than a
+// gap.** An ML-DSA key is `kty: "AKP"`; there is no PKCS#8 encoding for it
+// here, so PEM, DER and PKCS#12 have nothing to write. The BBS key is not
+// offered at all: it is a raw scalar published as `publicKeyMultibase`, with
+// no standard private encoding to export it in, and offering a format that
+// silently produced something no library would read would be worse than
+// leaving it off.
+// ---------------------------------------------------------------------------
+
+const nodeCrypto = require('crypto');
+// The debugger's own keystore code, vendored. Named `keystore` here because
+// `keyMaterial()` above is this file's REPORT on the keys and this is the
+// thing that EXPORTS them — two different jobs that would otherwise share a
+// name three hundred lines apart.
+const keystore = require('../common/vendored/key_material.js');
+
+// One row per key pair this process holds. `formats` is computed rather than
+// listed, because the answer differs per key for two different reasons — no
+// certificate, or no PKCS#8 encoding — and a hand-kept list would have to
+// repeat both.
+function keyInventory() {
+  log.debug("Entering keyInventory().");
+  const keys = stsKeysFor();
+  const cert = tlsServer.serverCertificate();
+  const rows = [];
+
+  rows.push({
+    id: 'sts-rsa',
+    label: 'Signing key',
+    alg: 'RS256', kty: 'RSA', crv: '', bits: 2048,
+    kid: String(keys.kid || ''),
+    scope: 'realm', realm: realms.currentId(),
+    hasCertificate: true,
+    formats: ['pem', 'der', 'jwk', 'pkcs12'],
+    usedFor: [
+      'Every access token and refresh token, and the default ID Token (RS256).',
+      'Every XML document this service mints — SAML 2.0 and 1.1 assertions and ' +
+      'responses, WS-Federation, WS-Trust, per-service-provider metadata, and ' +
+      'the outbound federation AuthnRequest.',
+      'Decrypting a JWE or an EncryptedID sent to this service.',
+      'Published at /oauth2/jwks and in every metadata document.'
+    ]
+  });
+
+  (keys.extraKeys || []).forEach(function (one) {
+    const jwk = one.publicJwk;
+    rows.push({
+      id: 'sts-' + String(jwk.kid || one.alg),
+      label: (jwk.crv || one.alg) + ' key',
+      alg: one.alg, kty: jwk.kty, crv: jwk.crv || '', bits: 0,
+      kid: String(jwk.kid || ''),
+      scope: 'realm', realm: realms.currentId(),
+      hasCertificate: false,
+      // No certificate, so no PKCS#12 — see the header.
+      formats: ['pem', 'der', 'jwk'],
+      usedFor: [
+        'An ID Token for a client that registered ' +
+        'id_token_signed_response_alg: ' + one.alg + '.',
+        'A signed UserInfo response for a client that registered it.',
+        'Published at /oauth2/jwks so a client can verify one.'
+      ]
+    });
+  });
+
+  // THE POST-QUANTUM KEYS ARE REPORTED WHETHER OR NOT THEY EXIST YET, and the
+  // row says which. They are made on first use — one SLH-DSA keygen is most of
+  // two seconds — so this page must not be the thing that makes them: a
+  // metadata screen that costs two seconds a view, in a realm where nobody
+  // asked for a post-quantum signature, is a screen somebody learns not to
+  // open. `/oauth2/jwks` is what brings them into being.
+  const pq = Array.isArray(keys.pqKeys) ? keys.pqKeys : [];
+  pqJose.PQ_ALGS.forEach(function (alg) {
+    const made = pq.filter(function (k) { return k.alg === alg; })[0];
+    rows.push({
+      id: 'sts-pq-' + alg.toLowerCase(),
+      label: alg,
+      alg: alg, kty: 'AKP', crv: '', bits: 0,
+      kid: made ? String(made.publicJwk.kid || '') : '',
+      scope: 'realm', realm: realms.currentId(),
+      hasCertificate: false,
+      generated: !!made,
+      // RFC 9964's key type, for which there is no PKCS#8 encoding here.
+      formats: made ? ['jwk'] : [],
+      usedFor: [
+        'An ID Token or a signed UserInfo response for a client that ' +
+        'registered ' + alg + '.',
+        'Published at /oauth2/jwks as an AKP JWK.',
+        'NOT usable for DPoP: RFC 7638 registers no thumbprint for AKP, so a ' +
+        'proof signed with one would verify and bind to nothing.'
+      ]
+    });
+  });
+
+  rows.push({
+    id: 'tls-server',
+    label: 'TLS server certificate',
+    alg: 'RS256', kty: 'RSA', crv: '', bits: 2048,
+    kid: '', fingerprint: cert.fingerprint256,
+    scope: 'process',
+    subject: cert.subject, names: cert.names, notAfter: cert.notAfter,
+    hasCertificate: true,
+    formats: ['pem', 'der', 'jwk', 'pkcs12'],
+    usedFor: [
+      'The TLS listener on 8443 and the mutual-TLS listener on 9443.',
+      'LDAPS on 636.',
+      'The main port, when global.https is on.',
+      'Published as a certificate at /tls/server-certificate — this page is ' +
+      'the only place the PRIVATE half is available.'
+    ]
+  });
+
+  log.debug("Leaving keyInventory(). " + rows.length + " key(s).");
+  return rows;
+}
+
+// The PEM pair for one row, or null where there is none to give. Kept apart
+// from keyInventory() because that function is a REPORT and is safe to call
+// anywhere, and this one reaches for private key material.
+// PKCS#1 IN, PKCS#8 OUT, ALWAYS, AND A REAL BUG IS WHY.
+//
+// `selfSignedRsaCertificate()` builds its key with forge, and forge writes
+// `-----BEGIN RSA PRIVATE KEY-----` — PKCS#1. The vendored exporter documents
+// its input as PKCS#8 and means it: PEM passed through untouched and looked
+// fine, while JWK came back "Invalid keyData" and PKCS#12 came back "Cannot
+// create 'PrivateKeyInfo' from ASN.1 object". Two of four formats failing with
+// messages naming neither the encoding nor the key is exactly the shape of bug
+// this normalisation exists to make impossible.
+//
+// node re-encodes it for nothing — `createPrivateKey()` reads either and
+// `export({type: 'pkcs8'})` writes the one every other tool expects — so this
+// is one call rather than a conversion worth arguing about, and it runs for
+// every key rather than for the two that needed it: a curve key that already
+// arrives as PKCS#8 comes out byte for byte the same.
+function toPkcs8(pem) {
+  return nodeCrypto.createPrivateKey(pem).export({ type: 'pkcs8',
+                                                   format: 'pem' });
+}
+
+function pemsFor(id) {
+  log.debug("Entering pemsFor(). id=" + id);
+  const keys = stsKeysFor();
+  if (id === 'sts-rsa') {
+    const pub = nodeCrypto.createPublicKey(keys.privateKeyPem)
+      .export({ type: 'spki', format: 'pem' });
+    log.debug("Leaving pemsFor(). The signing key.");
+    return { privatePem: toPkcs8(keys.privateKeyPem), publicPem: pub,
+             desc: { kind: 'rsa', hash: 'SHA-256' },
+             certs: [keys.certPem] };
+  }
+  if (id === 'tls-server') {
+    const cert = tlsServer.serverCertificate();
+    const pub = nodeCrypto.createPublicKey(cert.privateKeyPem)
+      .export({ type: 'spki', format: 'pem' });
+    log.debug("Leaving pemsFor(). The TLS key.");
+    return { privatePem: toPkcs8(cert.privateKeyPem), publicPem: pub,
+             desc: { kind: 'rsa', hash: 'SHA-256' },
+             certs: [cert.certPem] };
+  }
+  const extra = (keys.extraKeys || []).filter(function (one) {
+    return 'sts-' + String(one.publicJwk.kid || one.alg) === id;
+  })[0];
+  if (extra) {
+    const priv = extra.privateKey.export({ type: 'pkcs8', format: 'pem' });
+    const pub = nodeCrypto.createPublicKey(extra.privateKey)
+      .export({ type: 'spki', format: 'pem' });
+    log.debug("Leaving pemsFor(). A curve key.");
+    return { privatePem: priv, publicPem: pub,
+             desc: { kind: extra.publicJwk.kty === 'OKP' ? 'okp' : 'ec',
+                     curve: extra.publicJwk.crv },
+             certs: [] };
+  }
+  log.debug("Leaving pemsFor(). No PEM pair for this key.");
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// THE EXPORT ITSELF. Answers rather than throws, for the reason
+// `decryptElement()` answers: every refusal here is something a person can act
+// on — a format this key has no encoding for, a PKCS#12 with no password, a
+// key that has not been generated yet — and an exception would reach the
+// browser as a 500 with none of that in it.
+// ---------------------------------------------------------------------------
+async function exportKey(id, format, password) {
+  log.debug("Entering exportKey(). id=" + id + ", format=" + format);
+  const row = keyInventory().filter(function (one) { return one.id === id; })[0];
+  if (!row) {
+    log.debug("Leaving exportKey(). No such key.");
+    return { ok: false, errors: ['There is no key called "' + id + '" in this ' +
+      'realm. The list on the page is what this process holds; a key named ' +
+      'here and not there is usually a realm switch away.'] };
+  }
+  if (!row.formats.length) {
+    log.debug("Leaving exportKey(). Nothing to export.");
+    return { ok: false, errors: [row.label + ' cannot be exported' +
+      (row.generated === false
+        ? ' because it has not been generated yet. The post-quantum keys are ' +
+          'made on first use — fetch /oauth2/jwks in this realm and come back.'
+        : '.')] };
+  }
+  if (row.formats.indexOf(format) < 0) {
+    log.debug("Leaving exportKey(). Unsupported format.");
+    return { ok: false, errors: [row.label + ' cannot be exported as ' +
+      format + '. It offers ' + row.formats.join(', ') + '.' +
+      (format === 'pkcs12' && !row.hasCertificate
+        ? ' PKCS#12 wraps a private key in a CERTIFICATE, and this service ' +
+          'holds none for this key — only the signing key and the TLS key ' +
+          'have one. Minting a throwaway certificate so the format worked ' +
+          'would hand you a keystore this service has never presented.'
+        : '')] };
+  }
+
+  // The post-quantum keys are a JWK and nothing else, and they are not a PEM
+  // pair, so they do not go through the vendored exporter at all.
+  if (row.kty === 'AKP') {
+    const made = (stsKeysFor().pqKeys || []).filter(function (k) {
+      return k.alg === row.alg;
+    })[0];
+    if (!made) {
+      log.debug("Leaving exportKey(). The key vanished between the list and here.");
+      return { ok: false, errors: [row.label + ' has not been generated yet.'] };
+    }
+    // The PUBLIC half only. There is no interoperable private encoding for an
+    // AKP key to hand over — RFC 9964 defines the public members and the seed
+    // handling is still moving — so exporting a private half here would be
+    // inventing a format, and a file no library reads is worse than a refusal
+    // that says why.
+    const text = JSON.stringify(made.publicJwk, null, 2);
+    log.debug("Leaving exportKey(). An AKP public JWK.");
+    return { ok: true, publicOnly: true,
+             files: [{ name: row.alg.toLowerCase() + '-public.jwk.json',
+                       data: text, mime: 'application/jwk+json' }],
+             status: 'The PUBLIC half of ' + row.alg + ' as an AKP JWK. There ' +
+                     'is no interoperable private encoding for this key type ' +
+                     'to hand over, so the private half stays in the process.' };
+  }
+
+  const pems = pemsFor(id);
+  if (!pems) {
+    log.debug("Leaving exportKey(). No PEM pair.");
+    return { ok: false, errors: ['No key pair is available for ' + row.label +
+      ' in this realm.'] };
+  }
+  try {
+    const result = await keystore.exportKeyPair({
+      format: format,
+      privatePem: pems.privatePem,
+      publicPem: pems.publicPem,
+      desc: pems.desc,
+      password: String(password || ''),
+      baseName: id,
+      friendlyName: row.label,
+      certs: pems.certs,
+      alg: row.alg,
+      use: 'sig'
+    });
+    log.debug("Leaving exportKey(). " + result.files.length + " file(s).");
+    return { ok: true, files: result.files, status: result.status };
+  } catch (e) {
+    // The vendored module's own refusals — a PKCS#12 with no password, an
+    // unreadable key — reach the page as themselves. They are better sentences
+    // than anything this file would write over the top of them.
+    log.debug("Leaving exportKey(). The exporter refused: " + e.message);
+    return { ok: false, errors: [e.message] };
+  }
+}
+
+function keysJson(base) {
+  log.debug("Entering keysJson().");
+  const rows = keyInventory();
+  const out = {
+    issuer: base,
+    realm: realms.currentId(),
+    regeneratedEveryStart: true,
+    formats: keystore.keystoreFormats(),
+    keys: rows,
+    warning: 'THIS RESOURCE LISTS KEYS; the export operation beside it HANDS ' +
+             'OVER PRIVATE KEY MATERIAL. Every key here is generated at start, ' +
+             'lives only in memory and dies with the process, and none of them ' +
+             'protects anything — this service checks no password and validates ' +
+             'no token it did not mint.'
+  };
+  log.debug("Leaving keysJson(). " + rows.length + " key(s).");
+  return out;
+}
+
+// NAMED `renderKeyPairs` AND NOT `renderKeys`, AND A 500 IS WHY. This file
+// already had a `renderKeys()` — the KEY MATERIAL section of
+// /admin/crypto-metadata — and a second function declaration of that name
+// silently replaced it, so the page above started calling this one and threw
+// `report.keys.map is not a function` on a report that has no `keys`. Two
+// functions, one name, nine hundred lines apart: exactly what the `keystore`
+// import a few hundred lines up was renamed to avoid, met a second time
+// because the first rename fixed the symptom rather than teaching the lesson.
+function renderKeyPairs(report) {
+  log.debug("Entering renderKeys().");
+  let html = '<p class="lead">Every key pair this process generated at start, ' +
+    'what each one is used for, and a way to take it away. <strong>The signing ' +
+    'keys are per trust realm</strong> — this shows <code>' +
+    esc(report.realm) + '</code> — and the TLS certificate belongs to the ' +
+    'process.</p>';
+
+  html += admin.warn('<strong>THIS PAGE HANDS OVER PRIVATE KEYS, and it is the ' +
+    'only one here that does.</strong> <a href="/admin/crypto-metadata">' +
+    'Cryptography</a> next door publishes key types, identifiers and ' +
+    'fingerprints and deliberately no key material at all; this one is the ' +
+    'other half. It is defensible because of what these keys are: generated at ' +
+    'start, held only in memory, dead when the process exits, and protecting ' +
+    'nothing — this service checks no password and validates no token it did ' +
+    'not mint. It needs <strong>Admin Write</strong>, which is a stronger ' +
+    'requirement than any other read on this console, because here reading IS ' +
+    'taking.');
+
+  html += admin.note('<strong>The exporter is the debugger\'s own, vendored.</strong> ' +
+    '<code>common/vendored/key_material.js</code> does the four formats with a ' +
+    'password — PEM, DER, JWK and PKCS#12 — and is the same code the ' +
+    'debugger\'s PKI page has been exercised through. A second exporter beside ' +
+    'it would be the worse copy.');
+
+  html += '<h2 id="keys">The key pairs</h2>' +
+    '<table><thead><tr><th class="n">Key</th><th>Type</th><th>Identifier</th>' +
+    '<th>Scope</th><th>Formats</th></tr></thead><tbody>' +
+    report.keys.map(function (row) {
+      return '<tr><td class="n"><a href="#key-' + esc(row.id) + '">' +
+        esc(row.label) + '</a></td>' +
+        '<td><code>' + esc(row.alg) + '</code> <code>' + esc(row.kty) +
+        '</code>' + (row.crv ? ' <code>' + esc(row.crv) + '</code>' : '') +
+        (row.bits ? ' ' + esc(row.bits) + '-bit' : '') + '</td>' +
+        '<td>' + (row.kid ? '<code>' + esc(row.kid) + '</code>'
+                  : (row.fingerprint ? '<code>' + esc(row.fingerprint) + '</code>'
+                     : '<span class="why">' +
+                       (row.generated === false ? 'not made yet' : 'none') +
+                       '</span>')) + '</td>' +
+        '<td>' + (row.scope === 'realm' ? 'this realm' : 'the process') + '</td>' +
+        '<td>' + (row.formats.length ? chips(row.formats)
+                  : '<span class="why">not exportable</span>') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+
+  report.keys.forEach(function (row) {
+    html += '<h3 id="key-' + esc(row.id) + '">' + esc(row.label) + '</h3>' +
+      '<table><tbody><tr><th class="n">Used for</th><td><ul>' +
+      row.usedFor.map(function (what) {
+        return '<li>' + prose(what) + '</li>';
+      }).join('') + '</ul></td></tr>' +
+      (row.subject ? '<tr><th class="n">Subject</th><td><code>' +
+        esc(row.subject) + '</code></td></tr>' : '') +
+      (row.names ? '<tr><th class="n">Names</th><td>' + chips(row.names) +
+        '</td></tr>' : '') +
+      (row.notAfter ? '<tr><th class="n">Valid to</th><td>' +
+        esc(row.notAfter) + '</td></tr>' : '') +
+      '</tbody></table>' +
+      keyExportForm(row);
+  });
+  log.debug("Leaving renderKeys().");
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// ONE FORM PER KEY, and it is a real form with a real button because this
+// console runs no script (`script-src 'none'`). The POST answers with the FILE
+// rather than with a redirect, which is the one place in this console a form
+// does not come back as a page — a download is what was asked for, and a 303 to
+// a page saying "your key is ready" would be a page with nothing on it.
+// ---------------------------------------------------------------------------
+function keyExportForm(row) {
+  if (!row.formats.length) {
+    return admin.note('<strong>Not exportable.</strong> ' +
+      (row.generated === false
+        ? 'The post-quantum keys are made on FIRST USE — one SLH-DSA keygen is ' +
+          'most of two seconds — so this page deliberately does not make them. ' +
+          'Fetch <code>/oauth2/jwks</code> in this realm and come back.'
+        : 'There is no interoperable encoding for this key to hand over.'));
+  }
+  return '<form method="post" action="/admin/keys/export" class="formrow">' +
+    '<input type="hidden" name="key" value="' + esc(row.id) + '">' +
+    '<label for="fmt-' + esc(row.id) + '">Keystore format</label> ' +
+    '<select id="fmt-' + esc(row.id) + '" name="format">' +
+    row.formats.map(function (f) {
+      return '<option value="' + esc(f) + '">' + esc(f.toUpperCase()) +
+        (f === 'pkcs12' ? ' (.p12 — password required)' : '') + '</option>';
+    }).join('') + '</select> ' +
+    '<label for="pw-' + esc(row.id) + '">Password</label> ' +
+    '<input type="password" id="pw-' + esc(row.id) + '" name="password" ' +
+    'placeholder="required for PKCS#12; encrypts the private half of the rest">' +
+    ' <button type="submit">Download</button>' +
+    (row.kty === 'AKP'
+      ? admin.note('<strong>The PUBLIC half only.</strong> RFC 9964 defines ' +
+        'the public members of an AKP key and the private seed handling is ' +
+        'still moving, so there is no interoperable private encoding to hand ' +
+        'over. A file no library reads would be worse than saying so.')
+      : admin.note('<strong>A password is REQUIRED for PKCS#12 and optional ' +
+        'for the other three</strong>, where it encrypts the private half ' +
+        '(PKCS#8 for PEM and DER, PBES2 as a .jwe for JWK). Leave it empty and ' +
+        'the private key comes out in the clear, which is usually what you ' +
+        'want from a mock and is never what you want anywhere else.')) +
+    '</form>';
+}

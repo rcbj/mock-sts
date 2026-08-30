@@ -144,13 +144,51 @@ services:
   postgres:
     container_name: ${STS_POSTGRES_CONTAINER_NAME:-sts-postgres}
     hostname: postgres
-    image: postgres:16-alpine
+    # POSTGRES 18, AND NOT -alpine. The alpine variant ships busybox and no
+    # bash; the two scripts below are bash, and openssl is in the Debian image
+    # already. It was `postgres:16-alpine` until 2026-08-30.
+    #
+    # **A MAJOR UPGRADE DOES NOT READ THE OLD DATA DIRECTORY.** A `sts-db`
+    # volume written by 16 makes an 18 container exit with "database files are
+    # incompatible with server", naming the versions. `docker compose down -v`
+    # is the answer and costs nothing here: what this volume holds is the
+    # directory, the realm registry and the appconfig overrides — the three
+    # things somebody TYPED — and never anything this service minted.
+    image: postgres:18
     environment:
       - POSTGRES_USER=sts
       - POSTGRES_PASSWORD=sts
       - POSTGRES_DB=sts
     volumes:
-      - sts-db:/var/lib/postgresql/data
+      # ONE MOUNT AT /var/lib/postgresql, NOT AT .../data, AND 18 IS WHY.
+      # These images store the cluster in a major-version-specific directory
+      # from 18 onwards (/var/lib/postgresql/18/docker), so that
+      # `pg_upgrade --link` can work across a single mount point. A volume at
+      # the old .../data path makes the container REFUSE TO START, with a
+      # message naming "unused mount/volume" — which reads as a warning and is
+      # fatal. See docker-library/postgres#1259.
+      #
+      # The TLS pair lives INSIDE this volume (/var/lib/postgresql/tls) rather
+      # than in a mount of its own, because a second mount underneath this one
+      # is exactly the shape the image just refused. One volume, cleared by
+      # `docker compose down -v`, holding the cluster and the key pair that
+      # protects it.
+      - sts-db:/var/lib/postgresql
+      - ./postgres/generate-tls.sh:/usr/local/bin/generate-tls.sh:ro
+      # Runs ONCE, on the start that creates the cluster, and turns every
+      # `host` rule in pg_hba.conf into `hostssl`. See the script.
+      - ./postgres/require-tls.sh:/docker-entrypoint-initdb.d/00-require-tls.sh:ro
+    # THE KEY PAIR IS MADE BEFORE THE SERVER STARTS, which is why this is a
+    # `command` wrapper and not an initdb script: `ssl_cert_file` is read when
+    # the server boots, and an initdb script runs after that has already
+    # happened once. `exec` so that postgres keeps pid 1 and still receives the
+    # stop signal.
+    command: >
+      bash -c '/usr/local/bin/generate-tls.sh &&
+      exec docker-entrypoint.sh postgres
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/tls/server.crt
+      -c ssl_key_file=/var/lib/postgresql/tls/server.key'
     # ports:
     #   - "5432:5432"
     # `pg_isready` rather than a psql query: it is what the image ships for
@@ -297,7 +335,19 @@ services:
       # says otherwise.
       # ---------------------------------------------------------------------
       - STS_PERSISTENCE_MODE=${STS_PERSISTENCE_MODE:-postgres}
-      - STS_DATABASE_URL=${STS_DATABASE_URL:-postgres://sts:sts@postgres:5432/sts}
+      # `sslmode=require` IS IN THE DEFAULT, and it is the client half of the
+      # `hostssl` rules the database now enforces. Both ends say it: the server
+      # refuses a plaintext connection and the client refuses to make one, so
+      # neither can be quietly relaxed without the other noticing.
+      #
+      # `require` and not `verify-full`, and the reason is the certificate:
+      # it is generated in the container on first start and signed by nobody,
+      # so there is no anchor for a client to verify it against. `require`
+      # encrypts the connection and does not authenticate the server, which is
+      # the honest description of a self-signed pair — and it is what
+      # STS_DATABASE_TLS_REJECT_UNAUTHORIZED below says out loud rather than
+      # leaves to be discovered.
+      - STS_DATABASE_URL=${STS_DATABASE_URL:-postgres://sts:sts@postgres:5432/sts?sslmode=require}
       # Where ldif mode would write. Set even in postgres mode so that the
       # volume above has a meaning and switching modes changes one line.
       - STS_PERSISTENCE_DATA_DIR=/usr/src/sts/data

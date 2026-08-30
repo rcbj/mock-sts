@@ -1396,6 +1396,27 @@ const ENDPOINTS = [
           'key that will verify credentials, is a server-side request forgery with a ' +
           'citation attached. Push one in with POST /admin-api/spiffe/federation-set or ' +
           'BatchSetFederatedBundle.' },
+  { path: '/admin/keys', group: 'Admin', name: 'Key pairs',
+    specs: [],
+    what: 'NON-SPEC. Every key pair this process generated at start, what each ' +
+          'one is used for, and A WAY TO TAKE IT AWAY. It is the deliberate ' +
+          'opposite of /admin/crypto-metadata beside it: that page publishes ' +
+          'key types, identifiers and fingerprints and no key material at all, ' +
+          'and this one hands over the private half in PEM, DER, JWK or a ' +
+          'password-protected PKCS#12 — through the debugger\'s own keystore ' +
+          'code, vendored as common/vendored/key_material.js. It needs ADMIN ' +
+          'WRITE, which is stronger than any other read on this console, ' +
+          'because here reading IS taking. Defensible because of what these ' +
+          'keys are: made at start, held only in memory, dead with the ' +
+          'process, and protecting nothing.' },
+  { path: '/admin/keys/export', group: 'Admin', name: 'Export a key pair',
+    specs: [],
+    what: 'NON-SPEC. The form on the page above, and THE ONE FORM IN THIS ' +
+          'CONSOLE WHOSE ANSWER IS A FILE rather than a page — a download is ' +
+          'what was asked for, so a 303 back to a page saying "your key is ' +
+          'ready" would be a page with nothing on it. A REFUSAL is still a ' +
+          'page, so a bad password or an impossible format reads like every ' +
+          'other refusal here. Needs Admin Write.' },
   { path: '/admin/crypto-metadata', group: 'Admin', name: 'Cryptography',
     specs: [],
     what: 'NON-SPEC. The companion to this page, one layer down: what this ' +
@@ -2339,6 +2360,21 @@ const ENDPOINTS = [
           'totals — calls, tokens held and revoked, other artifacts, users, ' +
           'sign-on sessions. The cheapest call here and the one to poll. Mirrors ' +
           'GET /admin.' },
+  { path: '/admin-api/keys', group: 'Management API', name: 'Key pairs',
+    specs: [],
+    what: 'NON-SPEC. Everything /admin/keys lists, as JSON: every key pair, its ' +
+          'type, its identifier, whether it belongs to this realm or to the ' +
+          'process, what it is used for, and which keystore formats it can be ' +
+          'exported as. A LIST AND NEVER KEY MATERIAL. Mirrors GET /admin/keys.' },
+  { path: '/admin-api/keys/:action', group: 'Management API',
+    name: 'Export a key pair', specs: [],
+    what: 'NON-SPEC. THIS OPERATION RETURNS PRIVATE KEY MATERIAL, base64 in a ' +
+          'JSON reply because this API answers JSON everywhere else. Takes a ' +
+          'key id, a format (pem, der, jwk, pkcs12) and a password — required ' +
+          'for pkcs12, optional elsewhere, where it encrypts the private half. ' +
+          'This API is not gated at all, which is the same honest consequence ' +
+          'every operation here has and is worth saying twice for this one. ' +
+          'Mirrors POST /admin/keys/export.' },
   { path: '/admin-api/crypto', group: 'Management API', name: 'Cryptography',
     specs: [],
     what: 'NON-SPEC. Everything /admin/crypto-metadata reports, as JSON: every ' +

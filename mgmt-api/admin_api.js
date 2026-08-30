@@ -816,6 +816,151 @@ const ROUTES = [
       log.debug("Leaving the management API crypto metadata endpoint.");
     } },
 
+  // ---------------------------------------------------------------------
+  // THE KEY PAIRS. Two operations, because LISTING what this process holds and
+  // HANDING A KEY OVER are different acts and only the second is a write.
+  // ---------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/keys', tag: 'Service',
+    operationId: 'getKeys',
+    summary: 'Every key pair this process generated at start, and what it is for',
+    description: 'A LIST and never key material. The signing keys are per ' +
+                 'trust realm and the TLS certificate belongs to the process, ' +
+                 'and each row says which. `formats` is what that key can be ' +
+                 'exported as, computed rather than listed: a key with no ' +
+                 'certificate cannot be a PKCS#12, and a post-quantum key has ' +
+                 'no PKCS#8 encoding at all, so the answer differs per key for ' +
+                 'two different reasons.\n\nNothing here is key material. ' +
+                 'POST /admin-api/keys/export is the operation that hands one ' +
+                 'over.',
+    mirrors: 'GET /admin/keys',
+    responseDescription: 'The key pairs.',
+    responseSchema: { $ref: '#/components/schemas/KeyList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API key list endpoint.");
+      const report = admin.keysView(req);
+      if (!report) {
+        sendJson(res, 503, { ok: false, errors: [
+          'The crypto reporter is not installed in this process. ' +
+          'admin-ui/crypto_metadata.js fills it at its own require time.'] });
+        log.debug("Leaving the management API key list endpoint. No reporter.");
+        return;
+      }
+      sendJson(res, 200, report);
+      log.debug("Leaving the management API key list endpoint.");
+    } },
+
+  // AN ACTION RESOURCE RATHER THAN A BARE POST, and the suite is why. Every
+  // other POST here is `/<resource>/:action`, and `sts_admin_api_operations.js`
+  // probes each of them with an action nobody has heard of and requires a 400
+  // naming the ones that exist. A literal `/keys/export` looked like that
+  // resource and was not one, so the probe got a 404 — the route pattern
+  // simply did not match. One `export` action today; a second (an import, a
+  // rotation) goes in the same list.
+  { method: 'POST', route: BASE + '/keys/:action', tag: 'Service',
+    mirrors: 'POST /admin/keys/export',
+    handler: function (req, res) {
+      log.debug("Entering the management API key export endpoint.");
+      const body = withAction(req, parseBody(req));
+      if (body.action !== 'export') {
+        // THE SENTENCE IS THE SHAPE THE SUITE READS, and that is not a
+        // formatting preference: `sts_admin_api_operations.js` matches
+        // `Unknown action "x". <phrase>: <list>.` on every action resource,
+        // because `admin_api.js` uses the same sentence to check that every
+        // console action has an operation here. A handler that stopped writing
+        // it would turn that check off with nothing failing.
+        sendJson(res, 400, { ok: false, errors: [
+          'Unknown action "' + body.action + '". The actions here are: ' +
+          'export.'] });
+        log.debug("Leaving the management API key export endpoint. " +
+                  "Unknown action.");
+        return;
+      }
+      const pending = admin.keysExport(String(body.key || ''),
+                                       String(body.format || 'pem'),
+                                       String(body.password || ''));
+      if (!pending) {
+        sendJson(res, 503, { ok: false, errors: [
+          'The crypto reporter is not installed in this process.'] });
+        log.debug("Leaving the management API key export endpoint. No reporter.");
+        return;
+      }
+      pending.then(function (result) {
+        if (!result.ok) {
+          sendJson(res, 400, result);
+          log.debug("Leaving the management API key export endpoint. Refused.");
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          status: result.status,
+          publicOnly: !!result.publicOnly,
+          files: result.files.map(function (file) {
+            const data = Buffer.isBuffer(file.data) ? file.data
+              : (typeof file.data === 'string' ? Buffer.from(file.data, 'utf8')
+                 : Buffer.from(file.data));
+            return { name: file.name, mime: file.mime,
+                     bytes: data.length,
+                     base64: data.toString('base64') };
+          })
+        });
+        log.debug("Leaving the management API key export endpoint. " +
+                  result.files.length + " file(s).");
+      }).catch(function (e) {
+        sendJson(res, 400, { ok: false, errors: ['The export failed: ' +
+                                                 e.message] });
+        log.debug("Leaving the management API key export endpoint. Threw.");
+      });
+    },
+    actions: [
+      { action: 'export', operationId: 'exportKey',
+        summary: 'Hand over one key pair, in a chosen keystore format',
+        description: 'THIS OPERATION RETURNS PRIVATE KEY MATERIAL. It is the API ' +
+                 'half of the one page in this console where reading is ' +
+                 'taking.\n\nIt is defensible because of what these keys ' +
+                 'are: generated at start, held only in memory, dead when the ' +
+                 'process exits, and protecting nothing — this service checks ' +
+                 'no password and validates no token it did not mint. **This ' +
+                 'API is not gated at all**, so anybody who can reach this ' +
+                 'port can call it; that is the same honest consequence every ' +
+                 'other operation here has, stated again because this one ' +
+                 'returns a key.\n\n`format` is one of `pem`, `der`, `jwk` ' +
+                 'or `pkcs12`. A password is REQUIRED for `pkcs12` and ' +
+                 'optional for the rest, where it encrypts the private half. ' +
+                 'The reply carries the file base64-encoded rather than raw, ' +
+                 'because this API answers JSON everywhere else and a caller ' +
+                 'that suddenly got octets would have to special-case one ' +
+                 'operation.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            key: { type: 'string',
+                   description: 'The `id` from GET /admin-api/keys.' },
+            format: { type: 'string', enum: ['pem', 'der', 'jwk', 'pkcs12'],
+                      description: 'PKCS#12 is offered only for a key this ' +
+                                   'service holds a certificate for — the ' +
+                                   'signing key and the TLS key.' },
+            password: { type: 'string',
+                        description: 'REQUIRED for `pkcs12`; optional for the ' +
+                                     'other three, where it encrypts the ' +
+                                     'private half. Empty means the private ' +
+                                     'key comes out in the clear.' }
+          },
+          required: ['key', 'format'],
+          // THE EXAMPLE IS WHAT DRIVES THIS OPERATION IN THE SUITE.
+          // `sts_admin_api_operations.js` walks every GET and every POST that
+          // carries one; an operation with no example is covered by nothing
+          // and reported by nothing, which is what its ledger refuses. `pem`
+          // with no password is chosen deliberately — it is the one
+          // combination that needs nothing set up and hands back a file every
+          // tool reads.
+          examples: [{ key: 'sts-rsa', format: 'pem', password: '' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The exported files.',
+        responseSchema: { $ref: '#/components/schemas/KeyExport' } }
+    ] },
+
   { method: 'GET', path: BASE + '/docs', tag: 'Service',
     operationId: 'getDocs',
     summary: 'The explorer: every operation, with a form that calls it',

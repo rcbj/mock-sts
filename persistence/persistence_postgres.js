@@ -173,8 +173,78 @@ function create(options) {
                     'needs nothing but a directory to write in.');
   }
 
+  // ---------------------------------------------------------------------
+  // TLS, AND THE TWO HALVES OF IT THAT LIVE IN DIFFERENT PLACES.
+  //
+  // ENCRYPTION is `sslmode` in the connection string, which is postgres's own
+  // spelling and which `pg` parses for itself — `?sslmode=require` is in the
+  // compose default, and the database refuses a plaintext connection anyway
+  // because every `host` rule in its pg_hba.conf is `hostssl`. Nothing here
+  // has to do anything for that to work.
+  //
+  // TRUST is not expressible in a connection string as far as `pg` is
+  // concerned: `rejectUnauthorized` is a TLS option. So it is a setting, and
+  // it is applied HERE rather than pushed into the URL, where it would be
+  // silently ignored.
+  //
+  // THE OPTION IS ONLY SET WHEN sslmode ASKED FOR TLS. Passing `ssl` to `pg`
+  // turns TLS on regardless of the URL, so setting it unconditionally would
+  // make `sslmode=disable` mean its opposite — a connection string saying one
+  // thing and the client doing another, which is the shape of bug this whole
+  // change exists to remove.
+  const wantsTls = /[?&]sslmode=(require|verify-ca|verify-full|prefer)/i
+    .test(url);
+  const verify = !!options.verifyTls;
+  if (wantsTls) {
+    log.info('persistence: the database connection is TLS (sslmode in the ' +
+             'connection string), and the server certificate is ' +
+             (verify ? 'VERIFIED against this process\'s trust anchors.'
+                     : 'NOT verified — persistence.databaseTlsRejectUnauthorized ' +
+                       'is off, which is the honest setting for the ' +
+                       'self-signed pair the compose stack generates. The ' +
+                       'connection is encrypted either way.'));
+  } else {
+    log.warn('persistence: the database connection string does not ask for ' +
+             'TLS (no sslmode=require). The compose stack\'s database ' +
+             'REFUSES a plaintext connection, so this will fail to connect ' +
+             'there; against another database it will connect in the clear.');
+  }
+
+  // ONE DECIDER, AND A FAILED CONNECTION IS WHY.
+  //
+  // `pg` parses `sslmode` out of the connection string ITSELF and builds an
+  // `ssl` config from it — so a string carrying `sslmode=require` and an
+  // explicit `ssl: { rejectUnauthorized: false }` beside it are two answers to
+  // one question, and the string's won: the first run of this against the
+  // compose stack died with `self-signed certificate` despite the option
+  // saying not to verify.
+  //
+  // So the `sslmode` parameter is STRIPPED before the string reaches `pg`, and
+  // this driver configures the TLS. The parameter is still what the connection
+  // string SAYS — it is read above to decide whether TLS is wanted at all, and
+  // it is what an operator writes — but there is exactly one place that turns
+  // it into a socket option, which is what stops the two disagreeing again.
+  const dialled = (function () {
+    if (!wantsTls) {
+      return url;
+    }
+    try {
+      const parsed = new URL(url);
+      parsed.searchParams.delete('sslmode');
+      return parsed.toString();
+    } catch (e) {
+      // A libpq keyword/value string rather than a URL. `pg` accepts those and
+      // this cannot edit one safely, so it is passed through untouched and
+      // whatever it says about ssl is what happens.
+      log.debug('persistence: the connection string is not a URL, so its ' +
+                'sslmode was left as it is.');
+      return url;
+    }
+  })();
+
   const pool = new Pool({
-    connectionString: url,
+    connectionString: dialled,
+    ssl: wantsTls ? { rejectUnauthorized: verify } : undefined,
     // Small on purpose. Every query this driver makes is on the flush path,
     // there is one flush at a time by construction (persistence.js serialises
     // them), and a mock does not need a connection per core.
