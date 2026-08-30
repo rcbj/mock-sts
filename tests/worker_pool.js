@@ -74,6 +74,36 @@ const RANDOMIZED = ['ML-DSA-44-ES256', 'ML-DSA-65-ES256', 'ML-DSA-87-ES384'];
 // cheapest algorithm that can prove the claim at all.
 const SLOW_ALG = 'SLH-DSA-SHA2-128s';
 
+// ---------------------------------------------------------------------------
+// SECTION A DRIVES TEN OF THE ELEVEN, AND THE ONE IT LEAVES OUT IS THE
+// EXPENSIVE ONE. **This is a budget decision and it is worth stating, because
+// the omitted algorithm is the one this whole change set exists for.**
+//
+// SLH-DSA-SHAKE-128s costs about five seconds to generate a key and twelve to
+// sign, and section A signs TWICE — once here and once in a worker — so it
+// alone was 30 of this file's 37 seconds on a 20-core machine. In this
+// repository's CI that file runs under c8 instrumentation on a two-core
+// runner, where it went past the runner's 300-second per-job budget and was
+// killed. A test that is killed asserts nothing.
+//
+// What is lost by leaving it out is nothing: section A's claim is about the
+// TRANSPORT — that a Buffer crossing the IPC channel comes back as the bytes
+// that went in — and that is a property of the job table and the serialization,
+// not of the lattice. SLH-DSA-SHA2-128s stays in, and it is the one that
+// matters for this claim because its 7,856-byte signature is the largest
+// payload of the ten. Its SHAKE twin produces a signature of EXACTLY THE SAME
+// SIZE by a different hash, so it would exercise the same transport for
+// twenty-four more seconds.
+//
+// The algorithm itself is not untested: section B signs with SLH-DSA and
+// tests/pqc_engines.js over in the parent project drives every FIPS 205
+// parameter set against the standard's own vectors.
+// ---------------------------------------------------------------------------
+const TOO_SLOW_FOR_SECTION_A = ['SLH-DSA-SHAKE-128s'];
+const DRIVEN_IN_A = pqJose.PQ_ALGS.filter(function (alg) {
+  return TOO_SLOW_FOR_SECTION_A.indexOf(alg) === -1;
+});
+
 // `workers.count` is read per job, so a section can choose its own pool size
 // by setting an override and clearing it afterwards. Every section that does
 // puts it back, for the reason the parent suite's saml11_sso.js gives: a `set`
@@ -102,7 +132,7 @@ module.exports = {
     t.log.info('A. a worker computes what this process would have computed');
     // -----------------------------------------------------------------------
     await withWorkers(2, async function () {
-      for (const alg of pqJose.PQ_ALGS) {
+      for (const alg of DRIVEN_IN_A) {
         const pair = pqJose.generate(alg);
         const here = pqJose.sign(alg, pair.priv, MESSAGE);
         const there = await pqJose.signAsync(alg, pair.priv, MESSAGE);

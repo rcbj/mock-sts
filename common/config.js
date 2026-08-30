@@ -3578,6 +3578,20 @@ function describe(setting) {
     legacyEnv: setting.legacyEnv,
     appconfigPath: setting.path || setting.key,
     default: defaultOf(setting),
+    // WHETHER A REALM MAY CARRY IT, reported rather than left to be discovered
+    // by a refusal. A management API that describes a setting as `editable`
+    // and then refuses it under a realm prefix is telling half the truth, and
+    // it is the half a caller acts on: `tests/vendored/
+    // sts_admin_api_operations.js` walks this table for a runtime integer to
+    // drive a realm override with, and picked `workers.count` the day it was
+    // added — a setting a realm may not carry, so the write landed on the
+    // process and the row it read back said so.
+    //
+    // `perProcess` and the `realms.*` prefix are the two reasons, and both are
+    // config.js's own to state — see realmFor() and realms.js's
+    // checkRealmOverride().
+    realmSettable: !isPerProcess(setting.key) &&
+                   String(setting.key).indexOf('realms.') !== 0,
     overridden: Object.prototype.hasOwnProperty.call(overrides, setting.key)
   };
 }
