@@ -733,19 +733,42 @@ function warmPqKeys(realmId) {
   });
 }
 
-// ONE WATCHER, on `create` alone. An update, an override or a removal does not
-// change a realm's key material — the keys are made once and kept for the life
-// of the process, which is the property `docs/mock-sts.md` states as "the
-// signing key is regenerated on every start".
-realms.onChange(function (id, what) {
-  log.debug("Entering the realm key warm-up watcher. what=" + what);
-  if (what !== 'create') {
-    log.debug("Leaving the realm key warm-up watcher. Not a creation.");
-    return;
-  }
-  warmPqKeys(id);
-  log.debug("Leaving the realm key warm-up watcher.");
-});
+// ---------------------------------------------------------------------------
+// THERE IS NO WATCHER ANY MORE, AND THAT REVERSES HALF OF `5d9b51b` ON
+// EVIDENCE RATHER THAN ON TASTE (2026-08-30).
+//
+// It warmed every realm's eleven post-quantum keys as the realm was CREATED,
+// on `realms.onChange(… 'create')`. The argument was the paragraph above and
+// it is still correct as far as it goes: the pool makes paying early free, so
+// pay early.
+//
+// What it did not account for is WHO CREATES REALMS HERE. In a deployment a
+// realm is made by a person, once, and is then used. In this repository a
+// realm is made by a TEST, constantly, used for a dozen assertions about the
+// admin console or the management API, and removed — and not one of those
+// realms ever signs a post-quantum token. Measured on one CI coverage run:
+//
+//     default                 11 keys in 43.9s   (wanted)
+//     adminapi-mtgg0gs613jqe  11 keys in 58.9s   (never used)
+//     console-mtgg0i6k1m2sj   11 keys in 71.5s   (never used)
+//
+// Over two minutes of both worker processes, under instrumentation, spent on
+// key material nothing would ever ask for — on the same two cores the job that
+// DOES sign is waiting for. Eager generation is free when the pool is idle and
+// is not free when something else needs it.
+//
+// So the eager path is now the DEFAULT REALM ALONE, warmed from `announce()`
+// in server.js once the port is open — the realm every process has, that every
+// protocol answers in, and the one whose first JWKS fetch a person actually
+// waits for. A realm created at runtime makes its keys on first use, the way
+// every realm did before that commit: about 1.7 seconds in the pool, off the
+// event loop, on a request nobody has made yet.
+//
+// **This is a latency optimisation and not a correctness one**, which is what
+// makes it safe to narrow: no behaviour depends on when the keys exist, only
+// on their existing by the time a JWKS is served, and `pqKeysForAsync()` is
+// what guarantees that either way.
+// ---------------------------------------------------------------------------
 
 // Every signing key this realm can publish — the RSA one, the curve ones, and
 // the post-quantum ones, which this call brings into being.
