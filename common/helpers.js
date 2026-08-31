@@ -888,7 +888,17 @@ function signingKeyForAsync(alg) {
 
 // Sign with whichever key the algorithm needs. `secret` is required for HS\*
 // and ignored otherwise.
-function signJwtAs(payload, alg, secret) {
+//
+// `opts.header` is merged into the PROTECTED HEADER, and it is here for one
+// caller with one need: RFC 8417 section 2.2 gives a Security Event Token
+// `typ: "secevent+jwt"`, and a receiver that dispatches on the media type —
+// and several do — drops one without it with no error anybody sees. It is
+// passed straight through to `common/crypto.js`, which honours it on all
+// three of its signing paths since 2026-08-31; before that the two
+// hand-rolled ones ignored it, so the same call produced a different header
+// depending on which algorithm was chosen.
+function signJwtAs(payload, alg, secret, opts) {
+  const options = opts || {};
   log.debug("Entering signJwtAs(). alg=" + alg);
   const spec = stsCrypto.JWS_ALGS[alg];
   if (spec && spec.family === 'hmac') {
@@ -900,12 +910,14 @@ function signJwtAs(payload, alg, secret) {
     // No `kid`: the key is the client_secret, which is in no JWK Set, and a
     // kid pointing into the JWKS would send the client to the wrong key.
     log.debug("Leaving signJwtAs(). HMAC.");
-    return stsCrypto.signJws(payload, secret, { algorithm: alg });
+    return stsCrypto.signJws(payload, secret,
+                             { algorithm: alg, header: options.header });
   }
   const signer = signingKeyFor(alg);
   log.debug("Leaving signJwtAs(). " + alg + ".");
   return stsCrypto.signJws(payload, signer.key,
-                           { algorithm: alg, keyid: signer.kid });
+                           { algorithm: alg, keyid: signer.kid,
+                             header: options.header });
 }
 
 // ---------------------------------------------------------------------------
@@ -927,7 +939,8 @@ function signJwtAsAsync(payload, alg, secret, opts) {
   const spec = stsCrypto.JWS_ALGS[alg];
   if (spec && spec.family === 'hmac') {
     try {
-      const signed = signJwtAs(payload, alg, secret);
+      const signed = signJwtAs(payload, alg, secret,
+                               { header: options.header });
       log.debug("Leaving signJwtAsAsync(). HMAC, in process.");
       return Promise.resolve(signed);
     } catch (e) {
@@ -938,7 +951,8 @@ function signJwtAsAsync(payload, alg, secret, opts) {
   log.debug("Leaving signJwtAsAsync(). " + alg + ".");
   return signingKeyForAsync(alg).then(function (signer) {
     return stsCrypto.signJwsAsync(payload, signer.key,
-      { algorithm: alg, keyid: signer.kid, session: options.session });
+      { algorithm: alg, keyid: signer.kid, session: options.session,
+        header: options.header });
   });
 }
 
@@ -1211,6 +1225,84 @@ function numberWord(count) {
   return NUMBER_WORDS[n];
 }
 
+// ---------------------------------------------------------------------------
+// A RESPONSE OBJECT THAT RECORDS INSTEAD OF WRITING.
+//
+// It exists so that a handler which ANSWERS a request itself can be called by
+// something that needs its VERDICT rather than its reply. There is exactly one
+// such handler here and it is the reason this is shared:
+// `dpop.presentedAccessToken()` is the single access-token check the protected
+// endpoints in this service share — it carries the RFC 9449 proof and the
+// 401/DPoP-Nonce handshake, the RFC 8705 certificate binding, the RFC 9700
+// refusal of a token in a query string and the RFC 8707 audience check — and
+// it writes an OAuth `{error, error_description}` body. A caller that owes its
+// client a DIFFERENT error shape (SCIM's RFC 7644 section 3.12 Error object, or
+// the Shared Signals Framework's `{err, description}`) hands it one of these
+// and translates what it would have said.
+//
+// **THE HEADERS IT SET ARE KEPT VERBATIM AND THAT IS THE PART THAT MATTERS
+// MOST.** DPoP-Nonce and the `use_dpop_nonce` challenge are how a client learns
+// to retry, and dropping them leaves a conforming client unable to proceed with
+// no error to point at.
+//
+// It was written inside `scim/scim_auth.js` and moved here on 2026-08-31 when
+// `ssf/ssf_auth.js` became the second caller. A second copy of this would be a
+// second thing to update, and it would be a version behind within a release —
+// which is the argument that file already made about not writing a second
+// access-token check.
+// ---------------------------------------------------------------------------
+function capturingResponse() {
+  log.debug("Entering capturingResponse().");
+  const captured = { status: 0, headers: {}, body: '' };
+  const res = {
+    set: function (name, value) {
+      captured.headers[name] = value;
+      return res;
+    },
+    setHeader: function (name, value) {
+      captured.headers[name] = value;
+      return res;
+    },
+    status: function (code) {
+      captured.status = code;
+      return res;
+    },
+    type: function () {
+      return res;
+    },
+    send: function (body) {
+      captured.body = String(body === undefined ? '' : body);
+      return res;
+    },
+    json: function (body) {
+      captured.body = JSON.stringify(body);
+      return res;
+    },
+    end: function (body) {
+      captured.body = String(body === undefined ? '' : body);
+      return res;
+    }
+  };
+  log.debug("Leaving capturingResponse().");
+  return { res: res, captured: captured };
+}
+
+// What the captured reply was trying to say, as one sentence. The body is
+// whatever the handler wrote; today that is always JSON, and a change there
+// must not turn a 401 into an exception here — so the raw text is a better
+// answer than nothing.
+function capturedDescription(captured) {
+  log.debug("Entering capturedDescription().");
+  try {
+    const parsed = JSON.parse((captured && captured.body) || '{}');
+    log.debug("Leaving capturedDescription(). JSON.");
+    return String(parsed.error_description || parsed.error || '').trim();
+  } catch (e) {
+    log.debug("Leaving capturedDescription(). Not JSON.");
+    return String((captured && captured.body) || '').trim();
+  }
+}
+
 module.exports = {
   signingKeyFor: signingKeyFor,
   signingKeyForAsync: signingKeyForAsync,
@@ -1261,5 +1353,9 @@ module.exports = {
   stsKeysFor: stsKeysFor,
   // The count as a word, for the refusal sentences that name what they
   // know. See the block above it for the two sentences that went stale.
-  numberWord: numberWord
+  numberWord: numberWord,
+  // The recording response object and its one-sentence reading of what
+  // the handler tried to say. See the block above them.
+  capturingResponse: capturingResponse,
+  capturedDescription: capturedDescription
 };

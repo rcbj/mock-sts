@@ -154,6 +154,16 @@ const tlsServer = require('../tls/tls_server');
 const esc = xmlEscape;
 const xmldsig = stsCrypto.xmldsig;
 const scimAuth = require('../scim/scim_auth');
+// The Shared Signals event catalogue and its gate. BOTH ARE LIBRARIES that
+// register no route — `ssf/ssf.js`, which does, is deliberately NOT required
+// here: server.js loads it after this module, so requiring it would register
+// every /ssf endpoint and the well-known document AT THIS POINT in the router
+// (rule 1), ahead of ldap, scim and spiffe. What this page needs is the
+// algorithm and the scheme list, and those are exactly what the two leaves
+// hold. `ssf_auth` requires `oauth-oidc/dpop`, which this file already
+// requires two lines up, so it is a cache hit like every other require here.
+const ssfEvents = require('../ssf/ssf_events');
+const ssfAuth = require('../ssf/ssf_auth');
 
 // ---------------------------------------------------------------------------
 // THE IDENTITY SERVICES THIS MOCK ADVERTISES, AND WHAT EACH ONE DOES WITH
@@ -483,6 +493,59 @@ const FAMILIES = [
         })],
         ['HOBA', ['RSA-SHA256 (algorithm ' +
                   String(scimAuth.HOBA_ALG_RSA_SHA256) + ')']]
+      ];
+    } },
+
+  { name: 'Shared Signals',
+    signs: 'EVERY SECURITY EVENT TOKEN, and it is the document in this ' +
+           'service most worth thinking about the algorithm for. A SET ' +
+           'records that something HAPPENED and RFC 8417 section 4.1.4 ' +
+           'forbids it to expire, so it is read long after it was written — ' +
+           'which is the case a harvest-now-decrypt-later argument is ' +
+           'actually about. The signature goes through the SAME signer every ' +
+           'other JWT here goes through, so `ssf.signingAlgorithm` reaches ' +
+           'the whole table: RS256 by default, the PS and ES families, ' +
+           'EdDSA, and the post-quantum ones — ML-DSA at three sizes, ' +
+           'SLH-DSA at two, and the six composite ML-DSA + traditional ' +
+           'algorithms. An SLH-DSA signature takes seconds and runs on the ' +
+           'worker pool, so this service answers throughout and the receiver ' +
+           'waits.',
+    verifies: 'A Security Event Token pushed AT this service at ' +
+              '`POST /ssf/receive` — the roles reversed — against its own ' +
+              'JWKS, which is the only key it has. A SET signed by anybody ' +
+              'else is reported as NOT VERIFIABLE HERE rather than as ' +
+              'invalid, and is ACCEPTED anyway unless ' +
+              '`ssf.receiveRequireSignature` is on: a receiver that refused ' +
+              'could not show anybody what arrived or why it did not verify, ' +
+              'which is the question being asked. It also verifies the ' +
+              'access token on every stream management call, through the ' +
+              'same check every other protected endpoint here uses.',
+    encrypts: 'Nothing. SSF has no encrypted-SET profile — RFC 8417 permits ' +
+              'a JWE-wrapped SET and neither this service nor any deployed ' +
+              'transmitter emits one, so what protects an event in transit ' +
+              'is TLS on the delivery endpoint, which is why ' +
+              '`ssf.pushAllowInsecure` ships OFF.',
+    decrypts: 'Nothing, for the same reason.',
+    hashes: 'Whatever the chosen signature algorithm implies, and nothing of ' +
+            'its own: a SET carries no digest of anything the way an ID ' +
+            'Token carries `at_hash`.',
+    whatItDoesNot: 'IT SIGNS BADLY ON PURPOSE WHEN ASKED TO. ' +
+                   '`ssf.breakSetSignature` changes ONE CHARACTER of the ' +
+                   'signature after signing, so a receiver that does not ' +
+                   'verify accepts an event nothing signed. It is a ' +
+                   'character rather than a truncation deliberately: a ' +
+                   'truncated signature fails the base64url decode and is ' +
+                   'reported as a MALFORMED token, which is a different bug ' +
+                   'from a bad one for whoever is being tested.',
+    envelopes: ['jws', 'jwt', 'jwk', 'dpop', 'tls'],
+    algorithms: function () {
+      return [
+        ['Security Event Tokens, right now', [ssfEvents.signingAlgorithm()]],
+        ['Any of, through ssf.signingAlgorithm',
+         stsCrypto.JWS_ASYMMETRIC_ALGS],
+        ['Authentication schemes', ssfAuth.SCHEMES.map(function (one) {
+          return one.name;
+        })]
       ];
     } },
 

@@ -162,7 +162,8 @@ const crypto = require('crypto');
 // service since 2026-08-27.
 const stsCrypto = require('../common/crypto');
 
-const { log, baseUrlOf, parseBody, hasScope } = require('../common/helpers');
+const { log, baseUrlOf, parseBody, hasScope, capturingResponse,
+        capturedDescription } = require('../common/helpers');
 const config = require('../common/config');
 const dpop = require('../oauth-oidc/dpop');
 const mtls = require('../oauth-oidc/mtls');
@@ -543,34 +544,6 @@ function authorizationScheme(req) {
 // challenge are how a wallet learns to retry, and dropping them would leave a
 // conforming client unable to proceed with no error to point at.
 // ---------------------------------------------------------------------------
-function capturingResponse() {
-  log.debug("Entering capturingResponse().");
-  const captured = { status: 0, headers: {}, body: '' };
-  const res = {
-    set: function (name, value) { captured.headers[name] = value; return res; },
-    setHeader: function (name, value) { captured.headers[name] = value; return res; },
-    status: function (code) { captured.status = code; return res; },
-    type: function () { return res; },
-    send: function (body) { captured.body = String(body === undefined ? '' : body); return res; },
-    json: function (body) { captured.body = JSON.stringify(body); return res; },
-    end: function (body) { captured.body = String(body === undefined ? '' : body); return res; }
-  };
-  log.debug("Leaving capturingResponse().");
-  return { res: res, captured: captured };
-}
-
-function capturedDescription(captured) {
-  try {
-    const parsed = JSON.parse(captured.body || '{}');
-    return String(parsed.error_description || parsed.error || '').trim();
-  } catch (e) {
-    // Not JSON. presentedAccessToken() always writes JSON today, and a change
-    // there must not turn a 401 into an exception here — the raw text is a
-    // better answer than nothing.
-    return String(captured.body || '').trim();
-  }
-}
-
 function attemptBearer(req, ctx) {
   log.debug("Entering attemptBearer().");
   const scheme = authorizationScheme(req);

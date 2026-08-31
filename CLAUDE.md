@@ -32,6 +32,7 @@ files did not change; the paths did.
 | `ldap/` | The embedded directory. Also the STORE for people, groups, applications and the SPIFFE registry. |
 | `persistence/` | **THE ONE PLACE THIS SERVICE WRITES ANYTHING DOWN, since 2026-08-27, and the first time it ever has.** Three modes — `memory` (the default, and what this service always did), `ldif` (an RFC 2849 file per realm, no database) and `postgres` — behind one driver interface. THREE THINGS PERSIST: the embedded directory, the trust realm registry, and the runtime appconfig overrides. **NOTHING THIS SERVICE MINTS EVER DOES**, in any mode, because the signing key is regenerated on every start. It is PERSISTENCE and not COORDINATION, and `persistence/CLAUDE.md` says what the second one still needs. |
 | `scim/` | `/scim/v2`, its authentication, and its attribute mapping. |
+| `ssf/` | **The Shared Signals Framework (OpenID SSF 1.0, final September 2025), and the one family here that TALKS BACK** — every other answers a request, and this one agrees a STREAM and then delivers a Security Event Token at the moment something happens. Six modules: the routes, an RFC 9493 subject grammar written out here rather than vendored (a grammar is a READING, and one implementation read by both ends hides the misunderstandings they share), the RFC 8417 envelope, the streams and their queues per realm, the gate, and **the SECOND outbound request in this repository** — which is a weaker case than federation's and `ssf/CLAUDE.md` argues rather than cites, because RFC 8935 push IS the receiver telling the transmitter where to post. **SSF is the PIPE and not the vocabulary**: it defines two events of its own, both about the pipe, and CAEP and RISC are parts two and three. |
 | `spiffe/` | Six libraries, one server module, and the vendored `protos/`. |
 | `tls/` | The 8443 and 9443 listeners, and the certificate three other sockets share. |
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
@@ -57,7 +58,7 @@ site; this file and the directory files are the maintainer-facing half.
 
 ## Overview
 
-A mock identity service that speaks sixteen protocol families — Kerberos v5 (a KDC on
+A mock identity service that speaks seventeen protocol families — Kerberos v5 (a KDC on
 raw TCP/UDP 88 and over MS-KKDCP, plus a Kerberos-protected service and the same
 acceptor over HTTP as **SPNEGO**, RFC 4559/4178), WS-Trust
 1.0–1.4, **SAML 2.0** (assertions, and the Web Browser SSO profile over all three
@@ -79,7 +80,11 @@ both, built on the node-ldapjs SUBMODULE and used unmodified), **SCIM 2.0**
 same directory, entry for entry, with no store of its own), and **TLS / mutual TLS**
 (two HTTPS listeners of its own, 8443 and 9443, whose whole content is what the
 SERVER saw of the connection — see README.md; and, when `global.https` is set,
-the main port too, on the same certificate), and **SPIFFE** (an issuing authority
+the main port too, on the same certificate), and **SHARED SIGNALS** (SSF 1.0 — a TRANSMITTER: stream
+management, subjects in all eight RFC 9493 formats and the complex subject,
+verification, and delivery by RFC 8935 push or RFC 8936 poll, plus a receiver
+of its own so that a client can be the transmitter), and **SPIFFE** (an issuing
+authority
 for one trust domain, in all three of its server-side shapes: the bundle endpoint
 over plain HTTPS, and the **Workload API** and **SPIRE Server API** over gRPC on
 FOUR MORE SOCKETS — a Unix socket and a TCP port each). It exists to exercise
@@ -313,6 +318,20 @@ what each module is for is that directory's `CLAUDE.md`.
    carries ONE function, the whole report, so that the page and
    `/admin-api/crypto` cannot disagree about what this service's cryptography
    is.
+
+   **`admin.js`'s EIGHTH SLOT IS `setSignalsReporter()`, FILLED BY
+   `ssf/ssf.js`, AND IT IS THE FOURTH TO PASS THAT TEST BOTH WAYS ROUND.** A
+   require from `admin.js` to that module would CLOSE A CYCLE — it requires
+   `admin.js` for the page shell and the gate — and a require from
+   `mgmt-api/admin_api.js` (19) to it would MOVE ROUTES: every `/ssf` endpoint
+   and the `/.well-known/ssf-configuration` document ahead of the management
+   API's own and of ldap, scim and spiffe. It carries ONE object, validated
+   whole, because a filler that installed the reader without the action would
+   leave `/admin/ssf` able to LIST streams and unable to change any of them.
+   **Its `action` returns a PROMISE and it is the only slot here that does**:
+   transmitting a Security Event Token signs a JWS — possibly on the worker
+   pool — and then POSTs it to somebody else's endpoint, and answering before
+   either had happened would be the page reporting "sent" about nothing.
 
    **THAT MODULE OFFERS A SLOT OF ITS OWN, `setProtocolFamilies()`, AND
    `sts_metadata.js` FILLS IT** — the only slot in this service that is not on
@@ -620,6 +639,7 @@ require can see at a glance whether they are about to break one.
 | 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills five slots at require time. | `ldap/CLAUDE.md` |
 | 22 | `scim/scim` | **After `ldap/ldap_server`** — a plain require, and rule 3e's test is why. | `scim/CLAUDE.md` |
 | 23 | `spiffe/spiffe_server` | **After `ldap/ldap_server` and `tls/tls_server`.** Its registry's store is the directory. | `spiffe/CLAUDE.md` |
+| 23b | `ssf/ssf` | **After `admin-ui/admin`**, whose EIGHTH slot it fills, and whose page shell and gate it requires — so a require the other way would close a cycle, and one from `mgmt-api/admin_api.js` would move every `/ssf` route and the well-known document ahead of the management API's own. Rule 3e's test answers yes both ways. It starts nothing and holds no socket. | `ssf/CLAUDE.md` |
 | 23a | `logout/logout` | **Second to last.** It READS NINE MODULES — the session store, the token registry, the codes, the offers, the directory's connections, the principal database — so it must come after every one of them. Nine plain requires and no slot; the one exception is `admin.js`, which it fills. | `logout/CLAUDE.md` |
 | 24 | `sts_metadata` | **Last, for everybody.** It reads the router to list what everything else registered. | this file, below |
 
@@ -874,6 +894,16 @@ family list against THIS page's `PROTOCOLS` in both directions, which is why
 therefore costs a card here, an entry in `ENDPOINTS`, AND a row in
 `crypto_metadata.js`'s `FAMILIES`; `tests/vendored/admin_api.js` fails on the
 third being missing. See `admin-ui/CLAUDE.md`.
+
+**`ssf/CLAUDE.md` CARRIES THE FULL LIST OF WHAT ADDING THE SEVENTEENTH FAMILY
+ACTUALLY COST**, which is nine files rather than the three named above — the
+config group and its regenerated defaults, the applications registry (including
+a NEW attribute ROLE, because a push endpoint is where an EVENT goes and calling
+it a browser redirect would make a table this repository reads literally say
+something false), an audit category, the console slot and page, the crypto
+report row, the management API's operations and their schema, the two OAuth
+scopes, and the require. It is written down there rather than here because it is
+the record of one family; this file is the rule.
 
 Reading the router has one blind spot: **a protocol that registers no route is
 invisible to it**, which is exactly what the KDC's raw TCP/UDP 88 listeners are — and

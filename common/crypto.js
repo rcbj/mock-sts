@@ -1025,6 +1025,42 @@ function nodeParamsFor(spec, key) {
 }
 
 // ---------------------------------------------------------------------------
+// THE PROTECTED HEADER THE TWO HAND-ROLLED SIGNERS BUILD.
+//
+// `jsonwebtoken` merges `options.header` into the header it makes, so the
+// library path has always honoured a caller's `typ`. THE OTHER TWO DID NOT:
+// the `ownSigner` branch (EdDSA and ES256K, the two the library refuses) and
+// the post-quantum branch each hard-coded `typ: 'JWT'` and ignored
+// `options.header` entirely — so the SAME call produced a different header
+// depending on which algorithm was chosen, and no caller could have seen that
+// coming.
+//
+// **IT COST A REAL DEFECT AND THAT IS WHY THIS FUNCTION EXISTS.** A Security
+// Event Token (RFC 8417 section 2.2) carries `typ: "secevent+jwt"`, and a
+// receiver that dispatches on the media type — and several do — drops one
+// without it with no error anybody sees. `ssf/ssf_events.js` asks for that
+// header; on RS256 it got it and on EdDSA, ES256K and every post-quantum
+// algorithm it silently did not, which is precisely the shape of failure this
+// module was consolidated to end.
+//
+// `alg` and `kid` are this function's to set and a caller may not override
+// them: the algorithm is what was actually used, and the kid names the key
+// that was actually used. Everything else in `options.header` is merged.
+// ---------------------------------------------------------------------------
+function protectedHeaderFor(algorithm, options) {
+  log.debug('Entering protectedHeaderFor(). alg=' + algorithm);
+  const asked = (options && options.header && typeof options.header ===
+    'object') ? options.header : {};
+  const header = Object.assign({ typ: 'JWT' }, asked,
+      { alg: algorithm });
+  if (options && options.keyid) {
+    header.kid = options.keyid;
+  }
+  log.debug('Leaving protectedHeaderFor(). typ=' + header.typ);
+  return header;
+}
+
+// ---------------------------------------------------------------------------
 // The JWS framing a post-quantum signature goes over: header, payload,
 // base64url. The same shape as the `ownSigner` branch of signJws() below —
 // written out here rather than shared with the debugger's copy ON PURPOSE, see
@@ -1034,10 +1070,7 @@ function nodeParamsFor(spec, key) {
 // ---------------------------------------------------------------------------
 function pqSigningInput(payload, algorithm, options) {
   log.debug('Entering pqSigningInput(). alg=' + algorithm);
-  const header = { alg: algorithm, typ: 'JWT' };
-  if (options.keyid) {
-    header.kid = options.keyid;
-  }
+  const header = protectedHeaderFor(algorithm, options);
   const body = Object.assign({}, payload);
   if (body.iat === undefined) {
     body.iat = Math.floor(Date.now() / 1000);
@@ -1073,10 +1106,7 @@ function signJws(payload, key, opts) {
     // node's OpenSSL, with the same claim conveniences the library gives the
     // others so that a token does not gain or lose `iat` depending on which
     // algorithm signed it.
-    const header = { alg: algorithm, typ: 'JWT' };
-    if (options.keyid) {
-      header.kid = options.keyid;
-    }
+    const header = protectedHeaderFor(algorithm, options);
     const body = Object.assign({}, payload);
     if (body.iat === undefined) {
       body.iat = Math.floor(Date.now() / 1000);
@@ -2348,6 +2378,7 @@ module.exports = {
   JWS_SIGNING_ALGS: JWS_SIGNING_ALGS,
   JWS_ASYMMETRIC_ALGS: JWS_ASYMMETRIC_ALGS,
   jwsSpec: jwsSpec,
+  protectedHeaderFor: protectedHeaderFor,
   verifyCompactJws: verifyCompactJws,
   checkJwtClaims: checkJwtClaims,
   JWE_ALG: JWE_ALG,

@@ -285,6 +285,15 @@ function asMetadata(req, raw) {
       config.value('scim.enabled') !== false
         ? [String(config.value('scim.scopeRead') || 'scim:read'),
            String(config.value('scim.scopeWrite') || 'scim:write')]
+        : []).concat(
+      // The two SSF scopes, on the same terms and for the same reason: a
+      // receiver needs a token before it can create a stream, and a scope
+      // this document does not advertise is one a client has to be told
+      // about out of band. They go only where the family is on, so the
+      // promise and what is behind it stay together.
+      config.value('ssf.enabled') !== false
+        ? [String(config.value('ssf.authScopeRead') || 'ssf:read'),
+           String(config.value('ssf.authScopeWrite') || 'ssf:write')]
         : []),
     // All three, and form_post is the one that was advertised here and NOT
     // implemented for a long time — every request got a 302 whatever it asked

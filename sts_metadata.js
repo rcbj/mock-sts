@@ -308,6 +308,72 @@ const SPECS = [
   // requirements and use cases (no wire format at all), 7643 is the schema, and 7644 is
   // the protocol. A client author who has read only one of them has usually read 7644
   // and is looking for the attribute characteristics, which are in 7643.
+  // --- The Shared Signals Framework and the four IETF documents it is
+  //     assembled from. SSF is the PIPE; CAEP and RISC are the vocabularies
+  //     spoken over it and neither is here yet, which is why neither is in
+  //     this list — a specification named here and not implemented is an IDLE
+  //     CLAIM, and tests/vendored/sts_metadata.js fails the page for one.
+  { id: 'ssf', name: 'OpenID Shared Signals Framework 1.0',
+    where: 'OpenID Foundation',
+    url: 'https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html',
+    coverage: 'partial: the transmitter half in full — the configuration metadata at ' +
+              '/.well-known/ssf-configuration, the stream management API (create, read, ' +
+              'replace, merge, delete), the status endpoint with all three statuses, add ' +
+              'and remove subject, the verification endpoint, both delivery methods, and ' +
+              'both of the two event types SSF defines of its own (verification and ' +
+              'stream updated). Complex subjects and critical_subject_members are ' +
+              'implemented. Section 8 authorization is two schemes rather than an open ' +
+              'list — an OAuth 2.0 access token with ssf:read or ssf:write, and HTTP ' +
+              'Basic — published in authorization_schemes. NOT covered, each ' +
+              'deliberately and each on /ssf: nothing here GENERATES an event on its own, ' +
+              'so every SET was asked for; a failed push is never retried, because a ' +
+              'client that answers 500 then 202 would look from its own logs like a ' +
+              'client that works; streams are in memory and die with the process; and ' +
+              'nothing is verified about a subject, so a stream may name somebody who has ' +
+              'never been here.' },
+  { id: 'rfc8417', name: 'RFC 8417 — Security Event Token (SET)',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc8417',
+    coverage: 'full for what this service emits: every event travels as a signed JWT with ' +
+              'typ=secevent+jwt, an events map keyed by event-type URI, iss/jti/iat/aud, ' +
+              'the RFC 9493 subject in sub_id, and optional txn and toe. THERE IS NO exp ' +
+              'AND THAT IS SECTION 4.1.4 RATHER THAN AN OMISSION — a SET records that ' +
+              'something HAPPENED and a fact does not stop being true. The `sub` claim ' +
+              'section 2.2 discourages is absent unless ssf.legacySubClaim is turned on, ' +
+              'which is a deliberate defect for testing a client written against a ' +
+              'transmitter that gets it wrong.' },
+  { id: 'rfc9493', name: 'RFC 9493 — Subject Identifiers for Security Event Tokens',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc9493',
+    coverage: 'full: all eight formats — account, email, issuer_subject_id, opaque, ' +
+              'phone_number, decentralized_identifier, uri and aliases — with each ' +
+              'format\'s CLOSED member set enforced, which is the half implementations ' +
+              'get wrong: a subject carrying an extra member is one a conforming receiver ' +
+              'MUST reject, so this service refuses it and names the member. The ' +
+              'section 3.2.8 ban on nesting an aliases identifier inside another is ' +
+              'enforced rather than flattened.' },
+  { id: 'rfc8935', name: 'RFC 8935 — Push-Based Delivery of Security Event Tokens',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc8935',
+    coverage: 'partial: this service POSTs each SET as application/secevent+jwt with the ' +
+              'receiver\'s configured Authorization header, treats 202 as delivery, and ' +
+              'reads a 400 {err, description} as the receiver REFUSING — which is a ' +
+              'different outcome from a network failure and is recorded as one. It also ' +
+              'RECEIVES on that profile at POST /ssf/receive, the roles reversed, so a ' +
+              'client can be the transmitter. NOT covered: retries, deliberately — see ' +
+              'ssf/ssf_http.js.' },
+  { id: 'rfc8936', name: 'RFC 8936 — Poll-Based Delivery of Security Event Tokens',
+    where: 'IETF',
+    url: 'https://www.rfc-editor.org/rfc/rfc8936',
+    coverage: 'partial: the poll endpoint answers {sets, moreAvailable}, honours ' +
+              'maxEvents against a configured ceiling, and takes both ack (what the ' +
+              'receiver stored) and setErrs (what it REFUSED) — the second of which also ' +
+              'clears the queue, because a receiver that could not process an event will ' +
+              'not process it next time and redelivering would poll-loop. NOT covered: ' +
+              'long polling. returnImmediately is honoured as "yes" always, which the ' +
+              'specification permits and which keeps a mock from holding a socket open ' +
+              'to demonstrate nothing.' },
+
   { id: 'rfc7642', name: 'SCIM: Definitions, Overview, Concepts, and Requirements (RFC 7642)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc7642',
@@ -1076,6 +1142,113 @@ const ENDPOINTS = [
   // way down, so every one of its endpoints is a route on the plain listener and this
   // walk can see all of them. That is why the routes are registered against the shared
   // app one by one rather than behind a mounted express Router, which this walk skips.
+  // --- Shared Signals (SSF) ---
+  //
+  // Note what these rows are NOT: they are not the paths a receiver is meant
+  // to hard-code. SSF publishes every endpoint in its configuration metadata,
+  // so a conforming receiver discovers them and none of these names is
+  // normative. They are here because this page walks the live router, and a
+  // route that answers and is undescribed fails the drift check.
+  { path: '/.well-known/ssf-configuration', group: 'Shared Signals',
+    name: 'Transmitter configuration metadata',
+    specs: ['ssf'],
+    what: 'What this transmitter is and where its endpoints are: the issuer, the JWKS ' +
+          'every Security Event Token verifies against, the two delivery methods, the ' +
+          'stream management, status, subject and verification endpoints, the complex ' +
+          'subject members a receiver MUST understand, what an empty subject list means, ' +
+          'and the authorization schemes these endpoints accept. NEVER GATED, whatever ' +
+          'ssf.authRequired says, and that is not laxness: a receiver has to be able to ' +
+          'read what the endpoints are before it can authenticate to one, and a ' +
+          'transmitter whose discovery document needs a credential is one nothing can ' +
+          'bootstrap against. It also answers while ssf.enabled is OFF, so a receiver can ' +
+          'tell "this service does not speak SSF" from "the path is wrong".' },
+  { path: '/ssf', group: 'Shared Signals', name: 'What the Shared Signals surface is',
+    specs: ['ssf', 'rfc8417', 'rfc9493', 'rfc8935', 'rfc8936'],
+    what: 'NOT an SSF endpoint — a real transmitter publishes none of this. What the ' +
+          'framework is FOR (SAML and OpenID Connect authenticate at ONE INSTANT, and ' +
+          'the relying party then holds a session for hours whatever happens next), the ' +
+          'endpoints, both event types with every member, all eight RFC 9493 subject ' +
+          'formats with an example of each, the six complex-subject members, the ' +
+          'authentication schemes, the streams that exist right now, the ten things you ' +
+          'can do to make it fail, and the five things it deliberately does not do. The ' +
+          'one to read first: SSF IS THE PIPE AND NOT THE VOCABULARY — it defines two ' +
+          'events of its own, both about the pipe, and CAEP and RISC are the vocabularies ' +
+          'spoken over it. Add ?format=json.' },
+  { path: '/ssf/stream', group: 'Shared Signals', name: 'The stream management API',
+    specs: ['ssf', 'rfc9493'],
+    what: 'One path and five methods, which is the specification\'s own shape: the ' +
+          'configuration endpoint IS the resource. POST creates a stream — this service ' +
+          'mints the stream_id and sets the iss, and answers with events_delivered, the ' +
+          'INTERSECTION of what the receiver requested and what this transmitter ' +
+          'supports, which is the member most often confused with events_requested. GET ' +
+          'reads one (?stream_id=) or lists them all. PUT REPLACES and PATCH MERGES, and ' +
+          'the difference is real: a PUT that behaved like a PATCH would let a receiver ' +
+          'believe it had cleared events_requested when it had not. DELETE removes it. ' +
+          'Needs ssf:write for everything but the GET.' },
+  { path: '/ssf/status', group: 'Shared Signals', name: 'A stream\'s status',
+    specs: ['ssf'],
+    what: 'Read (GET) or set (POST) a stream\'s status: enabled, paused or disabled. The ' +
+          'middle one is the one worth knowing about — a PAUSED stream keeps QUEUEING and ' +
+          'delivers nothing, so what happened while it was paused is still there when it ' +
+          'is enabled again, while a DISABLED one drops it. That is the difference ' +
+          'between "I was not listening" and "it did not happen", which is the whole ' +
+          'reason a Shared Signals receiver has a pause. A change here also emits a ' +
+          'stream-updated event ON the stream, which is the one event a receiver gets ' +
+          'without asking for it.' },
+  { path: '/ssf/subjects/add', group: 'Shared Signals', name: 'Add a subject to a stream',
+    specs: ['ssf', 'rfc9493'],
+    what: 'Names somebody the stream is about, in any of RFC 9493\'s eight formats or as ' +
+          'a COMPLEX subject naming a user AND a device AND a session at once. Answers ' +
+          '204 with no body, which is what the specification says and is worth not ' +
+          '"improving". The path uses a SLASH where SSF\'s own examples write ' +
+          '"subjects:add", because express reads a leading colon as a route parameter — ' +
+          'the metadata publishes what is actually registered, so nothing about that is ' +
+          'visible on the wire.' },
+  { path: '/ssf/subjects/remove', group: 'Shared Signals',
+    name: 'Remove a subject from a stream',
+    specs: ['ssf', 'rfc9493'],
+    what: 'The other half, and IDEMPOTENT: removing a subject that is not there is a 204 ' +
+          'rather than a 404, because a receiver tidying up after a crash must not have ' +
+          'to know what it had already removed.' },
+  { path: '/ssf/verify', group: 'Shared Signals', name: 'Ask for a verification event',
+    specs: ['ssf', 'rfc8417'],
+    what: 'THE ONLY END-TO-END TEST A STREAM HAS. Everything else a receiver can do — ' +
+          'create the stream, read it back, add a subject — exercises the management API ' +
+          'and proves nothing about whether an event can actually be delivered. The ' +
+          '`state` a receiver sends comes back UNCHANGED inside the event and is the only ' +
+          'thing tying the two together. The rate limit this transmitter PUBLISHES ' +
+          '(min_verification_interval) is not enforced unless ' +
+          'ssf.verificationRateLimit is on, which is what makes the 429 reachable.' },
+  { path: '/ssf/poll', group: 'Shared Signals', name: 'Poll delivery (RFC 8936)',
+    specs: ['rfc8936', 'rfc8417'],
+    what: 'The receiver comes HERE, so nothing is dialled — which is why a browser can be ' +
+          'a receiver over this method and cannot over push. Answers {sets, ' +
+          'moreAvailable}. `ack` names what the receiver stored and `setErrs` what it ' +
+          'REFUSED, and both come off the queue: a receiver that could not process an ' +
+          'event will not process it next time either, so redelivering would poll-loop ' +
+          'forever. The refusal is recorded on the stream instead, where a person can ' +
+          'see it. RFC 8936 has no stream_id member because a real poll endpoint is per ' +
+          'stream; this transmitter publishes one URL, so the id goes in the body.' },
+  { path: '/ssf/receive', group: 'Shared Signals',
+    name: 'A Security Event Token pushed AT this service',
+    specs: ['rfc8935', 'rfc8417'],
+    what: 'THE ROLES REVERSED, and not an SSF endpoint: a transmitter has to have ' +
+          'somewhere to push, so this service is a RECEIVER here for a client\'s benefit. ' +
+          'It ACCEPTS a SET whose signature does not verify and reports why, which is ' +
+          'exactly right for a debugger — a receiver that refused could not show anybody ' +
+          'what arrived or why it did not verify, which is the question being asked. ' +
+          'ssf.receiveRequireSignature turns the 400 invalid_key on, which is what a real ' +
+          'receiver does. The verification is against THIS service\'s own key, the only ' +
+          'one it has, so a SET signed by somebody else is "not verifiable here" rather ' +
+          'than invalid.' },
+  { path: '/ssf/received', group: 'Shared Signals', name: 'What has been pushed here',
+    specs: ['rfc8935'],
+    what: 'Not an SSF endpoint either. Everything POST /ssf/receive has taken, with what ' +
+          'each one decoded to, whether its signature verified and whether it carried the ' +
+          'application/secevent+jwt media type RFC 8417 section 2.3 specifies — a ' +
+          'receiver that dispatches on the type, and several do, drops a SET sent as a ' +
+          'plain JWT with no error anybody sees.' },
+
   { path: '/scim', group: 'SCIM', name: 'What the SCIM surface is',
     specs: ['rfc7642', 'rfc7643', 'rfc7644', 'rfc7235', 'rfc7617', 'rfc7616',
             'rfc7486', 'rfc4511', 'rfc4519'],
@@ -3764,6 +3937,35 @@ const PROTOCOLS = [
           'bypass for every protocol in this process. A relationship is ' +
           'created disabled, at /admin/federation or POST ' +
           '/admin-api/federation/create.' },
+  { name: 'Shared Signals', groups: ['Shared Signals'],
+    specs: ['ssf', 'rfc8417', 'rfc9493', 'rfc8935', 'rfc8936'],
+    what: 'A Shared Signals TRANSMITTER (OpenID SSF 1.0, final September ' +
+          '2025), and the one protocol family here that talks back. Every ' +
+          'other family answers a request; this one agrees a STREAM with a ' +
+          'receiver and then delivers a Security Event Token at the moment ' +
+          'something happens.\n\n**IT IS THE PIPE AND NOT THE ' +
+          'VOCABULARY**, which is the thing to know before looking for an ' +
+          'event about a session. SSF defines how two parties agree a ' +
+          'stream, who the events are about (RFC 9493 subject identifiers, ' +
+          'all eight formats plus the complex subject), what they travel in ' +
+          '(RFC 8417 Security Event Tokens) and how they get there (RFC ' +
+          '8935 push, RFC 8936 poll) — and exactly TWO events of its own, ' +
+          'both about the pipe: verification and stream updated. The ' +
+          'vocabularies are CAEP (what happened to a session) and RISC ' +
+          '(what happened to an account), and neither is implemented here ' +
+          'yet.\n\n**NOTHING GENERATES AN EVENT ON ITS OWN.** Every SET ' +
+          'this service transmits was asked for — at the verification ' +
+          'endpoint, on /admin/ssf or through the management API — and that ' +
+          'is honest rather than unfinished: SSF defines no event about a ' +
+          'session, so a transmitter that invented one would be inventing a ' +
+          'vocabulary.',
+    sockets: 'It is also the only protocol family here that makes an ' +
+             'OUTBOUND request. Push delivery POSTs to a URL the RECEIVER ' +
+             'chose, which is a weaker position than federation\'s ' +
+             'back-channel and ssf/ssf_http.js argues rather than cites: ' +
+             'RFC 8935 push IS the receiver telling the transmitter where ' +
+             'to post. ssf.pushDelivery turns it off entirely, and poll ' +
+             'delivery dials nothing at all.' },
   { name: 'SAML 2.0', groups: ['SAML 2.0'],
     specs: ['saml2', 'saml2-bindings', 'saml2-profiles', 'saml2-metadata', 'xmldsig'],
     what: 'A full identity provider since 2026-08-24: the Web Browser SSO ' +

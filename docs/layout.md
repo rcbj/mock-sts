@@ -28,6 +28,9 @@ ldap/                the embedded directory
 persistence/         the only place this service writes anything down:
                      memory | ldif (RFC 2849) | postgres
 scim/                /scim/v2, its authentication, its attribute mapping
+ssf/                 Shared Signals: the transmitter, the RFC 9493 subject
+                     grammar, the RFC 8417 envelope, the streams, the gate,
+                     and the second outbound request in this repository
 spiffe/              six libraries, one server module, the vendored protos
 tls/                 the 8443 and 9443 listeners
 oid4vc/              OpenID4VCI, OpenID4VP, DID Core
