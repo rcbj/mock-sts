@@ -247,7 +247,88 @@ function fingerprintOf(pem) {
   return stsCrypto.certificateThumbprint(pem, { format: 'colon-hex' });
 }
 
-const SERVER_CERTIFICATE = makeServerCertificate();
+// ---------------------------------------------------------------------------
+// AN ML-DSA SERVER CERTIFICATE BESIDE THE RSA ONE, WHEN ASKED FOR.
+//
+// `tls.certificateAlgorithms` names what the listeners present. More than one
+// is the setting worth having: OpenSSL 3.5 serves whichever certificate
+// matches the signature algorithms the CLIENT offered, so one port answers an
+// ordinary client with RSA and a post-quantum one with ML-DSA — which is how a
+// migration is actually run, and something a debugger can otherwise only be
+// told about.
+//
+// The ML-DSA certificate is built by common/crypto.js's own encoder over
+// node's OpenSSL, not by node-forge (which cannot represent the key) and not
+// by anything vendored from the debugger (which would make the two sides share
+// one reading of RFC 9881 — see the note on selfSignedMlDsaCertificate()).
+//
+// WHAT IT COSTS, and it is the reason the default is RSA alone: an ML-DSA
+// certificate is refused by everything older than OpenSSL 3.5. The `openssl`
+// binary in these images is 3.0 and cannot even print it, and a client that
+// offers no ML-DSA signature algorithm gets `no suitable signature algorithm`
+// if there is no classical certificate to fall back to.
+function makeMlDsaServerCertificate(algorithm) {
+  log.debug('Entering makeMlDsaServerCertificate(). algorithm=' + algorithm);
+  const built = stsCrypto.selfSignedMlDsaCertificate({
+    algorithm: algorithm,
+    commonName: TLS_HOSTNAMES[0] || 'localhost',
+    organizationName: 'mock-sts',
+    serialNumber: '04',
+    years: 2,
+    dnsNames: TLS_HOSTNAMES,
+    ipAddresses: TLS_IPS
+  });
+  log.debug('Leaving makeMlDsaServerCertificate().');
+  return {
+    algorithm: algorithm,
+    privateKeyPem: built.privateKeyPem,
+    certPem: built.certPem,
+    subject: 'CN=' + (TLS_HOSTNAMES[0] || 'localhost') + ', O=mock-sts',
+    names: TLS_HOSTNAMES.concat(TLS_IPS),
+    fingerprint256: fingerprintOf(built.certPem),
+    notAfter: built.notAfter.toISOString()
+  };
+}
+
+// Every certificate the listeners present, in the order the setting names
+// them. The FIRST is what every existing caller means by "the server
+// certificate" — GET /tls/server-certificate still returns it — and the rest
+// are additional choices OpenSSL may make on a client's behalf.
+const SERVER_CERTIFICATES = (function buildServerCertificates() {
+  const wanted = (config.value('tls.certificateAlgorithms') || ['rsa'])
+    .map(function (name) {
+      return String(name || '').trim().toLowerCase();
+    })
+    .filter(function (name) {
+      return !!name;
+    });
+  const built = [];
+  (wanted.length ? wanted : ['rsa']).forEach(function (name) {
+    if (name === 'rsa') {
+      built.push(Object.assign({ algorithm: 'rsa' }, makeServerCertificate()));
+      return;
+    }
+    if (!stsCrypto.ML_DSA_OIDS[name]) {
+      // Named and ignored rather than fatal: this is a mock, and a typo in a
+      // certificate algorithm should not stop the whole service from starting
+      // — but it must be loud, because the alternative is a listener quietly
+      // presenting one fewer certificate than the operator asked for.
+      log.warn('tls: ignoring unknown certificate algorithm "' + name +
+               '". Known: rsa, ' + Object.keys(stsCrypto.ML_DSA_OIDS)
+                 .join(', ') + '.');
+      return;
+    }
+    built.push(makeMlDsaServerCertificate(name));
+  });
+  if (!built.length) {
+    log.warn('tls: no usable certificate algorithm was configured; falling ' +
+             'back to rsa.');
+    built.push(Object.assign({ algorithm: 'rsa' }, makeServerCertificate()));
+  }
+  return built;
+})();
+
+const SERVER_CERTIFICATE = SERVER_CERTIFICATES[0];
 
 // ---------------------------------------------------------------------------
 // ONE CERTIFICATE FOR EVERY TLS SOCKET IN THIS PROCESS.
@@ -294,7 +375,19 @@ function describePem(pem) {
     // an anchor — forge and OpenSSL do not accept exactly the same set, and
     // refusing here on forge's opinion would reject anchors that work. The
     // subject is a label on a page, not a check.
-    log.warn('tls: an anchor could not be parsed for display: ' + e.message);
+    //
+    // AND THE COMMONEST CASE IS NOW A POST-QUANTUM ANCHOR. node-forge has no
+    // ML-DSA and cannot parse a certificate signed with one at all, while the
+    // OpenSSL underneath this process reads it perfectly — so ask OpenSSL
+    // before giving up, or every ML-DSA root a debugger uploads is labelled
+    // '(unreadable)' on a page whose whole job is to say what was trusted.
+    try {
+      subject = new crypto.X509Certificate(pem).subject
+          .split('\n').join(', ');
+    } catch (openSslError) {
+      log.warn('tls: an anchor could not be parsed for display: ' +
+               e.message + ' / ' + openSslError.message);
+    }
   }
   log.debug('Leaving describePem(). subject=' + subject);
   return { pem: pem, subject: subject, fingerprint256: fingerprintOf(pem) };
@@ -307,9 +400,12 @@ function describePem(pem) {
 function secureContextOptions() {
   log.debug('Entering secureContextOptions(). anchors=' + anchors.length);
   log.debug('Leaving secureContextOptions().');
+  // ARRAYS, always — node takes parallel key/cert arrays and OpenSSL picks
+  // the one that matches the client's signature algorithms. With a single
+  // certificate this is the same thing it always was.
   return {
-    key: SERVER_CERTIFICATE.privateKeyPem,
-    cert: SERVER_CERTIFICATE.certPem,
+    key: SERVER_CERTIFICATES.map(function (one) { return one.privateKeyPem; }),
+    cert: SERVER_CERTIFICATES.map(function (one) { return one.certPem; }),
     ca: anchors.map(function (anchor) { return anchor.pem; })
   };
 }
@@ -540,6 +636,118 @@ function verdictFor(mode, presented, authorized, authorizationError) {
   return verdict;
 }
 
+// Which server certificate this socket presented, found by fingerprint.
+// `getCertificate()` is node's accessor for the LOCAL certificate; with a
+// single one configured this is a lookup with one possible answer, and with
+// several it is the only way to know what the client was given.
+function servedCertificate(socket) {
+  log.debug('Entering servedCertificate().');
+  let local = null;
+  try {
+    local = typeof socket.getCertificate === 'function'
+      ? socket.getCertificate() : null;
+  } catch (e) {
+    log.debug('servedCertificate(): ' + e.message);
+    local = null;
+  }
+  const wanted = local && local.fingerprint256 ? local.fingerprint256 : null;
+  const found = wanted
+    ? SERVER_CERTIFICATES.filter(function (one) {
+        return one.fingerprint256 === wanted;
+      })[0]
+    : null;
+  log.debug('Leaving servedCertificate(). ' +
+            ((found || SERVER_CERTIFICATE).algorithm));
+  return found || SERVER_CERTIFICATE;
+}
+
+// ---------------------------------------------------------------------------
+// THE POST-QUANTUM READING OF ONE CONNECTION, IN TWO INDEPENDENT HALVES.
+//
+// They answer different questions on different timescales and a single
+// boolean would be wrong for almost every connection made today:
+//
+//   * the KEY EXCHANGE decides whether a RECORDING of this connection can be
+//     decrypted by a quantum computer years from now. OpenSSL 3.5 offers
+//     X25519MLKEM768 first and both ends usually take it without anybody
+//     asking, so this half is frequently post-quantum already.
+//   * the CERTIFICATES decide whether either end can be IMPERSONATED by one,
+//     which requires an attacker who has the machine NOW.
+//
+// Node cannot name a hybrid group: `getEphemeralKeyInfo()` describes ECDH and
+// DH and returns an empty object for anything else, which under OpenSSL 3.5
+// means an ML-KEM hybrid — or a resumed session, which has no ephemeral key at
+// all. Both readings are reported rather than one being guessed.
+function postQuantumOf(socket, leaf) {
+  log.debug('Entering postQuantumOf().');
+  let ephemeral = null;
+  try {
+    ephemeral = socket.getEphemeralKeyInfo ? socket.getEphemeralKeyInfo()
+      : null;
+  } catch (e) {
+    log.debug('postQuantumOf(): no ephemeral key info: ' + e.message);
+  }
+  const named = !!(ephemeral && ephemeral.name);
+  const served = servedCertificate(socket);
+  const serverIsPq = served.algorithm !== 'rsa';
+  let clientKeyType = null;
+  if (leaf && leaf.pem) {
+    try {
+      clientKeyType = new crypto.X509Certificate(leaf.pem)
+          .publicKey.asymmetricKeyType || null;
+    } catch (e) {
+      // A composite certificate, or one this OpenSSL cannot read. Reported as
+      // unknown rather than as classical: those are different answers.
+      log.debug('postQuantumOf(): the client key could not be read: ' +
+                e.message);
+      clientKeyType = null;
+    }
+  }
+  const out = {
+    keyExchange: {
+      namedByNode: named,
+      ephemeralKey: named ? ephemeral : null,
+      note: named
+        ? 'The negotiated group is ' + ephemeral.name + ', which node can ' +
+          'name — so it is a classical ECDH or DH group and a recording of ' +
+          'this connection is NOT safe from a future quantum computer.'
+        : 'Node could not name the negotiated group. Its API knows ECDH and ' +
+          'DH only, so under OpenSSL ' + process.versions.openssl + ' this ' +
+          'is either an ML-KEM hybrid — the default first choice from 3.5 — ' +
+          'or a resumed session with no ephemeral key of its own. This ' +
+          'service will not guess between the two.'
+    },
+    serverCertificate: {
+      algorithm: served.algorithm,
+      postQuantum: serverIsPq,
+      note: serverIsPq
+        ? 'This connection was authenticated with an ' + served.algorithm +
+          ' certificate, so the server cannot be impersonated by an ' +
+          'adversary with a quantum computer.'
+        : 'This connection was authenticated with an RSA certificate. Set ' +
+          'tls.certificateAlgorithms to add an ML-DSA one beside it — with ' +
+          'both configured, a client that offers ML-DSA signature ' +
+          'algorithms gets the ML-DSA certificate and everything else keeps ' +
+          'getting this one.'
+    },
+    clientCertificate: {
+      presented: !!leaf,
+      publicKeyType: clientKeyType,
+      postQuantum: /^(ml-dsa|slh-dsa)/.test(String(clientKeyType || '')),
+      note: leaf
+        ? (clientKeyType
+          ? 'The client certificate carries an ' + clientKeyType + ' key.'
+          : 'The client certificate carries a key this OpenSSL cannot ' +
+            'parse, which is what a COMPOSITE certificate looks like: no ' +
+            'released OpenSSL implements draft-ietf-lamps-pq-composite-sigs. ' +
+            'The chain was still built and reported.')
+        : 'No client certificate was presented.'
+    }
+  };
+  log.debug('Leaving postQuantumOf().');
+  return out;
+}
+
 function describeConnection(req, mode) {
   log.debug('Entering describeConnection(). mode=' + mode);
   const socket = req.socket;
@@ -557,6 +765,11 @@ function describeConnection(req, mode) {
                               : null;
   const authorizationError = socket.authorizationError
     ? String(socket.authorizationError) : null;
+  // WHICH of the configured certificates this connection actually got. With
+  // one certificate it is that one; with several, OpenSSL chose on the
+  // client's behalf from the signature algorithms it offered, and the choice
+  // is the whole point of configuring several.
+  const served = servedCertificate(socket);
   let ephemeral = null;
   try {
     ephemeral = socket.getEphemeralKeyInfo ? socket.getEphemeralKeyInfo()
@@ -609,11 +822,27 @@ function describeConnection(req, mode) {
       sessionReused: typeof socket.isSessionReused === 'function'
         ? socket.isSessionReused() : null,
       ephemeralKey: ephemeral || null,
+      // THE POST-QUANTUM READING OF THIS CONNECTION, and its two halves are
+      // deliberately separate fields — see postQuantumOf() below. A report
+      // that answered "is this post-quantum" with one boolean would be wrong
+      // for almost every connection made in 2026.
+      postQuantum: postQuantumOf(socket, leaf),
       serverCertificate: {
-        subject: SERVER_CERTIFICATE.subject,
-        names: SERVER_CERTIFICATE.names,
-        fingerprint256: SERVER_CERTIFICATE.fingerprint256,
-        notAfter: SERVER_CERTIFICATE.notAfter,
+        subject: served.subject,
+        names: served.names,
+        algorithm: served.algorithm,
+        fingerprint256: served.fingerprint256,
+        notAfter: served.notAfter,
+        // What ELSE was on offer. With more than one certificate configured,
+        // WHICH one arrived is OpenSSL's answer to the signature algorithms
+        // this client offered — so naming the alternatives is the difference
+        // between "this server is RSA" and "this server gave YOU RSA".
+        alsoAvailable: SERVER_CERTIFICATES.filter(function (one) {
+          return one.fingerprint256 !== served.fingerprint256;
+        }).map(function (one) {
+          return { algorithm: one.algorithm,
+                  fingerprint256: one.fingerprint256 };
+        }),
         selfSigned: true,
         note: 'Self-signed and regenerated on every start, so it is an anchor ' +
           'nobody can have baked in. GET /tls/server-certificate over ' +
@@ -1041,6 +1270,24 @@ function description(req) {
   log.debug('Entering description().');
   const host = String(req.get('host') || 'localhost').split(':')[0];
   const out = {
+    // What the listeners present, and — when there is more than one — the
+    // fact that WHICH one arrives is decided by the client's own signature
+    // algorithms rather than by this service.
+    serverCertificates: SERVER_CERTIFICATES.map(function (one) {
+      return { algorithm: one.algorithm, subject: one.subject,
+              names: one.names, fingerprint256: one.fingerprint256,
+              notAfter: one.notAfter };
+    }),
+    serverCertificateNote: SERVER_CERTIFICATES.length > 1
+      ? 'Several certificates are configured (tls.certificateAlgorithms). ' +
+        'OpenSSL serves whichever one matches the signature algorithms the ' +
+        'CLIENT offered, so an ordinary client and a post-quantum one get ' +
+        'different certificates from the same port — which is what a ' +
+        'migration looks like. GET /tls/server-certificate returns all of ' +
+        'them, and a truststore needs all of them.'
+      : 'One certificate, self-signed and regenerated at every start. GET ' +
+        '/tls/server-certificate for it. Add an ML-DSA one beside it with ' +
+        'tls.certificateAlgorithms=rsa,ml-dsa-65.',
     listeners: [
       { mode: 'optional',
         url: 'https://' + host + ':' + (boundTlsPort || TLS_PORT) + '/',
@@ -1200,9 +1447,19 @@ app.get('/tls/server-certificate', function (req, res) {
   // copy outlives the key it describes and the failure it produces is a
   // handshake that does not verify — which reads as a broken server rather
   // than a stale anchor.
+  // EVERY certificate the listeners may present, concatenated. With the
+  // default single RSA certificate this is byte-for-byte what it always was;
+  // with an ML-DSA one configured beside it, a caller that put only the first
+  // in its truststore would fail to verify the connection it actually got —
+  // which one it gets is OpenSSL's choice, made from the signature algorithms
+  // the caller itself offered.
+  const pem = SERVER_CERTIFICATES.map(function (one) {
+    return one.certPem;
+  }).join('');
   res.status(200).type('text/plain').set('Cache-Control', 'no-store')
-     .send(SERVER_CERTIFICATE.certPem);
-  log.debug('Leaving GET /tls/server-certificate.');
+     .send(pem);
+  log.debug('Leaving GET /tls/server-certificate. ' +
+           SERVER_CERTIFICATES.length + ' certificate(s).');
 });
 
 // The body may be raw PEM (what a script sends), or the `certificates` member
