@@ -2268,6 +2268,341 @@ const SETTINGS = [
                  'grants nothing; here it authenticates somebody who may then ' +
                  'write to the directory.' },
 
+
+  // --- Shared Signals Framework (SSF) --------------------------------------
+  //
+  // The seventeenth protocol family, and the first one here that TALKS BACK:
+  // every other family answers a request, and this one delivers an event
+  // nobody asked for at the moment it happens. Two consequences run through
+  // every row below.
+  //
+  // THE FIRST IS THAT THIS SERVICE DIALS OUT. Push delivery (RFC 8935) posts
+  // each Security Event Token to a URL the RECEIVER chose, which is a weaker
+  // position than federation's outbound request and `ssf/ssf_http.js` says so
+  // at length rather than citing it. `ssf.pushDelivery`, `ssf.pushAllowedHosts`
+  // and `ssf.pushAllowInsecure` are the bounds. Poll delivery (RFC 8936) dials
+  // nothing at all — the receiver comes here — so a deployment that wants none
+  // of it turns push off and still speaks the whole of SSF.
+  //
+  // THE SECOND IS THAT A SET IS A DURABLE RECORD. It says something HAPPENED,
+  // RFC 8417 section 4.1.4 forbids it to expire, and it is therefore read long
+  // after it was written — which is the case a harvest-now-decrypt-later
+  // argument is actually about. `ssf.signingAlgorithm` is the one setting here
+  // that reaches the whole post-quantum table, because the signature goes
+  // through `helpers.signJwtAs()` like every other JWT this service mints.
+  { key: 'ssf.enabled', group: 'SSF', label: 'SSF enabled',
+    env: 'STS_SSF_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the Shared Signals Framework endpoints under ' +
+                 '/ssf agree streams, deliver Security Event Tokens and ' +
+                 'receive them. On by default, like every other protocol ' +
+                 'family here. Turning it off leaves the routes REGISTERED ' +
+                 'and makes them answer 501 rather than 404 — the feature ' +
+                 'is off, the URL is not wrong, and those are different ' +
+                 'sentences to a client. The transmitter configuration ' +
+                 'metadata at /.well-known/ssf-configuration goes on ' +
+                 'answering, so a receiver can still discover that this ' +
+                 'service speaks SSF and is not currently doing it.' },
+
+  { key: 'ssf.issuer', group: 'SSF', label: 'Transmitter issuer identifier',
+    env: 'STS_SSF_ISSUER', type: 'string', dflt: '', runtime: true,
+    description: 'The `iss` of every SET this service transmits and of the ' +
+                 'transmitter configuration metadata. EMPTY means "this ' +
+                 'realm\'s base URL", which is the right answer almost ' +
+                 'always and is why it is the default — a receiver matches ' +
+                 'the `iss` of an arriving SET against the issuer it ' +
+                 'discovered, so the two have to be the same string and ' +
+                 'deriving both from the request is how they stay so. Set ' +
+                 'it where this service sits behind a name it cannot see.' },
+
+  { key: 'ssf.signingAlgorithm', group: 'SSF',
+    label: 'Algorithm SETs are signed with',
+    env: 'STS_SSF_SIGNING_ALGORITHM', type: 'string', dflt: 'RS256',
+    runtime: true,
+    description: 'Which JWS algorithm every Security Event Token is signed ' +
+                 'with. It goes through the same signer every other JWT ' +
+                 'here does, so the whole table is available — RS256 and ' +
+                 'the PS/ES families, EdDSA, and the POST-QUANTUM ones: ' +
+                 'ML-DSA-44/65/87 (FIPS 204), SLH-DSA (FIPS 205) and the ' +
+                 'six composite ML-DSA + traditional algorithms. This is ' +
+                 'the document in this service most worth signing that way: ' +
+                 'a SET records that something happened and RFC 8417 ' +
+                 'section 4.1.4 forbids it to expire, so it is read long ' +
+                 'after it was written. Note an SLH-DSA signature takes ' +
+                 'seconds — it runs on the worker pool, so this service ' +
+                 'answers throughout, but the receiver waits.' },
+
+  { key: 'ssf.deliveryMethods', group: 'SSF', label: 'Delivery methods offered',
+    env: 'STS_SSF_DELIVERY_METHODS', type: 'csv',
+    dflt: 'urn:ietf:rfc:8935,urn:ietf:rfc:8936', runtime: true,
+    description: 'Which of SSF\'s two delivery methods this transmitter ' +
+                 'will agree to, published in delivery_methods_supported ' +
+                 'and enforced at stream creation. The values are the RFC ' +
+                 'numbers AS URNS — urn:ietf:rfc:8935 is push and ' +
+                 'urn:ietf:rfc:8936 is poll — which catches everybody once, ' +
+                 'so "push" and "poll" are accepted here as shorthand and ' +
+                 'normalised. Narrowing it to one is how a client\'s "this ' +
+                 'transmitter will not do push" path becomes reachable.' },
+
+  { key: 'ssf.defaultSubjects', group: 'SSF',
+    label: 'What an empty subject list means',
+    env: 'STS_SSF_DEFAULT_SUBJECTS', type: 'enum',
+    enumValues: ['ALL', 'NONE'], dflt: 'ALL', runtime: true,
+    description: 'Published as default_subjects and it decides the OPPOSITE ' +
+                 'of what it sounds like it decides: with ALL, a stream ' +
+                 'that names no subjects is about EVERYBODY and adding one ' +
+                 'narrows nothing; with NONE it is about nobody until a ' +
+                 'subject is added. A receiver that guesses wrong gets ' +
+                 'every event in the estate or gets none, and both look ' +
+                 'like a broken transmitter — which is why SSF makes it ' +
+                 'discoverable rather than leaving it to be inferred.' },
+
+  { key: 'ssf.streamStatusOnCreate', group: 'SSF',
+    label: 'Status a new stream is created in',
+    env: 'STS_SSF_STREAM_STATUS_ON_CREATE', type: 'enum',
+    enumValues: ['enabled', 'paused', 'disabled'], dflt: 'enabled',
+    runtime: true,
+    description: 'SSF does not say, so this is a choice and it is worth ' +
+                 'knowing which one was made: a stream here is ENABLED the ' +
+                 'moment it is created, which is the permissive answer this ' +
+                 'service gives everywhere. Set it to paused to exercise a ' +
+                 'receiver that has to enable its own stream before ' +
+                 'anything arrives — a step several real transmitters ' +
+                 'require and most clients have never run.' },
+
+  { key: 'ssf.minVerificationInterval', group: 'SSF',
+    label: 'Minimum verification interval (s)',
+    env: 'STS_SSF_MIN_VERIFICATION_INTERVAL', type: 'int', dflt: 60,
+    min: 0, max: 86400, runtime: true,
+    description: 'Published on every stream configuration as ' +
+                 'min_verification_interval: how often this transmitter is ' +
+                 'willing to be asked for a verification event. It is the ' +
+                 'TRANSMITTER\'s statement rather than the receiver\'s ' +
+                 'request, which is why a stream asking for something ' +
+                 'smaller is REFUSED rather than accepted and quietly ' +
+                 'ignored. Zero accepts any rate, which is what the test ' +
+                 'suite runs at.' },
+
+  { key: 'ssf.verificationRateLimit', group: 'SSF',
+    label: 'Enforce the verification interval',
+    env: 'STS_SSF_VERIFICATION_RATE_LIMIT', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, and the pair with the row above is the ' +
+                 'point: this service PUBLISHES an interval and does not ' +
+                 'hold callers to it, so a receiver can verify as often as ' +
+                 'it likes while still seeing a realistic value in the ' +
+                 'stream configuration. Turning it on answers 429 to a ' +
+                 'verification request that arrives too soon, which is the ' +
+                 'negative a client cannot otherwise reach.' },
+
+  { key: 'ssf.criticalSubjectMembers', group: 'SSF',
+    label: 'Critical complex-subject members',
+    env: 'STS_SSF_CRITICAL_SUBJECT_MEMBERS', type: 'csv', dflt: '',
+    runtime: true,
+    description: 'Published as critical_subject_members: the members of a ' +
+                 'COMPLEX subject a receiver of this transmitter\'s events ' +
+                 'MUST understand. The six SSF defines are user, device, ' +
+                 'session, tenant, org_unit and group. Naming one here is a ' +
+                 'promise, so this service also refuses to ADD a complex ' +
+                 'subject that omits it — a transmitter that published a ' +
+                 'critical member and then left it out would be producing ' +
+                 'events nothing acts on. Empty is the ordinary case.' },
+
+  { key: 'ssf.eventsSupported', group: 'SSF', label: 'Event types offered',
+    env: 'STS_SSF_EVENTS_SUPPORTED', type: 'csv',
+    dflt: 'https://schemas.openid.net/secevent/ssf/event-type/verification,' +
+          'https://schemas.openid.net/secevent/ssf/event-type/stream-updated',
+    runtime: true,
+    description: 'Which event types this transmitter will agree to deliver, ' +
+                 'published on every stream as events_supported and ' +
+                 'intersected with a receiver\'s events_requested to ' +
+                 'produce events_delivered. SSF 1.0 itself defines only the ' +
+                 'two above — it is a PIPE, and the vocabularies are CAEP ' +
+                 'and RISC. Narrowing this list is how a receiver\'s "you ' +
+                 'did not agree to the type I asked for" path is reached; ' +
+                 'an entry naming a type this service does not implement is ' +
+                 'dropped with a warning rather than advertised.' },
+
+  { key: 'ssf.pushDelivery', group: 'SSF', label: 'Make outbound push requests',
+    env: 'STS_SSF_PUSH_DELIVERY', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether this service may POST a Security Event Token OUT, ' +
+                 'to the delivery endpoint a receiver named on its stream. ' +
+                 'This is the SECOND outbound request in this repository ' +
+                 'and a weaker case than federation\'s: RFC 8935 push IS ' +
+                 'the receiver telling the transmitter where to post, so ' +
+                 'the URL is caller-supplied by construction. ' +
+                 'ssf/ssf_http.js argues it rather than citing federation. ' +
+                 'Turning it off leaves the whole of SSF working over POLL ' +
+                 'delivery, which dials nothing — and ' +
+                 'delivery_methods_supported then advertises only poll, so ' +
+                 'a receiver finds out at stream creation rather than by ' +
+                 'never receiving anything.' },
+
+  { key: 'ssf.pushAllowedHosts', group: 'SSF', label: 'Push endpoint allowlist',
+    env: 'STS_SSF_PUSH_ALLOWED_HOSTS', type: 'csv', dflt: '', runtime: true,
+    description: 'Host names this service will push to. EMPTY MEANS ANY, ' +
+                 'which is the default and the one deliberate looseness in ' +
+                 'the outbound path — it is what makes this usable as a ' +
+                 'mock. A deployment reachable by anybody it does not trust ' +
+                 'sets the list, and every other host is refused BY NAME on ' +
+                 'the stream\'s own log. Hosts rather than URLs on purpose: ' +
+                 'a receiver legitimately moves its endpoint path and does ' +
+                 'not legitimately move to another host.' },
+
+  { key: 'ssf.pushAllowInsecure', group: 'SSF',
+    label: 'Allow http:// and untrusted TLS to a receiver',
+    env: 'STS_SSF_PUSH_ALLOW_INSECURE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, like federation\'s equivalent and for a ' +
+                 'reason that is different in kind: what travels on a push ' +
+                 'is not a credential but an EVENT — that somebody\'s ' +
+                 'session was revoked, that an account was disabled — which ' +
+                 'is somebody\'s security posture in transit, and the ' +
+                 'receiver\'s own authorization_header travels beside it. ' +
+                 'ON accepts an http:// endpoint and a certificate nothing ' +
+                 'here trusts, and every request made under it is LOGGED as ' +
+                 'insecure rather than only the setting being logged once.' },
+
+  { key: 'ssf.pushTimeoutMs', group: 'SSF', label: 'Push timeout (ms)',
+    env: 'STS_SSF_PUSH_TIMEOUT_MS', type: 'int', dflt: 10000,
+    min: 250, max: 60000, runtime: true,
+    description: 'How long to wait for a receiver to answer a push. Nothing ' +
+                 'is WAITING on it the way a browser waits on a federated ' +
+                 'sign-in, so it is longer than federation\'s — but it is ' +
+                 'still bounded, because a receiver that never answers ' +
+                 'would otherwise hold a socket and a queued event ' +
+                 'indefinitely.' },
+
+  { key: 'ssf.maxStreams', group: 'SSF', label: 'Streams per realm',
+    env: 'STS_SSF_MAX_STREAMS', type: 'int', dflt: 25, min: 1, max: 1000,
+    runtime: true,
+    description: 'How many streams one trust realm may hold. A create past ' +
+                 'it is refused NAMING THIS SETTING, which is the point of ' +
+                 'having a limit on a mock at all: every ceiling here is a ' +
+                 'reachable negative a receiver cannot otherwise exercise.' },
+
+  { key: 'ssf.maxSubjectsPerStream', group: 'SSF', label: 'Subjects per stream',
+    env: 'STS_SSF_MAX_SUBJECTS_PER_STREAM', type: 'int', dflt: 100, min: 1,
+    max: 10000, runtime: true,
+    description: 'How many subjects one stream may name before Add Subject ' +
+                 'is refused. Same reasoning as the row above.' },
+
+  { key: 'ssf.maxQueuedEvents', group: 'SSF', label: 'Queued events per stream',
+    env: 'STS_SSF_MAX_QUEUED_EVENTS', type: 'int', dflt: 200, min: 1,
+    max: 10000, runtime: true,
+    description: 'How many undelivered SETs one stream holds. Past it the ' +
+                 'OLDEST is dropped and the stream\'s log says so — not the ' +
+                 'newest, because a receiver that has stopped reading most ' +
+                 'wants what has happened lately, and a queue that refused ' +
+                 'new events would make a transmitter stop recording ' +
+                 'because a receiver stopped listening.' },
+
+  { key: 'ssf.pollMaxEvents', group: 'SSF', label: 'Events per poll',
+    env: 'STS_SSF_POLL_MAX_EVENTS', type: 'int', dflt: 20, min: 1, max: 1000,
+    runtime: true,
+    description: 'The most SETs one RFC 8936 poll returns, whatever the ' +
+                 'receiver\'s maxEvents asked for. The response says ' +
+                 'moreAvailable so a receiver knows to come back — a client ' +
+                 'that ignores that member and assumes one poll drains the ' +
+                 'queue is a common enough defect to be worth being able to ' +
+                 'produce on demand: set this to 1.' },
+
+  { key: 'ssf.maxReceivedEvents', group: 'SSF', label: 'Received events kept',
+    env: 'STS_SSF_MAX_RECEIVED_EVENTS', type: 'int', dflt: 200, min: 1,
+    max: 10000, runtime: true,
+    description: 'How many SETs POST /ssf/receive keeps for /admin/ssf to ' +
+                 'show. That endpoint is this service acting as a RECEIVER, ' +
+                 'which is what the debugger pushes to when the roles are ' +
+                 'the other way round; the oldest are dropped past this.' },
+
+  { key: 'ssf.maxStreamLogEntries', group: 'SSF', label: 'Log lines per stream',
+    env: 'STS_SSF_MAX_STREAM_LOG_ENTRIES', type: 'int', dflt: 200, min: 1,
+    max: 10000, runtime: true,
+    description: 'How many lines of its own history a stream keeps for ' +
+                 '/admin/ssf. It is prose for a person and nothing reads it ' +
+                 'back; the cap exists because a stream nobody deletes ' +
+                 'would otherwise grow without bound in a process that ' +
+                 'never restarts.' },
+
+  { key: 'ssf.authRequired', group: 'SSF', label: 'Require authentication',
+    env: 'STS_SSF_AUTH_REQUIRED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the stream management, status, subject, ' +
+                 'verification and poll endpoints refuse a request carrying ' +
+                 'no credential with 401 and a WWW-Authenticate header. SSF ' +
+                 '1.0 section 8 says these endpoints MUST be protected and ' +
+                 'publishes what they accept in authorization_schemes. It ' +
+                 'is the same turnstile SCIM is: anybody can get a token ' +
+                 'with the ssf scope from this service\'s own token ' +
+                 'endpoint with any grant, and any username with any ' +
+                 'password but "invalid" passes Basic. What it buys is that ' +
+                 'a client\'s 401 path can be run at all. The transmitter ' +
+                 'metadata stays OPEN either way — a receiver has to be ' +
+                 'able to read what the endpoints are before it can ' +
+                 'authenticate to one.' },
+
+  { key: 'ssf.authScopeRead', group: 'SSF', label: 'Scope to read a stream',
+    env: 'STS_SSF_AUTH_SCOPE_READ', type: 'string', dflt: 'ssf:read',
+    runtime: true,
+    description: 'The OAuth scope an access token must carry to READ a ' +
+                 'stream configuration, its status or the poll queue. ' +
+                 'Published in scopes_supported in both discovery ' +
+                 'documents, exactly as the two SCIM scopes are.' },
+
+  { key: 'ssf.authScopeWrite', group: 'SSF', label: 'Scope to change a stream',
+    env: 'STS_SSF_AUTH_SCOPE_WRITE', type: 'string', dflt: 'ssf:write',
+    runtime: true,
+    description: 'The scope required to create, update or delete a stream, ' +
+                 'to add or remove a subject, to change a status or to ask ' +
+                 'for a verification event. A read scope is not enough for ' +
+                 'any of those, which is the first place in this service ' +
+                 'besides SCIM where two scopes differ in what they permit.' },
+
+  { key: 'ssf.receiveEnabled', group: 'SSF', label: 'Accept pushed events',
+    env: 'STS_SSF_RECEIVE_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether POST /ssf/receive accepts a Security Event Token ' +
+                 'pushed AT this service — the roles reversed, with the ' +
+                 'debugger as the transmitter. It verifies the signature ' +
+                 'when it can find a key and reports what it read either ' +
+                 'way, because a receiver that refused an unverifiable ' +
+                 'event would be unable to show a person WHY it was ' +
+                 'unverifiable. Off answers 501.' },
+
+  { key: 'ssf.receiveRequireSignature', group: 'SSF',
+    label: 'Refuse a SET whose signature does not verify',
+    env: 'STS_SSF_RECEIVE_REQUIRE_SIGNATURE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, which is this service\'s ordinary posture ' +
+                 'and is exactly right for a debugger: an event whose ' +
+                 'signature fails is ACCEPTED and reported as failing, so a ' +
+                 'person can see what arrived and why it did not verify. ' +
+                 'Turning it on answers 400 with err=invalid_key instead, ' +
+                 'which is what a real receiver does and is the negative a ' +
+                 'transmitter needs to be able to reach.' },
+
+  { key: 'ssf.legacySubClaim', group: 'SSF',
+    label: 'Also emit the deprecated `sub` claim',
+    env: 'STS_SSF_LEGACY_SUB_CLAIM', type: 'bool', dflt: false, runtime: true,
+    description: 'MAKES THIS SERVICE WRONG ON PURPOSE, like ' +
+                 'oauth2.breakIdTokenNonce and the Kerberos names that stay ' +
+                 'unknown. RFC 8417 section 2.2 discourages `sub` on a SET ' +
+                 'and SSF carries the subject in `sub_id` (RFC 9493) ' +
+                 'because the thing an event is about may be a person AND a ' +
+                 'device AND a session at once. Turning this on adds a ' +
+                 '`sub` beside it, so a client written against a ' +
+                 'transmitter that gets this wrong can be tested against ' +
+                 'one.' },
+
+  { key: 'ssf.breakSetSignature', group: 'SSF',
+    label: 'Sign every SET badly',
+    env: 'STS_SSF_BREAK_SET_SIGNATURE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'The second deliberate defect. One character of the ' +
+                 'signature is changed AFTER signing, so a receiver that ' +
+                 'does not verify accepts an event nothing signed. It is a ' +
+                 'character rather than a truncation on purpose: a ' +
+                 'truncated signature fails the base64url decode and is ' +
+                 'reported as a MALFORMED token, which is a different bug ' +
+                 'from a bad signature for whoever is being tested.' },
+
   // --- The group claim -----------------------------------------------------
   //
   // The one feature in this service that reads the directory's GROUPS back out

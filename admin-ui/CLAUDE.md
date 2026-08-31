@@ -1112,6 +1112,41 @@ lesson.** A file this long holds names nine hundred lines apart, `node --check`
 catches a duplicate `const` and says nothing about a duplicate `function`, and
 the browser suite is what found it. Check for the name before adding one.
 
+## `/admin/ssf` IS THE FIRST PAGE HERE WHOSE ACTION HANDLER AWAITS
+
+Added 2026-08-31 with the Shared Signals family. Everything about it follows the
+shapes already here — a `SECTIONS` row with a `blurb`, a `SETTING_HOMES` row, a
+GET and a POST on `/admin-api`, `configFormsFor()` at the foot — with two
+exceptions worth recording.
+
+**THE EIGHTH SLOT'S `action` RETURNS A PROMISE, AND NO OTHER ACTION FUNCTION IN
+THIS CONSOLE DOES.** Every other one answers from memory: a revocation, a claim,
+a realm. Transmitting a Security Event Token **signs a JWS** — which may be
+ML-DSA or SLH-DSA on the worker pool, seconds of computation — and then **POSTs
+it to somebody else's endpoint**. Neither can be done synchronously, and
+pretending otherwise would mean this page reporting "sent" before anything had
+been. So `app.post('/admin/ssf')` awaits and `respondToAction()` is called from
+the `then`; a rejection is turned into a refusal naming the message, because
+`consoleAction()` resolves a refusal rather than throwing one and a rejection
+here would be a bug in `ssf/ssf.js` rather than anything a request can cause.
+
+**THERE IS DELIBERATELY NO CREATE FORM, AND THAT IS RULE 7 READ EXACTLY RATHER
+THAN A GAP.** Every other registry page here can create the thing it lists. A
+Shared Signals stream carries a **delivery endpoint this service will DIAL**, and
+the one place that URL may come from is a receiver that authenticated at
+`POST /ssf/stream` and asked for it. A form here that could mint one would be a
+second door onto the outbound request `ssf/ssf_http.js` spends its whole header
+bounding — and this console is gated while `/admin-api` is not, so the second
+door would be the ungated one. There is no control, so there is no operation to
+mirror, and the parity holds. The page says so where the create form would have
+been rather than leaving its absence to be noticed.
+
+The four actions that DO exist — set a status, transmit an event, delete a
+stream, clear what has been received — each have their operation on
+`/admin-api/ssf/:action`, through the same function.
+
+---
+
 ## Four reader slots and THREE writer slots point INTO this module
 
 `server.js` requires this module BEFORE `../ldap/ldap_server.js`,

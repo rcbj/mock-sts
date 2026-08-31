@@ -150,7 +150,7 @@ succeeds, this service keeps answering out of memory, and the status turns red
 with the reason. The next change recomputes the same difference and tries again,
 so a failure loses nothing.
 
-That is deliberate: a database outage taking down sixteen protocol families that
+That is deliberate: a database outage taking down seventeen protocol families that
 do not need a database is the one failure mode a mock must not have. The same
 applies at startup — a store that cannot be opened leaves this service running
 with its seeded directory and says so, rather than refusing to start.

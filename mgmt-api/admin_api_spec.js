@@ -2141,6 +2141,73 @@ const SCHEMAS = {
         'one.', {})
     }),
 
+  Ssf: openObject(
+    'The Shared Signals transmitter: the streams it has agreed, who each one ' +
+    'is about, what is queued for it, what a receiver refused, and what has ' +
+    'been pushed AT this service. SSF is the PIPE and not the vocabulary — ' +
+    'it defines two events of its own, both about the pipe, and CAEP and ' +
+    'RISC are the vocabularies spoken over it.',
+    {
+      installed: {
+        type: 'boolean',
+        description: 'Whether ssf/ssf.js is loaded in this process at all. A ' +
+                     'DIFFERENT question from `enabled`, exactly as it is ' +
+                     'for SCIM: a process that never required it has no /ssf ' +
+                     'routes, where one with ssf.enabled false has routes ' +
+                     'that answer 501.'
+      },
+      enabled: {
+        type: 'boolean',
+        description: 'The `ssf.enabled` setting. When false every endpoint ' +
+                     'answers 501 EXCEPT the transmitter metadata, which ' +
+                     'goes on answering so that a receiver can tell "this ' +
+                     'service does not speak SSF" from "the path is wrong".'
+      },
+      issuer: {
+        type: 'string',
+        description: 'The `iss` of every Security Event Token this ' +
+                     'transmitter signs, and of its configuration metadata. ' +
+                     'A receiver matches the two, so they are one string.'
+      },
+      signingAlgorithm: {
+        type: 'string',
+        description: 'What SETs are signed with (`ssf.signingAlgorithm`). It ' +
+                     'reaches the whole JWS table, post-quantum included, ' +
+                     'because a SET goes through the same signer every other ' +
+                     'JWT here does.'
+      },
+      metadataUrl: {
+        type: 'string',
+        description: 'Where the never-gated transmitter configuration ' +
+                     'document is.'
+      },
+      streamDetail: {
+        type: 'array',
+        description: 'One entry per stream: its configuration, its subjects, ' +
+                     'what is queued, its counters and its own log. The ' +
+                     'receiver\'s `authorization_header` is NEVER in it — it ' +
+                     'is a credential belonging to somebody else\'s ' +
+                     'endpoint, and this resource is not the door it goes ' +
+                     'back through.',
+        items: { type: 'object' }
+      },
+      receivedDetail: {
+        type: 'array',
+        description: 'What POST /ssf/receive has taken, newest first, with ' +
+                     'whether each signature verified and whether the ' +
+                     'application/secevent+jwt media type was used.',
+        items: { type: 'object' }
+      },
+      settings: {
+        type: 'object',
+        description: 'The `SSF` setting group as /admin/ssf draws it, with ' +
+                     'each row\'s source and whether it is editable at ' +
+                     'runtime. Change one through POST ' +
+                     '/admin-api/config/set-many, which is why there is no ' +
+                     'settings operation of this resource\'s own.'
+      }
+    }),
+
   Scim: openObject(
     'The SCIM 2.0 provisioning surface: what it has been asked to do, what it ' +
     'will and will not do, and which LDAP attribute each SCIM member is. It ' +

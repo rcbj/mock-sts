@@ -5,7 +5,7 @@ nav_order: 1
 
 # mock-sts
 
-A mock identity service that speaks **sixteen protocol families** in one small
+A mock identity service that speaks **seventeen protocol families** in one small
 Node process. It exists to exercise *clients*: it checks no password, validates
 no access token and attests no workload.
 

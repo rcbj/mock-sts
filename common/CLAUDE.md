@@ -162,10 +162,61 @@ key to plausible garbage rather than failing), parses the plaintext before
 calling CBC a success, and tells a NamespaceError in a good NameID apart from a
 wrong certificate. Those messages are the product.
 
+**THE PROTECTED HEADER IS THIS FILE'S TO BUILD, AND FOR THREE YEARS TWO OF THE
+THREE SIGNING PATHS DID NOT HONOUR A CALLER'S.** `jsonwebtoken` merges
+`options.header` into the header it makes, so the library path had always taken
+a caller's `typ`. The other two — the `ownSigner` branch (EdDSA and ES256K, the
+two the library refuses) and the post-quantum branch — each hard-coded
+`typ: 'JWT'` and ignored `options.header` entirely. **The same call therefore
+produced a different header depending on which algorithm was chosen**, and no
+caller could have seen that coming from the outside.
+
+It was found on 2026-08-31 by the Shared Signals family, which is the first
+thing here that mints a JWT that is not an ordinary one: RFC 8417 section 2.2
+gives a Security Event Token `typ: "secevent+jwt"`, and a receiver that
+dispatches on the media type — several do — drops one without it with no error
+anybody sees. On RS256 it got the header it asked for; on EdDSA, ES256K and
+every post-quantum algorithm it silently did not.
+
+`protectedHeaderFor()` is the fix and all three paths go through it.
+**`alg` and `kid` remain this file's to set and a caller may not override
+them**: the algorithm is what was actually used and the kid names the key that
+was actually used, so a caller that could change either would be labelling a
+signature as something it is not. Everything else in `options.header` is merged.
+`helpers.signJwtAs()` and `signJwtAsAsync()` thread it through, which is how the
+one caller that needs it reaches it.
+
 **xml-crypto IS STILL A DEPENDENCY AND NOTHING IN THE SERVICE REQUIRES IT.** It
 is there for `tests/crypto_module.js`, which is the only independent reading of
 XMLDSIG in this repository — the thing that makes "our signature verifies"
 mean something. Removing it saves a package and costs that.
+
+## `applications.js` GREW A FOURTH ATTRIBUTE ROLE, AND THE NAME IS THE ARGUMENT
+
+`declarationAttributes()` walks the `PROTOCOLS` table for an `identifier`, a
+`redirect`, a `logout` and a `secret`. Shared Signals added a fifth kind of
+attribute and it was given a **`delivery`** role of its own rather than being
+folded into `redirect`.
+
+The temptation is obvious — both answer "where does the answer go?" — and it is
+wrong in a way this repository is otherwise careful about. **A redirect is where
+a BROWSER is sent back to after a protocol hop. `ssfDeliveryEndpoint` is a URL
+this service OPENS A CONNECTION TO.** Calling it a redirect would make a table
+that is read literally, by the console and by `GET /admin-api/applications/new`,
+say something false about the one attribute here with an outbound request behind
+it.
+
+The attribute itself is DECLARATION ONLY and nothing reads it: a push goes to
+the endpoint on the STREAM, which the receiver named when it created one, and
+this service will not take a URL to dial from an application entry. That is the
+same position `federation/federation_http.js` takes about `oauthJwksUri` one
+family along — a URL recorded here is a note about what a receiver IS, and a URL
+on a stream is a URL this service dials. The two are deliberately not one store.
+
+Its sibling `ssfReceiverId` is the opposite and is worth the contrast: it is one
+of the few declaration attributes a PROTOCOL also writes, because a receiver
+authenticating and being agreed a stream is exactly the kind of event this
+registry exists to hold.
 
 ## `worker.js` and `worker_pool.js`: the computation that must not run here
 

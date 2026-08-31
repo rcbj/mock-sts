@@ -3979,6 +3979,211 @@ const ROUTES = [
   // form on it, because a clear button on an unprotected console would make an
   // audit log unable to answer the one question it exists for. There is nothing
   // to change, so there is nothing to document as changeable.
+  // --- Shared Signals -----------------------------------------------------
+  //
+  // A GET and a POST, and unlike SCIM's the POST is not optional: /admin/ssf
+  // has FOUR CONTROLS on it — set a status, transmit an event, delete a
+  // stream, clear what has been received — and rule 7 is about controls. Every
+  // one of them calls the same function the console's form posts to, with
+  // `action` taken from the URL instead of from a hidden input.
+  //
+  // **THERE IS DELIBERATELY NO `create` ACTION**, and that is the rule read
+  // exactly rather than a gap. A stream carries a delivery endpoint THIS
+  // SERVICE WILL DIAL, and the one place that URL may come from is a receiver
+  // that authenticated at `POST /ssf/stream` and asked. A management API that
+  // could mint one would be a second, ungated door onto the outbound request
+  // `ssf/ssf_http.js` spends its header bounding — so the console has no
+  // create form either, and the parity holds because there is no control to
+  // mirror.
+  { method: 'GET', path: BASE + '/ssf', tag: 'Shared Signals',
+    operationId: 'getSsf',
+    summary: 'The Shared Signals transmitter: its streams, their subjects, ' +
+             'their queues and what a receiver refused',
+    description: 'Everything /admin/ssf draws, as JSON. Per stream: the ' +
+                 'configuration a receiver agreed, who it is about, what is ' +
+                 'waiting to be delivered, the counters, and the stream\'s ' +
+                 'own log — which is the only place a REFUSED PUSH is ' +
+                 'recorded, because a push a receiver rejected is invisible ' +
+                 'from the receiving end by definition.\n\nSSF IS THE PIPE ' +
+                 'AND NOT THE VOCABULARY. It defines how two parties agree a ' +
+                 'stream, who the events are about (RFC 9493), what they ' +
+                 'travel in (RFC 8417) and how they get there (RFC 8935 ' +
+                 'push, RFC 8936 poll) — and two events of its own, both ' +
+                 'about the pipe. CAEP and RISC are the vocabularies spoken ' +
+                 'over it and neither is implemented here yet.\n\nTHE ' +
+                 'RECEIVER\'S `authorization_header` IS NOT IN THIS REPLY. ' +
+                 'It is a credential belonging to somebody else\'s endpoint ' +
+                 'and it goes back only to the receiver that set it, at ' +
+                 'GET /ssf/stream.',
+    mirrors: 'GET /admin/ssf',
+    responseDescription: 'The transmitter, its streams and what it has ' +
+                         'received.',
+    responseSchema: { $ref: '#/components/schemas/Ssf' },
+    handler: function (req, res) {
+      log.debug("Entering the management API Shared Signals endpoint.");
+      sendJson(res, 200, admin.ssfView(req));
+      log.debug("Leaving the management API Shared Signals endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/ssf/:action', tag: 'Shared Signals',
+    mirrors: 'POST /admin/ssf',
+    handler: function (req, res) {
+      log.debug("Entering the management API Shared Signals action endpoint.");
+      const body = parseBody(req);
+      // THE ONE HANDLER IN THIS FILE THAT AWAITS. Transmitting a Security
+      // Event Token signs a JWS — which may be ML-DSA or SLH-DSA on the
+      // worker pool — and then POSTs it to somebody else's endpoint. Neither
+      // can be done synchronously, and answering before either had happened
+      // would be this API reporting "sent" about nothing.
+      admin.ssfAction(withAction(req, body)).then(function (result) {
+        sendJson(res, result.ok ? 200 : 400, result);
+        log.debug("Leaving the management API Shared Signals action " +
+                  "endpoint.");
+      }).catch(function (e) {
+        // A rejection here is a bug in ssf/ssf.js rather than anything a
+        // request can cause — its action function resolves a refusal rather
+        // than throwing one — so it is reported as a refusal instead of
+        // becoming an unhandled rejection that ends the process.
+        log.error('admin-api: the Shared Signals action threw: ' + e.message);
+        sendJson(res, 500, { ok: false,
+          errors: ['The action failed: ' + e.message] });
+        log.debug("Leaving the management API Shared Signals action " +
+                  "endpoint. Threw.");
+      });
+    },
+    actions: [
+      { action: 'status', operationId: 'setSsfStreamStatus',
+        summary: 'Enable, pause or disable a stream',
+        description: 'The three values and what separates them: a PAUSED ' +
+                     'stream keeps QUEUEING and delivers nothing, so what ' +
+                     'happened while it was paused is still there when it is ' +
+                     'enabled again; a DISABLED one DROPS what is waiting. ' +
+                     'That is the difference between "I was not listening" ' +
+                     'and "it did not happen", and it is the whole reason a ' +
+                     'Shared Signals receiver has a pause.\n\nA change here ' +
+                     'also emits a **stream updated** event ON the stream, ' +
+                     'if the receiver agreed that type — the one event a ' +
+                     'receiver gets without asking for it, and the one whose ' +
+                     'absence is hardest to notice.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            stream_id: { type: 'string',
+                         description: 'The stream, as GET /admin-api/ssf ' +
+                                      'lists it.' },
+            status: { type: 'string', enum: ['enabled', 'paused', 'disabled'],
+                      description: 'The new status.' },
+            reason: { type: 'string',
+                      description: 'Optional. Why, in words — it rides in the ' +
+                                   'stream-updated event\'s `reason` member, ' +
+                                   'which nothing parses.' }
+          },
+          required: ['stream_id', 'status'],
+          examples: [{ stream_id: 'ssf-0123456789ab', status: 'paused',
+                       reason: 'maintenance' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What happened, and whether the stream-updated ' +
+                             'event went with it.' },
+
+      { action: 'transmit', operationId: 'transmitSsfEvent',
+        summary: 'Send a Security Event Token on a stream',
+        description: 'Builds the SET, signs it with `ssf.signingAlgorithm`, ' +
+                     'queues it on the stream and — for a PUSH stream — ' +
+                     'POSTs it to the receiver\'s delivery endpoint. On a ' +
+                     'POLL stream it stays queued until the receiver asks.' +
+                     '\n\n**IT IS THE ONLY WAY AN EVENT HAPPENS HERE.** ' +
+                     'Nothing in this service watches a session and emits ' +
+                     'when it changes: SSF defines no event about a session, ' +
+                     'so a transmitter that invented one would be inventing ' +
+                     'a vocabulary. That changes with CAEP.\n\nA failed ' +
+                     'push is NOT retried and the event stays on the queue. ' +
+                     'A mock that retried would make a receiver\'s one-shot ' +
+                     'failure invisible — a client answering 500 then 202 ' +
+                     'looks, from its own logs, like a client that works.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            stream_id: { type: 'string', description: 'The stream.' },
+            type: { type: 'string',
+                    description: 'The event type URI. It must be one the ' +
+                                 'stream DELIVERS — the intersection of what ' +
+                                 'the receiver requested and what this ' +
+                                 'transmitter supports — and a refusal lists ' +
+                                 'what that is.' },
+            payload: { type: 'object',
+                       description: 'The event\'s own members. A verification ' +
+                                    'event takes an optional `state`; a ' +
+                                    'stream-updated event takes a required ' +
+                                    '`status` and an optional `reason`. An ' +
+                                    'unrecognised member is CARRIED with a ' +
+                                    'warning rather than refused: an event ' +
+                                    'vocabulary extends, and a receiver is ' +
+                                    'expected to ignore what it does not ' +
+                                    'know.' },
+            subject: { type: 'object',
+                       description: 'Optional `sub_id` (RFC 9493), simple or ' +
+                                    'complex. Neither SSF event takes one — ' +
+                                    'both are about the STREAM — so this is ' +
+                                    'here for the vocabularies that come ' +
+                                    'next. Each format\'s member set is ' +
+                                    'CLOSED and an extra member is refused ' +
+                                    'by name.' },
+            txn: { type: 'string',
+                   description: 'Optional RFC 8417 `txn`, tying several ' +
+                                'events to one act.' }
+          },
+          required: ['stream_id', 'type'],
+          examples: [{ stream_id: 'ssf-0123456789ab',
+            type: 'https://schemas.openid.net/secevent/ssf/event-type/' +
+                  'verification',
+            payload: { state: 'a-value-the-receiver-chose' } }],
+          additionalProperties: false
+        },
+        responseDescription: 'The jti, whether it was delivered or only ' +
+                             'queued, and what the receiver said.' },
+
+      { action: 'delete', operationId: 'deleteSsfStream',
+        summary: 'Delete a stream',
+        description: 'The stream, its subjects and everything queued on it. ' +
+                     'The receiver is NOT told — SSF has no event for "your ' +
+                     'stream is gone", and a stream-updated with status ' +
+                     'disabled would be a lie about something that still ' +
+                     'exists. A receiver finds out on its next call, with a ' +
+                     '404 naming the stream_id.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            stream_id: { type: 'string', description: 'The stream.' }
+          },
+          required: ['stream_id'],
+          examples: [{ stream_id: 'ssf-0123456789ab' }],
+          additionalProperties: false
+        },
+        responseDescription: 'Confirmation, or a refusal naming the ' +
+                             'stream_id.' },
+
+      { action: 'clear-received', operationId: 'clearSsfReceived',
+        summary: 'Drop what has been pushed AT this service',
+        description: 'Empties the list `POST /ssf/receive` fills — this ' +
+                     'service acting as a RECEIVER, which is the roles ' +
+                     'reversed and what a client acting as the TRANSMITTER ' +
+                     'pushes to. It touches no stream and no queue: those ' +
+                     'are the transmitter half and have nothing to do with ' +
+                     'this one.',
+        requestBodyRequired: false,
+        requestBody: {
+          type: 'object',
+          properties: {},
+          examples: [{}],
+          additionalProperties: false
+        },
+        responseDescription: 'How many were dropped.' }
+    ] },
+
   { method: 'GET', path: BASE + '/scim', tag: 'SCIM',
     operationId: 'getScim',
     summary: 'The SCIM 2.0 provisioning surface, and what it has been asked to do',

@@ -191,6 +191,31 @@ off `body`. `helpers.parseBody()` cannot see a repeated field, so a form-encoded
 body copied from the console's checkbox column would otherwise create the
 application with one family out of five and answer 200.
 
+### `/admin-api/ssf` IS THE FIRST OPERATION HERE WHOSE HANDLER AWAITS, AND THE FIRST WITH A CONTROL DELIBERATELY MISSING
+
+Added 2026-08-31. A GET and a POST with four actions — set a status, transmit an
+event, delete a stream, clear what has been received — each calling the same
+function the console's own form posts to, with `action` taken from the URL. The
+ordinary shape.
+
+**THE POST AWAITS, AND IT IS THE ONLY ONE IN THIS FILE THAT DOES.** Transmitting
+a Security Event Token signs a JWS — possibly ML-DSA or SLH-DSA on the worker
+pool — and then POSTs it to somebody else's endpoint. `sendJson()` is called
+from the `then`, and a rejection is answered as a 500 naming the message rather
+than becoming an unhandled rejection: `ssf/ssf.js`'s action function resolves a
+refusal rather than throwing one, so a rejection there is a bug in this
+repository and not something a request can cause.
+
+**AND THERE IS NO `create` ACTION, WHICH IS RULE 7 READ EXACTLY RATHER THAN A
+GAP.** A stream carries a **delivery endpoint this service will DIAL**, and the
+one place that URL may come from is a receiver that authenticated at
+`POST /ssf/stream` and asked. An operation here that could mint one would be a
+second door onto the outbound request `ssf/ssf_http.js` spends its header
+bounding — **and it would be the UNGATED door**, since this API is not gated and
+the console is. The console has no create form for the same reason, so there is
+no control to mirror and the parity holds; `ssf/CLAUDE.md` argues the outbound
+request itself.
+
 ### `/admin-api/federation` is where rule 7 pays MOST, and the honest sentence is sharper here
 
 `/admin/federation` arrived with `GET /admin-api/federation` and `POST

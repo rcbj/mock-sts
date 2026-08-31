@@ -121,7 +121,7 @@ jobs, say) gets. Both compose files here set `STS_HTTPS` to the same answer, so
 the container's healthcheck probes the scheme its service is actually bound in.
 
 Why it was turned on: 8443, 9443 and LDAPS 636 were TLS and the main port —
-the one every one of the sixteen protocol families actually answers on — was
+the one every one of the seventeen protocol families actually answers on — was
 not, so a caller who had already trusted this service's key for three sockets
 still met an unencrypted fourth. One certificate, one trust decision, every
 port.
