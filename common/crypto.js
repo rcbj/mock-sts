@@ -77,6 +77,9 @@
 
 const nodeCrypto = require('crypto');
 const forge = require('node-forge');
+// The DER writer for the post-quantum certificate below. node-forge cannot
+// represent an ML-DSA key at all, so that one certificate is built by hand.
+const asn1js = require('asn1js');
 const jwt = require('jsonwebtoken');
 const bunyan = require('bunyan');
 const config = require('./config');
@@ -1958,6 +1961,230 @@ function selfSignedRsaCertificate(opts) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// AN ML-DSA KEY AND A SELF-SIGNED CERTIFICATE OVER IT (FIPS 204, RFC 9881).
+//
+// WHY THIS IS WRITTEN OUT HERE AND NOT VENDORED FROM THE DEBUGGER, which is
+// the same argument pq_jose.js makes at length and which applies with more
+// force to a certificate: this service exists to be the FAR END of the
+// debugger's own PKI code. The debugger builds a post-quantum certificate with
+// pkijs and signs it with @noble/post-quantum; if this service did the same,
+// the two would share one reading of RFC 9881 — of where the OID goes, of
+// whether the AlgorithmIdentifier carries a NULL, of what the BIT STRING holds
+// — agree with each other perfectly, and interoperate with nothing.
+//
+// So the two halves here are deliberately the ones the debugger does NOT use:
+//
+//   * the KEY and the SIGNATURE come from node's OpenSSL 3.5, which has
+//     ML-DSA natively. `crypto.generateKeyPairSync('ml-dsa-65')` and
+//     `crypto.sign(null, tbs, key)` are C code from a different project.
+//   * the ENCODING is written below against RFC 9881 section 3 and RFC 5280
+//     section 4.1, with asn1js as the DER writer.
+//
+// The result is that a debugger which verifies this certificate has verified
+// something OpenSSL produced, and a debugger whose certificate this service
+// accepts has been read by OpenSSL. That is the only kind of check that means
+// anything here.
+//
+// NODE-FORGE CANNOT DO ANY OF THIS. It has no ML-DSA, cannot parse a
+// certificate whose signature algorithm it does not know, and cannot sign with
+// a key it cannot represent — which is the same capability gap
+// `spiffe/spiffe_ca.js` records for EC keys, one algorithm generation later.
+// ---------------------------------------------------------------------------
+const ML_DSA_OIDS = {
+  'ml-dsa-44': '2.16.840.1.101.3.4.3.17',
+  'ml-dsa-65': '2.16.840.1.101.3.4.3.18',
+  'ml-dsa-87': '2.16.840.1.101.3.4.3.19'
+};
+
+function mlDsaOid(algorithm) {
+  log.debug('Entering mlDsaOid(). algorithm=' + algorithm);
+  const oid = ML_DSA_OIDS[String(algorithm || '').toLowerCase()];
+  if (!oid) {
+    log.debug('Leaving mlDsaOid(). Unknown.');
+    throw new Error('Not an ML-DSA parameter set this service knows: ' +
+                    algorithm + '. RFC 9881 defines ML-DSA-44, -65 and -87.');
+  }
+  log.debug('Leaving mlDsaOid().');
+  return oid;
+}
+
+// The three DN attribute OIDs this builder writes, and the string type each
+// one takes. `C` MUST be a PrintableString and everything else here is a
+// UTF8String: a country encoded as UTF8String parses perfectly and is refused
+// by several validators, which reads as a signature problem.
+const DN_TYPES = {
+  commonName: { oid: '2.5.4.3', printable: false },
+  organizationName: { oid: '2.5.4.10', printable: false },
+  countryName: { oid: '2.5.4.6', printable: true }
+};
+
+function selfSignedMlDsaCertificate(opts) {
+  const options = opts || {};
+  const algorithm = String(options.algorithm || 'ml-dsa-65').toLowerCase();
+  log.debug('Entering selfSignedMlDsaCertificate(). algorithm=' + algorithm +
+            ' cn=' + (options.commonName || '(none)'));
+  const oid = mlDsaOid(algorithm);
+  const pair = nodeCrypto.generateKeyPairSync(algorithm);
+  const spkiDer = pair.publicKey.export({ type: 'spki', format: 'der' });
+
+  function bufferOf(bytes) {
+    const view = Uint8Array.from(bytes);
+    return view.buffer.slice(view.byteOffset, view.byteOffset +
+        view.byteLength);
+  }
+
+  function algorithmIdentifier() {
+    // PARAMETERS ABSENT — RFC 9881 section 3 says MUST, and an explicit NULL
+    // here (which is what an RSA identifier carries, so it is what a copied
+    // line produces) makes a certificate OpenSSL refuses to load at all.
+    return new asn1js.Sequence({
+      value: [new asn1js.ObjectIdentifier({ value: oid })]
+    });
+  }
+
+  function name(attributes) {
+    // An RDNSequence — a SEQUENCE OF one-element SETs — and not one SET
+    // holding every attribute. The second is a multi-valued RDN, which is a
+    // DIFFERENT NAME: it parses, it prints with + between the attributes, and
+    // nothing chains to it.
+    return new asn1js.Sequence({
+      value: attributes.map(function (attribute) {
+        const type = DN_TYPES[attribute.name];
+        const value = type.printable
+          ? new asn1js.PrintableString({ value: attribute.value })
+          : new asn1js.Utf8String({ value: attribute.value });
+        return new asn1js.Set({
+          value: [new asn1js.Sequence({
+            value: [new asn1js.ObjectIdentifier({ value: type.oid }), value]
+          })]
+        });
+      })
+    });
+  }
+
+  function utcTime(date) {
+    return new asn1js.UTCTime({ valueDate: date });
+  }
+
+  function extension(extnOid, critical, valueAsn1) {
+    const der = new Uint8Array(valueAsn1.toBER(false));
+    const value = [new asn1js.ObjectIdentifier({ value: extnOid })];
+    if (critical) value.push(new asn1js.Boolean({ value: true }));
+    value.push(new asn1js.OctetString({ valueHex: bufferOf(der) }));
+    return new asn1js.Sequence({ value: value });
+  }
+
+  const attributes = [
+    { name: 'commonName', value: options.commonName || 'mock-sts' }
+  ];
+  if (options.organizationName) {
+    attributes.push({ name: 'organizationName',
+                     value: options.organizationName });
+  }
+  const subject = name(attributes);
+  const notBefore = new Date();
+  const notAfter = new Date(notBefore.getTime());
+  notAfter.setFullYear(notBefore.getFullYear() + (options.years || 2));
+
+  // subjectAltName: dNSName is [2] and iPAddress is [7], both IMPLICIT and
+  // both primitive. The CN is ignored by every current client, so these are
+  // not decoration — they are the only place the names are.
+  const generalNames = [];
+  (options.dnsNames || []).forEach(function (dns) {
+    generalNames.push(new asn1js.Primitive({
+      idBlock: { tagClass: 3, tagNumber: 2 },
+      valueHex: bufferOf(Buffer.from(String(dns), 'utf8'))
+    }));
+  });
+  (options.ipAddresses || []).forEach(function (address) {
+    const octets = String(address).split('.').map(function (part) {
+      return parseInt(part, 10) & 0xff;
+    });
+    if (octets.length !== 4) return;
+    generalNames.push(new asn1js.Primitive({
+      idBlock: { tagClass: 3, tagNumber: 7 },
+      valueHex: bufferOf(octets)
+    }));
+  });
+
+  const extensions = [
+    extension('2.5.29.19', true, new asn1js.Sequence({ value: [] })),
+    // digitalSignature only: an ML-DSA key cannot encipher anything, so
+    // keyEncipherment — which the RSA certificate beside this one sets — would
+    // be a lie about the algorithm. RFC 9881 section 4 says the same.
+    extension('2.5.29.15', true, new asn1js.BitString({
+      valueHex: bufferOf([0x80]), unusedBits: 7 })),
+    extension('2.5.29.37', false, new asn1js.Sequence({
+      value: [new asn1js.ObjectIdentifier({ value: '1.3.6.1.5.5.7.3.1' })] }))
+  ];
+  if (generalNames.length) {
+    extensions.push(extension('2.5.29.17', false,
+        new asn1js.Sequence({ value: generalNames })));
+  }
+
+  const serialHex = String(options.serialNumber || '04');
+  const serialBytes = Buffer.from(serialHex.length % 2
+    ? '0' + serialHex : serialHex, 'hex');
+
+  const tbs = new asn1js.Sequence({
+    value: [
+      // [0] EXPLICIT version, v3 (2). A v1 certificate cannot carry
+      // extensions at all, and a subjectAltName in one is ignored in silence.
+      new asn1js.Constructed({
+        idBlock: { tagClass: 3, tagNumber: 0 },
+        value: [new asn1js.Integer({ value: 2 })]
+      }),
+      new asn1js.Integer({ valueHex: bufferOf(serialBytes) }),
+      algorithmIdentifier(),
+      subject,
+      new asn1js.Sequence({ value: [utcTime(notBefore), utcTime(notAfter)] }),
+      subject,
+      // The SubjectPublicKeyInfo is OpenSSL's own export, parsed in as the DER
+      // it already is rather than rebuilt — the one field where a second
+      // encoding of the same key would be a second chance to be wrong.
+      asn1js.fromBER(bufferOf(spkiDer)).result,
+      new asn1js.Constructed({
+        idBlock: { tagClass: 3, tagNumber: 3 },
+        value: [new asn1js.Sequence({ value: extensions })]
+      })
+    ]
+  });
+
+  const tbsDer = Buffer.from(tbs.toBER(false));
+  // `null` as the algorithm is how node asks for the key's own built-in
+  // hashing, which is what ML-DSA does: FIPS 204 takes the message, not a
+  // digest of it.
+  const signature = nodeCrypto.sign(null, tbsDer, pair.privateKey);
+
+  const certificate = new asn1js.Sequence({
+    value: [
+      tbs,
+      algorithmIdentifier(),
+      new asn1js.BitString({ valueHex: bufferOf(signature) })
+    ]
+  });
+  const certDer = Buffer.from(certificate.toBER(false));
+  const certPem = '-----BEGIN CERTIFICATE-----\n' +
+      (certDer.toString('base64').match(/.{1,64}/g) || []).join('\n') +
+      '\n-----END CERTIFICATE-----\n';
+  // Read back through OpenSSL before it leaves this function. A certificate
+  // this service cannot itself load is one the listener would fail to start
+  // with, at a point where the error names the socket rather than the encoder.
+  new nodeCrypto.X509Certificate(certDer);
+  log.debug('Leaving selfSignedMlDsaCertificate(). ' + certDer.length +
+            ' bytes.');
+  return {
+    algorithm: algorithm,
+    privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }),
+    certPem: certPem,
+    certB64: stripPem(certPem),
+    notBefore: notBefore,
+    notAfter: notAfter
+  };
+}
+
 // PEM armour off, whitespace out. What goes inside a <ds:X509Certificate>, and
 // what a DER digest is taken over.
 function stripPem(pem) {
@@ -2131,6 +2358,8 @@ module.exports = {
   decryptJweCompact: decryptJweCompact,
   // --- keys, certificates, thumbprints ---
   selfSignedRsaCertificate: selfSignedRsaCertificate,
+  selfSignedMlDsaCertificate: selfSignedMlDsaCertificate,
+  ML_DSA_OIDS: ML_DSA_OIDS,
   stripPem: stripPem,
   canonicalJwk: canonicalJwk,
   jwkThumbprint: jwkThumbprint,

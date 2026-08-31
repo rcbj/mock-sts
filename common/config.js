@@ -1660,6 +1660,21 @@ const SETTINGS = [
     restartReason: 'the server certificate is issued at startup for these addresses',
     description: 'The subjectAltName IP entries on the same certificate.' },
 
+  { key: 'tls.certificateAlgorithms', group: 'TLS',
+    label: 'Server certificate algorithms', env: 'STS_TLS_CERT_ALGS',
+    type: 'csv', dflt: 'rsa', runtime: false,
+    restartReason: 'the certificates are issued when the listeners are bound',
+    description: 'Which server certificates the two TLS listeners present: ' +
+                 '"rsa" (the default), and any of ml-dsa-44, ml-dsa-65 and ' +
+                 'ml-dsa-87. MORE THAN ONE IS THE INTERESTING SETTING — ' +
+                 'OpenSSL 3.5 serves whichever certificate matches the ' +
+                 'signature algorithms the CLIENT offered, so "rsa,ml-dsa-65" ' +
+                 'answers an ordinary client with RSA and a post-quantum one ' +
+                 'with ML-DSA over the same port, which is exactly how a real ' +
+                 'migration is run. It is not the default because an ML-DSA ' +
+                 'certificate is refused by everything older than OpenSSL ' +
+                 '3.5, including the openssl binary in these images.' },
+
   // --- OID4VCI -------------------------------------------------------------
   { key: 'oid4vci.walletUrl', group: 'OID4VCI', label: 'Wallet URL',
     env: 'OID4VCI_WALLET_URL', type: 'string', dflt: 'http://localhost:3000',
