@@ -263,10 +263,11 @@ function fingerprintOf(pem) {
 // one reading of RFC 9881 — see the note on selfSignedMlDsaCertificate()).
 //
 // WHAT IT COSTS, and it is the reason the default is RSA alone: an ML-DSA
-// certificate is refused by everything older than OpenSSL 3.5. The `openssl`
-// binary in these images is 3.0 and cannot even print it, and a client that
-// offers no ML-DSA signature algorithm gets `no suitable signature algorithm`
-// if there is no classical certificate to fall back to.
+// certificate is refused by everything older than OpenSSL 3.5, and which
+// `openssl` a caller has is not this service's to decide — 3.0 (Ubuntu
+// 22.04's) cannot even print one. A client that offers no ML-DSA signature
+// algorithm gets `no suitable signature algorithm` if there is no classical
+// certificate to fall back to.
 function makeMlDsaServerCertificate(algorithm) {
   log.debug('Entering makeMlDsaServerCertificate(). algorithm=' + algorithm);
   const built = stsCrypto.selfSignedMlDsaCertificate({
