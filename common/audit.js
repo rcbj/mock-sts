@@ -168,7 +168,26 @@ const CATEGORIES = [
           'accepted: an X509-SVID over mutual TLS, an agent attesting, a ' +
           'JWT-SVID validated. Those write an authentication row as well, at ' +
           'the funnel, the way one act writes rows at several layers ' +
-          'everywhere else here.' }
+          'everywhere else here.' },
+  // SHARED SIGNALS IS ITS OWN CATEGORY FOR A REASON THAT IS ALMOST THE
+  // OPPOSITE OF SPIFFE'S. Every other row in this log records something a
+  // caller asked this service to do. An SSF row records something this
+  // service did BECAUSE SOMETHING HAPPENED — an event transmitted to a
+  // receiver that made no request, a push refused by that receiver, an event
+  // pushed AT this service by somebody else. Filed under `protocol` those
+  // would sit among rows that all answer the question "who called what",
+  // which is the one question they do not answer.
+  //
+  // Note what is NOT here: accepting the credential on a stream management
+  // call is an `authentication` row at the funnel, like every other family's,
+  // and the stream it then changed is a row here. One act, two layers.
+  { category: 'signals', label: 'Shared Signals',
+    what: 'The Shared Signals Framework: a stream agreed, changed or ' +
+          'deleted, a subject added or removed, a status moved, and every ' +
+          'Security Event Token this service TRANSMITTED or RECEIVED — ' +
+          'including the ones a receiver refused, which is the row that ' +
+          'matters most, because a refused push is invisible from the ' +
+          'receiving end by definition.' }
 ];
 
 const ACTIONS = [
@@ -328,7 +347,30 @@ const ACTIONS = [
   // no-credential rule at the top of this file holding where it would be
   // easiest to break.
   { action: 'spiffe.call.refuse', category: 'spiffe',
-    label: 'A SPIRE Server API call was refused for who was calling' }
+    label: 'A SPIRE Server API call was refused for who was calling' },
+
+  // THE SHARED SIGNALS ROWS. Five are about the STREAM — the configuration
+  // that decides what will be delivered to whom — and three are about an
+  // EVENT actually moving, which is the half nothing else in this service
+  // has: `ssf.event.transmit` and `ssf.event.refused` are the same push seen
+  // from the two ends, and a receiver's refusal is a fact only the
+  // transmitter can record.
+  { action: 'ssf.stream.create', category: 'signals',
+    label: 'A Shared Signals stream was created' },
+  { action: 'ssf.stream.update', category: 'signals',
+    label: 'A Shared Signals stream was changed' },
+  { action: 'ssf.stream.delete', category: 'signals',
+    label: 'A Shared Signals stream was deleted' },
+  { action: 'ssf.stream.status', category: 'signals',
+    label: 'A stream was enabled, paused or disabled' },
+  { action: 'ssf.subject.change', category: 'signals',
+    label: 'A subject was added to or removed from a stream' },
+  { action: 'ssf.event.transmit', category: 'signals',
+    label: 'A Security Event Token was delivered to a receiver' },
+  { action: 'ssf.event.refused', category: 'signals',
+    label: 'A receiver refused a Security Event Token' },
+  { action: 'ssf.event.receive', category: 'signals',
+    label: 'A Security Event Token was pushed AT this service' }
 ];
 
 const CATEGORY_OF_ACTION = {};

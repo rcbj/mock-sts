@@ -751,6 +751,26 @@ const SECTIONS = [
                '/scim/v2/Users</code> and an <code>ldapadd</code> create the ' +
                'same entry and somebody provisioned over SCIM appears on ' +
                '<a href="/admin/users">Users</a>.' },
+      // UNGROUPED, beside SCIM, and for the smaller of that page's two
+      // reasons: a group of one would be a heading saying the label twice.
+      // What makes it worth its own page rather than a section of another is
+      // that it is the one family here that runs the OTHER WAY ROUND — this
+      // service delivering an event to a receiver that agreed in advance —
+      // so there is no family above it whose page it would be a corner of.
+      { path: '/admin/ssf', label: 'Shared Signals',
+        blurb: 'The <strong>Shared Signals Framework</strong> (OpenID SSF ' +
+               '1.0): the streams this transmitter has agreed, who each one ' +
+               'is about, what is queued for it and what a receiver refused. ' +
+               'It is the one protocol family here that TALKS BACK &mdash; ' +
+               'every other answers a request, and this one delivers a ' +
+               'Security Event Token nobody asked for, at the moment ' +
+               'something happens. <strong>SSF is the pipe and not the ' +
+               'vocabulary</strong>: it defines two events of its own, both ' +
+               'about the pipe, and the vocabularies are CAEP and RISC. ' +
+               'Nothing here generates an event on its own &mdash; every ' +
+               'SET was asked for, at the verification endpoint, on this ' +
+               'page or through the management API.' },
+
       // UNGROUPED, beside SCIM, and the placement needed the same argument the
       // delegation page needed. Federation spans FIVE protocol families, so
       // under any one of the groups above it would mean choosing which four
@@ -1212,6 +1232,12 @@ const SETTING_HOMES = [
   // restart" to look at the wrong page.
   { group: 'Persistence', pages: ['/admin/persistence'] },
   { group: 'SCIM', pages: ['/admin/scim'] },
+  // Shared Signals. A page of its own rather than a section of anything, for
+  // the reason /admin/federation is ungrouped: SSF is not a variant of another
+  // family here, it is the one that runs the other way round — this service
+  // delivering an event to somebody who agreed to be told. A group of one
+  // would be a heading that said the label twice.
+  { group: 'SSF', pages: ['/admin/ssf'] },
   // The claim itself is an OAuth2/OIDC and SAML concern, but what it NAMES is a
   // directory group and what decides whether somebody is in one is the Groups
   // page. Somebody asking "why is this group not in my token" is looking at
@@ -18598,6 +18624,348 @@ app.get('/admin/scim', function (req, res) {
   log.debug("Leaving the admin SCIM page.");
 });
 
+// ---------------------------------------------------------------------------
+// THE EIGHTH SLOT, filled by `../ssf/ssf.js` at its own require time, and rule
+// 3e's test answers yes in both directions at once.
+//
+//   * a require from THIS file to `../ssf/ssf.js` would CLOSE A CYCLE: that
+//     module requires this one for the page shell and the gate, exactly as
+//     `../sts_metadata.js` and `./crypto_metadata.js` do.
+//   * a require the other way round — from `mgmt-api/admin_api.js` (19) to
+//     `../ssf/ssf.js` — would MOVE ROUTES: every `/ssf` endpoint, and the
+//     `/.well-known/ssf-configuration` document, ahead of the management API's
+//     own and of ldap, scim and spiffe.
+//
+// So `/admin/ssf` and `/admin-api/ssf` reach it through a function this console
+// holds, the way `/admin-api/crypto` reaches the crypto report.
+//
+// **IT CARRIES ONE OBJECT AND IS VALIDATED WHOLE**, which is the rule
+// `setLogoutReader()` and `setCryptoReporter()` follow: a filler that installed
+// the reader without the action would leave this page able to LIST streams and
+// unable to change any of them, and rule 7's parity would be failing silently
+// rather than loudly.
+//
+// **`action` RETURNS A PROMISE AND IT IS THE ONLY SLOT HERE THAT DOES.** Every
+// other action function in this console answers from memory; transmitting a
+// Security Event Token signs a JWS — which may be ML-DSA or SLH-DSA on the
+// worker pool — and then POSTs it to somebody else's endpoint. Neither can be
+// done synchronously, and pretending otherwise would mean this page reporting
+// "sent" before anything had been.
+// ---------------------------------------------------------------------------
+let signalsReporter = null;
+
+function setSignalsReporter(reporter) {
+  log.debug("Entering setSignalsReporter().");
+  const needed = ['report', 'action', 'actions', 'eventTypes', 'statuses',
+                  'subjectFormats'];
+  const missing = needed.filter(function (name) {
+    return !reporter || reporter[name] === undefined;
+  });
+  if (missing.length) {
+    log.error('admin: setSignalsReporter() was given something without ' +
+              missing.join(', ') + ', and was ignored whole. /admin/ssf and ' +
+              '/admin-api/ssf will say the reporter is not installed rather ' +
+              'than half working.');
+    log.debug("Leaving setSignalsReporter(). Refused.");
+    return;
+  }
+  signalsReporter = reporter;
+  log.debug("Leaving setSignalsReporter(). Installed.");
+}
+
+// The whole report, for this page and for `GET /admin-api/ssf`. One function,
+// so the page and the API cannot disagree about what this transmitter is
+// doing — which is rule 7's entire subject.
+function ssfJson(req) {
+  log.debug("Entering ssfJson().");
+  if (!signalsReporter) {
+    log.debug("Leaving ssfJson(). Not installed.");
+    return { installed: false, enabled: false, streamDetail: [],
+             receivedDetail: [], settings: configSettingsJson('/admin/ssf'),
+             note: 'ssf/ssf.js is not loaded in this process, so nothing ' +
+                   'here can report on the Shared Signals Framework.' };
+  }
+  const report = signalsReporter.report(req);
+  report.installed = true;
+  report.settings = configSettingsJson('/admin/ssf');
+  log.debug("Leaving ssfJson(). " + report.streamDetail.length + " stream(s).");
+  return report;
+}
+
+// The four actions, shared with `POST /admin-api/ssf/:action`. It resolves
+// rather than returning, for the reason the slot's header gives.
+function ssfAction(body) {
+  log.debug("Entering ssfAction().");
+  const asked = body || {};
+  if (!signalsReporter) {
+    log.debug("Leaving ssfAction(). Not installed.");
+    return Promise.resolve({ ok: false, errors: [
+      'ssf/ssf.js is not loaded in this process, so there is nothing to ' +
+      'act on.'] });
+  }
+  const name = String(asked.action || '');
+  log.debug("Leaving ssfAction(). " + name);
+  return signalsReporter.action(name, asked, null);
+}
+
+function ssfStreamCard(row) {
+  log.debug("Entering ssfStreamCard().");
+  const subjects = row.subjects.length
+    ? row.subjects.map(function (one) {
+        return '<tr><td>' + esc(one.text) + '</td><td>' +
+          (one.verified ? 'verified' : 'unverified') + '</td><td class="sub">' +
+          esc(one.addedAt) + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="3">No subjects. What that MEANS is ' +
+      '<code>default_subjects</code> on the transmitter metadata: with ALL ' +
+      'this stream is about everybody, with NONE about nobody.</td></tr>';
+  const queue = row.queue.length
+    ? row.queue.map(function (one) {
+        return '<tr><td><code>' + esc(one.jti) + '</code></td><td>' +
+          esc(one.summary.name) + '</td><td class="sub">' +
+          esc(one.queuedAt) + '</td><td class="sub">' +
+          esc(one.deliveredAt || 'not yet') + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="4">Nothing waiting.</td></tr>';
+  const history = row.log.slice(0, 12).map(function (one) {
+    return '<tr><td class="sub">' + esc(one.at) + '</td><td>' +
+      esc(one.kind) + '</td><td>' + esc(one.text) + '</td></tr>';
+  }).join('') || '<tr><td colspan="3">Nothing recorded yet.</td></tr>';
+
+  log.debug("Leaving ssfStreamCard().");
+  return '<h3><code>' + esc(row.stream_id) + '</code> &mdash; ' +
+    esc(row.status) + '</h3>' +
+    '<table class="key">' +
+    '<tr><th>Issuer</th><td><code>' + esc(row.iss) + '</code></td></tr>' +
+    '<tr><th>Audience</th><td><code>' +
+    esc(Array.isArray(row.aud) ? row.aud.join(', ') : row.aud) +
+    '</code></td></tr>' +
+    '<tr><th>Delivery</th><td><code>' + esc(row.delivery.method) +
+    '</code>' + (row.delivery.endpoint_url
+      ? ' &rarr; <code>' + esc(row.delivery.endpoint_url) + '</code>'
+      : '') + '</td></tr>' +
+    '<tr><th>Delivers</th><td>' + (row.events_delivered.length
+      ? row.events_delivered.map(function (uri) {
+          return '<code>' + esc(uri) + '</code>';
+        }).join('<br>')
+      : 'nothing &mdash; the intersection of what the receiver asked for ' +
+        'and what this transmitter supports is empty') + '</td></tr>' +
+    '<tr><th>Created</th><td class="sub">' + esc(row.createdAt) + ' by ' +
+    esc(row.createdBy || '(unauthenticated)') + '</td></tr>' +
+    '<tr><th>Counters</th><td>' + row.counters.queued + ' queued, ' +
+    row.counters.delivered + ' delivered, ' + row.counters.failed +
+    ' failed, ' + row.counters.acknowledged + ' acknowledged, ' +
+    row.counters.receiverErrors + ' refused by the receiver</td></tr>' +
+    (row.lastPushError
+      ? '<tr><th>Last push</th><td class="state-invalid">' +
+        esc(row.lastPushError) + '</td></tr>'
+      : '') +
+    '</table>' +
+    '<h4>Subjects</h4>' +
+    '<table><tr><th>Subject</th><th>State</th><th>Added</th></tr>' +
+    subjects + '</table>' +
+    '<h4>Waiting to be delivered</h4>' +
+    '<table><tr><th>jti</th><th>Event</th><th>Queued</th><th>Delivered</th>' +
+    '</tr>' + queue + '</table>' +
+    '<h4>What has happened on this stream</h4>' +
+    '<table><tr><th>When</th><th>What</th><th>Detail</th></tr>' + history +
+    '</table>' +
+    '<form method="post" action="/admin/ssf"><div class="formrow">' +
+    '<input type="hidden" name="stream_id" value="' + esc(row.stream_id) +
+    '">' +
+    '<input type="hidden" name="action" value="status">' +
+    '<label for="status-' + esc(row.stream_id) + '">Set the status</label>' +
+    '<select id="status-' + esc(row.stream_id) + '" name="status">' +
+    (signalsReporter ? signalsReporter.statuses : []).map(function (one) {
+      return '<option value="' + esc(one) + '"' +
+        (one === row.status ? ' selected' : '') + '>' + esc(one) +
+        '</option>';
+    }).join('') + '</select>' +
+    '<input type="text" name="reason" size="28" placeholder="reason (shown ' +
+    'to the receiver)">' +
+    '<button>Set status</button>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/ssf"><div class="formrow">' +
+    '<input type="hidden" name="stream_id" value="' + esc(row.stream_id) +
+    '">' +
+    '<input type="hidden" name="action" value="transmit">' +
+    '<label for="type-' + esc(row.stream_id) + '">Transmit an event</label>' +
+    '<select id="type-' + esc(row.stream_id) + '" name="type">' +
+    (signalsReporter ? signalsReporter.eventTypes() : [])
+      .map(function (one) {
+        return '<option value="' + esc(one.uri) + '">' + esc(one.name) +
+          (one.offered ? '' : ' (not offered)') + '</option>';
+      }).join('') + '</select>' +
+    '<input type="text" name="payload" size="30" value="{}" ' +
+    'placeholder="the event payload, as JSON">' +
+    '<input type="text" name="subject" size="30" ' +
+    'placeholder="sub_id, as JSON — optional">' +
+    '<button>Transmit</button>' +
+    '</div></form>' +
+    '<form method="post" action="/admin/ssf"><div class="formrow">' +
+    '<input type="hidden" name="stream_id" value="' + esc(row.stream_id) +
+    '">' +
+    '<input type="hidden" name="action" value="delete">' +
+    '<button class="secondary">Delete this stream</button>' +
+    '</div></form>';
+}
+
+app.get('/admin/ssf', function (req, res) {
+  log.debug("Entering the admin Shared Signals page.");
+  const json = ssfJson(req);
+
+  const tiles = '<div class="tiles">' +
+    tile(json.streamDetail ? json.streamDetail.length : 0, 'streams') +
+    tile((json.streamDetail || []).filter(function (row) {
+      return row.status === 'enabled';
+    }).length, 'enabled') +
+    tile((json.streamDetail || []).reduce(function (n, row) {
+      return n + row.counters.delivered;
+    }, 0), 'events delivered') +
+    tile((json.streamDetail || []).reduce(function (n, row) {
+      return n + row.counters.failed;
+    }, 0), 'deliveries refused') +
+    tile((json.streamDetail || []).reduce(function (n, row) {
+      return n + row.queue.length;
+    }, 0), 'waiting') +
+    tile((json.receivedDetail || []).length, 'received here') +
+    '</div>';
+
+  const receivedRows = (json.receivedDetail || []).length
+    ? json.receivedDetail.slice(0, 25).map(function (row) {
+        return '<tr><td class="sub">' + esc(row.at) + '</td>' +
+          '<td>' + esc(row.summary ? row.summary.name : '(unreadable)') +
+          '</td>' +
+          '<td><code>' + esc(row.summary ? row.summary.jti : '') +
+          '</code></td>' +
+          '<td class="' + (row.verified ? 'state-valid' : 'sub') + '">' +
+          esc(row.verified ? 'verified' : 'not verified here') + '</td>' +
+          '<td class="' + (row.correctMediaType ? 'sub' : 'state-invalid') +
+          '"><code>' + esc(row.contentType || '(none)') + '</code></td>' +
+          '</tr>';
+      }).join('')
+    : '<tr><td colspan="5">Nothing has been pushed at this service.</td></tr>';
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>Shared Signals is not loaded in this ' +
+        'process.</strong> The module registers no routes here, so there is ' +
+        'nothing to report. Everything else on this console is ' +
+        'unaffected.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? warn('<strong>SSF is turned off</strong> ' +
+        '(<code>ssf.enabled</code>). The routes are still registered and ' +
+        'answer <code>501</code> rather than <code>404</code>, because the ' +
+        'feature being off and the URL being wrong are different sentences ' +
+        'to a client. The transmitter metadata still answers, so a receiver ' +
+        'can discover that this service speaks SSF and is not currently ' +
+        'doing it. Turn it back on in the settings at the foot of this page.')
+      : '') +
+
+    note('The <strong>Shared Signals Framework</strong> (OpenID SSF 1.0, ' +
+    'final 2 September 2025) is the one protocol family here that TALKS ' +
+    'BACK. Every other family answers a request; this one delivers an event ' +
+    'nobody asked for, at the moment it happens, to somebody who agreed in ' +
+    'advance to be told. What it solves is that SAML and OpenID Connect ' +
+    'authenticate at ONE INSTANT and the relying party then holds a session ' +
+    'for hours whatever happens next.') +
+
+    warn('<strong>SSF is the pipe and not the vocabulary.</strong> It ' +
+    'defines how two parties agree a stream, who the events are about (RFC ' +
+    '9493), what they travel in (RFC 8417) and how they get there (RFC 8935 ' +
+    'push, RFC 8936 poll) &mdash; and exactly TWO events of its own, both ' +
+    'about the pipe. The vocabularies are <strong>CAEP</strong> (what ' +
+    'happened to a session) and <strong>RISC</strong> (what happened to an ' +
+    'account), and neither is implemented here yet. <strong>Nothing ' +
+    'generates an event on its own</strong>: every Security Event Token ' +
+    'this service transmits was asked for &mdash; at the verification ' +
+    'endpoint, on this page, or through the management API.') +
+
+    tiles +
+
+    (json.installed
+      ? '<h2>Discovery</h2>' +
+        note('Everything a receiver needs is at <code>' +
+        esc(json.metadataUrl || '') + '</code>, which is <strong>never ' +
+        'gated</strong>: a receiver has to be able to read what the ' +
+        'endpoints are before it can authenticate to one. The issuer is ' +
+        '<code>' + esc(json.issuer || '') + '</code> and every SET is signed ' +
+        'with <code>' + esc(json.signingAlgorithm || '') + '</code>.') +
+        note('That algorithm is <code>ssf.signingAlgorithm</code> and it ' +
+        'reaches the whole table, <strong>post-quantum included</strong> ' +
+        '&mdash; ML-DSA at three sizes, SLH-DSA at two, and the six ' +
+        'composite ML-DSA + traditional ones &mdash; because a SET is signed ' +
+        'through the same signer every other JWT here goes through. This is ' +
+        'the document most worth signing that way: it records that something ' +
+        'HAPPENED, RFC 8417 section 4.1.4 forbids it to expire, and it is ' +
+        'therefore read long after it was written.')
+      : '') +
+
+    (json.installed
+      ? '<h2>Streams</h2>' +
+        ((json.streamDetail || []).length
+          ? json.streamDetail.map(ssfStreamCard).join('')
+          : note('No streams. A receiver creates one by POSTing a Stream ' +
+            'Configuration to <code>' +
+            esc((json.metadata && json.metadata.configuration_endpoint) ||
+                '/ssf/stream') + '</code>. There is deliberately no ' +
+            '&ldquo;create a stream&rdquo; form here: a stream carries a ' +
+            'delivery endpoint THIS SERVICE WILL DIAL, and the one place ' +
+            'that URL may come from is a receiver that authenticated and ' +
+            'asked &mdash; see <code>ssf/ssf_http.js</code>.'))
+      : '') +
+
+    (json.installed
+      ? '<h2>Pushed at this service</h2>' +
+        note('The roles reversed. <code>POST /ssf/receive</code> accepts a ' +
+        'Security Event Token pushed AT this service, which is what a client ' +
+        'acting as the TRANSMITTER sends to. It accepts one whose signature ' +
+        'does not verify and reports why &mdash; a receiver that refused ' +
+        'could not show anybody what arrived, which is the question being ' +
+        'asked. <code>ssf.receiveRequireSignature</code> turns the 400 on.') +
+        '<table><tr><th>When</th><th>Event</th><th>jti</th>' +
+        '<th>Signature</th><th>Content-Type</th></tr>' + receivedRows +
+        '</table>' +
+        '<form method="post" action="/admin/ssf"><div class="formrow">' +
+        '<input type="hidden" name="action" value="clear-received">' +
+        '<button class="secondary">Clear what has been received</button>' +
+        '</div></form>'
+      : '') +
+
+    configFormsFor('/admin/ssf') +
+
+    note('<a href="/ssf">What this is, for a person</a> &middot; ' +
+    '<a href="/admin/ssf?format=json">this page as JSON</a> &middot; ' +
+    '<a href="/admin-api/ssf">the same over the management API</a> &middot; ' +
+    '<a href="/admin/applications">the receivers, as applications</a>');
+
+  respond(req, res, json, 'Shared Signals', '/admin/ssf', inner);
+  log.debug("Leaving the admin Shared Signals page.");
+});
+
+app.post('/admin/ssf', function (req, res) {
+  log.debug("Entering the admin Shared Signals action endpoint.");
+  const body = parseBody(req);
+  // The one action handler in this console that awaits. Signing a Security
+  // Event Token may be an ML-DSA or SLH-DSA signature on the worker pool, and
+  // delivering it is a POST to somebody else's endpoint; answering before
+  // either had happened would be this page reporting "sent" about nothing.
+  ssfAction(body).then(function (result) {
+    respondToAction(req, res, '/admin/ssf', result);
+    log.debug("Leaving the admin Shared Signals action endpoint.");
+  }).catch(function (e) {
+    // A rejected promise here is a bug in ssf/ssf.js rather than anything a
+    // request can cause — consoleAction() resolves a refusal rather than
+    // throwing one — so it is reported as a refusal naming the message
+    // instead of becoming an unhandled rejection that ends the process.
+    log.error('admin: the Shared Signals action threw: ' + e.message);
+    respondToAction(req, res, '/admin/ssf',
+      { ok: false, errors: ['The action failed: ' + e.message] });
+    log.debug("Leaving the admin Shared Signals action endpoint. Threw.");
+  });
+});
+
 // ONE ROW OF THE INDEX: a group, its size, what is overridden in it, and the
 // page that edits it. Built from `config.groups()` and SETTING_HOMES together,
 // which is what makes a group with no home visible here rather than merely
@@ -21629,6 +21997,21 @@ module.exports = {
   // third to pass rule 3e's test both ways round. See the block above
   // setCryptoReporter().
   setCryptoReporter: setCryptoReporter,
+  // Filled by ../ssf/ssf.js at ITS require time — the eighth, and the fourth
+  // to pass rule 3e's test both ways round. See the block above
+  // setSignalsReporter().
+  setSignalsReporter: setSignalsReporter,
+  // The Shared Signals page's view and its four actions, for admin_api.js.
+  // Rule 7: the API calls exactly these, so an action added to that switch is
+  // most of adding it there. `ssfAction` RESOLVES rather than returning — it
+  // is the only action function in this console that does, because
+  // transmitting a Security Event Token signs a JWS and POSTs it to somebody
+  // else's endpoint.
+  ssfView: ssfJson,
+  ssfAction: ssfAction,
+  ssfActionNames: function () {
+    return signalsReporter ? signalsReporter.actions.slice() : [];
+  },
   // The crypto report, for admin_api.js. One function, so the page and the API
   // cannot disagree about what this service's cryptography is.
   cryptoView: cryptoView,

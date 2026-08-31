@@ -385,7 +385,24 @@ const PROTOCOLS = [
           'endpoint under RFC 8705. The two attributes that make the second REAL are on this ' +
           'entry and are genuinely read — oauthTlsClientAuthSubjectDn for section 2.1 and ' +
           'oauthTlsClientCertificateThumbprint for section 2.2 — so ticking this box is the ' +
-          'note to self, and those two are the configuration.' }
+          'note to self, and those two are the configuration.' },
+  // THE FIFTEENTH FAMILY, AND THE FIRST ONE WHOSE APPLICATION IS SOMETHING
+  // THIS SERVICE CALLS RATHER THAN SOMETHING THAT CALLS IT. Every other row
+  // above names a client: a client_id at the token endpoint, an entityID on
+  // an AuthnRequest, a bind DN on 389. A Shared Signals RECEIVER is the other
+  // way round — it agrees a stream and then this service POSTs events to it —
+  // which is why it is the only family here whose `deliveryAttribute` is a
+  // URL this service DIALS. See ssf/ssf_http.js, which argues that at length.
+  { id: 'ssf', label: 'Shared Signals', kind: 'ssf-receiver',
+    kinds: ['ssf-receiver'],
+    identifierAttribute: 'ssfReceiverId', redirectAttribute: '',
+    deliveryAttribute: 'ssfDeliveryEndpoint',
+    what: 'A Shared Signals RECEIVER: something that agrees a stream at /ssf/stream and is ' +
+          'then delivered Security Event Tokens. Its identifier is whatever it authenticated ' +
+          'as when it created the stream, which is the `aud` those SETs carry, and its ' +
+          'delivery endpoint is where a push goes. Neither is read as a permission — a stream ' +
+          'carries its own delivery endpoint and this entry is where an operator writes down ' +
+          'what a receiver is EXPECTED to be, beside everything else that application is.' }
 ];
 
 const PROTOCOL_IDS = PROTOCOLS.map(function (one) { return one.id; });
@@ -1152,6 +1169,24 @@ const SCHEMA = {
             'rather than an application identifier, so it writes nothing here; the value is ' +
             'a declaration, and scim.authRequired is what decides whether a credential is ' +
             'demanded at all.' },
+    { name: 'ssfReceiverId', kind: 'multi', from: 'SSF, the console, or by hand',
+      identifier: true,
+      identifierName: 'receiver id',
+      what: 'WHAT A SHARED SIGNALS RECEIVER IS CALLED — whatever it authenticated as when it ' +
+            'created a stream at /ssf/stream, which is also the `aud` of every Security Event ' +
+            'Token that stream carries. Unlike the four declaration-only identifiers above it, ' +
+            'this one IS written by the protocol: creating a stream records a sighting, ' +
+            'because a receiver authenticating and being agreed a stream is exactly the kind ' +
+            'of event this registry exists to hold. It still grants nothing — a stream is what ' +
+            'decides what a receiver gets, and it carries its own audience.' },
+    { name: 'ssfDeliveryEndpoint', kind: 'multi', from: 'the console, or by hand',
+      what: 'WHERE THIS RECEIVER EXPECTS ITS EVENTS PUSHED — an RFC 8935 delivery endpoint. It ' +
+            'is a DECLARATION and nothing reads it: a push goes to the endpoint on the STREAM, ' +
+            'which the receiver named when it created one, and this service will not take a URL ' +
+            'to dial from an application entry. That is the same position ' +
+            'federation/federation_http.js takes about oauthJwksUri, one family along: a URL ' +
+            'recorded here is a note about what a receiver is, and a URL on a stream is a URL ' +
+            'this service opens a connection to. The two are deliberately not the same store.' },
     { name: 'spiffeWorkloadId', kind: 'multi', from: 'the console, or by hand',
       identifier: true,
       identifierName: 'SPIFFE ID',
@@ -1444,6 +1479,13 @@ const EDITABLE = {
   ldapBindDn: 'multi',
   scimClientId: 'multi',
   spiffeWorkloadId: 'multi',
+  // The Shared Signals pair. `ssfReceiverId` is the one identifier here that a
+  // PROTOCOL also writes — creating a stream records a sighting — so it is
+  // `multi` like every other accumulating identifier; the delivery endpoint is
+  // declaration only, and `multi` because a receiver legitimately runs one per
+  // environment.
+  ssfReceiverId: 'multi',
+  ssfDeliveryEndpoint: 'multi',
   oauthRedirectUri: 'multi',
   oauthPostLogoutRedirectUri: 'multi',
   oauthFrontchannelLogoutUri: 'set',
@@ -1545,6 +1587,14 @@ function declarationAttributes() {
     // families, and of federation, which does not consume a federated
     // sign-out either.
     note(family.logoutAttribute, 'logout', family);
+    // WHERE AN EVENT GOES, for the one family that has one. It is a fourth
+    // ROLE rather than being folded into `redirectAttribute` above, and the
+    // distinction is not pedantry: a redirect is where a BROWSER is sent back
+    // to after a protocol hop, and this is a URL THIS SERVICE OPENS A
+    // CONNECTION TO. Calling it a redirect would make a table this repository
+    // reads literally say something false about the one attribute here with
+    // an outbound request behind it.
+    note(family.deliveryAttribute, 'delivery', family);
     // The client secret, which only the two OAuth families have. It is on this
     // walk rather than being special-cased on the form for the reason the
     // redirect URI is: the form, `GET /admin-api/applications/new` and

@@ -387,6 +387,33 @@ require('./scim/scim');
 // is correct rather than wasteful. See spiffe_ca.js.
 const spiffeServer = require('./spiffe/spiffe_server');
 // ---------------------------------------------------------------------------
+// SHARED SIGNALS — THE SEVENTEENTH FAMILY, AND THE FIRST ONE THAT TALKS BACK.
+//
+// Every other module above answers a request. This one AGREES A STREAM and
+// then delivers a Security Event Token to somebody who asked in advance to be
+// told — which is why it is the only protocol module here that makes an
+// outbound request, and only the second module in the repository that does
+// (`federation/federation_http.js` is the first, and `ssf/ssf_http.js` argues
+// its own case rather than citing that one, because RFC 8935 push IS the
+// receiver telling the transmitter where to post).
+//
+// **AFTER `admin-ui/admin.js`, and that is the constraint that decides the
+// line.** It fills that module's eighth slot — the reader and the four actions
+// behind `/admin/ssf` and `/admin-api/ssf` — and it requires it for the page
+// shell and the gate, exactly as `sts_metadata.js` and `crypto_metadata.js`
+// do. Rule 3e's test was applied both ways round: a require from `admin.js` to
+// here CLOSES A CYCLE, and a require from `mgmt-api/admin_api.js` to here
+// would MOVE ROUTES — every /ssf endpoint and the well-known document ahead of
+// the management API's own and of ldap, scim and spiffe. So a slot, not an
+// indirection added by analogy.
+//
+// It starts nothing: it is HTTP all the way down, so requiring it is the whole
+// of its installation. It registers no listener and holds no socket, and its
+// streams are in memory and die with the process — which persistence/CLAUDE.md
+// decides: the signing key is regenerated on every start, so a restored queue
+// would be tokens nothing can verify.
+require('./ssf/ssf');
+// ---------------------------------------------------------------------------
 // THE PROTOCOL-INDEPENDENT LOGOUT — SECOND TO LAST, AND THE POSITION IS THE
 // WHOLE OF ITS ARGUMENT.
 //

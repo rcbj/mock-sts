@@ -236,6 +236,37 @@ var config = {
     authClientCert: true         // Offer TLS client certificates
   },
 
+  // --- SSF -------------------------------------------------------------
+  ssf: {
+    enabled: true,                                                                                                                                        // SSF enabled
+    issuer: "",                                                                                                                                           // Transmitter issuer identifier
+    signingAlgorithm: "RS256",                                                                                                                            // Algorithm SETs are signed with
+    deliveryMethods: "urn:ietf:rfc:8935,urn:ietf:rfc:8936",                                                                                               // Delivery methods offered
+    defaultSubjects: "ALL",                                                                                                                               // What an empty subject list means
+    streamStatusOnCreate: "enabled",                                                                                                                      // Status a new stream is created in
+    minVerificationInterval: 60,                                                                                                                          // Minimum verification interval (s)
+    verificationRateLimit: false,                                                                                                                         // Enforce the verification interval
+    criticalSubjectMembers: "",                                                                                                                           // Critical complex-subject members
+    eventsSupported: "https://schemas.openid.net/secevent/ssf/event-type/verification,https://schemas.openid.net/secevent/ssf/event-type/stream-updated", // Event types offered
+    pushDelivery: true,                                                                                                                                   // Make outbound push requests
+    pushAllowedHosts: "",                                                                                                                                 // Push endpoint allowlist
+    pushAllowInsecure: false,                                                                                                                             // Allow http:// and untrusted TLS to a receiver
+    pushTimeoutMs: 10000,                                                                                                                                 // Push timeout (ms)
+    maxStreams: 25,                                                                                                                                       // Streams per realm
+    maxSubjectsPerStream: 100,                                                                                                                            // Subjects per stream
+    maxQueuedEvents: 200,                                                                                                                                 // Queued events per stream
+    pollMaxEvents: 20,                                                                                                                                    // Events per poll
+    maxReceivedEvents: 200,                                                                                                                               // Received events kept
+    maxStreamLogEntries: 200,                                                                                                                             // Log lines per stream
+    authRequired: true,                                                                                                                                   // Require authentication
+    authScopeRead: "ssf:read",                                                                                                                            // Scope to read a stream
+    authScopeWrite: "ssf:write",                                                                                                                          // Scope to change a stream
+    receiveEnabled: true,                                                                                                                                 // Accept pushed events
+    receiveRequireSignature: false,                                                                                                                       // Refuse a SET whose signature does not verify
+    legacySubClaim: false,                                                                                                                                // Also emit the deprecated `sub` claim
+    breakSetSignature: false                                                                                                                              // Sign every SET badly
+  },
+
   // --- Group claim -----------------------------------------------------
   groups: {
     claim: true,             // Carry a groups claim
