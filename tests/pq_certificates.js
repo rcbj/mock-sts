@@ -13,11 +13,13 @@
 //
 // **WHY IT IS HERE AND NOT IN THE PARENT SUITE**, which is the question
 // tests/CLAUDE.md says to answer first: every assertion below compares this
-// service's encoder against OPENSSL, in process, with no port. `openssl x509`
-// cannot be asked — the binary in these images is 3.0 and has no post-quantum
-// algorithms at all — so the second implementation is the one node is linked
-// against, reached through crypto.X509Certificate and tls.connect. There is
-// nothing to observe over HTTP.
+// service's encoder against OPENSSL, in process, with no port. The `openssl`
+// BINARY is no use for it — its version belongs to the base image and to
+// whoever is running this, and 3.0 (Ubuntu 22.04's, and ubuntu:latest's until
+// recently) has no post-quantum algorithms at all — while node's OpenSSL moves
+// with the node version, which this service pins. So the second implementation
+// is the one node is linked against, reached through crypto.X509Certificate
+// and tls.connect. There is nothing to observe over HTTP.
 //
 // The two things it is worth being sure of, in order:
 //
