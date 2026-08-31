@@ -84,3 +84,46 @@ the one place a reader goes when a handshake is failing.
   `applySpiffeCertificate()` in `ldap/ldap_server.js`, which says so beside
   `certificatePlan()` for exactly this reason: the two functions look alike
   enough to be "fixed" into agreement by somebody reading only one.
+
+## Post-quantum certificates
+
+`tls.certificateAlgorithms` (`STS_TLS_CERT_ALGS`) decides what the two
+listeners present. It is `rsa` alone by default and takes any of `ml-dsa-44`,
+`ml-dsa-65` and `ml-dsa-87` beside it, comma separated.
+
+**More than one is the setting worth having.** node takes parallel `key`/`cert`
+arrays and OpenSSL serves whichever certificate matches the signature
+algorithms the CLIENT offered — so `rsa,ml-dsa-65` answers an ordinary client
+with RSA and a post-quantum one with ML-DSA over the same port and the same
+listener. That is what a migration looks like, and it is a property of OpenSSL
+rather than of this code, which is why `tests/pq_certificates.js` asserts it
+rather than describing it.
+
+The ML-DSA certificate comes from `common/crypto.js`'s
+`selfSignedMlDsaCertificate()`. **node-forge cannot build it** — it has no
+ML-DSA and cannot represent the key — so the key and the signature come from
+node's own OpenSSL 3.5 and the DER is written out there against RFC 9881 and
+RFC 5280. It is deliberately not vendored from the debugger: this service is
+the far end of that code, and two copies of one reading of a specification
+agree with each other and interoperate with nothing. `common/pq_jose.js` makes
+the same argument at greater length.
+
+Three consequences are worth knowing before turning it on:
+
+* **`GET /tls/server-certificate` returns every certificate**, concatenated. A
+  truststore built from the first one alone fails to verify the connection it
+  actually gets, and which one it gets is the caller's own doing.
+* **The `openssl` binary in these images is 3.0 and cannot read any of it.**
+  `openssl x509 -in ml-dsa.pem -text` prints `Unable to load certificate`. Node
+  reads it perfectly; so does anything else linked against 3.5 or later.
+* **`/tls/whoami` reports the post-quantum posture in two independent halves**,
+  the key exchange and the certificates, because they answer different
+  questions on different timescales and a single boolean would be wrong for
+  almost every connection made today. Node cannot NAME a hybrid ML-KEM group —
+  `getEphemeralKeyInfo()` knows ECDH and DH only — so an unnamed group is
+  reported as unnamed, with both readings (a hybrid group, or a resumed
+  session) rather than a guess.
+
+LDAPS on 636 keeps serving the FIRST certificate, which is the RSA one unless
+the setting says otherwise: no LDAP client in reach speaks ML-DSA, and the
+point of that listener is that one anchor covers 8443, 9443 and 636.
