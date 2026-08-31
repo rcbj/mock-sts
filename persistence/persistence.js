@@ -667,7 +667,14 @@ function start() {
 
   try {
     driver = chosen === 'postgres'
-      ? require('./persistence_postgres').create({ url: databaseUrl(), log: log })
+      // `verifyTls` is READ HERE AND PASSED IN, rather than read in the
+      // driver: that module takes its url and its logger as options and
+      // reaches for nothing, which is what lets a test construct one against
+      // any database without this file's settings existing at all.
+      ? require('./persistence_postgres').create({
+          url: databaseUrl(), log: log,
+          verifyTls: !!config.value('persistence.databaseTlsRejectUnauthorized')
+        })
       : require('./persistence_ldif').create({ dir: dataDir(), log: log });
   } catch (err) {
     // The postgres driver's `require('pg')` is the realistic way to get here —
@@ -1021,17 +1028,46 @@ function describeDatabase() {
   }
   try {
     const parsed = new URL(raw);
+    // THE TLS STATE, out of the two places it actually lives. `sslmode` is
+    // postgres's own spelling and rides in the connection string; whether the
+    // certificate is BELIEVED is a setting, because `pg` takes that as a TLS
+    // option and not as a URL parameter. Both are reported, because "encrypted"
+    // and "authenticated" are two different answers and a page that gave one
+    // number for them would be the misleading half of a true sentence.
+    const sslmode = String(parsed.searchParams.get('sslmode') || '')
+      .toLowerCase();
+    const encrypted = ['require', 'verify-ca', 'verify-full', 'prefer']
+      .indexOf(sslmode) >= 0;
     return {
       host: parsed.hostname,
       port: parsed.port || '5432',
       database: String(parsed.pathname || '').replace(/^\//, ''),
-      user: parsed.username || null
+      user: parsed.username || null,
+      sslmode: sslmode || 'not set',
+      encrypted: encrypted,
+      verifyCertificate:
+        !!config.value('persistence.databaseTlsRejectUnauthorized'),
+      tls: encrypted
+        ? ('TLS, sslmode=' + sslmode + '; the server certificate is ' +
+           (config.value('persistence.databaseTlsRejectUnauthorized')
+             ? 'verified against this process\'s trust anchors.'
+             : 'NOT verified (persistence.databaseTlsRejectUnauthorized is ' +
+               'off), which is the honest setting for the self-signed pair ' +
+               'the compose stack generates. The connection is encrypted ' +
+               'either way.'))
+        : ('NOT TLS — the connection string does not ask for it. The compose ' +
+           'stack\'s database REFUSES a plaintext connection, because every ' +
+           'host rule in its pg_hba.conf is hostssl, so this configuration ' +
+           'will not connect there.')
     };
   } catch (err) {
     // Not a URL this runtime can parse — a libpq keyword/value string, which
     // `pg` also accepts. There is nothing safe to show of it, because the
     // password is in there somewhere and we do not know where.
     return { host: null, port: null, database: null, user: null,
+             sslmode: 'unknown', encrypted: false, verifyCertificate: false,
+             tls: 'unknown — the connection string is not a URL, so the ' +
+                  'sslmode cannot be read out of it.',
              note: 'the connection string is not a URL; nothing about it is ' +
                    'shown, because it carries a password.' };
   }

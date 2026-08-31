@@ -788,6 +788,84 @@ const SCHEMAS = {
       rows: { type: 'array', items: { $ref: '#/components/schemas/LogoutRow' } }
     }),
 
+  KeyList: openObject(
+    'Every key pair this process generated at start, what each is used for, ' +
+    'and which keystore formats it can be exported as. A LIST and never key ' +
+    'material — POST /admin-api/keys/export is what hands one over.',
+    {
+      issuer: { type: 'string' },
+      realm: { type: 'string',
+               description: 'The signing keys belong to this realm; the TLS ' +
+                            'certificate belongs to the process. Each row ' +
+                            'says which in `scope`.' },
+      regeneratedEveryStart: { type: 'boolean' },
+      formats: { type: 'array', items: { type: 'string' },
+                 description: 'Every format the exporter knows. What a ' +
+                              'PARTICULAR key offers is its own `formats`, ' +
+                              'which is narrower.' },
+      warning: { type: 'string' },
+      keys: { type: 'array', items: openObject('One key pair.', {
+        id: { type: 'string',
+              description: 'What POST /admin-api/keys/export takes as `key`.' },
+        label: { type: 'string' },
+        alg: { type: 'string' },
+        kty: { type: 'string' },
+        crv: { type: 'string' },
+        kid: { type: 'string',
+               description: 'Empty for the TLS key, which has a fingerprint ' +
+                            'instead, and for a post-quantum key that has not ' +
+                            'been generated yet.' },
+        scope: { type: 'string', description: '`realm` or `process`.' },
+        hasCertificate: { type: 'boolean',
+                          description: 'Whether a PKCS#12 is possible: a .p12 ' +
+                                       'wraps a private key in a certificate ' +
+                                       'and this service holds one for the ' +
+                                       'signing key and the TLS key only.' },
+        formats: { type: 'array', items: { type: 'string' },
+                   description: 'Empty means not exportable, and the page ' +
+                                'says why — a post-quantum key that has not ' +
+                                'been made yet, or one with no interoperable ' +
+                                'encoding.' },
+        usedFor: { type: 'array', items: { type: 'string' } }
+      }) }
+    }),
+
+  KeyExportRequest: openObject(
+    'Which key, in which format, under which password.',
+    {
+      key: { type: 'string',
+             description: 'The `id` from GET /admin-api/keys.' },
+      format: { type: 'string', enum: ['pem', 'der', 'jwk', 'pkcs12'] },
+      password: { type: 'string',
+                  description: 'REQUIRED for `pkcs12`. Optional for the other ' +
+                               'three, where it encrypts the private half — ' +
+                               'PKCS#8 for PEM and DER, PBES2 as a .jwe for ' +
+                               'JWK. Empty means the private key comes out in ' +
+                               'the clear, which is usually what is wanted ' +
+                               'from a mock and never anywhere else.' }
+    }),
+
+  KeyExport: openObject(
+    'THE EXPORTED FILES, CARRYING PRIVATE KEY MATERIAL. base64 rather than ' +
+    'raw octets because this API answers JSON everywhere else, and a caller ' +
+    'that suddenly got a binary body would have to special-case one operation.',
+    {
+      ok: { type: 'boolean' },
+      status: { type: 'string', description: 'One line about what came out.' },
+      publicOnly: { type: 'boolean',
+                    description: 'True for a post-quantum key: RFC 9964 ' +
+                                 'defines the public members and the private ' +
+                                 'seed handling is still moving, so there is ' +
+                                 'no interoperable private encoding to hand ' +
+                                 'over.' },
+      files: { type: 'array', items: openObject('One file.', {
+        name: { type: 'string' },
+        mime: { type: 'string' },
+        bytes: { type: 'integer' },
+        base64: { type: 'string' }
+      }) }
+    }),
+
   CryptoMetadata: openObject(
     'What this service does when it signs, verifies, encrypts or decrypts — ' +
     'for every identity service it advertises, with the algorithms each ' +
@@ -2892,6 +2970,20 @@ function operationOf(entry, action) {
                                      'application/json'] = {
     schema: source.responseSchema || { type: 'object' }
   };
+  // EVERY POST DOCUMENTS ITS 400, not only the action resources. A refusal is
+  // the reply half a caller has to handle, and it is not a property of being
+  // an ACTION — a plain POST that takes a body can refuse it just as an action
+  // can refuse its name. This was found by the parity test rather than
+  // reasoned about: `POST /admin-api/keys/export` is the first non-action POST
+  // this API has had, and it went in documenting a 200 alone.
+  if (entry.method === 'POST') {
+    operation.responses['400'] = {
+      description: 'The operation was refused; `errors` says why and nothing ' +
+                   'was handed over.',
+      content: { 'application/json': {
+        schema: { $ref: '#/components/schemas/ActionResult' } } }
+    };
+  }
   log.debug("Leaving operationOf().");
   return operation;
 }

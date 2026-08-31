@@ -1908,3 +1908,39 @@ a TABLE here rather than in a literal at a call site.** A `switch` in a
 protocol module is invisible to that page, so the page would go on looking
 complete while being wrong — which is the failure `sts_metadata.js` exists to
 prevent for endpoints and this arrangement extends to algorithms.
+
+## WHERE A SIGN-OUT GOES, AND THE CLIENT SECRET, ON THE NEW-APPLICATION FORM (2026-08-30)
+
+`PROTOCOLS` gained two optional members beside `identifierAttribute` and
+`redirectAttribute`, and `declarationAttributes()` walks both:
+
+* **`logoutAttribute`** — `oauthPostLogoutRedirectUri` (OAuth 2.0, OpenID
+  Connect), `samlSingleLogoutService` (SAML 2.0) and `wsfedSignOutUri`
+  (WS-Federation, the one attribute this schema did not have). All three are
+  `multi`, so the form draws a textarea and several addresses are one per line
+  — which is what a service provider with an endpoint per binding actually has.
+* **`secretAttribute`** — `oauthClientSecret`, on the two OAuth families. The
+  attribute already existed; what it did not have was a door on the create
+  form, so an application made by hand could not be given one.
+
+**THE ABSENCES ARE THE INTERESTING HALF AND EACH IS A FACT ABOUT THE PROTOCOL.**
+SAML 1.1 has no Single Logout at all — that arrived with 2.0 — so a field for it
+would be a control whose value nothing could ever read. WS-Trust issues a token
+and holds no session to end; Kerberos hands out a ticket this service cannot
+recall; federation deliberately does not consume a partner's sign-out. The rule
+is the one the identifiers already follow: a field is offered where an attribute
+exists to hold it, and nowhere else.
+
+**Adding them to the WALK rather than to the form is what made this one edit.**
+The form, `GET /admin-api/applications/new` and `createApplication()`'s accepted
+set all read `declarationAttributes()`, so a field that exists on one exists on
+all three, and `DECLARATION_ATTRIBUTE_NAMES` picked the two new roles up for
+free.
+
+**`wsfedSignOutUri` IS DECLARED AND NOT YET READ, and the schema row says so.**
+`cleanupTargetsFor()` builds its ping list from `session.wsfedRealms` — the
+`wreply` each sign-in response actually went to — so what this service pings is
+what it OBSERVED, and this attribute is what an operator DECLARED. They are two
+different facts. Wiring it in as the fallback for a realm signed into with no
+wreply is the obvious next step and is deliberately not taken: storing it is one
+change, and changing where a cleanup goes is a change to what the protocol does.

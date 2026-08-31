@@ -1026,6 +1026,18 @@ const SECTIONS = [
       // shell, and fills setCryptoReporter() below so that `/admin-api/crypto`
       // can mirror it. Nothing about the nav knows any of that — a page here
       // is a `path` and a `label` whoever builds it.
+      { path: '/admin/keys', label: 'Key pairs',
+        blurb: 'Every key pair this process generated at start, what each one ' +
+               'is used for, and <strong>a way to take it away</strong>. It is ' +
+               'the deliberate opposite of Cryptography beside it: that page ' +
+               'publishes key types, identifiers and fingerprints and no key ' +
+               'material at all, and this one hands over the private half in ' +
+               'PEM, DER, JWK or a password-protected PKCS#12 — the ' +
+               'debugger\'s own keystore code, vendored. Defensible because ' +
+               'of what these keys are: made at start, held in memory, dead ' +
+               'with the process, protecting nothing. It needs ADMIN WRITE, ' +
+               'which is stronger than any other read here, because on this ' +
+               'page reading is taking.' },
       { path: '/admin/crypto-metadata', label: 'Cryptography',
         blurb: 'What this service does when it SIGNS, VERIFIES, ENCRYPTS or ' +
                'DECRYPTS something — for every identity service it ' +
@@ -9241,10 +9253,20 @@ let cryptoReporter = null;
 
 function setCryptoReporter(reporter) {
   log.debug("Entering setCryptoReporter().");
-  if (typeof reporter !== 'function') {
-    log.error('admin: setCryptoReporter() was given ' + typeof reporter +
-              ' rather than a function, and was ignored. GET ' +
-              '/admin-api/crypto will answer 503.');
+  // ONE OBJECT, VALIDATED WHOLE AND REFUSED WHOLE, which is the rule
+  // setLogoutReader() follows and for the same reason: a filler that installed
+  // the report and not the export would leave one of the three operations
+  // answering 503 while the other two worked, and the parity rule would be
+  // failing silently rather than loudly.
+  const needed = ['report', 'keys', 'exportKey'];
+  const missing = needed.filter(function (name) {
+    return !reporter || typeof reporter[name] !== 'function';
+  });
+  if (missing.length) {
+    log.error('admin: setCryptoReporter() was given something without ' +
+              missing.join(', ') + ', and was ignored whole. ' +
+              '/admin/keys and the two /admin-api crypto resources will say ' +
+              'the reporter is not installed rather than half working.');
     log.debug("Leaving setCryptoReporter(). Refused.");
     return;
   }
@@ -9261,10 +9283,48 @@ function cryptoView(req) {
     log.debug("Leaving cryptoView(). No reporter.");
     return null;
   }
-  const report = cryptoReporter(baseUrlOf(req));
+  const report = cryptoReporter.report(baseUrlOf(req));
   log.debug("Leaving cryptoView(). " +
             ((report.families || []).length) + " identity service(s).");
   return report;
+}
+
+// The key inventory, for admin_api.js. A LIST and never key material: the
+// export is the other function, so a caller that only wanted to know what this
+// process holds cannot be handed a private key by accident.
+function keysView(req) {
+  log.debug("Entering keysView().");
+  if (!cryptoReporter) {
+    log.debug("Leaving keysView(). No reporter.");
+    return null;
+  }
+  const report = cryptoReporter.keys(baseUrlOf(req));
+  log.debug("Leaving keysView(). " + ((report.keys || []).length) + " key(s).");
+  return report;
+}
+
+// The export, for admin_api.js. Returns the vendored exporter's own answer —
+// `{ok, files, status}` or `{ok: false, errors}` — and decides nothing, so the
+// API and the page cannot refuse different things.
+function keysExport(key, format, password) {
+  log.debug("Entering keysExport(). key=" + key + ", format=" + format);
+  if (!cryptoReporter) {
+    log.debug("Leaving keysExport(). No reporter.");
+    return null;
+  }
+  log.debug("Leaving keysExport().");
+  return cryptoReporter.exportKey(key, format, password);
+}
+
+// Does this request hold Admin Write? One caller today —
+// `crypto_metadata.js`'s key export, which is the one act in this console that
+// hands over a private key — and it goes through `gateStateFor()` so that the
+// answer is the same one every page's banner is drawn from.
+function mayWrite(req) {
+  log.debug("Entering mayWrite().");
+  const state = gateStateFor(req);
+  log.debug("Leaving mayWrite(). write=" + !!state.write);
+  return !!state.write;
 }
 
 let logoutReader = null;
@@ -12060,6 +12120,51 @@ function declarationFieldsSection(role, heading, intro) {
     '</table></div>';
 }
 
+// ---------------------------------------------------------------------------
+// WHERE A SIGN-OUT GOES. Four families have one and the rest do not, and the
+// absences are the interesting half — each is a fact about the protocol rather
+// than a gap in this form.
+// ---------------------------------------------------------------------------
+const NEW_APPLICATION_LOGOUT_INTRO =
+  note('Where this application is sent, or pinged, when a session it was part of ' +
+  'ends. <strong>Every one of these takes MORE THAN ONE address, one per line</strong> — a ' +
+  'service provider commonly has a different endpoint per binding, and an OAuth client ' +
+  'registering several environments has a post-logout URI for each.') +
+  note('<strong>ONLY FOUR FAMILIES HAVE ONE, AND THE ABSENCES ARE NOT AN OVERSIGHT.</strong> ' +
+  'SAML 1.1 is the one people look for: it has NO Single Logout at all &mdash; that arrived ' +
+  'with SAML 2.0 &mdash; so a field here would be a box whose value nothing could ever read. ' +
+  'WS-Trust issues a token and holds no session to end; Kerberos hands out a ticket this ' +
+  'service cannot recall; and federation deliberately does not consume a partner\'s ' +
+  'sign-out. The rule this form follows is the one the identifiers follow: a field is ' +
+  'offered where an attribute exists to hold it, and nowhere else.') +
+  warn('<strong>These are DECLARED and, today, mostly not yet READ.</strong> ' +
+  '<code>samlSingleLogoutService</code> is the exception and always has been &mdash; SAML 2.0 ' +
+  'Single Logout really does send a LogoutRequest there. The OAuth post-logout URIs are ' +
+  'matched by RP-Initiated Logout when a client supplies one, and ' +
+  '<code>wsfedSignOutUri</code> is NEW and is not read by the sign-out yet: a ' +
+  '<code>wsignoutcleanup1.0</code> ping goes to the <code>wreply</code> this service ' +
+  'OBSERVED during sign-in, which is a different fact from the one an operator declares ' +
+  'here. Storing it is this change; changing where a cleanup goes is a change to what the ' +
+  'protocol does, and is deliberately separate.');
+
+// ---------------------------------------------------------------------------
+// THE CLIENT SECRET. One field, two families, and a warning that is the whole
+// point of it.
+// ---------------------------------------------------------------------------
+const NEW_APPLICATION_SECRET_INTRO =
+  note('The <code>client_secret</code> for the two OAuth families. Leave it empty and the ' +
+  'entry simply has none, which is what a public client is; a client registering through ' +
+  '<code>POST /oauth2/register</code> is minted one instead.') +
+  warn('<strong>IT IS STORED IN THE CLEAR, IN A DIRECTORY WHERE EVERY BIND SUCCEEDS.</strong> ' +
+  'That is deliberate and it is the same decision <code>GET /krb5/principals</code> makes ' +
+  'about the Kerberos passwords: a debugger whose accounts are unusable without reading the ' +
+  'source is worse than one that says what they are. Anybody who can reach port 389 can read ' +
+  'this value. It is never written to the audit log, which is the one place it is kept ' +
+  'back.\n\nNothing checks it today outside RFC 9700 mode. A mode that enforces client ' +
+  'authentication everywhere is the intended next step, and this field is what it will ' +
+  'check against &mdash; so a secret typed here is worth setting now even though it is not ' +
+  'yet a credential this service refuses anybody for.');
+
 const NEW_APPLICATION_IDENTIFIERS_INTRO =
   note('The name this application answers to in each family it speaks. They are ' +
   'all optional and all independent of the <em>Identifier</em> above &mdash; that one is the ' +
@@ -12248,6 +12353,10 @@ function newApplicationPage(req) {
                              NEW_APPLICATION_IDENTIFIERS_INTRO) +
     declarationFieldsSection('redirect', 'Where responses go back to',
                              NEW_APPLICATION_REDIRECTS_INTRO) +
+    declarationFieldsSection('logout', 'Where a sign-out goes',
+                             NEW_APPLICATION_LOGOUT_INTRO) +
+    declarationFieldsSection('secret', 'The client secret',
+                             NEW_APPLICATION_SECRET_INTRO) +
     samlOverrideFieldsSection() +
 
     '<div class="formrow"><button type="submit">Create the application</button>' +
@@ -18701,6 +18810,22 @@ function persistenceStatusBlock() {
             '</code>. The connection string itself is never shown here: it ' +
             'carries a password and this page is one fetch away from a log.'
           : 'a PostgreSQL connection string'],
+    // TLS TO THE DATABASE, as its own row rather than folded into the one
+    // above. Encryption and authentication are two answers and this page has
+    // room to give both — which matters here more than in most places,
+    // because the honest state of the compose stack is "encrypted and not
+    // authenticated" and a single tick would have to round that one way or
+    // the other.
+    ['Transport', off || info.mode !== 'postgres'
+      ? (info.mode === 'ldif'
+          ? 'a file on this machine — no connection, so nothing to encrypt'
+          : 'nothing is written, so nothing is dialled')
+      : (info.database
+          ? (info.database.encrypted
+              ? '<strong>TLS</strong> &mdash; ' + esc(String(info.database.tls))
+              : '<strong class="bad">NOT TLS</strong> &mdash; ' +
+                esc(String(info.database.tls)))
+          : 'unknown')],
     ['What is written', off ? 'nothing' : [
         info.persistsDirectory ? 'the embedded directory' : null,
         info.persistsRealms ? 'the trust realm registry' : null,
@@ -21507,6 +21632,13 @@ module.exports = {
   // The crypto report, for admin_api.js. One function, so the page and the API
   // cannot disagree about what this service's cryptography is.
   cryptoView: cryptoView,
+  // The key inventory and the export, for admin_api.js. Two functions rather
+  // than one because LISTING what this process holds and HANDING A KEY OVER
+  // are different acts, and only the second needs Admin Write.
+  keysView: keysView,
+  keysExport: keysExport,
+  // For crypto_metadata.js's export route, which is the only caller.
+  mayWrite: mayWrite,
   usersAction: usersAction,
   // The sign-out page's view and its four actions, for admin_api.js. Rule 7:
   // the API calls exactly these, so an action added to that switch is most of

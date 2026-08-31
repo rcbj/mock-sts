@@ -73,8 +73,13 @@ Bring one up to match:
 ```bash
 docker run -d --name sts-db -p 5432:5432 \
   -e POSTGRES_USER=sts -e POSTGRES_PASSWORD=sts -e POSTGRES_DB=sts \
-  postgres:16-alpine
+  postgres:18
 ```
+
+That plain container speaks TLS only if you configure it to; the compose stack
+below does it for you and **requires** it. Against a database of your own,
+either bring your own certificate or leave `sslmode` out of the connection
+string and connect in the clear — this service does whichever the string says.
 
 Point it somewhere else with `STS_DATABASE_URL`, or by editing
 `persistence.databaseUrl` in your appconfig file — all four of them carry the
@@ -96,6 +101,27 @@ docker compose up            # start; the directory is there again next time
 docker compose down          # stop, keeping the volumes
 docker compose down -v       # stop and throw the data away
 ```
+
+### The compose database is TLS, and requires it
+
+Since 2026-08-30 the Postgres container generates a server key pair on its first
+start and every `host` rule in its `pg_hba.conf` is `hostssl`, so a plaintext
+client is refused by the database with `no pg_hba.conf entry for host …, no
+encryption`. The connection string carries `?sslmode=require` to match.
+
+The certificate is **self-signed**, because it is generated in the container by
+something that has no CA to sign it. So the connection is *encrypted* and the
+server is not *authenticated*, and `/admin/persistence` says exactly that in its
+**Transport** row rather than showing one tick for two different facts. Turn
+`persistence.databaseTlsRejectUnauthorized` on when you point this at a real
+database whose certificate chains to something `NODE_EXTRA_CA_CERTS` names.
+
+**Upgrading from an older stack needs `docker compose down -v`.** The image is
+`postgres:18` now, and a major version will not read a data directory written by
+the previous one — nor will it accept the old `/var/lib/postgresql/data` mount,
+which is a single mount at `/var/lib/postgresql` from 18 onwards. Throwing the
+volume away costs only what somebody typed: the directory, the realm registry
+and the setting overrides. Nothing this service mints was ever in there.
 
 ## The settings
 
