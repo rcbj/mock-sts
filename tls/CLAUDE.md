@@ -113,9 +113,11 @@ Three consequences are worth knowing before turning it on:
 * **`GET /tls/server-certificate` returns every certificate**, concatenated. A
   truststore built from the first one alone fails to verify the connection it
   actually gets, and which one it gets is the caller's own doing.
-* **The `openssl` binary in these images is 3.0 and cannot read any of it.**
-  `openssl x509 -in ml-dsa.pem -text` prints `Unable to load certificate`. Node
-  reads it perfectly; so does anything else linked against 3.5 or later.
+* **Whether the `openssl` binary can read any of it depends on which one you
+  have.** 3.5 prints an ML-DSA certificate in full; 3.0 — Ubuntu 22.04's, and
+  `ubuntu:latest`'s until recently — says `Unable to load certificate`. Node
+  reads it whatever the binary does, because node's OpenSSL moves with the node
+  version rather than with the image.
 * **`/tls/whoami` reports the post-quantum posture in two independent halves**,
   the key exchange and the certificates, because they answer different
   questions on different timescales and a single boolean would be wrong for
