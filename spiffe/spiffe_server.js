@@ -195,9 +195,10 @@ function description(req) {
       refreshHint: state.refreshHint,
       profiles: {
         https_web: 'The partner verifies this URL with the Web PKI. This ' +
-                   'service\'s certificate is self-signed and regenerated on ' +
-                   'every start, so a partner using this profile has to trust ' +
-                   'it explicitly — fetch it from /tls/server-certificate.',
+                   'service\'s certificate is not in it — it is either ' +
+                   'self-signed or issued by a local authority — so a ' +
+                   'partner using this profile has to trust it explicitly: ' +
+                   'fetch it from /tls/server-certificate.',
         https_spiffe: 'The partner verifies this URL with a SPIFFE ID and a ' +
                       'bundle it already has. Supported in the sense that the ' +
                       'endpoint serves the right document; the SPIFFE ID this ' +

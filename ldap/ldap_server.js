@@ -5510,10 +5510,10 @@ function description(req) {
         fingerprint256: serverCertificate ? serverCertificate.fingerprint256 : '',
         notAfter: serverCertificate ? serverCertificate.notAfter : '',
         source: 'the same certificate and key the HTTPS listeners on ' +
-          tlsPorts.tls + ' and ' + tlsPorts.mtls + ' serve. It is self-signed ' +
-          'and regenerated on every start, so trust it per run rather than ' +
-          'once: GET /tls/server-certificate hands it out in PEM. One anchor ' +
-          'for all three sockets is why they share it.'
+          tlsPorts.tls + ' and ' + tlsPorts.mtls + ' serve. It is ' +
+          tlsServer.certificateProvenance() + ': GET ' +
+          '/tls/server-certificate hands it out in PEM. One anchor for all ' +
+          'three sockets is why they share it.'
       }
     },
     autoCreateUsers: autocreateUsers(),
@@ -5668,7 +5668,7 @@ app.get('/ldap', function (req, res) {
     '<strong>the one the HTTPS listeners serve</strong>: ' +
     '<code>' + xmlEscape(info.tls.certificate.subject) + '</code>, SHA-256 ' +
     '<code>' + xmlEscape(info.tls.certificate.fingerprint256) + '</code>, ' +
-    'self-signed and regenerated on every start. Fetch it from ' +
+    xmlEscape(tlsServer.certificateProvenance()) + '. Fetch it from ' +
     '<a href="/tls/server-certificate">/tls/server-certificate</a> and put it ' +
     'in your truststore &mdash; <code>LDAPTLS_REQCERT=never</code> is the ' +
     'habit this endpoint exists to avoid, and it would also hide the one ' +
@@ -7052,8 +7052,8 @@ function listen() {
       log.info('ldap: LDAPS is listening on TCP ' + boundTlsPort +
                ', serving the same certificate as the HTTPS listeners (' +
                serverCertificate.subject + ', SHA-256 ' +
-               serverCertificate.fingerprint256 + '). It is self-signed and ' +
-               'regenerated on every start, so fetch it from ' +
+               serverCertificate.fingerprint256 + '). It is ' +
+               tlsServer.certificateProvenance() + ', so fetch it from ' +
                '/tls/server-certificate and trust it rather than turning ' +
                'verification off.');
       resolve({ ldapsPort: boundTlsPort, ldapsListening: true,

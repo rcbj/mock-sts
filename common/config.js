@@ -1675,6 +1675,32 @@ const SETTINGS = [
                  'certificate is refused by everything older than OpenSSL ' +
                  '3.5, including the openssl binary in these images.' },
 
+  { key: 'tls.certificateFile', group: 'TLS',
+    label: 'Server certificate file', env: 'STS_TLS_CERT_FILE',
+    type: 'string', dflt: '', runtime: false,
+    restartReason: 'the certificate is read when the listeners are bound',
+    description: 'Serve a certificate somebody else issued instead of the ' +
+                 'self-signed one this service makes at every start. Set it ' +
+                 'with tls.keyFile; either one alone is refused, because a ' +
+                 'certificate and a key that do not go together fail at the ' +
+                 'handshake with a message about neither. THE POINT IS THE ' +
+                 'NUMBER OF TRUST DECISIONS A CALLER MAKES: a self-signed ' +
+                 'certificate regenerated per start is a new anchor every ' +
+                 'restart, on a THIRD origin beside the two the debugger ' +
+                 'already serves. Handed a leaf that chains to the same root ' +
+                 'as those two, one trusted root covers all three and ' +
+                 'survives restarts. The file may be a CHAIN — leaf first, ' +
+                 'issuers after — and all of it is sent. Unset, which is ' +
+                 'the default and what a bare `docker run` gets, nothing ' +
+                 'changes.' },
+
+  { key: 'tls.keyFile', group: 'TLS', label: 'Server private key file',
+    env: 'STS_TLS_KEY_FILE', type: 'string', dflt: '', runtime: false,
+    restartReason: 'the key is read when the listeners are bound',
+    description: 'The PKCS#8 or PKCS#1 private key for tls.certificateFile, ' +
+                 'unencrypted — this service is never given a passphrase to ' +
+                 'prompt for. Set both or neither.' },
+
   // --- OID4VCI -------------------------------------------------------------
   { key: 'oid4vci.walletUrl', group: 'OID4VCI', label: 'Wallet URL',
     env: 'OID4VCI_WALLET_URL', type: 'string', dflt: 'http://localhost:3000',

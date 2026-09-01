@@ -112,6 +112,7 @@
 const https = require('https');
 const tls = require('tls');
 const crypto = require('crypto');
+const fs = require('fs');
 const forge = require('node-forge');
 // The RSA keygen-and-self-sign skeleton this shares with `common/helpers.js`
 // lives in one module since 2026-08-27. What is NOT shared is anything below —
@@ -237,6 +238,25 @@ function bootstrapNote() {
     : '';
 }
 
+// WHAT THIS SERVICE'S CERTIFICATE IS, in a phrase another module can put in
+// a sentence — and it is not decoration, because it changes what a CALLER has
+// to do. A self-signed certificate regenerated per start has to be fetched
+// and trusted again after every restart; one issued by somebody else does not,
+// and telling a reader to re-trust a certificate that never changed sends them
+// to look for a problem that is not there. Six modules used to assert the
+// first outright.
+function certificateProvenance() {
+  log.debug('Entering certificateProvenance().');
+  if (SERVER_CERTIFICATE && SERVER_CERTIFICATE.algorithm === 'supplied') {
+    log.debug('Leaving certificateProvenance(). Supplied.');
+    return 'issued by somebody else and read from disk at startup ' +
+           '(tls.certificateFile), so it does NOT change when this service ' +
+           'restarts — trust its issuer once';
+  }
+  log.debug('Leaving certificateProvenance(). Self-signed.');
+  return 'self-signed and regenerated on every start';
+}
+
 function fingerprintOf(pem) {
   // `colon-hex` is what `openssl x509 -fingerprint -sha256` prints, which is
   // what a person is holding when they compare this by eye. It is the same
@@ -291,11 +311,130 @@ function makeMlDsaServerCertificate(algorithm) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// A CERTIFICATE SOMEBODY ELSE ISSUED, WHICH IS THE ONE WAY A CALLER TRUSTS
+// THIS SERVICE WITHOUT A TRUST DECISION OF ITS OWN.
+//
+// Everything above this makes a SELF-SIGNED certificate at every start, and
+// the cost of that is stated where it is paid: the anchor changes on each
+// restart, so `GET /tls/server-certificate` exists for a caller to fetch and
+// trust the new one. That is honest and it is still the default — a bare
+// `docker run` of this image needs no files and gets what it always got.
+//
+// What it cannot do is be the SECOND of two certificates a person accepts. The
+// debugger serves a UI and an api from a root that outlives their leaves, so
+// trusting that root once covers both across restarts; a self-signed mock
+// beside them is a third origin and a fresh warning every time. Handed a leaf
+// issued by the same issuing CA, this service joins that root and the count of
+// trust decisions goes from three-and-renewed to one.
+//
+// BOTH SETTINGS OR NEITHER. A certificate without its key, or a key that does
+// not match, fails inside the TLS handshake with a message about neither of
+// them — so it is refused here, by name, at startup.
+//
+// The file may hold a CHAIN. Node sends every certificate in `cert`, which is
+// what a client needs to build a path to a root it holds; everything that
+// reads a certificate OUT of this — the fingerprint, the subject, the names,
+// `GET /tls/server-certificate` — takes the first, which is the leaf.
+// ---------------------------------------------------------------------------
+function suppliedServerCertificate() {
+  log.debug('Entering suppliedServerCertificate().');
+  const certFile = String(config.value('tls.certificateFile') || '').trim();
+  const keyFile = String(config.value('tls.keyFile') || '').trim();
+  if (!certFile && !keyFile) {
+    log.debug('Leaving suppliedServerCertificate(). Neither is set.');
+    return null;
+  }
+  if (!certFile || !keyFile) {
+    // Loud and fatal rather than a fallback to self-signed: an operator who
+    // set one of these meant to be serving their certificate, and quietly
+    // serving a different one is the failure they would debug last.
+    log.debug('Leaving suppliedServerCertificate(). Only one is set.');
+    throw new Error('tls.certificateFile and tls.keyFile go together: ' +
+      (certFile ? 'tls.keyFile' : 'tls.certificateFile') + ' is not set. ' +
+      'Set both, or neither to keep the self-signed certificate this ' +
+      'service issues at startup.');
+  }
+  let certPem = '';
+  let keyPem = '';
+  try {
+    certPem = fs.readFileSync(certFile, 'utf8');
+    keyPem = fs.readFileSync(keyFile, 'utf8');
+  } catch (e) {
+    log.debug('Leaving suppliedServerCertificate(). Unreadable.');
+    throw new Error('tls: cannot read the certificate or key named by ' +
+      'tls.certificateFile / tls.keyFile: ' + e.message);
+  }
+  // Parsed here rather than at the handshake, for the same reason as above:
+  // node reports a malformed certificate from inside listen() with a message
+  // that names OpenSSL rather than this setting.
+  let leaf = null;
+  try {
+    leaf = new crypto.X509Certificate(certPem);
+  } catch (e) {
+    log.debug('Leaving suppliedServerCertificate(). Unparseable.');
+    throw new Error('tls: ' + certFile + ' is not a PEM certificate: ' +
+      e.message);
+  }
+  // A key that does not go with the certificate is the other failure that
+  // surfaces as an OpenSSL message three layers down.
+  let pair = false;
+  try {
+    pair = leaf.checkPrivateKey(crypto.createPrivateKey(keyPem));
+  } catch (e) {
+    throw new Error('tls: ' + keyFile + ' is not a readable private key: ' +
+      e.message);
+  }
+  if (!pair) {
+    log.debug('Leaving suppliedServerCertificate(). Key mismatch.');
+    throw new Error('tls: the key in ' + keyFile + ' does not match the ' +
+      'certificate in ' + certFile + '.');
+  }
+  const names = String(leaf.subjectAltName || '').split(',')
+    .map(function (entry) {
+      return entry.trim().replace(/^(DNS|IP Address):/, '');
+    })
+    .filter(function (entry) {
+      return !!entry;
+    });
+  const chainLength = splitPemCertificates(certPem).length;
+  log.info('tls: serving the certificate from ' + certFile + ' (' +
+           chainLength + ' certificate(s) in the chain, subject ' +
+           leaf.subject.replace(/\n/g, ', ') + ', names ' +
+           (names.join(', ') || 'none') + '). It is NOT self-signed and is ' +
+           'not regenerated on restart, so a caller that trusts its issuer ' +
+           'stays trusting it.');
+  log.debug('Leaving suppliedServerCertificate().');
+  return {
+    algorithm: 'supplied',
+    privateKeyPem: keyPem,
+    certPem: certPem,
+    subject: leaf.subject.replace(/\n/g, ', '),
+    names: names,
+    fingerprint256: fingerprintOf(certPem),
+    notAfter: new Date(leaf.validTo).toISOString()
+  };
+}
+
 // Every certificate the listeners present, in the order the setting names
 // them. The FIRST is what every existing caller means by "the server
 // certificate" — GET /tls/server-certificate still returns it — and the rest
 // are additional choices OpenSSL may make on a client's behalf.
 const SERVER_CERTIFICATES = (function buildServerCertificates() {
+  const supplied = suppliedServerCertificate();
+  if (supplied) {
+    // tls.certificateAlgorithms is about certificates this service ISSUES, so
+    // it has nothing to choose from here. Named rather than ignored: asking
+    // for ml-dsa-65 and being served one certificate is worth a line.
+    const asked = config.value('tls.certificateAlgorithms') || [];
+    if (asked.length && !(asked.length === 1 && asked[0] === 'rsa')) {
+      log.warn('tls: tls.certificateAlgorithms (' + asked.join(', ') +
+               ') is ignored while tls.certificateFile is set — that ' +
+               'setting chooses among certificates this service issues, ' +
+               'and it is serving one it was given.');
+    }
+    return [supplied];
+  }
   const wanted = (config.value('tls.certificateAlgorithms') || ['rsa'])
     .map(function (name) {
       return String(name || '').trim().toLowerCase();
@@ -1746,6 +1885,9 @@ module.exports = {
   dnRfc4514: dnRfc4514,
   addAnchors: addAnchors,
   clearAnchors: clearAnchors,
+  // See the note above it: the six modules that describe this certificate to
+  // a reader ask here rather than each asserting it is self-signed.
+  certificateProvenance: certificateProvenance,
   serverCertificatePem: function () { return SERVER_CERTIFICATE.certPem; },
   // The whole of it, private key included, because ldap_server.js serves it on
   // 636 — see the note above SERVER_CERTIFICATE. Handing a private key to

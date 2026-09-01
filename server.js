@@ -514,11 +514,12 @@ function announce() {
   if (useHttps) {
     log.info('This port is HTTPS (global.https' +
              (config.value('oauth2.rfc9700') ? ', which RFC 9700 mode turned on' : '') +
-             '), served with the same self-signed certificate 8443, 9443 and ' +
-             'LDAPS 636 use. It is regenerated on every start, so fetch it ' +
-             'from /tls/server-certificate and trust it — and fetch it WITHOUT ' +
-             'verification the first time (curl -k), because with this on ' +
-             'there is no plain port left to fetch it from.');
+             '), served with the same certificate 8443, 9443 and ' +
+             'LDAPS 636 use. It is ' + tlsServer.certificateProvenance() +
+             '. Fetch it from /tls/server-certificate and trust it — and ' +
+             'fetch it WITHOUT verification the first time (curl -k), ' +
+             'because with this on there is no plain port left to fetch it ' +
+             'from.');
     log.info('It also ASKS for a client certificate and never requires one ' +
              '(RFC 8705): a Token Request made with one gets an access token ' +
              'bound to it — cnf["x5t#S256"] — which the protected endpoints ' +
