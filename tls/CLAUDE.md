@@ -17,6 +17,44 @@ in `server.js` (rule 6); the main-port half needs no require order at all, becau
 crosses a module boundary and no network one: it is generated per start, held in
 memory, and `GET /tls/server-certificate` publishes the certificate alone.
 
+## The certificate can be one somebody else issued
+
+`tls.certificateFile` and `tls.keyFile` (`STS_TLS_CERT_FILE` / `STS_TLS_KEY_FILE`)
+make this service serve a certificate it was given instead of the self-signed one it
+issues at startup. Both or neither: one alone is refused at startup by name, because
+a certificate and a key that do not go together fail inside the handshake with a
+message about neither of them. A mismatched key and an unparseable file are refused
+there too, for the same reason.
+
+**Why it exists is arithmetic about a person, not about TLS.** Self-signed and
+regenerated per start means the anchor changes on every restart, and this service is
+a THIRD origin beside the debugger's UI and api. Handed a leaf from the same issuing
+CA as those two, one trusted root covers all three and survives restarts — which is
+what `../generate-tls-cert.sh` in the parent repository now issues, with this
+service's own `tls.hostnames` defaults (`localhost`, `sts`, `sts-mock`,
+`sts.example.com`) in the leaf's subjectAltNames so it answers to the names its
+callers already use. One supplied pair reaches all four sockets, since they share
+one.
+
+The file may be a CHAIN — leaf first, issuers after — and all of it is sent, which is
+what lets a client build a path to a root it holds. Everything that reads a
+certificate back OUT of it takes the first: the fingerprint, the subject, the names,
+and `GET /tls/server-certificate`.
+
+`tls.certificateAlgorithms` is ignored while this is set, and says so: that setting
+chooses among certificates this service ISSUES, and there is nothing to choose from
+when it was handed one.
+
+**`certificateProvenance()` is exported for the six modules that describe this
+certificate to a reader**, and it is not decoration — it changes what the reader has
+to DO. A self-signed certificate has to be fetched and trusted again after every
+restart; a supplied one does not, and telling somebody to re-trust a certificate that
+never changed sends them looking for a problem that is not there. `server.js`,
+`ldap_server.js` (twice) and the LDAP metadata page ask it rather than asserting the
+answer; `spiffe_server.js` says only that the certificate is not in the Web PKI,
+which is true either way and spares it a require this module's ordering rules would
+have to account for.
+
 **One thing that arrangement costs, and it is stated on the page rather than left to
 be met as a handshake failure**: with the main port TLS there is no plain listener in
 this process, so `POST /tls/trust` and `GET /tls/server-certificate` — which exist to
