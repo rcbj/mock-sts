@@ -681,6 +681,31 @@ function edgeLook(edge) {
     log.debug("Leaving edgeLook().");
     return { colour: INDIGO, dash: '', weight: 1.6 };
   }
+  // ---------------------------------------------------------------------------
+  // THE RELATION THE CONFIGURED PICTURE ADDS (common/app_permissions.js), and
+  // it is the FIRST line in this renderer that is not about something that
+  // happened. Every other look above describes an act: a credential was issued,
+  // refused, or carried a chain. A `may-reach` line says a client application
+  // has been GRANTED a permission on a resource application and nothing more —
+  // nobody has asked for it, no token exists, and there is no person anywhere
+  // in it.
+  //
+  // **IT TAKES NO MODE COLOUR**, for `signed-in`'s reason said about a
+  // different absence: amber and green are this file's judgement about
+  // impersonation versus delegation, and a permission that has never been
+  // exercised has performed neither. Colouring it green would tell a reader who
+  // has learnt the pairing something false.
+  //
+  // **DASHED UNTIL IT HAS BEEN USED, SOLID AFTERWARDS**, and that one bit is
+  // the most useful thing the configured picture says. `asked` is set when the
+  // client's own entry records having requested that permission in a `scope`,
+  // so a dashed line is a grant nobody has needed — which is the reading a
+  // configuration register exists for and the one an acts diagram can never
+  // give, because a grant nobody used draws no act at all.
+  if (edge.relation === 'may-reach') {
+    log.debug("Leaving edgeLook().");
+    return { colour: INDIGO, dash: edge.asked ? '' : '6 4', weight: 1.5 };
+  }
   if (edge.relation === 'acts-for') {
     const colour = edge.mode === 'impersonation' ? AMBER
                  : edge.mode === 'delegation' ? GREEN : INDIGO;
@@ -727,8 +752,20 @@ function edgeLabelLines(edge, labelOf) {
     // the same expression the mechanism gets on a delegation line, which is
     // what makes the two read as one picture.
     lines.push(edge.typeLabel ? shortType(edge.typeLabel) : 'issued for');
-  } else if (edge.relation === 'acts-for') {
-    lines.push('acts for');
+  } else if (edge.relation === 'may-reach') {
+    // THE PERMISSION IS THE WHOLE LABEL, and it is the NAME rather than the
+    // identifier: the base URI is what the box at the far end is called, so
+    // repeating it on every line into that box would be the same forty
+    // characters drawn once per edge. The `<title>` carries the identifier.
+    lines.push('may reach');
+    if (edge.permissionName) {
+      lines.push(trim(edge.permissionName, 22));
+    }
+    // AND WHETHER IT HAS EVER BEEN ASKED FOR, said in words as well as in the
+    // dash. A picture that carried the distinction only in a line style would
+    // be one where the single most useful thing on it was invisible to anybody
+    // who had not read the key.
+    lines.push(edge.asked ? 'asked for' : 'never asked for');
     if (edge.typeLabel) {
       lines.push(shortType(edge.typeLabel));
     }
@@ -1575,6 +1612,25 @@ function edgeTitle(edge) {
   } else if (edge.relation === 'issued-for') {
     parts.push('A credential NAMING this party was issued to that one, by an ' +
                'ordinary grant rather than by a delegation.');
+  } else if (edge.relation === 'may-reach') {
+    // THE TOOLTIP CARRIES THE FULL IDENTIFIER, which the label deliberately
+    // does not (see edgeLabelLines()). It is also the one thing on this picture
+    // a reader can copy into a client's `scope` and have work, so it is quoted
+    // exactly rather than described.
+    parts.push('MAY reach — a configured delegated permission, not something ' +
+               'that has happened.');
+    if (edge.permissionId) {
+      parts.push('The permission is ' + edge.permissionId +
+                 '. A client sends that string as an OAuth scope; the access ' +
+                 'token comes back audienced to ' + (edge.baseUri || 'the base URI') +
+                 ' with "' + (edge.permissionName || '') + '" on its scope claim.');
+    }
+    if (edge.description) {
+      parts.push(edge.description);
+    }
+    parts.push(edge.asked
+      ? 'This client HAS asked for it: the scope is recorded on its entry.'
+      : 'This client has NEVER asked for it — the grant is configured and unused.');
   } else if (edge.relation === 'acts-for') {
     parts.push('Acts on behalf of.');
   } else {

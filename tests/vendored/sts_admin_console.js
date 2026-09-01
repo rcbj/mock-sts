@@ -108,10 +108,10 @@
 //   * **NO PAGE NESTS A `<form>`** — the raw bytes and the parsed DOM, compared.
 //   * **EVERY LINK ON EVERY PAGE RESOLVES.** Every same-origin `<a href>` the
 //     console draws, deduplicated and then really visited, has to answer under
-//     400. This is what makes the seven console routes with no nav row —
-//     the three delegation drill-downs, both pictures, `/admin/tokens/credential`
-//     and the realm switcher — covered by construction rather than by a list
-//     somebody has to remember to extend.
+//     400. This is what makes the eight console routes with no nav row —
+//     the three delegation drill-downs, all THREE pictures,
+//     `/admin/tokens/credential` and the realm switcher — covered by
+//     construction rather than by a list somebody has to remember to extend.
 //   * **EVERY GET FORM IS FILLED IN AND SUBMITTED**, and what comes back is
 //     checked: the URL carries the fields, the page redraws, and a filter
 //     really narrows what is listed.
@@ -1004,11 +1004,13 @@ async function noPageNestsAForm(driver, pages) {
 // ---------------------------------------------------------------------------
 // EVERY LINK THE CONSOLE DRAWS, REALLY VISITED.
 //
-// This is the section that makes the console's SEVEN routes with no nav row
+// This is the section that makes the console's EIGHT routes with no nav row
 // covered by construction rather than by a list somebody has to remember to
-// extend: the three delegation drill-downs, both server-rendered pictures,
-// /admin/tokens/credential and /admin/realm-switch are all reached from a page,
-// so they are all in here, and so is anything added beside them tomorrow.
+// extend: the three delegation drill-downs, all THREE server-rendered pictures
+// (/admin/delegation/allowed joined them on 2026-09-01, reached from the
+// configured half of /admin/delegation), /admin/tokens/credential and
+// /admin/realm-switch are all reached from a page, so they are all in here,
+// and so is anything added beside them tomorrow.
 //
 // WHAT IS DELIBERATELY NOT CRAWLED, and why each:
 //
@@ -2068,8 +2070,176 @@ async function theHandlersNothingEverPressed(driver) {
   await theAssertionSettingsPageSaves(driver);
   await theSpiffePageRotatesAndFederates(driver);
   await theLifetimesPageSaves(driver);
+  await theDelegationPageDefinesAndGrants(driver);
 
   log.debug("Leaving theHandlersNothingEverPressed().");
+}
+
+// ---------------------------------------------------------------------------
+// /admin/delegation: THE FIVE CONTROLS ON THE CONFIGURED HALF.
+//
+// It is in this section rather than in the writeForms() table for the reason
+// /admin/logout is: each control needs something done first. A permission
+// cannot be defined until its application has a base URI, and it cannot be
+// granted until it has been defined — that ORDERING is the whole shape of the
+// feature, so a table entry that pressed one button in isolation would only
+// ever exercise the refusal.
+//
+// **THE TWO APPLICATIONS ARE MADE THROUGH THE API AND THE PERMISSIONS THROUGH
+// THE PAGE**, deliberately. `/admin/applications` already has its own coverage
+// above; what has never been pressed is these five, and making their operands
+// the cheap way keeps this function about them. Everything is in the realm, so
+// it all goes away with the realm.
+//
+// **AND THE READ-BACK IS OFF THE PAGE THAT DREW THE CONTROL**, not off the
+// API — which is this file's whole reason for existing. A handler that answers
+// 303 with a cheerful `?notice=` and writes to the wrong entry says exactly the
+// same sentence as one that works, and here there are two entries it could
+// have written to.
+// ---------------------------------------------------------------------------
+async function theDelegationPageDefinesAndGrants(driver) {
+  log.debug("Entering theDelegationPageDefinesAndGrants().");
+
+  const stamp = names.runStamp().toLowerCase().replace(/[^a-z0-9]/g, "")
+      .slice(0, 8);
+  const resource = "console-api-" + stamp;
+  const client = "console-app-" + stamp;
+  const baseUri = "https://" + resource + ".example.com/";
+
+  for (const one of [resource, client]) {
+    await common.httpJson(realm("/admin-api/applications/create"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifier: one, name: one,
+                             protocols: ["oauth2"],
+                             fields: { oauthClientId: one } })
+    });
+  }
+
+  // 1. THE BASE URI. Pressed first because nothing else on the page works
+  //    without it, which is exactly what the second press below asserts.
+  await open(driver, realm("/admin/delegation"));
+  // FOUND BY ACTION AND NOT BY FIELD NAMES, all three of them, and that is a
+  // correction rather than a style. The two TABLES on this page draw row
+  // buttons whose hidden fields are `resource`+`name` (Remove) and
+  // `client`+`permission` (Revoke) — the same names the Define and Grant forms
+  // ask for — and a table row comes FIRST in the document. Looking by field
+  // name happens to work while the register is empty, which is exactly when
+  // this run starts, and would silently press Remove instead of Define the
+  // first time it did not.
+  const baseForm = await formIndexPosting(driver, "set-permission-base");
+  check("/admin/delegation draws the Expose an API form", function () {
+    assert.ok(baseForm >= 0,
+      "/admin/delegation should draw a form taking a `resource` and a " +
+      "`baseUri`. The whole configured half of that page hangs off it: a " +
+      "permission is named by its base URI followed by its name, so an " +
+      "application with no base exposes permissions no client can ask for.");
+  });
+  await fillAndPress(driver, baseForm,
+                     { resource: resource, baseUri: baseUri });
+
+  // 2. THE PERMISSION.
+  await open(driver, realm("/admin/delegation"));
+  const defineForm = await formIndexPosting(driver, "define-permission");
+  check("/admin/delegation draws the Define a permission form", function () {
+    assert.ok(defineForm >= 0,
+      "/admin/delegation should draw a form taking a `resource` and a `name`.");
+  });
+  await fillAndPress(driver, defineForm,
+                     { resource: resource, name: "write",
+                       description: "Pressed by the console UI test" });
+
+  const defined = await survey(driver);
+  check("the permission is on the page, by its whole identifier", function () {
+    assert.ok(defined.text.indexOf(baseUri + "write") >= 0,
+      "AND THE PAGE MUST SHOW THE COMPOSED IDENTIFIER, not the name alone: " +
+      baseUri + "write is the string a client actually puts in a `scope`, " +
+      "and it is the one thing on this page somebody copies. The page says " +
+      defined.text.slice(0, 400));
+  });
+
+  // 3. THE GRANT — the relationship itself, and the control this whole
+  //    feature exists for.
+  const grantForm = await formIndexPosting(driver, "grant-permission");
+  check("/admin/delegation draws the Grant a permission form", function () {
+    assert.ok(grantForm >= 0,
+      "/admin/delegation should draw a form taking a `client` and a " +
+      "`permission` once something is defined. Before that it deliberately " +
+      "draws a paragraph instead, because a select with nothing in it is a " +
+      "control that can only fail.");
+  });
+  await fillAndPress(driver, grantForm,
+                     { client: client, permission: baseUri + "write" });
+
+  const granted = await survey(driver);
+  check("the grant names BOTH applications on the page", function () {
+    assert.ok(granted.text.indexOf(client) >= 0 &&
+              granted.text.indexOf(resource) >= 0,
+      "A GRANT IS BETWEEN TWO APPLICATIONS AND THE PAGE HAS TO SAY WHICH IS " +
+      "WHICH. The grant lands on the CLIENT's entry and resolves back to the " +
+      "resource through the permission's base URI, so a row naming only one " +
+      "of them is a row that resolved wrongly — which is the failure a read " +
+      "through the API could not distinguish, since that resource resolves " +
+      "both directions whichever entry the value landed on. The page says " +
+      granted.text.slice(0, 500));
+  });
+  check("and it is marked as never asked for", function () {
+    assert.ok(/never asked for/i.test(granted.text),
+      "a grant nobody has spent must say so. That column is the only thing " +
+      "on this register that comes from what HAPPENED rather than from what " +
+      "was typed, and it is what makes `granted and never asked for` a " +
+      "question the console can answer at all.");
+  });
+
+  // 4 and 5. REVOKE, then REMOVE — in that order, because removing the
+  //    permission first would leave the grant DANGLING and the revoke would
+  //    then be pressing a button on a row in a state this run did not set up.
+  const revokeForm = await formIndexPosting(driver, "revoke-permission");
+  if (revokeForm >= 0) {
+    await fillAndPress(driver, revokeForm, {});
+  }
+  await open(driver, realm("/admin/delegation"));
+  const removeForm = await formIndexPosting(driver, "remove-permission");
+  if (removeForm >= 0) {
+    await fillAndPress(driver, removeForm, {});
+  }
+  const cleared = await survey(driver);
+  check("revoke and remove take both of them off the page", function () {
+    assert.ok(revokeForm >= 0 && removeForm >= 0,
+      "each row should draw its own Revoke and Remove button; the page drew " +
+      "revoke=" + revokeForm + " remove=" + removeForm);
+    assert.ok(cleared.text.indexOf(baseUri + "write") < 0,
+      "and afterwards the permission should be gone from the page. It still " +
+      "says: " + cleared.text.slice(0, 400));
+  });
+
+  log.info("[permissions] OK — a base URI, a permission and a grant were " +
+           "typed on /admin/delegation, the composed identifier and both " +
+           "applications were read back off the page that drew the controls, " +
+           "and revoke and remove took them away again.");
+  log.debug("Leaving theDelegationPageDefinesAndGrants().");
+}
+
+// The index of the first POST form on the page whose hidden `action` holds a
+// given value. The forms in the two tables of the configured register are ROW
+// buttons — every field on them is hidden and already filled in — so they are
+// found by what they DO rather than by what they ask for, which is what
+// formIndexFilling() is for.
+async function formIndexPosting(driver, action) {
+  log.debug("Entering formIndexPosting(). action=" + action);
+  const found = await driver.executeScript(`
+    const wanted = arguments[0];
+    const forms = Array.from(document.forms);
+    for (let i = 0; i < forms.length; i++) {
+      const control = forms[i].elements['action'];
+      if (!control) { continue; }
+      const value = control.value !== undefined ? control.value : '';
+      if (String(value) === wanted) { return i; }
+    }
+    return -1;
+  `, action);
+  log.debug("Leaving formIndexPosting(). index=" + found);
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -2428,12 +2598,17 @@ async function theDrillDownsCarryTheirTrail(driver, created) {
     });
   }
 
-  // The four pages with no nav row of their own.
+  // The five pages with no nav row of their own. `/admin/delegation/allowed`
+  // is the newest and is a drill-down for the same reason the map beside it
+  // is: it is a second VIEW of a register on /admin/delegation rather than a
+  // filter over one, so it takes an `up` and the delegation page's own tab
+  // rather than a nav row of its own.
   const orphans = ["/admin/delegation/user?user=" +
                      encodeURIComponent(created.person),
                    "/admin/delegation/application?application=" +
                      encodeURIComponent(created.identifier),
                    "/admin/delegation/chain",
+                   "/admin/delegation/allowed",
                    "/admin/tokens/credential"];
   for (const path of orphans) {
     const page = await open(driver, realm(path));
@@ -2611,8 +2786,9 @@ async function theRealmSwitcherSwitches(driver) {
 // ---------------------------------------------------------------------------
 // THE TWO PICTURES, WHICH ARE DRAWN ON THE SERVER.
 //
-// `/admin/delegation/map` and `/admin/federation/map` are the console's two
-// drawings, and both are the case where the argument for a script came out the
+// `/admin/delegation/map`, `/admin/delegation/allowed` and
+// `/admin/federation/map` are the console's three drawings, and every one of
+// them is the case where the argument for a script came out the
 // other way: every graph library a person would reach for runs in the browser
 // and would have made these the first scripted pages in this console. They are
 // laid out with dagre on the server and arrive as inline SVG, so
@@ -2627,7 +2803,17 @@ async function theTwoDrawingsAreServerSide(driver) {
   log.debug("Entering theTwoDrawingsAreServerSide().");
   log.info("=== The delegation and federation pictures ===");
 
-  for (const path of ["/admin/delegation/map", "/admin/federation/map"]) {
+  // THE THIRD IS THE CONFIGURED ONE, and it is asserted here rather than
+  // given a check of its own because what is being asserted about it is
+  // identical: it is drawn by the SAME renderer, from a graph in the same
+  // shape, and the whole reason it is a SEPARATE DOCUMENT from the acts
+  // picture next to it is a claim about what is IN it — no person, no issuer,
+  // and lines for grants that have never been used. That claim is
+  // tests/app_permissions.js's, in process, where the graph can be chosen;
+  // what a browser can add is that this one is server-rendered SVG with no
+  // script on it, which is the same thing the other two have to be.
+  for (const path of ["/admin/delegation/map", "/admin/delegation/allowed",
+                      "/admin/federation/map"]) {
     const page = await open(driver, realm(path));
     const drawn = await driver.executeScript(`
       const svg = document.querySelectorAll('svg');
@@ -2670,8 +2856,8 @@ async function theTwoDrawingsAreServerSide(driver) {
     });
   }
 
-  log.info("[drawings] OK — both pictures are inline server-rendered SVG " +
-           "with no script and no image on the page, and both hand the " +
+  log.info("[drawings] OK — all three pictures are inline server-rendered SVG " +
+           "with no script and no image on the page, and all three hand the " +
            "document over at ?format=svg.");
   log.debug("Leaving theTwoDrawingsAreServerSide().");
 }

@@ -64,20 +64,21 @@ var config = {
 
   // --- OAuth 2.0 / OIDC ------------------------------------------------
   oauth2: {
-    issuer: "",                  // Issuer identifier
-    rfc9700: false,              // RFC 9700 mode; restart to apply
-    breakIdTokenNonce: false,    // Break the ID Token nonce
-    refreshIdleSeconds: 86400,   // Refresh token idle timeout (s)
-    revokeRefreshOnLogout: true, // Revoke refresh tokens on sign-out
-    eddsaCurve: "Ed25519",       // EdDSA curve
-    clientAssertionSkewS: 60,    // Client assertion clock skew (s)
-    accessTokenTtlS: 3600,       // Access token lifetime (s)
-    idTokenTtlS: 3600,           // ID Token lifetime (s)
-    refreshTokenTtlS: 86400,     // Refresh token lifetime (s)
-    clockSkewS: 30,              // Token clock skew (s)
-    redirectUris: "",            // Registered redirect URIs
-    loopbackPortWildcard: true,  // Loopback port wildcard
-    frontchannelLogout: true     // OpenID Connect Front-Channel Logout
+    issuer: "",                          // Issuer identifier
+    rfc9700: false,                      // RFC 9700 mode; restart to apply
+    delegatedPermissionsEnforced: false, // Enforce delegated permissions
+    breakIdTokenNonce: false,            // Break the ID Token nonce
+    refreshIdleSeconds: 86400,           // Refresh token idle timeout (s)
+    revokeRefreshOnLogout: true,         // Revoke refresh tokens on sign-out
+    eddsaCurve: "Ed25519",               // EdDSA curve
+    clientAssertionSkewS: 60,            // Client assertion clock skew (s)
+    accessTokenTtlS: 3600,               // Access token lifetime (s)
+    idTokenTtlS: 3600,                   // ID Token lifetime (s)
+    refreshTokenTtlS: 86400,             // Refresh token lifetime (s)
+    clockSkewS: 30,                      // Token clock skew (s)
+    redirectUris: "",                    // Registered redirect URIs
+    loopbackPortWildcard: true,          // Loopback port wildcard
+    frontchannelLogout: true             // OpenID Connect Front-Channel Logout
   },
 
   // --- Admin console ---------------------------------------------------

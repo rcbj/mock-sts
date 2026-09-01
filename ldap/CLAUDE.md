@@ -815,3 +815,27 @@ rule this directory keeps at every other door.
 untouched rather than hidden — a family that vanished when its setting was off
 would make a global logout look complete.
 
+---
+
+## THREE ATTRIBUTES UNDER `ou=applications` NOW MEAN SOMETHING ONLY IN PAIRS (2026-09-01)
+
+Every other attribute on an application entry describes the application it is
+on. `oauthPermissionBaseUri` and `oauthPermission` (on the RESOURCE) and
+`oauthDelegatedPermission` (on the CLIENT) do not: a grant is a fact about two
+entries at once, joined by a string composed from a third attribute on the first
+of them. `common/app_permissions.js` is what reads the two halves together and
+`common/CLAUDE.md` argues the model.
+
+**Nothing about this directory changed to take them.** They are rows in
+`applications.js`'s `SCHEMA` like every other, so `GET /ldap/applications`
+publishes them, `attributesFor()` writes them and `recordFromAttributes()` reads
+them back, and they persist wherever the directory does. That is the property
+that arrangement was built for, and this is the first feature to lean on it in
+both directions.
+
+**AN `ldapmodify` REACHES THEM AND IS NOT CHECKED**, exactly as it reaches a
+redirect URI. That is the whole reason the console can report a **dangling**
+grant — one naming a permission no application defines — as a state rather than
+an error: both console doors refuse to create one, so a dangling grant is always
+something that happened outside them, and this directory enforces nothing
+anywhere.

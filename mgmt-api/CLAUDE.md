@@ -475,3 +475,36 @@ certificate fingerprints and validity dates, all of them already readable from
 `/oauth2/jwks`, `/tls/server-certificate` and the SPIFFE bundle endpoint — and
 that is a rule for anything added to it later rather than an observation about
 what is in it now.
+
+---
+
+## `/admin-api/permissions` — A RESOURCE OF ITS OWN FOR THE CONFIGURED HALF OF ONE PAGE
+
+Added 2026-09-01, six operations: a `GET` and five actions
+(`set-permission-base`, `define-permission`, `remove-permission`,
+`grant-permission`, `revoke-permission`), all of them `mirrors`-ing
+`/admin/delegation`.
+
+**IT IS A RESOURCE OF ITS OWN RATHER THAN MORE ACTIONS ON `/delegation`**, and
+the reason is the same one the console gives for putting two headings on one
+page: the acts and the permissions are two registers, and an API answering both
+under one path would make a caller tell them apart by the shape of a row. `GET
+/admin-api/delegation` still carries the register in its `allowed` member —
+because the page it mirrors carries both — and that is the same data reachable
+under its own name rather than a second computation of it.
+
+**IT IS THE FIRST TIME ONE CONSOLE PAGE HAS BEEN MIRRORED BY TWO RESOURCES**,
+and rule 7 is satisfied by that rather than strained by it: the rule asks that
+every page and every ACTION have an operation, not that the mapping be one to
+one. `/admin/delegation` was already mirrored read-only by `GET
+/admin-api/delegation`; what it grew is five controls, and those five needed
+somewhere to be.
+
+**THE FIVE ACTION NAMES STUTTER UNDER THIS PATH AND THAT IS DELIBERATE.**
+`/admin-api/permissions/define-permission` reads badly and `/permissions/define`
+would read well — but the names are the ones in the console's hidden `action`
+inputs, where the page is `/admin/delegation` and `define` alone would say
+nothing about what is being defined. And `remove` and `revoke` are two different
+things here: one stops a resource exposing a permission, the other takes a grant
+away from a client. One vocabulary for both doors is worth more than a shorter
+URL, and the parity check reads the console's own list either way.

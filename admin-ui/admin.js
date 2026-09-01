@@ -298,6 +298,20 @@ const oauth2 = require('../oauth-oidc/oauth2');
 // holds the acts and this file renders them at /admin/delegation, the same
 // split audit.js has.
 const delegation = require('../common/delegation');
+// WHO MAY ACT ON WHOSE BEHALF — THE CONFIGURED HALF OF THE SAME QUESTION, and a
+// SEPARATE REGISTER from the one above rather than a filter over it. That module
+// holds delegation ACTS, which are evidence; this one holds delegated
+// PERMISSIONS, which are intent: a resource application exposes an API and a
+// client application is granted permissions on it, in Microsoft Entra ID's
+// shape, before anybody has asked for anything. `/admin/delegation` draws both
+// and labels which is which on every heading, because the interesting reading is
+// the DIFFERENCE — a grant nobody has used, and a delegation nobody granted.
+//
+// A library like the ones around it: it registers no route, requires only
+// helpers.js and applications.js, and holds the MODEL while this file holds the
+// HTML. Its header argues the model and says why the ordering rule (define
+// before grant) is enforced in applications.js rather than in either of them.
+const appPermissions = require('../common/app_permissions');
 // THE PICTURE OF THAT REGISTER, at /admin/delegation/map. A library like
 // `./admin_rbac.js` — it registers no route, requires only helpers.js and
 // @dagrejs/dagre, and knows nothing about this console: it is HANDED a resolver
@@ -2445,9 +2459,21 @@ function respondToAction(req, res, target, result) {
   // this is no longer always a bare path — and a second `?` does not start a second
   // query string, it becomes part of the previous parameter's value, which loses the
   // message and corrupts the parameter it landed on in one go.
-  const joiner = target.indexOf('?') < 0 ? '?' : '&';
+  // THE QUERY GOES BEFORE THE FRAGMENT, and a target that has none is
+  // unaffected — which is every target here bar one. `/admin/delegation`'s
+  // configured half posts back to `#allowed`, because that section is four
+  // screens down the longest page in this console and a reader who has just
+  // granted a permission should land on it. Appended the naive way, the
+  // `?notice=` became part of the FRAGMENT: the browser scrolled nowhere and
+  // the message the action came back with was never shown, which reads exactly
+  // like the form having done nothing.
+  const hash = target.indexOf('#');
+  const stem = hash < 0 ? target : target.slice(0, hash);
+  const anchor = hash < 0 ? '' : target.slice(hash);
+  const stemJoiner = stem.indexOf('?') < 0 ? '?' : '&';
   res.set('Cache-Control', 'no-store')
-     .redirect(303, target + joiner + key + '=' + encodeURIComponent(String(message).slice(0, 500)));
+     .redirect(303, stem + stemJoiner + key + '=' +
+                    encodeURIComponent(String(message).slice(0, 500)) + anchor);
   log.debug("Leaving respondToAction(). Redirected to " + target + ".");
 }
 
@@ -6056,9 +6082,453 @@ function delegationView(query) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// THE CONFIGURED HALF OF /admin/delegation: DELEGATED PERMISSIONS.
+//
+// `common/app_permissions.js` holds the model and this holds the HTML, the same
+// split every other register on this console has. Five actions, and they are
+// the reason this page HAS a form at all — which reverses a decision stated at
+// length in the route header above, so the reversal is argued here rather than
+// left as an inconsistency somebody re-derives.
+//
+// **THAT HEADER SAID "NO FORM, AND THAT IS A DECISION", AND IT WAS RIGHT ABOUT
+// WHAT IT WAS TALKING ABOUT.** Everything on this page WAS an observation: an
+// act happened or it did not, and a control that let somebody TYPE a chain
+// would put invented rows in a table whose whole worth is that its rows are
+// what actually happened. That sentence is untouched and still governs the acts
+// table, the chains and the picture — none of them has a control and none ever
+// will.
+//
+// What is new is a SECOND REGISTER on the same page, and it is configuration
+// rather than observation: a delegated permission is something somebody DECIDES,
+// like a redirect URI or a federation relationship, and configuration with no
+// way to type it is configuration only an `ldapmodify` can reach. The rule the
+// old header states is therefore intact and sharpened — **nothing that records
+// what HAPPENED has a control, and the thing that records what is ALLOWED is
+// nothing but controls.** The two are drawn under headings that say which is
+// which, because a reader who confused them would draw exactly the wrong
+// conclusion from the difference between them, which is the most useful thing
+// on the page.
+//
+// The five actions are thin: each calls `app_permissions.js`, which calls
+// `applications.updateApplication()`, which is where the RULES are — so the
+// form, `POST /admin-api/permissions/...` and the generic attribute editor on
+// /admin/applications all go through one implementation of "a permission must
+// be defined before it can be granted". See that module's header.
+// ---------------------------------------------------------------------------
+
+// BUILT FROM THE SWITCH BELOW RATHER THAN TYPED, for the reason
+// APPLICATION_ACTIONS gives at its own site: this repository's own
+// tests/vendored/admin_api.js READS the refusal sentence to check that every
+// console action has an /admin-api operation, so a list that is short by one is
+// a list that turns the parity check off for that action.
+const PERMISSION_ACTIONS = ['set-permission-base', 'define-permission',
+                            'remove-permission', 'grant-permission',
+                            'revoke-permission'];
+
+function permissionsAction(body) {
+  log.debug("Entering permissionsAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const actor = String(body.actor || '');
+  const resource = String(body.resource || body.application || '').trim();
+  const client = String(body.client || body.application || '').trim();
+
+  // WHICH APPLICATION, ASKED ONCE FOR EACH SIDE. The two names are deliberately
+  // different — `resource` for the application that EXPOSES a permission and
+  // `client` for the one that HOLDS it — because this is the one feature here
+  // where a body naming the wrong one still succeeds and writes a grant onto
+  // the API instead of onto its caller. `application` is accepted for either as
+  // a convenience for a caller editing one entry, and the refusals below name
+  // the field that was missing rather than "an application".
+  const needsResource = ['set-permission-base', 'define-permission', 'remove-permission'];
+  const needsClient = ['grant-permission', 'revoke-permission'];
+  if (needsResource.indexOf(action) >= 0 && !resource) {
+    log.debug("Leaving permissionsAction(). No resource named.");
+    return { ok: false, errors: ['Which application exposes it? Send `resource` with the ' +
+                                 'identifier exactly as the registry holds it — this is the ' +
+                                 'application whose API the permission belongs to, not the ' +
+                                 'one that will ask for it.'] };
+  }
+  if (needsClient.indexOf(action) >= 0 && !client) {
+    log.debug("Leaving permissionsAction(). No client named.");
+    return { ok: false, errors: ['Which application holds it? Send `client` with the ' +
+                                 'identifier exactly as the registry holds it — this is the ' +
+                                 'application that will name the permission in a `scope`, ' +
+                                 'not the one that exposes it.'] };
+  }
+
+  if (action === 'set-permission-base') {
+    // The empty value is legal and CLEARS the base — see setBaseUri()'s message,
+    // which says what that does to the permissions still on the entry. It is
+    // the same convention every `set` on /admin/applications follows.
+    const result = appPermissions.setBaseUri(resource, String(body.baseUri === undefined
+      ? (body.value === undefined ? '' : body.value) : body.baseUri), actor);
+    log.debug("Leaving permissionsAction(). set-permission-base " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'define-permission') {
+    const result = appPermissions.definePermission(resource, String(body.name || ''),
+      String(body.description || ''), actor);
+    log.debug("Leaving permissionsAction(). define-permission " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'remove-permission') {
+    // BY NAME AND NOT BY THE RAW ATTRIBUTE VALUE, deliberately. The value on
+    // the entry is `name|description` and a form that posted it back would
+    // break the moment somebody edited the description in an LDAP client — so
+    // the name is the handle and `removePermission()` looks the raw value up.
+    const result = appPermissions.removePermission(resource, String(body.name || ''), actor);
+    log.debug("Leaving permissionsAction(). remove-permission " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'grant-permission') {
+    const result = appPermissions.grant(client, String(body.permission || ''), actor);
+    log.debug("Leaving permissionsAction(). grant-permission " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'revoke-permission') {
+    const result = appPermissions.revoke(client, String(body.permission || ''), actor);
+    log.debug("Leaving permissionsAction(). revoke-permission " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  log.debug("Leaving permissionsAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The ' +
+                               numberWord(PERMISSION_ACTIONS.length) + ' are: ' +
+                               PERMISSION_ACTIONS.join(', ') + '.'] };
+}
+
+// The register and its picture, in one place so that the page, `?format=json`
+// and `GET /admin-api/permissions` cannot come to disagree about what is in it —
+// the same property `delegationView()` gives the acts half.
+function permissionsView() {
+  log.debug("Entering permissionsView().");
+  const register = appPermissions.register();
+  const graph = appPermissions.graph(register.grants);
+  log.debug("Leaving permissionsView(). " + register.counts.grants + " grant(s).");
+  return { register: register, graph: graph };
+}
+
+// One row of the permissions table: what a resource EXPOSES.
+function permissionDefinitionRow(one, listView) {
+  const href = '/admin/applications' + queryWith(listView || {}, { application: one.resource });
+  return '<tr>' +
+    '<td class="who"><a href="' + esc(href) + '">' + esc(one.resourceName) + '</a>' +
+      (one.resourceName === one.resource ? ''
+        : '<br><code>' + esc(one.resource) + '</code>') + '</td>' +
+    '<td><code>' + esc(one.name) + '</code>' +
+      (one.description ? '<br><span class="state-none">' + esc(one.description) + '</span>'
+                       : '') + '</td>' +
+    // THE IDENTIFIER IS THE COLUMN SOMEBODY COPIES, so it is `<code>` and it is
+    // whole rather than shortened. A permission whose entry has no base URI has
+    // none at all, and that is said rather than left as an empty cell — it is
+    // the one state on this table that means the row cannot work.
+    '<td>' + (one.id
+      ? '<code>' + esc(one.id) + '</code>'
+      : '<span class="state-revoked" title="This permission has no identifier ' +
+        'because its application has no oauthPermissionBaseUri. A permission is ' +
+        'named by its base URI followed by its name, so no client can ever ask ' +
+        'for this one. Set the base on the application and it resolves.">no ' +
+        'identifier &mdash; the application has no base URI</span>') + '</td>' +
+    '<td class="num">' + (one.grantedTo.length
+      ? '<span class="state-valid">' + one.grantedTo.length + '</span>'
+      : '<span class="state-none" title="Nothing holds this permission. That is ' +
+        'the ordinary state of a permission that has just been defined — ' +
+        'defining one grants it to nobody.">0</span>') + '</td>' +
+    '<td class="who">' + (one.grantedTo.length
+      ? one.grantedTo.map(function (who) {
+          return esc(who.name) + (who.asked ? '' :
+            ' <span class="state-none" title="Granted and never asked for.">(unused)</span>');
+        }).join('<br>')
+      : '<span class="state-none">&mdash;</span>') + '</td>' +
+    '<td>' + (one.id
+      ? '<form method="post" action="/admin/delegation"><div class="formrow">' +
+        '<input type="hidden" name="action" value="remove-permission">' +
+        '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
+        '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
+        '<button type="submit" class="danger">Remove</button>' +
+        '</div></form>'
+      : '<form method="post" action="/admin/delegation"><div class="formrow">' +
+        '<input type="hidden" name="action" value="remove-permission">' +
+        '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
+        '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
+        '<button type="submit" class="danger">Remove</button>' +
+        '</div></form>') + '</td>' +
+    '</tr>';
+}
+
+// One row of the grants table: the RELATIONSHIP itself.
+function permissionGrantRow(one, listView) {
+  const clientHref = '/admin/applications' +
+    queryWith(listView || {}, { application: one.client });
+  const resourceHref = one.resource
+    ? '/admin/applications' + queryWith(listView || {}, { application: one.resource }) : '';
+  return '<tr>' +
+    '<td class="who"><a href="' + esc(clientHref) + '">' + esc(one.clientName) + '</a>' +
+      (one.clientName === one.client ? ''
+        : '<br><code>' + esc(one.client) + '</code>') + '</td>' +
+    '<td class="who">' + (one.resource
+      ? '<a href="' + esc(resourceHref) + '">' + esc(one.resourceName) + '</a>'
+      // A DANGLING GRANT NAMES NO RESOURCE, and the cell says why rather than
+      // being empty. Both ways it can happen are named, because they are
+      // different problems: one is a deleted application and the other is a
+      // permission removed from under a grant that was made correctly.
+      : '<span class="state-revoked" title="No application in this registry ' +
+        'defines this permission. Either the resource\'s entry was deleted, or ' +
+        'the permission was removed from it while this grant still named it, or ' +
+        'an ldapmodify wrote a grant that never resolved — both console doors ' +
+        'refuse to create one.">dangling</span>') + '</td>' +
+    '<td>' + (one.permissionName
+      ? '<code>' + esc(one.permissionName) + '</code>' +
+        (one.description ? '<br><span class="state-none">' + esc(one.description) +
+                           '</span>' : '')
+      : '<span class="state-none">&mdash;</span>') + '</td>' +
+    '<td><code>' + esc(one.permissionId) + '</code></td>' +
+    // WHAT THE TOKEN WILL SAY, spelled out per row. It is the whole point of
+    // the feature and it is two facts a reader would otherwise have to compose
+    // from two other columns — which is exactly the arithmetic a table should
+    // do for somebody.
+    '<td>' + (one.baseUri
+      ? '<code>aud: ' + esc(one.baseUri) + '</code><br>' +
+        '<code>scope: ' + esc(one.permissionName) + '</code>'
+      : '<span class="state-none">nothing &mdash; the permission does not ' +
+        'resolve, so this scope is treated as an ordinary one</span>') + '</td>' +
+    '<td>' + (one.asked
+      ? '<span class="state-valid" title="This client\'s entry records having ' +
+        'asked for this scope. It is evidence rather than proof: oauthScope ' +
+        'records what was requested, not what was issued.">asked for</span>'
+      : '<span class="state-none" title="This client has never asked for it. A ' +
+        'configured grant nobody has needed is exactly what this register is ' +
+        'here to show.">never asked for</span>') + '</td>' +
+    '<td><form method="post" action="/admin/delegation"><div class="formrow">' +
+      '<input type="hidden" name="action" value="revoke-permission">' +
+      '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
+      '<input type="hidden" name="permission" value="' + esc(one.permissionId) + '">' +
+      '<button type="submit" class="danger">Revoke</button>' +
+      '</div></form></td>' +
+    '</tr>';
+}
+
+// The whole configured section, as it appears on /admin/delegation. Extracted
+// into a function of its own because that page's `inner` is already the longest
+// expression in this console and a fourth screen of string concatenation inside
+// it would be unreadable — not because anything else draws it.
+function permissionsSection(req, view, listView) {
+  log.debug("Entering permissionsSection().");
+  const register = view.register;
+  const counts = register.counts;
+  // Every application in the registry, for the two selects. A select rather
+  // than a text box because BOTH sides of a grant must already be entries —
+  // there is nothing to type that is not on this list, and a typed identifier
+  // that did not match would be refused with a sentence the reader could have
+  // been spared.
+  const all = applications.list();
+  const applicationOptions = all.map(function (row) {
+    return '<option value="' + esc(row.identifier) + '">' +
+           esc(row.name && row.name !== row.identifier
+             ? row.name + ' — ' + row.identifier : row.identifier) + '</option>';
+  }).join('');
+  // Only the permissions that HAVE an identifier can be granted, so only those
+  // are offered. One with no base URI is on the table above with the reason.
+  const grantable = register.permissions.filter(function (one) { return !!one.id; });
+  const permissionOptions = grantable.map(function (one) {
+    return '<option value="' + esc(one.id) + '">' + esc(one.id) +
+           ' — exposed by ' + esc(one.resourceName) + '</option>';
+  }).join('');
+
+  log.debug("Leaving permissionsSection(). " + counts.grants + " grant(s).");
+  return '<h2 id="allowed">What is ALLOWED, decided in advance</h2>' +
+
+    note('<strong>Everything above this heading is EVIDENCE and everything ' +
+    'below it is INTENT, and the difference is the most useful thing on this ' +
+    'page.</strong> The acts, the chains and the picture they are drawn from are ' +
+    'things that happened — a credential was issued or refused, at a moment, to ' +
+    'somebody. What follows is CONFIGURATION: which client applications may reach ' +
+    'which resource applications, typed in before anybody asked for anything. ' +
+    'Read one against the other and two questions answer themselves: <em>which ' +
+    'grants has nobody ever used</em>, and <em>what has been delegated that ' +
+    'nobody granted</em>.') +
+
+    note('<strong>The model is Microsoft Entra ID\'s, deliberately and by ' +
+    'name.</strong> A RESOURCE application exposes an API: it is given a base URI ' +
+    '(Entra calls it the Application ID URI and spells it <code>api://&lt;guid&gt;</code>; ' +
+    'anything absolute works here) and a list of permissions. A permission is ' +
+    'identified by the two joined together &mdash; base <code>https://example.com/</code> ' +
+    'and name <code>write</code> make <code>https://example.com/write</code> &mdash; and a ' +
+    'CLIENT application is granted some of them. <strong>A permission must be ' +
+    'DEFINED before it can be GRANTED</strong>, which is the one ordering rule ' +
+    'this feature has; it is checked in <code>applications.js</code> so that this ' +
+    'form, the management API and the attribute editor on ' +
+    '<a href="/admin/applications">Applications</a> cannot disagree about it.') +
+
+    note('<strong>Then a client asks for it as an OAuth scope, and the ' +
+    'access token says both halves.</strong> ' +
+    '<code>scope=openid https://example.com/write</code> produces a token ' +
+    'audienced to <code>https://example.com/</code> carrying ' +
+    '<code>scope: openid write</code> &mdash; the base becomes the <code>aud</code> ' +
+    'and the name becomes the scope, which is what a resource server wants: check ' +
+    'the audience once, then read bare permission names. That is the same rule ' +
+    'a scope naming another application\'s <code>client_id</code> already ' +
+    'follows, one step more precise.') +
+
+    note('<strong>A grant REFUSES nothing by default, and that is the ' +
+    'setting at the foot of this page.</strong> With ' +
+    '<code>oauth2.delegatedPermissionsEnforced</code> off &mdash; which it is ' +
+    'unless somebody turned it on &mdash; an ungranted permission is honoured ' +
+    'exactly as a granted one is, logged as ungranted, and marked here. With it ' +
+    'on the same request is refused <code>invalid_scope</code> at the ' +
+    'authorization endpoint, where the client can still be told. Both answers ' +
+    'exercise a client and neither is the right one for every test, which is why ' +
+    'the register is fully readable before anybody enforces anything.') +
+
+    '<div class="tiles">' +
+      tile(counts.resources, 'applications exposing an API') +
+      tile(counts.permissions, 'permissions defined') +
+      tile(counts.grants, 'grants') +
+      tile(counts.clients, 'applications holding one') +
+      tile(counts.unused, 'granted and never asked for') +
+      tile(counts.dangling, 'dangling') +
+    '</div>' +
+
+    note('<a class="btn" href="/admin/delegation/allowed">See the allowed ' +
+    'mappings as a picture &rarr;</a> <strong>A SECOND diagram, and it is not the ' +
+    'one above.</strong> ' +
+    '<a href="/admin/delegation/map">The picture of the acts</a> draws what ' +
+    'happened: three layers, a stick figure for the person it happened to, and a ' +
+    'hexagon for this service, which issued it. This one draws what is allowed: ' +
+    'every box is an application, there is no person on it at all &mdash; a ' +
+    'permission says <em>webapp1 may reach the API as whoever is signed in</em>, ' +
+    'and there is no whoever yet &mdash; and this service is not on it either, ' +
+    'because not one line of it has been issued. A line is DASHED until the ' +
+    'client has actually asked for that permission, which is the reading a ' +
+    'configured register exists for and the one an acts diagram can never give.') +
+
+    '<h3>Permissions applications expose</h3>' +
+    note('One row per permission. <strong>Defining one grants it to ' +
+    'nobody</strong>, so a row with nothing in the last two columns is the ' +
+    'ordinary first step rather than a mistake. Removing a permission does NOT ' +
+    'revoke the grants naming it &mdash; they stay on the clients\' entries and ' +
+    'become dangling, because tidying them would be this page writing to entries ' +
+    'nobody named.') +
+    '<table><tr><th>Exposed by</th><th>Permission</th><th>Identifier &mdash; what a ' +
+    'client sends</th><th>Held by</th><th>Which applications</th><th></th></tr>' +
+    (register.permissions.map(function (one) {
+      return permissionDefinitionRow(one, listView);
+    }).join('') || '<tr><td colspan="6">No application here exposes an API yet. ' +
+      'Give one a base URI below and then define a permission on it.</td></tr>') +
+    '</table>' +
+
+    '<h4>Expose an API</h4>' +
+    note('The base URI is one answer per application and everything it ' +
+    'exposes hangs off it. A trailing separator is added where there is none, ' +
+    'because the identifier is a plain concatenation and ' +
+    '<code>https://example.com</code> + <code>write</code> would otherwise read as ' +
+    'one word. Clearing it leaves the permissions on the entry with no identifier ' +
+    'at all, which the table above reports rather than hides.') +
+    '<form method="post" action="/admin/delegation"><div class="formrow">' +
+      '<input type="hidden" name="action" value="set-permission-base">' +
+      '<label for="base-resource">Application</label>' +
+      '<select id="base-resource" name="resource">' + applicationOptions + '</select>' +
+      '<label for="baseUri">Base URI</label>' +
+      '<input type="text" id="baseUri" name="baseUri" size="34" ' +
+        'placeholder="https://example.com/">' +
+      '<button type="submit">Set the base URI</button>' +
+    '</div></form>' +
+
+    '<h4>Define a permission</h4>' +
+    note('The name is what ends up on the token\'s <code>scope</code> ' +
+    'claim, so it must be a legal OAuth scope token: any printable ASCII except ' +
+    'space, double quote and backslash (RFC 6749 section 3.3), and not ' +
+    '<code>|</code>, which separates the name from the description in the ' +
+    'attribute. The description is optional and is shown wherever the permission ' +
+    'is; changing it means removing the permission and defining it again, because ' +
+    'a permission has one description and two rows with one name would leave the ' +
+    'second unreachable.') +
+    '<form method="post" action="/admin/delegation"><div class="formrow">' +
+      '<input type="hidden" name="action" value="define-permission">' +
+      '<label for="perm-resource">Exposed by</label>' +
+      '<select id="perm-resource" name="resource">' + applicationOptions + '</select>' +
+      '<label for="perm-name">Name</label>' +
+      '<input type="text" id="perm-name" name="name" size="18" placeholder="write">' +
+      '<label for="perm-description">Description</label>' +
+      '<input type="text" id="perm-description" name="description" size="34" ' +
+        'placeholder="Change widgets on somebody\'s behalf">' +
+      '<button type="submit">Define it</button>' +
+    '</div></form>' +
+
+    '<h3>Grants &mdash; the delegation relationships</h3>' +
+    note('<strong>One row per (client, permission), and that IS the ' +
+    'relationship.</strong> A client granted three permissions on one resource is ' +
+    'three rows rather than one labelled <em>3</em>, because the permission is ' +
+    'what was granted and the pair of applications is what it happens to join. ' +
+    'That is also how one-to-many and many-to-one both work here with no store of ' +
+    'their own: three clients granted one permission is one value on each of three ' +
+    'entries.') +
+    '<table><tr><th>Client &mdash; who may ask</th><th>Resource &mdash; what is ' +
+    'reached</th><th>Permission</th><th>Identifier</th><th>What the access token ' +
+    'will say</th><th>Ever asked for?</th><th></th></tr>' +
+    (register.grants.map(function (one) {
+      return permissionGrantRow(one, listView);
+    }).join('') || '<tr><td colspan="7">Nothing is granted yet. Define a ' +
+      'permission above and grant it below &mdash; until then every scope this ' +
+      'service is sent is an ordinary scope.</td></tr>') +
+    '</table>' +
+
+    '<h4>Grant a permission</h4>' +
+    (grantable.length
+      ? note('The grant lands on the CLIENT\'s entry, as a value of ' +
+        '<code>oauthDelegatedPermission</code>, because the client is the party ' +
+        'that will name the permission in a <code>scope</code> — so the entry that ' +
+        'answers <em>may this request be honoured</em> is the entry the request ' +
+        'identifies. An application cannot be granted its own permission: the ' +
+        'token would be addressed to itself, which is what an ID Token already ' +
+        'is.') +
+        '<form method="post" action="/admin/delegation"><div class="formrow">' +
+          '<input type="hidden" name="action" value="grant-permission">' +
+          '<label for="grant-client">Client</label>' +
+          '<select id="grant-client" name="client">' + applicationOptions + '</select>' +
+          '<label for="grant-permission">Permission</label>' +
+          '<select id="grant-permission" name="permission">' + permissionOptions +
+            '</select>' +
+          '<button type="submit">Grant it</button>' +
+        '</div></form>'
+      : note('<strong>There is nothing to grant yet.</strong> A permission ' +
+        'must be defined before it can be granted, so this form appears once an ' +
+        'application exposes one with an identifier. That ordering is the whole ' +
+        'shape of the feature rather than a limitation of this page.')) +
+
+    note('<strong>Every one of these is an ordinary attribute on an ' +
+    'ordinary directory entry</strong>, and an <code>ldapmodify</code> reaches ' +
+    'them exactly as it reaches a redirect URI: <code>oauthPermissionBaseUri</code> ' +
+    'and <code>oauthPermission</code> on the resource, ' +
+    '<code>oauthDelegatedPermission</code> on the client. What LDAP does not get ' +
+    'is the ordering check &mdash; this directory enforces nothing anywhere &mdash; ' +
+    'which is why a grant naming a permission nobody defines can exist at all, and ' +
+    'why it is shown as dangling rather than treated as an error. ' +
+    '<code>GET /ldap/applications</code> publishes all three, and they persist ' +
+    'wherever the directory does.');
+}
+
 app.get('/admin/delegation', function (req, res) {
   log.debug("Entering the admin delegation page.");
   const view = delegationView(req.query);
+  // THE CONFIGURED REGISTER, built once and handed to the section and to the
+  // JSON alike. It is deliberately NOT merged into `delegationView()`: that
+  // function is the acts, it is shared with /admin/delegation/map and with
+  // /admin-api/delegation, and folding a second register into it would make
+  // every caller of the acts view pay for a walk of ou=applications it did not
+  // ask for — and would make the two look like one thing in the one place they
+  // must not.
+  const permissions = permissionsView();
   const paging = view.paging;
   const summary = view.summary;
   const policy = view.policy;
@@ -6355,17 +6825,26 @@ app.get('/admin/delegation', function (req, res) {
         '</tr>';
     }).join('') || '<tr><td colspan="8">No chains yet.</td></tr>') + '</table>' +
 
-    '<h2>Who may delegate to whom</h2>' +
-    note('<strong>This half is CONFIGURATION rather than history, and ' +
-    'it is Kerberos only.</strong> That is not an omission: Kerberos is the one ' +
-    'family here that polices delegation at all. WS-Trust puts no authorization ' +
-    'on <code>OnBehalfOf</code> or <code>ActAs</code> and this service adds none; ' +
-    'RFC 8693 leaves the policy to the authorization server and this one has ' +
-    'none, so any client may exchange any token for a token about anybody. Both ' +
-    'of those are stated on every row they produce above, in the same column ' +
-    'that names an attribute for a Kerberos row — <strong>the asymmetry is the ' +
-    'most useful thing on this page</strong>: the same picture, policed at one ' +
-    'end and not at the other.') +
+    permissionsSection(req, permissions, listView) +
+
+    '<h2>Who may delegate to whom &mdash; Kerberos</h2>' +
+    note('<strong>The SECOND configured register on this page, and the ' +
+    'older one.</strong> Until delegated permissions arrived this was the only ' +
+    'configuration here and this paragraph said so — <em>this half is ' +
+    'configuration rather than history, and it is Kerberos only</em> — which is ' +
+    'no longer true and is worth saying rather than quietly editing. What IS ' +
+    'still true is the sentence underneath it: <strong>Kerberos is the one ' +
+    'family here that polices delegation IN THE ACT</strong>. The permissions ' +
+    'above are policy this service was configured with and refuses on only when ' +
+    '<code>oauth2.delegatedPermissionsEnforced</code> is set; these two ' +
+    'attributes are a KDC decision that has always been made, on every S4U ' +
+    'request, whatever anything is set to. WS-Trust puts no authorization on ' +
+    '<code>OnBehalfOf</code> or <code>ActAs</code> and this service adds none; ' +
+    'RFC 8693 leaves the policy to the authorization server, and what this one ' +
+    'now has is the register above rather than nothing. All of that is stated on ' +
+    'every row it produces, in the same column that names an attribute for a ' +
+    'Kerberos row — <strong>the asymmetry is still the most useful thing on this ' +
+    'page</strong>: the same picture, policed at one end and not at the other.') +
     note('The whole of the KDC\'s decision rests on two attributes on ' +
     'two OPPOSITE accounts, which is why they are in one table with a column ' +
     'saying which account carries the permission. Same messages, same KDC ' +
@@ -6450,10 +6929,165 @@ app.get('/admin/delegation', function (req, res) {
     'can be longer than the list they are derived from. The same data is at ' +
     '<code>GET /admin-api/delegation</code> with the same parameters.');
 
-  respond(req, res, Object.assign({}, view.json,
-          { settings: configSettingsJson('/admin/delegation') }),
+  respond(req, res, Object.assign({}, view.json, {
+            // UNDER A MEMBER OF ITS OWN AND NOT MERGED INTO THE ACTS, for the
+            // reason the two headings on the page give: they are different
+            // registers and a caller that had to tell them apart by looking at
+            // the shape of a row would eventually get it wrong. `allowed` is
+            // the word the page uses, so a reader moving between the two is
+            // reading one vocabulary.
+            allowed: {
+              resources: permissions.register.resources,
+              permissions: permissions.register.permissions,
+              grants: permissions.register.grants,
+              counts: permissions.register.counts,
+              graph: permissions.graph
+            },
+            settings: configSettingsJson('/admin/delegation')
+          }),
           'Delegation', '/admin/delegation', inner);
   log.debug("Leaving the admin delegation page.");
+});
+
+// ---------------------------------------------------------------------------
+// POST /admin/delegation — THE FIVE CONTROLS THE CONFIGURED HALF HAS.
+//
+// The acts half has none and never will; see `permissionsSection()`'s header,
+// where the reversal of that route's "NO FORM, AND THAT IS A DECISION" is
+// argued rather than assumed. Every action here writes a directory attribute
+// through `common/app_permissions.js` and therefore through
+// `applications.updateApplication()`, which is where the rules are.
+//
+// It lands back on this page's `#allowed` anchor rather than at the top, for
+// `chooserPane()`'s reason: this is the longest page in the console and a
+// reader who has just granted a permission is four screens down. The list state
+// rides on `back` exactly as /admin/applications' forms carry it.
+// ---------------------------------------------------------------------------
+app.post('/admin/delegation', function (req, res) {
+  log.debug("Entering the admin delegation action endpoint.");
+  const body = parseBody(req);
+  // The actor is the person whose session got them through the gate above, read
+  // here rather than inside `permissionsAction()` for `rbacAction()`'s reason:
+  // the management API calls the same function with an actor of its own, and a
+  // function that reached for a cookie would only work from one of them. It
+  // ends up on the `application.update` audit row that
+  // `applications.updateApplication()` writes.
+  const state = gateStateFor(req);
+  const result = permissionsAction(Object.assign({}, body,
+    { actor: (state && state.username) || '' }));
+  const listView = listViewFromBack('/admin/delegation', body.back);
+  respondToAction(req, res, '/admin/delegation' + queryWith(listView, {}) + '#allowed',
+                  result);
+  log.debug("Leaving the admin delegation action endpoint.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/delegation/allowed — THE CONFIGURED MAPPINGS, AS A PICTURE.
+//
+// A DRILL-DOWN OF /admin/delegation, exactly as /admin/delegation/map is: no
+// NAV row, an `up` that reads `Admin console › Delegation › The allowed
+// mappings`, and the delegation page's own tab active. Rule 7a's test is the
+// one that decided it and it decides it the same way — this is a second VIEW of
+// a list on that page rather than a filter over it.
+//
+// **IT IS A SECOND PICTURE AND NOT A MODE OF THE FIRST, and that is the whole
+// decision.** Drawing configured grants and recorded acts on one canvas was the
+// obvious thing and it is wrong for a reason the two graphs make unavoidable:
+// an act has three layers and the first is a PERSON, and a permission has no
+// person in it at all — it says `webapp1 may reach the API as whoever is signed
+// in`, and there is no whoever yet. One canvas would put a drawing of what may
+// happen and a drawing of what did happen in one frame with no way to tell a
+// box that has been used from a box that has merely been described, which is
+// the single distinction both pictures exist to make. They are cross-linked in
+// both directions instead, and each says in its first paragraph what the other
+// one is.
+//
+// The renderer is the SAME `delegation_map.js` and the same `delegationLooks()`
+// resolver — the graph arrives in `delegation.graph()`'s shape, which is what
+// that file's header says it was split out to make possible. What it draws
+// differently comes off ONE new relation (`may-reach`) and nothing else.
+//
+// `?format=svg` and `?format=json` answer the same two things they answer on
+// the map, for the same reasons, through the same two functions.
+// ---------------------------------------------------------------------------
+app.get('/admin/delegation/allowed', function (req, res) {
+  log.debug("Entering the admin allowed-delegation picture.");
+  const permissions = permissionsView();
+  const graph = permissions.graph;
+  const known = knownUserKeys();
+  const look = delegationLooks(graph, known);
+  const drawingLabel = 'Delegated permissions between applications, as a diagram';
+
+  if (String(req.query.format || '') === 'svg') {
+    sendDelegationSvg(res, graph, look, drawingLabel);
+    log.debug("Leaving the admin allowed-delegation picture. Answered SVG.");
+    return;
+  }
+
+  const picture = delegationDrawing(graph, look, '/admin/delegation/allowed', {},
+                                    drawingLabel);
+  const listView = listViewOf('/admin/delegation', req.query);
+  const up = upTo('/admin/delegation', 'The allowed mappings', listView);
+  const counts = permissions.register.counts;
+
+  const inner =
+    note('<strong>What is ALLOWED, not what happened.</strong> Every line ' +
+    'here is a delegated permission somebody configured: a client application has ' +
+    'been granted a permission that a resource application exposes, and a request ' +
+    'naming it in a <code>scope</code> would be issued an access token audienced ' +
+    'to that resource. Not one of these lines has been issued anything. ' +
+    '<a href="/admin/delegation/map">The other picture</a> is the one that draws ' +
+    'what actually happened.') +
+
+    note('<strong>Every box is an application and there is no person on ' +
+    'this diagram</strong>, which is the visual difference between the two and ' +
+    'the reason they are not one drawing. A delegation ACT has three layers and ' +
+    'the first of them is somebody — a stick figure, the person on whose behalf ' +
+    'it happened. A permission has nobody in it: it says <em>this client may ' +
+    'reach that API as whoever is signed in</em>, and there is no whoever yet. ' +
+    '<strong>This service is not on it either</strong>, for the same reason the ' +
+    'hexagon is on the other one: every line there exists because this service ' +
+    'issued or refused something, and none of these has been asked for.') +
+
+    note('<strong>A DASHED line is a grant nobody has ever used</strong> ' +
+    'and a solid one has been asked for at least once — read off the client\'s own ' +
+    '<code>oauthScope</code>, which records the scopes it has requested. That one ' +
+    'bit is what a configured picture can say and an acts diagram cannot: a grant ' +
+    'nobody needed draws no act at all, so it is invisible on the other one. It is ' +
+    'evidence rather than proof — that attribute records what was ASKED FOR, not ' +
+    'what was issued.') +
+
+    (counts.dangling
+      ? note('<strong>' + counts.dangling + ' grant(s) are DANGLING and are ' +
+        'not drawn.</strong> They name a permission no application in this ' +
+        'registry defines, so there is no box at the far end to reach — and a ' +
+        'line to nowhere would be a drawing of a resource that is there. They are ' +
+        'in the table on <a href="/admin/delegation#allowed">the register</a>, ' +
+        'which is where that state belongs.')
+      : '') +
+
+    picture.html +
+
+    '<div class="tiles">' +
+      tile(counts.grants, 'grants') +
+      tile(counts.permissions, 'permissions defined') +
+      tile(counts.unused, 'never asked for') +
+      tile(counts.dangling, 'dangling, not drawn') +
+    '</div>' +
+
+    note('The register itself, with the forms that change it, is on ' +
+    '<a href="/admin/delegation#allowed">the delegation page</a>. There is no ' +
+    'control on this one and no filter: a picture of forty boxes is the whole ' +
+    'answer to <em>what may reach what</em>, and this register has no dimension ' +
+    'to narrow on the way the acts have a mechanism, a mode and an outcome. ' +
+    '<code>?format=json</code> is the graph and <code>?format=svg</code> is the ' +
+    'document alone, which is also in the <code>allowed.graph</code> member of ' +
+    '<code>GET /admin-api/delegation</code>.');
+
+  respond(req, res, { graph: graph, counts: counts,
+                      grants: permissions.register.grants },
+          'The allowed mappings', '/admin/delegation', inner, up);
+  log.debug("Leaving the admin allowed-delegation picture.");
 });
 
 // ---------------------------------------------------------------------------
@@ -22098,6 +22732,20 @@ module.exports = {
   // work both the page and the API need. It is the second read-only resource
   // here — rule 7 asks for an operation per CONTROL, and this page has none.
   delegationView: delegationView,
+  // THE CONFIGURED HALF OF THAT PAGE, and the reason the sentence above it no
+  // longer describes the whole route. `/admin/delegation` has five controls
+  // now, all of them on this register, so rule 7 asks for five operations —
+  // `admin_api.js` calls exactly this function for all of them, which is what
+  // keeps the API from deciding anything the console does not. The view is
+  // exported beside it for the same reason `delegationView` is: the walk of the
+  // registry and the resolution of both directions are work both need, and two
+  // copies of it would be two answers that each looked right alone.
+  permissionsView: permissionsView,
+  permissionsAction: permissionsAction,
+  // The action names, read by admin_api.js so that its operations and this
+  // console's switch cannot come to name different things. Built from the same
+  // constant the refusal sentence is built from.
+  permissionActionNames: function () { return PERMISSION_ACTIONS.slice(); },
   usersView: usersView,
   groupsView: groupsView,
   applicationsView: applicationsView,

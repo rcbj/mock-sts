@@ -2250,3 +2250,105 @@ told apart now, and the second is a NOTE rather than a warning: "the flag is on
 and nothing has been defined" is this service's normal state, not a fault. **The
 lesson generalises past this page**: a predicate that is false for two reasons
 must not be rendered as a message that names one of them.
+
+---
+
+## `/admin/delegation` HAS A FORM NOW, AND THAT REVERSES A DECISION THIS FILE ARGUED
+
+Added 2026-09-01. That route's header said **"NO FORM, AND THAT IS A DECISION"**
+at length, and it was right about what it was talking about: everything on the
+page WAS an observation — an act happened or it did not, and a control that let
+somebody TYPE a chain would put invented rows in a table whose whole worth is
+that its rows are what actually happened. That sentence is untouched and still
+governs the acts table, the chains and the picture drawn from them. None of them
+has a control and none ever will.
+
+**What is new is a SECOND REGISTER on the same page**, and it is configuration
+rather than observation: a delegated permission is something somebody DECIDES,
+like a redirect URI or a federation relationship, and configuration with no way
+to type it is configuration only an `ldapmodify` can reach. So the rule the old
+header states is intact and sharper: **nothing that records what HAPPENED has a
+control, and the thing that records what is ALLOWED is nothing but controls.**
+The two are drawn under headings that say which is which, because a reader who
+confused them would draw exactly the wrong conclusion from the difference
+between them — which is the most useful thing on the page.
+
+**FIVE ACTIONS, AND THEY ARE THIN ON PURPOSE.** `PERMISSION_ACTIONS` is built
+from the switch rather than typed, for `APPLICATION_ACTIONS`'s reason: this
+repository's own `tests/vendored/admin_api.js` READS the refusal sentence to
+check that every console action has an `/admin-api` operation, so a list short by
+one turns the parity check off for that action. Each action calls
+`common/app_permissions.js`, which calls `applications.updateApplication()`,
+which is where the RULES are — so this form, `POST /admin-api/permissions/…` and
+the generic attribute editor on `/admin/applications` all go through one
+implementation of *a permission must be defined before it can be granted*.
+
+**THE KERBEROS SECTION'S HEADING AND ITS FIRST PARAGRAPH CHANGED, and the change
+is recorded rather than made quietly.** It read *this half is configuration
+rather than history, and it is Kerberos only*, which stopped being true the
+moment the register above it existed. What is still true is the sentence
+underneath: **Kerberos is the one family here that polices delegation IN THE
+ACT**, on every request, whatever anything is set to. The permissions above are
+policy this service was configured with and refuse only when
+`oauth2.delegatedPermissionsEnforced` is set.
+
+## `/admin/delegation/allowed` — THE THIRD PICTURE, AND WHY IT IS NOT A MODE OF THE FIRST
+
+A drill-down of `/admin/delegation` exactly as `/admin/delegation/map` is: no
+`NAV` row, an `up`, the delegation page's own tab active, and rule 7a's test
+answering the same way — this is a second VIEW of a register on that page rather
+than a filter over one.
+
+**DRAWING CONFIGURED GRANTS AND RECORDED ACTS ON ONE CANVAS WAS THE OBVIOUS
+THING AND IT IS WRONG.** An act has three layers and the first of them is a
+PERSON — a stick figure, somebody on whose behalf something happened. A
+permission has nobody in it at all: it says *this client may reach that API as
+whoever is signed in*, and there is no whoever yet. One canvas would put a
+drawing of what MAY happen and a drawing of what DID happen in one frame with no
+way to tell a box that has been used from a box that has merely been described,
+which is the single distinction both pictures exist to make. They are
+cross-linked in both directions instead, and each says in its first paragraph
+what the other one is.
+
+**IT COSTS ONE NEW RELATION AND NOTHING ELSE.** The graph arrives in
+`delegation.graph()`'s shape, so `delegation_map.js` draws it with the same
+`delegationLooks()` resolver, the same shapes and the same palette. What it draws
+differently comes off `may-reach` in `edgeLook()`, `edgeLabelLines()` and
+`edgeTitle()` — the third relation a caller has added after `user_graph.js`'s
+two, and like both of those it takes **no mode colour**: amber and green are this
+console's judgement about impersonation versus delegation, which are properties
+of a MECHANISM, and a permission that has never been exercised has performed
+none.
+
+**A LINE IS DASHED UNTIL THE CLIENT HAS ASKED FOR THAT PERMISSION.** That one
+bit is the most useful thing on the picture and it is the reading an acts diagram
+can never give — a grant nobody needed draws no act at all, so it is invisible
+over there. It is said in WORDS on the label as well (`never asked for`), because
+a picture whose most useful fact was carried only in a line style is one nobody
+reads it off.
+
+**A DANGLING GRANT IS NOT DRAWN**, and the page says how many were left out. It
+names a permission no application defines, so there is no box at the far end to
+reach, and a line to nowhere would be a drawing of a resource that is there. That
+state belongs on the register's table, which is where it is.
+
+**IT IS THE FOURTH TIME THE NO-SCRIPT ARGUMENT HAS COME OUT THE SAME WAY**, and
+the root `CLAUDE.md`'s rule is that the argument has to be MADE rather than
+cited. It is made in that route's header from scratch and lands where the
+delegation and federation pictures landed: the test for a script is that the page
+CANNOT work without one, and a diagram that does not move can. `@dagrejs/dagre`
+lays it out on the server, the SVG arrives inline as ordinary markup,
+`script-src 'none'` is untouched, and `?format=svg` is what answers the pan and
+zoom it does not have.
+
+## `respondToAction()` PUTS THE QUERY BEFORE THE FRAGMENT
+
+One line, and it is here because it was a real defect found by pressing the
+button. That function appended `?notice=…` to the target, and
+`/admin/delegation`'s configured half posts back to `#allowed` — because that
+section is four screens down the longest page in this console and a reader who
+has just granted a permission should land on it. Appended the naive way the
+`?notice=` became part of the FRAGMENT: the browser scrolled nowhere and the
+message the action came back with was never shown, which reads exactly like the
+form having done nothing. Every target without a `#` is unaffected, which is
+every other target in this console.

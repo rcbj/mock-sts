@@ -339,6 +339,12 @@ async function everyConsoleActionIsMirrored(index) {
     // else, so an unknown action comes back naming the four that exist rather
     // than complaining about a field.
     { path: "/config", probe: {} },
+    // The delegated permission actions, whose console form is the CONFIGURED
+    // half of /admin/delegation. Its probe is empty for /tokens' reason: the
+    // handler reaches its action switch before it asks which application, so
+    // an unknown action comes back naming the five that exist rather than
+    // complaining about a missing `resource`.
+    { path: "/permissions", probe: {} },
   ];
   const paths = new Set(index.operations.map(function (o) { return o.path; }));
   let checked = 0;

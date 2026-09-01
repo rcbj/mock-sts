@@ -1913,17 +1913,36 @@ const ENDPOINTS = [
           'carry the KDC\'s own e-text naming both accounts, both attributes ' +
           'and which was missing, and they appear in NO other list here, ' +
           'because nothing was accepted so no authentication was recorded. A ' +
-          'SECOND TABLE is CONFIGURATION rather than history — who MAY ' +
-          'delegate to whom, out of msDS-AllowedToDelegateTo on the front end ' +
-          'and msDS-AllowedToActOnBehalfOfOtherIdentity on the back end, with ' +
-          'the flags that stop delegation (NOT_DELEGATED) or enable protocol ' +
-          'transition (TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION) beside them. ' +
-          'It is KERBEROS ONLY because Kerberos is the only family here that ' +
-          'polices delegation at all: WS-Trust puts no authorization on ' +
-          'either element and this service adds none, and RFC 8693 leaves the ' +
-          'policy to the authorization server, which this one has not got — ' +
-          'so any client may exchange any token for a token about anybody. ' +
-          'Every act says which of the two it was. NO CREDENTIAL IS EVER ON A ' +
+          'SECOND HALF OF THE PAGE IS CONFIGURATION RATHER THAN HISTORY, ' +
+          'and it is TWO registers. DELEGATED PERMISSIONS, in Microsoft Entra ' +
+          'ID\'s shape and the only CONTROLS this page has: a resource ' +
+          'application is given a base URI (oauthPermissionBaseUri) and ' +
+          'permissions on it (oauthPermission), a permission is identified by ' +
+          'the two joined — https://example.com/ + write = ' +
+          'https://example.com/write — and a client application is granted ' +
+          'some of them (oauthDelegatedPermission). A client then asks for one ' +
+          'as an ORDINARY OAUTH SCOPE and the access token comes back ' +
+          'AUDIENCED to the base URI with the permission NAME on its scope ' +
+          'claim. A permission must be DEFINED before it can be GRANTED, which ' +
+          'is checked in applications.js so that this form, the management API ' +
+          'and the attribute editor on /admin/applications cannot disagree. IT ' +
+          'REFUSES NOTHING BY DEFAULT — an ungranted permission is honoured, ' +
+          'logged and marked here, and only oauth2.delegatedPermissionsEnforced ' +
+          'turns it into invalid_scope. A grant naming a permission nobody ' +
+          'defines is shown as DANGLING rather than treated as an error, ' +
+          'because ldapmodify reaches these attributes like every other. And ' +
+          'WHO MAY DELEGATE TO WHOM — out of msDS-AllowedToDelegateTo on the ' +
+          'front end and msDS-AllowedToActOnBehalfOfOtherIdentity on the back ' +
+          'end, with the flags that stop delegation (NOT_DELEGATED) or enable ' +
+          'protocol transition (TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION) beside ' +
+          'them. That one is KERBEROS ONLY because Kerberos is the only family ' +
+          'here that polices delegation IN THE ACT, on every request, whatever ' +
+          'anything is set to: WS-Trust puts no authorization on either ' +
+          'element and this service adds none, and RFC 8693 leaves the policy ' +
+          'to the authorization server — what this one now has is the ' +
+          'permission register, which is policy it was configured with rather ' +
+          'than a check the protocol makes. Every act says which of the two it ' +
+          'was. NO CREDENTIAL IS EVER ON A ' +
           'ROW, only its kind and identifier; a Kerberos ticket genuinely has ' +
           'none. In memory, capped by delegation.maxRecords, gone on restart, ' +
           'with no clear control and no way to add a row by hand. Filtered by ' +
@@ -1967,6 +1986,45 @@ const ENDPOINTS = [
           'untouched and the picture does not pan or zoom. ?format=json is the ' +
           'whole graph (also in the `graph` member of GET /admin-api/delegation) ' +
           'and ?format=svg is the document alone, with no links in it.' },
+  { path: '/admin/delegation/allowed', group: 'Admin',
+    name: 'Delegation — the allowed mappings',
+    // NOT the four the acts pages cite, and that is the entry's whole point.
+    // [MS-SFU], RFC 4120, WS-Trust and RFC 8693 are four mechanisms for
+    // PERFORMING a delegation, and not one line on this picture has been
+    // performed. What it draws is a permission model that no specification
+    // defines — it is Microsoft Entra ID's, which is a product's design — so
+    // the only thing it can honestly cite is the scope parameter a client uses
+    // to ask for one and the audience claim the answer carries.
+    specs: ['rfc6749', 'rfc7519'],
+    what: 'NON-SPEC PAGE, and a DRILL-DOWN of /admin/delegation rather than a ' +
+          'section of its own. THE SECOND PICTURE IN THIS CONSOLE\'S ' +
+          'DELEGATION FAMILY AND THE ONLY ONE THAT DRAWS WHAT HAS NOT ' +
+          'HAPPENED: every line is a configured delegated permission — a ' +
+          'client application granted a permission that a resource application ' +
+          'exposes — and nothing on it has been issued anything. That is why ' +
+          'it is a separate document from /admin/delegation/map rather than a ' +
+          'mode of it: an ACT has three layers and the first is a PERSON, and ' +
+          'a permission has nobody in it at all (it says `this client may ' +
+          'reach that API as whoever is signed in`, and there is no whoever ' +
+          'yet), so one canvas would put what may happen and what did happen ' +
+          'in one frame with no way to tell them apart. EVERY BOX IS AN ' +
+          'APPLICATION, there is no stick figure, and THIS SERVICE IS NOT ON ' +
+          'IT — the hexagon is on the other picture because every line there ' +
+          'exists because this service issued or refused something. ONE LINE ' +
+          'PER PERMISSION rather than per pair, so two grants between the same ' +
+          'two applications are two lines: the permission is what was granted ' +
+          'and the pair is what it joins. A DASHED line is a grant NOBODY HAS ' +
+          'EVER ASKED FOR and a solid one has been used at least once, read ' +
+          'off the client\'s own oauthScope — that one bit is what a ' +
+          'configured picture can say and an acts diagram cannot, since a ' +
+          'grant nobody needed draws no act at all. A DANGLING grant (naming a ' +
+          'permission no application defines) is NOT drawn, because a line to ' +
+          'nowhere would be a drawing of a resource that is there; it is on ' +
+          'the register instead. NO SCRIPT and no controls — the layout is ' +
+          'computed on the server with @dagrejs/dagre, the shapes are shared ' +
+          'with the acts picture, and script-src \'none\' is untouched. ' +
+          '?format=json is the graph (also in the `allowed.graph` member of ' +
+          'GET /admin-api/delegation) and ?format=svg is the document alone.' },
   { path: '/admin/delegation/chain', group: 'Admin',
     name: 'Delegation — one relationship',
     // The same four specifications as the two pages above, and for the reason
@@ -2763,6 +2821,47 @@ const ENDPOINTS = [
           'two resources here that is: everything on it is an observation or ' +
           'somebody else\'s configuration, so there is nothing to change. ' +
           'Mirrors GET /admin/delegation.' },
+  { path: '/admin-api/permissions', group: 'Management API',
+    name: 'Delegated permissions',
+    // Not the four the delegation resource cites: those are four ways of
+    // PERFORMING a delegation, and nothing in this register has been
+    // performed. What it can honestly cite is the scope parameter a client
+    // asks with and the audience claim the answer carries.
+    specs: ['openapi', 'rfc6749', 'rfc7519'],
+    what: 'NON-SPEC. The CONFIGURED half of the delegation register, in ' +
+          'Microsoft Entra ID\'s shape and the other side of ' +
+          '/admin-api/delegation: that one is what HAPPENED and this one is ' +
+          'what is ALLOWED. A resource application is given a base URI ' +
+          '(oauthPermissionBaseUri) and permissions on it (oauthPermission); a ' +
+          'permission is identified by the two joined — https://example.com/ ' +
+          '+ write = https://example.com/write — and a client application is ' +
+          'granted some of them (oauthDelegatedPermission). All three are ' +
+          'ordinary attributes on entries in ou=applications, so an ' +
+          'ldapmodify is a configuration change here as it is for a redirect ' +
+          'URI. A client then asks for one as an ORDINARY OAUTH SCOPE and the ' +
+          'access token comes back AUDIENCED to the base URI with the ' +
+          'permission NAME on its scope claim. `dangling` is a grant naming a ' +
+          'permission nobody defines; `asked` is whether the client has ever ' +
+          'requested it, which is the one field here that comes from what ' +
+          'happened. READ ONLY — the five controls are on the resource below. ' +
+          'Mirrors the ALLOWED half of GET /admin/delegation.' },
+  { path: '/admin-api/permissions/:action', group: 'Management API',
+    name: 'Define and grant delegated permissions',
+    specs: ['openapi', 'rfc6749'],
+    what: 'set-permission-base, define-permission, remove-permission, ' +
+          'grant-permission and revoke-permission — the same five the ' +
+          'console\'s forms post to /admin/delegation, through the same ' +
+          'functions, so neither door can enforce a rule the other does not. ' +
+          'A PERMISSION MUST BE DEFINED BEFORE IT CAN BE GRANTED, which is ' +
+          'the one ordering rule here and is checked in ' +
+          'applications.updateApplication() so that these five, the generic ' +
+          'POST /admin-api/applications/update and the console agree about ' +
+          'it. NONE OF IT REFUSES A TOKEN REQUEST unless ' +
+          'oauth2.delegatedPermissionsEnforced is on, which is off by ' +
+          'default: an ungranted permission is honoured, logged and marked ' +
+          'rather than turned away. Removing a permission does not revoke the ' +
+          'grants naming it — they become dangling, because tidying them ' +
+          'would be one call writing to entries it did not name.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +

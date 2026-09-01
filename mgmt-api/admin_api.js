@@ -4378,6 +4378,269 @@ const ROUTES = [
     } },
 
   // -------------------------------------------------------------------------
+  // DELEGATED PERMISSIONS — the CONFIGURED half of /admin/delegation.
+  //
+  // A RESOURCE OF ITS OWN RATHER THAN MORE ACTIONS ON `/delegation`, and the
+  // reason is the same one the console gives for putting two headings on one
+  // page: the acts and the permissions are two registers, and an API that
+  // answered both under one path would make a caller tell them apart by the
+  // shape of a row. `GET /admin-api/delegation` still carries the register in
+  // its `allowed` member, because the page it mirrors carries both — this is
+  // the same data reachable under its own name, not a second computation of it.
+  //
+  // THE FIVE ACTION NAMES STUTTER SLIGHTLY UNDER THIS PATH
+  // (`/permissions/define-permission`) AND THAT IS DELIBERATE. They are the
+  // names in the console's hidden `action` inputs, where the page they sit on
+  // is `/admin/delegation` and `define` alone would say nothing about what is
+  // being defined — and `remove` and `revoke` are two different things here
+  // (one removes a permission somebody exposes, the other takes a grant away
+  // from a client). One vocabulary for both doors is worth more than a shorter
+  // URL, and rule 7's parity check reads the console's own list.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/permissions', tag: 'Delegation',
+    operationId: 'getPermissions',
+    summary: 'Which applications may reach which, decided in advance',
+    description: 'The CONFIGURED delegation register, in Microsoft Entra ' +
+                 'ID\'s shape. It is the other half of `GET ' +
+                 '/admin-api/delegation`: that one is what HAPPENED — acts, ' +
+                 'evidence, one row per exchange — and this one is INTENT, ' +
+                 'typed in before anybody asked for anything.\n\n**How it ' +
+                 'works.** A RESOURCE application is given a base URI ' +
+                 '(`oauthPermissionBaseUri`; Entra calls it the Application ID ' +
+                 'URI and spells it `api://<guid>`, and anything absolute ' +
+                 'works here) and permissions on it (`oauthPermission`). A ' +
+                 'permission is identified by the two joined — ' +
+                 '`https://example.com/` + `write` = ' +
+                 '`https://example.com/write` — and a CLIENT application is ' +
+                 'granted some of them (`oauthDelegatedPermission`). All three ' +
+                 'are ordinary attributes on ordinary entries in ' +
+                 '`ou=applications`, so an `ldapmodify` is a configuration ' +
+                 'change here exactly as it is for a redirect ' +
+                 'URI.\n\n**What the token then says.** A client asks for a ' +
+                 'permission as an ordinary OAuth `scope`, and the access ' +
+                 'token comes back AUDIENCED to the base URI with the ' +
+                 'permission NAME on its scope claim: ' +
+                 '`scope=openid https://example.com/write` produces ' +
+                 '`aud: https://example.com/` and `scope: openid write`. Each ' +
+                 'grant row spells that out, because it is two facts a caller ' +
+                 'would otherwise have to compose.\n\n**It refuses nothing ' +
+                 'by default.** An ungranted permission is honoured exactly as ' +
+                 'a granted one is and marked here; only ' +
+                 '`oauth2.delegatedPermissionsEnforced` turns it into ' +
+                 '`invalid_scope`, at the authorization endpoint where the ' +
+                 'client can still be told.\n\n`grants[].dangling` is a ' +
+                 'grant naming a permission no application defines — a deleted ' +
+                 'resource, a permission removed from under it, or an ' +
+                 '`ldapmodify`, since both console doors refuse to create one. ' +
+                 '`grants[].asked` is whether the client has ever requested ' +
+                 'that scope, read off its own `oauthScope`: evidence rather ' +
+                 'than proof, and the one thing here that comes from what ' +
+                 'happened.\n\nThe `graph` member is the same picture ' +
+                 '/admin/delegation/allowed draws, in the shape ' +
+                 '`GET /admin-api/delegation`\'s `graph` uses.',
+    mirrors: 'GET /admin/delegation',
+    responseDescription: 'Every application exposing an API, every permission ' +
+                         'defined, every grant between two applications, and ' +
+                         'the graph of them.',
+    responseSchema: { type: 'object',
+                      description: 'The configured delegated permission ' +
+                                   'register, both directions.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API permissions endpoint.");
+      const view = admin.permissionsView();
+      sendJson(res, 200, Object.assign({}, view.register, { graph: view.graph }));
+      log.debug("Leaving the management API permissions endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/permissions/:action', tag: 'Delegation',
+    mirrors: 'POST /admin/delegation',
+    handler: function (req, res) {
+      log.debug("Entering the management API permissions action endpoint.");
+      const body = parseBody(req);
+      const result = admin.permissionsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API permissions action endpoint.");
+    },
+    actions: [
+      { action: 'set-permission-base', operationId: 'setPermissionBase',
+        summary: 'Give an application the base URI its permissions hang off',
+        description: 'The first step of exposing an API, and the one that ' +
+                     'makes every permission on the entry NAMEABLE: a ' +
+                     'permission is identified by this value followed by its ' +
+                     'name, so an application with permissions and no base has ' +
+                     'permissions no client can ever ask for.\n\nIt must be ' +
+                     'ABSOLUTE, because it becomes the `aud` of an access ' +
+                     'token and an audience that is not absolute is one ' +
+                     'nothing can compare against. A trailing separator is ' +
+                     'ADDED where there is none — `https://example.com` ' +
+                     'becomes `https://example.com/` — because the identifier ' +
+                     'is a plain concatenation and the two would otherwise ' +
+                     'join into one word. An `ldapmodify` is not normalised ' +
+                     'and means exactly what it says.\n\nSending an empty ' +
+                     'value CLEARS it. The permissions stay on the entry with ' +
+                     'no identifier, which `GET /admin-api/permissions` ' +
+                     'reports, and grants already made become `dangling` on ' +
+                     'the clients holding them. Neither is tidied up: that ' +
+                     'would be this operation writing to entries the caller ' +
+                     'did not name.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that EXPOSES the API, by ' +
+                                     'its identifier exactly as ' +
+                                     '`ou=applications` holds it.' },
+            baseUri: { type: 'string',
+                       description: 'An absolute URI. Empty clears it.' }
+          },
+          required: ['resource'],
+          examples: [{ resource: 'api1', baseUri: 'https://example.com/' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, and what a ' +
+                             'permission on it is now called.' },
+
+      { action: 'define-permission', operationId: 'definePermission',
+        summary: 'Expose one permission on an application',
+        description: 'Entra ID\'s `oauth2PermissionScopes`, one at a ' +
+                     'time.\n\nThe NAME is what ends up on the access ' +
+                     'token\'s `scope` claim, so it must be a legal OAuth ' +
+                     'scope token: any printable ASCII except space, double ' +
+                     'quote and backslash (RFC 6749 section 3.3), and not `|`, ' +
+                     'which separates the name from the description in the ' +
+                     'attribute. The DESCRIPTION is optional and is stored ' +
+                     'after the first `|` in the same value.\n\n**Defining a ' +
+                     'permission grants it to nobody.** That is the ordering ' +
+                     'this feature is built on and the reason this operation ' +
+                     'and `grant-permission` are two: a permission must exist ' +
+                     'before anything can be granted it, and the check is in ' +
+                     '`applications.updateApplication()` so that this ' +
+                     'operation, the console form and the generic ' +
+                     '`POST /admin-api/applications/update` cannot disagree ' +
+                     'about it.\n\nA second permission of the SAME NAME is ' +
+                     'refused rather than merged — a permission has one ' +
+                     'description, and two rows with one name would leave the ' +
+                     'second unreachable. Remove it and define it again to ' +
+                     'change the wording.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that exposes it.' },
+            name: { type: 'string',
+                    description: 'The permission name — the word a client will ' +
+                                 'send inside a `scope`.' },
+            description: { type: 'string',
+                           description: 'Optional prose, shown wherever the ' +
+                                        'permission is.' }
+          },
+          required: ['resource', 'name'],
+          examples: [{ resource: 'api1', name: 'write',
+                       description: 'Change widgets on somebody\'s behalf' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The permission\'s identifier, and what a request ' +
+                             'naming it would be issued.' },
+
+      { action: 'remove-permission', operationId: 'removePermission',
+        summary: 'Stop exposing a permission',
+        description: 'Named by its NAME rather than by the raw attribute ' +
+                     'value, because that value is `name|description` and a ' +
+                     'caller holding a stale description would fail to remove ' +
+                     'anything.\n\n**Grants naming it are NOT revoked.** ' +
+                     'They stay on the clients\' entries and become ' +
+                     '`dangling`, which `GET /admin-api/permissions` reports ' +
+                     'and the reply here counts. Revoking them would be this ' +
+                     'operation writing to entries the caller did not name; ' +
+                     'define the permission again and every one of them ' +
+                     'resolves exactly as before.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that exposes it.' },
+            name: { type: 'string', description: 'The permission name.' }
+          },
+          required: ['resource', 'name'],
+          examples: [{ resource: 'api1', name: 'write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was removed, and how many grants it ' +
+                             'stranded.' },
+
+      { action: 'grant-permission', operationId: 'grantPermission',
+        summary: 'Grant a client application a permission on another one',
+        description: '**THE DELEGATION RELATIONSHIP ITSELF** — Entra ID\'s ' +
+                     '`requiredResourceAccess`, one permission at a ' +
+                     'time.\n\nIt lands on the CLIENT\'s entry, as a value ' +
+                     'of `oauthDelegatedPermission`, because the client is the ' +
+                     'party that will name the permission in a `scope` — so ' +
+                     'the entry that answers *may this request be honoured* is ' +
+                     'the entry the request identifies. One client granted ' +
+                     'three permissions is three calls and three values; three ' +
+                     'clients granted one permission is one value on each of ' +
+                     'three entries. That is how one-to-many and many-to-one ' +
+                     'both work with no store of their own.\n\n**The ' +
+                     'permission must already be DEFINED**, matched EXACTLY ' +
+                     'rather than as a prefix of a registered base — so a ' +
+                     'client cannot address a token to somebody\'s API by ' +
+                     'inventing a word after their base URI. An application ' +
+                     'cannot be granted its own permission: the token would be ' +
+                     'addressed to itself, which is what an ID Token already ' +
+                     'is.\n\n**It changes nothing about what is issued** ' +
+                     'unless `oauth2.delegatedPermissionsEnforced` is on. With ' +
+                     'it off — the default — the request was already producing ' +
+                     'the audience and the scope, and what the grant changes is ' +
+                     'that the console stops marking it ungranted.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string',
+                      description: 'The application that WILL ASK — the one ' +
+                                   'whose `client_id` appears on the token ' +
+                                   'request. Not the one exposing the API.' },
+            permission: { type: 'string',
+                          description: 'The whole permission identifier, base ' +
+                                       'URI and name together.' }
+          },
+          required: ['client', 'permission'],
+          examples: [{ client: 'webapp1', permission: 'https://example.com/write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The grant, and what an access token asking for ' +
+                             'it will carry.' },
+
+      { action: 'revoke-permission', operationId: 'revokePermission',
+        summary: 'Take a permission away from a client application',
+        description: 'The opposite of `grant-permission`, and with the setting ' +
+                     'off it changes nothing about what is issued either: the ' +
+                     'permission still becomes an audience and a scope, and ' +
+                     'those requests are simply reported as UNGRANTED — which ' +
+                     'is the state `oauth2.delegatedPermissionsEnforced` turns ' +
+                     'into a refusal.\n\nIt is also how a DANGLING grant is ' +
+                     'cleared: send the identifier exactly as it appears on ' +
+                     'the entry, and it goes whether or not anything defines ' +
+                     'it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string', description: 'The application holding it.' },
+            permission: { type: 'string',
+                          description: 'The whole permission identifier.' }
+          },
+          required: ['client', 'permission'],
+          examples: [{ client: 'webapp1', permission: 'https://example.com/write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was revoked.' }
+    ] },
+
+  // -------------------------------------------------------------------------
   // SPIFFE. Three resources, mirroring the three console pages one for one, and
   // each POST calls the SAME action function the console's form posts to — with
   // `action` taken from the URL instead of from a hidden input. Rule 7.

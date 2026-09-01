@@ -686,3 +686,40 @@ optional here: a renamed family row (caught, naming SCIM in both directions), a
 hand-written ID Token list of two algorithms (caught, naming the discovery
 document), and a coverage note rewritten to open with "we do all of this"
 (caught, naming the `jws` row).
+
+---
+
+## `app_permissions.js` (2026-09-01) — the line drawn at "choosing the graph"
+
+Most of the delegated-permission feature is NOT in this directory, and that is
+the line this file exists to draw. That a permission must be defined before it
+is granted, that a base URI is normalised, that an ungranted scope is refused
+`invalid_scope` when the setting is on, that a grant lands on the CLIENT's entry
+and not the resource's — every one of those can be driven against the running
+service, and `tests/vendored/sts_admin_api_operations.js` drives all five
+operations and reads them back through two different doors.
+
+Two halves cannot be driven, and they are what is here:
+
+* **CHOOSING THE GRAPH.** The states worth asserting are ones a running service
+  will not produce on demand: a DANGLING grant (a permission removed from under
+  one), and an application granted its OWN permission — which
+  `updateApplication()` refuses through both console doors, so only an
+  `ldapmodify` can write it. Reaching either over HTTP would mean driving the
+  LDAP socket to build a state the API exists to prevent and then parsing
+  geometry back out of an SVG. The parsing is the same either way; what cannot
+  be done over there is choosing the graph. Same argument as
+  `delegation_map_bands.js` and `user_graph_signin.js`.
+* **THE PURE FUNCTIONS.** `base + name` and `name|description` are string rules
+  with edge cases no request can reach: a description containing the delimiter,
+  a base already ending in `#`, a base written by hand and therefore not
+  normalised.
+
+**It was mutation-tested against five mutants before it was committed**, as the
+rule here requires: dropping the base-URI separator, a configured box claiming
+an act (which would draw every grant in the refusal colour), the `may-reach`
+look ignoring whether the grant was ever asked for, a self-grant drawing a loop,
+and a dangling grant drawing a line. Each was caught.
+
+**It touches no process-wide state** — every graph it draws is built in the
+file — so the restore rule does not apply to it.

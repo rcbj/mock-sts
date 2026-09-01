@@ -14,7 +14,8 @@ more than one family needs it, not because it felt general.
 | `admin_stats.js` | The counters, the revocation set, and `recordAuthentication()` — the single authentication funnel. |
 | `audit.js` | What happened, when, and to whom, as discrete events. Sits BESIDE `admin_stats.js`, not under it. |
 | `applications.js` | Every application this service has been asked about, stored in the directory under `ou=applications`. |
-| `delegation.js` | Who acted on whose behalf, through what, to reach what — eight mechanisms across three protocol families in ONE model. |
+| `delegation.js` | Who acted on whose behalf, through what, to reach what — eight mechanisms across three protocol families in ONE model. What HAPPENED. |
+| `app_permissions.js` | **Who MAY reach what, decided in advance** — delegated permissions between two OAuth application entries, in Microsoft Entra ID's shape. The CONFIGURED twin of the file above it, and never to be drawn as one register with it. |
 | `user_graph.js` | ONE PERSON, END TO END: that register UNIONED with the issued one, so a picture can show every grant, flow, assertion, ticket and SVID in somebody's name beside every delegation naming them. |
 | `credential_graph.js` | ONE CREDENTIAL, END TO END: where it came from — who held it, in whose name, to reach what — and every generation of exchange behind it, back to the issuance the line rests on. |
 | `claim_attributes.js` | Which LDAP attributes a token or an assertion carries, per claim set. |
@@ -1565,6 +1566,78 @@ with `Cannot find module` naming a file the operator never mentioned.
    and that store is over there. A `common/` module reaching into `kerberos/`
    would have been the layering inversion this directory's entry test exists to
    prevent; `admin.js` requires both and renders them side by side.
+
+3s. **`app_permissions.js` is a library, and the whole of it is the argument
+   for why a CONFIGURED register is not the observed one with a flag on it.**
+   `delegation.js` above holds ACTS — one row per exchange, at a moment, with a
+   credential in it. This holds GRANTS: which client applications have been
+   given which permissions on which resource applications, typed in before
+   anybody asked for anything. It requires `helpers.js` and `applications.js`
+   and nothing else; neither requires it back, so there is no cycle and none of
+   rule 3e's slots is needed.
+
+   **THE TWO MUST NEVER BE DRAWN AS ONE REGISTER**, and this repository already
+   keeps exactly that distinction one file over: `appProtocol` is what happened
+   and `appAllowedProtocol` is what somebody declared, and `applications.js`'s
+   PROTOCOLS header spends a page on why collapsing them would be wrong.
+   `/admin/delegation` shows both and says which is which on every heading,
+   because the interesting reading is the DIFFERENCE — a grant nobody has used,
+   and a delegation nobody granted.
+
+   **THE MODEL IS ENTRA ID'S, DELIBERATELY AND BY NAME.** A resource
+   application exposes an API (`oauthPermissionBaseUri`, their Application ID
+   URI; `oauthPermission`, their `oauth2PermissionScopes`) and a client is
+   granted some of them (`oauthDelegatedPermission`, their
+   `requiredResourceAccess`). A permission is identified by the base URI
+   followed by its name, and a client asks for it by putting that whole string
+   in an OAuth `scope`. **One-to-many and many-to-one both fall out of that one
+   identifier with no container of their own** — three permissions granted to
+   one client is three values on one entry, and one permission granted to three
+   clients is one value on each of three — which is why there is no
+   `ou=delegations` and why there should not be.
+
+   **`ou=applications` IS THE STORE AND THERE IS NO SECOND ONE HERE.** Every
+   function is a read of the registry or a write through
+   `applications.updateApplication()`. That is `applications.js`'s own rule
+   applied again: a Map in this file would look correct alone and would be the
+   one that silently disagreed. It also means an `ldapmodify` IS a
+   configuration change here, exactly as it is for a redirect URI.
+
+   **THE DIVISION OF LABOUR WITH `applications.js` IS EXACT**, and it is the
+   split `delegation.js`/`delegation_map.js` already have. THAT module owns the
+   SCHEMA — how a permission is spelled (`name` or `name|description`), how base
+   and name are joined (`permissionIdOf()`), which spellings are legal, and the
+   two lookups a reader of ONE entry needs (`forPermission()`,
+   `holdsPermission()`). THIS module owns what the two halves MEAN read against
+   each other: the register in both directions, the five actions, and the graph.
+
+   **THE ORDERING RULE IS ENFORCED IN `applications.js` AND NOT HERE**, and
+   that is worth stating because this is where somebody will look for it. A
+   permission must be DEFINED before it can be GRANTED, and the check lives in
+   `updateApplication()` because that is the ONE door the console form, the
+   management API's generic `update` operation and the five actions below all
+   go through. A copy here would be a second opinion, and the generic attribute
+   editor would be the way around it.
+
+   **`graph()` RETURNS `delegation.graph()`'s SHAPE**, so `delegation_map.js`
+   draws it with no argument about which graph it is looking at — which is the
+   property that file's header says it was split out to keep. Three things
+   about it are claims rather than mechanics, and `tests/app_permissions.js`
+   asserts all three: **every box is an application and there is no person on
+   it** (a permission says *this client may reach that API as whoever is signed
+   in*, and there is no whoever yet); **this service is not on it either**, so
+   no hexagon, because every line on the acts picture exists because something
+   was issued and none of these has been asked for; and **`acts` stays zero on
+   every box**, which is load-bearing rather than tidy — `edgeLook()` paints an
+   edge RED when `acts && !issued`, so a box claiming an act would draw every
+   configured grant in the refusal colour.
+
+   **ONE EDGE PER PERMISSION, NOT PER PAIR**, for `delegation.graph()`'s reason
+   about two mechanisms joining the same boxes. And a line is DASHED until the
+   client has actually asked for that permission — read off its own
+   `oauthScope` — which is the single most useful thing a configured picture can
+   say and the one thing an acts diagram can never say, because a grant nobody
+   needed draws no act at all.
 
 3p. **`user_graph.js` is a library over TWO registers, and the whole of it is
    the argument for why the union is here rather than in the console.** It
