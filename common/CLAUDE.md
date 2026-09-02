@@ -2151,3 +2151,120 @@ what it OBSERVED, and this attribute is what an operator DECLARED. They are two
 different facts. Wiring it in as the fallback for a realm signed into with no
 wreply is the obvious next step and is deliberately not taken: storing it is one
 change, and changing where a cleanup goes is a change to what the protocol does.
+
+## `consent.js`: what a person AGREED to, which is neither an act nor an intent
+
+Rule 3t. It is the THIRD register in this directory that looks like the other
+two and answers a different question, and saying which is which is most of what
+this file has to do. `delegation.js` holds ACTS — one row per exchange, evidence
+that something happened. `app_permissions.js` holds INTENT — what an operator
+allowed between two applications, typed before anybody asked for anything.
+**`consent.js` holds neither: it holds what somebody SAID YES TO**, and every row
+in it has a person in it, which is what stops it being a fourth heading on
+`/admin/delegation`.
+
+**IT IS A LIBRARY (rule 3) AND IT HOLDS NO STORE.** It registers no route, so
+its place in the require order is not a place. The store is the DIRECTORY in
+both halves — `oauthConsent` on a person under `ou=users`, `oauthGlobalConsent`
+on an application under `ou=applications` — for the reason `applications.js`
+states about the registry: a Map here would be a second store that looked right
+on its own and silently disagreed with an `ldapsearch`. It also means an
+`ldapmodify` IS a configuration change here, exactly as it is for a redirect
+URI.
+
+It requires `helpers.js`, `config.js`, `applications.js` and `admin_stats.js`
+(for `identityKeyOf()`, so that `alice`, `alice@EXAMPLE.COM` and
+`urn:sts-mock:user:alice` are one person here exactly as they are one entry in
+the directory), and nothing requires it back. **The directory arrives through
+`setDirectory()`, which `ldap_server.js` fills at ITS require time** — the same
+inversion `group_claims.js`, `applications.js`, `federation.js`,
+`spiffe_registry.js`, `vc_claims.js` and `admin_rbac.js` all use, and for their
+reason: that module is required at 21 precisely so its routes are registered
+last.
+
+### The unit is (person, application, scope) and it is ONE VALUE
+
+Not a snapshot of the `scope` string, and not a list hanging off a pair. Both
+were considered and both answer the wrong question. A SNAPSHOT makes
+`openid profile` and `profile openid` two different agreements, and adding one
+scope to a client's request throws away the agreement to the other four. A LIST
+inside one attribute value is a value that grows, which a directory cannot add
+to or remove from a member of — every change would be a read, a rewrite and a
+race.
+
+One value per triple makes every operation an `add` or a `remove` of exactly the
+thing being talked about, and makes the question the authorization endpoint asks
+— *which of these five scopes has this person not agreed to for this client* — a
+set difference rather than a parse.
+
+### Why the client_id is the LAST field of the value
+
+    oauthConsent: 20260901143000Z openid webapp1
+
+Three fields, space-separated, and the order is the only order this value can be
+parsed in without a rule somebody can break. The TIMESTAMP is a GeneralizedTime
+— digits and a `Z` — and cannot contain a space. The SCOPE cannot either, and
+that is guaranteed by CONSTRUCTION rather than by a check: a scope value only
+ever reaches this module by having been split out of a space-delimited `scope`
+parameter (RFC 6749 section 3.3), so a value with a space in it is not one
+scope. The CLIENT_ID is the one field with no rule at all —
+`identifierProblem()` refuses only a line break, a NUL and 512 characters — so
+it goes last and takes the remainder.
+
+That is also why the delimiter is a SPACE rather than this repository's usual
+`|`. The `|` convention works on `oauthPermission` (`name|description`) because
+the unconstrained field is last there too; here the unconstrained field contains
+`|` as happily as anything else.
+
+**THE TIMESTAMP IS CHECKED AGAINST ITS OWN SHAPE AND NOT MERELY SPLIT OFF**, and
+that check is what tells a value this service wrote from a sentence somebody
+left on an entry. `this is not a consent` fits a space-counting grammar exactly
+and would otherwise read as a consent to `is` for a client called
+`not a consent` — a permission granted to nobody, invented by a parser out of
+prose. Fourteen digits and a `Z` is what `generalizedTime()` emits; anything
+else is reported as unreadable and consents nothing.
+
+**A DELEGATED PERMISSION IS STORED WHOLE.** `https://example.com/write` is what
+the client put in its `scope`, so it is what is recorded. Storing the resolved
+permission NAME instead was refused for the reason the feature exists: two
+resources may both expose `read`, the person agreed to one of them, and a
+consent recorded as `read` would silently cover the other.
+
+### The override is not a record, and that decides what removing it does
+
+`oauthGlobalConsent` on the CLIENT APPLICATION's entry, one value per scope. A
+scope named there is never asked about: everybody who signs in to that
+application skips the prompt for it and **nothing is written about anybody**.
+
+Two consequences follow and both are said on the console page, because they are
+what somebody gets wrong:
+
+* **Removing one asks EVERYBODY again**, including the people who would have
+  said yes — there is no record of who they were. Removing a person's own
+  `oauthConsent` asks one person.
+* **It is keyed on (application, scope) and never on the scope alone.** A
+  service-wide list of harmless scopes would be shorter to configure and would
+  mean an application registered five minutes ago inheriting a decision made
+  about a different one.
+
+### Two more things
+
+**THE RULE ABOUT WHAT A SCOPE MAY BE LIVES IN `applications.js`.** RFC 6749
+section 3.3's `scope-token` is `scopeTokenProblem()` over there, beside
+`permissionNameProblem()` which is that rule plus a refusal of `|`. That module
+owns the SCHEMA, so it owns what a value of one of its attributes may be, and a
+second copy of the grammar here would be the thing that eventually disagreed.
+This file delegates in one line.
+
+**A SERVICE WHOSE SLOT WAS NEVER FILLED PROMPTS EVERY TIME AND SAYS SO.** Not
+"consents to everything": an agreement that cannot be remembered is one nobody
+gave, and the honest behaviour is to ask again. `record()` answers
+`{ ok: true, stored: false }` so that a directory which cannot hold the answer
+never fails an authorization request — a mock that stopped issuing because it
+could not file the paperwork would be a mock that stopped answering.
+
+**IT IS PER REALM FOR FREE.** Both halves live in the directory, the directory
+is a subtree per realm, and `applications.js`'s registry is that subtree's
+`ou=applications`. So a consent agreed in `acme` is invisible in the default
+realm without one line in this file mentioning a realm — which is the property
+to check a new store against, answered here by having no store.

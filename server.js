@@ -176,6 +176,17 @@ require('./ws-trust/wstrust');
 // thing that authenticates should be listed before the protocols that lean on
 // it.
 require('./authn/authn');
+// The consent screen. It must come AFTER authn.js and BEFORE oauth2.js, and
+// both halves are dependencies rather than preferences. AFTER, because it reads
+// that module's session to check that the person answering is the person the
+// question was asked of, and draws with that module's stylesheet so the two
+// screens a person meets seconds apart in one flow look like one service.
+// BEFORE, because the authorization endpoint calls beginConsent() and takes the
+// browser back afterwards — exactly the arrangement it already has with
+// beginAuthentication(), and the dependency is one-way in the same way: this
+// module knows nothing about OAuth beyond a `returnTo` it is handed and a
+// `consent_error` it hands back.
+require('./oauth-oidc/consent_screen');
 require('./oauth-oidc/oauth2');
 // WS-Federation's passive requestor profile. It must come AFTER authn.js and the
 // order is a dependency and not a preference: it signs users in to the session

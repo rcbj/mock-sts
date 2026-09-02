@@ -20,6 +20,7 @@ service can be told to be strict, it can.
 | It does not | Notes |
 |---|---|
 | Check any end user's password | The username typed at `/authn/login` becomes the identity in every token and every assertion |
+| ISSUE WITHOUT ASKING — **this row runs the other way, and it is the only one here that does.** Since 2026-09-01 the authorization endpoint asks: the first time a given username signs in to a given `client_id` for a given scope, `/oauth2/consent` is drawn and nothing is issued until they answer. `oauth2.consentRequired` is ON by default, which no other policy here is, because consent is not a refusal — it is the screen every real authorization server draws on a first sign-in, and a client that has never met one has never run the code that survives it. **It still checks nothing**: the person was let in under any name they typed, one row above. See below |
 | Refuse any LDAP bind | Any DN, any password, anonymous included — on 389 and on LDAPS 636 alike |
 | Verify an access token it did not issue | Except at `/oauth2/userinfo`, which answers "who did *you* authenticate" and so must |
 | Require DPoP | Nonce mode makes proofs fresher, not mandatory. A request with no `DPoP` header is a Bearer request |
@@ -41,6 +42,46 @@ entry — because an identity turned up here and something about it was accepted
 None of them starts a session or issues a token. A mock that quietly promoted one
 into the other would teach a client something false about every real server it
 will ever meet.
+
+## Consent is ASKED, and it is the one thing here that is on by default
+
+Everything else on this page is something this service declines to check.
+Consent is the opposite: it is something it insists on, and the setting that
+governs it — `oauth2.consentRequired` — is the only one in the service that
+defaults to ON.
+
+The argument is that consent is not a refusal. Every other policy here is off
+because a mock exists to exercise clients and a refusal that cannot be turned
+off removes a test case rather than adding one. A consent screen ADDS one: the
+extra redirect, the second visit to the authorization endpoint, and the
+`access_denied` a client gets when somebody says no are all code paths a client
+that has never met a first-time sign-in has never run.
+
+**It does not check anything.** The person reached the screen by typing any name
+they liked at a sign-in screen that checks no password — the first row of the
+permissive list is unchanged. What the screen establishes is that a human
+pressed a button, not who they are.
+
+Three things about it are worth knowing here:
+
+* **The answer is a record, not a permission.** It is written to `oauthConsent`
+  on the person's own entry — one value per (person, application, scope) — and
+  it is read by exactly one thing: the authorization endpoint, deciding whether
+  to draw the screen again. No endpoint anywhere consults it to allow or refuse
+  anything else.
+* **Nothing already issued is re-judged.** The token endpoint asks nobody
+  anything, so a refresh of a code obtained before the setting was turned on
+  still works, and revoking somebody's consent leaves a token already minted
+  valid. That is the same rule delegated permissions follow and the same rule
+  federation follows about not re-checking a person once the session exists.
+* **`oauthGlobalConsent` on an application's entry turns the asking off for
+  everybody who signs in to it**, without writing anything about anybody — so
+  taking it away asks everybody again, including the people who would have said
+  yes. It is keyed on (application, scope) and never on the scope alone.
+
+Turning the setting off makes this service behave exactly as it did before the
+screen existed: nothing asked, nothing recorded. It does **not** mean everybody
+consented — no agreement is written down, so turning it back on asks again.
 
 ## Delegation is policed in one family out of three, and the page says which
 

@@ -1963,6 +1963,38 @@ const ENDPOINTS = [
           'mechanism, kind, outcome, protocol and free text; paged; ' +
           '?format=json carries the acts, the distinct CHAINS among them (one ' +
           'per edge of the picture) and the policy.' },
+  { path: '/admin/consent', group: 'Admin', name: 'Consent',
+    // Two specifications and not the delegation page's four. Nothing here has
+    // been PERFORMED, so [MS-SFU] and WS-Trust have nothing to do with it;
+    // what this page can honestly cite is the scope parameter a client asks
+    // with and the prompt/consent vocabulary OpenID Connect defines around it.
+    specs: ['rfc6749', 'oidc'],
+    what: 'NON-SPEC PAGE. What a PERSON agreed an application may ask for on ' +
+          'their behalf — the third register beside /admin/delegation\'s two ' +
+          'and the first whose rows have a person in them. TWO HALVES AND ' +
+          'THEY ARE NOT THE SAME KIND OF THING. Recorded consent is a RECORD: ' +
+          'one oauthConsent value per (person, application, scope) on the ' +
+          'person\'s own entry under ou=users, written when they pressed ' +
+          'Allow at /oauth2/consent, and revoking one asks that one person ' +
+          'again. Global consent is CONFIGURATION: one oauthGlobalConsent ' +
+          'value per scope on the APPLICATION\'s entry, which skips the ' +
+          'prompt for everybody and writes nothing about anybody — so ' +
+          'removing one asks EVERYBODY again, including the people who would ' +
+          'have said yes. It is keyed on (application, scope) and never on ' +
+          'the scope alone, so consenting `read` for one application leaves ' +
+          'every other one asking. Four controls: consent a scope for ' +
+          'everybody, stop consenting it, revoke one person\'s answer, and ' +
+          'forget everything one person agreed to. NOTHING HERE TOUCHES WHAT ' +
+          'WAS ALREADY ISSUED — an access token minted before a revoke is ' +
+          'still valid, exactly as taking a delegated permission away does ' +
+          'not re-judge a grant already made; /admin/tokens is where an ' +
+          'issued credential is revoked. Both attributes are ordinary ' +
+          'attributes on ordinary entries, so an ldapmodify reaches them and ' +
+          'they persist wherever the directory does. Searched over the ' +
+          'person, the application and the scope; both tables paged; ' +
+          '?format=json carries the register whole. The screen itself is ' +
+          'oauth2.consentRequired, which is ON by default and is the one ' +
+          'policy in this service that is.' },
   { path: '/admin/delegation/map', group: 'Admin', name: 'Delegation — the picture',
     // The same four specifications as the page above it, and for the same
     // reason: this is that page's acts drawn rather than a different subject.
@@ -2902,6 +2934,46 @@ const ENDPOINTS = [
           'rather than turned away. Removing a permission does not revoke the ' +
           'grants naming it — they become dangling, because tidying them ' +
           'would be one call writing to entries it did not name.' },
+  { path: '/admin-api/consent', group: 'Management API', name: 'Consent',
+    specs: ['openapi', 'rfc6749', 'oidc'],
+    what: 'NON-SPEC. The consent register, both halves, and the third in this ' +
+          'family beside /admin-api/delegation (what HAPPENED) and ' +
+          '/admin-api/permissions (what is ALLOWED between two applications): ' +
+          'this is what a PERSON said yes to. `users` is the record — one ' +
+          'oauthConsent value per (person, application, scope) on the ' +
+          'person\'s entry, written when they pressed Allow at ' +
+          '/oauth2/consent. `globals` is the override — oauthGlobalConsent on ' +
+          'an APPLICATION\'s entry, one value per scope, which skips the ' +
+          'prompt for everybody and writes nothing about anybody. ' +
+          '`globals[].resource` says which application exposes the permission ' +
+          'where the scope resolves to one and `globals[].granted` whether ' +
+          'that client also HOLDS it, which are independent questions. ' +
+          '`users[].unreadable` is a value an ldapmodify put on an entry that ' +
+          'is not in the shape this service writes: it consents nothing and ' +
+          'is reported rather than dropped. `storable: false` means no ' +
+          'directory is installed behind the register, so an answer is ' +
+          'honoured once and forgotten and the screen is drawn every time. ' +
+          'READ ONLY — the four controls are on the resource below. Mirrors ' +
+          'GET /admin/consent.' },
+  { path: '/admin-api/consent/:action', group: 'Management API',
+    name: 'Grant and revoke consent',
+    specs: ['openapi', 'rfc6749'],
+    what: 'grant-global-consent, revoke-global-consent, revoke-consent and ' +
+          'forget-user-consent — the same four the console\'s forms post to ' +
+          '/admin/consent, through the same functions, so neither door can ' +
+          'enforce a rule the other does not. THE TWO REVOKES ARE NOT ' +
+          'INTERCHANGEABLE and the names say which is which: ' +
+          'revoke-global-consent removes an override and therefore asks ' +
+          'EVERYBODY again, and revoke-consent removes one person\'s answer ' +
+          'and asks that one person. revoke-consent needs all three of ' +
+          'username, client and scope, because one person may consent the ' +
+          'same scope to several applications and revoking the wrong pair is ' +
+          'invisible until somebody is asked again. A global consent must be ' +
+          'a legal RFC 6749 section 3.3 scope token and need NOT name a ' +
+          'permission any application defines — most scopes are not ' +
+          'permissions, and refusing an unrecognised one would make it ' +
+          'impossible to consent openid. NONE OF THE FOUR TOUCHES WHAT WAS ' +
+          'ALREADY ISSUED.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +
@@ -3878,6 +3950,36 @@ const ENDPOINTS = [
           '8/9 server-supplied nonce requirement on and off at runtime, so the 401/retry exchange ' +
           'can be exercised without restarting the service. GET reports the current state; POST ' +
           '{"required": true|false} sets it.' },
+  { path: '/oauth2/consent', group: 'OAuth 2.0 / OIDC', name: 'Consent screen',
+    specs: ['oidc', 'rfc6749'],
+    effect: 'needs a pending consent id — answers 400 when followed bare',
+    what: 'NON-SPEC SCREEN FOR A SPEC BEHAVIOUR. OAuth 2.0 and OpenID Connect ' +
+          'both assume an authorization server obtains the resource owner\'s ' +
+          'consent and neither says what that looks like; this is what it ' +
+          'looks like here. The authorization endpoint sends a signed-in ' +
+          'person here when the request names a scope they have not already ' +
+          'agreed to for that client_id, and nothing is issued until they ' +
+          'answer. Allow writes one oauthConsent value per scope onto their ' +
+          'own entry under ou=users — <when> <scope> <client_id>, one value ' +
+          'per (person, application, scope) — so the second sign-in is silent ' +
+          'and an ldapsearch can read what somebody agreed to. Deny sends ' +
+          'access_denied back to the client through the authorization ' +
+          'endpoint, which is what decides how it travels: a form_post ' +
+          'response is a form and not a redirect, and this screen must not ' +
+          'know that. A delegated permission is recorded by its WHOLE ' +
+          'identifier, never by the bare permission name, because two ' +
+          'resources may both expose `read`. THE RECORD IS SERVER-SIDE and ' +
+          'the only thing in the URL is an unguessable id, so there is no ' +
+          'return address anybody can rewrite; the answer is a POST, because ' +
+          'a GET that recorded consent would be consent anything that ' +
+          'prefetches a link could give; and the session is checked against ' +
+          'the person the question was asked of, which is the one failure ' +
+          'here that would write something untrue into the directory. NO ' +
+          'SCRIPT — two buttons in a form, so the service-wide ' +
+          'script-src \'none\' is untouched. oauth2.consentRequired turns it ' +
+          'off, and it is ON by default; /admin/consent is the register, and ' +
+          'oauthGlobalConsent on an application entry skips the prompt for ' +
+          'everybody without writing anything about anybody.' },
   { path: '/oauth2/autopost.js', group: 'OAuth 2.0 / OIDC',
     name: 'The form-post response script', specs: ['oauth-form-post', 'rfc9700'],
     what: 'The script that submits the form on a response_mode=form_post authorization ' +

@@ -891,3 +891,96 @@ however often it asked. The visible symptom was on `/admin/delegation`, whose
 minute was reported as never having asked for it. It is CONDITIONAL on the body
 carrying a scope, because an `authorization_code` redemption does not (the grant
 does) and writing an empty value would record that the client asked for nothing.
+
+## `consent_screen.js`: the screen, and why it is not in `oauth2.js`
+
+Rule 4c. `/oauth2/consent` is the one thing between a signed-in person and an
+issued credential since 2026-09-01, and it is a module of its own for the reason
+`authn/authn.js` is: **the authorization endpoint hands a browser to a screen
+somebody else owns and takes it back afterwards**, and the thing that owns the
+screen must not have to know what OAuth is.
+
+**IT IS REQUIRED AFTER `authn.js` AND BEFORE `oauth2.js`, and both halves are
+dependencies.** AFTER, because it reads that module's session — to check that
+the person answering is the person the question was asked of — and draws with
+its stylesheet, so that two screens a person meets seconds apart in one flow
+look like one service. BEFORE, because the authorization endpoint calls
+`beginConsent()`. The dependency is one-way in exactly the way
+`beginAuthentication()`'s is: this module knows nothing about OAuth beyond a
+`returnTo` it is handed and a `consent_error` it hands back.
+
+**THE SCREEN HOLDS THE PENDING RECORDS AND THE REGISTER HOLDS NONE.**
+`common/consent.js` is the model — the value's grammar, what "outstanding"
+means, the global override, the register both console halves are read from — and
+it holds no store at all, because both halves of what it knows are attributes in
+the directory. This file holds the one thing that IS state: a `realms.map()` of
+consents in flight. That split is `app_permissions.js` / `admin-ui/admin.js`'s
+and `delegation.js` / `delegation_map.js`'s, made a third time.
+
+### Where the check sits in `authorizeEndpoint()`, and why
+
+**Inside the branch that has a session, above `issueAuthorizationResponse()`.**
+Everything above that line is about the REQUEST; this is the only check in that
+endpoint that is about who is answering it, and there is no person until there
+is a session.
+
+**`consent_error` is read beside `authn_error`, one line below it, and the
+reason it must be THERE rather than lower is the opposite of the sign-in
+screen's.** A refused sign-in leaves no session, so the session branch would
+draw the login screen again — a loop with a form in it. A refused CONSENT leaves
+the session STANDING, so the session branch would find it, ask
+`consent.outstanding()` again and send the person straight back to the screen
+they just said no on. Same loop, one door along, and the only way out would be
+closing the tab.
+
+**The `returnTo` is built exactly as the sign-in hop's is, with `prompt`
+dropped** — it has been honoured by the time they come back, and leaving
+`prompt=consent` on would ask again for ever. Everything else goes back
+untouched, because the second pass has to be the request the client actually
+made: PKCE, the nonce, `claims` and `authorization_details` are all read on it.
+
+**THE APPLICATION IS RECORDED ON THIS PATH TOO, with `counts: false`.**
+`issueAuthorizationResponse()` is where a client_id is normally written into
+`ou=applications` and it is not reached here, so without it an application whose
+very first request meets the screen has no entry — the screen shows a bare
+client_id where a name belongs, and `/admin/consent` cannot offer it in the list
+of applications a scope can be consented for. An operator wanting to pre-consent
+a new client would have had to sign in to it first and agree to everything by
+hand. `counts: false` is what keeps it honest: being ASKED is not an
+authentication, and the call in `issueAuthorizationResponse()` still counts
+once.
+
+### What the screen refuses, and the one that matters
+
+Three checks, and only one of them is obvious. The record must EXIST and not
+have expired (ten minutes, `authn.js`'s window, because they are two halves of
+one interrupted request). The answer must be a POST — a GET that recorded
+consent would be consent that anything prefetching a link could give. And **the
+session presenting the answer must belong to the person the question was asked
+of**: that is the one failure at this door that would write something UNTRUE
+into the directory rather than merely letting something through, because the
+answer would be filed against whoever happened to be signed in.
+
+Every one of those refusals leaves the pending record ALONE. A screen that spent
+itself on a refusal would turn each of them into a denial of service against the
+person it was asked of.
+
+### Two things it deliberately is not
+
+**IT IS NOT A SIXTH SCRIPTED PAGE.** `app.js` sets `script-src 'none'` for the
+whole service and this repository's rule is that a page wanting a script must
+argue it CANNOT work without one. This one plainly can: it is two buttons in a
+form. There is no `contentSecurityPolicy()` override anywhere in the file.
+
+**IT IS NOT A REFUSAL, WHICH IS WHY THE SETTING IS ON BY DEFAULT.** Every other
+policy here is off because a refusal that cannot be turned off removes a test
+case; consent adds one. `oauth2.consentRequired` off means exactly what this
+service did before the screen existed — nothing asked and nothing recorded — and
+it is NOT "everybody consented", because no agreement is written down and
+turning it back on asks again.
+
+**THE TOKEN ENDPOINT ASKS NOBODY ANYTHING.** A grant already issued is never
+re-judged, the same rule delegated permissions follow and federation follows
+about not re-checking a person once the session exists — so a refresh of a code
+obtained before the setting was turned on still works, and revoking a consent
+does not touch a token already minted.

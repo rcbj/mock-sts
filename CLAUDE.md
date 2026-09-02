@@ -18,11 +18,11 @@ files did not change; the paths did.
 
 | Directory | What is in it |
 |---|---|
-| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, **`crypto.js`**, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, **`app_permissions.js`** (the CONFIGURED delegation register — who MAY reach what, in Entra ID's shape, against `delegation.js`'s record of what DID), `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`, and — since 2026-08-30 — **`worker.js` and `worker_pool.js`, the child-process pool the post-quantum signing runs in** (see *One listener process, N stateless workers* below). **`crypto.js` is THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS since 2026-08-27** — before that it did all four in about twenty places, including six XML signers and four XML signature verifiers. `common/CLAUDE.md` argues it. |
+| `common/` | Everything more than one family reads: `config.js`, `helpers.js`, **`crypto.js`**, `app.js`, `realms.js`, `admin_stats.js`, `audit.js`, `applications.js`, `delegation.js`, **`app_permissions.js`** (the CONFIGURED delegation register — who MAY reach what, in Entra ID's shape, against `delegation.js`'s record of what DID), `user_graph.js`, `claim_attributes.js`, `group_claims.js`, `config_file.js`, and — since 2026-08-30 — **`worker.js` and `worker_pool.js`, the child-process pool the post-quantum signing runs in** (see *One listener process, N stateless workers* below). **`crypto.js` is THE ONE PLACE THIS SERVICE SIGNS, VERIFIES, ENCRYPTS AND DECRYPTS since 2026-08-27** — before that it did all four in about twenty places, including six XML signers and four XML signature verifiers. `common/CLAUDE.md` argues it. **And since 2026-09-01 `consent.js`, the register of what a PERSON agreed an application may ask for on their behalf** — the third register in the `delegation.js` / `app_permissions.js` family and the first whose rows have a person in them, holding no store of its own because both halves are attributes in the directory (`oauthConsent` on a person, `oauthGlobalConsent` on an application). |
 | `common/vendored/` | Byte-identical copies of the parent project's files, plus the JSON-LD `contexts/`. **Do not edit them here.** Since 2026-08-27 that includes `xmldsig.js`, the parent's own XML Signature and XML Encryption module, which is now the signer behind every signed document this service emits — so both ends of a SAML exchange canonicalize with the same code. |
 | `home/` | The front door: `GET /` and the one image on it. |
 | `logout/` | The protocol-independent sign-out: `GET|POST /logout`, and the one model of what a live session IS across every family. |
-| `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles, and **the UserInfo endpoint's four layers** — a claim set of its own configured at `/admin/userinfo-claims`, the scope-driven set, OIDC Core 5.5's claims request, and `sub`. |
+| `oauth-oidc/` | The authorization server, RFC 9700 mode, DPoP, mTLS, client authentication, the multi-AS profiles, **the CONSENT SCREEN at `/oauth2/consent`** (2026-09-01 — the one thing between a signed-in person and an issued credential, and the one policy in this service that is ON by default), and **the UserInfo endpoint's four layers** — a claim set of its own configured at `/admin/userinfo-claims`, the scope-driven set, OIDC Core 5.5's claims request, and `sub`. |
 | `authn/` | The authentication service and the WebAuthn relying party. Owns the SESSION. **One endpoint in its own path space lives elsewhere**: `/authn/spnego` is `kerberos/spnego_authn.js`, for a require-order reason both files argue. |
 | `saml/` | The two assertion builders, and A BROWSER-FACING IDENTITY PROVIDER FOR EACH: SAML 2.0's Web Browser SSO profile (all three bindings, Single Logout, metadata per service provider) and SAML 1.1's two browser profiles (Browser/POST, Browser/Artifact, a SOAP responder that is also an attribute authority, metadata per relying party). **They are separate implementations, not one with a version flag** — SAML 1.1 has no request message, no Single Logout, and a different spelling for almost every shared element; `saml/CLAUDE.md` has the table. |
 | `ws-trust/` | WS-Trust 1.0–1.4. |
@@ -38,7 +38,7 @@ files did not change; the paths did.
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
 | `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, **every setting drawn on the page for the protocol it configures** (2026-08-27 — `SETTING_HOMES` is the table, `/admin/config` keeps the rows belonging to no protocol and the index of the rest), and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. **And since 2026-08-30 the CRYPTO REPORT** (`crypto_metadata.js`, `/admin/crypto-metadata`): what this service does when it signs, verifies, encrypts or decrypts, for every identity service it advertises, with every algorithm table READ FROM THE MODULE THAT PERFORMS THE ALGORITHM — the same argument `sts_metadata.js` makes about the router, one layer down. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
-| `tests/` | **THE ONLY TEST DIRECTORY HERE**, and since 2026-08-28 it holds BOTH halves of this service's coverage. `tests/*.js` is the in-process half — assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. **`tests/vendored/` is the protocol half**: fourteen jobs driven over HTTP against a CONTAINER built from this tree by `docker-compose.yml` (a throwaway in-process copy under `--no-docker`, and under coverage), plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent project's mock-only jobs and are NOT edited here; **FIVE are this repository's own** — the ones that drive this service's `/admin` console and `/admin-api`, marked `local: true` since 2026-08-28, with no copy over there to sync from and the editing rule inverted for them. `tests/vendored/MANIFEST.js` says which is which and where each copy came from, and `--vendor-check` reports drift in the nine. See *Tests* below for what changed and `tests/CLAUDE.md` for the rules that are not optional there. **`tests/tools/` is not tests**: the report generator, the coverage renderer, the compose-stack helpers (`compose.sh`, shared by both launchers) and the throwaway-service launcher `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` drive — in a subdirectory precisely so that `run.js`'s discovery rule needs no exclusion list. **`tests/Dockerfile`, its own `.dockerignore` and `tests/run-tests-in-container.sh` are not tests either**: they are the RUNNER as a container, which `docker-compose-run-tests.yml` brings up beside the service so that a host with docker and nothing else runs all twenty-seven jobs — see *Tests* item 5. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
+| `tests/` | **THE ONLY TEST DIRECTORY HERE**, and since 2026-08-28 it holds BOTH halves of this service's coverage. `tests/*.js` is the in-process half — assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. **`tests/vendored/` is the protocol half**: fifteen jobs driven over HTTP against a CONTAINER built from this tree by `docker-compose.yml` (a throwaway in-process copy under `--no-docker`, and under coverage), plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent project's mock-only jobs and are NOT edited here; **SIX are this repository's own** — the ones that drive this service's `/admin` console and `/admin-api`, marked `local: true` since 2026-08-28, with no copy over there to sync from and the editing rule inverted for them. `tests/vendored/MANIFEST.js` says which is which and where each copy came from, and `--vendor-check` reports drift in the nine. See *Tests* below for what changed and `tests/CLAUDE.md` for the rules that are not optional there. **`tests/tools/` is not tests**: the report generator, the coverage renderer, the compose-stack helpers (`compose.sh`, shared by both launchers) and the throwaway-service launcher `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` drive — in a subdirectory precisely so that `run.js`'s discovery rule needs no exclusion list. **`tests/Dockerfile`, its own `.dockerignore` and `tests/run-tests-in-container.sh` are not tests either**: they are the RUNNER as a container, which `docker-compose-run-tests.yml` brings up beside the service so that a host with docker and nothing else runs all thirty jobs — see *Tests* item 5. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
 | `postgres/` | **Two shell scripts the database container runs, and nothing else.** `generate-tls.sh` makes its server key pair on first start — the same decision every other key here follows, because a certificate committed to a repository is a private key committed to a repository — and `require-tls.sh` rewrites every `host` rule in `pg_hba.conf` to `hostssl` so that TLS is REQUIRED rather than merely available. Both are mounted into the image by `docker-compose.yml`; neither is run by this service. `persistence/CLAUDE.md` argues them. |
 | `docs/` | The GitHub Pages site. See `docs/CLAUDE.md`. |
 | `env/` | The appconfig files. `CONFIG_FILE` selects one, and it is unioned on top of `defaults.js`, which is GENERATED by `generate_defaults.js` and is not selected by anything. |
@@ -644,6 +644,7 @@ require can see at a glance whether they are about to break one.
 | 6a | `home/home` | No constraint. Two EXACT paths (`/` and `/logo.png`) and nothing but the app behind them; first among the route modules so that the page a person meets first heads the list on `/admin/sts-metadata`. | `home/CLAUDE.md` |
 | 7 | `ws-trust/wstrust` | No constraint. | `ws-trust/CLAUDE.md` |
 | 8 | `authn/authn` | Before `oauth-oidc/oauth2` — it owns the session that module reads, and fills `audit.js`'s `setActorResolver()`. | `authn/CLAUDE.md` |
+| 8b | `oauth-oidc/consent_screen` | **After `authn`** — it reads that module's session to check that the person answering is the person the question was asked of, and draws with its stylesheet. **And before `oauth2`**, which calls its `beginConsent()` and takes the browser back afterwards: exactly the arrangement `authn.js` already has with `beginAuthentication()`, one-way in the same way. It holds the pending records and nothing else; the REGISTER is `common/consent.js`. | `oauth-oidc/CLAUDE.md` |
 | 9 | `oauth-oidc/oauth2` | Before `ws-federation/wsfed` and before `admin-ui/admin`. | `oauth-oidc/CLAUDE.md` |
 | 10 | `ws-federation/wsfed` | **After `oauth2`** — rule 4. Single sign-on across the two protocols. |
 | 10a | `saml/saml2_sso` | **After `authn`**, and a stronger dependency than WS-Federation's: it has NO sign-in screen of its own and reaches that service's through `beginAuthentication()`. No constraint against `wsfed` either way. | `saml/CLAUDE.md` | `ws-federation/CLAUDE.md` |
@@ -657,7 +658,7 @@ require can see at a glance whether they are about to break one.
 | 19 | `mgmt-api/admin_api` | **After `admin-ui/admin`** — rule 7. It calls that module's action functions and JSON views. | `mgmt-api/CLAUDE.md` |
 | 20 | `tls/tls_server` | **Before `ldap/ldap_server`**, which serves its certificate and key on 636. | `tls/CLAUDE.md` |
 | 20a | `admin-ui/crypto_metadata` | **After `tls/tls_server`, and that is the constraint that decides the line.** It reads an algorithm table out of eleven modules — `common/crypto`, `pq_jose`, the vendored `xmldsig`, `krb5_crypto`, `webauthn`, `oauth2`/`dpop`/`client_auth`/`mtls`, `spiffe_ca`, `scim_auth` and `tls_server` — and requiring one this file has not yet loaded would REGISTER ITS ROUTES HERE (rule 1). Here every one of them is a cache hit. Also after `admin-ui/admin` for the shell and the gate. Fills `admin.setCryptoReporter()`; `sts_metadata.js` fills ITS `setProtocolFamilies()`. | `admin-ui/CLAUDE.md` |
-| 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills SIX slots at require time, the newest being `admin.setDirectoryPages()` (rule 3e), and registers the five `/admin/ldap/*` console pages it draws. | `ldap/CLAUDE.md` |
+| 21 | `ldap/ldap_server` | **After `admin-ui/admin` and after `tls/tls_server`** — rule 6. Fills SEVEN slots at require time — the newest is `consent.setDirectory()` (2026-09-01), which carries the four functions that put a person's answer on their own entry and read it back — and registers the five `/admin/ldap/*` console pages it draws. | `ldap/CLAUDE.md` |
 | 22 | `scim/scim` | **After `ldap/ldap_server`** — a plain require, and rule 3e's test is why. | `scim/CLAUDE.md` |
 | 23 | `spiffe/spiffe_server` | **After `ldap/ldap_server` and `tls/tls_server`.** Its registry's store is the directory. | `spiffe/CLAUDE.md` |
 | 23b | `ssf/ssf` | **After `admin-ui/admin`**, whose EIGHTH slot it fills, and whose page shell and gate it requires — so a require the other way would close a cycle, and one from `mgmt-api/admin_api.js` would move every `/ssf` route and the well-known document ahead of the management API's own. Rule 3e's test answers yes both ways. It starts nothing and holds no socket. | `ssf/CLAUDE.md` |
@@ -687,6 +688,8 @@ in every file, including the ones in the source comments. This is the index.
 | 4b | `saml11_sso.js` after `authn.js` and after `saml2_sso.js`, and why the two profiles are separate implementations | `saml/CLAUDE.md` |
 | 3l | `delegation.js`, and why it has no funnel | `common/CLAUDE.md` |
 | 3s | `app_permissions.js`, why a CONFIGURED register is not the observed one with a flag on it, and why the ordering rule lives in `applications.js` | `common/CLAUDE.md` |
+| 3t | `consent.js`, why an OVERRIDE is not a RECORD, and why the client_id is the last field of the value | `common/CLAUDE.md` |
+| 4c | `consent_screen.js` after `authn.js` and before `oauth2.js`, and why the screen holds the records while the register holds none | `oauth-oidc/CLAUDE.md` |
 | 3p | `user_graph.js`, and why the union of two registers is a library rather than a page | `common/CLAUDE.md` |
 | 3o | `federation.js`, why four modules may require it, and why `PATHS` is not beside the routes | `federation/CLAUDE.md` |
 | 3m | `realms.js`, the realm slot in `config.js`, and why the realm is ambient | `common/CLAUDE.md` |
@@ -1132,10 +1135,10 @@ the process-wide state you touch.
 
 ```bash
 npm test                          # unchanged: one process, bunyan, under 2s
-./docker-run-tests.sh             # ALL 23 jobs, ENTIRELY IN CONTAINERS — the
+./docker-run-tests.sh             # ALL 30 jobs, ENTIRELY IN CONTAINERS — the
                                   # service AND the runner. Needs docker and
                                   # NOTHING else. What CI runs (see 5 below)
-./local-run-tests.sh              # ALL 23 jobs: the in-process suite, and the
+./local-run-tests.sh              # ALL 30 jobs: the in-process suite, and the
                                   # protocol jobs against a CONTAINER built
                                   # from this working tree
 ./local-run-tests.sh --no-docker  # the same set, with the service run on this
@@ -1186,7 +1189,7 @@ REST IS ARGUED.**
    They answer the gitlink problem the last section of this file describes:
    their suite drives the pinned `sts/` checkout, so a change made here is not
    covered by it until somebody bumps the pin. A run brings up a copy of this
-   tree and drives the fourteen jobs against it — in a CONTAINER since the
+   tree and drives the fifteen jobs against it — in a CONTAINER since the
    same day, which is item 4. About a minute plus the image build.
 
    **`--protocol` used to be needed and is now the default**, because without
@@ -1199,7 +1202,7 @@ REST IS ARGUED.**
    and says so.
 
    **And the jobs are COPIES here rather than read out of the parent**, so a
-   machine with only this repository on it runs all twenty-seven. It does NOT
+   machine with only this repository on it runs all thirty. It does NOT
    replace bumping the pin, because it runs on a developer's machine and CI
    over there still drives what the gitlink names.
 2. **A VENDORED JOB CAN BE AHEAD OF THIS TREE, and vendoring changed what that
@@ -1233,7 +1236,7 @@ REST IS ARGUED.**
    read off the service itself and a container torn down at the last line is
    gone by the time the report says to look at it. `startStack()` already
    brought its own project down before bringing it up, so the next run meets
-   no leftover; `--tear-down` is the old behaviour. The fourteen jobs are node
+   no leftover; `--tear-down` is the old behaviour. The fifteen jobs are node
    processes on this machine exactly as they were, which is what keeps the
    loop short, what lets the five jobs that load this service's modules IN
    PROCESS keep doing so, and what lets the browser job drive the Chrome that
@@ -1292,7 +1295,7 @@ REST IS ARGUED.**
    `docker-compose-run-tests.yml` brings up two services on a private bridge —
    the mock from this repository's Dockerfile, and a runner built from
    `tests/Dockerfile` with node, a Chrome and this working tree in it — runs
-   all twenty-seven jobs against the service by its compose DNS name, and exits
+   all thirty jobs against the service by its compose DNS name, and exits
    with the suite's status (`--exit-code-from tests`).
 
    **WHAT IT BUYS IS THAT THE HOST NEEDS DOCKER AND NOTHING ELSE**: no node, no
@@ -1301,7 +1304,7 @@ REST IS ARGUED.**
    2026-08-28 vendoring — the jobs became this repository's own files that day,
    and until this they still needed a developer's machine to run on. It is also
    what to reach for when a run is green here and red somewhere else: the two
-   launchers drive the SAME twenty-seven jobs through the same runner, so a
+   launchers drive the SAME thirty jobs through the same runner, so a
    difference between them is a difference in the environment and nothing else.
 
    **THE TWO LAUNCHERS ARE NOT REDUNDANT AND NEITHER REPLACES THE OTHER.**
@@ -1333,21 +1336,27 @@ REST IS ARGUED.**
    image, same compose file, different shape, and its own compose project so
    that the two runs cannot reach each other's containers.
 
-Nine tests need only this service, and since 2026-08-28 they are OWNED by two
+Ten tests need only this service, and since 2026-08-28 they are OWNED by two
 different repositories — which is the first thing to know about the table below,
 because every one of them but the last ran from the parent's suite before that
-date. **FIVE are this repository's own**: `sts_metadata.js`, `admin_api.js`,
+date. **SIX are this repository's own**: `sts_metadata.js`, `admin_api.js`,
 `sts_admin_api_operations.js` and `sts_admin_console.js`, deleted over there and
 kept here, because each asserts something about this service's `/admin` console
 or its `/admin-api` and the tree that adds a control is the tree that should
 fail when the control loses its operation — and
 `sts_delegated_permissions_example.js`, which was NEVER over there: it was
 written here on 2026-09-01 and it drives `/admin-api` to build something for
-`/admin` to draw. **The other four are still the parent's**, and this repository
+`/admin` to draw — and `sts_consent.js`, written here the same day and here for
+a THIRD reason worth keeping apart from those two. Half of it is an ordinary
+protocol test and by the rule below belongs over there; the other half grants a
+GLOBAL CONSENT through `/admin-api/consent` and then watches a sign-in stop
+being asked, and the assertion that matters is that a console control changed
+what the AUTHORIZATION ENDPOINT does. A test with the grant in one repository
+and the sign-in in the other could not make it. **The other four are still the parent's**, and this repository
 holds copies of three of them — `sts_persistence_postgres.js` is not vendored,
 because it needs docker.
 
-**Fourteen jobs run from `tests/vendored/`** — the nine below that a lone mock
+**Fifteen jobs run from `tests/vendored/`** — the ten below that a lone mock
 can satisfy, plus five others — so they run against this working tree with no
 parent checkout present. The paths in the first column are where each file is
 READ FROM here; for the four the parent still owns, that copy is not the source
@@ -1365,6 +1374,7 @@ of truth.
 | `tests/app_permissions.js` | **a CONFIGURED delegated permission is drawn as intent and never as an act.** In process, and the line it draws is the one this section states: the five API operations, the ordering rule and the refusals are all driven over HTTP by `sts_admin_api_operations.js` and are not here. What is here is the two halves that cannot be — CHOOSING the graph (a dangling grant, and an application granted its own permission, which both console doors refuse to create) and the pure string rules of `base + name` and `name|description`. Mutation-tested against five mutants |
 | `tests/vendored/sts_admin_console.js` **(ours)** | **the `/admin` console itself, IN A REAL BROWSER since 2026-08-28: the gate, all thirty-eight pages, every link, every GET form and every button on them — and the value that comes back afterwards.** It was an HTTP job, and the argument for that (this console has no script on it, so a control IS a form and pressing a button IS posting it) is still true; what it missed is that a hand-built submission is the TEST's reading of the markup rather than the browser's, that the twenty-two GET forms had no POST target to walk and so were never checked at all, that the nested-`<form>` guard is a PARSER question the old file had to reason about instead of asking, and that a notice is not a value. Status codes and headers come from **WebDriver BiDi**, because `default-src 'none'` blocks a `fetch()` from the page — the thing under test. Plus: every link really visited, which covers the seven routes with no nav row by construction; the five handlers nothing had ever pressed, `/admin/rbac`'s own grant and revoke among them; refusals split into what the BROWSER will not send and what the handler will not accept; the realm switcher; and the browser's own console, which on this console must be empty |
 | `tests/vendored/sts_delegated_permissions_example.js` **(ours)** | **THE DELEGATED PERMISSION REGISTER AS A RING, AND THE ONE JOB HERE THAT LEAVES ITS WORK BEHIND ON PURPOSE.** `abcapp1`–`abcapp5` in the DEFAULT realm, each declared for OAuth 2.0 and OpenID Connect with its supporting fields filled in, each exposing `read` and `write` under a base URI of its own, and each granted both on THE NEXT ONE ROUND — `abcapp1`→`abcapp2`→`abcapp3`→`abcapp4`→`abcapp5`→`abcapp1`: five resources, ten permissions, ten grants. **It was a complete mesh of forty grants until 2026-09-01** and the file argues the change rather than merely recording it: the mesh was the stronger test and the weaker EXAMPLE, and this job is both — forty lines between five boxes is the one graph shape that looks the same however it is drawn and however it is wrong, and this example exists to be LOOKED at. What survives is the assertion that matters: every grant still resolves to the RIGHT resource among five whose bases differ only in a digit, so a lookup matching on a prefix, a host or the bare name is wrong for four of the five pairs. What replaced the mesh's arithmetic is an EXACT-LIST assertion per entry — `abcapp2` holding `abcapp4`'s `read` would keep every count right and be wrong about the only thing the example says. Plus the two halves landing on the right ENTRIES (a grant written to the resource instead of the client reads correctly on `/permissions` and finds nothing at the token endpoint), the PICTURE — five boxes, ten lines, `may-reach` on every one and `acts` zero everywhere, because a configured grant has been exercised nought times and the renderer colours `acts && !issued` as a refusal — and the TOKEN, audienced to the one base URI of five that was asked for (its own successor, the only one it holds anything on), carrying the bare names on its scope claim, and moving exactly two of the ten grants to `asked`. It is IDEMPOTENT (the identifiers are fixed, so every previous `abcapp*` is forgotten first) and it does not tear down, because the example exists to be READ at `/admin/delegation/allowed` |
+| `tests/vendored/sts_consent.js` **(ours)** | **THE CONSENT SCREEN, AND THE OVERRIDE THAT MAKES IT NOT APPEAR.** Mostly negatives, for `sts_dpop.js`'s reason: a screen that draws, takes an Allow and hands over a code looks finished and can be worth nothing. What it asserts is that a GET of the screen records NOTHING (or anything that prefetches a link has consented for somebody), that a consent id is spendable ONCE, that a consent asked of one person cannot be drawn OR answered by another's session and that every one of those refusals leaves the pending record answerable by the person it belongs to, that Deny records nothing and the refused scope is asked again, that a second request is silent and a new scope asks about ITSELF ALONE, that `prompt=none` answers `consent_required` and `prompt=consent` asks again without destroying what was already agreed. **And the half that is not drivable from the parent's suite and is why this file is here**: a delegated permission consented globally on an application's entry stops a person who has never been here being asked — with NOTHING written about them — while a second application asking for the same permission is still asked, and removing the override asks everybody again including the people it was covering |
 | `tests/sts_persistence_postgres.js` | **`persistence.mode=postgres`, and the only test anywhere that RESTARTS this service.** It starts its own database and its own mock, so it touches the shared one not at all. What survives — the realm registry with each realm's overrides, the directory in both realms, the appconfig overrides with their source — and, just as much, **what must not**: the signing key is regenerated, so the `kid` differs and a token minted before the restart is dead at introspection. Plus the two claims nothing else could check: that two processes on one database do NOT see each other's writes (`coordinates: false`, demonstrated rather than read back), and that a database that is not there leaves this service RUNNING out of its seeded directory. Skips, naming which, without docker or without a complete checkout to run |
 
 They are plain node scripts using `assert` and `bunyan`, and they take
@@ -1624,6 +1634,7 @@ argument in two places is an argument that will disagree with itself.
 | Federate with anybody it was not CONFIGURED to federate with — the one place this service refuses by default, and the one refusal that is not a mode | `federation/CLAUDE.md` |
 | Decrypt an assertion a federation partner encrypted, consume a federated SIGN-OUT, or re-check a federated person after the session exists | `federation/CLAUDE.md` |
 | Dial any URL that did not come off a federation relationship entry — `jwks_uri` on an application entry and WS-Federation's `wreqptr` are still never followed | `federation/CLAUDE.md`, `oauth-oidc/CLAUDE.md` |
+| ASK anybody's permission before it issues something — **this row is REVERSED since 2026-09-01 and is the one entry in this table that now reads the other way.** `/oauth2/consent` asks, and `oauth2.consentRequired` is ON by default, which no other policy here is. It is not a refusal and that is why: it is the screen every real authorization server draws on a first sign-in, and a client that has never met one has never run the code that survives it. It still checks nothing — the person has already been let in under any name they typed | `common/CLAUDE.md`, `oauth-oidc/CLAUDE.md` |
 | Check any end user's password, in any protocol — **with one exception since 2026-08-26**: a Kerberos ticket presented at `/authn/spnego` is verified against a real long-term key before a session is minted, because Kerberos cannot be permissive the way everything else here is. The KDC behind it still is | `authn/CLAUDE.md`, `kerberos/CLAUDE.md` |
 | Check any credential except a registered client's secret, in RFC 9700 mode only | `oauth-oidc/CLAUDE.md` |
 | Refuse any LDAP bind — any DN, any password, anonymous, on 389 and 636 alike | `ldap/CLAUDE.md` |

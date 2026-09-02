@@ -312,6 +312,20 @@ const delegation = require('../common/delegation');
 // HTML. Its header argues the model and says why the ordering rule (define
 // before grant) is enforced in applications.js rather than in either of them.
 const appPermissions = require('../common/app_permissions');
+// WHAT A PERSON AGREED AN APPLICATION MAY ASK FOR ON THEIR BEHALF — the THIRD
+// register in this family and the first one whose rows are about a person
+// rather than about two applications. `delegation.js` is what happened,
+// `app_permissions.js` is what an operator allowed, and this is what somebody
+// SAID YES TO. The three are drawn on two pages and never merged, for the
+// reason /admin/delegation gives about the first two: an act, an intent and a
+// consent look alike in a table and answer three different questions.
+//
+// A library like the ones around it: it registers no route, requires
+// helpers.js, config.js, applications.js and admin_stats.js, and holds the
+// MODEL while this file holds the HTML. Its header argues both halves — the
+// per-person record and the per-application override — and why the second is
+// an override rather than a record.
+const consent = require('../common/consent');
 // THE PICTURE OF THAT REGISTER, at /admin/delegation/map. A library like
 // `./admin_rbac.js` — it registers no route, requires only helpers.js and
 // @dagrejs/dagre, and knows nothing about this console: it is HANDED a resolver
@@ -1070,6 +1084,24 @@ const SECTIONS = [
                '<a href="/admin/delegation/map">The picture</a> draws the ' +
                'same acts as a graph, laid out on the SERVER because this ' +
                'console runs no script.' },
+      // Beside Delegation and not inside it, and the argument is the one both
+      // of that page's pictures rest on: every row there is about two
+      // APPLICATIONS, and every row here has a PERSON in it. Merging them would
+      // put "webapp1 may reach the API" and "alice let webapp1 read her
+      // profile" under one heading, which are the two halves of the question a
+      // reader arrives with and are answered by two different registers.
+      { path: '/admin/consent', label: 'Consent',
+        blurb: 'What a person agreed an application may ask for on their ' +
+               'behalf. The authorization endpoint asks the first time a given ' +
+               'username signs in to a given <code>client_id</code> for a given ' +
+               'scope, and issues nothing until they answer — ' +
+               '<code>oauth2.consentRequired</code>, which is ON by default and ' +
+               'is the one policy here that is. Answers are ordinary attributes ' +
+               'on ordinary entries: <code>oauthConsent</code> on the person, ' +
+               'one value per (person, application, scope). Beside them the ' +
+               'OVERRIDE — <code>oauthGlobalConsent</code> on an application\'s ' +
+               'entry, which skips the prompt for everybody and writes nothing ' +
+               'about anybody, so taking one away asks everybody again.' },
       // Beside the tokens page rather than under Protocols, and for the same
       // reason delegation is: signing somebody out is deliberately NOT a
       // protocol family. It reaches nine stores across six families and the
@@ -1524,7 +1556,14 @@ const LIST_PARAMS = {
   '/admin/tokens': ['family', 'kind', 'state', 'per', 'page'],
   '/admin/logout': ['family', 'per', 'page'],
   '/admin/realms': ['per', 'page'],
-  '/admin/federation': ['q', 'role', 'per', 'page']
+  '/admin/federation': ['q', 'role', 'per', 'page'],
+  // TWO lists on one page — the global overrides and the recorded answers —
+  // so each gets a page parameter of its own and they share one `per`, which
+  // is the arrangement /admin/delegation already has and pagingOf()'s
+  // `options.name` exists for. `q` searches the recorded half only; the
+  // overrides table is one row per (application, scope) and is short by
+  // construction, because somebody typed every one of them.
+  '/admin/consent': ['q', 'per', 'page', 'globalsPage', 'consentsPage']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -15826,6 +15865,388 @@ function rbacAction(body, context) {
                                'revoke.'] };
 }
 
+
+// ---------------------------------------------------------------------------
+// GET /admin/consent, POST /admin/consent — WHAT PEOPLE HAVE AGREED TO.
+//
+// THE THIRD REGISTER IN THIS CONSOLE THAT LOOKS LIKE THE OTHER TWO AND ANSWERS
+// A DIFFERENT QUESTION, and saying which is which is most of what this page is
+// for. `/admin/delegation` holds ACTS (what happened) beside INTENT (what an
+// operator allowed between two applications). This page holds neither: it holds
+// what a PERSON said yes to, and the override an operator wrote so that nobody
+// would be asked.
+//
+// It is a page of its own rather than a fourth heading on /admin/delegation for
+// two reasons and the first is enough. Every row there is about two
+// APPLICATIONS; every row here has a person in it, and the whole argument for
+// keeping the acts picture and the permissions picture on separate canvases is
+// that a drawing with a person in it and a drawing without one must not share a
+// frame. The second is arithmetic: that page already carries seven tables.
+//
+// TWO SECTIONS, AND THEY ARE NOT THE SAME KIND OF THING:
+//
+//   * GLOBAL CONSENT is CONFIGURATION. One row per (application, scope), held
+//     as `oauthGlobalConsent` on the application's own entry. Nobody is asked
+//     about a scope named there, and nothing is written about anybody — so
+//     REMOVING one asks everybody again, including the people who would have
+//     said yes.
+//   * RECORDED CONSENT is a RECORD. One row per (person, application, scope),
+//     held as `oauthConsent` on the person's own entry. Removing one asks that
+//     person again and nobody else.
+//
+// Both headings say so, because a reader who confused them would draw exactly
+// the wrong conclusion from an empty second table — which is what a service
+// with everything under global consent correctly looks like.
+//
+// FOUR ACTIONS, and two of them go through `applications.updateApplication()`
+// like every other attribute write in this console, so the ordering rules, the
+// audit row and the `ldapmodify` equivalence all come for free.
+// ---------------------------------------------------------------------------
+
+// BUILT FROM THE SWITCH BELOW RATHER THAN TYPED, for the reason
+// PERMISSION_ACTIONS gives at its own site: this repository's own
+// tests/vendored/admin_api.js READS the refusal sentence to check that every
+// console action has an /admin-api operation, so a list that is short by one is
+// a list that turns the parity check off for that action.
+const CONSENT_ACTIONS = ['grant-global-consent', 'revoke-global-consent',
+                         'revoke-consent', 'forget-user-consent'];
+
+function consentAction(body) {
+  log.debug("Entering consentAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const actor = String(body.actor || '');
+  // `client` for the application half and `username` for the person half, named
+  // apart for `permissionsAction()`'s reason: this is another feature where a
+  // body naming the wrong field still succeeds and writes the right-looking
+  // thing onto the wrong entry. `application` is accepted for `client` as a
+  // convenience for a caller editing one entry.
+  const client = String(body.client || body.application || '').trim();
+  const username = String(body.username || body.user || '').trim();
+  const scope = String(body.scope || '').trim();
+
+  if (action === 'grant-global-consent') {
+    const result = consent.grantGlobal(client, scope, actor);
+    log.debug("Leaving consentAction(). grant-global-consent " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'revoke-global-consent') {
+    const result = consent.revokeGlobal(client, scope, actor);
+    log.debug("Leaving consentAction(). revoke-global-consent " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'revoke-consent') {
+    const result = consent.revoke(username, client, scope, actor);
+    if (result.ok) {
+      // THE AUDIT ROW IS WRITTEN HERE AND NOT IN consent.js, and that is the
+      // same division `rbacAction()` has: the actor is the person whose session
+      // got them through the gate, and the module underneath has no request to
+      // read one from. `consent_screen.js` writes its own row for the same
+      // reason from the other side — there the actor is the person consenting.
+      auditLog.audit({ action: 'consent.revoke', actor: actor, target: client,
+                    protocol: 'OAuth 2.0 / OIDC', channel: 'http',
+                    detail: 'revoked "' + scope + '" for ' + username });
+    }
+    log.debug("Leaving consentAction(). revoke-consent " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  if (action === 'forget-user-consent') {
+    const result = consent.forget(username, actor);
+    if (result.ok) {
+      auditLog.audit({ action: 'consent.revoke', actor: actor, target: username,
+                    protocol: 'OAuth 2.0 / OIDC', channel: 'http',
+                    detail: 'forgot every consent (' + result.removed + ') for ' + username });
+    }
+    log.debug("Leaving consentAction(). forget-user-consent " +
+              (result.ok ? 'ok' : 'refused') + ".");
+    return result;
+  }
+
+  log.debug("Leaving consentAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The ' +
+                               numberWord(CONSENT_ACTIONS.length) + ' are: ' +
+                               CONSENT_ACTIONS.join(', ') + '.'] };
+}
+
+// The register, in one place so that the page, `?format=json` and
+// `GET /admin-api/consent` cannot come to disagree about what is in it — the
+// same property `permissionsView()` gives the delegated permission register.
+function consentView() {
+  log.debug("Entering consentView().");
+  const register = consent.register();
+  log.debug("Leaving consentView(). " + register.counts.globals + " override(s), " +
+            register.counts.consents + " recorded.");
+  return register;
+}
+
+function consentBack(listView) {
+  return '<input type="hidden" name="back" value="' +
+         esc(queryWith(listView || {}, {})) + '">';
+}
+
+// One row of the overrides table.
+function globalConsentRow(one, listView) {
+  const href = '/admin/applications' + queryWith(listView || {}, { application: one.client });
+  return '<tr>' +
+    '<td class="who"><a href="' + esc(href) + '">' + esc(one.clientName) + '</a>' +
+      (one.clientName === one.client ? '' : '<br><code>' + esc(one.client) + '</code>') +
+    '</td>' +
+    '<td><code>' + esc(one.scope) + '</code></td>' +
+    // WHAT THE SCOPE IS, in three states rather than two, which is the same
+    // honesty the grants table applies to a name it cannot resolve. Most scopes
+    // are not permissions and saying "not a permission" about `openid` would be
+    // reporting a fault where there is none.
+    '<td>' + (one.resource
+      ? 'the permission <code>' + esc(one.permission) + '</code> exposed by <code>' +
+        esc(one.resource) + '</code>' +
+        (one.granted ? '' : '<br><span class="state-none">and this client has NOT been ' +
+          'granted it &mdash; with <code>oauth2.delegatedPermissionsEnforced</code> on, ' +
+          'the request is refused anyway, consented or not</span>')
+      : '<span class="state-none">an ordinary scope &mdash; no application here defines ' +
+        'a permission by that name</span>') + '</td>' +
+    '<td class="act"><form method="post" action="/admin/consent">' + consentBack(listView) +
+      '<input type="hidden" name="action" value="revoke-global-consent">' +
+      '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
+      '<input type="hidden" name="scope" value="' + esc(one.scope) + '">' +
+      '<button type="submit" class="danger">Remove</button>' +
+    '</form></td></tr>';
+}
+
+// One row of the recorded table.
+function recordedConsentRow(one, listView) {
+  const userHref = '/admin/users' + queryWith(listView || {}, { user: one.username });
+  const appHref = '/admin/applications' + queryWith(listView || {}, { application: one.client });
+  if (one.unreadable) {
+    return '<tr><td class="who"><a href="' + esc(userHref) + '">' + esc(one.username) +
+      '</a></td><td colspan="2"><span class="state-none">This value is not in the shape ' +
+      'this service writes &mdash; something put it on the entry by hand: <code>' +
+      esc(one.raw) + '</code>. It is shown rather than dropped, because a value the page ' +
+      'silently ignored would be one somebody wrote on purpose and could not find out ' +
+      'was being ignored. It consents nothing.</span></td><td class="act"></td></tr>';
+  }
+  return '<tr>' +
+    '<td class="who"><a href="' + esc(userHref) + '">' + esc(one.username) + '</a></td>' +
+    '<td class="who"><a href="' + esc(appHref) + '">' + esc(one.client) + '</a></td>' +
+    '<td><code>' + esc(one.scope) + '</code>' +
+      (one.at ? '<br><span class="state-none">agreed at ' + esc(one.at) + '</span>' : '') +
+    '</td>' +
+    '<td class="act"><form method="post" action="/admin/consent">' + consentBack(listView) +
+      '<input type="hidden" name="action" value="revoke-consent">' +
+      '<input type="hidden" name="username" value="' + esc(one.username) + '">' +
+      '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
+      '<input type="hidden" name="scope" value="' + esc(one.scope) + '">' +
+      '<button type="submit" class="danger">Revoke</button>' +
+    '</form></td></tr>';
+}
+
+app.get('/admin/consent', function (req, res) {
+  log.debug("Entering the admin consent page.");
+  const register = consentView();
+  const listView = listViewOf('/admin/consent', req.query);
+  const navParams = pageParamsOf(req.query);
+
+  // THE SEARCH IS OVER THE RECORDED HALF ONLY. The overrides table is one row
+  // per thing somebody typed, so it is short by construction; the recorded
+  // table grows by one row for every scope every person agrees to, which on a
+  // service driven for an afternoon is hundreds. It matches the person, the
+  // application OR the scope, because a reader arrives at this page holding
+  // exactly one of those three and does not know which column it is in.
+  const q = String((Array.isArray(req.query.q) ? req.query.q[0] : req.query.q) || '')
+    .trim().toLowerCase();
+  const matched = q
+    ? register.users.filter(function (one) {
+        return String(one.username).toLowerCase().indexOf(q) >= 0 ||
+               String(one.client).toLowerCase().indexOf(q) >= 0 ||
+               String(one.scope).toLowerCase().indexOf(q) >= 0;
+      })
+    : register.users;
+
+  const globalPage = pagedRows(req.query, register.globals,
+    { name: 'globals', noun: 'overrides', defaultPer: DELEGATION_PER_PAGE });
+  const globalsNav = pageNavPair('/admin/consent', navParams, globalPage.paging);
+  const consentPage = pagedRows(req.query, matched,
+    { name: 'consents', noun: 'consents', defaultPer: DELEGATION_PER_PAGE });
+  const consentsNav = pageNavPair('/admin/consent', navParams, consentPage.paging);
+
+  const all = applications.list();
+  const applicationOptions = all.map(function (row) {
+    return '<option value="' + esc(row.identifier) + '">' +
+           esc(row.name && row.name !== row.identifier
+             ? row.name + ' — ' + row.identifier : row.identifier) + '</option>';
+  }).join('');
+
+  const inner =
+    '<h2>Consent</h2>' +
+    note('<strong>What a person agreed an application may ask for on their ' +
+    'behalf.</strong> With <code>oauth2.consentRequired</code> ON &mdash; it is ' +
+    'ON by default, and it is the one policy in this service that is &mdash; the ' +
+    'authorization endpoint draws a screen the first time a given username signs ' +
+    'in to a given <code>client_id</code> for a given scope, and issues nothing ' +
+    'until they answer. Allow writes one <code>' + esc(register.attribute) +
+    '</code> value per scope onto that person\'s own entry under ' +
+    '<code>ou=users</code>; Deny returns <code>access_denied</code> to the client ' +
+    'and records nothing at all. A delegated permission is recorded by its WHOLE ' +
+    'identifier &mdash; <code>https://example.com/write</code> and never the bare ' +
+    '<code>write</code> &mdash; because two resources may both expose a permission ' +
+    'of the same name and a consent to one must not cover the other.') +
+    (register.required ? '' : warn('<strong>Nothing is being asked.</strong> ' +
+      '<code>oauth2.consentRequired</code> is OFF, so the authorization endpoint ' +
+      'issues whatever is requested and this page is a record of what was agreed ' +
+      'while it was on. Turning it back on asks again for anything not listed ' +
+      'below &mdash; OFF does not mean everybody consented, it means nobody was ' +
+      'asked. The switch is on <a href="/admin/oauth2">OAuth 2.0 / OIDC</a>.')) +
+    (register.storable ? '' : warn('<strong>Nothing can be written down.</strong> ' +
+      'This process has no directory installed behind the consent register, so an ' +
+      'answer given at the screen is honoured for that one request and forgotten &mdash; ' +
+      'every sign-in draws the screen again. That is deliberate rather than a ' +
+      'fallback to consenting silently: an agreement that cannot be remembered is ' +
+      'one nobody gave.')) +
+
+    '<h3 id="globals">Global consent &mdash; nobody is asked about these</h3>' +
+    note('<strong>Configuration, not a record.</strong> One value per ' +
+    '(application, scope), held as <code>' + esc(register.globalAttribute) + '</code> ' +
+    'on the APPLICATION\'s own entry. Everybody who signs in to that application ' +
+    'skips the prompt for that scope, and <strong>nothing is written about ' +
+    'anybody</strong> &mdash; so removing a row here asks everybody again, ' +
+    'including the people who would have said yes. That is the whole difference ' +
+    'from the table below it, where removing a row asks one person.<br><br>' +
+    'It is keyed on the PAIR and not on the scope alone: consenting ' +
+    '<code>read</code> here consents it for this application, and an application ' +
+    'registered five minutes from now that spells the same word is still asked. ' +
+    'It is an ordinary attribute on an ordinary entry, so an ' +
+    '<code>ldapmodify</code> reaches it exactly as it reaches a redirect URI, and ' +
+    'it persists wherever the directory does.') +
+    globalsNav.head +
+    (globalPage.shown.length
+      ? '<table><thead><tr><th>Application</th><th>Scope</th><th>What it is</th>' +
+        '<th></th></tr></thead><tbody>' +
+        globalPage.shown.map(function (one) {
+          return globalConsentRow(one, listView);
+        }).join('') + '</tbody></table>'
+      : note('<strong>Nothing is globally consented.</strong> Every person is ' +
+        'asked about every scope the first time an application requests it, which ' +
+        'is what this service does out of the box.')) +
+    globalsNav.foot +
+
+    '<h4>Consent a scope for everybody</h4>' +
+    note('The scope is written exactly as a client puts it in a ' +
+    '<code>scope</code> parameter: <code>openid</code>, <code>profile</code>, or a ' +
+    'whole delegated permission identifier such as ' +
+    '<code>https://example.com/write</code>. It must be a legal OAuth scope token ' +
+    '(RFC 6749 section 3.3: any printable ASCII except space, double quote and ' +
+    'backslash), because a value with a space in it is two scopes and could never ' +
+    'match one. A scope no application here defines a permission for is accepted ' +
+    'rather than refused &mdash; most scopes are not permissions.') +
+    '<form method="post" action="/admin/consent">' + consentBack(listView) +
+      '<div class="formrow">' +
+      '<input type="hidden" name="action" value="grant-global-consent">' +
+      '<label for="gc-client">Application</label>' +
+      '<select id="gc-client" name="client">' + applicationOptions + '</select>' +
+      '<label for="gc-scope">Scope</label>' +
+      '<input type="text" id="gc-scope" name="scope" size="30" placeholder="openid">' +
+      '<button type="submit">Consent it for everybody</button>' +
+    '</div></form>' +
+
+    '<h3 id="recorded">Recorded consent &mdash; what people actually answered</h3>' +
+    note('<strong>One row per (person, application, scope), and that IS the ' +
+    'answer.</strong> A person who agreed to five scopes for one application is ' +
+    'five rows rather than one labelled <em>5</em>, because a client that later ' +
+    'asks for a sixth is asked about the sixth alone &mdash; which is what the ' +
+    'screen shows and what these rows have to be able to express. The timestamp ' +
+    'is when they pressed Allow.<br><br>Revoking a row asks that one person again ' +
+    'the next time that one application requests that one scope. It does NOT ' +
+    'touch anything already issued: an access token minted before the revoke is ' +
+    'still valid, exactly as taking a delegated permission away does not re-judge ' +
+    'a grant already made. <a href="/admin/tokens">Tokens</a> is where something ' +
+    'already issued is revoked.') +
+    sectionSearchForm({
+      path: '/admin/consent', query: req.query, param: 'q',
+      // The list this search narrows, so that a new search starts at page 1
+      // rather than at whatever page the reader happened to be on when the
+      // list was longer — which reads as "nothing matched".
+      pageParam: 'consentsPage', label: 'Search',
+      placeholder: 'a person, an application or a scope'
+    }) +
+    consentsNav.head +
+    (consentPage.shown.length
+      ? '<table><thead><tr><th>Person</th><th>Application</th><th>Scope</th>' +
+        '<th></th></tr></thead><tbody>' +
+        consentPage.shown.map(function (one) {
+          return recordedConsentRow(one, listView);
+        }).join('') + '</tbody></table>'
+      : note(q
+          ? '<strong>Nothing matches &ldquo;' + esc(q) + '&rdquo;.</strong> The ' +
+            'search is over the person, the application and the scope.'
+          : '<strong>Nobody has consented anything yet.</strong> That is what a ' +
+            'service nobody has signed in to looks like &mdash; and also what one ' +
+            'looks like where every scope anybody has asked for is under global ' +
+            'consent above, because an override writes nothing down.')) +
+    consentsNav.foot +
+
+    '<h4>Forget everything one person agreed to</h4>' +
+    note('Every recorded consent for one person, in one act, so that they are ' +
+    'asked again by every application. It is a separate control rather than a ' +
+    'loop over the Revoke buttons above because being asked again is the one ' +
+    'thing somebody wants after testing this screen, and doing it a row at a time ' +
+    'for a person with thirty consents is a chore rather than a control. It ' +
+    'reaches nothing under global consent, because there is nothing on their ' +
+    'entry to reach.') +
+    '<form method="post" action="/admin/consent">' + consentBack(listView) +
+      '<div class="formrow">' +
+      '<input type="hidden" name="action" value="forget-user-consent">' +
+      '<label for="fc-username">Person</label>' +
+      '<input type="text" id="fc-username" name="username" size="24" ' +
+        'placeholder="alice">' +
+      '<button type="submit" class="danger">Forget them all</button>' +
+    '</div></form>' +
+
+    note('<strong>Both halves are ordinary attributes on ordinary directory ' +
+    'entries.</strong> <code>' + esc(register.globalAttribute) + '</code> on an ' +
+    'application under <code>ou=applications</code>, <code>' +
+    esc(register.attribute) + '</code> on a person under <code>ou=users</code> as ' +
+    '<code>&lt;when&gt; &lt;scope&gt; &lt;client_id&gt;</code> &mdash; the client_id ' +
+    'last, because it is the one field with no rule about what it may contain and ' +
+    'therefore has to take the remainder of the value. ' +
+    '<code>GET /admin/ldap/directory</code> shows them as they are, and they ' +
+    'persist wherever the directory does.');
+
+  const json = Object.assign({}, register, {
+    matched: matched.length,
+    globalsPaging: pagingJson(globalPage.paging),
+    consentsPaging: pagingJson(consentPage.paging),
+    query: { q: q }
+  });
+  respond(req, res, json, 'Consent', '/admin/consent', inner);
+  log.debug("Leaving the admin consent page.");
+});
+
+app.post('/admin/consent', function (req, res) {
+  log.debug("Entering the admin consent action endpoint.");
+  const body = parseBody(req);
+  // The actor is the person whose session got them through the gate above, read
+  // here rather than inside consentAction() for rbacAction()'s reason: the
+  // management API calls the same function with an actor of its own, and a
+  // function that reached for a cookie would only work from one of them.
+  const state = gateStateFor(req);
+  const result = consentAction(Object.assign({}, body,
+    { actor: (state && state.username) || '' }));
+  const back = '/admin/consent' +
+    queryWith(listViewFromBack('/admin/consent', body.back), {}) +
+    // WHICH HALF OF THE PAGE THE READER WAS ON. `from` is a NAME and never a
+    // URL, for configReturnTo()'s reason: a redirect target taken out of a
+    // request body is an open redirect and one carrying a newline is a header
+    // injection. The worst a hand-written value can reach is the other
+    // heading on this same page.
+    (String(body.from || '') === 'recorded' ? '#recorded' : '#globals');
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin consent action endpoint.");
+});
+
 app.get('/admin/rbac', function (req, res) {
   log.debug("Entering the admin roles page.");
   const view = rbacView(req);
@@ -23926,6 +24347,12 @@ module.exports = {
   // console's switch cannot come to name different things. Built from the same
   // constant the refusal sentence is built from.
   permissionActionNames: function () { return PERMISSION_ACTIONS.slice(); },
+  // The consent register, its four actions and their names — the same three
+  // exports the delegated permission register has, for rule 7's reason: the
+  // management API mirrors the page and reads the action list to check it.
+  consentView: consentView,
+  consentAction: consentAction,
+  consentActionNames: function () { return CONSENT_ACTIONS.slice(); },
   usersView: usersView,
   groupsView: groupsView,
   applicationsView: applicationsView,

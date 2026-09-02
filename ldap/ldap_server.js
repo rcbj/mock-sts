@@ -237,6 +237,16 @@ const groupClaims = require('../common/group_claims');
 // no route (rule 3), so nothing about the require order changes by naming it here;
 // the slot below is what carries this module's functions the other way.
 const adminRbac = require('../admin-ui/admin_rbac');
+// WHAT A PERSON AGREED AN APPLICATION MAY ASK FOR ON THEIR BEHALF. Required
+// outright for `groupClaims`'s reason and with the same traffic in the other
+// direction: `common/consent.js` registers no route (rule 3) and requires
+// helpers.js, config.js, applications.js and admin_stats.js — none of which
+// requires this file — so naming it here changes nothing about the require
+// order. The four functions this module contributes go the other way through
+// its setDirectory() slot further down, because THAT module is read from
+// `oauth-oidc/consent_screen.js` and from the console, both of which server.js
+// requires long before this directory's routes should exist.
+const consent = require('../common/consent');
 
 // The port. 389 is the assigned one and this process is root in the container,
 // so it binds it directly; a host run is not root, which is why the variable
@@ -876,7 +886,23 @@ const OWN_NAMES = [
   // service made up, which is exactly the question a federated directory entry
   // raises. Nothing reads it; it is there to be read.
   'federationRelationship', 'federationIssuer', 'federationSubject',
-  'federationLastSeen', 'federationAttribute'
+  'federationLastSeen', 'federationAttribute',
+
+  // WHAT THIS PERSON AGREED AN APPLICATION MAY ASK FOR ON THEIR BEHALF, one
+  // value per (application, scope) — `20260901143000Z openid webapp1`. Invented
+  // for the same reason as everything above it: OAuth 2.0 postdates the LDAP
+  // schema documents and registered no attribute type for consent, and the
+  // nearest standard thing is nothing at all. The grammar is
+  // `common/consent.js`'s and is argued there, including why the client_id is
+  // LAST (it is the one field with no rule about what it may contain, so it
+  // takes the remainder of the value).
+  //
+  // It is NOT a credential and it grants nothing: it is a record of an answer,
+  // and the authorization endpoint reads it only to decide whether to draw the
+  // consent screen. The OTHER half of the feature is `oauthGlobalConsent`,
+  // which is on an APPLICATION's entry and is in the applications schema rather
+  // than in this list.
+  'oauthConsent'
 ];
 
 // The table itself, built from the two lists. `learnName()` is the ONE way in,
@@ -4241,6 +4267,147 @@ if (typeof groupClaims.setDirectory === 'function') {
   log.warn('ldap: group_claims.js offers no setDirectory(), so no token or ' +
            'assertion will carry a groups claim. The directory itself is ' +
            'unaffected.');
+}
+
+// ---------------------------------------------------------------------------
+// CONSENT: THE FOUR FUNCTIONS THAT PUT AN ANSWER ON A PERSON'S ENTRY, AND READ
+// IT BACK.
+//
+// `common/consent.js` owns the MODEL — the value's grammar, what "outstanding"
+// means, the global override, the register both halves are read from. This
+// module owns the STORE, which is `oauthConsent` on an entry under ou=users,
+// and that division is the one `group_claims.js` and `applications.js` already
+// have: neither file knows the other's half.
+//
+// **NOTHING HERE CREATES AN ENTRY.** A consent is written for somebody who has
+// just authenticated, so their entry exists — `observeIdentity()` made it on
+// the way past. Where it does not (`ldap.autoCreateUsers` off, or an entry
+// deleted between the sign-in and the button), the write is REFUSED and says
+// why, and consent.js turns that into "they will be asked again" rather than
+// into a failed authorization. Creating a person here in order to file their
+// consent would put somebody in the directory that `autoCreateUsers` had just
+// been set to keep out.
+//
+// **THE IDENTITY IS ALREADY NORMALISED WHEN IT ARRIVES.** consent.js runs it
+// through `admin_stats.js`'s identityKeyOf() first, which is the same
+// normalisation `autoCreateUser()` used to place the entry — so `alice`,
+// `alice@EXAMPLE.COM` and `urn:sts-mock:user:alice` reach `locateEntry()` as
+// one key and find one entry. A second normalisation here would be a second
+// opinion about who somebody is.
+// ---------------------------------------------------------------------------
+
+// Everything one person's entry holds. `found: false` for an identity with no
+// entry, which is not an error — it is what a person who has never
+// authenticated in this realm looks like.
+function consentValuesOf(key) {
+  log.debug('Entering consentValuesOf(). key=' + key);
+  const located = locateEntry(String(key || ''));
+  const stored = located.stored;
+  if (!stored) {
+    log.debug('Leaving consentValuesOf(). There is no entry at ' + located.dn + '.');
+    return { dn: located.dn, found: false, values: [] };
+  }
+  const values = (stored.attributes.oauthconsent || []).slice(0);
+  log.debug('Leaving consentValuesOf(). ' + values.length + ' value(s) on ' + stored.dn + '.');
+  return { dn: stored.dn, found: true, values: values };
+}
+
+// ADD values, through addValues() so that a value already there is not written
+// twice — two identical consents would be two rows on /admin/consent for one
+// answer, and revoking would remove one of them.
+function addConsentValues(key, values) {
+  log.debug('Entering addConsentValues(). key=' + key);
+  const located = locateEntry(String(key || ''));
+  const stored = located.stored;
+  if (!stored) {
+    log.warn('ldap: "' + key + '" has no entry in this realm, so the consent they ' +
+             'gave was not recorded. They will be asked again. This is what ' +
+             'ldap.autoCreateUsers being off looks like from the consent screen.');
+    log.debug('Leaving addConsentValues(). Nothing to write to.');
+    return { ok: false, dn: located.dn, reason: 'noEntry' };
+  }
+  const changed = addValues(stored, 'oauthConsent', values);
+  if (changed) {
+    stored.attributes.modifytimestamp = [generalizedTime()];
+    touchDirectory();
+  }
+  log.debug('Leaving addConsentValues(). ' + (changed ? 'Written.' : 'Already there.'));
+  return { ok: true, dn: stored.dn, changed: changed };
+}
+
+// REMOVE values. An exact match on the whole value, because that is what the
+// register handed out: the timestamp is part of it, so two consents to the same
+// scope agreed at different times are two values and removing one leaves the
+// other — which is the honest reading of an attribute somebody may have edited
+// by hand.
+function removeConsentValues(key, values) {
+  log.debug('Entering removeConsentValues(). key=' + key);
+  const located = locateEntry(String(key || ''));
+  const stored = located.stored;
+  if (!stored) {
+    log.debug('Leaving removeConsentValues(). There is no entry.');
+    return { ok: false, dn: located.dn, reason: 'noEntry' };
+  }
+  const wanted = valuesOf(values);
+  const have = stored.attributes.oauthconsent || [];
+  const left = have.filter(function (one) {
+    return wanted.indexOf(one) < 0;
+  });
+  if (left.length === have.length) {
+    log.debug('Leaving removeConsentValues(). Nothing matched.');
+    return { ok: false, dn: stored.dn, reason: 'notHeld' };
+  }
+  if (left.length) {
+    stored.attributes.oauthconsent = left;
+  } else {
+    // THE ATTRIBUTE GOES RATHER THAN BECOMING EMPTY. LDAP has no empty
+    // attribute — RFC 4511's modify with no values is a delete — so leaving
+    // `oauthconsent: []` behind would put a value on the wire that no client
+    // can read as anything and would show on /admin/ldap/directory as an
+    // attribute with nothing in it.
+    delete stored.attributes.oauthconsent;
+  }
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  touchDirectory();
+  log.debug('Leaving removeConsentValues(). ' + (have.length - left.length) + ' removed.');
+  return { ok: true, dn: stored.dn, removed: have.length - left.length };
+}
+
+// EVERY person in THIS REALM who has consented anything. It walks the realm's
+// entries rather than reading a list, for `applications.js`'s reason about the
+// registry: a Map of who has consented what would be a second store that looked
+// right on its own and silently disagreed with an `ldapmodify`.
+function listConsentValues() {
+  log.debug('Entering listConsentValues().');
+  const rows = [];
+  eachEntryInRealm(function (entry) {
+    const values = entry.attributes.oauthconsent || [];
+    if (!values.length) {
+      return;
+    }
+    rows.push({ dn: entry.dn, username: usernameOfEntry(entry), values: values.slice(0) });
+  });
+  log.debug('Leaving listConsentValues(). ' + rows.length + ' entry/entries.');
+  return rows;
+}
+
+// The SEVENTH slot, and the second one that hands over a WRITER as well as
+// readers. Guarded like the six above: an older `common/consent.js` without the
+// slot costs a warning rather than a service that will not start — and the
+// warning says what is lost, which is that the screen would draw for ever
+// because nothing it recorded could be read back.
+if (typeof consent.setDirectory === 'function') {
+  consent.setDirectory({
+    consentsOf: consentValuesOf,
+    addConsent: addConsentValues,
+    removeConsent: removeConsentValues,
+    listConsents: listConsentValues
+  });
+} else {
+  log.warn('ldap: common/consent.js offers no setDirectory(), so nothing a ' +
+           'person agrees to at /oauth2/consent can be written down or read ' +
+           'back. With oauth2.consentRequired on, the screen is drawn on every ' +
+           'authorization request. The directory itself is unaffected.');
 }
 
 // The SIXTH, and it is the first one that hands over a WRITER as well as
