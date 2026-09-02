@@ -499,7 +499,20 @@ function graphOf(trail) {
         // the box it points at: an audience the applications registry knows is
         // drawn as that application. See audienceParties().
         audience: one.audience,
-        audienceRegistered: one.registered
+        audienceRegistered: one.registered,
+        // AND WHICH OF THAT RESOURCE'S DELEGATED PERMISSIONS THE TOKEN CARRIES
+        // — `user_graph.js`'s `permissionsAddressedTo()`, for the reason its
+        // export comment gives: this is the same `reaches` line that file draws
+        // on /admin/delegation/user, and one relationship must not be labelled
+        // two ways on two pages of one console.
+        //
+        // Seeded whole rather than folded, because this line is keyed on the
+        // CREDENTIAL: there is exactly one token behind it, so there is nothing
+        // to union. An EMPTY array is the answer where the token asked for none
+        // of them, and it is drawn as `default permissions` rather than as
+        // nothing — see delegation_map.js.
+        permissions: userGraph.permissionsAddressedTo(credential.scope, one.audience),
+        scopes: String(credential.scope || '').split(/\s+/).filter(Boolean)
       });
       reachEdge.credentials++;
       reachEdge.lastAt = Math.max(reachEdge.lastAt, credential.issuedAt || 0);

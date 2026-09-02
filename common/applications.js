@@ -3355,6 +3355,10 @@ function get(identifier) {
 //     built the same way, for the same reason and with the same three
 //     disclaimers: it is a LOOKUP and not a permission, it is not case-folded,
 //     and it walks the container.
+//   * `forPermissionBase(base)` — which application exposes its API under this
+//     base URI, the FIFTH lookup. `forPermission()` asked one level up, for a
+//     reader holding an ISSUED token: the base is what such a token carries as
+//     its `aud`, and none of the four above can turn that back into an entry.
 //   * `holdsPermission(clientId, id)` — whether a client has been GRANTED it.
 //     Separate from the above because the two answer different questions and
 //     collapsing them is how "this permission exists" comes to be read as
@@ -3536,6 +3540,69 @@ function forPermission(id) {
   }
   log.debug("Leaving forPermission(). " + answer.identifier + " defines " + answer.name + ".");
   return answer;
+}
+
+// WHICH APPLICATION EXPOSES ITS API UNDER THIS BASE URI, or null.
+//
+// The FIFTH lookup, and it is `forPermission()` above asked one level up: that
+// one takes a whole identifier and answers which application defines it, and
+// this one takes the BASE ALONE and answers which application the base belongs
+// to. It exists because of what `oauth2.js`'s `audienceScopes()` writes onto a
+// token — the base URI becomes the `aud` and the bare names become the `scope`
+// — so a reader holding an ISSUED token holds the base and nothing else, and
+// the four lookups above cannot turn it back into an application:
+// `forAudience()` reads `oauthAudience`, which is a DIFFERENT attribute that a
+// resource is under no obligation to have set; `forClientId()` reads a bare
+// name; and `forPermission()` needs a name on the end that the reader is trying
+// to work out.
+//
+// `common/user_graph.js` is the caller and its `permissionsAddressedTo()` says
+// what it does with the answer. Doing it there instead would have meant a
+// second walk of the container per scope value — one `forPermission()` call per
+// name — where this is one walk per audience and then a read of the entry the
+// caller already has.
+//
+// IT NORMALISES BOTH SIDES AND MATCHES EXACTLY OTHERWISE. `permissionBaseOf()`
+// is what added the trailing separator when the identifier was composed, so a
+// base stored by an `ldapmodify` as `https://example.com` and an `aud` carrying
+// `https://example.com/` are the same API and must land on the same entry —
+// that is the one difference this lookup has from `forAudience()`, and it is
+// not a softening of the rule but the same rule applied to a value THIS module
+// composed. It is still not case-folded, for `forAudience()`'s reason.
+//
+// AN ENTRY WITH NO BASE IS NEVER MATCHED, because `permissionBaseOf('')` is the
+// empty string and an empty base would otherwise match every entry that has
+// none. That is the state `permissionsOf()`'s `id` comment describes.
+function forPermissionBase(base) {
+  log.debug("Entering forPermissionBase(). base=" + base);
+  const wanted = permissionBaseOf(base);
+  if (!wanted) {
+    log.debug("Leaving forPermissionBase(). Nothing was asked for.");
+    return null;
+  }
+  const found = list().filter(function (row) {
+    return permissionBaseOf((row.fields || {}).oauthPermissionBaseUri) === wanted;
+  });
+  if (!found.length) {
+    log.debug("Leaving forPermissionBase(). No application exposes it.");
+    return null;
+  }
+  if (found.length > 1) {
+    // Two entries exposing one base is a configuration mistake rather than a
+    // state to resolve here — the same sentence forAudience() and forClientId()
+    // say about their own attributes, with this consequence: a permission
+    // identifier is base + name, so two entries under one base means one string
+    // naming two permissions and `forPermission()` answering with whichever it
+    // walked into first.
+    log.warn('applications: ' + found.length + ' applications expose their ' +
+             'permissions under the base URI "' + wanted + '" (' +
+             found.map(function (row) { return row.identifier; }).join(', ') +
+             '). A base URI names one API; a permission identifier is that base ' +
+             'followed by a name, so two entries under one base are two ' +
+             'permissions that cannot be told apart. Remove it from the others.');
+  }
+  log.debug("Leaving forPermissionBase(). " + found[0].identifier + ".");
+  return found[0];
 }
 
 // WHETHER A CLIENT HAS BEEN GRANTED A PERMISSION.
@@ -4082,6 +4149,10 @@ module.exports = {
   // The fourth lookup, exported for oauth2.js's audienceScopes(). Its header
   // says why the match is exact rather than a prefix test on the base.
   forPermission: forPermission,
+  // The FIFTH, exported for user_graph.js's `permissionsAddressedTo()`. Its
+  // header says why the four above it cannot answer the question it answers —
+  // an ISSUED token carries the base URI and nothing else.
+  forPermissionBase: forPermissionBase,
   // And the question the lookup deliberately does not answer: whether the
   // client asking has been GRANTED what it is naming.
   holdsPermission: holdsPermission,

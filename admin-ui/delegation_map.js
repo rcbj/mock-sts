@@ -126,6 +126,63 @@ function markerId(colour) {
 }
 
 // ---------------------------------------------------------------------------
+// AND EVERY LINE NEEDS A TAIL AS WELL AS A HEAD, WHICH IT DID NOT HAVE UNTIL
+// 2026-09-02.
+//
+// A line here carried its direction in ONE place: the arrowhead, at the far
+// end, against the box it points at. That is enough to read a picture of three
+// boxes and it is not enough to read one of five — because the question a
+// reader actually asks is asked from a BOX and not from a line. Standing at
+// `abcapp1` on `/admin/delegation/allowed`, four lines touch it, and every one
+// of them meets its perimeter as the same bare stroke: the two it grants leave
+// from the same edge, at the same angle, in the same colour, as the two granted
+// to it. The only thing that told them apart was several hundred pixels away at
+// the other end of a curve that crosses three other curves on the way. So the
+// answer to "is this one mine, or somebody's on me" was to trace each line
+// across the whole picture, which is exactly the work a drawing exists to save.
+//
+// So the SOURCE end gets a mark of its own: a small filled disc of the line's
+// own colour, sitting on the box the line leaves. It is the ball-and-arrow
+// convention, and what recommends it over the alternatives is that it costs no
+// new vocabulary — nobody has to be told that the round end is the start and
+// the pointed end is the finish, and the picture reads the same at a glance and
+// under a hover. The ones weighed against it:
+//
+//   * A SECOND arrowhead partway along each line. More legible still, and it
+//     cannot be a marker: `marker-mid` fires at the path's own vertices, which
+//     here are wherever the smoothing put them, so it would have meant a second
+//     `<path>` per edge positioned by hand — forty more elements to make one
+//     bit of information twice.
+//   * A gradient from pale at the tail to full at the head. Subtler than a
+//     disc, needs a `<linearGradient>` per edge because the geometry differs,
+//     and reads as a colour difference in a picture where colour already MEANS
+//     something (see `edgeLook()` — amber is impersonation, red is a refusal).
+//   * Starting the line short of the box it leaves. Rejected outright: the
+//     fanning note below turns on both ends being clipped to their own box
+//     exactly, and a gap at the tail would read as a line to a party that is
+//     not quite that one.
+//
+// The disc is DELIBERATELY SMALLER THAN THE ARROWHEAD, and points nowhere. Two
+// marks of equal weight at the two ends of a line is a drawing of a
+// relationship with no direction at all, which is the thing being fixed rather
+// than a different way of saying it. `markerUnits` is left at its default of
+// `strokeWidth` for both, as it always was, so a heavier line gets a
+// proportionally heavier tail and the pair keep their ratio.
+//
+// `refX` is 0 rather than the centre, so the disc sits FORWARD of the path's
+// first point along the line rather than straddling it. Edges are painted
+// before nodes (see `renderUnguarded()`), so a disc centred on the perimeter
+// would have its inner half covered by the box's own fill and would be drawn as
+// a half moon.
+// ---------------------------------------------------------------------------
+const TAIL_SIZE = 5;
+const TAIL_R = 4;
+
+function tailId(colour) {
+  return 'dm-tail-' + colour.replace('#', '');
+}
+
+// ---------------------------------------------------------------------------
 // TEXT, WITHOUT A FONT.
 //
 // Nothing on the server can measure a string in a font the browser has not
@@ -315,6 +372,45 @@ const STS_BAND_SEP = RANK_SEP;
 const ARC_LANE_H = 34;
 const ARC_GUTTER = 14;
 const ARC_PAD = 12;
+
+// ---------------------------------------------------------------------------
+// WHERE AN ARC MEETS THE BOX IT LEAVES OR ENTERS — A BERTH, AND UNTIL
+// 2026-09-02 EVERY ARC AT ONE BOX SHARED ONE OF TWO.
+//
+// The rule was: a third of the box's width in from the centre, towards the far
+// box. It reads as a spread and it is not one — it is a two-way SORT, so every
+// arc whose far end is to the right leaves at one point and every arc whose far
+// end is to the left leaves at another. On the ring at
+// `/admin/delegation/allowed` that put THREE lines on one pixel of `abcapp1`'s
+// bottom edge: the one it grants `abcapp2` leaving, and the two `abcapp5`
+// grants it arriving. One tail disc and two arrowheads, drawn on top of each
+// other, on a box whose whole question is which of these is mine.
+//
+// It is the fault the ask names — an outbound line starting exactly where the
+// inbound ones come in — and no marking of the ENDS can fix it, because the
+// ends were in the same place. So each arc endpoint at a box gets a BERTH of
+// its own along that box's bottom edge.
+//
+// WHICH BERTH AN ARC GETS is decided so that no two arcs off one box cross each
+// other on the way out; the rule and the geometry it comes from are with the
+// sort itself, in `renderUnguarded()`, because it is about the arcs and this is
+// about the edge they share. What is worth saying HERE is what was NOT done:
+// the berths are not sorted by DIRECTION — every departure on one half of the
+// edge and every arrival on the other. That would say which is which by
+// position, which is what the tail disc already says, and it would buy the
+// second saying of it by making every arc whose far end is the other way cross
+// all of its neighbours.
+//
+// `BERTH` is the space one wants: wide enough that a tail disc and an arrowhead
+// side by side are two marks rather than a blot. It is what a berth gets when
+// the box is wide enough to give it; where there are more arcs than the box has
+// room for, they share what there is, because a berth outside the box would be
+// a line starting in mid-air beside a box rather than from under it.
+// `BERTH_PAD` keeps the outermost off the rounded corner, where a line would
+// appear to leave the side rather than the bottom.
+// ---------------------------------------------------------------------------
+const BERTH = 16;
+const BERTH_PAD = 9;
 
 // The gap between two boxes on the row: `GAP_PAD` of air on each side of the
 // label that lies in it, and `GAP_MIN` where no line lies in it at all. The
@@ -772,6 +868,26 @@ function edgeLabelLines(edge, labelOf) {
   } else {
     lines.push(edge.subject
       ? 'reaches as ' + trim(labelOf(edge.subject), 20) : 'reaches');
+    // AND WHAT IT MAY DO THERE, on every line that came out of a CREDENTIAL.
+    //
+    // `user_graph.js` puts a `permissions` array on a `reaches` line it built
+    // from a token and the identical relation out of `delegation.js` carries
+    // none, which is what this test is: an ACT has no scope claim behind it, so
+    // a line about one has nothing to say here and says nothing rather than
+    // saying `default permissions` about a Kerberos ticket.
+    //
+    // **AN EMPTY ARRAY IS AN ANSWER AND IS DRAWN AS ONE.** The token named this
+    // resource — by the client_id spelling, which takes the value off the scope
+    // claim — and asked for none of its permissions, and `default permissions`
+    // is this service's word for that. Leaving the line blank there would make
+    // the commonest case indistinguishable from a line the renderer has not
+    // been taught about, and it is exactly the distinction the configured
+    // picture makes with `never asked for`.
+    if (edge.permissions) {
+      lines.push(edge.permissions.length
+        ? trim(edge.permissions.join(', '), 26)
+        : 'default permissions');
+    }
     if (edge.typeLabel) {
       lines.push(shortType(edge.typeLabel));
     }
@@ -806,12 +922,22 @@ function edgeLabelLines(edge, labelOf) {
     lines.push(counts.join(', '));
   }
   log.debug("Leaving edgeLabelLines().");
-  // THREE, except on the one line that carries a list — `signed in` plus its
+  // THREE, with TWO exceptions and both of them earned rather than granted by
+  // analogy. The first is the line that carries a LIST — `signed in` plus its
   // entries, which is what the fold in `user_graph.js` bought: those entries
   // used to be a line each, with three lines of label apiece and every one of
   // them drawn on top of the last.
-  return lines.slice(0, edge.relation === 'signed-in'
-    ? SIGNED_IN_ENTRIES + 1 : 3);
+  //
+  // The second is a `reaches` line carrying PERMISSIONS, and it is a fourth
+  // line for the same reason the third one is worth having: the permission is
+  // the answer to what this relationship IS, and the three that were already
+  // there are who it is as, what mechanism issued it, and how many credentials
+  // — none of which the permission can be inferred from. Dropping one of those
+  // to make room was the alternative and each of them is somebody's reason for
+  // reading the picture. Four lines is 44px, which is what the sign-in line
+  // already occupies, so the bands below measure it and nothing new is needed.
+  return lines.slice(0, edge.relation === 'signed-in' ? SIGNED_IN_ENTRIES + 1
+    : edge.permissions ? 4 : 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,6 +1572,91 @@ function renderUnguarded(graph, options) {
     placed[node.id] = { x: at.x + shiftX, y: at.y + bandH };
   });
   // ---------------------------------------------------------------------------
+  // THE BERTHS, worked out for every box before any arc is drawn — because a
+  // berth is a share of ONE box's bottom edge and cannot be decided from one
+  // edge at a time. See the note on `BERTH` for what a berth is and why there
+  // are any; the ORDER they go in is argued with the sort just below.
+  // ---------------------------------------------------------------------------
+  const berths = {};
+  partyEdges.forEach(function (edge) {
+    const how = route[edge.id];
+    if (!how || how.straight || !placed[edge.from] || !placed[edge.to] ||
+        edge.from === edge.to) {
+      return;
+    }
+    [['from', edge.to], ['to', edge.from]].forEach(function (pair) {
+      const at = pair[0] === 'from' ? edge.from : edge.to;
+      if (!berths[at]) {
+        berths[at] = [];
+      }
+      berths[at].push({ id: edge.id, end: pair[0], lane: how.lane || 0,
+                        // Which way this arc leaves. `placed[at].x` is the box's
+                        // own centre, so this is the side of it the far end is
+                        // on and nothing subtler.
+                        rightward: placed[pair[1]].x >= placed[at].x });
+    });
+  });
+  const berthAt = {};
+  Object.keys(berths).forEach(function (id) {
+    const held = berths[id];
+    // ---------------------------------------------------------------------
+    // THE ORDER, AND IT IS THE ONE THAT MAKES NO TWO ARCS OFF ONE BOX CROSS.
+    //
+    // An arc drops STRAIGHT DOWN from its berth — the first control point
+    // shares the berth's x — runs across at its lane's depth, and rises
+    // straight into the far box's berth. So two arcs leaving one box the same
+    // way cross exactly when the SHALLOWER of them is the outer one: it turns
+    // across at a depth the deeper one is still descending through.
+    //
+    // Which gives the whole rule in two lines. Arcs going LEFT take the left of
+    // the edge and arcs going RIGHT take the right, because two arcs leaving in
+    // opposite directions from berths on the wrong sides of each other cross
+    // immediately. And within each side the SHALLOWEST is the outermost — so
+    // going left, lanes ascend from the left; going right, they descend into
+    // it. The far box's x is not consulted at all: the lane is what a crossing
+    // is actually about, and it usually agrees with distance and does not have
+    // to.
+    //
+    // No two arcs at one box can share a lane — a lane holds arcs that do not
+    // overlap horizontally, and two arcs off one box always overlap there — so
+    // this is a total order and the id is only a tie-break that should never be
+    // reached. It is here so that a picture drawn twice from one graph is the
+    // same picture, which is what lets a reader compare it with the one they
+    // were looking at a moment ago.
+    // ---------------------------------------------------------------------
+    held.sort(function (one, other) {
+      if (one.rightward !== other.rightward) {
+        return one.rightward ? 1 : -1;
+      }
+      const byLane = one.rightward ? other.lane - one.lane : one.lane - other.lane;
+      return byLane || (one.id < other.id ? -1 : one.id > other.id ? 1 : 0);
+    });
+    const size = drawn[id].size;
+    const usable = Math.max(0, size.width - BERTH_PAD * 2);
+    const step = held.length > 1
+      ? Math.min(BERTH, usable / (held.length - 1)) : 0;
+    const span = step * (held.length - 1);
+    held.forEach(function (one, index) {
+      berthAt[one.id + '|' + one.end] = placed[id].x - span / 2 + step * index;
+    });
+  });
+  // A berth if one was assigned, and the old lean if not — which is every arc
+  // this loop is asked for that the block above did not see, and is not a state
+  // that should arise. It is a FALLBACK rather than an assertion for the reason
+  // `render()` is wrapped: a drawing on a console page must not be able to take
+  // the page down, and a line a third of the way off centre is a worse picture
+  // and still a picture.
+  const berthX = function (id, edgeId, end, at, size, towards) {
+    const held = berthAt[edgeId + '|' + end];
+    if (held !== undefined) {
+      return held;
+    }
+    const dx = towards.x - at.x;
+    const step = Math.min(size.width / 3, Math.abs(dx) / 3);
+    return at.x + (dx < 0 ? -step : step);
+  };
+
+  // ---------------------------------------------------------------------------
   // THE PARTY LINES, drawn from the decision made above rather than from what
   // dagre routed. Its routes described the staircase and every one of them would
   // now leave its box sideways into empty space.
@@ -1483,17 +1694,13 @@ function renderUnguarded(graph, options) {
     const b = placed[edge.to];
     const aSize = drawn[edge.from].size;
     const bSize = drawn[edge.to].size;
-    // A third of the way in from the centre, towards the far box: it leaves the
-    // bottom edge rather than the corner, so two arcs off one box do not start
-    // at the same point, and it is inside the box's own width so the start is
-    // hidden under it the way `boundaryPoint()`'s is.
-    const lean = function (at, size, towards) {
-      const dx = towards.x - at.x;
-      const step = Math.min(size.width / 3, Math.abs(dx) / 3);
-      return { x: at.x + (dx < 0 ? -step : step), y: at.y + size.height / 2 };
-    };
-    const from = lean(a, aSize, b);
-    const to = lean(b, bSize, a);
+    // ITS BERTH ON EACH BOX'S BOTTOM EDGE, assigned above. The y is the bottom
+    // edge itself, so the start is hidden under the box the way
+    // `boundaryPoint()`'s is; only the x is the berth's.
+    const from = { x: berthX(edge.from, edge.id, 'from', a, aSize, b),
+                   y: a.y + aSize.height / 2 };
+    const to = { x: berthX(edge.to, edge.id, 'to', b, bSize, a),
+                 y: b.y + bSize.height / 2 };
     // WHERE THE CURVE ACTUALLY DIPS TO, solved for rather than assumed. A cubic
     // whose two controls share a y is at ((y0 + y1) / 8) + (3 / 4)c when it is
     // halfway along, which is where its lowest point is when the ends are level
@@ -1566,7 +1773,18 @@ function renderUnguarded(graph, options) {
   const defs = '<defs>' + ARROW_COLOURS.map(function (colour) {
     return '<marker id="' + prefix + '-' + markerId(colour) + '" viewBox="0 0 10 10" ' +
       'refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
-      '<path d="M0 0L10 5L0 10z" fill="' + colour + '"/></marker>';
+      '<path d="M0 0L10 5L0 10z" fill="' + colour + '"/></marker>' +
+      // The tail. See tailId() for why there is one and why it is the shape and
+      // the size it is. `orient="auto"` looks pointless on a disc and is not:
+      // it is what makes `refX="0"` mean "forward ALONG THE LINE" rather than
+      // "to the right of the page", which is the default and which set the disc
+      // beside the start of a line that leaves downwards instead of below it —
+      // straddling the box's own bottom edge, where the box (painted after the
+      // edges) covered its upper half and drew it as a half moon.
+      '<marker id="' + prefix + '-' + tailId(colour) + '" viewBox="0 0 10 10" ' +
+      'refX="0" refY="5" markerWidth="' + TAIL_SIZE + '" markerHeight="' + TAIL_SIZE +
+      '" orient="auto">' +
+      '<circle cx="5" cy="5" r="' + TAIL_R + '" fill="' + colour + '"/></marker>';
   }).join('') + '</defs>';
 
   // EDGES FIRST, so that a line passing near a box goes UNDER it rather than
@@ -1637,6 +1855,7 @@ function renderUnguarded(graph, options) {
       line: '<g><title>' + esc(title) + '</title>' +
         '<path d="' + d + '" fill="none" stroke="' + look.colour + '" stroke-width="' +
         look.weight + '"' + (look.dash ? ' stroke-dasharray="' + look.dash + '"' : '') +
+        ' marker-start="url(#' + prefix + '-' + tailId(look.colour) + ')"' +
         ' marker-end="url(#' + prefix + '-' + markerId(look.colour) + ')"/></g>',
       label: label ? '<g><title>' + esc(title) + '</title>' + label + '</g>' : ''
     };
@@ -1720,6 +1939,33 @@ function edgeTitle(edge) {
                    ? ', which this party has registered on oauthAudience.'
                    : ', which no application here has registered — so it is ' +
                      'drawn as itself.'));
+    }
+    // AND THE PERMISSIONS, IN FULL, because the label is capped at 26
+    // characters and a resource exposing six of them would be cut there. The
+    // scope claim goes with them: a reader asking why a line says `default
+    // permissions` is asking what the token DID carry, and `openid profile` is
+    // the whole answer in the ordinary case.
+    if (edge.permissions && edge.permissions.length) {
+      parts.push('Carries the delegated permission' +
+                 (edge.permissions.length === 1 ? ' ' : 's ') +
+                 edge.permissions.join(', ') + ' — the names on the token\'s ' +
+                 'scope claim that this resource DEFINES. A client asks for one ' +
+                 'by sending the whole identifier (the base URI followed by the ' +
+                 'name) as a scope; the token comes back audienced to the base ' +
+                 'with the bare name on its scope claim. Whether the client was ' +
+                 'GRANTED it is the configured register\'s question and is at ' +
+                 '/admin/delegation/allowed — this line is what was issued, and ' +
+                 'oauth2.delegatedPermissionsEnforced is off by default.');
+    } else if (edge.permissions) {
+      parts.push('DEFAULT PERMISSIONS: the token names this resource and none ' +
+                 'of its delegated permissions. That is what a scope naming the ' +
+                 'resource\'s client_id produces — the value becomes the ' +
+                 'audience and comes off the scope claim, so nothing on the ' +
+                 'token asks for anything in particular. It is also what a ' +
+                 'resource that defines no permissions can ever produce.');
+    }
+    if (edge.scopes && edge.scopes.length) {
+      parts.push('The scope claim carries: ' + edge.scopes.join(' ') + '.');
     }
   }
   if (edge.typeLabel) {
@@ -1861,8 +2107,44 @@ function nodeMarkupFor(entry, at, options) {
   return '<g>' + body + '</g>';
 }
 
+// ---------------------------------------------------------------------------
+// ONE LINE, WITH BOTH ITS ENDS, FOR THE KEY BESIDE THE PICTURE.
+//
+// The legend in `admin.js` drew its own sample line and its own arrowhead,
+// which was already the "second set of shapes" that `delegationMapKey()`'s own
+// header warns about — and the tail disc would have made it a second set of
+// two. So the sample is drawn HERE, out of the same numbers the markers are.
+//
+// It is SHAPES rather than the markers themselves, and it has to be: a marker
+// lives in a `<defs>`, each swatch in the key is an `<svg>` of its own, and
+// giving every one of a dozen swatches its own defs to draw one line would be
+// more markup and one more thing to keep in step, not less. What is shared is
+// the arithmetic — `TAIL_SIZE`, `TAIL_R` and the arrowhead's own geometry — so
+// the two cannot drift in the way that matters, which is one of them being
+// changed and the other not.
+// ---------------------------------------------------------------------------
+function edgeSample(colour, dash, weight) {
+  const stroke = weight || 1.8;
+  // What the markers come out as at this stroke width. `markerUnits` is left at
+  // its default of `strokeWidth` on both, so both scale with the line.
+  const tail = (TAIL_R / 10) * TAIL_SIZE * stroke;
+  const head = 7 * stroke;
+  const x1 = 4 + tail * 2;
+  const x2 = 58 - head;
+  return '<circle cx="' + round(4 + tail) + '" cy="20" r="' + round(tail) +
+    '" fill="' + colour + '"/>' +
+    '<path d="M' + round(x1) + ' 20H' + round(x2) + '" stroke="' + colour +
+    '" stroke-width="' + stroke + '" fill="none"' +
+    (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>' +
+    '<path d="M' + round(x2) + ' ' + round(20 - head / 2) + 'L58 20L' +
+    round(x2) + ' ' + round(20 + head / 2) + 'z" fill="' + colour + '"/>';
+}
+
 module.exports = {
   render: render,
+  // The key beside the picture draws its sample lines with this, so that the
+  // round end and the pointed end in the legend are the ones in the drawing.
+  edgeSample: edgeSample,
   // Exported for the legend on the page, so that the swatch beside "an
   // application" and the box in the picture cannot come to be drawn from two
   // different palettes. admin.js draws the key out of these rather than naming

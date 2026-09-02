@@ -1748,6 +1748,41 @@ parameter, and it is the first thing to check any change to it against.
   acts, which read as a delegation that was tried and came to nothing. That
   second one was already wrong on the grey `issued to` line and nobody had said
   so.
+* **AND SINCE 2026-09-02 THAT `reaches` LINE SAYS WHAT THE TOKEN MAY DO AT THE
+  FAR END.** It carried who it is as, the mechanism and a credential count, and
+  nothing about the PERMISSION — so the page next door drew a configured grant
+  with its permission on it and this one drew the same relationship, actually
+  exercised, and could not say what it was exercised FOR. `user_graph.js`'s
+  `permissionsAddressedTo()` is the rule (rule 3p, argued there); three things
+  about how it is DRAWN belong here.
+
+  **`edge.permissions` IS TESTED, NOT `edge.relation`.** The delegation register
+  emits the identical `reaches` relation for an ACT, which has no scope claim
+  behind it and carries no such member — so an act line says nothing, rather
+  than saying `default permissions` about a Kerberos ticket.
+
+  **AN EMPTY ARRAY IS DRAWN AS `default permissions` AND NOT AS A BLANK.** A
+  scope naming a resource by its client_id takes that value off the scope claim,
+  so an empty list is the commonest state there is; drawing nothing would make
+  it indistinguishable from a line this renderer has not been taught about,
+  which is exactly the distinction `never asked for` makes on the configured
+  picture.
+
+  **IT IS THE SECOND EXCEPTION TO THE THREE-LINE LABEL CAP, and it is earned
+  rather than granted by analogy with the first.** The sign-in line gets a
+  fourth because it ABSORBED lines that used to be drawn on top of each other;
+  this one gets a fourth because the permission is the answer to what the
+  relationship IS, and the three already there — who it is as, the mechanism,
+  the credential count — are each somebody's reason for reading the picture and
+  none of them implies it. Four lines is 44px, which is what the sign-in line
+  already occupies, so the bands measure it and nothing new was needed.
+
+  The tooltip carries the list in FULL, because the label is capped at 26
+  characters, and the scope claim beside it — a reader asking why a line says
+  `default permissions` is asking what the token did carry. `userEdgeRow()`
+  prints the same names uncapped, because the picture and the table under it are
+  drawn from ONE graph and a reader comparing them must not find them
+  disagreeing.
 * **`issued-for` runs from the person where somebody else holds the credential
   and FROM THE HEXAGON where nobody does.** `client_credentials` is the case
   that settled it: the token is about the client itself, so the subject and the
@@ -1755,6 +1790,11 @@ parameter, and it is the first thing to check any change to it against.
   grey `issued to` line alone left the picture of a client credentials grant
   silent about which grant it was — on the page whose whole ask is that the
   grant be named. An X509-SVID with no audience is the same shape.
+  **What that case ALSO lacked until 2026-09-02 is a `reaches` line at all**:
+  the audience block sat inside the same `if (holder)` guard, so a
+  machine-to-machine token drew its grant and said nothing about the API it was
+  addressed to. It is drawn from the client's own box now — see the permissions
+  bullet above, where that is the half that is not about a label.
 * **A `client_credentials` subject is drawn as an APPLICATION**, and only where
   neither store has an opinion. `delegationNodeLook()`'s fallback is the shape
   the ROLE implies and the subject of this page is an initial identity, so a
