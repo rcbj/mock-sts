@@ -645,6 +645,145 @@ async function theAttributesLandOnTheRightEntries() {
 }
 
 // ---------------------------------------------------------------------------
+// THE GROUPING. `GET /admin-api/permissions/groups` partitions the register
+// into sets of applications that can be reached from one another by following
+// grants with the direction ignored, and /admin/delegation/cluster draws ONE of
+// them — which is the whole reason the whole-register picture is not the only
+// picture: it is the right drawing of five applications and the wrong drawing
+// of eighty.
+//
+// **THE RING IS THE ONE FIXTURE ON THIS SERVICE THAT MAKES THAT ASSERTABLE**,
+// and it is why these checks are here rather than in a job of their own. Five
+// applications joined into ONE group, standing in a default realm that also
+// holds the console job's applications, a SAML service provider and the
+// console's own entries — none of which is in the permission register at all.
+// So `the five are one group` and `no sixth application is in it` are two
+// different claims and both are worth making: the first fails if the partition
+// is too fine, the second if it is too coarse, and a service with only these
+// five configured could not tell either apart.
+//
+// **WHAT IS NOT HERE IS THE DIRECTION DECISION**, deliberately. A ring is
+// connected whichever way you walk it, so it cannot tell an implementation that
+// ignores direction from one that follows the arrows — the shape that does is
+// two clients on one resource, and it is asserted in process by
+// `tests/app_permissions.js`, which can build a register a running service will
+// not produce on demand.
+// ---------------------------------------------------------------------------
+async function theRingIsOneGroup() {
+  log.debug("Entering theRingIsOneGroup().");
+  log.info("=== The grouping: five applications, one group ===");
+
+  const list = await get("/permissions/groups");
+  assert.strictEqual(list.status, 200,
+    "GET /admin-api/permissions/groups should answer 200; it answered " +
+    list.status);
+  assert.ok(Array.isArray(list.body.groups) && list.body.paging,
+    "and it should carry the groups and their paging; it carried " +
+    JSON.stringify(list.body).slice(0, 200));
+
+  const ours = list.body.groups.filter(function (group) {
+    return group.members.some(isOurs);
+  });
+  assert.strictEqual(ours.length, 1,
+    "THE FIVE SHOULD BE ONE GROUP AND NOT FIVE. Every application in this " +
+    "ring holds permissions on its successor, so a partition that made more " +
+    "than one group of them would be drawing a service where an application " +
+    "and the API it may reach have nothing to do with each other. It found " +
+    ours.length + ": " + JSON.stringify(ours.map(function (one) {
+      return one.key + ":" + one.members.join(",");
+    })));
+
+  const ring = ours[0];
+  assert.deepStrictEqual(ring.members.slice().sort(),
+    APPS.map(function (app) { return app.id; }).sort(),
+    "AND NOTHING ELSE SHOULD BE IN IT. The default realm holds applications " +
+    "this file did not create — the console job's, a SAML service provider, " +
+    "the console's own — and none of them is in the permission register, so a " +
+    "sixth member here would mean the partition had joined applications that " +
+    "share no grant.");
+  assert.strictEqual(ring.key, APPS[0].id,
+    "the group should be named after the member whose identifier sorts " +
+    "first, which for abcapp1..abcapp5 is abcapp1; it was named " + ring.key +
+    ". That name is a property of the SET, so adding a grant inside the ring " +
+    "must not rename it.");
+  assert.strictEqual(ring.counts.lines, intendedGrants().length,
+    "TEN GRANTS SHOULD BE TEN LINES ON THE GROUP'S OWN COUNT, which is the " +
+    "number printed in a table beside the diagram — a count that included a " +
+    "dangling or a self grant would be a page whose own arithmetic " +
+    "contradicted the picture under it. It said " + ring.counts.lines + ".");
+  assert.strictEqual(ring.counts.dangling, 0,
+    "and none of them dangling: every permission in this ring is defined by " +
+    "an application that is in it.");
+
+  // EVERY ONE OF THE FIVE ANSWERS THE SAME GROUP. Asking only one would leave
+  // a lookup that resolved a client and not a resource passing — and in this
+  // ring every application is both, so the two readings are only told apart by
+  // asking all five.
+  for (const app of APPS) {
+    const one = await get("/permissions/groups?application=" +
+                          encodeURIComponent(app.id));
+    assert.strictEqual(one.status, 200,
+      "GET /permissions/groups?application=" + app.id +
+      " should answer 200; it answered " + one.status);
+    assert.ok(one.body.group,
+      "and it should find a group for " + app.id + ", which holds two " +
+      "permissions and exposes two.");
+    assert.strictEqual(one.body.group.key, ring.key,
+      "AND ALL FIVE SHOULD ANSWER THE SAME GROUP: " + app.id + " answered " +
+      one.body.group.key + " where the list says " + ring.key + ".");
+    const nodes = one.body.graph.nodes.filter(function (node) {
+      return isOurs(node.id);
+    });
+    assert.strictEqual(nodes.length, APPS.length,
+      "and the group's own graph should carry all five boxes for " + app.id +
+      "; it carried " + nodes.length + ". A drill-down that drew only the " +
+      "application's immediate neighbours would be a neighbour list rather " +
+      "than a group.");
+    assert.strictEqual(one.body.graph.edges.length, intendedGrants().length,
+      "with all ten lines; it carried " + one.body.graph.edges.length + ".");
+    assert.ok(one.body.graph.edges.every(function (edge) {
+      return edge.relation === "may-reach";
+    }), "and every line in a group is `may-reach`, exactly as on the whole " +
+        "register — a group is that picture narrowed, drawn by the same code, " +
+        "so a reader who has learnt what a line means on one has learnt it on " +
+        "the other.");
+  }
+
+  // AN APPLICATION THIS REGISTER HAS NEVER HEARD OF IS A 200 AND NOT A 404,
+  // because having no permissions configured is the ordinary state of most
+  // entries in this registry — it is a fact about the register rather than a
+  // missing resource. The name is made unique per run so this cannot pass by
+  // asking about something a previous run deleted.
+  const absent = "abcapp-not-configured-" + Date.now();
+  const none = await get("/permissions/groups?application=" +
+                         encodeURIComponent(absent));
+  assert.strictEqual(none.status, 200,
+    "an application with nothing configured should answer 200; it answered " +
+    none.status);
+  assert.strictEqual(none.body.group, null,
+    "with `group: null` rather than an error or the first group in the list. " +
+    "It answered " + JSON.stringify(none.body.group));
+
+  // AND THE IDENTIFIER IS MATCHED EXACTLY. Nothing in this service case-folds
+  // one — an audience differing by a character is a different audience — so a
+  // lookup that matched loosely would hand a reader the group of an
+  // application they did not name.
+  const shouted = await get("/permissions/groups?application=" +
+                            encodeURIComponent(APPS[0].id.toUpperCase()));
+  assert.strictEqual(shouted.body.group, null,
+    "ABCAPP1 is not abcapp1: nothing here case-folds an identifier, and a " +
+    "lookup that did would be this operation deciding a comparison rule on " +
+    "applications.js's behalf. It answered " +
+    JSON.stringify(shouted.body.group));
+
+  log.info("[groups] OK — the five are one group named " + ring.key +
+           ", with " + ring.counts.lines + " lines, and all five applications " +
+           "resolve to it. " + list.body.counts.clusters + " group(s) in the " +
+           "register altogether.");
+  log.debug("Leaving theRingIsOneGroup().");
+}
+
+// ---------------------------------------------------------------------------
 // THE PICTURE. `GET /admin-api/permissions` carries the same `{nodes, edges}`
 // the console hands to the renderer, so the drawing can be asserted without a
 // browser — which is what makes this worth checking at all, given that the
@@ -871,6 +1010,7 @@ async function test() {
   await theRegisterReadsBackAsARing();
   await theAttributesLandOnTheRightEntries();
   await thePictureIsARingAndNotAnActsDiagram();
+  await theRingIsOneGroup();
   await theTokenSaysBothHalves();
 
   // NO TEARDOWN, and this line is where a reader is told so rather than
@@ -883,7 +1023,9 @@ async function test() {
            APPS[0].id + ". Read it at " + base +
            "/admin/delegation/allowed, where the picture of it is drawn " +
            "below the tables (" + base +
-           "/admin/delegation/allowed?format=svg for the drawing alone).");
+           "/admin/delegation/allowed?format=svg for the drawing alone) and " +
+           "the five are listed as ONE GROUP under it; the group alone is at " +
+           base + "/admin/delegation/cluster?application=" + APPS[0].id + ".");
   log.debug("Leaving test().");
 }
 

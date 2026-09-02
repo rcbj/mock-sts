@@ -34,13 +34,15 @@ edited HERE, and only here.
 **THE FIFTH WAS NEVER OVER THERE AND IT BREAKS ONE RULE ON PURPOSE.**
 `sts_delegated_permissions_example.js` (2026-09-01) builds
 `abcapp1`–`abcapp5` in the DEFAULT realm — five applications that each expose
-`read` and `write` and each hold both on all four of the others — and it does
+`read` and `write` and each hold both on THE NEXT ONE ROUND, a ring rather than
+the complete mesh it built for one day — and it does
 NOT clean up after itself, where every other job that writes anything works in
 a throwaway realm and removes it in a `finally`. That is not an oversight and
 it is not a precedent: what the job produces IS the deliverable, an example
-meant to be read at `/admin/delegation/allowed` and drawn at
-`/admin/delegation/allowed/map`, and a realm deleted on the way out is an
-example nobody can open. What pays for it is that the job is IDEMPOTENT — the
+meant to be read at `/admin/delegation/allowed`, drawn there, and — since
+2026-09-02 — listed under that drawing as ONE GROUP, whose own picture is at
+`/admin/delegation/cluster?application=abcapp1`. A realm deleted on the way out
+is an example nobody can open. What pays for it is that the job is IDEMPOTENT — the
 identifiers are fixed, so it forgets every previous `abcapp*` before creating
 anything — that nothing else in the suite asserts an application COUNT, and
 that it runs after `sts_admin_console.js` so the console's own coverage walks
@@ -733,11 +735,48 @@ Two halves cannot be driven, and they are what is here:
   a base already ending in `#`, a base written by hand and therefore not
   normalised.
 
+**THE GROUPINGS JOINED IT ON 2026-09-02 AND THEY ARE THE SAME LINE AGAIN.**
+`app_permissions.clusters()` partitions the register into sets of applications
+that can be reached from one another by following grants with the direction
+IGNORED, and `/admin/delegation/cluster` draws one of them. The list operation
+and the drill-down are driven over HTTP — the generic GET walk in
+`sts_admin_api_operations.js` reaches `GET /admin-api/permissions/groups`, and
+`sts_delegated_permissions_example.js` asserts that its ring of five is ONE
+group — so what is here is only what those cannot reach:
+
+* **THE DIRECTION DECISION NEEDS A REGISTER THE SERVICE WILL NOT BUILD ON
+  DEMAND.** The shape that tells *ignore the direction* from *follow the
+  arrows* is TWO CLIENTS OF ONE RESOURCE: following the arrows, the second
+  client is reachable from the first only by walking a grant backwards. A RING —
+  which is the fixture over there, and the one an example wants — is connected
+  whichever way you walk it and cannot tell the two apart at all.
+* **AND THE THREE GROUPS OF ONE ARE `app_permissions.js`'s OWN STATES.** A
+  dangling grant and a self-grant are two of them, and both are the "choosing
+  the graph" argument above, unchanged.
+
 **It was mutation-tested against five mutants before it was committed**, as the
 rule here requires: dropping the base-URI separator, a configured box claiming
 an act (which would draw every grant in the refusal colour), the `may-reach`
 look ignoring whether the grant was ever asked for, a self-grant drawing a loop,
 and a dangling grant drawing a line. Each was caught.
+
+**The partition was mutation-tested against nine more, and one of them
+survived** — which is the part worth writing down. Caught: joining only one way
+round, naming a group after the union-find root, dropping the resources with no
+grants out of the membership universe, joining a dangling grant to its
+permission identifier, counting every grant as a line, sorting smallest-first,
+filing only granted permissions, and a `clusterFor()` that case-folds. **The
+survivor was a `join()` that moved a node only while it was still its own
+root** — a first-write-wins union — and it survived because the original fixture
+had no client holding permissions on TWO resources, which is the only shape that
+reaches the second write. The fixture grew one and the mutant was then caught.
+The lesson is the one this directory keeps relearning: a mutant that survives is
+usually telling you about the FIXTURE and not about the assertion. A tenth was
+written and thrown away rather than counted: filing each grant under its
+RESOURCE's group instead of its client's is behaviour-preserving, because the
+two are in one group whenever there is a resource at all — an equivalent mutant
+is not a hole, and counting one would inflate the number this paragraph is
+for.
 
 **It touches no process-wide state** — every graph it draws is built in the
 file — so the restore rule does not apply to it.

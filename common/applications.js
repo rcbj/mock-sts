@@ -1008,6 +1008,58 @@ const SCHEMA = {
             'this makes it reproducible for ONE client while the rest behave.' },
 
     // ---------------------------------------------------------------------
+    // THE SIXTH OAUTH OVERRIDE, ADDED 2026-09-01, AND THE FIRST ATTRIBUTE IN
+    // THIS SCHEMA THAT IS SCOPED TO A PROTOCOL FAMILY.
+    //
+    // Every other row here is offered on every entry. Most of them are named
+    // for the family they belong to and that has been enough: writing
+    // `saml2SignAssertion` onto an OAuth client is inert rather than wrong, and
+    // refusing it would be this registry having an opinion about an attribute
+    // nothing reads. This one is different in a way worth spelling out, because
+    // the mechanism it introduces will be reached for again.
+    //
+    // It decides what the TOKEN ENDPOINT does for one client_id. So an entry
+    // that is not an OAuth client at all cannot be the entry it decides
+    // anything for — there is no request that would ever arrive naming it — and
+    // a value written there is not merely inert, it is a POLICY somebody
+    // believes is in force. That is the state `families` exists to refuse: the
+    // attribute applies to the OAuth 2.0 and OpenID Connect families, and
+    // updateApplication() and createApplication() both turn away a write onto
+    // an entry declared for neither, naming what to tick first. The console
+    // does not offer it there either, which is the same "a form cannot offer a
+    // field the action would refuse" rule EDITABLE's own header states.
+    //
+    // `ldapmodify` still reaches it, as it reaches everything here. The refusal
+    // is the difference between offering an operation and merely not preventing
+    // it, which is the line the derived attributes are already on.
+    { name: 'oauthTokenExchangeRefreshToken', kind: 'single',
+      from: 'the console, the management API, or by hand',
+      overrides: 'oauth2.tokenExchangeRefreshToken',
+      families: ['oauth2', 'oidc'],
+      what: 'WHETHER AN RFC 8693 TOKEN EXCHANGE PERFORMED BY THIS CLIENT GETS A ' +
+            '`refresh_token` BESIDE THE EXCHANGED ACCESS TOKEN, overriding ' +
+            'oauth2.tokenExchangeRefreshToken for it alone. One of three words: ' +
+            '`never`, `when-requested` (the service-wide default — the client asks with ' +
+            'RFC 8693 section 2.1\'s `requested_token_type` and gets one only if it ' +
+            'did) or `always`.\n\nIT IS READ ON THE CLIENT PERFORMING THE EXCHANGE and ' +
+            'not on the audience, because the refresh token is handed to the client: it ' +
+            'is that party\'s credential to hold, revoke and eventually redeem. The ' +
+            'subject the exchange is ABOUT has no entry in this registry at all in the ' +
+            'interesting case, since the whole point of an exchange is a subject_token ' +
+            'from somewhere else.\n\n**IT APPLIES TO THE OAUTH 2.0 AND OPENID CONNECT ' +
+            'FAMILIES AND TO NO OTHER, and unlike every other attribute here that is ' +
+            'ENFORCED.** An entry declared for neither is turned away by both console ' +
+            'doors and by the management API, naming the family to tick first — because ' +
+            'a value here is a policy about the token endpoint, and an entry no token ' +
+            'request can ever name would carry it looking as though it were in force. ' +
+            'The block above this row argues it. `ldapmodify` reaches this attribute ' +
+            'like every other and is not checked.\n\nA VALUE THAT IS NOT ONE OF THE ' +
+            'THREE WORDS IS NOT AN ERROR AT WRITE TIME AND IS NOT SILENT: settingFor() ' +
+            'warns naming the entry, the attribute and what it holds, and the ' +
+            'service-wide setting decides — the same three-state honesty every other ' +
+            'override on this entry gets.' },
+
+    // ---------------------------------------------------------------------
     // THE GROUP CLAIM, PER APPLICATION, added 2026-08-27.
     //
     // The one override group here that is NOT a protocol's: these four reach an
@@ -1547,6 +1599,10 @@ const EDITABLE = {
   oauthRefreshTokenTtlS: 'set',
   oauthRefreshIdleSeconds: 'set',
   oauthRevokeRefreshOnLogout: 'set',
+  // The sixth, and the one whose row carries `families`. Editable like the five
+  // above it and refused on an entry declared for neither OAuth 2.0 nor OpenID
+  // Connect — see familyRefusal(), and the block above the row itself.
+  oauthTokenExchangeRefreshToken: 'set',
   appGroupsClaim: 'set',
   appGroupsClaimName: 'set',
   appGroupsClaimValue: 'set',
@@ -1646,6 +1702,75 @@ function editableAttributes(mode) {
   return SCHEMA.attributes.filter(function (row) {
     return mode ? row.editable === mode : !!row.editable;
   });
+}
+
+// ---------------------------------------------------------------------------
+// AN ATTRIBUTE THAT ONLY MEANS SOMETHING TO SOME FAMILIES, AND THE TWO
+// FUNCTIONS THAT ARE THE WHOLE MECHANISM.
+//
+// A SCHEMA row may carry `families: ['oauth2', 'oidc']`. One does today —
+// `oauthTokenExchangeRefreshToken`, whose own block argues why it is the first
+// — and the rule it declares is that the attribute may be WRITTEN only onto an
+// entry declared for at least one of those families.
+//
+// IT IS A TABLE AND NOT A SPECIAL CASE, deliberately, and for the reason
+// OVERRIDE_ATTRIBUTES is built from the rows rather than written out: a second
+// family-scoped attribute must cost a member on its row and nothing else. The
+// alternative — an `if (attribute === ...)` in updateApplication() beside the
+// permission rules — would have been shorter today and would be the place the
+// console's idea of what it may offer eventually disagrees with the action's.
+//
+// THE TEST IS `appAllowedProtocol` AND NOT `appProtocol`, which is the
+// declared-versus-derived line EDITABLE's header draws, applied to a refusal.
+// What somebody DECLARED the application is for is a statement they made and
+// can change; what this service has SEEN it do is a fact about the past, and an
+// application that has been ticked for OAuth 2.0 and has never yet made a
+// request is exactly the entry somebody is configuring when they reach for this.
+// Testing the derived attribute would refuse every write until after the first
+// token request, which is the wrong way round.
+// ---------------------------------------------------------------------------
+function declaredFamiliesOf(record) {
+  return valuesOf((record && record.fields || {}).appAllowedProtocol)
+    .map(function (one) { return String(one).trim().toLowerCase(); })
+    .filter(function (one) { return !!one; });
+}
+
+// '' when the write is allowed, and the sentence to refuse it with otherwise.
+// `declared` is a list of family ids — from the entry for an update, and from
+// what the create is about to write for a create, which is why it is a
+// parameter rather than being read in here.
+function familyRefusal(attributeName, declared, identifier) {
+  log.debug("Entering familyRefusal(). attribute=" + attributeName);
+  const row = ATTRIBUTE_BY_NAME[attributeName];
+  if (!row || !row.families || !row.families.length) {
+    log.debug("Leaving familyRefusal(). Not family-scoped.");
+    return '';
+  }
+  const held = (declared || []).map(function (one) {
+    return String(one).trim().toLowerCase();
+  });
+  const matched = row.families.filter(function (id) {
+    return held.indexOf(id) >= 0;
+  });
+  if (matched.length) {
+    log.debug("Leaving familyRefusal(). Declared for " + matched.join(', ') + ".");
+    return '';
+  }
+  const labels = row.families.map(function (id) {
+    const family = PROTOCOL_BY_ID[id];
+    return family ? family.label : id;
+  });
+  log.debug("Leaving familyRefusal(). Refused.");
+  return '"' + attributeName + '" applies to the ' + labels.join(' and ') +
+         ' ' + (labels.length === 1 ? 'family' : 'families') + ', and "' +
+         String(identifier) + '" is declared for ' +
+         (held.length ? held.join(', ') : 'no family at all') + '. It decides what the ' +
+         'TOKEN ENDPOINT does for one client_id, so on an entry no token request can ' +
+         'ever name it would sit there looking like a policy that was in force. Add ' +
+         labels.join(' or ') + ' to `appAllowedProtocol` first — that is the tick box ' +
+         'on /admin/applications/new and the `protocols` member of the create — and ' +
+         'then set this. An `ldapmodify` reaches the attribute like every other and is ' +
+         'not checked.';
 }
 
 // ---------------------------------------------------------------------------
@@ -2766,6 +2891,22 @@ function createApplication(detail) {
     log.debug("Leaving createApplication().");
     return { ok: false, errors: given.errors };
   }
+  // AND THE FAMILY RULE, against the families this create is ABOUT TO WRITE
+  // rather than against an entry that does not exist yet. That is the whole
+  // reason familyRefusal() takes the list as a parameter: an update reads it
+  // off `appAllowedProtocol` and a create has not written that attribute at
+  // this point, and one function has to answer both or the form that ticks
+  // OAuth 2.0 and fills the field in one submission would be refused by a check
+  // reading an empty entry.
+  const wrongFamily = Object.keys(given.fields).map(function (name) {
+    return familyRefusal(name, asked.protocols, identifier);
+  }).filter(function (one) { return !!one; });
+  if (wrongFamily.length) {
+    log.debug("Leaving createApplication(). " + wrongFamily.length +
+              " field(s) do not apply to the families declared.");
+    log.debug("Leaving createApplication().");
+    return { ok: false, errors: wrongFamily };
+  }
   const record = loaded.record;
   const now = Date.now();
   record.firstAt = now;
@@ -2947,6 +3088,31 @@ function updateApplication(identifier, change) {
     if (!known.ok) {
       log.debug("Leaving updateApplication(). Unknown protocol family.");
       return { ok: false, errors: known.errors };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // AND THE RULE THAT READS THAT ATTRIBUTE BACK: an attribute scoped to a
+  // protocol family may only be written onto an entry declared for one of them.
+  // See familyRefusal() and the block above `oauthTokenExchangeRefreshToken`,
+  // which is the only row carrying `families` today.
+  //
+  // HERE rather than in the console for the reason every rule in this function
+  // is: this is the ONE door the form and `POST /admin-api/applications/update`
+  // both go through, and a refusal enforced in either alone is a refusal the
+  // other walks around.
+  //
+  // A CLEAR IS ALWAYS ALLOWED — `mode === 'set'` with an empty value — which is
+  // the same asymmetry the permission rules and `appAllowedProtocol` have, read
+  // one step further. A value can arrive here by `ldapmodify`, or be left
+  // behind by a family being untimed from the entry after it was set, and
+  // refusing to remove it would shut the one door that could tidy it up.
+  if ((mode === 'set' && value) || mode === 'add') {
+    const wrongFamily = familyRefusal(attribute, declaredFamiliesOf(loaded.record),
+                                      identifier);
+    if (wrongFamily) {
+      log.debug("Leaving updateApplication(). The attribute does not apply to this entry.");
+      return { ok: false, errors: [wrongFamily] };
     }
   }
 
@@ -4197,6 +4363,12 @@ module.exports = {
   recordFromAttributes: recordFromAttributes,
   labelFor: labelFor,
   editableAttributes: editableAttributes,
+  // The family scope, exported so that the console can leave a field out of the
+  // two selects on an entry the action would refuse it on — "a form cannot offer
+  // a field the action would refuse", which is the rule editableAttributes()
+  // itself exists for. Both halves come off the SCHEMA row's `families` member.
+  declaredFamiliesOf: declaredFamiliesOf,
+  familyRefusal: familyRefusal,
   createApplication: createApplication,
   seedInternalApplications: seedInternalApplications,
   updateApplication: updateApplication,

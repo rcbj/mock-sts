@@ -6620,12 +6620,24 @@ function permissionsView() {
   log.debug("Entering permissionsView().");
   const register = appPermissions.register();
   const graph = appPermissions.graph(register.grants);
-  log.debug("Leaving permissionsView(). " + register.counts.grants + " grant(s).");
-  return { register: register, graph: graph };
+  // THE GROUPINGS, off the register that has just been read rather than off a
+  // second walk of `ou=applications`. `appPermissions.clusters()` will do the
+  // walk itself when it is handed nothing, and every caller here has the answer
+  // in hand already — so passing it is what keeps the whole-register picture,
+  // the group list under it and `GET /admin-api/permissions` describing ONE
+  // reading of the registry rather than three taken a few milliseconds apart.
+  const groups = appPermissions.clusters(register);
+  log.debug("Leaving permissionsView(). " + register.counts.grants + " grant(s) in " +
+            groups.counts.clusters + " group(s).");
+  return { register: register, graph: graph, clusters: groups };
 }
 
 // One row of the permissions table: what a resource EXPOSES.
-function permissionDefinitionRow(one, listView) {
+// `options.readOnly` swaps the Remove form for a link to the page that has it,
+// for the reason permissionGrantRow() carries the same parameter: the picture
+// pages list what they draw and change nothing, and one row function is what
+// stops two tables coming to disagree about what a permission identifier is.
+function permissionDefinitionRow(one, listView, options) {
   const href = '/admin/applications' + queryWith(listView || {}, { application: one.resource });
   return '<tr>' +
     '<td class="who"><a href="' + esc(href) + '">' + esc(one.resourceName) + '</a>' +
@@ -6660,13 +6672,17 @@ function permissionDefinitionRow(one, listView) {
     // carried a `back` as well — the `one.id` test above decides the
     // IDENTIFIER cell, not this one, and a permission with no identifier is
     // removed by exactly the same call. One form, once.
-    '<td><form method="post" action="/admin/delegation">' +
-      permissionsBack(listView) + '<div class="formrow">' +
-      '<input type="hidden" name="action" value="remove-permission">' +
-      '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
-      '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
-      '<button type="submit" class="danger">Remove</button>' +
-      '</div></form></td>' +
+    '<td>' + (options && options.readOnly
+      ? '<a href="/admin/delegation#allowed" title="This page draws the ' +
+        'register and does not change it. The Remove button for this ' +
+        'permission is on the register itself.">on the register</a>'
+      : '<form method="post" action="/admin/delegation">' +
+        permissionsBack(listView) + '<div class="formrow">' +
+        '<input type="hidden" name="action" value="remove-permission">' +
+        '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
+        '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
+        '<button type="submit" class="danger">Remove</button>' +
+        '</div></form>') + '</td>' +
     '</tr>';
 }
 
@@ -6692,7 +6708,20 @@ function permissionsBack(listView) {
 }
 
 // One row of the grants table: the RELATIONSHIP itself.
-function permissionGrantRow(one, listView) {
+// `options.readOnly` swaps the last cell for a link to the page that DOES have
+// the form on it, and is what lets the group picture at /admin/delegation/cluster
+// list the grants it is drawing without becoming a fourth door onto the
+// register (2026-09-02). It is a parameter rather than a second row function
+// for the reason chooserPane() is one function drawn eight times: the six cells
+// before it are the whole of what a grant IS, and two copies of them is two
+// tables that come to disagree about what the access token will say.
+//
+// The picture pages are read-only ON PURPOSE — /admin/delegation/allowed says
+// so in as many words — so a Revoke drawn there would be the one control on a
+// page whose text says it has none, and it would answer by throwing the reader
+// back to a table three screens up on a different page, because
+// permissionsReturnTo() has nowhere else to send it.
+function permissionGrantRow(one, listView, options) {
   const clientHref = '/admin/applications' +
     queryWith(listView || {}, { application: one.client });
   const resourceHref = one.resource
@@ -6734,13 +6763,17 @@ function permissionGrantRow(one, listView) {
       : '<span class="state-none" title="This client has never asked for it. A ' +
         'configured grant nobody has needed is exactly what this register is ' +
         'here to show.">never asked for</span>') + '</td>' +
-    '<td><form method="post" action="/admin/delegation">' +
-      permissionsBack(listView) + '<div class="formrow">' +
-      '<input type="hidden" name="action" value="revoke-permission">' +
-      '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
-      '<input type="hidden" name="permission" value="' + esc(one.permissionId) + '">' +
-      '<button type="submit" class="danger">Revoke</button>' +
-      '</div></form></td>' +
+    '<td>' + (options && options.readOnly
+      ? '<a href="/admin/delegation#allowed" title="This page draws the ' +
+        'register and does not change it. The Revoke button for this grant is ' +
+        'on the register itself.">on the register</a>'
+      : '<form method="post" action="/admin/delegation">' +
+        permissionsBack(listView) + '<div class="formrow">' +
+        '<input type="hidden" name="action" value="revoke-permission">' +
+        '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
+        '<input type="hidden" name="permission" value="' + esc(one.permissionId) + '">' +
+        '<button type="submit" class="danger">Revoke</button>' +
+        '</div></form>') + '</td>' +
     '</tr>';
 }
 
@@ -7710,6 +7743,229 @@ function permissionsReturnTo(body) {
 }
 
 // ---------------------------------------------------------------------------
+// THE APPLICATION SEARCH OVER THE CONFIGURED REGISTER, AND WHY IT NEEDED
+// PARAMETER NAMES OF ITS OWN.
+//
+// It is `chooserPane()` again — the same control, the same twenty-at-a-time
+// pane, the same "an empty box matches everything" — drawn on
+// /admin/delegation/allowed and again on /admin/delegation/cluster under the
+// group it opened, for the reason `delegationApplicationChooser()` gives about
+// its own second copy: comparing two groups should be one click rather than
+// two.
+//
+// **THE CATALOGUE IS A DIFFERENT LIST FROM THE ACTS CHOOSER'S AND THAT IS THE
+// WHOLE REASON THIS IS A SECOND FUNCTION.** `delegationApplicationChooser()`
+// offers what some act NAMED — what has actually delegated, spellings and all,
+// including an RFC 8693 audience nobody registered. This one offers what the
+// CONFIGURED register touches: every application carrying a base URI or a
+// permission, and every application holding a grant. The two lists overlap and
+// neither contains the other, and a reader searching here for something they
+// saw on the acts picture must be told it is not in this register rather than
+// shown a group it is not in.
+//
+// **IT USES `permappq` / `permappfrom` AND MUST NOT REUSE `appq` / `appfrom`.**
+// Those two belong to the acts chooser, they are in LIST_PARAMS for
+// /admin/delegation, and a drill-down of that page carries them through
+// untouched so that the way back lands on the search the reader left. A second
+// control writing the same two names would overwrite that on every search —
+// the reader would come back to /admin/delegation holding a term they typed
+// into a different list. That is precisely the failure the acts page's own two
+// pairs are split to prevent, made once more between two pages instead of
+// twice on one.
+// ---------------------------------------------------------------------------
+function allowedApplicationChooser(view, selectedKey, carry, here) {
+  log.debug("Entering allowedApplicationChooser().");
+  const groups = view.clusters;
+  if (!groups.counts.applications) {
+    log.debug("Leaving allowedApplicationChooser(). Nothing configured yet.");
+    return note('<strong>No application in this registry exposes an API or ' +
+      'holds a permission yet</strong>, so there is nothing to search. An ' +
+      'application arrives in this list the moment it is given a base URI or a ' +
+      'permission of its own — which makes it a RESOURCE — or is granted one ' +
+      'somebody else exposes, which makes it a CLIENT. Both are done on ' +
+      '<a href="/admin/delegation#allowed">the register</a> or through ' +
+      '<code>POST /admin-api/permissions/…</code>.');
+  }
+
+  // Everything one row of the pane has to say, worked out from the register
+  // ONCE rather than per entry: `register()` is already in hand, and a filter
+  // per application over `grants` and `permissions` would be quadratic in a
+  // registry whose whole point is that it can be large.
+  const holds = {};
+  const reached = {};
+  const exposes = {};
+  view.register.grants.forEach(function (one) {
+    holds[one.client] = (holds[one.client] || 0) + 1;
+    if (one.resource) {
+      reached[one.resource] = (reached[one.resource] || 0) + 1;
+    }
+  });
+  view.register.permissions.forEach(function (one) {
+    exposes[one.resource] = (exposes[one.resource] || 0) + 1;
+  });
+
+  const entries = [];
+  groups.clusters.forEach(function (group) {
+    group.members.forEach(function (identifier) {
+      const registered = applications.get(identifier);
+      const name = registered
+        ? (registered.name || registered.dnLabel || identifier) : '';
+      const parts = [];
+      if (holds[identifier]) {
+        parts.push(holds[identifier] + ' grant(s) held');
+      }
+      if (exposes[identifier]) {
+        parts.push(exposes[identifier] + ' permission(s) exposed');
+      }
+      if (reached[identifier]) {
+        parts.push(reached[identifier] + ' grant(s) on it');
+      }
+      if (!parts.length) {
+        parts.push('a base URI and nothing on it yet');
+      }
+      entries.push({
+        key: identifier,
+        // The identifier AND the name somebody gave the entry, because the
+        // chooser shows one of them and a reader is about as likely to be
+        // holding the other — `chooserMatches()`'s whole subject.
+        names: name && name !== identifier ? [identifier, name] : [identifier],
+        label: identifier,
+        detail: parts.join(', ') + ' — ' +
+                (group.counts.applications === 1
+                  ? 'in no group but its own'
+                  : 'one of ' + group.counts.applications +
+                    ' applications joined to each other'),
+        // THE GROUP AND NOT THE APPLICATION IS WHAT OPENS, which is the one way
+        // this control differs from every other chooser in the console: a
+        // result here is not a page about the thing clicked, it is the page
+        // about everything that thing is joined to. The application is still
+        // the parameter, because it is what the reader chose and it is what
+        // makes the URL one somebody can check — a group's own key is the
+        // alphabetically first member, which is a name nobody typed.
+        href: '/admin/delegation/cluster' +
+              queryWith(carry || {}, { application: identifier })
+      });
+    });
+  });
+  // ALPHABETICAL AND NOT IN GROUP ORDER. The groups are sorted biggest-first
+  // for the table below, and that is the right order for a list of GROUPS; it
+  // is the wrong one for a list of applications, where the reader is looking
+  // for a name and the group is what they are about to find out.
+  entries.sort(function (a, b) { return a.key.localeCompare(b.key); });
+
+  log.debug("Leaving allowedApplicationChooser(). " + entries.length +
+            " application(s) to search.");
+  return chooserPane({
+    here: here, param: 'permappq', fromParam: 'permappfrom',
+    label: 'Find an application',
+    placeholder: 'part of a client_id, a base URI or an application name',
+    entries: entries, selectedKey: selectedKey,
+    nothing: 'No application in the configured register matches that. This ' +
+      'list holds what the PERMISSION register touches — an entry with a base ' +
+      'URI or a permission of its own, or one holding a grant — so a name that ' +
+      'is on <a href="/admin/applications">the registry</a> and not in here is ' +
+      'an application nothing has been configured about yet.'
+  });
+}
+
+// The chooser's own two parameters, carried by hand from the page the search
+// was typed on to the page a result opens.
+//
+// They are deliberately NOT in LIST_PARAMS for /admin/delegation. That table is
+// the state of the acts LIST, spent by the breadcrumb's way back to it, and
+// these two names belong to neither the list nor the page it hangs under — a
+// crumb pointing at /admin/delegation carrying a search that page cannot use
+// would be state nobody can get back to, which is exactly what that table's
+// header says a row is for. So the way BACK to the allowed picture carries them
+// and the way UP to the acts table does not, and each link says which it is.
+function allowedChooserState(query) {
+  const out = {};
+  ['permappq', 'permappfrom'].forEach(function (name) {
+    const value = queryOne(query, name);
+    if (value !== '') {
+      out[name] = value;
+    }
+  });
+  return out;
+}
+
+// The groups themselves, as a table: the answer to *what is joined to what*
+// without opening a picture of any of it.
+//
+// One row per group, biggest first, with the applications in it spelled out —
+// because the size of a group is not what makes it interesting, its MEMBERS
+// are, and a table of counts with no names in it would send a reader into every
+// picture in turn to find the one they meant.
+function allowedClusterTable(groups, shown, carry) {
+  log.debug("Entering allowedClusterTable(). " + shown.length + " row(s).");
+  const rows = shown.map(function (group) {
+    const members = group.members.map(function (identifier) {
+      const registered = applications.get(identifier);
+      const name = registered
+        ? (registered.name || registered.dnLabel || identifier) : identifier;
+      return '<a href="' + esc('/admin/delegation/cluster' +
+        queryWith(carry || {}, { application: identifier })) + '"><code>' +
+        esc(identifier) + '</code></a>' +
+        (name !== identifier
+          ? ' <span class="state-none">' + esc(name) + '</span>' : '') +
+        (registered ? ''
+          : ' <span class="state-none" title="No entry under ou=applications ' +
+            'answers to this identifier. It can only have got here through an ' +
+            'ldapmodify, since both console doors read the registry.">not in ' +
+            'the registry</span>');
+    }).join('<br>');
+    return '<tr>' +
+      '<td class="who"><a href="' + esc('/admin/delegation/cluster' +
+        queryWith(carry || {}, { application: group.key })) + '">' +
+        (group.counts.applications === 1
+          ? 'this one alone'
+          : esc(group.counts.applications) + ' applications') + '</a>' +
+        '<br><span class="state-none" title="A group is named after the ' +
+        'application whose identifier sorts first, so that adding a grant ' +
+        'inside it does not rename it.">named for <code>' + esc(group.key) +
+        '</code></span></td>' +
+      '<td>' + members + '</td>' +
+      '<td class="num">' + (group.counts.lines
+        ? esc(group.counts.lines)
+        : '<span class="state-none" title="Nothing in this group may reach ' +
+          'anything else in it. A group of one with a base URI is an API ' +
+          'somebody described and nothing was granted on.">0</span>') + '</td>' +
+      '<td class="num">' + (group.counts.asked
+        ? '<span class="state-valid">' + esc(group.counts.asked) + '</span>'
+        : '<span class="state-none">0</span>') + ' asked for<br>' +
+        (group.counts.unused
+          ? '<span class="state-expired" title="Granted and never requested. ' +
+            'Read off the client\'s own oauthScope — evidence rather than ' +
+            'proof.">' + esc(group.counts.unused) + '</span>'
+          : '<span class="state-none">0</span>') + ' never used</td>' +
+      '<td class="num">' + esc(group.counts.permissions) + '</td>' +
+      '<td class="num">' + (group.counts.dangling
+        ? '<span class="state-revoked" title="Naming a permission no ' +
+          'application in this registry defines. Not drawn on any picture, ' +
+          'because a line to nowhere would be a drawing of a resource that is ' +
+          'there.">' + esc(group.counts.dangling) + ' dangling</span>'
+        : '<span class="state-none">&mdash;</span>') +
+        (group.counts.selfGrants
+          ? '<br><span class="state-expired" title="An application granted its ' +
+            'own permission. Neither console door will create one; an ' +
+            'ldapmodify can. No arrow is drawn, because an arrow from a box ' +
+            'back to itself is a drawing of nothing.">' +
+            esc(group.counts.selfGrants) + ' to itself</span>'
+          : '') + '</td>' +
+      '</tr>';
+  }).join('');
+  log.debug("Leaving allowedClusterTable().");
+  return '<table><tr><th>The group</th><th>The applications in it</th>' +
+    '<th>Lines drawn</th><th>Grants</th><th>Permissions exposed</th>' +
+    '<th>Not drawn</th></tr>' +
+    (rows || '<tr><td colspan="6">' +
+      (groups.counts.clusters
+        ? 'No group on this page.'
+        : 'Nothing in this registry exposes an API or holds a permission, so ' +
+          'there are no groups to draw.') + '</td></tr>') + '</table>';
+}
+
+// ---------------------------------------------------------------------------
 // GET /admin/delegation/allowed — THE CONFIGURED MAPPINGS, AS A PICTURE.
 //
 // A DRILL-DOWN OF /admin/delegation, exactly as /admin/delegation/map is: no
@@ -7757,6 +8013,25 @@ app.get('/admin/delegation/allowed', function (req, res) {
   const listView = listViewOf('/admin/delegation', req.query);
   const up = upTo('/admin/delegation', 'The allowed mappings', listView);
   const counts = permissions.register.counts;
+
+  // THE GROUPS, PAGED. The whole-register picture above is one document however
+  // large the register is; this list is one row per group and a service with
+  // eighty applications configured has as many rows as it has groups, so it
+  // pages the way every other list in this console does. `name: 'groups'` gives
+  // it a parameter of its own for `pagingOf()`'s reason — this page could
+  // acquire a second list tomorrow, and two controls sharing `page` would page
+  // each other's table.
+  const groups = permissions.clusters;
+  const groupPage = pagedRows(req.query, groups.clusters,
+                              { name: 'groups', noun: 'groups' });
+  const groupNav = pageNavPair('/admin/delegation/allowed', pageParamsOf(req.query),
+                               groupPage.paging);
+  // What a link OUT of this page carries: the acts list's state, so the
+  // breadcrumb on the group page still leads back where the reader came from,
+  // AND this page's own search, so its copy of the chooser opens holding the
+  // term that was typed here. allowedChooserState() says why the second one is
+  // spelled out rather than added to LIST_PARAMS.
+  const onward = Object.assign({}, listView, allowedChooserState(req.query));
 
   const inner =
     note('<strong>What is ALLOWED, not what happened.</strong> Every line ' +
@@ -7814,19 +8089,550 @@ app.get('/admin/delegation/allowed', function (req, res) {
       tile(counts.dangling, 'dangling, not drawn') +
     '</div>' +
 
+    '<h2 id="groups">The groupings: which applications are joined to each ' +
+    'other</h2>' +
+
+    note('<strong>A GROUP IS A SET OF APPLICATIONS THAT CAN BE REACHED FROM ' +
+    'ONE ANOTHER BY FOLLOWING GRANTS, IGNORING WHICH WAY EACH ONE POINTS.</strong> ' +
+    'That is the whole definition, and the direction is dropped ON PURPOSE. A ' +
+    'grant is directed — a client is granted a permission a resource exposes, ' +
+    'which is why every line above has a round end and a pointed one — but ' +
+    'following the arrows would answer <em>what can this client eventually ' +
+    'reach</em>, and a permission register has no chains in it: holding a ' +
+    'permission on an API does not grant that API\'s permissions to anybody. ' +
+    'Following a grant EITHER WAY answers the question somebody actually ' +
+    'arrives with — <em>which applications are in the same conversation as ' +
+    'this one</em> — and it is the only reading under which an API and the ' +
+    'three front ends holding permissions on it come out as ONE group rather ' +
+    'than as four. Every picture still draws every line with its direction on ' +
+    'it, so what is dropped is direction as a test of MEMBERSHIP, never ' +
+    'direction as a fact.') +
+
+    note('<strong>This is what the whole-register picture above stops being ' +
+    'able to say.</strong> One canvas is the right drawing of five ' +
+    'applications and the wrong drawing of eighty, where the interesting ' +
+    'reading is almost never the whole of it. Search for an application below ' +
+    'and the picture you get is its group and nothing else — the applications ' +
+    'it is joined to, however many hops away, and none of the ones it is not.') +
+
+    allowedApplicationChooser(permissions, '', onward,
+      { path: '/admin/delegation/allowed', query: req.query }) +
+
+    // This page has no filter form to hang `per` on, which is the case
+    // perPageForm() exists for. The leaf it carries is the CHOOSER'S SEARCH
+    // rather than a selected thing, because that is the only state on this
+    // page a reader would lose by changing the size.
+    perPageForm('/admin/delegation/allowed', 'permappq',
+                queryOne(req.query, 'permappq'), groupPage.paging.perPage,
+                'There is one table below. The drawing above is never paged: ' +
+                'paging a picture draws the pagination rather than the ' +
+                'service.',
+                filterOnly(listView)) +
+
+    groupNav.head +
+    allowedClusterTable(groups, groupPage.shown, onward) +
+    groupNav.foot +
+
+    '<div class="tiles">' +
+      tile(groups.counts.clusters, 'groups') +
+      tile(groups.counts.joined, 'with more than one in them') +
+      tile(groups.counts.alone, 'of one application') +
+      tile(groups.counts.largest, 'in the largest') +
+    '</div>' +
+
+    note('<strong>A group of ONE is a real answer and not an empty ' +
+    'row.</strong> Three different things produce one and they are worth ' +
+    'telling apart: an application carrying a base URI and permissions that ' +
+    'nobody has been granted — somebody described an API and nothing may reach ' +
+    'it; a client holding only DANGLING grants, which name permissions no ' +
+    'application defines, so there is no far end to be in a group with; and an ' +
+    'application granted its OWN permission, which is one application however ' +
+    'it is drawn. The last two columns say which.') +
+
     note('The register itself, with the forms that change it, is on ' +
-    '<a href="/admin/delegation#allowed">the delegation page</a>. There is no ' +
-    'control on this one and no filter: a picture of forty boxes is the whole ' +
-    'answer to <em>what may reach what</em>, and this register has no dimension ' +
-    'to narrow on the way the acts have a mechanism, a mode and an outcome. ' +
-    '<code>?format=json</code> is the graph and <code>?format=svg</code> is the ' +
-    'document alone, which is also in the <code>allowed.graph</code> member of ' +
-    '<code>GET /admin-api/delegation</code>.');
+    '<a href="/admin/delegation#allowed">the delegation page</a>. ' +
+    '<strong>Nothing on this page changes anything</strong> — the search above ' +
+    'is the only control, and it narrows nothing here: it opens a picture of ' +
+    'its own. There is still no FILTER over the drawing at the top, because ' +
+    'this register has no dimension to narrow on the way the acts have a ' +
+    'mechanism, a mode and an outcome — the one division it does have is which ' +
+    'applications can reach each other at all, and that is the list above ' +
+    'rather than a filter. <code>?format=json</code> is the graph and the ' +
+    'groups, <code>?format=svg</code> is the document alone, and the graph is ' +
+    'also in the <code>allowed.graph</code> member of ' +
+    '<code>GET /admin-api/delegation</code> with the groups at ' +
+    '<code>GET /admin-api/permissions/groups</code>.');
 
   respond(req, res, { graph: graph, counts: counts,
-                      grants: permissions.register.grants },
+                      grants: permissions.register.grants,
+                      // THE GROUPS THIS PAGE IS SHOWING, through the SAME
+                      // `clusterSummary()` that `GET
+                      // /admin-api/permissions/groups` answers with — so a
+                      // caller reading a group off this reply and a caller
+                      // reading one off that operation are reading the same
+                      // object. It is this page's own slice rather than that
+                      // operation's, because `?format=json` must describe the
+                      // page it is a format of; the paging is beside it.
+                      //
+                      // It carries the counts and NOT the rows: a caller
+                      // wanting one group's grants asks for that group, and
+                      // repeating every grant once per group here would grow
+                      // this reply with the square of the register.
+                      groups: groupPage.shown.map(clusterSummary),
+                      groupCounts: groups.counts,
+                      groupsPaging: pagingJson(groupPage.paging) },
           'The allowed mappings', '/admin/delegation', inner, up);
   log.debug("Leaving the admin allowed-delegation picture.");
+});
+
+// One group as a REPLY carries: what it is and how big, and not the rows.
+//
+// The rows are on the group's own page and in its own `?format=json`. A list of
+// groups that carried every grant would repeat the whole register once per
+// group in the worst case — a caller asking *what is joined to what* would be
+// handed the answer to a question they did not ask, and the reply would grow
+// with the square of the register on exactly the service where that matters.
+function clusterSummary(group) {
+  return { key: group.key, members: group.members, counts: group.counts };
+}
+
+// THE GROUPINGS AS A REPLY, AND THE ONE FUNCTION BOTH DOORS ONTO THEM GO
+// THROUGH.
+//
+// `GET /admin-api/permissions/groups` calls it and so does
+// /admin/delegation/cluster's own `?format=json`, for the reason
+// `delegationView()` and `permissionsView()` both give: two hand-built copies
+// of one object is precisely the drift this console's own text keeps warning
+// about, and it is invisible — each looks right alone and neither ever sees the
+// other.
+//
+// `view` is an optional `permissionsView()` already in hand. The route has one
+// because it is drawing the page from it; the management API has not and this
+// function makes its own. Passing it is what keeps a page's markup and its JSON
+// describing ONE read of `ou=applications` rather than two taken a few
+// milliseconds apart — which on a register somebody is editing is the
+// difference between a table and a picture that agree and two that nearly do.
+//
+// **`application` DECIDES THE SHAPE and there is only one operation**, because
+// the two are the same question at two scales: without it, every group with its
+// counts and none of its rows; with it, the ONE group that application is in,
+// with its grants, its permissions and the graph the picture is drawn from.
+// An application this register has never heard of is `group: null` and a 200 —
+// having no permissions configured is the ordinary state of most entries in
+// the registry, and it is a fact rather than an error.
+function permissionGroupsView(query, view) {
+  log.debug("Entering permissionGroupsView().");
+  const permissions = view || permissionsView();
+  const groups = permissions.clusters;
+  const asked = queryOne(query, 'application').trim();
+
+  if (asked) {
+    const group = appPermissions.clusterFor(asked, groups);
+    // The SAME paging the page's own grants table uses, by the same name, so
+    // that a caller reading `?format=json` off a page they are looking at gets
+    // the rows they can see. `graph()` of an absent group is an empty graph
+    // rather than a null, because every caller of this member hands it to a
+    // renderer and a renderer takes a graph.
+    const grantPage = pagedRows(query, group ? group.grants : [],
+                                { name: 'groupGrants', noun: 'grants' });
+    const permissionPage = pagedRows(query, group ? group.permissions : [],
+                                     { name: 'groupPermissions',
+                                       noun: 'permissions' });
+    const answer = {
+      application: asked,
+      group: group ? clusterSummary(group) : null,
+      grants: grantPage.shown,
+      grantsPaging: pagingJson(grantPage.paging),
+      permissions: permissionPage.shown,
+      permissionsPaging: pagingJson(permissionPage.paging),
+      graph: appPermissions.graph(group ? group.grants : []),
+      counts: groups.counts
+    };
+    log.debug("Leaving permissionGroupsView(). " +
+              (group ? group.counts.applications + " application(s) in the group."
+                     : "Nothing configured names that."));
+    return answer;
+  }
+
+  const groupPage = pagedRows(query, groups.clusters,
+                              { name: 'groups', noun: 'groups' });
+  const answer = {
+    application: null,
+    groups: groupPage.shown.map(clusterSummary),
+    counts: groups.counts,
+    paging: pagingJson(groupPage.paging)
+  };
+  log.debug("Leaving permissionGroupsView(). " + groups.counts.clusters +
+            " group(s), " + groupPage.shown.length + " on this page.");
+  return answer;
+}
+
+// ---------------------------------------------------------------------------
+// GET /admin/delegation/cluster?application=… — ONE GROUP OF APPLICATIONS,
+// DRAWN ALONE.
+//
+// THE DRILL-DOWN OF /admin/delegation/allowed, and the sixth page in the
+// delegation family. That page draws the WHOLE configured register on one
+// canvas, which is the right document for five applications and the wrong one
+// for eighty: past a certain size the interesting reading of a permission
+// register is never the whole of it, it is which applications are joined to
+// each other at all. This page is that reading — search for an application on
+// the allowed picture, and get a diagram of ITS GROUP and nothing else.
+//
+// **A GROUP IS A CONNECTED COMPONENT OF THE GRANT GRAPH WITH THE DIRECTION
+// IGNORED, AND THAT IS THE ONE DECISION ON THIS PAGE.** `app_permissions.js`'s
+// `clusters()` carries the argument in full and it is not repeated here; the
+// short of it is that following the arrows would answer *what can this client
+// eventually reach*, which is a question about a chain, and a permission
+// register has no chains in it — holding a permission on an API grants nobody
+// that API's own permissions. Following a grant either way answers the question
+// somebody arrives with, and it is the only reading under which an API and the
+// three front ends holding permissions on it come out as ONE group.
+// **Membership ignores direction; the PICTURE does not.** Every line is still
+// drawn with its round end and its arrowhead, because which way a grant points
+// is a fact about the grant and this page changes nothing about it.
+//
+// **IT IS A DRILL-DOWN OF /admin/delegation, LIKE ITS FIVE SIBLINGS, AND NOT OF
+// /admin/delegation/allowed** — even though that is the page it is reached
+// from. `upTo()` takes a NAV path and the allowed picture is not one; the trail
+// reads `Admin console › Delegation › One group of applications`, the delegation
+// tab stays active, and the way back to the picture is a button at the top of
+// the page carrying this page's own search. That is rule 7a's arrangement and
+// the same one /admin/delegation/chain has, where the row that was clicked was
+// also on a page rather than in the nav.
+//
+// **THE SAME RENDERER AND THE SAME GRAPH BUILDER**, handed the group's grants
+// instead of every grant in the register. So a line here and a line on the
+// whole-register picture are the same line drawn by the same code, and a
+// reader who has learnt what a dash means on one has learnt it on the other.
+//
+// **A BARE PAGE IS THE CHOOSER AND NOT A 404** — /admin/logout's rule, which
+// /admin/delegation/application and /admin/delegation/user both follow. Arriving
+// with nothing selected is how somebody gets here from a bookmark, and an
+// application the configured register has never heard of is a state to explain
+// rather than an error: it is the ordinary condition of every entry in
+// `ou=applications` that has not been given a base URI or a grant.
+//
+// **NO FORM AND THEREFORE NO NEW OPERATION ON /admin-api** — rule 7, satisfied
+// the way the other picture pages satisfy it. What this page shows without a
+// browser is `?format=json` here and `GET /admin-api/permissions/groups`, which
+// answers the list and one group alike; `?format=svg` is the document alone,
+// with no links in it for the reason the map's header gives.
+// ---------------------------------------------------------------------------
+app.get('/admin/delegation/cluster', function (req, res) {
+  log.debug("Entering the admin delegated-permission group page.");
+  const asked = String(req.query.application || '').trim();
+  const permissions = permissionsView();
+  const groups = permissions.clusters;
+  // EXACT EQUALITY ON THE IDENTIFIER, which is `clusterFor()`'s rule and is
+  // deliberately NOT the normalisation /admin/delegation/application performs.
+  // That page is keyed on what an ACT presented, and one application arrives
+  // spelled several ways; this one is keyed on an entry in `ou=applications`,
+  // where the identifier is the key and nothing in this service case-folds one.
+  const group = asked ? appPermissions.clusterFor(asked, groups) : null;
+  const known = knownUserKeys();
+  const graph = appPermissions.graph(group ? group.grants : []);
+  const look = delegationLooks(graph, known);
+  const drawingLabel = group
+    ? 'Delegated permissions across the ' + group.counts.applications +
+      ' application(s) joined to ' + asked
+    : 'Applications joined by delegated permissions';
+
+  if (String(req.query.format || '') === 'svg') {
+    sendDelegationSvg(res, graph, look, drawingLabel);
+    log.debug("Leaving the admin delegated-permission group page. Answered SVG.");
+    return;
+  }
+
+  const listView = listViewOf('/admin/delegation', req.query);
+  const up = upTo('/admin/delegation', 'One group of applications', listView);
+  // The way back to the picture this page was opened from, carrying the search
+  // that opened it — see allowedChooserState(). The breadcrumb above goes to
+  // the delegation TABLE, which is the section; this button goes to the page
+  // the reader was actually standing on, and the two are different places.
+  const onward = Object.assign({}, listView, allowedChooserState(req.query));
+  const back = note('<a class="btn" href="' +
+    esc('/admin/delegation/allowed' + queryWith(onward, {})) +
+    '">&larr; Back to the allowed mappings</a>');
+  const chooser = allowedApplicationChooser(permissions, group ? asked : '',
+    onward, { path: '/admin/delegation/cluster', query: req.query });
+
+  if (!group) {
+    const groupPage = pagedRows(req.query, groups.clusters,
+                                { name: 'groups', noun: 'groups' });
+    const groupNav = pageNavPair('/admin/delegation/cluster',
+                                 pageParamsOf(req.query), groupPage.paging);
+    const inner = messagesOf(req) + back +
+      (asked
+        ? note('<strong>The configured register has nothing about ' +
+          '<code>' + esc(asked) + '</code>.</strong> That is not an error and ' +
+          'it is the ordinary state of most entries in this registry: an ' +
+          'application arrives in this register only when it is given a base ' +
+          'URI or a permission of its own, which makes it a RESOURCE, or is ' +
+          'granted a permission somebody else exposes, which makes it a ' +
+          'CLIENT. Until one of those has been done there is nothing for it to ' +
+          'be joined to. Two other things could be true: the name is spelled ' +
+          'differently from the identifier on the entry &mdash; nothing here ' +
+          'case-folds one, so <code>WebApp1</code> and <code>webapp1</code> are ' +
+          'two applications &mdash; or the entry has been deleted since the ' +
+          'link was made. <a href="/admin/applications' +
+          esc(queryWith({ application: asked }, {})) + '">The registry</a> ' +
+          'settles both.')
+        : '') +
+      note('<strong>Choose an application and get a picture of everything ' +
+      'it is joined to.</strong> A group is a set of applications that can be ' +
+      'reached from one another by following delegated permissions, IGNORING ' +
+      'which way each one points &mdash; because a grant is directed but a ' +
+      'permission register has no chains in it, and the question worth ' +
+      'answering is <em>which applications are in the same conversation as ' +
+      'this one</em>. <a href="/admin/delegation/allowed">The whole ' +
+      'register</a> is one picture of all of them at once, which is the right ' +
+      'drawing of five applications and the wrong drawing of eighty.') +
+      chooser +
+      perPageForm('/admin/delegation/cluster', 'permappq',
+                  queryOne(req.query, 'permappq'), groupPage.paging.perPage,
+                  '', filterOnly(listView)) +
+      groupNav.head +
+      allowedClusterTable(groups, groupPage.shown, onward) +
+      groupNav.foot +
+      note('The list is built from the CONFIGURED register and not from ' +
+      '<a href="/admin/applications">the registry</a>, so an application with ' +
+      'no base URI and no grant is in neither this table nor the search above. ' +
+      '<a href="/admin/delegation/application">The acts drill-down</a> is the ' +
+      'other question entirely: what has actually been delegated through an ' +
+      'application or to it, which can name something no permission mentions.');
+    respond(req, res, permissionGroupsView(req.query, permissions),
+            'Delegation — one group', '/admin/delegation', inner, up);
+    log.debug("Leaving the admin delegated-permission group page. " +
+              (asked ? "Nothing configured names that." : "Drew the chooser."));
+    return;
+  }
+
+  // WHAT EACH MEMBER IS IN THIS GROUP, counted once over the group's own rows
+  // rather than filtered per member — the same reason the chooser does it:
+  // a filter per application over the grant list is quadratic, and a group is
+  // the one place in this console where the list being walked is deliberately
+  // allowed to be large.
+  const holds = {};
+  const reached = {};
+  const dangles = {};
+  group.grants.forEach(function (one) {
+    holds[one.client] = (holds[one.client] || 0) + 1;
+    if (one.dangling) {
+      dangles[one.client] = (dangles[one.client] || 0) + 1;
+    } else if (one.resource) {
+      reached[one.resource] = (reached[one.resource] || 0) + 1;
+    }
+  });
+  const exposes = {};
+  group.permissions.forEach(function (one) {
+    exposes[one.resource] = (exposes[one.resource] || 0) + 1;
+  });
+
+  const picture = delegationDrawing(graph, look, '/admin/delegation/cluster',
+                                    Object.assign({}, onward,
+                                                  { application: asked }),
+                                    drawingLabel);
+
+  const memberRows = group.members.map(function (identifier) {
+    const registered = applications.get(identifier);
+    const name = registered
+      ? (registered.name || registered.dnLabel || identifier) : '';
+    const href = '/admin/applications' +
+      queryWith(listView, { application: identifier });
+    // The chosen application is marked with a WORD and not with a class:
+    // `.on` in this console's stylesheet is scoped to the chooser's own list,
+    // so a class here would be markup that styles nothing — and a colour alone
+    // would say it to sighted readers only.
+    return '<tr>' +
+      '<td class="who">' + (registered
+        ? '<a href="' + esc(href) + '">' + esc(name) + '</a><br><code>' +
+          esc(identifier) + '</code>'
+        : '<code>' + esc(identifier) + '</code><br><span class="state-none" ' +
+          'title="No entry under ou=applications answers to this identifier. ' +
+          'Both console doors read the registry, so a grant naming something ' +
+          'that is not in it can only have been written by an ldapmodify.">not ' +
+          'in the registry</span>') +
+        (identifier === asked
+          ? '<br><span class="state-valid">the one you chose</span>' : '') +
+        '</td>' +
+      '<td class="num">' + (exposes[identifier]
+        ? '<strong>' + esc(exposes[identifier]) + '</strong>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td class="num">' + (reached[identifier]
+        ? '<strong>' + esc(reached[identifier]) + '</strong>'
+        : '<span class="state-none">0</span>') + '</td>' +
+      '<td class="num">' + (holds[identifier]
+        ? '<strong>' + esc(holds[identifier]) + '</strong>'
+        : '<span class="state-none">0</span>') +
+        (dangles[identifier]
+          ? '<br><span class="state-revoked" title="Naming a permission no ' +
+            'application in this registry defines. It joins this application ' +
+            'to nothing, because there is no far end.">' +
+            esc(dangles[identifier]) + ' dangling</span>'
+          : '') + '</td>' +
+      '<td class="who"><a href="' + esc('/admin/delegation/application' +
+        queryWith(listView, { application: identifier })) + '">what it has ' +
+        'actually delegated</a></td>' +
+      '</tr>';
+  }).join('');
+
+  const grantPage = pagedRows(req.query, group.grants,
+                              { name: 'groupGrants', noun: 'grants' });
+  const grantNav = pageNavPair('/admin/delegation/cluster',
+                               pageParamsOf(req.query), grantPage.paging);
+  const permissionPage = pagedRows(req.query, group.permissions,
+                                   { name: 'groupPermissions',
+                                     noun: 'permissions' });
+  const permissionNav = pageNavPair('/admin/delegation/cluster',
+                                    pageParamsOf(req.query),
+                                    permissionPage.paging);
+
+  const inner = messagesOf(req) + back +
+
+    '<div class="tiles">' +
+      tile(group.counts.applications, 'applications in the group') +
+      tile(group.counts.lines, 'lines drawn') +
+      tile(group.counts.asked, 'asked for at least once') +
+      tile(group.counts.unused, 'never asked for') +
+      tile(group.counts.permissions, 'permissions exposed') +
+      tile(group.counts.dangling, 'dangling, not drawn') +
+    '</div>' +
+
+    note('<strong><code>' + esc(asked) + '</code> is one of ' +
+    esc(group.counts.applications) + ' application(s) that can be reached from ' +
+    'one another by following delegated permissions.</strong> ' +
+    (group.counts.applications === 1
+      ? 'It is joined to nothing: no grant leads from it to another ' +
+        'application, and none leads to it. That is a real answer rather than ' +
+        'an empty page &mdash; an API with permissions defined and nothing ' +
+        'granted on them is a description nobody may use, and a client holding ' +
+        'only dangling grants has been granted something that does not exist.'
+      : 'The group is named after <code>' + esc(group.key) + '</code>, which ' +
+        'is simply the identifier that sorts first &mdash; a group has no name ' +
+        'of its own, and using the union of its members rather than one of ' +
+        'them means adding a grant inside a group does not rename it.') +
+    ' <strong>DIRECTION IS IGNORED FOR MEMBERSHIP AND DRAWN ON EVERY ' +
+    'LINE.</strong> Following the arrows would answer <em>what can this client ' +
+    'eventually reach</em>, and there is no such chain here: holding a ' +
+    'permission on an API grants nobody that API\'s own permissions. Following ' +
+    'a grant either way is what puts an API and the front ends holding ' +
+    'permissions on it in one group instead of four.') +
+
+    // Three paged tables on this page and no filter form to hang the size on,
+    // which is exactly the drill-down case perPageForm()'s header describes.
+    // The leaf is the application, and the chooser's search rides along so
+    // that changing the size does not clear a search the reader is still
+    // reading by.
+    perPageForm('/admin/delegation/cluster', 'application', asked,
+                grantPage.paging.perPage,
+                'The diagram is never paged: it is the whole group or it is a ' +
+                'drawing of the pagination.',
+                Object.assign({}, filterOnly(listView),
+                              allowedChooserState(req.query))) +
+
+    (group.counts.lines
+      ? '<h2>The group, drawn</h2>' +
+        note('<strong>A line leaves the box with the ROUND end and ' +
+        'arrives at the box with the ARROWHEAD</strong>, and a DASHED line is a ' +
+        'grant nobody has ever asked for. Both are the same marks the ' +
+        '<a href="' + esc('/admin/delegation/allowed' + queryWith(onward, {})) +
+        '">whole register</a> uses, drawn by the same code &mdash; this page ' +
+        'hands it a subset of the grants and changes nothing else. ONE LINE PER ' +
+        'PERMISSION rather than per pair, so two grants between the same two ' +
+        'applications are two lines. There is no person and no hexagon on it: a ' +
+        'configured permission says <em>this client may reach that API as ' +
+        'whoever is signed in</em>, and there is no whoever yet.') +
+        picture.html
+      // WHY THERE IS NOTHING TO DRAW, and the three reasons are three
+      // different states rather than one empty page. Saying "every grant here
+      // is dangling" about an application that holds no grants at all would be
+      // the page inventing rows to explain their absence.
+      : note('<strong>There is nothing to draw.</strong> ' +
+        (!group.counts.grants
+          ? 'No grant in this group names anything: this application carries a ' +
+            'base URI and permissions of its own, and nobody has been granted ' +
+            'one of them. That is an API somebody described and nothing may ' +
+            'reach &mdash; the most interesting group of one there is, and a ' +
+            'real answer rather than an empty page. Grant one of the ' +
+            'permissions listed below on a client\'s own page and this ' +
+            'application joins that client\'s group.'
+          : 'Every grant in this group is one the picture leaves out on ' +
+            'purpose &mdash; a DANGLING grant, which names a permission no ' +
+            'application defines and so has no far end to reach, or a grant an ' +
+            'application made to ITSELF, which would be an arrow from a box ' +
+            'back to the same box. Both are in the table below, which is where ' +
+            'those states belong.') +
+        ' <code>?format=svg</code> answers an empty document rather than ' +
+        'refusing, so a link that worked yesterday still resolves.')) +
+
+    '<h2>The applications in it</h2>' +
+    note('<strong>Every member, with which side of a grant it is on.</strong> ' +
+    'An application here is usually both &mdash; a client of one thing and a ' +
+    'resource of another &mdash; which is the whole reason this group exists ' +
+    'as something bigger than a pair. The last column crosses to the other ' +
+    'register: what this application has ACTUALLY delegated, which is a ' +
+    'different question and can name applications that are not in this group ' +
+    'at all.') +
+    '<table><tr><th>Application</th><th>Permissions it exposes</th>' +
+    '<th>Grants held on it</th><th>Grants it holds</th>' +
+    '<th>On the acts side</th></tr>' +
+    (memberRows || '<tr><td colspan="5">No applications.</td></tr>') +
+    '</table>' +
+
+    '<h2>What may be asked for in it</h2>' +
+    note('<strong>Every permission the applications in this group ' +
+    'expose</strong>, granted or not. The UNGRANTED ones are why this table is ' +
+    'here and not left to the grants below: a permission nobody holds appears ' +
+    'on no line of the picture and in no row of that table, so a group whose ' +
+    'whole content is a described API with nothing granted on it would ' +
+    'otherwise be a page with nothing on it at all.') +
+    permissionNav.head +
+    '<table><tr><th>Resource</th><th>Permission</th><th>Identifier</th>' +
+    '<th class="num">Held by</th><th>Who holds it</th><th></th></tr>' +
+    (permissionPage.shown.map(function (one) {
+      return permissionDefinitionRow(one, listView, { readOnly: true });
+    }).join('') || '<tr><td colspan="6">No application in this group exposes a ' +
+      'permission, so every grant in it is dangling &mdash; each names a ' +
+      'permission this registry does not define.</td></tr>') +
+    '</table>' +
+    permissionNav.foot +
+
+    '<h2>Every grant in the group</h2>' +
+    note('The rows <a href="/admin/delegation#allowed">the register</a> ' +
+    'holds, narrowed to this group. <strong>Nothing here changes anything</strong> ' +
+    '&mdash; the Revoke button for a grant is on the register itself, so that ' +
+    'the picture pages stay documents rather than becoming a fourth door onto ' +
+    'the same five actions.') +
+    grantNav.head +
+    '<table><tr><th>Client &mdash; who may ask</th><th>Resource &mdash; what is ' +
+    'reached</th><th>Permission</th><th>Identifier</th><th>What the access token ' +
+    'will say</th><th>Ever asked for?</th><th></th></tr>' +
+    (grantPage.shown.map(function (one) {
+      return permissionGrantRow(one, listView, { readOnly: true });
+    }).join('') || '<tr><td colspan="7">No grant in this group, which means ' +
+      'this application exposes an API and nothing has been granted on ' +
+      'it.</td></tr>') +
+    '</table>' +
+    grantNav.foot +
+
+    '<h2>Another application</h2>' +
+    note('The same search that is on ' +
+    '<a href="' + esc('/admin/delegation/allowed' + queryWith(onward, {})) +
+    '">the allowed picture</a>, drawn again here so that comparing two groups ' +
+    'is one click rather than two.') +
+    chooser +
+
+    note('<code>?format=json</code> is this group, its grants and its graph; ' +
+    '<code>?format=svg</code> is the picture alone, with no links in it. Every ' +
+    'group at once is <code>GET /admin-api/permissions/groups</code>, and this ' +
+    'one is that operation with <code>?application=' + esc(asked) + '</code>.');
+
+  respond(req, res, permissionGroupsView(req.query, permissions),
+          'Delegation — one group', '/admin/delegation', inner, up);
+  log.debug("Leaving the admin delegated-permission group page. " +
+            group.counts.applications + " application(s), " +
+            group.counts.lines + " line(s).");
 });
 
 // ---------------------------------------------------------------------------
@@ -12620,11 +13426,31 @@ function firstFieldValue(row, attribute) {
 // The two selects the edit forms offer, built from applications.js's EDITABLE
 // table so that a form cannot offer a field the action would refuse — the same
 // reason the audit page's filters are built from the audit vocabulary.
-function editableOptions(mode, selected) {
-  return applications.editableAttributes(mode).map(function (row) {
-    return '<option value="' + esc(row.name) + '"' +
-      (row.name === selected ? ' selected' : '') + '>' + esc(row.name) +
-      (row.sensitive ? ' (credential)' : '') + '</option>';
+//
+// `row` IS THE ENTRY BEING EDITED, and it is here because that rule acquired a
+// second half on 2026-09-01. An attribute whose SCHEMA row carries `families`
+// may only be written onto an entry declared for one of them —
+// `oauthTokenExchangeRefreshToken` is the only one today — and
+// `updateApplication()` refuses it. Offering it in this select on a SAML-only
+// application would be exactly the drift this function exists to prevent: a
+// control that looks like a control and answers with a refusal. Both halves
+// come off the same SCHEMA member, so a second family-scoped attribute needs
+// nothing here.
+//
+// The entry is optional: `editableOptions(mode, selected)` with no entry offers
+// everything, which is what a caller with no application in hand should get.
+function editableOptions(mode, selected, row) {
+  const declared = row ? applications.declaredFamiliesOf(row) : null;
+  return applications.editableAttributes(mode).filter(function (attribute) {
+    if (!declared) {
+      return true;
+    }
+    return !applications.familyRefusal(attribute.name, declared,
+                                       (row && row.identifier) || '');
+  }).map(function (attribute) {
+    return '<option value="' + esc(attribute.name) + '"' +
+      (attribute.name === selected ? ' selected' : '') + '>' + esc(attribute.name) +
+      (attribute.sensitive ? ' (credential)' : '') + '</option>';
   }).join('');
 }
 
@@ -13372,7 +14198,7 @@ function applicationDetailPage(req, identifier) {
     '<input type="hidden" name="action" value="set">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="setattr">Set</label>' +
-    '<select id="setattr" name="attribute">' + editableOptions('set', '') + '</select>' +
+    '<select id="setattr" name="attribute">' + editableOptions('set', '', row) + '</select>' +
     '<label for="setval">to</label>' +
     '<input type="text" id="setval" name="value" size="34" placeholder="empty clears it">' +
     '<button type="submit">Set</button>' +
@@ -13381,7 +14207,7 @@ function applicationDetailPage(req, identifier) {
     '<input type="hidden" name="action" value="add">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="addattr">Add to</label>' +
-    '<select id="addattr" name="attribute">' + editableOptions('multi', 'oauthRedirectUri') +
+    '<select id="addattr" name="attribute">' + editableOptions('multi', 'oauthRedirectUri', row) +
     '</select>' +
     '<label for="addval">the value</label>' +
     '<input type="text" id="addval" name="value" size="34" required>' +
@@ -13391,6 +14217,13 @@ function applicationDetailPage(req, identifier) {
     '<input type="hidden" name="action" value="remove">' +
     '<input type="hidden" name="application" value="' + esc(row.identifier) + '">' +
     '<label for="remattr">Remove from</label>' +
+    // NO `row` HERE, AND THAT IS THE RULE READ EXACTLY: the family scope refuses
+    // a SET and an ADD and never a REMOVE, for updateApplication()'s reason —
+    // a value can arrive by `ldapmodify` or be left behind when a family is
+    // untimed from the entry, and a console that would not offer to remove it
+    // would be the one door that could tidy it up, shut. So this select keeps
+    // offering everything editable. Nothing family-scoped is `multi` today; the
+    // asymmetry is here so that the first one that is behaves correctly.
     '<select id="remattr" name="attribute">' + editableOptions('multi', 'oauthRedirectUri') +
     '</select>' +
     '<label for="remval">the value</label>' +
@@ -13710,11 +14543,23 @@ function samlOverrideFieldRow(row) {
   const id = 'field-' + row.attribute;
   const hint = tip(described.description);
   const inherits = 'inherit — currently ' + described.text;
-  const control = described.type === 'bool'
+  // A BOOL AND AN ENUM ARE THE SAME CONTROL WITH DIFFERENT OPTIONS, which is
+  // why the enum joined this branch rather than getting one of its own: both
+  // are a closed vocabulary plus the empty option that means inherit, and a
+  // bool is the two-word case of it. The options come off `enumValues` on the
+  // setting's own row, so a value added there reaches this form with nothing
+  // edited here — the same rule the section itself follows about
+  // `overridableSettings()`. A text box would have been the alternative and is
+  // the wrong one: this attribute is read back through `config.parseAs()`, so a
+  // typo is a warning in the log and the service-wide value silently in force,
+  // which is the failure a select cannot have.
+  const choices = described.type === 'bool' ? ['true', 'false']
+    : (described.type === 'enum' ? (described.enumValues || []) : null);
+  const control = choices
     ? '<select id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint + '>' +
       '<option value="">' + esc(inherits) + '</option>' +
-      ['true', 'false'].map(function (option) {
-        return '<option value="' + option + '">' + option + '</option>';
+      choices.map(function (option) {
+        return '<option value="' + esc(option) + '">' + esc(option) + '</option>';
       }).join('') + '</select>'
     : '<input type="' + (described.type === 'int' ? 'number' : 'text') + '"' +
       ' id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint +
@@ -13739,9 +14584,14 @@ function samlOverrideFieldRow(row) {
 const OVERRIDE_SECTIONS = [
   { prefix: 'oauth2.', heading: 'What OAuth 2.0 / OIDC issues for this client',
     families: ['oauth2', 'oidc'],
-    intro: 'The three token lifetimes plus the refresh idle timeout and whether ' +
-           'signing out revokes this client\'s refresh tokens. The last two are read ' +
-           'only in RFC 9700 mode.' },
+    intro: 'The three token lifetimes, the refresh idle timeout, whether signing ' +
+           'out revokes this client\'s refresh tokens, and whether an RFC 8693 token ' +
+           'exchange it performs comes back with a refresh token. The idle timeout ' +
+           'and the sign-out revocation are read only in RFC 9700 mode. The last is ' +
+           'the ONE field on this whole form that is refused rather than merely ' +
+           'inert when the family above is not ticked &mdash; it decides what the ' +
+           'token endpoint does for a client_id, so an entry no token request can ' +
+           'name would carry it looking like a policy in force.' },
   { prefix: 'saml2.', heading: 'What SAML 2.0 issues for this service provider',
     families: ['saml2'],
     intro: 'The assertion lifetime, the two signature switches, the default NameID ' +
@@ -13794,11 +14644,23 @@ function samlOverrideFieldRow(row) {
   const id = 'field-' + row.attribute;
   const hint = tip(described.description);
   const inherits = 'inherit — currently ' + described.text;
-  const control = described.type === 'bool'
+  // A BOOL AND AN ENUM ARE THE SAME CONTROL WITH DIFFERENT OPTIONS, which is
+  // why the enum joined this branch rather than getting one of its own: both
+  // are a closed vocabulary plus the empty option that means inherit, and a
+  // bool is the two-word case of it. The options come off `enumValues` on the
+  // setting's own row, so a value added there reaches this form with nothing
+  // edited here — the same rule the section itself follows about
+  // `overridableSettings()`. A text box would have been the alternative and is
+  // the wrong one: this attribute is read back through `config.parseAs()`, so a
+  // typo is a warning in the log and the service-wide value silently in force,
+  // which is the failure a select cannot have.
+  const choices = described.type === 'bool' ? ['true', 'false']
+    : (described.type === 'enum' ? (described.enumValues || []) : null);
+  const control = choices
     ? '<select id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint + '>' +
       '<option value="">' + esc(inherits) + '</option>' +
-      ['true', 'false'].map(function (option) {
-        return '<option value="' + option + '">' + option + '</option>';
+      choices.map(function (option) {
+        return '<option value="' + esc(option) + '">' + esc(option) + '</option>';
       }).join('') + '</select>'
     : '<input type="' + (described.type === 'int' ? 'number' : 'text') + '"' +
       ' id="' + esc(id) + '" name="field.' + esc(row.attribute) + '"' + hint +
@@ -13920,13 +14782,23 @@ function samlOverrideFieldsSection() {
     'live on <a href="/admin/token-lifetimes">Token lifetimes</a> and ' +
     '<a href="/admin/saml-assertions">SAML assertions</a>, and changing one there moves ' +
     'every application that has not been given an answer of its own.') +
-    note('<strong>They apply whether or not the protocol is ticked above.</strong> A ' +
-    'declaration grants and refuses nothing here — an application declared for nothing at ' +
-    'all still gets a token if it asks for one — so these are read whenever this service ' +
-    'issues to this application. Ticking a family only decides what this page SHOWS you. ' +
+    note('<strong>They apply whether or not the protocol is ticked above &mdash; with ' +
+    'one exception, named below.</strong> A declaration grants and refuses nothing here ' +
+    '&mdash; an application declared for nothing at all still gets a token if it asks for ' +
+    'one &mdash; so these are read whenever this service issues to this application. ' +
+    'Ticking a family only decides what this page SHOWS you. ' +
     'What ticking SAML 2.0 or SAML 1.1 does do is give the entry a ' +
     '<code>samlEntityId</code> if you leave that blank, so its metadata is publishable ' +
     'immediately.') +
+    note('<strong>The exception is <code>oauthTokenExchangeRefreshToken</code>, and it ' +
+    'is REFUSED rather than inert on an entry declared for neither OAuth 2.0 nor OpenID ' +
+    'Connect.</strong> Every other field here is a default something reads if it ever ' +
+    'gets the chance, so writing one onto an application that never reaches that protocol ' +
+    'costs nothing and says nothing false. That one decides what the <em>token ' +
+    'endpoint</em> does for one <code>client_id</code> &mdash; so on an entry no token ' +
+    'request could ever name, it would sit there reading like a policy that was in force. ' +
+    'Tick OAuth 2.0 or OpenID Connect and it is accepted. An <code>ldapmodify</code> ' +
+    'reaches the attribute either way, as it reaches every attribute here.') +
     sections + extra + samlKeySourceSection();
 }
 
@@ -14243,7 +15115,17 @@ function newApplicationPage(req) {
       // offer a field the form has never heard of, nor the other way round.
       declarations: applications.declarationAttributes(),
       editable: applications.editableAttributes().map(function (row) {
-        return { name: row.name, mode: row.editable, sensitive: !!row.sensitive };
+        // `families` where the attribute has one, and ABSENT where it does not,
+        // so that a caller reading this document to learn what it may send is
+        // told about the one refusal it could otherwise only discover by being
+        // refused. An empty array here would have said "applies to no family",
+        // which is the opposite of what an absent member means.
+        const published = { name: row.name, mode: row.editable,
+                            sensitive: !!row.sensitive };
+        if (row.families && row.families.length) {
+          published.families = row.families.slice(0);
+        }
+        return published;
       })
     }
   };
@@ -24342,6 +25224,7 @@ module.exports = {
   // registry and the resolution of both directions are work both need, and two
   // copies of it would be two answers that each looked right alone.
   permissionsView: permissionsView,
+  permissionGroupsView: permissionGroupsView,
   permissionsAction: permissionsAction,
   // The action names, read by admin_api.js so that its operations and this
   // console's switch cannot come to name different things. Built from the same

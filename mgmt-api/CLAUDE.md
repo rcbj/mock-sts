@@ -483,7 +483,9 @@ what is in it now.
 Added 2026-09-01, six operations: a `GET` and five actions
 (`set-permission-base`, `define-permission`, `remove-permission`,
 `grant-permission`, `revoke-permission`), all of them `mirrors`-ing
-`/admin/delegation`.
+`/admin/delegation`. A seventh joined them on 2026-09-02 —
+`GET /admin-api/permissions/groups`, the register partitioned — and it is
+argued below rather than here.
 
 **IT IS A RESOURCE OF ITS OWN RATHER THAN MORE ACTIONS ON `/delegation`**, and
 the reason is the same one the console gives for putting two headings on one
@@ -522,6 +524,36 @@ moving an action** — making it one would have wanted a
 `POST /admin-api/applications/grant-permission` beside the
 `/permissions/grant-permission` that already exists, which is two operations for
 one write. `admin-ui/CLAUDE.md` argues the move itself.
+
+**`GET /admin-api/permissions/groups` JOINED IT ON 2026-09-02, AND A MEMBER ON
+THE `GET` ABOVE WOULD HAVE BEEN THE SHORTER CHANGE AND THE WRONG ONE.** It
+answers the register PARTITIONED — a group is a set of applications that can be
+reached from one another by following grants with the direction ignored, which
+`common/CLAUDE.md`'s rule 3s argues — and it mirrors `GET /admin/delegation`
+like the register beside it, because the two console pages it belongs to
+(`/admin/delegation/allowed` and `/admin/delegation/cluster`) are drill-downs of
+that tab and rule 7's parity check reads a `NAV` path. Three things decided it:
+
+* **`graph` on the reply above is the boundary rather than the precedent.**
+  That member is one document about the whole register and its size is the
+  register's. A list of groups that carried its grants would repeat the whole
+  register once per group; one that did not would leave a caller no way to ask
+  for a single group's rows at all.
+* **It needs PAGING**, and a member of somebody else's reply has nowhere to put
+  a page number. The console's own list of groups is paged, and the standing
+  rule here is that a new console page gets an API resource in the same change
+  and both get pagination.
+* **ONE OPERATION ANSWERS BOTH SHAPES**, `?application=` deciding which, because
+  they are the same question at two scales and the console draws them with one
+  function. Two operations would have been two places to disagree about what a
+  group is. `admin.permissionGroupsView()` is that function, and this handler
+  and `/admin/delegation/cluster?format=json` both go through it.
+
+An application the register has never heard of answers **200 with `group:
+null`** rather than 404: having no permissions configured is the ordinary state
+of most entries in `ou=applications`, which is a fact about the register and not
+a missing resource. It is the same three-state honesty the `dangling` flag on a
+grant carries.
 
 **THE FIVE ACTION NAMES STUTTER UNDER THIS PATH AND THAT IS DELIBERATE.**
 `/admin-api/permissions/define-permission` reads badly and `/permissions/define`

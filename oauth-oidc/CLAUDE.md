@@ -730,6 +730,82 @@ exactly as it was before this existed.
 row names an attribute. `may_act` is the claim a real deployment would use for
 it; this service neither issues nor reads one.
 
+**AN EXCHANGE MAY ASK FOR A REFRESH TOKEN SINCE 2026-09-01, AND THAT REVERSED A
+SENTENCE THIS FILE AND README.md BOTH USED TO STATE FLATLY.** The old one was
+that an exchanged token carries no refresh token because there is no end-user
+session behind it to refresh against — which is true and is not the argument.
+RFC 8693 section 2.2.1 makes `refresh_token` an OPTIONAL member and says when it
+is worth issuing: "in cases where the client of the token exchange needs the
+ability to access a resource even when the original credential is no longer
+valid", the user-not-present case where there is no session BY DESIGN. So the
+absence of a session was the reason to have one, read backwards.
+
+Three things about how it is done are the parts worth keeping:
+
+* **It is asked for, not assumed — and what the ask BUYS is configured.**
+  `requested_token_type` is section 2.1's parameter for exactly this, and the
+  branch reads it and nothing else about the request: the URN
+  `urn:ietf:params:oauth:token-type:refresh_token` is the ask and every other
+  value, including none, is not. What that ask then produces is
+  `oauth2.tokenExchangeRefreshToken`, which is THREE WORDS AND NOT A FLAG:
+  `never` refuses the ask (silently — an exchange that asked and did not get one
+  is still well-formed, and the refusal is a log line naming the setting rather
+  than an error), `when-requested` honours it and is the default, `always` hands
+  one to an exchange that never mentioned the parameter. A bool could not have
+  said this: `false` would have had to mean `never`, leaving `true` meaning
+  either of the other two with no way to reach the third — and `always` is the
+  side the interesting client bug is on, because a credential arrives that the
+  client did not ask for and must not leak. The default keeps the change
+  invisible to every existing caller, `tests/vendored/oauth2_sts_endpoints.js`
+  among them.
+* **It is read on the CLIENT PERFORMING THE EXCHANGE**, through
+  `applications.settingFor()` — the same call every other per-client OAuth
+  override goes through, so `oauthTokenExchangeRefreshToken` on that entry wins
+  over the service-wide value. The client and not the audience, for two reasons
+  that point the same way: the refresh token is HANDED to the client, so it is
+  that party's credential to hold, revoke and redeem; and in the interesting
+  case the subject the exchange is *about* has no entry in the registry at all,
+  the whole point of an exchange being a subject_token from somewhere else.
+  **That attribute is the first in this service's application schema that is
+  scoped to a protocol family** — it applies to OAuth 2.0 and OpenID Connect and
+  both write doors refuse it elsewhere; `common/CLAUDE.md`'s rule 3g argues the
+  mechanism, and the reason it is worth refusing rather than leaving inert is
+  that a value here is a policy about the TOKEN ENDPOINT, and an entry no token
+  request can ever name would carry it looking as though it were in force.
+* **An unrecognised value falls to `when-requested` and not to `always`.**
+  `settingFor()` warns naming the entry and hands back the service-wide value,
+  and the branch then compares that against the three words — so a fourth word
+  behaves as the middle one. That is the safe end of the range to fall off: the
+  client gets what it asked for and nothing it did not.
+* **`withRefresh` and `resources` are the WHOLE of it.** The token is minted by
+  `refreshToken()` through `tokenSet()`, the same path every other grant takes,
+  so "an ordinary refresh token of this service" is true by construction rather
+  than by six properties having been remembered separately — the `typ`, the jti
+  in the one revocation set, `oauth2.refreshTokenTtlS`, the RFC 9700 family
+  bookkeeping and rotation, and the DPoP and certificate confirmations. An
+  exchange made with a proof mints a BOUND refresh token, which is the whole of
+  RFC 9449 section 5 on the long-lived half of a grant. `resources` is passed
+  because it is what the refresh grant compares a renewal against: an exchange
+  addressed to one audience must not be renewable into a token carrying this
+  service's default, since a grant cannot widen itself by being renewed and an
+  exchange is a grant like the rest.
+* **`issued_token_type` still says `access_token`, and that is a decision.**
+  Section 2.2.1 defines that member as describing the token in `access_token`,
+  and an access token is what this response's `access_token` holds however the
+  request was written. The other available reading — hand the client a refresh
+  token IN `access_token` and name it there, which the section's "historical
+  reasons" note permits — was refused: a client would then hold a `typ:
+  'Refresh'` JWT under the name every other grant here uses for the credential
+  a resource server is presented with, and this service's own protected
+  endpoints would refuse it. Both halves of the grant come back where a client
+  already knows to look for them.
+
+The delegation act names the refresh token in `produced` beside the access token
+and the ID token, for the id_token's reason and a stronger one: it is the half
+that OUTLIVES the exchange, and an act that did not mention it would describe a
+delegation as having produced a credential good for an hour when what it
+produced is one good for a day and renewable.
+
 ---
 
 3n. **`frontchannel_logout.js` is a library (rule 3) and it exists because THREE

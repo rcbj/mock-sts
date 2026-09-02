@@ -714,6 +714,51 @@ function narrowDoorProperties(keys) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// THE ATTRIBUTES SCOPED TO A PROTOCOL FAMILY, AS A SENTENCE, GENERATED.
+//
+// One row in `applications.SCHEMA` carries `families` today and the rule it
+// declares is the only refusal in this registry that is about WHICH
+// application rather than about which attribute — so a caller reading this
+// document to learn what it may send has to be told, or it discovers the rule
+// by being refused.
+//
+// GENERATED FROM THE SCHEMA AND NOT TYPED, for the reason the `set` and `add`
+// descriptions above are: a hand-written list of what an operation accepts is a
+// second definition of a table, and it goes wrong silently in exactly the
+// document a caller trusts most. It answers with the empty string when nothing
+// is family-scoped, so removing the last such row removes the paragraph.
+function familyScopeNote() {
+  log.debug("Entering familyScopeNote().");
+  const scoped = applications.SCHEMA.attributes.filter(function (row) {
+    return row.editable && row.families && row.families.length;
+  });
+  if (!scoped.length) {
+    log.debug("Leaving familyScopeNote(). Nothing is family-scoped.");
+    return '';
+  }
+  const listed = scoped.map(function (row) {
+    const labels = row.families.map(function (id) {
+      const family = applications.PROTOCOLS.filter(function (one) {
+        return one.id === id;
+      })[0];
+      return family ? family.label : id;
+    });
+    return '`' + row.name + '` (' + labels.join(', ') + ')';
+  }).join(', ');
+  log.debug("Leaving familyScopeNote(). " + scoped.length + " attribute(s).");
+  return '**' + (scoped.length === 1 ? 'One attribute is' : scoped.length +
+         ' attributes are') + ' scoped to a PROTOCOL FAMILY and REFUSED on an ' +
+         'application declared for none of them: ' + listed + '.** That is ' +
+         'unlike every other attribute here, which is inert rather than wrong ' +
+         'on an entry that never reaches the protocol it belongs to — these ' +
+         'decide what an ENDPOINT does for an identifier, so on an entry no ' +
+         'request could ever name they would read as a policy that was in ' +
+         'force. Declare the family first (`protocols` on the create, or add ' +
+         'to `appAllowedProtocol`). Clearing one is never refused, and ' +
+         '`ldapmodify` reaches them like every other attribute.\n\n';
+}
+
 const ROUTES = [
   { method: 'GET', path: BASE, tag: 'Service',
     operationId: 'getIndex',
@@ -3973,7 +4018,8 @@ const ROUTES = [
                            'there.\n\n**Nothing given here is CHECKED except ' +
                            'the OAuth redirect URIs, and those only in RFC 9700 ' +
                            'mode.** The rest are recorded, in the way being in ' +
-                           'this registry at all is a record.' }
+                           'this registry at all is a record.\n\n' +
+                           familyScopeNote() }
           },
           required: ['identifier'],
           examples: [{ identifier: 'urn:example:crm', name: 'CRM',
@@ -4010,7 +4056,8 @@ const ROUTES = [
                      '`ldapmodify` still reaches every attribute, which is a ' +
                      'deliberate difference — refusing them HERE is the ' +
                      'difference between offering an operation and merely not ' +
-                     'preventing it.\n\nThis writes the same entry LDAP ' +
+                     'preventing it.\n\n' + familyScopeNote() +
+                     'This writes the same entry LDAP ' +
                      'writes, through the same functions, so it takes effect ' +
                      'on the very next authorization request.',
         requestBodyRequired: true,
@@ -4660,6 +4707,113 @@ const ROUTES = [
       const view = admin.permissionsView();
       sendJson(res, 200, Object.assign({}, view.register, { graph: view.graph }));
       log.debug("Leaving the management API permissions endpoint.");
+    } },
+
+  // -------------------------------------------------------------------------
+  // THE GROUPINGS, AS A RESOURCE OF ITS OWN (2026-09-02).
+  //
+  // A MEMBER ON `GET /permissions` WOULD HAVE BEEN THE SHORTER CHANGE AND IT IS
+  // THE WRONG ONE, for the reason that reply's own `graph` member is the
+  // boundary rather than an example. `graph` is one document about the whole
+  // register and its size is the register's; a list of groups that carried its
+  // grants would repeat the register once per group, and one that did not would
+  // leave a caller no way to ask for a single group's rows at all. It also
+  // needs PAGING — the console's own list of groups is paged, and a member of
+  // somebody else's reply has nowhere to put a page number.
+  //
+  // ONE OPERATION ANSWERS BOTH SHAPES, `?application=` deciding which, because
+  // they are the same question at two scales and the console draws them with
+  // one function: without it, every group with its counts; with it, the ONE
+  // group that application is in, with its grants, its permissions and the
+  // graph /admin/delegation/cluster draws. Two operations would have been two
+  // places to disagree about what a group is.
+  //
+  // It mirrors `GET /admin/delegation` like the register beside it — the
+  // console pages it belongs to are drill-downs of that tab, and rule 7's
+  // parity check reads a NAV path.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/permissions/groups', tag: 'Delegation',
+    operationId: 'getPermissionGroups',
+    summary: 'Which applications are joined to each other by delegated permissions',
+    description: 'The configured register PARTITIONED: a group is a set of ' +
+                 'applications that can be reached from one another by ' +
+                 'following grants, **ignoring which way each grant ' +
+                 'points**.\n\nDirection is dropped for MEMBERSHIP and kept ' +
+                 'on every line of the picture. Following the arrows would ' +
+                 'answer *what can this client eventually reach*, which is a ' +
+                 'question about a chain, and a permission register has no ' +
+                 'chains in it: holding a permission on an API grants nobody ' +
+                 'that API\'s own permissions. Following a grant either way is ' +
+                 'the only reading under which an API and the three front ends ' +
+                 'holding permissions on it come out as ONE group rather than ' +
+                 'as four.\n\n**The membership universe is what the ' +
+                 'CONFIGURED register touches**: every application carrying a ' +
+                 'base URI or a permission of its own, and every application ' +
+                 'holding a grant. An entry in `ou=applications` that is ' +
+                 'neither is in no group, because this register has nothing to ' +
+                 'say about it.\n\nThree states join no two applications, and ' +
+                 'each produces a group of ONE rather than being left out: a ' +
+                 'DANGLING grant (no application defines the permission, so ' +
+                 'there is no far end), a grant an application made to ITSELF ' +
+                 '(one application however it is drawn), and a resource nobody ' +
+                 'holds anything on — which is the most interesting group of ' +
+                 'one there is, since somebody described an API and nothing ' +
+                 'may reach it.\n\nA group is NAMED after the identifier of ' +
+                 'its members that sorts first. That is a property of the SET, ' +
+                 'so adding a grant inside a group does not rename it.\n\n' +
+                 'With no `application`, every group with its counts and no ' +
+                 'rows, biggest first and paged on `groupsPage` — the shape ' +
+                 '/admin/delegation/allowed lists. With `application`, the ONE ' +
+                 'group that application is in, with its permissions paged ' +
+                 'on `groupPermissionsPage`, its ' +
+                 'grants paged on `groupGrantsPage`, and the `graph` ' +
+                 '/admin/delegation/cluster draws, in the shape `GET ' +
+                 '/admin-api/delegation`\'s `graph` uses. An application the ' +
+                 'configured register has never heard of answers 200 with ' +
+                 '`group: null`, not 404: having no permissions configured is ' +
+                 'the ordinary state of most entries in this registry, and it ' +
+                 'is a fact rather than an error. **The identifier is matched ' +
+                 'EXACTLY** — nothing in this service case-folds one, so ' +
+                 '`WebApp1` and `webapp1` are two applications.',
+    mirrors: 'GET /admin/delegation',
+    parameters: [
+      { name: 'application', in: 'query',
+        description: 'One application\'s identifier. Answers the group it is ' +
+                     'in, with its rows and its graph, instead of the list of ' +
+                     'every group. Matched exactly.',
+        schema: { type: 'string' } },
+      { name: 'groupsPage', in: 'query',
+        description: 'Which page of the group LIST. The same name the console ' +
+                     'page uses, because a group list is one of several lists ' +
+                     'a delegation page can hold and a bare `page` would move ' +
+                     'them together. Not read when `application` is given.',
+        schema: { type: 'integer', minimum: 1 } },
+      { name: 'groupGrantsPage', in: 'query',
+        description: 'Which page of the GRANTS inside one group. Read only ' +
+                     'when `application` is given.',
+        schema: { type: 'integer', minimum: 1 } },
+      { name: 'groupPermissionsPage', in: 'query',
+        description: 'Which page of the PERMISSIONS the applications in one ' +
+                     'group expose, granted or not. Read only when ' +
+                     '`application` is given.',
+        schema: { type: 'integer', minimum: 1 } },
+      { name: 'per', in: 'query',
+        description: 'Rows per page, shared by both lists above — one `per` ' +
+                     'per page is this console\'s rule and this operation ' +
+                     'follows it.',
+        schema: { type: 'integer', minimum: 1 } }
+    ],
+    responseDescription: 'Every group with its members and counts, or the one ' +
+                         'group an application is in with its grants, its ' +
+                         'permissions and its graph.',
+    responseSchema: { type: 'object',
+                      description: 'The configured register partitioned into ' +
+                                   'groups of applications that can reach one ' +
+                                   'another, direction ignored.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API permission groups endpoint.");
+      sendJson(res, 200, admin.permissionGroupsView(req.query));
+      log.debug("Leaving the management API permission groups endpoint.");
     } },
 
   { method: 'POST', route: BASE + '/permissions/:action', tag: 'Delegation',

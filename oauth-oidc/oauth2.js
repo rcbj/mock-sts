@@ -5157,15 +5157,131 @@ async function tokenEndpoint(req, res) {
       requestedResources.filter(function (one) {
         return askedAudiences.indexOf(one) < 0;
       }));
+    // -----------------------------------------------------------------------
+    // AND WHETHER A REFRESH TOKEN COMES BACK BESIDE IT — RFC 8693 section 2.1's
+    // `requested_token_type`, WHICH THIS BRANCH READ NOWHERE UNTIL 2026-09-01.
+    //
+    // Section 2.2.1 makes `refresh_token` an OPTIONAL member of a token
+    // exchange response and says exactly when one is worth having: "in cases
+    // where the client of the token exchange needs the ability to access a
+    // resource even when the original credential is no longer valid" — the
+    // offline case, where there is no longer a person entertaining a session
+    // with the client. It is a thing a client ASKS FOR, and the parameter it
+    // asks with is `requested_token_type`; section 2.1 leaves the answer
+    // entirely to the authorization server when it is absent.
+    //
+    // So the default is UNCHANGED — an exchange that says nothing gets an
+    // access token and nothing else, which is what every caller of this
+    // endpoint has ever had — and asking for
+    // `urn:ietf:params:oauth:token-type:refresh_token` is what adds one.
+    //
+    // NOTHING IS REFUSED FOR ASKING FOR SOMETHING ELSE. A `requested_token_type`
+    // naming a SAML assertion or a JWT is answered with exactly what this
+    // branch has always answered with, because section 2.1's own reading is
+    // that the type is a REQUEST rather than an instruction — and refusing one
+    // would be this service enforcing something by default, which nothing here
+    // does outside RFC 9700 mode.
+    // -----------------------------------------------------------------------
+    const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token';
+    const REFRESH_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:refresh_token';
+    const askedForRefresh =
+      String(body.requested_token_type || '').trim() === REFRESH_TOKEN_TYPE;
+    // -----------------------------------------------------------------------
+    // AND WHAT THIS SERVICE HAS BEEN CONFIGURED TO DO ABOUT THAT ASK.
+    //
+    // `oauth2.tokenExchangeRefreshToken` is three words rather than a flag, and
+    // its row in `config.js` argues why: RFC 8693 section 2.2.1 leaves the
+    // decision to the authorization server, real ones differ, and a client
+    // written against one of them meets the others. `never` refuses the ask,
+    // `when-requested` honours it (the default, and what this endpoint did the
+    // day the ask was implemented), `always` hands one to an exchange that
+    // never mentioned the parameter.
+    //
+    // READ THROUGH applications.settingFor() ON THE CLIENT PERFORMING THE
+    // EXCHANGE, which is the same call every other per-client OAuth override
+    // goes through. The client and not the audience, because the refresh token
+    // is handed to the client — it is that party's credential to hold and
+    // redeem — and because in the interesting case the subject the exchange is
+    // ABOUT has no entry here at all, the whole point of an exchange being a
+    // subject_token from somewhere else.
+    //
+    // AN UNRECOGNISED VALUE IS NOT AN ERROR HERE. `settingFor()` warns naming
+    // the entry and falls back to the service-wide setting, and this reads
+    // whatever comes back against the three words — so a fourth word behaves as
+    // `when-requested` does rather than as `always`, which is the safe end of
+    // the range to fall off: the client gets what it asked for and nothing it
+    // did not.
+    // -----------------------------------------------------------------------
+    const refreshPolicy = String(applications.settingFor(
+      client.client_id, 'oauth2.tokenExchangeRefreshToken', config) || '').trim();
+    const wantsRefresh = refreshPolicy === 'always' ||
+      (refreshPolicy !== 'never' && askedForRefresh);
+    log.debug("Token exchange: oauth2.tokenExchangeRefreshToken is \"" + refreshPolicy +
+              "\" for " + client.client_id + " and the request " +
+              (askedForRefresh ? 'asked for' : 'did not ask for') +
+              " a refresh token, so the token set " +
+              (wantsRefresh ? 'carries' : 'does not carry') + " one.");
+    if (askedForRefresh && refreshPolicy === 'never') {
+      // SAID OUT LOUD AND NOT REFUSED. RFC 8693 section 2.1 makes
+      // `requested_token_type` a request rather than an instruction and section
+      // 2.2.1 makes the member optional, so an exchange that asked and did not
+      // get one is a well-formed exchange — the response says what was issued,
+      // which is what `issued_token_type` is for. A client that cannot see this
+      // line would otherwise have nothing to tell it apart from a service that
+      // had never heard of the parameter, which is why it is logged at INFO.
+      log.info('oauth2: "' + client.client_id + '" asked for a refresh token by ' +
+               'requested_token_type and oauth2.tokenExchangeRefreshToken is "never" ' +
+               'for it, so the exchange succeeded without one. Set that to ' +
+               '"when-requested" service-wide, or put oauthTokenExchangeRefreshToken ' +
+               'on this application\'s entry, to honour the ask.');
+    }
     const exchanged = await issue({
       jkt: dpopJkt,
       sub: subject.sub || 'urn:sts-mock:exchanged',
       user: Object.assign(userFor(subject.username), subject.sub ? { sub: subject.sub } : {}),
       client_id: client.client_id, scope: String(body.scope || subject.scope || ''),
-      audience: audienceClaim(exchangeAudiences), act: act, withRefresh: false,
+      audience: audienceClaim(exchangeAudiences), act: act,
+      // Section 2.2.1's `refresh_token` member — and this flag is the ONLY
+      // thing this branch decides about it. It is minted by the same
+      // refreshToken(), through the same tokenSet(), as the token every other
+      // grant here hands back, which is what makes "treat it as any other
+      // refresh token" true by construction rather than by six things having
+      // been remembered: the same `typ: 'Refresh'`, the same jti in the same
+      // revocation set, the same `oauth2.refreshTokenTtlS`, the same RFC 9700
+      // family bookkeeping and rotation on redemption, and the same
+      // confirmations — an exchange made with a DPoP proof or over a client
+      // certificate mints a BOUND refresh token, which is the whole of RFC 9449
+      // section 5 and RFC 8705 section 3 on the long-lived half of a grant.
+      withRefresh: wantsRefresh,
+      // RFC 8707, reached through RFC 8693 section 2.1, and only relevant now
+      // that there is a refresh token to carry it: `resources` is what the
+      // refresh grant compares a renewal against, so an exchange addressed to
+      // one audience must not be renewable into a token carrying this service's
+      // default. A grant cannot widen itself by being renewed, and an exchange
+      // is a grant like the rest. The AUDIENCES go on it rather than
+      // `requestedResources` alone, because `aud` on the token being minted is
+      // the union of both and the two must not come to describe different
+      // resource servers.
+      resources: wantsRefresh ? exchangeAudiences : undefined,
       grant: 'token exchange'
     });
-    exchanged.issued_token_type = 'urn:ietf:params:oauth:token-type:access_token';
+    // RFC 8693 section 2.2.1: `issued_token_type` describes THE TOKEN IN THE
+    // `access_token` MEMBER, and that member holds an access token here whatever
+    // was asked for — so it says access token even when a refresh token was
+    // requested and came back beside it.
+    //
+    // The other reading of section 2.1 is that a client asking for a refresh
+    // token should be handed one IN `access_token` with `issued_token_type`
+    // naming it — the section does say that member is called `access_token`
+    // for historical reasons and need not carry one. That is deliberately not
+    // what happens here. A client would then hold a `typ: 'Refresh'` JWT under
+    // the name every other grant in this service uses for the credential a
+    // resource server is presented with, and this service's own protected
+    // endpoints would refuse it. The refresh token goes where every other grant
+    // puts one, which is what "the same as any other refresh token" means, and
+    // the client gets both halves of a grant out of one exchange rather than a
+    // credential it has to know not to present.
+    exchanged.issued_token_type = ACCESS_TOKEN_TYPE;
 
     // ---------------------------------------------------------------------------
     // THE DELEGATION ACT, for /admin/delegation.
@@ -5217,6 +5333,14 @@ async function tokenEndpoint(req, res) {
     // was exchanged to get this" about a token that was exchanged is worse than
     // a row that says nothing, so both are named here.
     const issuedIdJti = jtiOf(exchanged.id_token);
+    // AND THE REFRESH TOKEN, when `requested_token_type` asked for one. Named
+    // for the id_token's reason and a stronger one: a refresh token is the half
+    // of this grant that OUTLIVES the exchange, so an act that did not mention
+    // it would describe a delegation as having produced a credential good for
+    // an hour when what it actually produced is one good for a day and
+    // renewable. /admin/tokens/credential reads these identifiers, and a
+    // refresh token with no act behind it reads as having been issued directly.
+    const issuedRefreshJti = jtiOf(exchanged.refresh_token);
     // The FIRST of them, which is `audience` where one was sent and the resource
     // otherwise — see the ordering note above. A delegation act names one
     // target; an exchange asking for several is drawn against the one it named
@@ -5314,6 +5438,20 @@ async function tokenEndpoint(req, res) {
               'RFC 8693 returns ONE token — the `access_token` member above is ' +
               'what `issued_token_type` describes — and this one rides along ' +
               'because every grant here mints a token SET.'
+      }] : []).concat(exchanged.refresh_token ? [{
+        kind: 'refresh_token',
+        identifier: issuedRefreshJti,
+        note: 'RFC 8693 section 2.2.1\'s optional `refresh_token`, minted ' +
+              'because oauth2.tokenExchangeRefreshToken is "' + refreshPolicy +
+              '" for this client and the request ' +
+              (askedForRefresh ? 'asked for one with requested_token_type'
+                               : 'did not ask for one') + '. It ' +
+              'is an ordinary refresh token of this service: redeemable at the ' +
+              'refresh grant, revocable, and bound to the same key or ' +
+              'certificate as the access token above. It OUTLIVES the exchange, ' +
+              'which is the point of asking — the client can go on reaching ' +
+              'the audience after the subject_token it was exchanged for has ' +
+              'expired.'
       }] : []),
       // No session, and that is a fact about token exchange rather than a gap:
       // a service exchanging a token on somebody's behalf has no browser

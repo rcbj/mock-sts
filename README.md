@@ -373,7 +373,7 @@ rather than only service-wide:
 
 | Protocol | Settings a single application may overrule | Attributes |
 |---|---|---|
-| OAuth 2.0 / OIDC | the three token lifetimes, the refresh idle timeout, revoke-on-logout | `oauthAccessTokenTtlS`, `oauthIdTokenTtlS`, `oauthRefreshTokenTtlS`, `oauthRefreshIdleSeconds`, `oauthRevokeRefreshOnLogout` |
+| OAuth 2.0 / OIDC | the three token lifetimes, the refresh idle timeout, revoke-on-logout, and whether an RFC 8693 token exchange comes back with a refresh token | `oauthAccessTokenTtlS`, `oauthIdTokenTtlS`, `oauthRefreshTokenTtlS`, `oauthRefreshIdleSeconds`, `oauthRevokeRefreshOnLogout`, `oauthTokenExchangeRefreshToken` |
 | SAML 2.0 | assertion lifetime, both signature switches, NameID format, artifact lifetime | `saml2AssertionLifetimeMin`, `saml2SignAssertion`, `saml2SignResponse`, `saml2NameIdFormat`, `saml2ArtifactTtlS` |
 | SAML 1.1 | the same five | `saml11*` |
 | WS-Federation | assertion lifetime | `wsfedAssertionLifetimeMin` |
@@ -385,6 +385,22 @@ defaults live on `/admin/token-lifetimes` and `/admin/saml-assertions`, and each
 page names the attribute that overrides each row. The globals each protocol
 keeps — its issuer identity, its sockets, its clock skews — stay on that
 protocol's own page.
+
+**One of them is REFUSED rather than merely inert on an entry of the wrong
+family, and it is the only attribute in this registry that is.**
+`oauthTokenExchangeRefreshToken` applies to the OAuth 2.0 and OpenID Connect
+families, and both console doors and `/admin-api` turn away a write of it onto
+an application declared for neither, naming what to tick first. Every other
+attribute here is a default something reads if it ever gets the chance, so
+writing `saml2SignAssertion` onto an OAuth client costs nothing and says nothing
+false; that one decides what the **token endpoint** does for one `client_id`, so
+on an entry no token request could ever name it would sit there reading like a
+policy that was in force. The rule is declared on the schema row itself
+(`families: ['oauth2', 'oidc']`) rather than written into either door, so a
+second attribute that needs it costs a member and nothing else. `ldapmodify`
+reaches the attribute either way, as it reaches every attribute here — the
+refusal is the difference between offering an operation and merely not
+preventing it.
 
 **The New Application form shows a field only when its protocol is ticked**, so
 an OAuth client is not asked for a SAML entityID. That is done in CSS with
@@ -579,6 +595,7 @@ are refused at both ends.
 | `oauth2.rfc9700` | `STS_OAUTH2_RFC9700` | `false` | **restart** — it decides whether the main port is bound as HTTPS (global.https), and a listener is bound when the process starts. A **trust realm** may carry it even so: a realm binds no socket, so only the mode's checks change | Enforce RFC 9700 (OAuth 2.0 Security Best Current Practice) on the authorization flow: exact-string redirect URI matching with the loopback port exception, no open redirects, no http redirect URI off the loopback, PKCE required of public clients with S256 only, PKCE downgrade and value-reuse refused, a nonce required with any id_token, and no response type that issues an access token from the authorization endpoint. |
 | `oauth2.delegatedPermissionsEnforced` | `STS_OAUTH2_DELEGATED_PERMISSIONS_ENFORCED` | `false` | yes | REFUSE an authorization or token request that asks for a permission the client has not been granted. A permission is defined on a resource application — a base URI and a name, joined into `https://example.com/write` — and granted to a client application on its own entry; `/admin/delegation` is the register and defines both. With this OFF (the default) an ungranted permission is still honoured: the token is audienced to the base URI and carries the permission name on its scope claim exactly as a granted one would, and the console marks it. With it ON the same request is refused `invalid_scope` at the AUTHORIZATION endpoint — where the client can still be told — and at the token endpoint for the grants that never reach it. A scope naming no defined permission is unaffected in both modes. It does NOT re-judge a grant already issued. |
 | `oauth2.consentRequired` | `STS_OAUTH2_CONSENT_REQUIRED` | **`true`** — the one policy here that is on by default | yes | ASK THE PERSON before the authorization endpoint issues anything for a scope they have not already agreed to for that application. The first time a given username signs in to a given `client_id` for a given scope, `/oauth2/consent` is drawn listing the scopes that are new; nothing is issued until they press Allow, and Deny returns `access_denied` to the client. The answer is written to `oauthConsent` on that person's own entry under `ou=users` — one value per (person, application, scope), spelled `<when> <scope> <client_id>` — so the second sign-in is silent and an `ldapsearch` can read what somebody agreed to. A delegated permission is recorded by its WHOLE identifier (`https://example.com/write`) and never by the bare permission name, because two resources may each expose a `read`. `oauthGlobalConsent` on an APPLICATION's entry consents a scope for everybody who signs in to it and writes nothing about anybody — an override rather than a record, so removing it asks everybody again. `prompt=consent` asks again whatever is on the entry; `prompt=none` with something outstanding is `consent_required`. With this OFF nothing is asked and nothing is recorded, which is what this service did before the screen existed — it is NOT "everybody consented". `/admin/consent` is the register. |
+| `oauth2.tokenExchangeRefreshToken` | `STS_OAUTH2_TOKEN_EXCHANGE_REFRESH_TOKEN` | `when-requested` | yes | WHETHER AN RFC 8693 TOKEN EXCHANGE HANDS BACK A `refresh_token` beside the exchanged access token. Section 2.2.1 makes it OPTIONAL and names the case it is for: a client that must keep reaching a resource "even when the original credential is no longer valid" — the user-not-present case, where there is no session by design. Three values. `when-requested` is the default and is section 2.1 read literally — the client asks with `requested_token_type=urn:ietf:params:oauth:token-type:refresh_token` and gets one only if it did. `never` refuses the ask silently: the exchange still succeeds, with no refresh token in it, which is what this service did before the parameter was implemented. `always` hands one to every exchange whether it asked or not, which is how several deployed authorization servers behave and is the path a client written against the other two has never run. What comes back is an ORDINARY refresh token of this service in every case — redeemable at the refresh grant, revocable, subject to `oauth2.refreshTokenTtlS`, rotated in RFC 9700 mode, and bound to the DPoP key or client certificate the exchange was made with — and `issued_token_type` says `access_token` throughout, because it describes the token in the `access_token` member. `oauthTokenExchangeRefreshToken` on the CLIENT application's entry overrides it for that client alone. |
 | `oauth2.breakIdTokenNonce` | `STS_OAUTH2_BREAK_ID_TOKEN_NONCE` | `false` | yes | Put a DELIBERATELY WRONG nonce in every ID Token that should carry one. |
 | `oauth2.refreshIdleSeconds` | `STS_OAUTH2_REFRESH_IDLE_SECONDS` | `86400` | yes | In RFC 9700 mode, how long a refresh CHAIN may go unused before it stops working — section 2.2.2 says a refresh token SHOULD expire after a period of client inactivity, and says the period is deployment-dependent, which is why this is a setting rather than a constant. |
 | `oauth2.revokeRefreshOnLogout` | `STS_OAUTH2_REVOKE_REFRESH_ON_LOGOUT` | `true` | yes | In RFC 9700 mode, end a browser sign-on session and every refresh token issued ON that session is revoked — the section MAY that names logout and a password change as the examples. |
@@ -2397,11 +2414,48 @@ reason: the interesting exchange is the federated one, where the subject token c
 from a real IdP this mock has no key for, and refusing it would make the grant
 untestable. It is also exactly the behaviour that would be a critical vulnerability in
 a real authorization server, which is why it is written down here rather than left as an
-implementation detail. **The exchanged token carries no refresh token**, because there
-is no end-user session behind it to refresh against, and `actor_token` becomes the
-RFC 8693 `act` claim — the delegation record saying *this* client is acting for *that*
-subject, which is the only part of the response a downstream resource server can
-reason about.
+implementation detail. And `actor_token` becomes the RFC 8693 `act` claim — the
+delegation record saying *this* client is acting for *that* subject, which is the only
+part of the response a downstream resource server can reason about.
+
+**The exchanged token carries a refresh token when the request asks for one, and
+otherwise still carries none.** This paragraph said flatly that it never did — because
+there is no end-user session behind an exchange to refresh against — and RFC 8693
+section 2.2.1 answers that argument directly: a refresh token is worth issuing here
+precisely "in cases where the client of the token exchange needs the ability to access a
+resource even when the original credential is no longer valid", which is the
+user-not-present case where there is no session by design. So the parameter section 2.1
+gives a client for saying which token it wants is now read:
+`requested_token_type=urn:ietf:params:oauth:token-type:refresh_token` adds a
+`refresh_token` to the response, and an exchange that says nothing gets exactly what it
+always got.
+
+**Whether that ask is honoured is `oauth2.tokenExchangeRefreshToken`, and it has three
+values rather than two.** RFC 8693 leaves the decision to the authorization server, real
+ones differ, and a client written against one of them meets the others — which is the
+difference this service exists to be. `when-requested` is the default and is the
+paragraph above. `never` refuses the ask silently: the exchange still succeeds, with no
+refresh token in it and a line in the log naming the setting, because section 2.1 makes
+`requested_token_type` a request rather than an instruction and an exchange that asked
+and did not get one is still well-formed. `always` hands one to every exchange whether it
+asked or not. A bool could not have said this: `false` would have had to mean `never`,
+leaving `true` meaning either of the other two and no way to reach the third — and the
+`always` side is where the interesting client bug lives, since a credential arrives that
+the client never asked for and must not leak. **`oauthTokenExchangeRefreshToken` on the
+CLIENT's own entry overrides it for that client alone** — the client performing the
+exchange, because the refresh token is handed to the client and because in the
+interesting case the subject the exchange is *about* has no entry here at all. **What comes back is an ordinary refresh token of this service** — the same
+`typ`, the same lifetime (`oauth2.refreshTokenTtlS`), redeemable at the refresh grant,
+revocable at `/oauth2/revoke`, listed at `/admin/tokens`, rotated in RFC 9700 mode, and
+bound to the DPoP key or client certificate the exchange was made with, because it is
+minted by the one function every grant here mints one through. It also remembers the
+RFC 8707 resources the exchange named, so a renewal cannot widen the audience the
+exchange narrowed. `issued_token_type` still says `access_token`, because it describes
+the token in the `access_token` member and that is what that member holds: the refresh
+token is in `refresh_token`, where every other grant puts one, rather than in the member
+a client presents at a resource server. Any other `requested_token_type` is accepted and
+answered as before — the type is a request and not an instruction, and this service
+refuses nothing by default.
 
 The consequence shows up one endpoint over: an exchanged token is issued with whatever
 scope was asked for, so unless that includes `openid` it gets a 403
@@ -3936,7 +3990,11 @@ The base URI becomes the audience and the permission NAME becomes the scope, whi
 
 **`/admin/delegation/allowed` draws it**, and it is a SECOND picture rather than a mode of the first. Every box is an application and there is no person on it — a permission says *this client may reach that API as whoever is signed in*, and there is no whoever yet — and this service is not on it either, because not one of its lines has been issued. A line is DASHED until the client has actually asked for that permission, which is the reading a configured register exists for and the one an acts diagram can never give: a grant nobody needed draws no act at all.
 
-It has no form and no clear control: everything on it either happened or is somebody else's configuration. The same data is at `GET /admin-api/delegation`, with the acts, the distinct *chains* among them (one per edge of the picture) and the policy. It is in memory, capped by `delegation.maxRecords`, and gone on restart — like everything else this service RECORDS or MINTS. (The directory, the trust realms and the runtime settings can be kept; see *Persistence* above. A delegation record is not one of them: it is a statistic about a process.)
+**And under that picture it lists the GROUPINGS, which is what a register stops being able to draw on one canvas.** One diagram is the right document for five applications and the wrong one for eighty: past a certain size the interesting reading is never the whole of it, it is *which applications are joined to each other at all* — the API and the three front ends holding permissions on it, the batch job that reaches two of them, and the twelve applications elsewhere in the registry that have nothing to do with any of it. So the allowed picture carries a **search over every application the configured register touches**, the same twenty-at-a-time control the two choosers on `/admin/delegation` use, and a paged table of the groups themselves with the applications in each spelled out. Clicking one opens **`/admin/delegation/cluster`**, which draws that group alone — the same renderer, the same shapes, the same dash, handed a subset of the grants and nothing else changed — with the members and which side of a grant each is on, every permission the group exposes (granted or not), and every grant in it.
+
+**A group is a set of applications that can be reached from one another by following grants, ignoring which way each grant points**, and the dropped direction is the whole decision. A grant IS directed — that is why every line has a round end and an arrowhead — but following the arrows would answer *what can this client eventually reach*, which is a question about a chain, and a permission register has no chains in it: holding a permission on an API does not grant that API's own permissions to anybody. Following a grant either way is the only reading under which an API and the front ends holding permissions on it come out as ONE group rather than as four. Membership ignores direction; the picture never does. **Three states make a group of one and each is a real answer**: an application with a base URI and permissions nobody has been granted — somebody described an API and nothing may reach it; a client holding only dangling grants, which have no far end to be joined to; and an application granted its own permission. A group is named after the member whose identifier sorts first, which is a property of the set, so adding a grant inside a group does not rename it. `GET /admin-api/permissions/groups` is the same answer without a browser — every group with its counts, or `?application=` for the one group an application is in with its rows and its graph — and both console pages answer `?format=json` and `?format=svg`.
+
+Neither picture has a form on it: everything on them either happened or is somebody else's configuration, and the button that revokes a grant stays on the register. The same data is at `GET /admin-api/delegation`, with the acts, the distinct *chains* among them (one per edge of the picture) and the policy. It is in memory, capped by `delegation.maxRecords`, and gone on restart — like everything else this service RECORDS or MINTS. (The directory, the trust realms and the runtime settings can be kept; see *Persistence* above. A delegation record is not one of them: it is a statistic about a process.)
 
 **`/admin/delegation/map` draws it.** The same acts as a diagram, generated on the server and reached from a link at the top of the table. It is **two bands**: the parties on one plane, in the order of the chain, and this service in a band of its own above them, centred, with its lines dropping onto whoever it issued to. That is why it reads as a line rather than a staircase — the issuer touches every line in the picture, so leaving it in the flow put the one box nothing is about in the middle of everything that is. **The plane is a real one**: every party, the person included, is on a single centreline whatever shape the graph is, which is not what a layered layout does on its own — it spreads a branch out vertically, and one person with three applications came out as four boxes at four heights. So the row owns the layout and the library is kept for the ORDER alone. A line whose two boxes are **neighbours** on the row lies along it, and everything else — a box in between, a second mechanism between the same pair — **arcs under it** in a lane of its own, which is where the crossings a flat row cannot avoid are paid for. On the parties' band there is a **stick figure** for every party with an entry under `ou=users`, a **rectangle** for every one with an entry under `ou=applications`, a **rectangle with a figure inside it** for the middle tier that is routinely both, and a **hexagon** for this service, carrying the trust realm the picture is of. Two kinds of line, because a chain makes two different claims: *acts for* is the delegation relationship — who is acting on whose behalf, coloured amber for an impersonation and green for a delegation, the pairing the table already uses — and *reaches* is the **trust** relationship, what the credential was FOR, which is *what is this token's audience* asked as a picture. A dashed grey line from the hexagon is this service having issued to whoever asked. A **broken** line jumps a party nobody named, which is what a forwarded ticket-granting ticket is: no intermediary, and none possible. **Red is a chain nothing was ever issued on**, and a party neither store has heard of is drawn dashed in the shape its role implies rather than as a registered one. A party that reached *itself* — S4U2Self asks for a ticket to yourself — is marked on the box rather than drawn as a loop on it, because an arrow leaving a box and coming back is a drawing of nothing.
 
