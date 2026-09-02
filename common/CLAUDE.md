@@ -1336,6 +1336,32 @@ with `Cannot find module` naming a file the operator never mentioned.
    `audience=https://esb1.example.com` indistinguishable in the one place the
    difference is the point.
 
+   **`forPermissionBase()` IS THE FIFTH LOOKUP, added 2026-09-02, and it is
+   `forPermission()` asked one level up.** That one takes a whole permission
+   identifier and answers which application defines it; this takes the BASE
+   ALONE. It exists for a reader holding an ISSUED TOKEN rather than a request:
+   `audienceScopes()` writes the base URI onto the `aud` and the bare names onto
+   the `scope`, so what a picture has is a base and nothing else — and none of
+   the four lookups above it can turn that back into an entry.
+   `forAudience()` reads `oauthAudience`, a different attribute a resource is
+   under no obligation to have set; `forClientId()` reads a bare name; and
+   `forPermission()` needs a name on the end that the reader is trying to work
+   out. `common/user_graph.js`'s `permissionsAddressedTo()` is its one caller.
+
+   **IT NORMALISES BOTH SIDES, WHICH IS ITS ONE DIFFERENCE FROM `forAudience()`
+   AND IS NOT A SOFTENING OF THAT RULE.** An `ldapmodify` is not normalised, so
+   an entry can hold `https://example.com` while every identifier this service
+   composed from it — and therefore every `aud` a token addressed to it carries
+   — ends in the separator. `permissionBaseOf()` is what added that separator,
+   so comparing through it is comparing a value this module composed with
+   itself. Get that wrong in the ENTRY direction and the entry is unreachable
+   from its own tokens, which reads as the feature quietly not working rather
+   than as an error; `tests/user_graph_permissions.js` caught exactly that
+   mutant on its second round. It is still not case-folded, and **an entry with
+   no base is never matched** — `permissionBaseOf('')` is empty, so a lookup
+   without that guard answers with the first entry that has none, which is the
+   one entry it must never be.
+
    **`forClientId()` IS THE SECOND LOOKUP THAT IS NOT BY IDENTIFIER, added
    2026-08-26 beside it, and the paragraph above is exactly why it is a separate
    function.** It matches `oauthClientId`, and `oauth-oidc/oauth2.js`'s
@@ -1738,6 +1764,63 @@ with `Cannot find module` naming a file the operator never mentioned.
    overlap therefore survives on purpose**: an S4U service ticket is in both
    registers and has no identifier in either, so it is drawn on both lines and
    the page says which register each came from.
+
+   **AND SINCE 2026-09-02 THAT LINE SAYS WHAT THE TOKEN MAY DO AT THE FAR END,
+   which is the one thing the ACTS picture could never say and the CONFIGURED
+   one always could.** A `may-reach` line on `/admin/delegation/allowed` carries
+   the permission it is a grant of, because a configured grant IS a permission;
+   a `reaches` line drawn from an issued token carried the mechanism and a
+   credential count and nothing else — so the picture showing what a client DID
+   was the one that could not say what it did it WITH.
+   `permissionsAddressedTo()` is the rule, and it is three sentences.
+
+   **IT IS ASKED OF THE TOKEN AND NOT OF THE REQUEST, which is what makes the
+   two spellings a client may use come out as one rule.** `oauth2.js`'s
+   `audienceScopes()` turns `scope=https://api.example.com/read` into
+   `aud: https://api.example.com/` and `scope: read`, and turns `scope=apigw1`
+   into `aud: apigw1` with that value taken OFF the scope claim. Whichever was
+   sent, what arrives here is an audience and a scope claim — so the rule is
+   *the scope values that name a permission THIS resource defines*, resolved
+   through `applications.forPermissionBase()` beside the two lookups
+   `audienceParties()` already makes. The first spelling answers with names; the
+   second answers with none, and **an EMPTY ARRAY is an answer** — the picture
+   draws it as `default permissions`, which is the commonest state there is.
+
+   **THE INTERSECTION IS WHAT MAKES IT SAFE.** A scope claim carries the
+   protocol's own words and anything else a client cared to send, so a label
+   built from the scope claim alone would name a resource with `openid`. Only
+   names the resolved resource has DEFINED are reported, which also means a
+   permission removed from the register since the token was minted drops off the
+   line — the same reading `audienceParties()` makes when it resolves an `aud`
+   against the CURRENT registry.
+
+   **AND NOTHING HERE ASKS WHETHER THE GRANT WAS HELD.** `holdsPermission()` is
+   that question and it belongs to the configured register;
+   `oauth2.delegatedPermissionsEnforced` is off by default, so a token carrying
+   a permission its client was never granted is an ordinary outcome here and the
+   line reports what was ISSUED. Colouring it as a refusal would be this model
+   deciding a policy the token endpoint declined to decide.
+
+   **THE ARRAY'S PRESENCE IS THE DISCRIMINATOR, and that is load-bearing rather
+   than incidental.** `delegation.graph()` emits the identical `reaches` relation
+   for a delegation ACT, which has no scope claim anywhere behind it and carries
+   no such member — so `delegation_map.js` tests for the member rather than for
+   the relation, and an act line says nothing instead of saying `default
+   permissions` about a Kerberos ticket. An edge seeded without it would be
+   drawn as an act.
+
+   **IT ALSO MOVED THE AUDIENCE BLOCK OUT OF `if (holder)`.** `holder` is null
+   when the credential's `client_id` IS the box the page is about, which is what
+   the CLIENT CREDENTIALS grant looks like here — so that guard drew the grant
+   line and threw away the only interesting thing about a machine-to-machine
+   token: which API it was for. The line now runs from the holder, or from the
+   person where there is no separate holder.
+
+   **`credential_graph.js` DRAWS THE SAME LINE AND TAKES THE SAME ANSWER**,
+   through an export, for the reason `holderOf()`, `detailOf()` and
+   `audienceParties()` are already exported to it: two answers to *which
+   permissions does this token carry* would be two labels on one relationship on
+   two pages of one console.
 
    **`userList()` UNIONS THE TWO REGISTERS TOO, and that is the half worth
    keeping.** An identity named only by a delegation — an S4U2Self subject, an

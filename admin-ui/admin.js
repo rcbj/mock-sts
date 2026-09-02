@@ -7738,6 +7738,17 @@ app.get('/admin/delegation/allowed', function (req, res) {
     'hexagon is on the other one: every line there exists because this service ' +
     'issued or refused something, and none of these has been asked for.') +
 
+    note('<strong>A line leaves the box with the ROUND end and arrives at ' +
+    'the box with the ARROWHEAD.</strong> That is worth saying on this page in ' +
+    'particular, because it is the one where nearly every box is at both ends ' +
+    'of something: an application here is usually a client of one and a ' +
+    'resource of another, and the question is always <em>which of the lines ' +
+    'touching this box are its own?</em> Both marks are on every line, and each ' +
+    'one has a berth of its own on the box\'s edge, so a grant this application ' +
+    'holds and a grant somebody holds on it never start from the same point. ' +
+    'No line here is two-way: where two applications may reach each other, that ' +
+    'is two grants and it is drawn as two lines.') +
+
     note('<strong>A DASHED line is a grant nobody has ever used</strong> ' +
     'and a solid one has been asked for at least once — read off the client\'s own ' +
     '<code>oauthScope</code>, which records the scopes it has requested. That one ' +
@@ -8064,10 +8075,12 @@ function delegationMapKey(options) {
       ' 40" aria-hidden="true">' + inner + '</svg>';
   };
   const C = delegationMap.COLOURS;
+  // Drawn by `delegation_map.js` rather than here, so that the round end and the
+  // pointed end in the key are the ones the picture actually puts on a line.
+  // The arrowhead used to be drawn on this side and the tail disc would have
+  // made that two shapes to keep in step instead of one.
   const line = function (colour, dash) {
-    return '<path d="M4 20H50" stroke="' + colour + '" stroke-width="1.8" fill="none"' +
-      (dash ? ' stroke-dasharray="' + dash + '"' : '') + '/>' +
-      '<path d="M50 15L58 20L50 25z" fill="' + colour + '"/>';
+    return delegationMap.edgeSample(colour, dash);
   };
   const items = [
     { art: swatch(delegationMap.personGlyph(9, 3, C.indigo, false, 1), 44),
@@ -8130,6 +8143,15 @@ function delegationMapKey(options) {
             'It is drawn in the shape its ROLE implies and is not an error: an ' +
             'RFC 8693 <code>audience</code> nobody has otherwise mentioned is ' +
             'exactly this.' },
+    { art: swatch(line(C.indigo, ''), 64),
+      what: '<strong>Which way a line goes is at BOTH of its ends.</strong> It ' +
+            'leaves the box with the round end and arrives at the box with the ' +
+            'arrowhead &mdash; so the question a reader actually asks, standing ' +
+            'at one box: <em>is this line mine, or somebody\'s on me?</em>, is ' +
+            'answered where they are standing rather than at the far end of a ' +
+            'curve that crosses three others on the way. Every line here has ' +
+            'both marks, and no line here is two-way: two applications that ' +
+            'reach each other are drawn as two lines.' },
     { art: swatch(line(C.amber, ''), 64),
       what: '<strong>acts for &mdash; an IMPERSONATION.</strong> What came out ' +
             'names the initial identity and nothing else, so nothing at the far ' +
@@ -8189,7 +8211,22 @@ function delegationMapKey(options) {
               'The mechanism on the label is what tells the two apart: a ' +
               'grant, or <code>Token exchange</code>. The audience the token ' +
               'actually carries is in the tooltip, because the box is named ' +
-              'after whichever application registered that audience.' });
+              'after whichever application registered that audience. ' +
+              '<strong>The line under it names the DELEGATED PERMISSIONS on ' +
+              'that token</strong> — the values on its <code>scope</code> ' +
+              'claim that the resource at the far end has DEFINED, which is ' +
+              'what a client asks for by sending the whole permission ' +
+              'identifier (the resource\'s base URI followed by the name) as a ' +
+              'scope. <strong><code>default permissions</code> means the token ' +
+              'named the resource and asked for none of them</strong>: that is ' +
+              'what a scope naming the resource\'s own <code>client_id</code> ' +
+              'produces, since that value becomes the audience and comes off ' +
+              'the scope claim. It says what was ISSUED and not what was ' +
+              'GRANTED — <a href="/admin/delegation/allowed">the configured ' +
+              'register</a> is the other question, and ' +
+              '<code>oauth2.delegatedPermissionsEnforced</code> is off by ' +
+              'default, so a token can carry a permission its client was never ' +
+              'granted.' });
   }
   return '<table class="key"><tr><th>Shape</th><th>What it means</th></tr>' +
     items.map(function (one) {
@@ -9952,7 +9989,31 @@ function userEdgeRow(edge, lookOf) {
       ? '<strong>acts for</strong><br><span class="state-none">a delegation</span>'
       : '<strong>reaches</strong>' +
         (edge.subject ? '<br><span class="state-none">as ' + esc(edge.subject) +
-                        '</span>' : '');
+                        '</span>' : '') +
+        // WHAT THE TOKEN MAY DO AT THE FAR END, said here as well as on the
+        // picture because the two are drawn from ONE graph and a reader
+        // comparing them must not find the line and the row disagreeing. The
+        // picture cuts the list at 26 characters and this does not, which is
+        // the ordinary division of labour between them.
+        //
+        // `permissions` is present only on a line built from a CREDENTIAL —
+        // see common/user_graph.js — so a `reaches` line out of the delegation
+        // register renders exactly as it did. An EMPTY array is drawn rather
+        // than skipped, for the renderer's reason: it means the token named
+        // this resource and asked for none of its permissions, which is a
+        // state and not a gap.
+        (edge.permissions
+          ? '<br>' + (edge.permissions.length
+              ? edge.permissions.map(function (one) {
+                  return '<code>' + esc(one) + '</code>';
+                }).join(' ')
+              : '<span class="state-none" title="The token names this resource ' +
+                'and none of its delegated permissions \u2014 which is what a ' +
+                'scope naming the resource\'s client_id produces, because that ' +
+                'value becomes the audience and comes off the scope claim. It ' +
+                'is also what a resource that defines no permissions can ever ' +
+                'produce.">default permissions</span>')
+          : '');
   const mechanism = edge.typeLabel
     ? (edge.type ? '<code>' + esc(edge.type) + '</code><br>' : '') +
       '<span class="state-none">' + esc(edge.typeLabel) + '</span>' +

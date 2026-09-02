@@ -365,6 +365,7 @@ Two rules that are not optional here:
 | `spnego_identity.js` | what a SPNEGO sign-in claims: which part of a Kerberos principal becomes the session's username, and the `amr`/`acr` read off the ticket's own flags |
 | `ldif_codec.js` | that every value this service can put in an attribute survives the RFC 2849 round trip `persistence.mode=ldif` writes — the base64 rules, the folding, `origin` riding as a comment, and a URL-valued attribute being refused rather than dereferenced |
 | `appconfig_persistence.js` | that a setting change reaches the store ON DISK, comes back the way the next start puts it back, and that a realm's settings and the process's are two different files |
+| `user_graph_permissions.js` | that a blue `reaches` line drawn from a TOKEN names the delegated permissions on it — both spellings a client may use, the `default permissions` fallback, the intersection that keeps `openid` off the label, and that a `reaches` line out of the delegation register says none of it |
 | `worker_pool.js` | the four ways moving a computation into another process goes wrong: that a worker computes the SAME BYTES (literal equality for the nine deterministic algorithms; cross-verification for the three whose ECDSA half is randomized and must be), that the event loop is genuinely FREE while it does — counted in timer ticks, against an unpooled control that manages none — that a session's jobs go to one worker and unnamed ones spread, and that a SIGKILLed worker FAILS its jobs with a sentence rather than leaving a promise nobody settles. Plus `workers.count = 0` producing the same bytes here, and a realm being refused the setting at both ends |
 
 **`vendored/` is not in that table either, and for the opposite reason: it is
@@ -740,3 +741,64 @@ and a dangling grant drawing a line. Each was caught.
 
 **It touches no process-wide state** — every graph it draws is built in the
 file — so the restore rule does not apply to it.
+
+---
+
+## `user_graph_permissions.js` (2026-09-02) — the same line, read the other way
+
+`app_permissions.js` above is about the CONFIGURED register. This is about an
+ISSUED TOKEN read against it: `/admin/delegation/allowed` draws a `may-reach`
+line carrying the permission it is a grant of, and the pictures drawn from what
+actually happened draw the same `reaches` relation from a token and carried the
+mechanism, a credential count and nothing about the permission. So the one
+picture showing what a client DID was the one that could not say what it did it
+WITH. `common/user_graph.js`'s `permissionsAddressedTo()` is the rule that
+closed that; this is its guard.
+
+**The end-to-end claim is deliberately NOT here.**
+`tests/vendored/sts_delegated_permissions_example.js` builds five real
+applications and spends a real token against them, which is what proves the rule
+reaches a page. Three things cannot be driven over there and every case in this
+file turns on one — all three are `app_permissions.js`'s "choosing the graph"
+argument said about a different register:
+
+* **an audience NOBODY answers to**, which is what a real resource server looks
+  like here and which the picture has to draw without inventing a permission for;
+* **a scope value that looks like a permission and is not** — `read` against a
+  resource that defines no `read`, which the token endpoint will not produce
+  against a resource that does;
+* **a resource carrying permissions and NO BASE URI**, which `permissionsOf()`
+  gives an empty identifier on purpose and which `updateApplication()` refuses
+  from both console doors, so only an `ldapmodify` writes it.
+
+It asserts the MODEL and the RENDERER together, for `user_graph_signin.js`'s
+reason: the fold putting the array on the edge while the label drops it, and the
+label drawing a line the fold never fills, are both green in a test that looks at
+one of them.
+
+**It was mutation-tested against NINE mutants and each was caught**: the
+`forPermissionBase()` lookup dropped from the resolver (3 assertions red), the
+intersection removed so every scope value is reported as a permission (7), that
+lookup comparing the entry's raw base instead of the normalised one (1), the same
+lookup's empty-base guard removed so it answers with the first entry that has no
+base (2), an empty permission list drawn as a blank line instead of `default
+permissions` (1), the four-line label cap put back to three (1), the audience
+block put back inside `if (holder)` so a client_credentials token draws no
+resource at all (13), the edge seeding no `permissions` member so the renderer
+cannot tell a token line from an act line (1), and the fold taking the last
+credential's answer instead of the union across the line (1).
+
+**Two of those survived the first round and are the reason the file is longer
+than it was.** The raw-base mutant passed because every fixture entry held a
+base written the normalised way, so only the value ASKED FOR was ever being
+normalised — the entry that an `ldapmodify` wrote the other way is the case that
+matters and there was none. And the empty-base mutant passed because
+`permissionsAddressedTo()` returns early on an empty audience, so the guard
+inside the lookup was never reached from there; it is asserted against
+`applications.forPermissionBase()` directly now. **A guard reached only through
+a caller that already refuses is a guard that has not been tested.**
+
+**It restores `applications.setDirectory()`.** The registry's store is one
+reference for the whole process and every later file in the run reads through it,
+so a fake left installed would answer every subsequent question about
+applications with this file's four entries.

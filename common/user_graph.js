@@ -45,7 +45,7 @@
 // console renders what it is handed.
 //
 // ---------------------------------------------------------------------------
-// SIX DECISIONS ARE JUDGEMENTS RATHER THAN MECHANICS.
+// SEVEN DECISIONS ARE JUDGEMENTS RATHER THAN MECHANICS.
 //
 // **THE GRAPH IS `delegation.graph()`'s SHAPE, EXTENDED — NOT A SECOND SHAPE.**
 // Every node and every edge here carries the fields that file's do, so
@@ -123,13 +123,32 @@
 // section 2.3 is how one gets here: one line per resource is what the token
 // actually says, where a single lookup of the joined string would find nothing
 // and draw a box whose name is two URLs with a space in it.
+//
+// **AND THE SEVENTH, ADDED 2026-09-02: THAT LINE SAYS WHAT THE TOKEN MAY DO AT
+// THE FAR END, NOT MERELY THAT IT GOT THERE.** A `reaches` line drawn from a
+// credential now carries the DELEGATED PERMISSIONS on that token's scope claim
+// — `read, write` — or the words `default permissions` where the token named
+// the resource and asked for none of them. `permissionsAddressedTo()` argues
+// the rule and the two spellings a client may use to produce either; the two
+// things worth knowing up here are that it is a fact about the TOKEN and not
+// about the register (a permission the client was never granted is still on the
+// line, because `oauth2.delegatedPermissionsEnforced` is off by default and the
+// token really does carry it), and that the array's PRESENCE is what tells
+// `delegation_map.js` this line came from a credential at all — the identical
+// `reaches` relation out of `delegation.js` describes a delegation ACT, which
+// has no scope claim behind it and carries no such member.
+//
+// It is also why the audience block is no longer inside `if (holder)`. The
+// CLIENT CREDENTIALS grant has no holder distinct from its subject, so that
+// guard drew the grant and threw away the only interesting thing about a
+// machine-to-machine token: which API it was for.
 // ---------------------------------------------------------------------------
 
 const { log } = require('./helpers');
 const stats = require('./admin_stats');
 const delegation = require('./delegation');
-// THE REGISTRY, for `audienceParties()` alone — see the sixth decision in the
-// header. It requires `helpers.js`, `config.js` and `audit.js` and nothing here,
+// THE REGISTRY, for `audienceParties()` and `permissionsAddressedTo()` — see
+// the sixth and seventh decisions in the header. It requires `helpers.js`, `config.js` and `audit.js` and nothing here,
 // so this is a plain require in the ordinary direction: no cycle to close, and
 // it registers no route so there is none to move. Rule 3e's test is not reached.
 const applications = require('./applications');
@@ -480,6 +499,108 @@ function audienceParties(audience, issuer) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// WHICH OF A RESOURCE'S DELEGATED PERMISSIONS A TOKEN ACTUALLY CARRIES.
+//
+// `audienceParties()` above answers *which application is this credential
+// addressed to*. This answers the question that comes straight after it and
+// that the picture had no answer for until 2026-09-02: *and to do WHAT there*.
+//
+// **IT IS THE DYNAMIC HALF OF WHAT `/admin/delegation/allowed` DRAWS AS
+// INTENT.** A `may-reach` line carries the permission it is a grant of, because
+// a configured grant IS a permission and nothing else; a `reaches` line drawn
+// from an issued token carried the mechanism and a credential count and said
+// nothing about the permission, so the one picture that shows what a client
+// ACTUALLY did was the one that could not say what it did it WITH. The two
+// registers are still two registers (`app_permissions.js` says so at length)
+// and this does not join them: it reads the ISSUED token and says what is on
+// it, which may be a permission nobody ever granted.
+//
+// ---------------------------------------------------------------------------
+// THE TWO SPELLINGS A CLIENT MAY USE, AND WHY THEY COME OUT AS ONE RULE.
+//
+// `oauth2.js`'s `audienceScopes()` turns a scope list into an audience and a
+// scope claim, and a client can name the party it wants in two ways:
+//
+//   * **THE WHOLE PERMISSION IDENTIFIER.** `scope=https://abcapp2.example.com/read`
+//     produces `aud: https://abcapp2.example.com/` and `scope: read` — the base
+//     becomes the audience and the bare name becomes the scope. The permission
+//     is named EXACTLY and there is one on the line.
+//   * **THE CLIENT_ID OF THE AUDIENCE.** `scope=abcapp4` produces `aud: abcapp4`
+//     and takes that value OFF the scope claim, because it named a party rather
+//     than a permission. Nothing on the token then names a permission at all,
+//     which is not a gap — it is a token for the resource with no permission
+//     asked for, and this service's word for that is DEFAULT PERMISSIONS.
+//
+// They come out as one rule because the question is asked of the TOKEN and not
+// of the request: whichever way the client spelled it, what arrives here is an
+// audience and a scope claim, so the rule is *the scope values that name a
+// permission THIS resource defines*. The first spelling answers with those
+// names; the second answers with none, and the caller draws the fallback.
+//
+// **THE INTERSECTION IS WHAT MAKES IT SAFE.** A scope claim carries the
+// protocol's own words too — `openid`, `profile`, `scim:read` — and any string
+// a client cared to send, so a line drawn from the scope claim alone would
+// label a resource with words that have nothing to do with it. Only names the
+// resolved resource has DEFINED are named, which also means a permission
+// removed from the register since the token was minted drops off the line
+// rather than being asserted out of a token nobody can check any more. That is
+// the same reading `audienceParties()` makes when it resolves an `aud` against
+// the CURRENT registry, and it is the honest one for a console describing live
+// state.
+//
+// **NOTHING HERE ASKS WHETHER THE GRANT WAS HELD.** `holdsPermission()` is that
+// question and it belongs to the configured picture; this line is evidence, and
+// a token carrying a permission its client was never granted is exactly what
+// `oauth2.delegatedPermissionsEnforced` being off produces. Colouring it as a
+// refusal would be this renderer deciding a policy the token endpoint declined
+// to decide.
+//
+// One walk of the container per AUDIENCE, and none per scope value: that is
+// what `applications.forPermissionBase()` was added for, and its header argues
+// why the four lookups that were already there cannot answer this.
+// ---------------------------------------------------------------------------
+function permissionsAddressedTo(scope, audience) {
+  log.debug("Entering permissionsAddressedTo(). audience=" + audience);
+  const asked = String(scope == null ? '' : scope).split(/\s+/).filter(Boolean);
+  const wanted = String(audience == null ? '' : audience).trim();
+  if (!asked.length || !wanted) {
+    log.debug("Leaving permissionsAddressedTo(). Nothing to resolve.");
+    return [];
+  }
+  // THE SAME TWO LOOKUPS `audienceParties()` MAKES, IN THE SAME ORDER, so that
+  // the box on the picture and the permissions on the line into it cannot be
+  // about two different applications — and then a THIRD that only this question
+  // needs. An `aud` that is a permission BASE is registered on neither
+  // `oauthAudience` nor `oauthClientId`: it is the value this service composed
+  // identifiers from, and `forPermissionBase()` is the only lookup that reads
+  // it. That third one is why a token minted the first way resolves at all.
+  const resource = applications.forAudience(wanted) ||
+                   applications.forClientId(wanted) ||
+                   applications.forPermissionBase(wanted);
+  if (!resource) {
+    log.debug("Leaving permissionsAddressedTo(). No application answers to \"" +
+              wanted + "\", so nothing here defines a permission and there is " +
+              "nothing to name.");
+    return [];
+  }
+  const defined = {};
+  applications.permissionsOf(resource).forEach(function (one) {
+    if (one.name) {
+      defined[one.name] = true;
+    }
+  });
+  const out = [];
+  asked.forEach(function (one) {
+    if (defined[one] && out.indexOf(one) < 0) {
+      out.push(one);
+    }
+  });
+  log.debug("Leaving permissionsAddressedTo(). " + out.length +
+            " permission(s) of " + resource.identifier + " named on the token.");
+  return out;
+}
+
 // Whether two URLs are the same scheme, host and port. `false` for anything that
 // is not a URL at all, which is most of what arrives here: an `aud` may be any
 // string, and a SAML entityID or a `wtrealm` that happens not to parse is a
@@ -563,6 +684,18 @@ function credentialsFor(detail, skipIdentifiers) {
       // `holderOf()` already reads, so passing it here would draw every SAML
       // assertion and every JWT-SVID as a line from a box to itself.
       audience: String(record.audience || ''),
+      // AND WHAT IT ASKED FOR, which is the other half of the two facts a
+      // DELEGATED PERMISSION is spelled in. `audienceScopes()` in oauth2.js
+      // writes the resource's base URI onto the `aud` and the bare permission
+      // NAMES onto the `scope`, which is Microsoft Entra ID's arrangement, so
+      // the audience above says WHICH application and this says WHICH OF ITS
+      // permissions. Neither is the whole answer alone; `permissionsAddressedTo()`
+      // reads them together.
+      //
+      // Carried only for this family, exactly like the audience beside it and
+      // for the same reason: an assertion, a ticket and an SVID have no scope
+      // claim to carry.
+      scope: String(record.scope || ''),
       // WHO ISSUED IT, which is how `audienceParties()` tells an audience that
       // names a party from one that names this service. See that function.
       issuer: String(record.iss || ''),
@@ -593,8 +726,10 @@ function credentialsFor(detail, skipIdentifiers) {
       holder: holderOf(Object.assign({ family: family }, record)),
       // Deliberately empty, and the line above is why: for an assertion, a
       // JWT-SVID and a ticket the audience IS the holder. See the note on the
-      // token rows.
-      audience: '', issuer: '',
+      // token rows. `scope` is empty because none of these four families has
+      // one — an OAuth scope claim is a token's, and a permission asked for in
+      // one is a fact about the OAuth family and about nothing else here.
+      audience: '', issuer: '', scope: '',
       state: record.state,
       sessionId: '',
       revocable: false,
@@ -993,16 +1128,29 @@ function graphFor(key) {
       }
     }
 
-    if (holder) {
+    {
       // AND WHAT IT IS ADDRESSED TO — the first hop of every chain, and the one
       // that used to be missing. See the sixth decision in the header. One line
       // per audience, from the party HOLDING the credential to the party the
       // registry says that audience is; nothing at all where the two are the
       // same box, which is what an ID Token addressed to its own client looks
       // like and what every assertion looks like.
+      //
+      // **FROM THE HOLDER, OR FROM THE PERSON WHERE THERE IS NO SEPARATE
+      // HOLDER**, and that second case was drawn as nothing at all until
+      // 2026-09-02. `holder` is null when the credential's `client_id` IS the
+      // box this page is about, which is what the CLIENT CREDENTIALS grant
+      // looks like here: the client is the subject, so the person-to-holder
+      // line collapses (the `else` branch below draws the grant from the
+      // hexagon instead) — and the audience block sat inside `if (holder)`, so
+      // a token that named a resource in its scope list drew a grant line and
+      // no relationship to the resource it was FOR. That is the one grant a
+      // machine-to-machine client uses and the one whose whole content is
+      // which API it reached.
+      const reachFrom = holder || person;
       audienceParties(credential.audience, credential.issuer).forEach(function (addressed) {
         const audienceId = stats.identityKeyOf(addressed.identifier);
-        if (!audienceId || audienceId === holder.id || audienceId === person.id) {
+        if (!audienceId || audienceId === reachFrom.id || audienceId === person.id) {
           return;
         }
         const resource = nodeFor(audienceId, { application: addressed.identifier });
@@ -1029,8 +1177,8 @@ function graphFor(key) {
         // tokens out of one grant are one relationship, and three lines saying
         // so would be the picture reporting the token endpoint's arithmetic.
         const reach = edgeFor('addressed | ' + flowKey + ' | ' +
-                              holder.id + ' > ' + audienceId, {
-          from: holder.id, to: audienceId,
+                              reachFrom.id + ' > ' + audienceId, {
+          from: reachFrom.id, to: audienceId,
           fromRole: 'holder', toRole: 'target',
           relation: 'reaches',
           type: credential.flow, typeLabel: credential.flowLabel,
@@ -1040,16 +1188,50 @@ function graphFor(key) {
           // ordinary grant claims neither. It is also what keeps this line the
           // console's neutral indigo instead of amber.
           mode: '', policed: false,
-          subject: person.id, actor: holder.id,
+          subject: person.id, actor: reachFrom.id,
           // The string the token actually carries, which is not always the name
           // of the box it points at. `audienceRegistered` says which.
           audience: addressed.audience,
-          audienceRegistered: addressed.registered
+          audienceRegistered: addressed.registered,
+          // AND WHAT THE TOKENS ON THIS LINE MAY DO THERE — see
+          // `permissionsAddressedTo()`. An ARRAY that starts empty and is
+          // present on every line built from a credential, which is what tells
+          // the renderer that this line came from a token at all: a `reaches`
+          // line out of `delegation.js` describes a delegation ACT, has no
+          // scope claim anywhere behind it, and carries no such member. An
+          // EMPTY array is a real answer and not a missing one — it means the
+          // token named this resource and asked for none of its permissions,
+          // which the picture draws as `default permissions`.
+          permissions: [],
+          // The scope claim itself, deduped, for the tooltip. The label names
+          // only the permissions; a reader asking why a line says `default
+          // permissions` wants to see what the token DID carry, and `openid
+          // profile` is the whole answer in the ordinary case.
+          scopes: []
         });
         reach.credentials++;
         reach.lastAt = Math.max(reach.lastAt, credential.at);
         reach.firstAt = reach.firstAt ? Math.min(reach.firstAt, credential.at)
                                       : credential.at;
+        // THE UNION ACROSS EVERY CREDENTIAL ON THE LINE, because the line is
+        // keyed on the grant and not on the credential: a client that asked for
+        // `read` and later refreshed for `read write` has ONE line, and it
+        // reaches that resource for both. A last-one-wins would make the label
+        // depend on the order the register happens to hold.
+        if (!reach.permissions) reach.permissions = [];
+        if (!reach.scopes) reach.scopes = [];
+        permissionsAddressedTo(credential.scope, addressed.audience)
+          .forEach(function (one) {
+            if (reach.permissions.indexOf(one) < 0) {
+              reach.permissions.push(one);
+            }
+          });
+        String(credential.scope || '').split(/\s+/).filter(Boolean)
+          .forEach(function (one) {
+            if (reach.scopes.indexOf(one) < 0) {
+              reach.scopes.push(one);
+            }
+          });
         foldOnto(reach, credential);
         if (credential.flowProtocol && reach.protocols.indexOf(credential.flowProtocol) < 0) {
           reach.protocols.push(credential.flowProtocol);
@@ -1211,6 +1393,12 @@ module.exports = {
   // answers to "what is this token for" would be two pictures of one issuance
   // on two pages of one console.
   audienceParties: audienceParties,
+  // AND WHAT IT MAY DO THERE. Exported for `credential_graph.js` beside the two
+  // above and for exactly their reason: that file draws the SAME `reaches` line
+  // for one credential that this one draws for one person, and two answers to
+  // "which permissions does this token carry" would be two labels on one
+  // relationship on two pages of one console.
+  permissionsAddressedTo: permissionsAddressedTo,
   userList: userList,
   graphFor: graphFor,
   activityFor: activityFor
