@@ -1022,6 +1022,97 @@ async function theApplicationsRegistryRoundTrips() {
     { application: identifier, attribute: "entryDN", value: "cn=nope" },
     /entryDN/, "a derived attribute");
 
+  // ---------------------------------------------------------------------------
+  // AN ATTRIBUTE SCOPED TO A PROTOCOL FAMILY, IN BOTH DIRECTIONS.
+  //
+  // A SCHEMA row may carry `families`, and the attribute may then be written
+  // only onto an entry declared for one of them —
+  // `oauthTokenExchangeRefreshToken` is the only one today, and it is refused
+  // elsewhere because it decides what the TOKEN ENDPOINT does for a client_id,
+  // so on an entry no token request could ever name it would read as a policy
+  // in force. Everything else in this registry is inert rather than wrong on
+  // the wrong entry, which is why this needs a test of its own.
+  //
+  // THE ATTRIBUTE AND THE FAMILIES ARE READ OFF THE SERVICE, from the
+  // `families` member GET /applications/new publishes on its `editable` rows —
+  // the same rule the kinds and the protocol vocabularies above follow, and for
+  // the same reason: a name typed here is a second definition of the schema and
+  // it goes stale in the file that is supposed to catch the schema changing.
+  // The whole block is skipped, saying so, if nothing is family-scoped — which
+  // is the honest answer when the last such row is removed.
+  const scoped = editable.filter(function (row) {
+    return row.families && row.families.length;
+  })[0];
+  if (!scoped) {
+    log.info("[applications] no attribute in the published `editable` table is " +
+             "scoped to a protocol family, so the family-scope checks have " +
+             "nothing to drive. That is a fact about the schema rather than a " +
+             "skip: the rule is still enforced by common/applications.js.");
+  } else {
+    const wrong = families.filter(function (id) {
+      return scoped.families.indexOf(id) < 0;
+    })[0];
+    const right = scoped.families[0];
+    assert.ok(wrong,
+      "every protocol family this service has is one `" + scoped.name + "` " +
+      "applies to, so there is no entry the refusal could be provoked on. " +
+      "That is not a bug in this test — it means the attribute is not " +
+      "actually scoped to anything.");
+
+    // A CREATE carrying it onto the wrong family is refused WHOLE. The entry
+    // must not exist afterwards: a create that wrote the entry and dropped the
+    // field would be the half-success createApplication()'s own comment refuses
+    // to produce, and it would read as a complete declaration.
+    const wrongId = identifier + "-" + wrong;
+    await refused("/applications/create",
+      { identifier: wrongId, protocols: [wrong],
+        fields: (function () { const f = {}; f[scoped.name] = "always"; return f; })() },
+      new RegExp(scoped.name),
+      "a create putting " + scoped.name + " on an entry declared for " + wrong);
+    assert.strictEqual((await application(wrongId)).found, false,
+      "the refused create must have made NO entry: `" + wrongId + "` is in " +
+      "the registry, so the create wrote the entry and then refused the " +
+      "field — which leaves something that reads as a finished declaration.");
+
+    // And a `set` onto an entry that already exists in the wrong family.
+    await ok("/applications/create", { identifier: wrongId, protocols: [wrong] },
+             "created an application declared for " + wrong + " alone");
+    await refused("/applications/set",
+      { application: wrongId, attribute: scoped.name, value: "always" },
+      new RegExp(scoped.name),
+      "setting " + scoped.name + " on an entry declared for " + wrong);
+    assert.deepStrictEqual(fieldValues(await application(wrongId), scoped.name), [],
+      "and the refusal must have written NOTHING — a refusal that recorded " +
+      "the value anyway is the one failure mode a 400 cannot be trusted to " +
+      "rule out, since the caller never reads the entry.");
+
+    // CLEARING IS NEVER REFUSED, which is the other half of the rule and the
+    // half a reader would not predict: a value can arrive by `ldapmodify` or be
+    // left behind when a family is untimed from the entry, so refusing the
+    // clear would shut the one door that could tidy it up.
+    await ok("/applications/set",
+      { application: wrongId, attribute: scoped.name, value: "" },
+      "clearing " + scoped.name + " on an entry of the wrong family");
+
+    // DECLARE THE FAMILY AND THE SAME WRITE IS ACCEPTED. Without this the
+    // block above would pass equally against a service that had simply stopped
+    // accepting the attribute anywhere.
+    await ok("/applications/add",
+      { application: wrongId, attribute: "appAllowedProtocol", value: right },
+      "declared " + right + " on it");
+    await ok("/applications/set",
+      { application: wrongId, attribute: scoped.name, value: "always" },
+      "set " + scoped.name + " now that " + right + " is declared");
+    assert.deepStrictEqual(fieldValues(await application(wrongId), scoped.name),
+      ["always"],
+      "and it must be readable back off the entry: the refusal is about the " +
+      "FAMILY and not about the attribute, so declaring the family has to be " +
+      "the whole of what was missing.");
+
+    await ok("/applications/forget", { application: wrongId },
+             "forgot the family-scope probe");
+  }
+
   // Two refusals that name the referent rather than the field. They are the
   // ones this API answers most often, so their wording is worth pinning: a
   // caller that gets "which application?" when it sent one has a different

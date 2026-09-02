@@ -2066,11 +2066,68 @@ const ENDPOINTS = [
           'grant nobody needed draws no act at all. A DANGLING grant (naming a ' +
           'permission no application defines) is NOT drawn, because a line to ' +
           'nowhere would be a drawing of a resource that is there; it is on ' +
-          'the register instead. NO SCRIPT and no controls — the layout is ' +
+          'the register instead. NO SCRIPT — the layout is ' +
           'computed on the server with @dagrejs/dagre, the shapes are shared ' +
           'with the acts picture, and script-src \'none\' is untouched. ' +
+          'SINCE 2026-09-02 IT ALSO LISTS THE GROUPINGS and carries the one ' +
+          'control on it: a SEARCH over every application the configured ' +
+          'register touches, whose result opens /admin/delegation/cluster — ' +
+          'the picture of that application\'s group alone. A group is a set of ' +
+          'applications reachable from one another by following grants with ' +
+          'the direction ignored, which is the one division this register has ' +
+          'to narrow on; the acts have a mechanism, a mode and an outcome and ' +
+          'this one has none of those, which is why there is still no filter ' +
+          'over the drawing itself. The search NARROWS NOTHING HERE and ' +
+          'nothing on this page changes anything. ' +
           '?format=json is the graph (also in the `allowed.graph` member of ' +
-          'GET /admin-api/delegation) and ?format=svg is the document alone.' },
+          'GET /admin-api/delegation) plus the groups (also at GET ' +
+          '/admin-api/permissions/groups) and ?format=svg is the document ' +
+          'alone.' },
+  { path: '/admin/delegation/cluster', group: 'Admin',
+    name: 'Delegation — one group of applications',
+    // The same two the allowed picture cites and for its reason: this is that
+    // register narrowed, not a different subject. Nothing on it has been
+    // performed, so none of the four delegation mechanisms is claimed — the
+    // scope parameter a client asks a permission with and the audience claim
+    // the answer carries are the only things it can honestly cite.
+    specs: ['rfc6749', 'rfc7519'],
+    what: 'NON-SPEC PAGE, and a DRILL-DOWN of /admin/delegation reached from ' +
+          '/admin/delegation/allowed. ONE GROUP OF APPLICATIONS DRAWN ALONE. A ' +
+          'GROUP IS A SET OF APPLICATIONS THAT CAN BE REACHED FROM ONE ANOTHER ' +
+          'BY FOLLOWING DELEGATED PERMISSIONS, IGNORING WHICH WAY EACH GRANT ' +
+          'POINTS — and the dropped direction is the whole decision. Following ' +
+          'the arrows would answer `what can this client eventually reach`, ' +
+          'which is a question about a chain, and a permission register has no ' +
+          'chains in it: holding a permission on an API grants nobody that ' +
+          'API\'s own permissions. Following a grant either way is the only ' +
+          'reading under which an API and the three front ends holding ' +
+          'permissions on it come out as ONE group rather than as four. ' +
+          'MEMBERSHIP ignores direction; the PICTURE does not — every line is ' +
+          'still drawn with a round end and an arrowhead. It exists because ' +
+          'the whole-register picture is the right document for five ' +
+          'applications and the wrong one for eighty, where the interesting ' +
+          'reading is never the whole of it. Reached by SEARCHING for an ' +
+          'application on /admin/delegation/allowed, in the same chooser ' +
+          '/admin/delegation offers over the ACTS — a different catalogue, ' +
+          'because this one holds what the CONFIGURED register touches (an ' +
+          'entry with a base URI or a permission, or one holding a grant) and ' +
+          'that one holds what some act actually named. THREE STATES MAKE A ' +
+          'GROUP OF ONE and each is a real answer rather than an empty row: a ' +
+          'resource nobody holds anything on (an API somebody described and ' +
+          'nothing may reach), a client holding only DANGLING grants (naming ' +
+          'permissions no application defines, so there is no far end), and an ' +
+          'application granted its OWN permission. A group is NAMED after the ' +
+          'member whose identifier sorts first, which is a property of the set, ' +
+          'so adding a grant inside a group does not rename it. Same renderer, ' +
+          'same graph builder and same shapes as the allowed picture, handed a ' +
+          'subset of the grants and nothing else changed: NO SCRIPT, laid out ' +
+          'on the server with @dagrejs/dagre. NOTHING ON IT CHANGES ANYTHING — ' +
+          'the Revoke button for a grant stays on the register, so the picture ' +
+          'pages stay documents. A bare page is the chooser rather than a 404, ' +
+          'and an application this register has never heard of is explained ' +
+          'rather than refused. ?format=json is the group, its grants and its ' +
+          'graph — the same answer GET /admin-api/permissions/groups gives — ' +
+          'and ?format=svg is the document alone.' },
   { path: '/admin/delegation/chain', group: 'Admin',
     name: 'Delegation — one relationship',
     // The same four specifications as the two pages above, and for the reason
@@ -2911,6 +2968,37 @@ const ENDPOINTS = [
           'requested it, which is the one field here that comes from what ' +
           'happened. READ ONLY — the five controls are on the resource below. ' +
           'Mirrors the ALLOWED half of GET /admin/delegation.' },
+  { path: '/admin-api/permissions/groups', group: 'Management API',
+    name: 'Which applications are joined to each other',
+    // The same three the register above cites, and for its reason: this is
+    // that register PARTITIONED, not a different subject.
+    specs: ['openapi', 'rfc6749', 'rfc7519'],
+    what: 'NON-SPEC. The configured register PARTITIONED into GROUPS: a group ' +
+          'is a set of applications that can be reached from one another by ' +
+          'following grants, IGNORING WHICH WAY EACH GRANT POINTS. The ' +
+          'dropped direction is the decision — following the arrows would ' +
+          'answer `what can this client eventually reach`, and a permission ' +
+          'register has no chains in it, since holding a permission on an API ' +
+          'grants nobody that API\'s own permissions; following a grant either ' +
+          'way is the only reading under which an API and the front ends ' +
+          'holding permissions on it come out as ONE group. The universe is ' +
+          'what the configured register TOUCHES — an entry with a base URI or ' +
+          'a permission of its own, or one holding a grant — so an ordinary ' +
+          'entry in ou=applications is in no group. THREE STATES MAKE A GROUP ' +
+          'OF ONE and each is in the answer rather than left out: a resource ' +
+          'nobody holds anything on, a client holding only DANGLING grants, ' +
+          'and an application granted its own permission. A group is named ' +
+          'after the member whose identifier sorts first, which is a property ' +
+          'of the set, so adding a grant inside a group does not rename it. ' +
+          'With no ?application, every group with its counts and no rows, ' +
+          'biggest first and paged; with one, the group that application is ' +
+          'in, with its permissions, its grants and the graph — the same ' +
+          'answer /admin/delegation/cluster?format=json gives. An application ' +
+          'this register has never heard of is `group: null` and a 200, ' +
+          'because having no permissions configured is the ordinary state of ' +
+          'most entries. The identifier is matched EXACTLY; nothing here ' +
+          'case-folds one. READ ONLY. Mirrors GET /admin/delegation/allowed ' +
+          'and GET /admin/delegation/cluster.' },
   { path: '/admin-api/permissions/:action', group: 'Management API',
     name: 'Define and grant delegated permissions',
     specs: ['openapi', 'rfc6749'],
@@ -3920,7 +4008,18 @@ const ENDPOINTS = [
     specs: ['rfc6749', 'oidc', 'rfc8693', 'rfc9396', 'oid4vci', 'rfc9449', 'rfc7800', 'rfc9700',
             'rfc8705', 'rfc8707', 'rfc7523'],
     what: 'authorization_code, refresh_token, client_credentials, password, token-exchange, and ' +
-          "OID4VCI's pre-authorized_code with tx_code enforcement. A DPoP proof on the request " +
+          "OID4VCI's pre-authorized_code with tx_code enforcement. An RFC 8693 exchange can " +
+          'come back with a REFRESH TOKEN beside the exchanged access token — an ordinary one ' +
+          'of this service, redeemable at the refresh grant and bound and rotated like any ' +
+          "other (section 2.2.1's offline case). oauth2.tokenExchangeRefreshToken decides, in " +
+          'three values: `when-requested` (the default — section 2.1 read literally, so the ' +
+          'client asks with `requested_token_type=urn:ietf:params:oauth:token-type:' +
+          'refresh_token` and gets one only if it did), `never` (the ask succeeds without one, ' +
+          'which is what this endpoint did before the parameter was implemented) and `always` ' +
+          '(every exchange gets one, asked for or not). oauthTokenExchangeRefreshToken on the ' +
+          "CLIENT application's entry overrides it for that client alone, and " +
+          'issued_token_type describes the access_token member throughout. ' +
+          'A DPoP proof on the request ' +
           'binds the issued access and refresh tokens to its key (cnf.jkt) and makes token_type ' +
           'DPoP; without one the response is an ordinary Bearer token. A Token Request made ' +
           'over a connection carrying a CLIENT CERTIFICATE binds the access and refresh tokens ' +

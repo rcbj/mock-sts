@@ -221,6 +221,68 @@ anything, so a refresh of a code obtained before this was turned on still works,
 and revoking a consent leaves a token already minted valid. `/admin/tokens` is
 where an issued credential is revoked.
 
+### `oauth2.tokenExchangeRefreshToken` — three servers, one switch
+
+Runtime, settable on a trust realm, and the only OAuth setting here whose value
+is a WORD rather than a number or a yes/no.
+
+An RFC 8693 token exchange trades one token for another. Whether the response
+also carries a `refresh_token` is left to the authorization server by section
+2.2.1, which names the case it is for: a client that must keep reaching a
+resource *"even when the original credential is no longer valid"* — the
+user-not-present case, where there is no session by design. Real authorization
+servers differ, so this one can be any of them:
+
+| Value | What an exchange gets back |
+|---|---|
+| `when-requested` | **The default.** Section 2.1 read literally: the client asks with `requested_token_type=urn:ietf:params:oauth:token-type:refresh_token` and gets a refresh token only if it did. |
+| `never` | No refresh token from an exchange, whatever the request said. An exchange that asked still SUCCEEDS — the ask is a request and not an instruction — and the log says which setting swallowed it. |
+| `always` | Every exchange response carries one, asked for or not. |
+
+**Why three words and not a switch.** `false` would have had to mean `never`,
+which leaves `true` meaning either of the other two and no way to reach the
+third — and `always` is the interesting one to point a client at, because a
+credential arrives that it never asked for and must not leak.
+
+**What comes back is an ordinary refresh token of this service**, in every case
+and by construction: it is minted by the one function every grant here mints one
+through. It redeems at the refresh grant, reports at `/oauth2/introspect`, is
+revocable at `/oauth2/revoke`, lives for `oauth2.refreshTokenTtlS`, rotates in
+RFC 9700 mode, and is bound to the DPoP key or client certificate the exchange
+was made with. It also remembers the RFC 8707 resources the exchange named, so a
+renewal cannot widen the audience the exchange narrowed.
+
+`issued_token_type` says `access_token` throughout. It describes the token in
+the `access_token` member, and that member holds an access token whichever way
+this is set.
+
+#### One client at a time
+
+`oauthTokenExchangeRefreshToken` on the **client application's** entry, holding
+one of the same three words, overrides this for that client alone — typed on
+`/admin/applications`, on `/admin/applications/new`, or through
+`POST /admin-api/applications/set`.
+
+The CLIENT performing the exchange and not the audience, for two reasons that
+point the same way: the refresh token is handed to the client, so it is that
+party's credential to hold and redeem; and in the interesting case the subject
+the exchange is *about* has no entry here at all, the whole point of an exchange
+being a `subject_token` from somewhere else.
+
+**It is the one attribute in this registry that is REFUSED on an application of
+the wrong kind.** It applies to the OAuth 2.0 and OpenID Connect families, and
+writing it onto an entry declared for neither is turned away by the console and
+by `/admin-api`, naming the family to tick first. Every other per-application
+setting is a default something reads if it ever gets the chance, so writing one
+onto an application that never reaches that protocol costs nothing; this one
+decides what the *token endpoint* does for a `client_id`, so on an entry no
+token request could ever name it would sit there reading like a policy that was
+in force. Clearing it is never refused, and `ldapmodify` reaches it like every
+other attribute.
+
+A value that is not one of the three words is not an error either: the log says
+which entry carries what, and the service-wide setting decides.
+
 ### `global.https` — TLS on the main port
 
 **ON in every appconfig file this repository ships, since 2026-08-30.** That is

@@ -2674,17 +2674,28 @@ async function theDrillDownsCarryTheirTrail(driver, created) {
     });
   }
 
-  // The five pages with no nav row of their own. `/admin/delegation/allowed`
-  // is the newest and is a drill-down for the same reason the map beside it
-  // is: it is a second VIEW of a register on /admin/delegation rather than a
-  // filter over one, so it takes an `up` and the delegation page's own tab
-  // rather than a nav row of its own.
+  // The six pages with no nav row of their own. `/admin/delegation/cluster` is
+  // the newest and it is a drill-down of a drill-down — it is reached from a
+  // search on /admin/delegation/allowed, which is itself reached from
+  // /admin/delegation — so it is the page where the trail is doing the most
+  // work and the one where losing it would strand a reader two levels down.
+  // Both it and `/admin/delegation/allowed` take an `up` and the delegation
+  // page's own tab rather than a nav row, for the reason the map beside them
+  // does: they are second VIEWS of a register on that page rather than filters
+  // over one.
+  //
+  // It is driven BARE here on purpose. With an `?application=` it is a
+  // picture; with nothing it is the chooser, and a bare drill-down answering
+  // 404 instead of offering the list is the failure /admin/logout's rule
+  // exists to prevent — a bookmark to the page becomes an error rather than
+  // the search that page is for.
   const orphans = ["/admin/delegation/user?user=" +
                      encodeURIComponent(created.person),
                    "/admin/delegation/application?application=" +
                      encodeURIComponent(created.identifier),
                    "/admin/delegation/chain",
                    "/admin/delegation/allowed",
+                   "/admin/delegation/cluster",
                    "/admin/tokens/credential"];
   for (const path of orphans) {
     const page = await open(driver, realm(path));

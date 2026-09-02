@@ -101,6 +101,29 @@ function edgeDashes(svg, colour) {
   return out;
 }
 
+// A whole `register()` reply, for the clustering assertions below. It is built
+// by hand for this file's own reason: the states worth partitioning are the
+// ones a directory will not hand over, and two of them — a dangling grant and
+// an application granted its own permission — are refused by both console
+// doors. `resources` is the list of identifiers that carry a base URI or a
+// permission, which is what `register()` means by one; `defined` is the
+// permissions on them, as [resource, name] pairs.
+function registerOf(grants, resources, defined) {
+  return {
+    resources: (resources || []).map(function (identifier) {
+      return { identifier: identifier, name: identifier,
+               baseUri: 'https://' + identifier + '/' };
+    }),
+    permissions: (defined || []).map(function (pair) {
+      return { resource: pair[0], resourceName: pair[0],
+               baseUri: 'https://' + pair[0] + '/', name: pair[1],
+               description: '', id: 'https://' + pair[0] + '/' + pair[1],
+               raw: pair[1], grantedTo: [] };
+    }),
+    grants: grants
+  };
+}
+
 function run(t) {
   // -----------------------------------------------------------------------
   t.log.info('a permission identifier is the base and the name, joined once');
@@ -254,6 +277,190 @@ function run(t) {
           'and both states are said in words as well as in the dash — a ' +
           'picture whose most useful fact was invisible without a key would ' +
           'be one nobody read it off');
+
+  // -----------------------------------------------------------------------
+  t.log.info('the register partitions into groups, and direction is ignored');
+  // -----------------------------------------------------------------------
+  // WHY IN PROCESS, WHICH IS THE SAME QUESTION THIS FILE'S HEADER ANSWERS FOR
+  // THE GRAPH. Two of the four states below cannot be produced over HTTP at
+  // all: a DANGLING grant needs a permission removed from under one, and an
+  // application granted its OWN permission is refused by both console doors.
+  // The third — a resource with permissions and no grants — is reachable over
+  // HTTP and is asserted here anyway, because the assertion is that it is IN
+  // the answer, and that is a claim about the partition rather than about the
+  // service. `tests/vendored/sts_admin_api_operations.js` drives the operation.
+  //
+  // The mesh below is deliberately the one shape that tells the two readings
+  // apart. `webapp1 -> api1` and `webapp2 -> api1` are two arrows INTO one
+  // resource: following the arrows, webapp1 reaches api1 and stops, and webapp2
+  // is reachable only by walking one of them backwards. So webapp1 and webapp2
+  // land in one group if and only if direction is ignored — and a
+  // implementation that followed the arrows would still put `api1` and `api2`
+  // together, which is why a chain alone would have asserted nothing.
+  const mesh = registerOf([
+    grant('webapp1', 'api1', 'read', { baseUri: 'https://api1/', asked: true }),
+    grant('webapp1', 'api1', 'write', { baseUri: 'https://api1/' }),
+    grant('webapp2', 'api1', 'read', { baseUri: 'https://api1/' }),
+    grant('api1', 'api2', 'sync', { baseUri: 'https://api2/' }),
+    // ONE CLIENT ON TWO RESOURCES, which is the shape that tells a real union
+    // from a first-write-wins one: `webapp1` has already been joined to `api1`
+    // when this row arrives, so an implementation that only sets a parent when
+    // the client is still its own root would leave api5 in a group of its own
+    // and every count in this file would still be right about the rest.
+    grant('webapp1', 'api5', 'call', { baseUri: 'https://api5/' }),
+    grant('batchjob', 'api3', 'run', { baseUri: 'https://api3/' }),
+    // Neither of these joins anything, and each is a different reason.
+    grant('ghost', 'gone', 'tmp', { baseUri: 'https://gone/', dangling: true }),
+    grant('selfy', 'selfy', 'me', { baseUri: 'https://selfy/' })
+  ], ['api1', 'api2', 'api3', 'api5', 'selfy', 'lonely'],
+     [['api1', 'read'], ['api1', 'write'], ['api2', 'sync'], ['api3', 'run'],
+      ['api5', 'call'], ['lonely', 'peek']]);
+  const parts = permissions.clusters(mesh);
+  const groupOf = function (identifier) {
+    return permissions.clusterFor(identifier, parts);
+  };
+
+  t.equal(JSON.stringify(groupOf('webapp1').members),
+          JSON.stringify(['api1', 'api2', 'api5', 'webapp1', 'webapp2']),
+          'TWO CLIENTS OF ONE RESOURCE ARE IN ONE GROUP, which is the whole ' +
+          'of the direction decision: following the arrows, webapp2 is ' +
+          'reachable from webapp1 only by walking a grant backwards, so a ' +
+          'partition that respected direction would put them in two groups ' +
+          'and the picture would say that an API and its front ends have ' +
+          'nothing to do with each other');
+  t.equal(groupOf('api5').key, groupOf('webapp2').key,
+          'AND ONE CLIENT ON TWO RESOURCES PUTS BOTH RESOURCES IN ONE GROUP: ' +
+          'webapp1 reaches api1 and api5, so api5 is in webapp2\'s group ' +
+          'though nothing joins the two directly. A join that only moved a ' +
+          'node still standing on its own root would drop this one silently');
+  t.equal(groupOf('api2').key, groupOf('webapp2').key,
+          'and it is TRANSITIVE — api2 is two hops from webapp2 and in its ' +
+          'group, because a group is a connected component and not a ' +
+          'neighbour list');
+  t.equal(groupOf('batchjob').key, 'api3',
+          'a pair with nothing to do with the rest is a group of its own — ' +
+          'this is the fact the whole feature exists to draw, and a ' +
+          'partition that joined everything would be the whole-register ' +
+          'picture with extra steps');
+  t.equal(groupOf('webapp1').key, 'api1',
+          'A GROUP IS NAMED AFTER THE MEMBER WHOSE IDENTIFIER SORTS FIRST, ' +
+          'which is a property of the SET — the union-find root is whichever ' +
+          'identifier the joins happened to leave on top, so naming a group ' +
+          'after it would rename every group on the console the moment a ' +
+          'grant was added anywhere inside it');
+
+  // -----------------------------------------------------------------------
+  t.log.info('and three states each make a group of ONE for three reasons');
+  // -----------------------------------------------------------------------
+  // `check` and not `equal`, because the mutant this is aimed at — a universe
+  // built from the grants alone — makes `groupOf('lonely')` NULL, and a test
+  // that dereferenced it would report a TypeError instead of the sentence.
+  t.check(!!groupOf('lonely'),
+          'A RESOURCE NOBODY HOLDS ANYTHING ON IS IN THE ANSWER. It appears ' +
+          'in no grant at all, so a partition built from the grants alone ' +
+          'would have left it out — and an API somebody described that ' +
+          'nothing may reach is the most interesting group of one there is');
+  t.equal(groupOf('lonely') ? groupOf('lonely').counts.applications : 0, 1,
+          'and it is a group of one');
+  t.equal(groupOf('lonely') ? groupOf('lonely').counts.permissions : 0, 1,
+          'with the permission it exposes counted on it, which is the only ' +
+          'thing its own page has to show');
+  t.equal(groupOf('ghost').counts.applications, 1,
+          'A DANGLING GRANT JOINS ITS CLIENT TO NOTHING — it names a ' +
+          'permission no application defines, so there is no far end to be ' +
+          'in a group with. A partition that keyed on the permission ' +
+          'identifier rather than on the resource would have invented a ' +
+          'second member out of a string');
+  t.equal(groupOf('ghost').counts.dangling, 1,
+          'and the row is COUNTED on the group rather than dropped, so the ' +
+          'page can say why there is nothing to draw');
+  t.equal(groupOf('selfy').counts.applications, 1,
+          'AN APPLICATION GRANTED ITS OWN PERMISSION IS ONE APPLICATION, ' +
+          'however it is drawn');
+  t.equal(groupOf('selfy').counts.lines, 0,
+          'and no line, because `graph()` draws no arrow from a box back to ' +
+          'itself — the count on the group and the picture beside it have to ' +
+          'agree, and a table reading `1 grant` above an empty diagram is the ' +
+          'console disagreeing with itself about one row');
+  t.equal(groupOf('selfy').counts.selfGrants, 1,
+          'it is reported as what it is instead');
+
+  t.equal(parts.counts.clusters, 5,
+          'five groups over the whole register');
+  t.equal(parts.counts.alone, 3,
+          'three of them of one application, which is the number the page ' +
+          'draws a tile for');
+  t.equal(parts.clusters[0].counts.applications, 5,
+          'BIGGEST FIRST. The list exists to surface the groups worth ' +
+          'looking at, and the interesting one at position thirty-one is the ' +
+          'problem the whole-register picture already had');
+
+  // -----------------------------------------------------------------------
+  t.log.info('every grant belongs to exactly one group, and to the right one');
+  // -----------------------------------------------------------------------
+  // THE ASSERTION A COUNT CANNOT MAKE. Every arithmetic check above would
+  // still pass if a grant were filed under the wrong group, or under two — and
+  // the picture would then draw a line between boxes that are not both on it,
+  // which is the one failure that looks like a rendering bug.
+  const filed = {};
+  parts.clusters.forEach(function (group) {
+    group.grants.forEach(function (one) {
+      filed[one.client + '|' + one.permissionId] =
+        (filed[one.client + '|' + one.permissionId] || 0) + 1;
+      t.check(group.members.indexOf(one.client) >= 0,
+              'the client of every grant is a member of the group it is filed ' +
+              'under: ' + one.client + ' in ' + group.key);
+      t.check(!one.resource || group.members.indexOf(one.resource) >= 0,
+              'and so is its resource, where it has one: ' +
+              (one.resource || '(dangling)') + ' in ' + group.key);
+    });
+  });
+  t.equal(Object.keys(filed).length, mesh.grants.length,
+          'every grant in the register is filed');
+  t.check(Object.keys(filed).every(function (key) { return filed[key] === 1; }),
+          'AND EACH IS FILED EXACTLY ONCE. A grant appearing in two groups ' +
+          'would draw one relationship on two pictures and count it twice on ' +
+          'the page that lists them',
+          JSON.stringify(filed));
+
+  // -----------------------------------------------------------------------
+  t.log.info('a group\'s picture is the whole picture narrowed and nothing else');
+  // -----------------------------------------------------------------------
+  // THE JOIN, and it is what makes the count on the console a claim about the
+  // renderer rather than about this module's arithmetic.
+  const whole = permissions.graph(mesh.grants);
+  const part = permissions.graph(groupOf('webapp1').grants);
+  t.equal(part.nodes.length, 5,
+          'the group draws five boxes where the whole register draws ' +
+          whole.nodes.length);
+  t.equal(part.edges.length, groupOf('webapp1').counts.lines,
+          'AND THE `lines` COUNT ON THE GROUP IS WHAT THE RENDERER ACTUALLY ' +
+          'DRAWS. It is computed in app_permissions.js and spent in a table ' +
+          'beside the diagram, so a count that included the dangling and the ' +
+          'self grants would be a page whose own numbers contradicted the ' +
+          'picture under them');
+  t.check(part.edges.every(function (edge) {
+            return whole.edges.filter(function (one) {
+              return one.id === edge.id && one.from === edge.from &&
+                     one.to === edge.to && one.relation === edge.relation;
+            }).length === 1;
+          }),
+          'and every line in the group is the SAME line the whole register ' +
+          'draws, by id and by both ends — a group is the register narrowed, ' +
+          'so a reader who has learnt what a dash means on one picture has ' +
+          'learnt it on the other');
+
+  // -----------------------------------------------------------------------
+  t.log.info('and an identifier is matched exactly, here as everywhere else');
+  // -----------------------------------------------------------------------
+  t.equal(groupOf('WebApp1'), null,
+          'NOTHING HERE CASE-FOLDS AN IDENTIFIER. `applications.js` does not, ' +
+          'an audience that differs by a character is a different audience, ' +
+          'and a lookup that matched loosely would be this module deciding a ' +
+          'comparison rule on that one\'s behalf — and would hand a reader the ' +
+          'group of an application they did not name');
+  t.equal(groupOf(''), null,
+          'and an empty name is not the first group in the list');
 }
 
 module.exports = {

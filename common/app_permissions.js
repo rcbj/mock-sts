@@ -625,6 +625,236 @@ function graph(rows) {
   return answer;
 }
 
+// ---------------------------------------------------------------------------
+// THE GROUPINGS: WHICH APPLICATIONS CAN BE REACHED FROM WHICH, FOLLOWING A
+// GRANT IN EITHER DIRECTION.
+//
+// `graph()` above answers *what may reach what* and it answers it for the whole
+// registry at once. That is the right picture for a service with five
+// applications in it and it is the wrong one for a service with eighty: the
+// interesting reading of a permission register is almost never the whole of it,
+// it is **which applications are joined to each other at all** — the API and the
+// three front ends that hold permissions on it, the batch job that reaches two
+// of them, and the twelve applications elsewhere in the registry that have
+// nothing whatever to do with any of it.
+//
+// So this function partitions the register into GROUPS. A group is a connected
+// component of the grant graph, and the whole of the definition is in the next
+// paragraph.
+//
+// **DIRECTION IS IGNORED, DELIBERATELY, AND IT IS THE ONE DECISION HERE.** A
+// grant is directed — a CLIENT is granted a permission a RESOURCE exposes, and
+// the picture draws that with a round end and an arrowhead precisely because
+// the two ends are not interchangeable. Following the arrows would answer *what
+// can this client eventually reach*, which is a question about a chain; a
+// permission register has no chains in it, because holding a permission on an
+// API does not grant that API's own permissions to anybody. Following a grant
+// EITHER WAY answers the question a reader actually brings to this page —
+// *which applications are in the same conversation as this one* — and it is the
+// only reading under which the API and the three front ends holding permissions
+// on it come out as one group rather than as four. The PICTURE still draws
+// every line with its direction on it, so nothing is lost: what is dropped is
+// direction as a criterion for MEMBERSHIP, not direction as a fact.
+//
+// Three states join no two applications and each is a different reason:
+//
+//   * **A DANGLING grant** names a permission no application defines, so there
+//     is no far end to be in a group with. Its client is a member of whatever
+//     group its other grants put it in, and of a group of its own if it has
+//     none — which is the honest drawing of *this application has been granted
+//     something that does not exist*.
+//   * **A SELF-GRANT** (client and resource the same entry, which only an
+//     `ldapmodify` can write — see `graph()`) is one application, so it is one
+//     group of one. `graph()` already refuses to draw an arrow from a box back
+//     to itself; there is nothing for that arrow to connect either.
+//   * **A RESOURCE NOBODY HOLDS ANYTHING ON** is a group of one, and it is in
+//     this answer rather than left out of it. An API with permissions defined
+//     and no grants against them is the most interesting group of one there is:
+//     somebody described an API and nothing may reach it. Leaving it out would
+//     have made this list a list of grants wearing a different hat.
+//
+// The MEMBERSHIP UNIVERSE is therefore every application the configured
+// register touches at all: every resource `register()` found (an entry carrying
+// a base URI or a permission), and every client holding a grant. An entry in
+// `ou=applications` that is neither is not in any group, because this register
+// has nothing to say about it — `/admin/applications` is where those live.
+//
+// **IT TAKES THE REGISTER RATHER THAN READING ONE.** `register()` is a walk of
+// `ou=applications` and the console already has its answer in hand when it asks
+// for this; a second walk would be a second linear read per page and — the part
+// that actually matters — a second chance to disagree with the picture drawn
+// beside it about which entries are resources.
+// ---------------------------------------------------------------------------
+function clusters(reg) {
+  log.debug("Entering clusters().");
+  const all = reg || register();
+
+  // Union-find over the identifiers. A breadth-first walk of an adjacency map
+  // would do as well and this is shorter to be sure of: there is no recursion
+  // to blow a stack on a long chain, and the two halves — `add` and `join` —
+  // are each three lines, so the whole partition is something a reader can
+  // check rather than trust.
+  const parent = {};
+  function add(id) {
+    if (!Object.prototype.hasOwnProperty.call(parent, id)) {
+      parent[id] = id;
+    }
+  }
+  function find(id) {
+    let at = id;
+    // Path halving. Every lookup shortens the chain it walked, so a register
+    // built one grant at a time does not degenerate into a list.
+    while (parent[at] !== at) {
+      parent[at] = parent[parent[at]];
+      at = parent[at];
+    }
+    return at;
+  }
+  function join(a, b) {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) {
+      parent[ra] = rb;
+    }
+  }
+
+  all.resources.forEach(function (one) {
+    add(one.identifier);
+  });
+  all.grants.forEach(function (one) {
+    add(one.client);
+    // A dangling grant has no resource — see the header. `row.resource` is the
+    // empty string there rather than a name nothing answers to, which is
+    // `register()`'s own three-state honesty and is why this test is on the
+    // value and not on the `dangling` flag beside it.
+    if (one.resource) {
+      add(one.resource);
+      join(one.client, one.resource);
+    }
+  });
+
+  const membersOf = {};
+  Object.keys(parent).forEach(function (id) {
+    const root = find(id);
+    (membersOf[root] = membersOf[root] || []).push(id);
+  });
+
+  // THE KEY IS THE ALPHABETICALLY FIRST MEMBER AND NOT THE UNION-FIND ROOT.
+  // The root is whichever identifier the joins happened to leave on top, so it
+  // moves when a grant is added anywhere in the group — which would make every
+  // link to a group on the console a link that goes stale for a reason nobody
+  // could see. The first member is a property of the SET, so a group keeps its
+  // name until its membership changes.
+  const keyOf = {};
+  Object.keys(membersOf).forEach(function (root) {
+    membersOf[root].sort(function (a, b) { return a.localeCompare(b); });
+    keyOf[root] = membersOf[root][0];
+  });
+  const memberOf = {};
+  Object.keys(parent).forEach(function (id) {
+    memberOf[id] = keyOf[find(id)];
+  });
+
+  // Every grant and every permission filed under the group it belongs to. A
+  // grant is filed by its CLIENT, which is enough: its resource is in the same
+  // group by construction where it has one, and where it has not the grant is
+  // dangling and belongs to the client alone.
+  const grantsOf = {};
+  all.grants.forEach(function (one) {
+    const key = memberOf[one.client];
+    (grantsOf[key] = grantsOf[key] || []).push(one);
+  });
+  const permissionsOf = {};
+  all.permissions.forEach(function (one) {
+    const key = memberOf[one.resource];
+    (permissionsOf[key] = permissionsOf[key] || []).push(one);
+  });
+
+  const list = Object.keys(membersOf).map(function (root) {
+    const key = keyOf[root];
+    const members = membersOf[root];
+    const grants = grantsOf[key] || [];
+    const permissions = permissionsOf[key] || [];
+    // WHAT THE PICTURE WILL ACTUALLY DRAW, counted here rather than by the page
+    // that draws it. `graph()` draws no line for a dangling grant and none for
+    // a self-grant, and a group whose table said `3 grants` above a diagram
+    // with one line on it would be the console disagreeing with itself about
+    // the same three rows.
+    const drawn = grants.filter(function (one) {
+      return !one.dangling && one.resource && one.resource !== one.client;
+    });
+    return {
+      key: key,
+      members: members,
+      grants: grants,
+      permissions: permissions,
+      counts: {
+        applications: members.length,
+        grants: grants.length,
+        lines: drawn.length,
+        permissions: permissions.length,
+        dangling: grants.filter(function (one) { return one.dangling; }).length,
+        selfGrants: grants.filter(function (one) {
+          return !one.dangling && one.resource && one.resource === one.client;
+        }).length,
+        // The two readings the whole configured register exists for, per group:
+        // a grant somebody has asked for at least once, and one nobody has ever
+        // needed. Dangling rows are in neither, because `asked` on a grant that
+        // resolves to nothing is not evidence about a relationship.
+        asked: drawn.filter(function (one) { return one.asked; }).length,
+        unused: drawn.filter(function (one) { return !one.asked; }).length
+      }
+    };
+  });
+
+  // BIGGEST FIRST, because the page this feeds exists to surface the groups
+  // worth looking at and a list of forty groups of one with the interesting one
+  // at position thirty-one is the same problem the whole-register picture had.
+  // Ties broken by the number of lines and then by the key, so that two runs of
+  // the same service produce the same page — `register()` sorts for the same
+  // reason and says so.
+  list.sort(function (a, b) {
+    return b.counts.applications - a.counts.applications ||
+           b.counts.lines - a.counts.lines ||
+           a.key.localeCompare(b.key);
+  });
+
+  const answer = {
+    clusters: list,
+    memberOf: memberOf,
+    counts: {
+      clusters: list.length,
+      applications: Object.keys(parent).length,
+      largest: list.length ? list[0].counts.applications : 0,
+      alone: list.filter(function (one) { return one.counts.applications === 1; }).length,
+      joined: list.filter(function (one) { return one.counts.applications > 1; }).length
+    }
+  };
+  log.debug("Leaving clusters(). " + answer.counts.clusters + " group(s) over " +
+            answer.counts.applications + " application(s); largest " +
+            answer.counts.largest + ".");
+  return answer;
+}
+
+// The one group an application is in, or null where the configured register has
+// never heard of it. Exact equality on the identifier, for the reason `graph()`
+// gives above and `applications.js` gives at length: nothing here case-folds an
+// identifier, and matching loosely in this one function would be this module
+// deciding a comparison rule on that one's behalf.
+function clusterFor(identifier, reg) {
+  const wanted = String(identifier == null ? '' : identifier).trim();
+  log.debug("Entering clusterFor(). identifier=" + wanted);
+  const all = reg || clusters();
+  const key = all.memberOf[wanted];
+  const found = key === undefined
+    ? null
+    : all.clusters.filter(function (one) { return one.key === key; })[0] || null;
+  log.debug("Leaving clusterFor(). " +
+            (found ? found.counts.applications + " application(s) in it."
+                   : "Not in the configured register."));
+  return found;
+}
+
 module.exports = {
   register: register,
   forApplication: forApplication,
@@ -633,5 +863,7 @@ module.exports = {
   removePermission: removePermission,
   grant: grant,
   revoke: revoke,
-  graph: graph
+  graph: graph,
+  clusters: clusters,
+  clusterFor: clusterFor
 };

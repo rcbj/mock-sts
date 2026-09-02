@@ -795,6 +795,84 @@ const SETTINGS = [
                  'already issued, so a refresh of a code obtained before the ' +
                  'setting was turned on still works.' },
 
+  // ---------------------------------------------------------------------------
+  // RFC 8693 SECTION 2.2.1'S OPTIONAL `refresh_token`, AS A POLICY RATHER THAN
+  // A YES OR A NO.
+  //
+  // The section says when one is worth issuing from a token exchange — "in
+  // cases where the client of the token exchange needs the ability to access a
+  // resource even when the original credential is no longer valid", the
+  // user-not-present case — and leaves whether to do it to the authorization
+  // server. Real ones differ, and a client written against one of them meets
+  // the others; that difference is the thing this service exists to be.
+  //
+  // SO IT IS AN ENUM AND NOT A BOOL, and the three values are three servers a
+  // client can be pointed at:
+  //
+  //   * `never`          — no refresh token from an exchange, whatever the
+  //                        request said. What this service did before
+  //                        2026-09-01, kept because a client that copes with a
+  //                        refresh token and not with its absence is exactly
+  //                        the bug a mock is for.
+  //   * `when-requested` — RFC 8693 section 2.1 read literally: the client asks
+  //                        with `requested_token_type`, and gets one if it did.
+  //                        THE DEFAULT, so nothing changes for anybody.
+  //   * `always`         — every exchange response carries one, asked for or
+  //                        not. Several deployed authorization servers behave
+  //                        this way and a client written against one of them
+  //                        has never run the other path.
+  //
+  // A BOOL COULD NOT HAVE SAID THIS. `false` would have had to mean `never`,
+  // which leaves `true` meaning either of the other two and no way to ask for
+  // the third — and the interesting client bug is on the `always` side, where
+  // a credential arrives that the client did not ask for and must not leak.
+  //
+  // PER APPLICATION, through `oauthTokenExchangeRefreshToken` on the CLIENT's
+  // own entry — the client performing the exchange, since it is the party the
+  // refresh token is handed to. That attribute applies to the OAuth 2.0 and
+  // OpenID Connect families and to no other, and `common/applications.js`
+  // refuses to write it on an entry declared for neither; see its `families`
+  // member, which is the first of its kind in that schema.
+  //
+  // `runtime: true` and settable on a realm, for `consentRequired`'s reason:
+  // there is no listener and no key involved, so nothing here is decided when a
+  // socket is bound.
+  { key: 'oauth2.tokenExchangeRefreshToken', group: 'OAuth 2.0 / OIDC',
+    label: 'Refresh token from a token exchange',
+    env: 'STS_OAUTH2_TOKEN_EXCHANGE_REFRESH_TOKEN', type: 'enum',
+    enumValues: ['never', 'when-requested', 'always'],
+    dflt: 'when-requested', runtime: true,
+    description: 'WHETHER AN RFC 8693 TOKEN EXCHANGE HANDS BACK A ' +
+                 '`refresh_token` BESIDE THE EXCHANGED ACCESS TOKEN. Section ' +
+                 '2.2.1 makes it OPTIONAL and names the case it is for: a ' +
+                 'client that must keep reaching a resource "even when the ' +
+                 'original credential is no longer valid" — the user-not-' +
+                 'present case, where there is no session by design. ' +
+                 '`when-requested` is the default and is section 2.1 read ' +
+                 'literally: the client asks with ' +
+                 '`requested_token_type=urn:ietf:params:oauth:token-type:' +
+                 'refresh_token` and gets one only if it did. `never` is what ' +
+                 'this service did before that was implemented and refuses the ' +
+                 'ask silently — the exchange still succeeds, with no refresh ' +
+                 'token in it. `always` hands one to every exchange whether it ' +
+                 'asked or not, which is how several deployed authorization ' +
+                 'servers behave and is the path a client written against the ' +
+                 'other two has never run. What comes back is an ORDINARY ' +
+                 'refresh token of this service in every case: redeemable at ' +
+                 'the refresh grant, revocable, subject to ' +
+                 '`oauth2.refreshTokenTtlS`, rotated in RFC 9700 mode, and ' +
+                 'bound to the DPoP key or client certificate the exchange was ' +
+                 'made with. `issued_token_type` says `access_token` ' +
+                 'throughout, because it describes the token in the ' +
+                 '`access_token` member and that is what that member holds. ' +
+                 '`oauthTokenExchangeRefreshToken` on the CLIENT application\'s ' +
+                 'entry overrides this for that client alone — it is an ' +
+                 'OAuth 2.0 / OpenID Connect attribute and this registry ' +
+                 'refuses it on an application declared for neither family. It ' +
+                 'does not re-judge anything already issued: a refresh token ' +
+                 'handed out while this said `always` goes on working after it ' +
+                 'is set to `never`, and /oauth2/revoke is how to end one.' },
+
   // NOT part of RFC 9700 mode, and deliberately separate from it: it is a
   // testing aid rather than a policy, and it is useful in both modes. It is the
   // only way this service can help with a requirement it cannot enforce — the

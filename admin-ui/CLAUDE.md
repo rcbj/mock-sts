@@ -431,6 +431,36 @@ child of a `display:none` ancestor is still the child's own value.
 `el.checkVisibility()` is the call that answers the question actually being
 asked, and it is the one to use for the next page like this.
 
+**HIDING IS NOT REFUSING, AND SINCE 2026-09-02 ONE FIELD ON THIS FORM IS BOTH.**
+Everything above is presentation: the server reads what was posted and has no
+idea what was visible, which is exactly why the fallback can safely be to show
+everything. `oauthTokenExchangeRefreshToken` is the first attribute this
+registry REFUSES on an entry of the wrong family — it decides what the token
+endpoint does for one `client_id`, so on an application declared for neither
+OAuth 2.0 nor OpenID Connect it would sit there reading like a policy in force
+rather than lying inert like every other override. Three consequences worth
+keeping apart:
+
+* The CSS above still does the hiding, unchanged, and is still only
+  presentation. A browser with no `:has()` shows the field, somebody fills it
+  in without ticking the family, and the SERVER answers with a sentence naming
+  what to tick. That is the right failure and it is why the refusal could not
+  have been left to the stylesheet.
+* **`editableOptions()` on `/admin/applications` takes the ENTRY now**, and
+  filters the Set and Add selects through `applications.familyRefusal()`. That
+  is the rule that function has always existed for — a form cannot offer a
+  field the action would refuse — extended to the second thing that can make an
+  action refuse. The REMOVE select is deliberately not filtered: the family rule
+  refuses a set and an add and never a remove, so filtering it would shut the
+  one door that could take off a value an `ldapmodify` had put there.
+* **The bool control grew an enum sibling rather than a branch of its own.**
+  `samlOverrideFieldRow()` draws a `<select>` for a bool because an unticked
+  checkbox posts nothing and "leave it alone" has to be expressible; an enum is
+  the same control with more options, read off the setting row's `enumValues`.
+  A text box would have been the wrong answer for a value that is parsed back
+  through `config.parseAs()`, where a typo is a warning in the log and the
+  service-wide value silently in force.
+
 ---
 
 ## `/admin/saml-assertions` IS THE THIRD PAGE OF THAT SHAPE, AND IT WAS CHECKED AGAINST THE TEST ABOVE RATHER THAN CITING IT
@@ -2510,6 +2540,18 @@ names a permission no application defines, so there is no box at the far end to
 reach, and a line to nowhere would be a drawing of a resource that is there. That
 state belongs on the register's table, which is where it is.
 
+**IT HAS ONE CONTROL SINCE 2026-09-02 AND IT NARROWS NOTHING ON THE PAGE.** The
+page used to say, correctly, that there was no control on it and no filter — a
+picture of forty boxes being the whole answer to *what may reach what*, and this
+register having no dimension to narrow on the way the acts have a mechanism, a
+mode and an outcome. Half of that is still true and half of it was a gap: the
+one division this register DOES have is which applications can reach each other
+at all, and it is a LIST rather than a filter. So the page gained a search over
+every application the configured register touches, and a paged table of the
+GROUPS under it; a result opens `/admin/delegation/cluster`, which is the
+section below. The drawing at the top is untouched, and the closing note now
+says all of that rather than the sentence it replaced.
+
 **IT IS THE FOURTH TIME THE NO-SCRIPT ARGUMENT HAS COME OUT THE SAME WAY**, and
 the root `CLAUDE.md`'s rule is that the argument has to be MADE rather than
 cited. It is made in that route's header from scratch and lands where the
@@ -2518,6 +2560,90 @@ CANNOT work without one, and a diagram that does not move can. `@dagrejs/dagre`
 lays it out on the server, the SVG arrives inline as ordinary markup,
 `script-src 'none'` is untouched, and `?format=svg` is what answers the pan and
 zoom it does not have.
+
+## `/admin/delegation/cluster` — THE GROUPINGS, AND WHY THE WHOLE-REGISTER PICTURE NEEDED A SECOND ONE
+
+Added 2026-09-02. `/admin/delegation/allowed` draws the whole configured
+register on one canvas, and that is the right document for five applications and
+the wrong one for eighty. Past a certain size the interesting reading of a
+permission register is never the whole of it: it is **which applications are
+joined to each other at all** — the API and the three front ends holding
+permissions on it, the batch job that reaches two of them, and the twelve
+applications elsewhere in the registry that have nothing to do with any of it.
+So the allowed picture gained a SEARCH and this page draws the answer.
+
+**A GROUP IS A CONNECTED COMPONENT OF THE GRANT GRAPH WITH THE DIRECTION
+IGNORED, AND THAT IS THE ONLY DECISION ON THE PAGE.** A grant is directed — a
+CLIENT is granted a permission a RESOURCE exposes, which is exactly why every
+line carries a round end and an arrowhead — and following the arrows would
+answer *what can this client eventually reach*, which is a question about a
+CHAIN. **A permission register has no chains in it**: holding a permission on an
+API does not grant that API's own permissions to anybody, so the transitive
+reading is a claim about the model that the model does not make. Following a
+grant either way answers the question a reader actually arrives with, and it is
+the only reading under which an API and the three front ends holding permissions
+on it come out as ONE group rather than as four. **Membership ignores direction;
+the picture does not** — every line is still drawn with both marks, because
+which way a grant points is a fact about the grant and this page changes nothing
+about it. `common/app_permissions.js`'s `clusters()` carries the argument; this
+page cites it rather than restating it, which is the rule this file follows
+about `delegation.js` everywhere else.
+
+**THE SEARCH IS `chooserPane()` AGAIN AND ITS PARAMETERS ARE ITS OWN.**
+`permappq` / `permappfrom`, never `appq` / `appfrom`. Those two belong to the
+ACTS chooser, they are in `LIST_PARAMS` for `/admin/delegation`, and every
+drill-down of that page carries them through untouched so that the way back
+lands on the search the reader left — a second control writing the same two
+names would overwrite it on every search. The catalogue is different too, which
+is why `allowedApplicationChooser()` is a second function rather than an
+argument to the first: `delegationApplicationChooser()` offers what some ACT
+named, spellings and all, and this one offers what the CONFIGURED register
+touches. The two lists overlap and neither contains the other, and a reader
+searching here for something they saw on the acts picture must be told it is not
+in this register rather than shown a group it is not in.
+
+**IT IS A DRILL-DOWN OF `/admin/delegation` AND NOT OF THE PAGE IT IS REACHED
+FROM.** `upTo()` takes a `NAV` path and the allowed picture is not one, so the
+trail reads *Admin console › Delegation › One group of applications* and the way
+back to the picture is a BUTTON at the top carrying this page's own search.
+`allowedChooserState()` is why those two carriers are different: the crumb
+spends the acts LIST's state and the button spends this page's search, and
+putting the search in `LIST_PARAMS` would have made the crumb carry state the
+page it points at cannot use.
+
+**THREE STATES MAKE A GROUP OF ONE AND EACH IS A REAL ANSWER.** A resource
+nobody holds anything on — an API somebody described and nothing may reach,
+which is the most interesting group of one there is and the reason the
+membership universe is every RESOURCE and not just the two ends of a grant; a
+client holding only DANGLING grants, which name permissions no application
+defines, so there is no far end to be in a group with; and an application
+granted its OWN permission, which is one application however it is drawn. The
+page says which of the three it is looking at rather than drawing an empty
+canvas — an early version said *every grant here is dangling* about an
+application that held no grants at all, which is the page inventing rows to
+explain their absence.
+
+**NOTHING ON IT CHANGES ANYTHING, AND THAT IS WHY `permissionGrantRow()` AND
+`permissionDefinitionRow()` TOOK AN `options.readOnly`.** The picture pages are
+documents; `/admin/delegation/allowed` says so in as many words. A Revoke drawn
+here would be the one control on a page whose text says it has none, and it
+would answer by throwing the reader back to a table three screens up on a
+different page, because `permissionsReturnTo()` has nowhere else to send it. One
+row function with a flag rather than two row functions, for `chooserPane()`'s
+reason: the six cells before the last one are the whole of what a grant IS, and
+two copies of them are two tables that come to disagree about what the access
+token will say.
+
+**IT COSTS NO NEW OPERATION AND IT GOT ONE ANYWAY.** Rule 7 asks for an
+operation per FORM and there is no form here, which is how the other picture
+pages satisfy it. `GET /admin-api/permissions/groups` exists because a new
+console page gets a management API resource in the same change and both get
+pagination, and because a member on `GET /admin-api/permissions` could not have
+carried either: a list of groups holding its grants would repeat the register
+once per group, and one that did not would leave a caller no way to ask for a
+single group's rows at all. `permissionGroupsView()` is the one function both
+that operation and this page's `?format=json` go through — `delegationView()`'s
+arrangement, for its reason.
 
 ## `respondToAction()` PUTS THE QUERY BEFORE THE FRAGMENT
 

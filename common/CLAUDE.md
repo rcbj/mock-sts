@@ -1665,6 +1665,50 @@ with `Cannot find module` naming a file the operator never mentioned.
    say and the one thing an acts diagram can never say, because a grant nobody
    needed draws no act at all.
 
+   **`clusters()` PARTITIONS IT, AND IT IS THE FILE'S ONE READING OF THE
+   REGISTER THAT IS NOT A ROW OF IT (2026-09-02).** `graph()` answers *what may
+   reach what* for the whole registry at once, which is the right picture for
+   five applications and the wrong one for eighty: past a certain size the
+   interesting reading is never the whole of it, it is which applications are
+   joined to each other at all. So a GROUP is a connected component of the grant
+   graph, `/admin/delegation/allowed` lists them and
+   `/admin/delegation/cluster` draws ONE.
+
+   **THE DIRECTION IS IGNORED, AND THAT IS THE ONE DECISION IN IT.** A grant is
+   directed — the picture draws both ends differently precisely because they are
+   not interchangeable — but following the arrows would answer *what can this
+   client eventually reach*, which is a question about a CHAIN, and **this
+   register has no chains in it**: holding a permission on an API does not grant
+   that API's own permissions to anybody, so the transitive reading is a claim
+   the model does not make. Following a grant either way is the only reading
+   under which an API and the three front ends holding permissions on it come
+   out as ONE group rather than as four. Membership ignores direction; the
+   picture does not.
+
+   **THE MEMBERSHIP UNIVERSE IS EVERY RESOURCE AND EVERY CLIENT, NOT THE TWO
+   ENDS OF EVERY GRANT.** An API with permissions defined and nothing granted on
+   them appears in no grant, so a partition built from the grants alone would
+   have dropped it — and *somebody described an API and nothing may reach it* is
+   the most interesting group of one there is. The other two groups of one are a
+   client holding only DANGLING grants (no application defines the permission,
+   so there is no far end) and an application granted its OWN permission (one
+   application however it is drawn); each is reported as what it is rather than
+   left as an empty page.
+
+   **A GROUP IS NAMED AFTER THE MEMBER WHOSE IDENTIFIER SORTS FIRST AND NEVER
+   AFTER THE UNION-FIND ROOT.** The root is whichever identifier the joins
+   happened to leave on top, so it moves when a grant is added anywhere inside
+   the group — and every link to a group on the console would go stale for a
+   reason nobody could see. The first member is a property of the SET.
+
+   **`counts.lines` IS WHAT THE RENDERER WILL ACTUALLY DRAW** and is computed
+   here rather than by the page, because a table reading `3 grants` above a
+   diagram with one line on it is the console disagreeing with itself about the
+   same three rows. `tests/app_permissions.js` asserts it against
+   `graph()`'s own edge count, along with the direction decision — over the one
+   shape that tells the two readings apart, two clients of one resource, which
+   a ring cannot.
+
 3p. **`user_graph.js` is a library over TWO registers, and the whole of it is
    the argument for why the union is here rather than in the console.** It
    requires `helpers.js`, `admin_stats.js` and `delegation.js`; nothing requires
@@ -1943,13 +1987,50 @@ empty require list true (rule 3g) and keeps the resolver testable with a stub.
 SETTING is the opposite case: there is one answer to "sign the assertion?", and
 a list would be a question with no rule for which value won.
 
-**IT IS TWENTY ATTRIBUTES ACROSS FOUR PROTOCOLS SINCE THE SECOND PASS**, and
-the mechanism did not change to take them: five OAuth 2.0 / OIDC per-client
+**IT IS TWENTY-ONE ATTRIBUTES ACROSS FOUR PROTOCOLS SINCE THE SECOND PASS**, and
+the mechanism did not change to take them: SIX OAuth 2.0 / OIDC per-client
 settings, the SAML ten, WS-Federation's assertion lifetime, and the group
 claim's four. Each is a row in `SCHEMA.attributes` carrying `overrides`, and
 that is the whole of what adding one costs — `settingFor()`, the New Application
 form, both defaults pages and `GET /admin-api/saml-assertions` all read the same
 derived table.
+
+**THE SIXTH OAUTH ONE IS `oauthTokenExchangeRefreshToken` (2026-09-02) AND IT
+BROUGHT A NEW MEMBER WITH IT: `families`.** It overrides
+`oauth2.tokenExchangeRefreshToken` — whether an RFC 8693 token exchange this
+client performs comes back with a refresh token, in three words rather than two;
+`oauth-oidc/CLAUDE.md` argues the values. What is new here is not the override,
+which is the same derived table as the other twenty, but the SCOPE:
+
+* **A row may declare `families: ['oauth2', 'oidc']`, and the attribute may then
+  only be WRITTEN onto an entry declared for one of them.** Both write doors go
+  through `familyRefusal()` — `updateApplication()` reads the list off
+  `appAllowedProtocol` and `createApplication()` passes the families the create
+  is about to write, which is why that function takes the list as a PARAMETER
+  rather than reading it: at create time the attribute does not exist on the
+  entry yet, and a check that read an empty entry would refuse the one
+  submission that ticks the family and fills the field together.
+* **The console filters its two selects through the same function**, so the rule
+  `editableOptions()` already followed — a form cannot offer a field the action
+  would refuse — stays true with nothing written down twice.
+* **WHY THIS ONE AND NOT THE OTHER TWENTY.** Every other override is a DEFAULT
+  something reads if it ever gets the chance, so `saml2SignAssertion` on an
+  OAuth client is inert rather than wrong and refusing it would be this registry
+  having an opinion about an attribute nothing reads. This one decides what the
+  TOKEN ENDPOINT does for one `client_id` — so on an entry no token request
+  could ever name, it is not inert, it is a POLICY SOMEBODY BELIEVES IS IN
+  FORCE. That is the state the refusal exists to prevent, and it is the test to
+  apply before putting `families` on a second row.
+* **A REMOVE AND A CLEAR ARE NEVER REFUSED**, the same asymmetry the permission
+  ordering rule and `appAllowedProtocol`'s closed vocabulary already have: a
+  value can arrive by `ldapmodify` or be left behind when a family is untimed
+  from the entry, and refusing to take it off would shut the one door that could
+  tidy it up.
+* **It is `appAllowedProtocol` that is read and not `appProtocol`** — declared
+  and not derived. An application ticked for OAuth 2.0 that has never yet made a
+  request is exactly the entry somebody is configuring when they reach for this,
+  and testing what the service has SEEN would refuse every write until after the
+  first token request.
 
 **THE GROUP CLAIM'S FOUR ARE THE ONE SET THAT IS NOT A PROTOCOL'S**, and they
 are the reason `appOf(context)` in `group_claims.js` looks at `client_id` OR
