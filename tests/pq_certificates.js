@@ -97,6 +97,56 @@ module.exports = {
 
   run: async function (t) {
     // -----------------------------------------------------------------------
+    // THE RUNTIME COMES FIRST, AND IT IS THE ONE THING IN THIS DIRECTORY THAT
+    // CAN STOP A FILE FROM RUNNING AT ALL.
+    //
+    // Everything below needs node's OpenSSL 3.5 — the KEY and the SIGNATURE
+    // are OpenSSL's, deliberately, because a test where both sides came from
+    // one implementation proves nothing. That is node 24, which this
+    // repository's Dockerfile pins (24.16.0) and which the containerized run
+    // therefore always has; a developer on node 22 has an interpreter with no
+    // ML-DSA in it, and until 2026-09-01 this file died there with
+    // `ERR_INVALID_ARG_VALUE: The argument 'type' must be a supported key
+    // type` — a stack naming neither this service nor the requirement nor the
+    // way out.
+    //
+    // **IT DOES NOT SILENTLY PASS.** This harness has no skip and a file that
+    // asserts nothing counts as green, which is the failure mode this whole
+    // directory is about — so the warning is loud, it names the version that
+    // is running and the version that is needed, and the two assertions that
+    // ARE runnable here are made: that the probe and the builder AGREE, which
+    // is the only branch of this code a node 22 can reach and is exactly the
+    // branch that stopped `tls_server.js` from throwing out of a require.
+    // -----------------------------------------------------------------------
+    if (!crypto.mlDsaAvailable()) {
+      t.check(true,
+              'this runtime has no ML-DSA, so the certificate assertions ' +
+              'below did not run — node ' + process.versions.node +
+              ' is linked against OpenSSL ' + process.versions.openssl +
+              ' and ML-DSA needs 3.5, which is node 24 (the Dockerfile pins ' +
+              '24.16.0, so the containerized run does check all of it)');
+      t.log.warn('NOT CHECKED HERE: every ML-DSA certificate assertion in ' +
+                 'pq_certificates.js. Run ./docker-run-tests.sh, or use ' +
+                 'node 24, to check them. The post-quantum JOSE algorithms ' +
+                 'are unaffected and worker_pool.js still covers them — they ' +
+                 'come from @noble/post-quantum and need nothing of OpenSSL.');
+      let named = null;
+      try {
+        crypto.selfSignedMlDsaCertificate({ algorithm: 'ml-dsa-65',
+                                            commonName: 'localhost' });
+      } catch (e) {
+        named = e.message;
+      }
+      t.check(named && /OpenSSL 3\.5/.test(named) && /node 24/.test(named),
+              'and the builder refuses in this service\'s own words rather ' +
+              'than node\'s — a caller that did not ask first must still be ' +
+              'told which runtime it needs, because the raw refusal names an ' +
+              'argument called `type` and nothing else',
+              String(named));
+      return;
+    }
+
+    // -----------------------------------------------------------------------
     t.log.info('A. OpenSSL reads what this service wrote');
     // -----------------------------------------------------------------------
     const built = crypto.selfSignedMlDsaCertificate({

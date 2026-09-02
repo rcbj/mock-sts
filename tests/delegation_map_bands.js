@@ -151,6 +151,29 @@ function onSegment(line, x, y) {
   return Math.abs((line.x1 + (line.x2 - line.x1) * t) - x) <= 1;
 }
 
+// WHERE THE LINES STOP AND THE LABELS START, in DOCUMENT ORDER — which in an
+// SVG is the whole of the stacking, there being no z-index. A line emitted
+// after a label panel is painted ON TOP of the words in it.
+function paintOrder(svg) {
+  const lines = [];
+  const reLine = /<path d="[^"]+" fill="none" stroke=/g;
+  let m = reLine.exec(svg);
+  while (m) {
+    lines.push(m.index);
+    m = reLine.exec(svg);
+  }
+  const labels = [];
+  const rePanel = /<rect x="[-\d.]+" y="[-\d.]+" width="[\d.]+" height="[\d.]+" rx="3"/g;
+  m = rePanel.exec(svg);
+  while (m) {
+    labels.push(m.index);
+    m = rePanel.exec(svg);
+  }
+  return { lines: lines, labels: labels,
+           lastLine: lines.length ? lines[lines.length - 1] : -1,
+           firstLabel: labels.length ? labels[0] : Infinity };
+}
+
 function overlap(a, b) {
   return a.x < b.x + b.width && b.x < a.x + a.width &&
          a.y < b.y + b.height && b.y < a.y + a.height;
@@ -514,6 +537,163 @@ function run(t) {
           'AND THE PICTURE ENDS JUST BELOW IT — no empty band under a lone hexagon',
           'hexagon ends at ' + (aloneBox && aloneBox.bottom) +
           ', picture is ' + alone.height + ' tall');
+
+  // -----------------------------------------------------------------------
+  t.log.info('a DENSE graph — every pair in both directions, twice over');
+  // -----------------------------------------------------------------------
+  // THE PICTURE WAS NOT DRAWN AT ALL, and every table under it was right. On
+  // 2026-09-01 `/admin/delegation/allowed` answered `The picture could not be
+  // drawn: Not possible to find intersection inside of the rectangle` for the
+  // delegated permission example — five applications, each granting the other
+  // four `read` and `write`, which is five boxes and forty lines. The graph was
+  // perfect; `?format=json` reported all forty, and the tables below the
+  // picture were built from the same graph and were correct. Only the LAYOUT
+  // threw, and `render()`'s guard turned that into a sentence where the diagram
+  // goes — so a page whose whole purpose is the picture had everything on it
+  // except the picture.
+  //
+  // The cause was dagre being handed a MULTIGRAPH, which it was because two
+  // chains between one pair of boxes are two lines. It needs two ingredients
+  // and the mesh is the smallest thing that has both: a pair joined in BOTH
+  // directions, and PARALLEL lines within a pair. Given both, dagre 1.x leaves
+  // a dummy node's position at NaN, and `assignNodeIntersects()` then finds
+  // neither a dx nor a dy and throws. Either ingredient alone lays out fine,
+  // which is why every fixture above missed it — CHAIN and FAN have neither,
+  // and TWICE has the parallel pair without the cycle.
+  //
+  // WHY IN PROCESS, when `tests/vendored/sts_delegated_permissions_example.js`
+  // builds this very mesh over HTTP: that job asserted the GRAPH and never
+  // asked whether the picture drew, which is exactly the hole this fell
+  // through, and it is being closed there too. What cannot be done over there
+  // is asking the question CHEAPLY — this is the renderer's own contract, it
+  // is a pure function, and a fixture here costs milliseconds and no container.
+  const MESH_IDS = ['abcapp1', 'abcapp2', 'abcapp3', 'abcapp4', 'abcapp5'];
+  const MESH = { nodes: [], edges: [] };
+  MESH_IDS.forEach(function (id) {
+    MESH.nodes.push(party(id, { chiefRole: 'target',
+                                roles: { initial: 0, intermediary: 4, target: 4 } }));
+  });
+  MESH_IDS.forEach(function (client) {
+    MESH_IDS.forEach(function (resource) {
+      if (client === resource) {
+        // `app_permissions.graph()` draws no line for a self-grant — an arrow
+        // leaving a box and returning to it is a drawing of nothing — so the
+        // fixture does not make one either.
+        return;
+      }
+      ['read', 'write'].forEach(function (name) {
+        const line = edge(client + ' | ' + resource + '/' + name, client, resource, {
+          relation: 'may-reach', protocols: [], protocol: '', typeLabel: '',
+          // The identifier is the resource's BASE followed by the name, which
+          // is what `app_permissions.js` mints and what a client sends as an
+          // OAuth scope. Written out in that shape rather than as a handle,
+          // because the tooltip assertion below is that the whole of it is on
+          // the picture somewhere. `credentials` is left OFF the edge on
+          // purpose: `app_permissions.graph()` publishes no such member, and
+          // that absence is exactly what put `undefined` in every tooltip.
+          permissionId: 'https://' + resource + '.example.com/' + name,
+          permissionName: name,
+          baseUri: 'https://' + resource + '.example.com/',
+          description: name + ' access to ' + resource, asked: false
+        });
+        // DELETED rather than set to a number or to zero. `app_permissions.js`
+        // publishes no `credentials` member at all, and the ABSENCE is the
+        // thing being reproduced: the generic `edge()` fixture above defaults
+        // it to 1, which would put a plausible number in the tooltip and hide
+        // the `undefined` the assertion below exists to catch.
+        delete line.credentials;
+        MESH.edges.push(line);
+      });
+    });
+  });
+
+  const mesh = map.render(MESH, { id: 'mesh', label: 'mesh' });
+  t.check(!mesh.failed,
+          'THE PICTURE IS DRAWN — five boxes and forty lines is a layout, not a failure',
+          mesh.failed || (mesh.width + 'x' + mesh.height + ' of SVG'));
+  t.equal(mesh.nodes, MESH_IDS.length, 'every box is in it');
+  t.equal(mesh.edges, MESH.edges.length, 'and every line');
+
+  // The boxes are still a ROW, which is the property every fixture above
+  // asserts and the one a collapsed layout could quietly lose: dagre is being
+  // kept for the ORDER alone, and an order it could not compute would stack
+  // five boxes on one another rather than saying so.
+  const meshBoxes = rects(mesh.svg);
+  t.equal(meshBoxes.length, MESH_IDS.length, 'drawn as five rectangles');
+  const meshLefts = meshBoxes.map(function (one) { return one.left; })
+    .sort(function (a, b) { return a - b; });
+  const meshStacked = meshLefts.filter(function (x, i) {
+    return i > 0 && Math.abs(x - meshLefts[i - 1]) < 1;
+  });
+  t.check(meshStacked.length === 0,
+          'each in a column of its own rather than on top of the last',
+          'left edges: ' + meshLefts.map(function (x) { return x.toFixed(0); }).join(', '));
+
+  // EVERY LINE IS PAINTED BEFORE EVERY LABEL, and on this graph that is the
+  // difference between a picture and a mess. Each edge used to emit its own
+  // line and then its own label, so document order interleaved them and the
+  // fortieth line went straight across the first line's words: 25 of the 40
+  // labels here were crossed by a line drawn ON TOP of them. The lane
+  // assignment was never the problem — no two label panels overlap, on this
+  // fixture or any other above, and the assertion below says so from the same
+  // SVG so that the two failures cannot be confused for each other again.
+  //
+  // Asserted as ORDER rather than by counting crossings, because the crossings
+  // are real: forty lines between five boxes cross each other whatever is done,
+  // and the claim being made is only that a crossing goes BEHIND the words.
+  const meshOrder = paintOrder(mesh.svg);
+  t.check(meshOrder.lines.length > 0 && meshOrder.labels.length > 0 &&
+          meshOrder.lastLine < meshOrder.firstLabel,
+          'AND EVERY LINE IS DRAWN BEFORE EVERY LABEL — a crossing goes behind ' +
+          'the words rather than through them',
+          meshOrder.lines.length + ' line(s) ending at ' + meshOrder.lastLine +
+          ', ' + meshOrder.labels.length + ' label(s) starting at ' +
+          meshOrder.firstLabel);
+
+  const meshPanels = panels(mesh.svg);
+  t.equal(meshPanels.length, MESH.edges.length, 'every line carries its label');
+  const meshClashes = [];
+  meshPanels.forEach(function (one, i) {
+    meshPanels.slice(i + 1).forEach(function (other) {
+      if (overlap(one, other)) {
+        meshClashes.push('(' + one.x.toFixed(0) + ',' + one.y.toFixed(0) + ') and (' +
+                         other.x.toFixed(0) + ',' + other.y.toFixed(0) + ')');
+      }
+    });
+  });
+  t.check(meshClashes.length === 0,
+          'and no two of the forty labels overlap — the arc lanes hold at this density',
+          meshClashes.length ? meshClashes.slice(0, 5).join('; ')
+                             : meshPanels.length + ' panel(s), none overlapping');
+
+  // AND THE SENTENCE ON HOVER IS ABOUT THIS PICTURE. `edgeTitle()` ends with a
+  // count of acts and of credentials from the issued register, which a
+  // CONFIGURED permission has neither of — `app_permissions.graph()` publishes
+  // no `credentials` member, correctly, so every one of the forty lines here
+  // said `undefined credential(s) from the issued register, and no delegation
+  // act: nothing was exchanged to get them` until 2026-09-01. The `undefined`
+  // is the visible half; the sentence is wrong even with a number in it,
+  // because "nothing was exchanged" is an observation about acts on a line
+  // that describes no act. This is the one thing on the picture that carries
+  // the whole permission identifier, which is why it is worth an assertion.
+  t.check(mesh.svg.indexOf('undefined') < 0,
+          'AND NO TOOLTIP SAYS `undefined` — a configured line has no credential ' +
+          'count to report',
+          mesh.svg.indexOf('undefined') < 0
+            ? 'no occurrence in ' + mesh.svg.length + ' bytes'
+            : mesh.svg.slice(Math.max(0, mesh.svg.indexOf('undefined') - 90),
+                             mesh.svg.indexOf('undefined') + 40));
+  t.check(mesh.svg.indexOf('nothing was exchanged') < 0 &&
+          mesh.svg.indexOf('issued register') < 0,
+          'and none of them reports acts or the issued register on a line that ' +
+          'describes neither',
+          'the may-reach tooltip ends at what the client has asked for');
+  t.check(/MAY reach/.test(mesh.svg) &&
+          mesh.svg.indexOf('has NEVER asked for it') >= 0 &&
+          mesh.svg.indexOf('abcapp2.example.com/read') >= 0,
+          'while still carrying what a configured line DOES say — the relation, ' +
+          'the whole permission identifier, and whether it has ever been asked for',
+          'MAY reach / the identifier / never asked for are all in the document');
 }
 
 module.exports = {

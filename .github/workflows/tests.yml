@@ -9,7 +9,7 @@
 #
 #   tests     ./docker-run-tests.sh — builds docker-compose-run-tests.yml (the
 #             service from this repository's Dockerfile, and a test runner with
-#             node and a Chrome in it), runs all twenty-three jobs against the
+#             node and a Chrome in it), runs all twenty-seven jobs against the
 #             service over the compose network, and always tears the stack down.
 #   coverage  ./run-coverage.sh — HALF of that same compose file. It puts the
 #             RUNNER in the `tests` image and lets it start the service it
@@ -65,7 +65,7 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # THE PLAIN SUITE. All twenty-three jobs, service and runner both in
+  # THE PLAIN SUITE. All twenty-seven jobs, service and runner both in
   # containers, nothing instrumented. This is the one whose status means "the
   # tree is green".
   # ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # THE SAME SUITE AGAIN, INSTRUMENTED. What this adds is the only question the
-  # job above cannot answer: WHICH LINES of this tree the twenty-three jobs
+  # job above cannot answer: WHICH LINES of this tree the twenty-seven jobs
   # actually reached. It is the second half of the picture for anybody deciding
   # what to test next, and it is worth a CI run because the report is the thing
   # nobody generates by hand.

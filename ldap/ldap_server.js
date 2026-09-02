@@ -50,7 +50,7 @@
 // A real directory would refuse most of that, and where the difference matters
 // (a missing objectClass, an unknown attribute type) it is a difference a reader
 // should be told about rather than one this mock should hide by inventing a
-// schema of its own. GET /ldap says so on the page.
+// schema of its own. GET /admin/ldap/service says so on the page.
 //
 // Four behaviours ARE enforced. Three of them are protocol rules whose absence
 // would teach a client something false, and the fourth is this service's own:
@@ -247,7 +247,7 @@ const LDAP_PORT = config.value('ldap.port');
 
 // The LDAPS port. 636 is the IANA-assigned one for LDAP over TLS and, like 389,
 // it is privileged — so the container binds it and a host run usually cannot.
-// A failure to bind is RECORDED and published on GET /ldap exactly as the plain
+// A failure to bind is RECORDED and published on GET /admin/ldap/service exactly as the plain
 // listener's is, and it is not fatal to the plain listener: the two sockets are
 // started independently and either can be up while the other is not, which is
 // the commonest outcome of a host run and is why they have separate state
@@ -1243,7 +1243,7 @@ function seed() {
       'partner on. It is the one store in this directory whose contents are a ' +
       'SECURITY DECISION rather than a record: everything else here is ' +
       'permissive by design, and a federation endpoint cannot be. ' +
-      'federation/federation.js holds the schema; GET /ldap/federations ' +
+      'federation/federation.js holds the schema; GET /admin/ldap/federations ' +
       'publishes it.'
   }, { origin: 'seed' });
   putEntry(spiffeDn(), {
@@ -1252,7 +1252,7 @@ function seed() {
     description: 'The SPIFFE trust domain this service is the issuing ' +
       'authority for. Two containers beneath: entries (registration entries, ' +
       'which decide what gets issued) and agents (what has attested). ' +
-      'spiffe_registry.js holds the schema; GET /ldap/spiffe publishes it.'
+      'spiffe_registry.js holds the schema; GET /admin/ldap/spiffe publishes it.'
   }, { origin: 'seed' });
   putEntry(spiffeEntriesDn(), {
     objectClass: ['top', 'organizationalUnit'],
@@ -4392,7 +4392,7 @@ populateVcAttributes();
 // The secure one is built only if there IS certificate material. There always
 // is — tls_server.js generates it at require time and would have thrown before
 // this line if it could not — so this branch is for the case where that stops
-// being true: an absence recorded and published on GET /ldap is worth more than
+// being true: an absence recorded and published on GET /admin/ldap/service is worth more than
 // a TypeError out of a constructor, which is the same trade every listen path
 // here makes.
 // ---------------------------------------------------------------------------
@@ -4406,7 +4406,7 @@ if (serverCertificate && serverCertificate.certPem &&
   // `certificate` and `key` are the option names ldapjs checks for, and it
   // hands the whole options object to tls.createServer(). No client certificate
   // is asked for here: this listener proves the SERVER's identity and nothing
-  // else, which GET /ldap says out loud rather than leaving somebody to work
+  // else, which GET /admin/ldap/service says out loud rather than leaving somebody to work
   // out why the client certificate they offered was never requested. The
   // permissive and strict client-certificate listeners are the HTTPS ones next
   // door, where the whole content is the answer to that question.
@@ -5384,33 +5384,18 @@ server.unbind(function (req, res, next) {
 //
 // GET /admin/sts-metadata is built by walking the express router, so a protocol
 // that registers no route is invisible to it — which is exactly what a raw TCP
-// listener is. These two routes are what make this directory visible from a
-// browser AND what make it appear in that index; the listener itself is
-// described by hand there, as the KDC's is.
+// listener is. The FIVE routes below are what make this directory visible from
+// a browser AND what make it appear in that index; the two listeners
+// themselves are described by hand there, as the KDC's are.
+//
+// THEY ARE ADMIN CONSOLE PAGES SINCE 2026-09-01 (`/admin/ldap/*`, drawn in
+// that console's shell through `admin.respond()`), and the long block above
+// the first of them argues the move. They were `/ldap`, `/ldap/directory`,
+// `/ldap/applications`, `/ldap/federations` and `/ldap/spiffe`; those paths
+// answer nothing now, deliberately, rather than redirecting — a service that
+// keeps a path alive forever is a service whose endpoint list stops meaning
+// anything, and `/admin/sts-metadata` is built by reading that list.
 // ---------------------------------------------------------------------------
-
-function pageShell(title, inner) {
-  return '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<title>' + xmlEscape(title) + '</title><style>' +
-    'body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;' +
-    'background:#f4f4f7;margin:0;padding:2rem;color:#222;line-height:1.45}' +
-    '.card{background:#fff;border:1px solid #d5d5dd;border-radius:10px;' +
-    'padding:24px 28px;max-width:60rem;margin:0 auto;' +
-    'box-shadow:0 6px 24px rgba(0,0,0,.08)}' +
-    'h1{font-size:1.3em;margin:0 0 4px;color:#12107c}' +
-    'h2{font-size:1em;margin:1.4em 0 .4em}' +
-    'p.sub{color:#666;font-size:.85em;margin:0 0 18px}' +
-    'table{border-collapse:collapse;width:100%;margin:.5rem 0 1rem;' +
-    'font-size:.85em}' +
-    'th,td{border:1px solid #ddd;padding:.35rem .55rem;text-align:left;' +
-    'vertical-align:top}th{background:#f0f0f5}' +
-    'code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;' +
-    'font-size:.85em;background:#f4f4f8;padding:.1rem .25rem;border-radius:3px;' +
-    'word-break:break-all}a{color:#12107c}' +
-    'ul{margin:.3em 0;padding-left:1.2em}li{margin:.2em 0}' +
-    '</style></head><body><div class="card">' + inner + '</div></body></html>\n';
-}
 
 // What this directory is, as data. Shared by the page and by ?format=json so
 // the two cannot disagree — which is the same reason /admin/sts-metadata reads
@@ -5586,13 +5571,87 @@ function description(req) {
   return out;
 }
 
-app.get('/ldap', function (req, res) {
-  log.debug('Entering GET /ldap.');
+// ---------------------------------------------------------------------------
+// THE FIVE HTML VIEWS, WHICH ARE ADMIN CONSOLE PAGES SINCE 2026-09-01.
+//
+// They were `/ldap`, `/ldap/directory`, `/ldap/applications`,
+// `/ldap/federations` and `/ldap/spiffe` — five pages in a shell of their own,
+// with their own stylesheet, no sidebar, no breadcrumb, no realm switcher and
+// no gate. Every one of them answers a question about what is in THIS
+// SERVICE'S DIRECTORY, which is the question the four pages under the
+// console's *Directory* heading already answer; the only thing that made them
+// a separate surface was that they happened to have been written here.
+//
+// So they are `/admin/ldap/*` now, drawn by `admin.respond()` in the console's
+// own shell. Four things about that arrangement are worth knowing before
+// touching any of it.
+//
+//   * **THEY ARE STILL BUILT HERE, and that is not a leftover.** A console
+//     page is a `path` and a `label` in `admin-ui/admin.js`'s `SECTIONS`
+//     whoever builds the body — `/admin/sts-metadata` is built by
+//     `../sts_metadata.js` for the same reason and has been since 2026-08-24.
+//     Moving these bodies into that file would mean moving `description()`,
+//     `eachEntryInRealm()` and `entryObject()` with them, or exporting all
+//     three; the directory's own store belongs to the directory's own module.
+//   * **THEY ARE GATED NOW.** `admin.js` registers its gate as one
+//     `app.use('/admin', ...)` above its own routes, and this module is
+//     required at #21 — far below — so a route registered here under `/admin`
+//     is behind it. That is a real change in what an unauthenticated caller
+//     can reach and it is the right one: a dump of every attribute of every
+//     entry prints `oauthClientSecret` and `fedClientSecret` in the clear, and
+//     these were the one surface in this service handing those to anybody who
+//     could reach the port. `/admin-api` mirrors all five and is still
+//     ungated, which is what a test drives.
+//   * **NOTHING ABOUT THE CONTENT CHANGED, bar the paging and the
+//     shortening.** These pages still show the store rather than a copy of it;
+//     `?format=json` still answers with the same payload; the schemas each one
+//     publishes are still read out of the module that owns them.
+//   * **THE PAGING AND THE SHORTENING ARE THE CONSOLE'S, not this file's.**
+//     `admin.pagedRows()`, `admin.pageNavPair()`, `admin.perPageOptions()` and
+//     `admin.clipped()` are the same functions `/admin/tokens` and
+//     `/admin/applications` use. A control on one of these pages that behaved
+//     differently from the identical-looking control on the page next door
+//     would be the worst possible outcome of moving them here.
+//
+// The `?format=json` half of each is a `view()` function returning
+// `{ title, inner, json }` — the shape every view in `admin.js` returns — and
+// the five are handed to `admin.setDirectoryPages()` at the foot of this file
+// so that `mgmt-api/admin_api.js` can answer them without requiring this
+// module. See the block above that slot in `admin.js`.
+// ---------------------------------------------------------------------------
+
+// The two facts every one of these pages needs about the reader's query, in
+// one place: which page of which size they are looking at. Written out rather
+// than inlined five times because the FILTER differs per page and the paging
+// does not.
+function directoryPaging(req, rows, noun, name) {
+  return admin.pagedRows(req.query, rows,
+                         { noun: noun, name: name || null });
+}
+
+// The `per` a control has to carry onward. Empty unless the reader chose one,
+// so the URL of an unfiltered first page is still the bare path — the rule
+// `queryWith()` follows for every other value.
+function perOf(req, paging) {
+  return req.query.per ? String(paging.perPage) : '';
+}
+
+// ---------------------------------------------------------------------------
+// GET /admin/ldap/service — what the directory IS, right now.
+//
+// The only page in this console that can tell a running listener from one
+// whose port was taken: it is HTTP and answers either way, and the two raw
+// sockets are invisible to everything that walks the express router.
+//
+// It is deliberately NOT `/admin/ldap`, which is the LDAP / LDAPS SETTINGS
+// page under *Protocols*. The two answer different questions and the
+// difference is the useful one: that page says what the sockets are SET to and
+// lets somebody change it, and this one says what actually happened when the
+// process tried. Each links to the other rather than restating it.
+// ---------------------------------------------------------------------------
+function ldapServiceView(req) {
+  log.debug('Entering ldapServiceView().');
   const info = description(req);
-  if (String(req.query.format || '').toLowerCase() === 'json') {
-    log.debug('Leaving GET /ldap. JSON.');
-    return res.status(200).json(info);
-  }
   const rows = [
     ['URL', info.url],
     ['LDAPS URL', info.tls.ldaps
@@ -5646,71 +5705,119 @@ app.get('/ldap', function (req, res) {
         'one above.'],
     ['An entry per authenticated user', info.autoCreateUsers ? 'on' : 'off']
   ].map(function (pair) {
-    return '<tr><td>' + xmlEscape(pair[0]) + '</td><td><code>' +
-      xmlEscape(pair[1]) + '</code></td></tr>';
+    // The VALUE is clipped and the LABEL is not: a label here is four words
+    // and a value is a sentence or a DN. admin.clipped() leaves anything
+    // under its limit exactly as it was, so the short rows are untouched and
+    // the two long ones stop pushing the table past the card.
+    return '<tr><td>' + xmlEscape(pair[0]) + '</td><td>' +
+      admin.clipped(pair[1], 150) + '</td></tr>';
   }).join('');
-  const inner = '<h1>An LDAP directory lives here</h1>' +
-    '<p class="sub">LDAPv3 over TCP ' + LDAP_PORT + ', and over TLS on ' +
-    LDAPS_PORT + ', RFC 4511. A browser cannot speak it &mdash; the ' +
-    'debugger&rsquo;s api opens the socket.</p>' +
+
+  // The two sockets as TILES, which is the console's own way of saying
+  // "here are the numbers, and here is the one that is wrong". A listener
+  // that failed to bind is the single most useful fact on this page and it
+  // was previously the eleventh row of a fourteen-row table.
+  const tiles = '<div class="tiles">' +
+    admin.tile(info.limits.currentEntries, 'Entries in this realm') +
+    admin.tile(info.limits.currentEntriesEverywhere, 'Entries in the process') +
+    admin.tile(info.listening ? 'up' : 'down', 'TCP ' + info.port) +
+    admin.tile(info.tls.listening ? 'up' : 'down',
+               'LDAPS ' + (info.tls.port || LDAPS_PORT)) +
+    '</div>';
+
+  const inner = '<p class="sub">LDAPv3 over TCP ' + LDAP_PORT + ', and over ' +
+    'TLS on ' + LDAPS_PORT + ', RFC 4511. A browser cannot speak it &mdash; ' +
+    'the debugger&rsquo;s api opens the socket. What the sockets are SET to ' +
+    'is <a href="/admin/ldap">LDAP / LDAPS</a>; this page is what actually ' +
+    'happened when this process tried to bind them.</p>' +
+    tiles +
     '<table><tr><th>Thing</th><th>Value</th></tr>' + rows + '</table>' +
     '<h2>It authenticates nobody</h2>' +
-    '<p>' + xmlEscape(info.bindPolicy) + '.</p>' +
+    admin.note(xmlEscape(info.bindPolicy) + '.') +
     '<h2>Where an identity&rsquo;s entry goes</h2>' +
-    '<p>' + xmlEscape(info.autoCreateRule) + '</p>' +
+    admin.note(xmlEscape(info.autoCreateRule)) +
     '<h2>And how they authenticated</h2>' +
-    '<p>' + xmlEscape(info.authenticationFacts) + '</p>' +
+    admin.note(xmlEscape(info.authenticationFacts)) +
     '<h2>LDAPS, and what it does not change</h2>' +
-    '<p>Port ' + (info.tls.port || LDAPS_PORT) + ' is the same directory over ' +
-    'TLS &mdash; the same entries, the same handlers, the same every-bind-' +
-    'succeeds. What TLS adds is that the password is not on the wire in the ' +
-    'clear; it does not make it <em>checked</em>. The certificate is ' +
-    '<strong>the one the HTTPS listeners serve</strong>: ' +
+    admin.note('Port ' + (info.tls.port || LDAPS_PORT) + ' is the same ' +
+    'directory over TLS &mdash; the same entries, the same handlers, the same ' +
+    'every-bind-succeeds. What TLS adds is that the password is not on the ' +
+    'wire in the clear; it does not make it <em>checked</em>. The certificate ' +
+    'is <strong>the one the HTTPS listeners serve</strong>: ' +
     '<code>' + xmlEscape(info.tls.certificate.subject) + '</code>, SHA-256 ' +
     '<code>' + xmlEscape(info.tls.certificate.fingerprint256) + '</code>, ' +
     xmlEscape(tlsServer.certificateProvenance()) + '. Fetch it from ' +
     '<a href="/tls/server-certificate">/tls/server-certificate</a> and put it ' +
     'in your truststore &mdash; <code>LDAPTLS_REQCERT=never</code> is the ' +
     'habit this endpoint exists to avoid, and it would also hide the one ' +
-    'thing worth checking here.</p>' +
-    '<p>' + xmlEscape(info.tls.clientCertificates) + ' There is no StartTLS: ' +
-    'it is an extended operation (RFC 4511 &sect;4.14) and ldapjs implements ' +
-    'none, and this service does not patch that submodule. LDAPS is the one ' +
-    'of the two no RFC defines &mdash; RFC 4513 standardised StartTLS and ' +
-    'left <code>ldaps://</code> as the de-facto scheme every client speaks ' +
-    'anyway.</p>' +
+    'thing worth checking here.') +
+    admin.note(xmlEscape(info.tls.clientCertificates) + ' There is no ' +
+    'StartTLS: it is an extended operation (RFC 4511 &sect;4.14) and ldapjs ' +
+    'implements none, and this service does not patch that submodule. LDAPS ' +
+    'is the one of the two no RFC defines &mdash; RFC 4513 standardised ' +
+    'StartTLS and left <code>ldaps://</code> as the de-facto scheme every ' +
+    'client speaks anyway.') +
     '<h2>It has no schema</h2>' +
-    '<p>' + xmlEscape(info.schema) + '</p>' +
-    '<h2>What it does still enforce</h2><ul>' +
+    admin.note(xmlEscape(info.schema)) +
+    '<h2>What it does still enforce</h2>' +
     info.enforcedRules.map(function (rule) {
-      return '<li>' + xmlEscape(rule) + '</li>';
+      return admin.bullet(xmlEscape(rule));
     }).join('') +
-    '</ul>' +
-    '<p>And one thing it does <em>not</em>: deleting a user leaves its DN in ' +
-    'every group that lists it as a <code>member</code>. Referential ' +
-    'integrity is a directory feature, not a protocol rule.</p>' +
-    '<p>The tree has three containers. <code>ou=users</code> holds people, one ' +
-    'per identity that has authenticated here through any protocol. ' +
-    '<code>ou=groups</code> holds groups, which grant nothing. ' +
+    admin.note('And one thing it does <em>not</em>: deleting a user leaves ' +
+    'its DN in every group that lists it as a <code>member</code>. ' +
+    'Referential integrity is a directory feature, not a protocol rule.') +
+    '<h2>The containers</h2>' +
+    admin.note('The tree has three containers. <code>ou=users</code> holds ' +
+    'people, one per identity that has authenticated here through any ' +
+    'protocol. <code>ou=groups</code> holds groups, which grant nothing. ' +
     '<code>ou=applications</code> holds the OTHER side of those ' +
-    'authentications — every OAuth client, relying party, service provider and ' +
-    'Kerberos service this service has been asked about — and it is different ' +
-    'from the other two in one way worth knowing: <strong>it is a registry ' +
-    'rather than a record</strong>. The RFC 7591 client registrations live ' +
-    'there and nothing caches them, so an <code>ldapmodify</code> of an ' +
-    'application entry changes what the protocol endpoints do. ' +
-    '<a href="/ldap/applications">What is in it, and the schema it uses</a>.</p>' +
-    '<p class="sub"><a href="/ldap?format=json">This page as JSON</a> ' +
-    '&middot; <a href="/ldap/applications">the application registry</a> ' +
-    '&middot; <a href="/ldap/directory">every entry in the directory</a> ' +
-    '&middot; <a href="/admin/sts-metadata">everything this service ' +
-    'speaks</a></p>';
-  res.status(200).type('html').send(pageShell('LDAP directory', inner));
-  log.debug('Leaving GET /ldap.');
+    'authentications &mdash; every OAuth client, relying party, service ' +
+    'provider and Kerberos service this service has been asked about &mdash; ' +
+    'and it is different from the other two in one way worth knowing: ' +
+    '<strong>it is a registry rather than a record</strong>. The RFC 7591 ' +
+    'client registrations live there and nothing caches them, so an ' +
+    '<code>ldapmodify</code> of an application entry changes what the ' +
+    'protocol endpoints do. ' +
+    '<a href="/admin/ldap/applications">What is in it, and the schema it ' +
+    'uses</a>.') +
+    '<p class="sub"><a href="/admin/ldap/service?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/ldap/applications">the application ' +
+    'registry</a> &middot; <a href="/admin/ldap/directory">every entry in the ' +
+    'directory</a> &middot; <a href="/admin/ldap">the settings behind these ' +
+    'sockets</a> &middot; <a href="/admin/sts-metadata">everything this ' +
+    'service speaks</a></p>';
+  log.debug('Leaving ldapServiceView().');
+  return { title: 'The directory service', inner: inner, json: info };
+}
+
+app.get('/admin/ldap/service', function (req, res) {
+  log.debug('Entering GET /admin/ldap/service.');
+  const view = ldapServiceView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/service',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/service.');
 });
 
-app.get('/ldap/directory', function (req, res) {
-  log.debug('Entering GET /ldap/directory.');
+// ---------------------------------------------------------------------------
+// GET /admin/ldap/directory — every entry, paged.
+//
+// THE PAGING IS NEW AND IT IS NOT A CONVENIENCE. This page prints one row per
+// entry with EVERY attribute of that entry in the last column, and the cap on
+// the store (`ldap.maxEntries`) is in the hundreds — so a service that has
+// been driven by a test suite for an hour answered this path with a document
+// several megabytes long and a browser that took seconds to lay it out. It
+// pages the way every other list in this console pages, through the same two
+// functions, so `?per=` and `?page=` mean here exactly what they mean on
+// `/admin/tokens`.
+//
+// THE FILTER IS OVER THE WHOLE ENTRY AND NOT ONLY THE DN, which is the one
+// thing about it worth stating: somebody looking for the entry that carries a
+// particular client secret or thumbprint has the VALUE and not the name. So
+// `q` matches the DN, any attribute name and any attribute value, and the
+// page says so under the box rather than leaving it to be discovered.
+// ---------------------------------------------------------------------------
+function ldapDirectoryView(req) {
+  log.debug('Entering ldapDirectoryView().');
   const listed = [];
   eachEntryInRealm(function (stored) {
     const attributes = {};
@@ -5726,31 +5833,150 @@ app.get('/ldap/directory', function (req, res) {
   listed.sort(function (a, b) {
     return a.dn.localeCompare(b.dn);
   });
+
+  const wantedText = String(req.query.q || '').trim();
+  const wantedOrigin = String(req.query.origin || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = listed.filter(function (entry) {
+    if (wantedOrigin && entry.origin !== wantedOrigin) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    if (entry.dn.toLowerCase().indexOf(needle) >= 0) {
+      return true;
+    }
+    // The NAMES and the VALUES both. See the header: the reader who needs
+    // this box most often has a value in hand and no idea which entry it is
+    // on, which a DN-only search cannot answer at all.
+    return Object.keys(entry.attributes).some(function (name) {
+      if (name.toLowerCase().indexOf(needle) >= 0) {
+        return true;
+      }
+      return entry.attributes[name].some(function (value) {
+        return String(value).toLowerCase().indexOf(needle) >= 0;
+      });
+    });
+  });
+
+  const paged = directoryPaging(req, filtered, 'entries');
+  const paging = paged.paging;
+
   if (String(req.query.format || '').toLowerCase() === 'json') {
-    log.debug('Leaving GET /ldap/directory. JSON, ' + listed.length +
-              ' entry/entries.');
-    return res.status(200).json({ baseDn: baseDn(), count: listed.length,
-                                  entries: listed });
+    log.debug('Leaving ldapDirectoryView(). JSON, ' + paged.shown.length +
+              ' of ' + filtered.length + ' entry/entries.');
   }
-  const rows = listed.map(function (entry) {
-    const attrs = Object.keys(entry.attributes).map(function (name) {
-      return '<code>' + xmlEscape(name) + '</code>: ' +
-        xmlEscape(entry.attributes[name].join(' | '));
-    }).join('<br>');
-    return '<tr><td><code>' + xmlEscape(entry.dn) + '</code></td><td>' +
-      xmlEscape(entry.origin) + '</td><td>' + attrs + '</td></tr>';
+
+  // ORIGINS COUNTED OVER EVERYTHING and never over the filtered set, for the
+  // reason /admin/applications gives about its Kind select: options that
+  // renumber themselves as the reader narrows the list cannot be used to find
+  // out where the rows went.
+  const origins = [];
+  listed.forEach(function (entry) {
+    if (origins.indexOf(entry.origin) < 0) {
+      origins.push(entry.origin);
+    }
+  });
+  origins.sort();
+  const originOptions = ['<option value=""' + (wantedOrigin ? '' : ' selected') +
+                         '>any origin</option>']
+    .concat(origins.map(function (origin) {
+      const n = listed.filter(function (e) { return e.origin === origin; }).length;
+      return '<option value="' + xmlEscape(origin) + '"' +
+             (origin === wantedOrigin ? ' selected' : '') + '>' +
+             xmlEscape(origin) + ' (' + n + ')</option>';
+    })).join('');
+
+  const filterParams = { q: wantedText || '', origin: wantedOrigin || '',
+                         per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/directory', filterParams, paging);
+
+  const rows = paged.shown.map(function (entry) {
+    const attrs = Object.keys(entry.attributes).sort().map(function (name) {
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(entry.attributes[name]) + '</div>';
+    }).join('');
+    return '<tr><td class="dn">' + admin.clipped(entry.dn, 60) +
+      '</td><td class="from">' + xmlEscape(entry.origin) +
+      '</td><td class="attrs">' + attrs + '</td></tr>';
   }).join('');
-  const inner = '<h1>Every entry in the directory</h1>' +
-    '<p class="sub">' + listed.length + ' entry/entries under <code>' +
-    xmlEscape(baseDn()) + '</code>. This page is not LDAP &mdash; it is this ' +
-    'service showing its own store, which is how you can tell an empty ' +
-    'directory from a search filter that matched nothing.</p>' +
-    '<table><tr><th>DN</th><th>Came from</th><th>Attributes</th></tr>' +
-    rows + '</table>' +
-    '<p class="sub"><a href="/ldap/directory?format=json">This page as ' +
-    'JSON</a> &middot; <a href="/ldap">what this directory is</a></p>';
-  res.status(200).type('html').send(pageShell('LDAP directory contents', inner));
-  log.debug('Leaving GET /ldap/directory. ' + listed.length + ' entry/entries.');
+
+  const inner = '<p class="sub">' + listed.length + ' entry/entries under ' +
+    '<code>' + xmlEscape(baseDn()) + '</code>. This page is not LDAP &mdash; ' +
+    'it is this service showing its own store, which is how you can tell an ' +
+    'empty directory from a search filter that matched nothing.</p>' +
+    '<div class="tiles">' +
+    admin.tile(listed.length, 'Entries in this realm') +
+    admin.tile(filtered.length, 'Matching the filter') +
+    admin.tile(origins.length, 'Origins') +
+    '</div>' +
+    '<form method="get" action="/admin/ldap/directory"><div class="formrow">' +
+    '<label for="q">Anywhere in the entry</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="a DN, an attribute name, or a value">' +
+    '<label for="origin">Came from</label>' +
+    '<select id="origin" name="origin">' + originOptions + '</select>' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    ((wantedText || wantedOrigin)
+      ? ' <a href="/admin/ldap/directory">clear</a>' : '') +
+    '</div></form>' +
+    admin.note('The box matches the DN, any attribute NAME and any attribute ' +
+    'VALUE, case-insensitively. Values are searched because the reader who ' +
+    'needs this most often has a thumbprint or a secret in hand and no idea ' +
+    'which entry carries it, which a search over DNs alone cannot answer.') +
+    nav.head +
+    '<table><tr><th class="dn">DN</th><th class="from">Came from</th>' +
+    '<th>Attributes</th></tr>' +
+    (rows || '<tr><td colspan="3">No entry matches. ' +
+             ((wantedText || wantedOrigin)
+               ? 'The filter above may be hiding some.'
+               : 'This realm&rsquo;s directory is empty.') + '</td></tr>') +
+    '</table>' +
+    nav.foot +
+    admin.note('<strong>A value too long for its column is shortened, and ' +
+    'the whole of it is one hover away.</strong> Hovering a shortened value ' +
+    'opens a box holding it in full; one click inside that box selects all ' +
+    'of it, so it can be copied. Nothing is lost by the shortening &mdash; ' +
+    '<code>?format=json</code> below is the whole store with nothing cut, ' +
+    'and the full value is in this page&rsquo;s markup either way.') +
+    '<p class="sub"><a href="/admin/ldap/directory?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/ldap/service">what this directory ' +
+    'is</a> &middot; <a href="/admin/users">the people in it</a> &middot; ' +
+    '<a href="/admin/groups">the groups in it</a></p>';
+
+  log.debug('Leaving ldapDirectoryView(). ' + paged.shown.length + ' row(s) of ' +
+            filtered.length + ' matched.');
+  return {
+    title: 'Every entry in the directory',
+    inner: inner,
+    json: {
+      baseDn: baseDn(),
+      // `count` is every entry in this realm and `matched` is what the filter
+      // left. The first name is kept because it is what this endpoint has
+      // always answered with and a caller reads it; the second is the console's
+      // own word for the same idea on every other list.
+      count: listed.length,
+      matched: filtered.length,
+      shown: paged.shown.length,
+      filter: { q: wantedText || null, origin: wantedOrigin || null },
+      origins: origins,
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      entries: paged.shown
+    }
+  };
+}
+
+app.get('/admin/ldap/directory', function (req, res) {
+  log.debug('Entering GET /admin/ldap/directory.');
+  const view = ldapDirectoryView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/directory',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/directory.');
 });
 
 // ---------------------------------------------------------------------------
@@ -6505,7 +6731,7 @@ function writePerson(dn, attributes) {
 }
 
 // Delete a person's entry. It leaves that DN behind in every group that lists
-// it, which is deliberate and is the same non-feature `GET /ldap` documents:
+// it, which is deliberate and is the same non-feature `GET /admin/ldap/service` documents:
 // referential integrity is a directory feature and not a protocol rule, and a
 // dangling member is exactly what /admin/groups exists to report. A SCIM client
 // that means to remove somebody from their groups has to say so.
@@ -6641,33 +6867,55 @@ function deleteGroupEntry(dn) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /ldap/applications — the registry, and the schema that defines it.
+// GET /admin/ldap/spiffe — the SPIFFE containers, and their schema.
 //
-// Two things on one page because they answer one question. The TABLE is what
-// this service has been asked about; the SCHEMA below it is what an entry may
-// carry and where each attribute comes from — published rather than left to be
-// read out of the source, for the reason `GET /ldap` publishes the bind policy:
-// a directory whose shape you have to infer is one every client infers
-// differently.
+// The same page `/admin/ldap/applications` is, for the same reason: this
+// directory is SCHEMALESS, so a container whose entries carry thirty invented
+// attribute names needs somewhere to publish what they mean, or a client
+// reading one back is guessing. It sits here rather than in
+// `spiffe_registry.js` because it is a view of the CONTAINERS — where they
+// are, how full they are — which is this file's half of the division.
 //
-// It is a view of the store rather than a store of its own: every row is read
-// through applications.js, which reads these very entries. The page cannot
-// disagree with the directory because it has nothing to disagree with.
+// IT IS THE ONE OF THE FIVE WITH TWO LISTS ON IT, so it is also the one that
+// needs `pagedRows()`'s `name` option: registration entries and attested
+// agents page separately and share one `per`, exactly as the console's two
+// drill-downs do. A single `page` would have meant clicking "next" under the
+// agents silently advancing the entries above them.
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// GET /ldap/spiffe — the SPIFFE containers, and their schema.
-//
-// The same page `/ldap/applications` is, for the same reason: this directory is
-// SCHEMALESS, so a container whose entries carry thirty invented attribute
-// names needs somewhere to publish what they mean, or a client reading one back
-// is guessing. It sits here rather than in `spiffe_registry.js` because it is a
-// view of the CONTAINERS — where they are, how full they are — which is this
-// file's half of the division.
-// ---------------------------------------------------------------------------
-app.get('/ldap/spiffe', function (req, res) {
-  log.debug('Entering GET /ldap/spiffe.');
+function ldapSpiffeView(req) {
+  log.debug('Entering ldapSpiffeView().');
   const entries_ = spiffeRegistry.allEntries();
   const agents = spiffeRegistry.allAgents();
+
+  const wantedEntry = String(req.query.entryq || '').trim().toLowerCase();
+  const wantedAgent = String(req.query.agentq || '').trim().toLowerCase();
+  const matchedEntries = entries_.filter(function (row) {
+    if (!wantedEntry) {
+      return true;
+    }
+    return String(row.spiffeId).toLowerCase().indexOf(wantedEntry) >= 0 ||
+           String(row.dn).toLowerCase().indexOf(wantedEntry) >= 0;
+  });
+  const matchedAgents = agents.filter(function (row) {
+    if (!wantedAgent) {
+      return true;
+    }
+    return String(row.id).toLowerCase().indexOf(wantedAgent) >= 0 ||
+           String(row.dn).toLowerCase().indexOf(wantedAgent) >= 0;
+  });
+
+  const pagedEntries = directoryPaging(req, matchedEntries, 'entries', 'entries');
+  const pagedAgents = directoryPaging(req, matchedAgents, 'agents', 'agents');
+  const carried = { entryq: String(req.query.entryq || '').trim(),
+                    agentq: String(req.query.agentq || '').trim(),
+                    entriesPage: req.query.entriesPage || '',
+                    agentsPage: req.query.agentsPage || '',
+                    per: perOf(req, pagedEntries.paging) };
+  const entriesNav = admin.pageNavPair('/admin/ldap/spiffe', carried,
+                                       pagedEntries.paging);
+  const agentsNav = admin.pageNavPair('/admin/ldap/spiffe', carried,
+                                      pagedAgents.paging);
+
   const payload = {
     baseDn: baseDn(),
     container: spiffeDn(),
@@ -6686,13 +6934,18 @@ app.get('/ldap/spiffe', function (req, res) {
       'agent is editable from the console.',
     editable: spiffeRegistry.EDITABLE,
     schema: spiffeRegistry.SCHEMA,
-    registrationEntries: entries_,
-    attestedAgents: agents
+    filter: { entryq: carried.entryq || null, agentq: carried.agentq || null },
+    entriesPaging: admin.pagingJson(pagedEntries.paging),
+    agentsPaging: admin.pagingJson(pagedAgents.paging),
+    // THE PAGE OF EACH LIST rather than the whole of it, which is the one way
+    // this payload differs from what `/ldap/spiffe` answered with before
+    // 2026-09-01. The paging members above say which page, and `entries` and
+    // `agents` at the top are still the totals — a caller reading those is
+    // unaffected.
+    registrationEntries: pagedEntries.shown,
+    attestedAgents: pagedAgents.shown
   };
-  if (String(req.query.format || '').toLowerCase() === 'json') {
-    log.debug('Leaving GET /ldap/spiffe. JSON.');
-    return res.status(200).json(payload);
-  }
+
   const classRows = spiffeRegistry.SCHEMA.objectClasses.map(function (one) {
     return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
       xmlEscape(one.where) + (one.standard ? '' : ' <strong>(invented here)</strong>') +
@@ -6704,103 +6957,202 @@ app.get('/ldap/spiffe', function (req, res) {
       (row.editable ? 'yes' : 'no') + '</td><td>' + xmlEscape(row.from) +
       '</td><td>' + xmlEscape(row.what) + '</td></tr>';
   }).join('');
-  const entryRows = entries_.map(function (row) {
-    return '<tr><td><code>' + xmlEscape(row.spiffeId) + '</code><br>' +
-      '<span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td><td>' +
-      xmlEscape(row.selectors.map(spiffeRegistry.selectorText).join(', ') ||
-                '(none — matches every workload)') +
-      '</td><td>' + xmlEscape(row.origin) + '</td><td>' + row.svidsIssued +
-      '</td></tr>';
+  const entryRows = pagedEntries.shown.map(function (row) {
+    return '<tr><td>' + admin.clipped(row.spiffeId, 52) +
+      '<div class="sub">' + admin.clipped(row.dn, 52) + '</div></td><td>' +
+      admin.clipped(row.selectors.map(spiffeRegistry.selectorText).join(', ') ||
+                    '(none — matches every workload)', 60) +
+      '</td><td>' + xmlEscape(row.origin) + '</td><td class="num">' +
+      row.svidsIssued + '</td></tr>';
   }).join('');
-  const agentRows = agents.map(function (row) {
-    return '<tr><td><code>' + xmlEscape(row.id) + '</code><br>' +
-      '<span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td><td>' +
+  const agentRows = pagedAgents.shown.map(function (row) {
+    return '<tr><td>' + admin.clipped(row.id, 52) +
+      '<div class="sub">' + admin.clipped(row.dn, 52) + '</div></td><td>' +
       xmlEscape(row.attestationType) + '</td><td>' +
-      (row.banned ? '<strong>banned</strong>' : 'active') + '</td><td>' +
-      row.attestations + '</td></tr>';
+      (row.banned ? '<span class="state-revoked">banned</span>'
+                  : '<span class="state-valid">active</span>') +
+      '</td><td class="num">' + row.attestations + '</td></tr>';
   }).join('');
-  res.status(200).type('text/html').set('Cache-Control', 'no-store').send(
-    '<!doctype html><html><head><meta charset="utf-8">' +
-    '<title>The SPIFFE registry in the directory</title><style>' +
-    'body{font-family:system-ui,sans-serif;margin:2rem;max-width:70rem;line-height:1.5}' +
-    'table{border-collapse:collapse;margin:1rem 0;width:100%}' +
-    'th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left;vertical-align:top}' +
-    'th{background:#f4f4f4}code{background:#f4f4f4;padding:.1rem .3rem}' +
-    '.sub{color:#666;font-size:.9em}' +
-    '</style></head><body><h1>The SPIFFE registry, in the directory</h1>' +
-    '<p>' + xmlEscape(payload.sourceOfTruth) + '</p>' +
-    '<p>Registration entries live under <code>' + xmlEscape(spiffeEntriesDn()) +
-    '</code> (' + entries_.length + ' of at most ' + spiffeRegistry.maxEntries() +
-    ') and attested agents under <code>' + xmlEscape(spiffeAgentsDn()) +
-    '</code> (' + agents.length + ' of at most ' + spiffeRegistry.maxAgents() +
-    '). <a href="/spiffe">What SPIFFE is here</a> &middot; ' +
-    '<a href="/admin/spiffe">the console</a>.</p>' +
-    '<h2>Registration entries</h2><table>' +
-    '<tr><th>SPIFFE ID / DN</th><th>Selectors</th><th>Origin</th><th>SVIDs</th></tr>' +
+
+  const inner = '<p class="sub">Registration entries live under <code>' +
+    xmlEscape(spiffeEntriesDn()) + '</code> and attested agents under ' +
+    '<code>' + xmlEscape(spiffeAgentsDn()) + '</code>. ' +
+    '<a href="/spiffe">What SPIFFE is here</a> &middot; ' +
+    '<a href="/admin/spiffe">the console page for it</a>.</p>' +
+    '<div class="tiles">' +
+    admin.tile(entries_.length, 'Registration entries') +
+    admin.tile(spiffeRegistry.maxEntries(), 'Maximum entries') +
+    admin.tile(agents.length, 'Attested agents') +
+    admin.tile(spiffeRegistry.maxAgents(), 'Maximum agents') +
+    '</div>' +
+    admin.note(xmlEscape(payload.sourceOfTruth)) +
+    '<form method="get" action="/admin/ldap/spiffe"><div class="formrow">' +
+    '<input type="hidden" name="entryq" value="' + xmlEscape(carried.entryq) + '">' +
+    '<input type="hidden" name="agentq" value="' + xmlEscape(carried.agentq) + '">' +
+    '<label for="per">Rows per table</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(pagedEntries.paging.perPage) + '</select>' +
+    '<button class="secondary" type="submit">Apply</button>' +
+    '</div></form>' +
+    admin.note('Both tables below are paged separately and they share this ' +
+    'size. Changing it starts each of them at its first page.') +
+    '<h2>Registration entries</h2>' +
+    '<form method="get" action="/admin/ldap/spiffe"><div class="formrow">' +
+    '<input type="hidden" name="agentq" value="' + xmlEscape(carried.agentq) + '">' +
+    '<input type="hidden" name="per" value="' + xmlEscape(carried.per) + '">' +
+    '<label for="entryq">SPIFFE ID or DN</label>' +
+    '<input type="text" id="entryq" name="entryq" size="30" value="' +
+    xmlEscape(carried.entryq) + '" placeholder="spiffe://…, or part of a DN">' +
+    '<button type="submit">Search</button>' +
+    (carried.entryq ? ' <a href="/admin/ldap/spiffe">clear</a>' : '') +
+    '</div></form>' +
+    entriesNav.head +
+    '<table><tr><th>SPIFFE ID / DN</th><th>Selectors</th><th>Origin</th>' +
+    '<th class="num">SVIDs</th></tr>' +
     (entryRows || '<tr><td colspan="4">None.</td></tr>') + '</table>' +
-    '<h2>Attested agents</h2><table>' +
-    '<tr><th>Agent / DN</th><th>Attestor</th><th>State</th><th>Attestations</th></tr>' +
-    (agentRows || '<tr><td colspan="4">None. Nothing has attested here.</td></tr>') +
+    entriesNav.foot +
+    '<h2>Attested agents</h2>' +
+    '<form method="get" action="/admin/ldap/spiffe"><div class="formrow">' +
+    '<input type="hidden" name="entryq" value="' + xmlEscape(carried.entryq) + '">' +
+    '<input type="hidden" name="per" value="' + xmlEscape(carried.per) + '">' +
+    '<label for="agentq">Agent or DN</label>' +
+    '<input type="text" id="agentq" name="agentq" size="30" value="' +
+    xmlEscape(carried.agentq) + '" placeholder="an agent SPIFFE ID, or part of a DN">' +
+    '<button type="submit">Search</button>' +
+    (carried.agentq ? ' <a href="/admin/ldap/spiffe">clear</a>' : '') +
+    '</div></form>' +
+    agentsNav.head +
+    '<table><tr><th>Agent / DN</th><th>Attestor</th><th>State</th>' +
+    '<th class="num">Attestations</th></tr>' +
+    (agentRows ||
+     '<tr><td colspan="4">None. Nothing has attested here.</td></tr>') +
     '</table>' +
+    agentsNav.foot +
     '<h2>Object classes</h2><table><tr><th>Class</th><th>Where from</th>' +
     '<th>What</th></tr>' + classRows + '</table>' +
     '<h2>Attributes</h2>' +
-    '<p>Declared is what an entry may DO and is editable from the console; ' +
-    'derived is what HAPPENED and is not. <code>ldapmodify</code> reaches ' +
-    'everything either way — refusing it in the console is the difference ' +
-    'between offering an operation and merely not preventing it.</p>' +
+    admin.note('Declared is what an entry may DO and is editable from the ' +
+    'console; derived is what HAPPENED and is not. <code>ldapmodify</code> ' +
+    'reaches everything either way &mdash; refusing it in the console is the ' +
+    'difference between offering an operation and merely not preventing it.') +
     '<table><tr><th>Attribute</th><th>Values</th><th>Editable</th>' +
     '<th>Written by</th><th>What</th></tr>' + attrRows + '</table>' +
-    '<p class="sub">Add <code>?format=json</code> for the machine-readable ' +
-    'form, which includes every entry in full.</p></body></html>');
-  log.debug('Leaving GET /ldap/spiffe. HTML.');
+    '<p class="sub"><a href="/admin/ldap/spiffe?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/spiffe/entries">the entries as the ' +
+    'console edits them</a> &middot; <a href="/admin/ldap/directory">every ' +
+    'entry in the directory</a> &middot; <a href="/admin/ldap/service">what ' +
+    'this directory is</a></p>';
+
+  log.debug('Leaving ldapSpiffeView(). ' + pagedEntries.shown.length +
+            ' entry row(s), ' + pagedAgents.shown.length + ' agent row(s).');
+  return { title: 'SPIFFE entries in the directory', inner: inner,
+           json: payload };
+}
+
+app.get('/admin/ldap/spiffe', function (req, res) {
+  log.debug('Entering GET /admin/ldap/spiffe.');
+  const view = ldapSpiffeView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/spiffe',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/spiffe.');
 });
 
-app.get('/ldap/applications', function (req, res) {
-  log.debug('Entering GET /ldap/applications.');
-  const rows = applications.list();
+// ---------------------------------------------------------------------------
+// GET /admin/ldap/applications — the registry, and the schema that defines it.
+//
+// Two things on one page because they answer one question. The TABLE is what
+// this service has been asked about; the SCHEMA below it is what an entry may
+// carry and where each attribute comes from — published rather than left to be
+// read out of the source, for the reason `/admin/ldap/service` publishes the
+// bind policy: a directory whose shape you have to infer is one every client
+// infers differently.
+//
+// It is a view of the store rather than a store of its own: every row is read
+// through applications.js, which reads these very entries. The page cannot
+// disagree with the directory because it has nothing to disagree with.
+//
+// AND IT IS NOT `/admin/applications`, which is the page next door and is not
+// this one. That page is the registry as the CONSOLE works with it — one row
+// per application, the counters, the six actions, the drill-down. This is the
+// registry as the DIRECTORY holds it: the DN, every attribute with every
+// value, and the vocabulary. The two are the same entries read for two
+// different purposes and each links to the other.
+// ---------------------------------------------------------------------------
+function ldapApplicationsView(req) {
+  log.debug('Entering ldapApplicationsView().');
+  const all = applications.list();
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (!needle) {
+      return true;
+    }
+    if (String(row.identifier).toLowerCase().indexOf(needle) >= 0 ||
+        String(row.name).toLowerCase().indexOf(needle) >= 0 ||
+        String(row.dn || '').toLowerCase().indexOf(needle) >= 0) {
+      return true;
+    }
+    // The ATTRIBUTES too, for the reason the directory dump searches values:
+    // somebody looking for the entry that carries a particular redirect URI
+    // has the URI and not the client_id.
+    return Object.keys(row.attributes || {}).some(function (name) {
+      const value = row.attributes[name];
+      const values = Array.isArray(value) ? value : [value];
+      return values.some(function (one) {
+        return String(one).toLowerCase().indexOf(needle) >= 0;
+      });
+    });
+  });
+  const paged = directoryPaging(req, filtered, 'applications');
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/applications', filterParams, paging);
+
   const payload = {
     baseDn: baseDn(),
     container: applicationsDn(),
-    count: rows.length,
+    count: all.length,
+    matched: filtered.length,
+    shown: paged.shown.length,
     max: maxApplications(),
+    filter: { q: wantedText || null },
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
     sourceOfTruth: 'These entries ARE the registry. An ldapmodify here changes what the ' +
       'protocol endpoints do — adding a value to oauthRedirectUri adds a redirect URI ' +
       'that RFC 9700 mode will then accept by exact match.',
     kinds: applications.KINDS,
     schema: applications.SCHEMA,
-    applications: rows
+    applications: paged.shown
   };
-  if (String(req.query.format || '').toLowerCase() === 'json') {
-    log.debug('Leaving GET /ldap/applications. JSON, ' + rows.length + ' application(s).');
-    return res.status(200).json(payload);
-  }
-  const appRows = rows.map(function (row) {
+
+  const appRows = paged.shown.map(function (row) {
     // EVERY attribute, which now includes the operational ones and entryDN. A
     // search would withhold those unless they were asked for by name (RFC 4511
     // section 4.5.1.8); this is the service showing its own store, so it shows
     // them, and the column heading below says so.
     const attrs = Object.keys(row.attributes).sort().map(function (name) {
-      const value = row.attributes[name];
-      return '<code>' + xmlEscape(name) + '</code>: ' +
-        xmlEscape(Array.isArray(value) ? value.join(' | ') : String(value));
-    }).join('<br>');
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(row.attributes[name]) + '</div>';
+    }).join('');
     // The DN on every row. This is the page headed "the registry as the
     // directory sees it", and the directory sees an entry by its DN — a row that
     // named only the identifier left the one address an ldapsearch needs to be
     // reconstructed by the reader from a naming rule published nowhere.
-    return '<tr><td><code>' + xmlEscape(row.identifier) + '</code>' +
-      (row.dn ? '<br><span class="sub"><code>' + xmlEscape(row.dn) + '</code>' +
+    return '<tr><td>' + admin.clipped(row.identifier, 40) +
+      (row.dn ? '<div class="sub">' + admin.clipped(row.dn, 40) +
         (row.identifier === row.dnLabel ? '' :
           ' &mdash; the identifier is too long for a readable RDN, so the cn is a ' +
           'digest of it and <code>appIdentifier</code> is the identity') +
-        '</span>' : '') +
+        '</div>' : '') +
       '</td><td>' + xmlEscape(row.name) + '</td><td>' +
-      xmlEscape(row.kinds.join(', ') || '(unstated)') + '<br><span class="sub">' +
-      xmlEscape(row.protocols.join(', ')) + '</span></td><td>' +
-      (row.registered ? 'yes' : 'no') + '</td><td>' + row.authentications +
-      ' auth<br>' + row.sessions + ' session(s)<br>' + row.users + ' user(s)</td><td>' +
-      attrs + '</td></tr>';
+      xmlEscape(row.kinds.join(', ') || '(unstated)') + '<div class="sub">' +
+      xmlEscape(row.protocols.join(', ')) + '</div></td><td>' +
+      (row.registered ? '<span class="state-valid">yes</span>'
+                      : '<span class="state-none">no</span>') +
+      '</td><td class="counts">' + row.authentications + ' auth<br>' +
+      row.sessions + ' session(s)<br>' + row.users +
+      ' user(s)</td><td class="attrs">' + attrs + '</td></tr>';
   }).join('');
   const classRows = applications.SCHEMA.objectClasses.map(function (one) {
     return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
@@ -6817,49 +7169,87 @@ app.get('/ldap/applications', function (req, res) {
     return '<tr><td><code>' + xmlEscape(one.kind) + '</code></td><td>' +
       xmlEscape(one.label) + '</td><td>' + xmlEscape(one.what) + '</td></tr>';
   }).join('');
-  const inner = '<h1>Applications</h1>' +
-    '<p class="sub">' + rows.length + ' of a maximum ' + maxApplications() +
-    ' under <code>' + xmlEscape(applicationsDn()) + '</code>: every OAuth client, ' +
-    'OpenID Connect relying party, SAML service provider, WS-Federation application, ' +
-    'WS-Trust relying party, OpenID4VP verifier and Kerberos service this instance has ' +
-    'been asked about. One entry per unique identifier, so an application that speaks ' +
-    'two protocols under one name is one row with two kinds rather than two rows.</p>' +
-    '<p class="sub"><strong>These entries are the registry, not a copy of one.</strong> ' +
-    'An <code>ldapmodify</code> here changes what the protocol endpoints do: add a value ' +
-    'to <code>oauthRedirectUri</code> and RFC 9700 mode accepts that redirect URI by exact ' +
-    'match on the next authorization request. Nothing caches them.</p>' +
-    (rows.length
-      ? '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th><th>Registered</th>' +
-        '<th>Seen</th><th>Every attribute</th></tr>' + appRows + '</table>'
-      : '<p class="sub">Nothing yet. An entry appears the first time a client_id, ' +
-        'wtrealm, AppliesTo, entityID or service principal name is accepted.</p>') +
-    '<h2>What an application can be</h2>' +
-    '<table><tr><th>Kind</th><th>Label</th><th>What it means</th></tr>' + kindRows +
+
+  const inner = '<p class="sub">' + all.length + ' of a maximum ' +
+    maxApplications() + ' under <code>' + xmlEscape(applicationsDn()) +
+    '</code>: every OAuth client, OpenID Connect relying party, SAML service ' +
+    'provider, WS-Federation application, WS-Trust relying party, OpenID4VP ' +
+    'verifier and Kerberos service this instance has been asked about. One ' +
+    'entry per unique identifier, so an application that speaks two protocols ' +
+    'under one name is one row with two kinds rather than two rows.</p>' +
+    '<div class="tiles">' +
+    admin.tile(all.length, 'Application entries') +
+    admin.tile(filtered.length, 'Matching the filter') +
+    admin.tile(maxApplications(), 'Maximum held') +
+    '</div>' +
+    admin.note('<strong>These entries are the registry, not a copy of ' +
+    'one.</strong> An <code>ldapmodify</code> here changes what the protocol ' +
+    'endpoints do: add a value to <code>oauthRedirectUri</code> and RFC 9700 ' +
+    'mode accepts that redirect URI by exact match on the next authorization ' +
+    'request. Nothing caches them. To EDIT one, ' +
+    '<a href="/admin/applications">Applications</a> is the page with the ' +
+    'controls on it; this one is the dump.') +
+    '<form method="get" action="/admin/ldap/applications"><div class="formrow">' +
+    '<label for="q">Anywhere in the entry</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="an identifier, a name, a DN or any value">' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/ldap/applications">clear</a>' : '') +
+    '</div></form>' +
+    nav.head +
+    '<table><tr><th>Identifier</th><th>Name</th><th>Kind</th>' +
+    '<th>Registered</th><th>Seen</th><th>Every attribute</th></tr>' +
+    (appRows || '<tr><td colspan="6">' +
+      (wantedText
+        ? 'No application matches. The filter above may be hiding some.'
+        : 'Nothing yet. An entry appears the first time a client_id, wtrealm, ' +
+          'AppliesTo, entityID or service principal name is accepted.') +
+      '</td></tr>') +
     '</table>' +
+    nav.foot +
+    '<h2>What an application can be</h2>' +
+    '<table><tr><th>Kind</th><th>Label</th><th>What it means</th></tr>' +
+    kindRows + '</table>' +
     '<h2>The object classes</h2>' +
-    '<p class="sub">node-ldapjs has no schema subsystem &mdash; it is protocol machinery, ' +
-    'and it is a submodule this repository does not modify &mdash; and this directory is ' +
-    'schemaless on purpose. So this is a VOCABULARY rather than a constraint: nothing ' +
-    'rejects an entry for disobeying it. Where a registered class fits, it is used.</p>' +
+    admin.note('node-ldapjs has no schema subsystem &mdash; it is protocol ' +
+    'machinery, and it is a submodule this repository does not modify &mdash; ' +
+    'and this directory is schemaless on purpose. So this is a VOCABULARY ' +
+    'rather than a constraint: nothing rejects an entry for disobeying it. ' +
+    'Where a registered class fits, it is used.') +
     '<table><tr><th>Class</th><th>Where from</th><th>What it brings</th></tr>' +
     classRows + '</table>' +
     '<h2>The attributes</h2>' +
-    '<p class="sub"><code>multi</code> accumulates a repeat, <code>single</code> is ' +
-    'assigned &mdash; which is what stops a counter growing a value per sign-in. Two ' +
-    'attributes hold CREDENTIALS in the clear, for the reason ' +
-    '<code>/krb5/principals</code> prints the Kerberos passwords; they are never written ' +
-    'to the audit log.</p>' +
-    '<table><tr><th>Attribute</th><th>Values</th><th>Set by</th><th>What it is</th></tr>' +
-    attrRows + '</table>' +
-    '<p class="sub"><a href="/ldap/applications?format=json">This page as JSON</a> ' +
-    '&middot; <a href="/ldap/directory">every entry in the directory</a> &middot; ' +
-    '<a href="/ldap">what this directory is</a></p>';
-  res.status(200).type('html').send(pageShell('Applications', inner));
-  log.debug('Leaving GET /ldap/applications. ' + rows.length + ' application(s).');
+    admin.note('<code>multi</code> accumulates a repeat, <code>single</code> ' +
+    'is assigned &mdash; which is what stops a counter growing a value per ' +
+    'sign-in. Two attributes hold CREDENTIALS in the clear, for the reason ' +
+    '<code>/krb5/principals</code> prints the Kerberos passwords; they are ' +
+    'never written to the audit log.') +
+    '<table><tr><th>Attribute</th><th>Values</th><th>Set by</th>' +
+    '<th>What it is</th></tr>' + attrRows + '</table>' +
+    '<p class="sub"><a href="/admin/ldap/applications?format=json">This page ' +
+    'as JSON</a> &middot; <a href="/admin/applications">the same registry ' +
+    'with the controls on it</a> &middot; ' +
+    '<a href="/admin/ldap/directory">every entry in the directory</a> ' +
+    '&middot; <a href="/admin/ldap/service">what this directory is</a></p>';
+
+  log.debug('Leaving ldapApplicationsView(). ' + paged.shown.length +
+            ' row(s) of ' + filtered.length + ' matched.');
+  return { title: 'Application entries', inner: inner, json: payload };
+}
+
+app.get('/admin/ldap/applications', function (req, res) {
+  log.debug('Entering GET /admin/ldap/applications.');
+  const view = ldapApplicationsView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/applications',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/applications.');
 });
 
 // ---------------------------------------------------------------------------
-// GET /ldap/federations — the register as the directory sees it.
+// GET /admin/ldap/federations — the register as the directory sees it.
 //
 // The applications page's twin, and a page of its own rather than a section of
 // that one for the reason the container is a container of its own: half these
@@ -6872,21 +7262,42 @@ app.get('/ldap/applications', function (req, res) {
 // on. That sentence is the whole difference between this container and every
 // other one, so it is at the top rather than in a footnote.
 // ---------------------------------------------------------------------------
-app.get('/ldap/federations', function (req, res) {
-  log.debug('Entering GET /ldap/federations.');
-  const rows = federation.list();
+function ldapFederationsView(req) {
+  log.debug('Entering ldapFederationsView().');
+  const all = federation.list();
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (!needle) {
+      return true;
+    }
+    return String(row.fedId).toLowerCase().indexOf(needle) >= 0 ||
+           String(row.dn).toLowerCase().indexOf(needle) >= 0 ||
+           String(row.fedProtocol || '').toLowerCase().indexOf(needle) >= 0 ||
+           String(row.fedRole || '').toLowerCase().indexOf(needle) >= 0;
+  });
+  const paged = directoryPaging(req, filtered, 'relationships');
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/federations', filterParams, paging);
+
   const payload = {
     baseDn: baseDn(),
     container: federationsDn(),
-    count: rows.length,
+    count: all.length,
+    matched: filtered.length,
+    shown: paged.shown.length,
     max: maxFederations(),
+    filter: { q: wantedText || null },
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
     sourceOfTruth: 'These entries ARE the register. An ldapmodify here is a SECURITY ' +
       'change: fedSigningCertificate decides whose assertions this service will ' +
       'believe, and fedEnabled turns a partner on. Nothing caches them.',
     roles: federation.ROLES,
     protocols: federation.PROTOCOLS,
     schema: federation.SCHEMA,
-    relationships: rows.map(function (row) {
+    relationships: paged.shown.map(function (row) {
       // The record MINUS the credential, and the entry beside it. The whole
       // entry's attributes are shown below in the table, secret included — this
       // is the page that says what the directory holds, and hiding a value here
@@ -6906,31 +7317,29 @@ app.get('/ldap/federations', function (req, res) {
       return out;
     })
   };
-  if (String(req.query.format || '').toLowerCase() === 'json') {
-    log.debug('Leaving GET /ldap/federations. JSON, ' + rows.length + ' relationship(s).');
-    return res.status(200).json(payload);
-  }
-  const relRows = rows.map(function (row) {
+
+  const relRows = paged.shown.map(function (row) {
     const attrs = Object.keys(row.entry.attributes).sort().map(function (name) {
-      const value = row.entry.attributes[name];
-      return '<code>' + xmlEscape(name) + '</code>: ' +
-        xmlEscape(Array.isArray(value) ? value.join(' | ') : String(value));
-    }).join('<br>');
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(row.entry.attributes[name]) + '</div>';
+    }).join('');
     const readiness = federation.readinessOf(row);
-    return '<tr><td><code>' + xmlEscape(row.fedId) + '</code>' +
-      '<br><span class="sub"><code>' + xmlEscape(row.dn) + '</code></span></td>' +
+    return '<tr><td>' + admin.clipped(row.fedId, 40) +
+      '<div class="sub">' + admin.clipped(row.dn, 40) + '</div></td>' +
       '<td>' + xmlEscape((federation.roleRow(row.fedRole) || {}).short || row.fedRole) +
-      '<br><span class="sub">' +
+      '<div class="sub">' +
       xmlEscape((federation.protocolRow(row.fedProtocol) || {}).label || row.fedProtocol) +
-      '</span></td>' +
+      '</div></td>' +
       '<td>' + (federation.isEnabled(row)
-        ? (readiness.ready ? 'enabled and ready'
-           : 'ENABLED, not configured<br><span class="sub">' +
-             xmlEscape(readiness.missing.join(', ')) + '</span>')
-        : 'disabled') + '</td>' +
+        ? (readiness.ready
+            ? '<span class="state-valid">enabled and ready</span>'
+            : '<span class="state-expired">ENABLED, not configured</span>' +
+              '<div class="sub">' +
+              xmlEscape(readiness.missing.join(', ')) + '</div>')
+        : '<span class="state-none">disabled</span>') + '</td>' +
       '<td>' + xmlEscape(row.fedAuthentications || '0') + ' sign-in(s)<br>' +
       xmlEscape(row.fedUsers || '0') + ' person/people</td>' +
-      '<td>' + attrs + '</td></tr>';
+      '<td class="attrs">' + attrs + '</td></tr>';
   }).join('');
   const classRows = federation.SCHEMA.objectClasses.map(function (one) {
     return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
@@ -6943,27 +7352,50 @@ app.get('/ldap/federations', function (req, res) {
       '</td><td>' + xmlEscape(row.kind) + '</td><td>' + xmlEscape(row.role) +
       '</td><td>' + xmlEscape(row.what) + '</td></tr>';
   }).join('');
-  const inner = '<h1>Federation relationships</h1>' +
-    '<p class="sub">' + rows.length + ' of a maximum ' + maxFederations() +
-    ' under <code>' + xmlEscape(federationsDn()) + '</code>: the foreign identity ' +
-    'providers this service consumes assertions from, and the foreign service ' +
-    'providers it asserts to. One relationship is one DIRECTION, so a partner in both ' +
-    'is two entries.</p>' +
-    '<p class="sub"><strong>An ldapmodify here is a security change, which is not true ' +
-    'of any other container in this directory.</strong> ' +
-    '<code>fedSigningCertificate</code> decides whose assertions this service will ' +
-    'believe; <code>fedEnabled</code> turns a partner on. Everywhere else here an edit ' +
-    'changes what this service hands out, and every bind to this directory succeeds &mdash; ' +
-    'so this container is exactly as protected as the rest of it, which is to say not at ' +
-    'all. That is the honest state of a mock, and it is why federation is the one feature ' +
-    'here that refuses by default.</p>' +
-    (rows.length
-      ? '<table><tr><th>Relationship</th><th>Direction</th><th>State</th><th>Seen</th>' +
-        '<th>Every attribute</th></tr>' + relRows + '</table>'
-      : '<p class="sub">Nothing yet, and nothing will appear by itself: unlike every ' +
-        'other container here, this one is CONFIGURED. Add a relationship on ' +
-        '<a href="/admin/federation">/admin/federation</a> or through ' +
-        '<code>POST /admin-api/federation/create</code>.</p>') +
+
+  const inner = '<p class="sub">' + all.length + ' of a maximum ' +
+    maxFederations() + ' under <code>' + xmlEscape(federationsDn()) +
+    '</code>: the foreign identity providers this service consumes assertions ' +
+    'from, and the foreign service providers it asserts to. One relationship ' +
+    'is one DIRECTION, so a partner in both is two entries.</p>' +
+    '<div class="tiles">' +
+    admin.tile(all.length, 'Relationships') +
+    admin.tile(all.filter(function (r) { return federation.isEnabled(r); }).length,
+               'Enabled') +
+    admin.tile(maxFederations(), 'Maximum held') +
+    '</div>' +
+    admin.warn('<strong>An ldapmodify here is a security change, which is not ' +
+    'true of any other container in this directory.</strong> ' +
+    '<code>fedSigningCertificate</code> decides whose assertions this service ' +
+    'will believe; <code>fedEnabled</code> turns a partner on. Everywhere ' +
+    'else here an edit changes what this service hands out, and every bind to ' +
+    'this directory succeeds &mdash; so this container is exactly as ' +
+    'protected as the rest of it, which is to say not at all. That is the ' +
+    'honest state of a mock, and it is why federation is the one feature here ' +
+    'that refuses by default.') +
+    '<form method="get" action="/admin/ldap/federations"><div class="formrow">' +
+    '<label for="q">Relationship</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="an id, a DN, a protocol or a direction">' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/ldap/federations">clear</a>' : '') +
+    '</div></form>' +
+    nav.head +
+    '<table><tr><th>Relationship</th><th>Direction</th><th>State</th>' +
+    '<th>Seen</th><th>Every attribute</th></tr>' +
+    (relRows || '<tr><td colspan="5">' +
+      (wantedText
+        ? 'No relationship matches. The filter above may be hiding some.'
+        : 'Nothing yet, and nothing will appear by itself: unlike every other ' +
+          'container here, this one is CONFIGURED. Add a relationship on ' +
+          '<a href="/admin/federation">/admin/federation</a> or through ' +
+          '<code>POST /admin-api/federation/create</code>.') +
+      '</td></tr>') +
+    '</table>' +
+    nav.foot +
     '<h2>The two directions</h2>' +
     '<table><tr><th>Role</th><th>What it means</th></tr>' +
     federation.ROLES.map(function (one) {
@@ -6980,24 +7412,60 @@ app.get('/ldap/federations', function (req, res) {
     '<table><tr><th>Class</th><th>Where from</th><th>What it brings</th></tr>' +
     classRows + '</table>' +
     '<h2>The attributes</h2>' +
-    '<p class="sub"><code>multi</code> accumulates a repeat, <code>single</code> is ' +
-    'assigned. The <code>role</code> column says which direction an attribute is for; ' +
-    'one belonging to the other direction is refused by the console and by the ' +
-    'management API, and an <code>ldapmodify</code> can still write it, where it will ' +
-    'be ignored. <code>fedClientSecret</code> is THIS SERVICE\'S OWN CREDENTIAL AT THE ' +
-    'PARTNER &mdash; a real secret at a real foreign service, which is a stronger ' +
-    'statement than anything else in this directory &mdash; and it is here in the clear ' +
-    'for the reason <code>/krb5/principals</code> prints the Kerberos passwords. It is ' +
-    'never written to the audit log and never shown in the console.</p>' +
-    '<table><tr><th>Attribute</th><th>Values</th><th>Direction</th><th>What it is</th>' +
-    '</tr>' + attrRows + '</table>' +
-    '<p class="sub"><a href="/ldap/federations?format=json">This page as JSON</a> ' +
-    '&middot; <a href="/admin/federation">configure them in the console</a> &middot; ' +
-    '&middot; <a href="/federation">what federation is here</a> &middot; ' +
-    '<a href="/ldap">what this directory is</a></p>';
-  res.status(200).type('html').send(pageShell('Federation relationships', inner));
-  log.debug('Leaving GET /ldap/federations. ' + rows.length + ' relationship(s).');
+    admin.note('<code>multi</code> accumulates a repeat, <code>single</code> ' +
+    'is assigned. The <code>role</code> column says which direction an ' +
+    'attribute is for; one belonging to the other direction is refused by the ' +
+    'console and by the management API, and an <code>ldapmodify</code> can ' +
+    'still write it, where it will be ignored. <code>fedClientSecret</code> ' +
+    'is THIS SERVICE\'S OWN CREDENTIAL AT THE PARTNER &mdash; a real secret ' +
+    'at a real foreign service, which is a stronger statement than anything ' +
+    'else in this directory &mdash; and it is here in the clear for the ' +
+    'reason <code>/krb5/principals</code> prints the Kerberos passwords. It ' +
+    'is never written to the audit log and never shown in the console.') +
+    '<table><tr><th>Attribute</th><th>Values</th><th>Direction</th>' +
+    '<th>What it is</th></tr>' + attrRows + '</table>' +
+    '<p class="sub"><a href="/admin/ldap/federations?format=json">This page ' +
+    'as JSON</a> &middot; <a href="/admin/federation">configure them in the ' +
+    'console</a> &middot; <a href="/federation">what federation is here</a> ' +
+    '&middot; <a href="/admin/ldap/service">what this directory is</a></p>';
+
+  log.debug('Leaving ldapFederationsView(). ' + paged.shown.length +
+            ' row(s) of ' + filtered.length + ' matched.');
+  return { title: 'Federation entries', inner: inner, json: payload };
+}
+
+app.get('/admin/ldap/federations', function (req, res) {
+  log.debug('Entering GET /admin/ldap/federations.');
+  const view = ldapFederationsView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/federations',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/federations.');
 });
+
+// ---------------------------------------------------------------------------
+// THE NINTH SLOT ON admin.js, FILLED HERE.
+//
+// `mgmt-api/admin_api.js` mirrors every page of the console (rule 7) and sits
+// two positions ABOVE this module in the require order, so it cannot require
+// this file to reach these five views without dragging every route registered
+// here ahead of its own. The slot is the way across; see the block above
+// `setDirectoryPages()` in `admin.js` for the argument, and the guard below is
+// the one every other install in this file uses — an older copy of `admin.js`
+// (the parent project's) costs a warning rather than a crash at require time.
+// ---------------------------------------------------------------------------
+if (typeof admin.setDirectoryPages === 'function') {
+  admin.setDirectoryPages({
+    service: ldapServiceView,
+    directory: ldapDirectoryView,
+    applications: ldapApplicationsView,
+    federations: ldapFederationsView,
+    spiffe: ldapSpiffeView
+  });
+} else {
+  log.warn('ldap: this copy of admin-ui/admin.js offers no ' +
+           'setDirectoryPages() slot, so /admin-api will not mirror the five ' +
+           'directory pages. The pages themselves are unaffected.');
+}
 
 function listen() {
   log.debug('Entering listen().');
@@ -7008,11 +7476,11 @@ function listen() {
       listening = true;
       listenError = '';
       // ROOT_DN: what this SOCKET serves. A realm's subtree is under it and
-      // is reported per realm on GET /ldap, which does have a realm.
+      // is reported per realm on GET /admin/ldap/service, which does have a realm.
       log.info('ldap: listening on TCP ' + boundPort + ' with base DN ' +
                ROOT_DN + '; ' + totalEntries() +
                ' entry/entries across ' + realms.count() + ' trust realm(s), ' +
-               'each with a directory of its own; GET /ldap describes it.');
+               'each with a directory of its own; GET /admin/ldap/service describes it.');
       resolve({ port: boundPort, baseDn: ROOT_DN });
     });
     plainServer.once('error', function (err) {
@@ -7034,7 +7502,7 @@ function listen() {
   // point: LDAPS is the second way in to a directory that already answers on
   // 389, so a failure to bind 636 must not turn into a rejected whenReady and
   // an "ldap: the directory could not start" in server.js for a directory that
-  // started. It is recorded, logged, and published on GET /ldap — the same
+  // started. It is recorded, logged, and published on GET /admin/ldap/service — the same
   // treatment a failure on 389 gets, minus the rejection.
   const whenSecure = new Promise(function (resolve) {
     if (!secureServer) {

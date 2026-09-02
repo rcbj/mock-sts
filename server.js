@@ -332,7 +332,7 @@ const tlsServer = require('./tls/tls_server');
 require('./admin-ui/crypto_metadata');
 // The embedded LDAPv3 directory (RFC 4511), built on the node-ldapjs submodule.
 // Like the two Kerberos modules it registers its HTTP views at require time
-// (/ldap, /ldap/directory) and starts its TCP listener from listen() below, for
+// (/ldap, /admin/ldap/directory) and starts its TCP listener from listen() below, for
 // the same reason: binding port 389 is privileged and can fail, and a require
 // that throws takes the whole service down where a route cannot.
 //
@@ -579,7 +579,8 @@ function announce() {
   });
   krb5Service.listen();
   // The LDAP directory's socket, started here for the same reason the KDC's is.
-  // GET /ldap says what it is and GET /ldap/directory shows every entry in it;
+  // GET /admin/ldap/service says what it is and GET /admin/ldap/directory shows
+  // every entry in it;
   // GET /admin/sts-metadata cannot see a raw socket, so the listener has its
   // own entry there beside the KDC's.
   const ldapListener = ldapServer.listen();
@@ -593,8 +594,10 @@ function announce() {
                : ', and NOT over LDAPS — ' + (ready.ldapsError ||
                  'it never bound') + ', which leaves the plain listener and ' +
                  'the rest of this service untouched') +
-             '. Every bind succeeds except the password "invalid"; GET /ldap ' +
-             'describes it and GET /ldap/directory lists every entry.');
+             '. Every bind succeeds except the password "invalid"; ' +
+             'GET /admin/ldap/service describes it and GET ' +
+             '/admin/ldap/directory lists every entry. Both are admin console ' +
+             'pages and behind its gate; /admin-api mirrors them and is not.');
   }).catch(function (err) {
     // Reported rather than thrown, exactly as the KDC's failure is: the rest of
     // this service is still useful, and a silent failure to bind would surface

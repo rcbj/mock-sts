@@ -82,7 +82,7 @@ should be re-fetching — and every document that carries it is served
 point. `GET /oauth2/rfc9700` publishes every BCP requirement with `yes`,
 `detected`, `always`, `deployment` or `no` and the reason. `GET /spiffe` names
 the six of forty-two SPIRE methods that are unimplemented and why each one is.
-`GET /ldap` says the directory is schemaless. A mock that quietly pretended
+`GET /admin/ldap/service` says the directory is schemaless. A mock that quietly pretended
 would teach you something false about every real server you will ever meet.
 
 **The admin console at `/admin` asks for a sign-in and a role** — `admin.authRequired`,

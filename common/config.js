@@ -704,6 +704,46 @@ const SETTINGS = [
                  'are only detected, and which are true of the deployment ' +
                  'rather than of a request.' },
 
+  // THE SECOND MODE IN THIS FILE, AND IT IS DELIBERATELY NOT PART OF THE FIRST.
+  // RFC 9700 mode enforces a published Best Current Practice and every one of
+  // its checks cites a section; a delegated permission is nothing of the kind —
+  // it is a policy this service was CONFIGURED with, in the shape Microsoft
+  // Entra ID uses, and no RFC says an authorization server must have one. Rolling
+  // it into `oauth2.rfc9700` would have made `GET /oauth2/rfc9700` list a
+  // requirement no document contains, which is the one thing that page must
+  // never do.
+  //
+  // OFF BY DEFAULT, for the reason every refusal in this service is off by
+  // default: it exists to exercise clients, and a client is exercised by both
+  // answers. With it off a permission scope still becomes an audience and a
+  // scope claim and the console still says which requests were not backed by a
+  // grant — so the register is fully usable, and readable, before anybody turns
+  // this on. `runtime: true` and settable on a realm, so one realm can enforce
+  // while another does not: there is no listener and no key involved, which is
+  // what makes `oauth2.rfc9700` restart-only and does not apply here.
+  { key: 'oauth2.delegatedPermissionsEnforced', group: 'OAuth 2.0 / OIDC',
+    label: 'Enforce delegated permissions',
+    env: 'STS_OAUTH2_DELEGATED_PERMISSIONS_ENFORCED', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'REFUSE an authorization or token request that asks for a ' +
+                 'permission the client has not been granted. A permission is ' +
+                 'defined on a resource application — a base URI and a name, ' +
+                 'joined into `https://example.com/write` — and granted to a ' +
+                 'client application on its own entry; /admin/delegation is ' +
+                 'the register and defines both. With this OFF (the default) ' +
+                 'an ungranted permission is still honoured: the token is ' +
+                 'audienced to the base URI and carries the permission name ' +
+                 'on its scope claim exactly as a granted one would, the ' +
+                 'request is logged as ungranted and the console marks it. ' +
+                 'With it ON the same request is refused `invalid_scope` at ' +
+                 'the AUTHORIZATION endpoint — where the client can still be ' +
+                 'told — and at the token endpoint for the grants that never ' +
+                 'reach it. A scope that names no defined permission is ' +
+                 'unaffected in both modes: it is an ordinary scope, granted ' +
+                 'as everything else here is. It does NOT re-judge a grant ' +
+                 'already issued, so a refresh of a code obtained before the ' +
+                 'setting was turned on still works.' },
+
   // NOT part of RFC 9700 mode, and deliberately separate from it: it is a
   // testing aid rather than a policy, and it is useful in both modes. It is the
   // only way this service can help with a requirement it cannot enforce — the
@@ -2024,7 +2064,7 @@ const SETTINGS = [
     restartReason: 'the socket is bound when the process starts',
     description: 'The plain LDAP listener. 389 is privileged, so a host run ' +
                  'that is not root fails to bind it — recorded rather than ' +
-                 'thrown, and reported by GET /ldap.' },
+                 'thrown, and reported by GET /admin/ldap/service.' },
 
   { key: 'ldap.tlsPort', group: 'LDAP', label: 'LDAPS port',
     env: 'LDAPS_PORT', type: 'port', dflt: 636, runtime: false,

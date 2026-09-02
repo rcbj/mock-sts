@@ -9,7 +9,7 @@ first or the rest of this file will read as though it contradicts itself:
 | | What it is | Where it is authored |
 |---|---|---|
 | `tests/*.js` | the IN-PROCESS half — this repository's own module contracts, no port, no container, under a second | here |
-| `tests/vendored/` | the PROTOCOL half — thirteen jobs driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent's mock-only jobs; **FOUR are this repository's own** | the nine: **the parent project**, not edited here. the four: **here**, and only here |
+| `tests/vendored/` | the PROTOCOL half — fourteen jobs driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent's mock-only jobs; **FIVE are this repository's own** | the nine: **the parent project**, not edited here. the five: **here**, and only here |
 
 Everything this file says about what belongs HERE is about the first row. MOST
 of the second row is copies, `tests/vendored/MANIFEST.js` argues them, and the
@@ -18,17 +18,34 @@ rule that governs them is `common/vendored/`'s: **edit the parent's copy, then
 overwritten by the next sync and never reaches the stack that gates that
 project.
 
-**THE FOUR JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
+**THE FIVE JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
 RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
-`sts_admin_api_operations.js` and `sts_admin_console.js` drive this service's OWN
-`/admin` console and its `/admin-api`. They ran from the parent's suite until
-2026-08-28 and were deleted there that day, on the argument that a test
-asserting something about this console belongs in the tree where a control is
-ADDED to that console — the tree that should go red when the control loses its
-operation. **There is no copy of them over there to sync from**, which is what
-the flag is for: `allFiles()` leaves them out, so `--vendor-check` cannot report
-them GONE UPSTREAM and `--vendor-sync` cannot overwrite them. They are edited
-HERE, and only here.
+`sts_admin_api_operations.js`, `sts_admin_console.js` and
+`sts_delegated_permissions_example.js` drive this service's OWN
+`/admin` console and its `/admin-api`. The first four ran from the parent's
+suite until 2026-08-28 and were deleted there that day, on the argument that a
+test asserting something about this console belongs in the tree where a control
+is ADDED to that console — the tree that should go red when the control loses
+its operation. **There is no copy of them over there to sync from**, which is
+what the flag is for: `allFiles()` leaves them out, so `--vendor-check` cannot
+report them GONE UPSTREAM and `--vendor-sync` cannot overwrite them. They are
+edited HERE, and only here.
+
+**THE FIFTH WAS NEVER OVER THERE AND IT BREAKS ONE RULE ON PURPOSE.**
+`sts_delegated_permissions_example.js` (2026-09-01) builds
+`abcapp1`–`abcapp5` in the DEFAULT realm — five applications that each expose
+`read` and `write` and each hold both on all four of the others — and it does
+NOT clean up after itself, where every other job that writes anything works in
+a throwaway realm and removes it in a `finally`. That is not an oversight and
+it is not a precedent: what the job produces IS the deliverable, an example
+meant to be read at `/admin/delegation/allowed` and drawn at
+`/admin/delegation/allowed/map`, and a realm deleted on the way out is an
+example nobody can open. What pays for it is that the job is IDEMPOTENT — the
+identifiers are fixed, so it forgets every previous `abcapp*` before creating
+anything — that nothing else in the suite asserts an application COUNT, and
+that it runs after `sts_admin_console.js` so the console's own coverage walks
+the console it has always walked. **A second job wanting the same exemption
+needs the same three sentences**, not a reference to this one.
 
 They still SIT in `tests/vendored/` rather than beside this file, and the reason
 is how they RUN rather than where they belong: `tools/run-report.js` spawns them
@@ -686,3 +703,40 @@ optional here: a renamed family row (caught, naming SCIM in both directions), a
 hand-written ID Token list of two algorithms (caught, naming the discovery
 document), and a coverage note rewritten to open with "we do all of this"
 (caught, naming the `jws` row).
+
+---
+
+## `app_permissions.js` (2026-09-01) — the line drawn at "choosing the graph"
+
+Most of the delegated-permission feature is NOT in this directory, and that is
+the line this file exists to draw. That a permission must be defined before it
+is granted, that a base URI is normalised, that an ungranted scope is refused
+`invalid_scope` when the setting is on, that a grant lands on the CLIENT's entry
+and not the resource's — every one of those can be driven against the running
+service, and `tests/vendored/sts_admin_api_operations.js` drives all five
+operations and reads them back through two different doors.
+
+Two halves cannot be driven, and they are what is here:
+
+* **CHOOSING THE GRAPH.** The states worth asserting are ones a running service
+  will not produce on demand: a DANGLING grant (a permission removed from under
+  one), and an application granted its OWN permission — which
+  `updateApplication()` refuses through both console doors, so only an
+  `ldapmodify` can write it. Reaching either over HTTP would mean driving the
+  LDAP socket to build a state the API exists to prevent and then parsing
+  geometry back out of an SVG. The parsing is the same either way; what cannot
+  be done over there is choosing the graph. Same argument as
+  `delegation_map_bands.js` and `user_graph_signin.js`.
+* **THE PURE FUNCTIONS.** `base + name` and `name|description` are string rules
+  with edge cases no request can reach: a description containing the delimiter,
+  a base already ending in `#`, a base written by hand and therefore not
+  normalised.
+
+**It was mutation-tested against five mutants before it was committed**, as the
+rule here requires: dropping the base-URI separator, a configured box claiming
+an act (which would draw every grant in the refusal colour), the `may-reach`
+look ignoring whether the grant was ever asked for, a self-grant drawing a loop,
+and a dangling grant drawing a line. Each was caught.
+
+**It touches no process-wide state** — every graph it draws is built in the
+file — so the restore rule does not apply to it.

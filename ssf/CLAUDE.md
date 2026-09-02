@@ -394,7 +394,28 @@ For the next person adding one, this family's full list:
   reports it in both directions;
 * `mgmt-api/admin_api.js` — a GET and a POST with four actions;
   `mgmt-api/admin_api_spec.js` — the `Ssf` schema;
-* `sts_metadata.js` — five `SPECS` entries, eleven `ENDPOINTS` rows and a
-  `PROTOCOLS` card;
+* `sts_metadata.js` — five `SPECS` entries, **fourteen** `ENDPOINTS` rows and a
+  `PROTOCOLS` card. It was eleven until 2026-09-01, and the three that were
+  missing are the ones that are not `/ssf/*` at all: `/admin/ssf`,
+  `/admin-api/ssf` and `/admin-api/ssf/:action`. That is worth knowing because
+  it is the shape of the mistake rather than one instance of it — a family's
+  own endpoints are obvious and the CONSOLE and MANAGEMENT API rows it also
+  costs are the ones a checklist forgets. `tests/vendored/sts_metadata.js` is
+  what caught them, in the direction only it checks: registered and described
+  nowhere;
 * `oauth-oidc/oauth2.js` — the two scopes in `scopes_supported`;
 * `server.js` — the require, at 23b.
+
+**AND ONE THING THAT IS NOT A FILE: THE REFUSAL SENTENCE HAS TO BE SPELLED THE
+WAY EVERY OTHER ACTION HANDLER SPELLS IT.** `consoleAction()` answered an
+unknown action with `"x" is not an action on this resource. The ones that are:
+…` until 2026-09-01, which reads perfectly well and is INVISIBLE to the two
+checks that depend on it: `tests/vendored/admin_api.js` requires
+`/unknown action/i` before it parses the list — that is the console/API parity
+check, so `/ssf`'s four actions were being compared against nothing — and
+`tests/vendored/sts_admin_api_operations.js` matches `Unknown action "x".
+<count phrase>: <list>.` across every documented resource, which is what caught
+it. It is `Unknown action "x". The four are: …` now, with the count coming from
+`CONSOLE_ACTIONS.length` through `helpers.numberWord()` rather than from a word
+typed beside it. **This sentence is not prose — it is READ**, and that is the
+whole reason it is worth a paragraph in this file.

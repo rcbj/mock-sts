@@ -66,7 +66,7 @@
 // to extend and nothing to register with: the schema below is DEFINED HERE, and
 // it is a VOCABULARY rather than a constraint. Nothing rejects an entry for
 // disobeying it, exactly as nothing rejects one anywhere else in this
-// deliberately schemaless directory — `GET /ldap` says so at length.
+// deliberately schemaless directory — `GET /admin/ldap/service` says so at length.
 //
 // Where a standard name exists it is used. `applicationProcess` (RFC 4519
 // section 3.3) is the one registered object class that fits an application at
@@ -123,7 +123,7 @@
 //
 // `oauthClientSecret` holds the secret this service minted at registration, on
 // an entry in a directory where every bind succeeds and which `GET
-// /ldap/directory` prints on an unprotected page. The same objection applies to
+// /admin/ldap/directory` prints on an unprotected page. The same objection applies to
 // `GET /krb5/principals`, which prints every Kerberos password, and the answer
 // is the one written there: a debugger whose accounts are unusable without
 // reading the source is worse than one that says what they are. The secret is
@@ -496,7 +496,7 @@ function normaliseProtocols(value) {
 // THE SCHEMA.
 //
 // One row per attribute, and the row is the whole definition: `GET
-// /ldap/applications` publishes this table, `ldap_server.js` builds the entry
+// /admin/ldap/applications` publishes this table, `ldap_server.js` builds the entry
 // from it, and there is no second list anywhere to update. An attribute that is
 // not here is not written, which is what makes the published schema worth
 // reading — the lesson `vc_claims.js` learned about an issuer advertising five
@@ -683,6 +683,84 @@ const SCHEMA = {
       what: 'response_type values seen at the authorization endpoint.' },
     { name: 'oauthScope', kind: 'multi', from: 'OAuth 2.0 / OIDC',
       what: 'Scopes this application has asked for.' },
+
+    // --- delegated permissions: the RESOURCE half, then the CLIENT half -----
+    //
+    // THREE ATTRIBUTES THAT ARE ONE FEATURE, AND THEY ARE THE FIRST THING IN
+    // THIS SCHEMA WHERE ONE ENTRY'S VALUE IS ONLY MEANINGFUL AGAINST ANOTHER
+    // ENTRY'S. Everything above describes the application it is on. A GRANT
+    // does not: `oauthDelegatedPermission` on webapp1 is a fact about webapp1
+    // AND about the resource whose permission it names, and neither entry is
+    // complete on its own. That is what makes this a RELATIONSHIP rather than
+    // one more declaration, and it is why `common/app_permissions.js` exists to
+    // read the two halves together — see its header, which argues the model.
+    //
+    // The shape is Microsoft Entra ID's, deliberately and by name: a resource
+    // application EXPOSES an API (`oauth2PermissionScopes` there) and a client
+    // application is granted delegated permissions on it
+    // (`requiredResourceAccess`). Two attributes on two entries, one value per
+    // relationship, so one client granted three permissions is three values and
+    // three clients granted one permission is three values on three entries —
+    // which is how 1-to-many and many-to-1 both fall out of the same attribute
+    // without a container of their own.
+    { name: 'oauthPermissionBaseUri', kind: 'single',
+      from: 'the console, the management API, or by hand',
+      what: 'THE BASE URI EVERY PERMISSION THIS APPLICATION DEFINES HANGS OFF, and the ' +
+            'thing that makes a permission name globally unique here. A permission is ' +
+            'identified by this value followed by its name — base ' +
+            '`https://example.com/` and name `write` are the permission ' +
+            '`https://example.com/write` — which is what a client puts in a `scope` and ' +
+            'what the access token is then AUDIENCED to. Entra ID calls it the ' +
+            'Application ID URI and spells it `api://<guid>`; the shape is the same and ' +
+            'nothing here requires that scheme.\n\nIT IS NORMALISED TO END IN A ' +
+            'SEPARATOR when it is written through this module — a trailing `/` is added ' +
+            'where there is no `/`, `#` or `:` at the end — because base + name is a ' +
+            'plain concatenation and `https://example.com` + `write` would otherwise ' +
+            'produce `https://example.comwrite`. An `ldapmodify` reaches this attribute ' +
+            'like every other and is not normalised, so a base written by hand means ' +
+            'exactly what it says.\n\nSINGLE-VALUED, and it is the one attribute in this ' +
+            'group that could not be widened without deciding something: two bases would ' +
+            'mean every permission on the entry had two identifiers, and the lookup that ' +
+            'turns a scope into an audience would have to pick one to put in `aud`.' },
+    { name: 'oauthPermission', kind: 'multi',
+      from: 'the console, the management API, or by hand',
+      what: 'ONE PERMISSION THIS APPLICATION EXPOSES, one value each. The value is the ' +
+            'permission\'s NAME — `read`, `write`, `Widgets.ReadWrite.All` — optionally ' +
+            'followed by `|` and a description: `write|Change widgets on somebody\'s ' +
+            'behalf`. The FIRST `|` is the delimiter and every later one belongs to the ' +
+            'description, so a description may contain the character and a name may ' +
+            'not.\n\nThe name must be a legal OAuth scope token (RFC 6749 section 3.3 — ' +
+            'no space, no double quote, no backslash), because that is what a client ' +
+            'will put in a `scope` parameter and what comes back on the token\'s `scope` ' +
+            'claim. Nothing enforces that when an `ldapmodify` writes it; this module ' +
+            'and both consoles do.\n\nA PERMISSION MUST EXIST BEFORE ANYTHING CAN BE ' +
+            'GRANTED IT, which is the one ordering rule this feature has and is checked ' +
+            'in updateApplication() so that the console form and the management API ' +
+            'cannot disagree about it. It is checked on the GRANT and not here: this ' +
+            'attribute is the definition, and a definition nobody has used yet is the ' +
+            'ordinary first step rather than a mistake.' },
+    { name: 'oauthDelegatedPermission', kind: 'multi',
+      from: 'the console, the management API, or by hand',
+      what: 'A PERMISSION THIS APPLICATION HAS BEEN GRANTED ON ANOTHER ONE — the whole ' +
+            'permission identifier, base URI and name together: ' +
+            '`https://example.com/write`. It is the DELEGATION RELATIONSHIP, and it is ' +
+            'held on the CLIENT rather than on the resource for Entra\'s reason and one ' +
+            'more: the client is the party that will name it in a `scope`, so the entry ' +
+            'that answers "may this request be honoured" is the entry the request ' +
+            'identifies.\n\n**IT IS READ, and it is read in the one place that decides ' +
+            'what a token says.** A `scope` value matching a defined permission becomes ' +
+            'the access token\'s `aud` (the base URI) and its `scope` (the name) — see ' +
+            'oauth2.js\'s audienceScopes(). Whether the client HOLDS the grant is ' +
+            'reported either way and REFUSES nothing unless ' +
+            '`oauth2.delegatedPermissionsEnforced` is on, which is off by default: this ' +
+            'service exists to exercise clients and a refusal that cannot be turned off ' +
+            'removes a test case rather than adding one. With it on, an ungranted ' +
+            'permission is `invalid_scope` at the authorization endpoint, where the ' +
+            'client can still be told.\n\nA VALUE THAT RESOLVES TO NO DEFINED PERMISSION ' +
+            'IS NOT AN ERROR AND IS NOT HIDDEN. The resource\'s entry may have been ' +
+            'deleted, or the permission removed from under it; `/admin/delegation` shows ' +
+            'such a grant as DANGLING, which is the same three-state honesty the rest of ' +
+            'this console applies to a name it cannot resolve.' },
     { name: 'oauthTokenEndpointAuthMethod', kind: 'single', from: 'POST /oauth2/register',
       what: 'How it authenticates. RFC 7591 section 2 makes client_secret_basic the ' +
             'default when a registration omits it, which is why an omission means ' +
@@ -1493,6 +1571,25 @@ const EDITABLE = {
   oauthGrantType: 'multi',
   oauthResponseType: 'multi',
   oauthScope: 'multi',
+  // THE THREE THAT MAKE A DELEGATED PERMISSION. Two `multi` and one `set`, and
+  // each mode is the attribute's own kind read back: a base URI is one answer
+  // per application (its own row says why widening it would mean deciding
+  // which of two identifiers a token is audienced to), and both lists
+  // accumulate because an application legitimately exposes six permissions and
+  // holds four.
+  //
+  // THEY ARE THE ONLY EDITABLE ATTRIBUTES HERE WITH A CROSS-ENTRY RULE, and it
+  // is checked in updateApplication() rather than in the console: a permission
+  // must be DEFINED before it can be GRANTED, and the check has to sit where
+  // both doors go through it or the form and `POST /admin-api/applications/update`
+  // would hold two opinions about the same relationship. Same argument as
+  // `appAllowedProtocol`'s closed vocabulary two hundred lines up, and the same
+  // asymmetry: only an ADD is checked, because a REMOVE has to name a value the
+  // entry already carries and refusing to remove what LDAP put there would shut
+  // the one door that could tidy it up.
+  oauthPermissionBaseUri: 'set',
+  oauthPermission: 'multi',
+  oauthDelegatedPermission: 'multi',
   samlAssertionConsumerService: 'multi',
   // WS-Federation's return address, which used to be recorded in the attribute
   // above. Its own row says why the two were split.
@@ -1711,7 +1808,7 @@ function normaliseFields(value) {
     }
     const row = ATTRIBUTE_BY_NAME[name];
     if (!row) {
-      errors.push('"' + name + '" is not in the published schema. GET /ldap/applications ' +
+      errors.push('"' + name + '" is not in the published schema. GET /admin/ldap/applications ' +
                   'lists every attribute an entry may carry; adding one that is not there ' +
                   'means adding a row to SCHEMA.attributes, not writing it through this.');
       return;
@@ -2769,7 +2866,7 @@ function updateApplication(identifier, change) {
     log.debug("Leaving updateApplication(). Not in the schema.");
     log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" is not in the published schema. ' +
-                                 'GET /ldap/applications lists every attribute an entry may ' +
+                                 'GET /admin/ldap/applications lists every attribute an entry may ' +
                                  'carry; adding one that is not there means adding a row to ' +
                                  'SCHEMA.attributes, not writing it through this.'] };
   }
@@ -2817,6 +2914,105 @@ function updateApplication(identifier, change) {
     if (!known.ok) {
       log.debug("Leaving updateApplication(). Unknown protocol family.");
       return { ok: false, errors: known.errors };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // THE DELEGATED PERMISSION RULES, AND THEY ARE HERE FOR THE REASON THE
+  // PROTOCOL FAMILY CHECK ABOVE IS: this function is the ONE door the console
+  // form and `POST /admin-api/applications/update` both go through, and a rule
+  // enforced in either of them alone would be a rule the other could walk
+  // around. `common/app_permissions.js`'s four actions call this function too,
+  // so there is one implementation of each rule and not four.
+  //
+  // Three rules, and each of them is about something that would otherwise fail
+  // silently rather than loudly:
+  //
+  //   * A BASE URI MUST BE ABSOLUTE, because it becomes an access token's `aud`.
+  //   * A PERMISSION NEEDS A BASE URI ALREADY ON THE ENTRY, because base + name
+  //     is the identifier and a permission with no base is one no client can
+  //     ever name — it would sit on the entry looking defined and match nothing.
+  //   * A GRANT MUST NAME A PERMISSION THAT EXISTS. This is the ordering rule
+  //     the feature was asked for: define the permission, then grant it.
+  //
+  // ONLY AN ADD OR A SET IS CHECKED, the same asymmetry `appAllowedProtocol`
+  // has above and for the same reason: a remove names a value already on the
+  // entry, and refusing to remove what an `ldapmodify` put there would shut the
+  // one door that could tidy it up. Clearing the base is likewise allowed even
+  // where permissions still hang off it — the console reports those as having
+  // no identifier, which is the honest state, and refusing the clear would mean
+  // an entry could not be dismantled in any order.
+  if (attribute === 'oauthPermissionBaseUri' && mode === 'set' && value) {
+    const problem = permissionBaseProblem(value);
+    if (problem) {
+      log.debug("Leaving updateApplication(). The base URI is not absolute.");
+      return { ok: false, errors: [problem] };
+    }
+  }
+  if (attribute === 'oauthPermission' && mode === 'add') {
+    const parsed = parsePermissionValue(value);
+    const problem = permissionNameProblem(parsed.name);
+    if (problem) {
+      log.debug("Leaving updateApplication(). The permission name is not usable.");
+      return { ok: false, errors: [problem] };
+    }
+    const already = permissionsOf(loaded.record).filter(function (one) {
+      return one.name === parsed.name;
+    })[0];
+    if (already) {
+      // REFUSED RATHER THAN MERGED, because the two values would be two
+      // descriptions of one permission and `permissionsOf()` returns both — so
+      // the console would list `write` twice and the second row would be
+      // unreachable. Remove and re-add is how a description is changed, and the
+      // message says so rather than leaving somebody to discover it.
+      log.debug("Leaving updateApplication(). That permission is already defined.");
+      return { ok: false, errors: ['This application already defines a permission called "' +
+                                   parsed.name + '"' +
+                                   (already.description ? ' (' + already.description + ')' : '') +
+                                   '. A permission has one description, so change it by ' +
+                                   'removing "' + already.raw + '" and adding the new value — ' +
+                                   'adding a second would put two rows with one name on every ' +
+                                   'page that lists them.'] };
+    }
+    if (!permissionBaseOf((loaded.record.fields || {}).oauthPermissionBaseUri)) {
+      log.debug("Leaving updateApplication(). No base URI on the entry.");
+      return { ok: false, errors: ['This application has no `oauthPermissionBaseUri`, so a ' +
+                                   'permission on it would have no identifier: a permission is ' +
+                                   'named by its base URI followed by its name, and a client ' +
+                                   'asks for it by putting that whole string in a `scope`. Set ' +
+                                   'the base first — `https://example.com/` is the shape, and ' +
+                                   'Entra ID spells the same thing `api://<guid>`.'] };
+    }
+  }
+  if (attribute === 'oauthDelegatedPermission' && mode === 'add') {
+    const defines = forPermission(value);
+    if (!defines) {
+      log.debug("Leaving updateApplication(). No application defines that permission.");
+      return { ok: false, errors: ['No application in this registry defines the permission "' +
+                                   value + '", and a permission must be DEFINED before it can ' +
+                                   'be GRANTED — that is the one ordering rule this feature ' +
+                                   'has. Give the resource application an ' +
+                                   '`oauthPermissionBaseUri` and an `oauthPermission`, then ' +
+                                   'grant the two joined together. The identifier is an exact ' +
+                                   'match rather than a prefix of a registered base, so that a ' +
+                                   'client cannot address a token to somebody\'s API by ' +
+                                   'inventing a word after their base URI. `ldapmodify` reaches ' +
+                                   'this attribute like every other and is not checked, which ' +
+                                   'is what /admin/delegation reports as a DANGLING grant.'] };
+    }
+    if (defines.identifier === identifier) {
+      // AN APPLICATION GRANTING ITSELF ITS OWN PERMISSION. Refused because the
+      // token it would produce is a token addressed to itself — which is what
+      // an ID Token already is — and because the picture would draw a line from
+      // a box back to the same box. The same decision audienceScopes() makes
+      // about a client naming its own client_id as a scope, made here so that
+      // the two cannot disagree.
+      log.debug("Leaving updateApplication(). An application cannot grant itself.");
+      return { ok: false, errors: ['"' + identifier + '" is the application that DEFINES "' +
+                                   value + '", so granting it to itself would address a token ' +
+                                   'to its own API — which is what an ID Token already is, and ' +
+                                   'which draws as a line from a box back to the same box. A ' +
+                                   'grant is between two applications.'] };
     }
   }
   const record = loaded.record;
@@ -3135,6 +3331,243 @@ function overridableSettings() {
 function get(identifier) {
   const loaded = load(identifier);
   return loaded.known ? view(loaded.record, loaded.entry) : null;
+}
+
+// ---------------------------------------------------------------------------
+// DELEGATED PERMISSIONS: THE SCHEMA'S HALF OF THE FEATURE.
+//
+// The MODEL — the register, both directions, the actions and the picture — is
+// `common/app_permissions.js`, and it is a separate file for the reason
+// `delegation_map.js` is separate from `delegation.js`: this module owns the
+// SCHEMA and therefore owns how a permission is spelled on an entry and how a
+// spelling is read back, and that module owns what the two halves MEAN when
+// read against each other. What is here is everything a reader of one entry
+// needs; what is there is everything that needs two.
+//
+// Four functions and they are all this module contributes:
+//
+//   * `permissionIdOf(base, name)` — the concatenation, in ONE place, because
+//     a second copy of it in the console and a third at the token endpoint is
+//     three chances for `https://example.comwrite`.
+//   * `permissionsOf(record)` — the permissions one entry DEFINES.
+//   * `forPermission(id)` — which application defines this identifier, the
+//     fourth lookup beside forAudience(), forClientId() and forAppliesTo() and
+//     built the same way, for the same reason and with the same three
+//     disclaimers: it is a LOOKUP and not a permission, it is not case-folded,
+//     and it walks the container.
+//   * `holdsPermission(clientId, id)` — whether a client has been GRANTED it.
+//     Separate from the above because the two answer different questions and
+//     collapsing them is how "this permission exists" comes to be read as
+//     "this client may have it", which is the whole distinction this feature
+//     is about.
+// ---------------------------------------------------------------------------
+
+// The one place base and name are joined. A base that does not end in a
+// separator gets a `/`, which is what makes `https://example.com` + `write`
+// produce `https://example.com/write` rather than one word — see the attribute's
+// own row, which says that an ldapmodify is not normalised and therefore means
+// exactly what it says.
+function permissionBaseOf(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) {
+    return '';
+  }
+  return /[/#:]$/.test(text) ? text : text + '/';
+}
+
+function permissionIdOf(base, name) {
+  const prefix = permissionBaseOf(base);
+  const leaf = String(name == null ? '' : name).trim();
+  return (prefix && leaf) ? prefix + leaf : '';
+}
+
+// `write` or `write|Change widgets on somebody's behalf`. The FIRST `|` is the
+// delimiter and every later one is part of the description, which is why this
+// is an indexOf and not a split — a split would silently drop the tail of a
+// description that contained the character, and the value would still look
+// right on the entry.
+function parsePermissionValue(value) {
+  const text = String(value == null ? '' : value);
+  const at = text.indexOf('|');
+  const name = (at < 0 ? text : text.slice(0, at)).trim();
+  const description = at < 0 ? '' : text.slice(at + 1).trim();
+  return { name: name, description: description };
+}
+
+function permissionValueOf(name, description) {
+  const leaf = String(name == null ? '' : name).trim();
+  const what = String(description == null ? '' : description).trim();
+  return what ? leaf + '|' + what : leaf;
+}
+
+// RFC 6749 section 3.3's `scope-token`: %x21 / %x23-5B / %x5D-7E — every
+// printable ASCII character except space, double quote and backslash. Checked
+// because the name IS what a client sends in a `scope` parameter and what comes
+// back on the token's `scope` claim, and a name with a space in it would arrive
+// at the token endpoint as two scopes neither of which is a permission.
+//
+// `|` is refused BEYOND the RFC, because it is this schema's own delimiter and
+// a name carrying one could never be read back as the name that was written.
+function permissionNameProblem(name) {
+  const text = String(name == null ? '' : name);
+  if (!text.trim()) {
+    return 'A permission needs a name — the word a client will put in its `scope`, ' +
+           'such as `read` or `Widgets.ReadWrite.All`.';
+  }
+  if (text !== text.trim()) {
+    return 'A permission name may not begin or end with whitespace: it is sent as one ' +
+           'word in an OAuth `scope` parameter, which is space-delimited.';
+  }
+  if (text.indexOf('|') >= 0) {
+    return 'A permission name may not contain "|". That character separates the name ' +
+           'from the description in the `oauthPermission` attribute, so a name carrying ' +
+           'one could never be read back as the name that was written — put the text ' +
+           'after the first "|" and it becomes the description.';
+  }
+  if (!/^[\x21\x23-\x5B\x5D-\x7E]+$/.test(text)) {
+    return '"' + text + '" is not a legal OAuth scope token. RFC 6749 section 3.3 allows ' +
+           'any printable ASCII except space, double quote and backslash, because a scope ' +
+           'list is space-delimited — a name outside that set cannot survive the round ' +
+           'trip through a `scope` parameter.';
+  }
+  return '';
+}
+
+// A base URI has to be absolute, for the reason RFC 8707 gives about `resource`
+// and for one of this feature's own: it becomes the `aud` of an access token,
+// and a relative string there is an audience nothing can compare against.
+// A FRAGMENT IS ALLOWED where RFC 8707 refuses one, and that is deliberate
+// rather than an oversight — this is not a resource indicator, it is a name
+// this service concatenates onto, and `https://example.com/api#` is a perfectly
+// readable base whose permissions are `https://example.com/api#read`.
+function permissionBaseProblem(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) {
+    return '';
+  }
+  let parsed = null;
+  try {
+    parsed = new URL(text);
+  } catch (e) {
+    // Not a URI at all. The message names what was sent rather than the
+    // exception, which says only "Invalid URL" and would send somebody looking
+    // at their client.
+    return '"' + text + '" is not an absolute URI. A permission base is what an access ' +
+           'token asking for one of this application\'s permissions is AUDIENCED to, and ' +
+           'an audience that is not absolute is one nothing can compare against. ' +
+           'Microsoft Entra ID spells this `api://<guid>`; anything absolute works here.';
+  }
+  if (!parsed.protocol) {
+    return '"' + text + '" has no scheme.';
+  }
+  return '';
+}
+
+// The permissions ONE ENTRY defines, in the order the attribute holds them.
+// Takes a record (what load() returns) or a view (what get() and list()
+// return) — both carry `fields`, which is the whole of what this reads, so one
+// function serves the pages and the token endpoint rather than two that could
+// come to disagree about what a permission is.
+function permissionsOf(source) {
+  const fields = (source && source.fields) || {};
+  const base = permissionBaseOf(fields.oauthPermissionBaseUri);
+  return valuesOf(fields.oauthPermission).map(function (value) {
+    const parsed = parsePermissionValue(value);
+    return {
+      name: parsed.name,
+      description: parsed.description,
+      // EMPTY WHERE THERE IS NO BASE, and that is a state worth carrying rather
+      // than hiding: an entry can hold `oauthPermission` with no
+      // `oauthPermissionBaseUri` — an ldapmodify can write one without the
+      // other, and so can somebody who removed the base afterwards — and a
+      // permission with no identifier is one no client can ever ask for. The
+      // console says so; a computed id here would invent one.
+      id: base ? base + parsed.name : '',
+      raw: String(value)
+    };
+  });
+}
+
+// WHICH APPLICATION DEFINES THIS PERMISSION IDENTIFIER, or null.
+//
+// The fourth lookup in this module, and it is the same shape as the three above
+// for the same reasons — it walks the container, it is not case-folded, and it
+// REFUSES NOTHING. What it adds over them is that the answer names two things:
+// the application AND which of its permissions was matched, because the caller
+// needs both (the base becomes the audience, the name becomes the scope) and a
+// caller that had to re-derive the second from the first would be the second
+// place `base + name` was taken apart.
+//
+// The match is EXACT against the composed identifier rather than a prefix test
+// on the base. A prefix test would match `https://example.com/write` against a
+// base of `https://example.com/` even where no `write` permission was ever
+// defined, which is precisely the case this feature exists to distinguish: a
+// scope naming a permission that does not exist is an ordinary scope, and
+// turning it into an audience would let any client address a token to any
+// registered base by inventing a word.
+function forPermission(id) {
+  log.debug("Entering forPermission(). id=" + id);
+  const wanted = String(id == null ? '' : id).trim();
+  if (!wanted) {
+    log.debug("Leaving forPermission(). Nothing was asked for.");
+    return null;
+  }
+  let answer = null;
+  list().some(function (row) {
+    const found = permissionsOf(row).filter(function (one) {
+      return one.id && one.id === wanted;
+    })[0];
+    if (!found) {
+      return false;
+    }
+    answer = {
+      identifier: row.identifier,
+      application: row,
+      baseUri: permissionBaseOf(row.fields.oauthPermissionBaseUri),
+      name: found.name,
+      description: found.description,
+      id: found.id
+    };
+    return true;
+  });
+  if (!answer) {
+    log.debug("Leaving forPermission(). No application defines it.");
+    return null;
+  }
+  log.debug("Leaving forPermission(). " + answer.identifier + " defines " + answer.name + ".");
+  return answer;
+}
+
+// WHETHER A CLIENT HAS BEEN GRANTED A PERMISSION.
+//
+// The client is named the way a token request names it — by `client_id` — so
+// this goes through forClientId() rather than through get(): an application
+// created from the console under one name and registered under another answers
+// to both, and a lookup by identifier would find the grant on only one of them.
+// It falls back to get() for a caller holding the registry identifier itself,
+// because those are the same entry in the ordinary case and a caller should not
+// have to know which spelling it is holding.
+//
+// IT IS A QUESTION AND NOT A GATE. Nothing in this module refuses anything for
+// its answer; `oauth2.delegatedPermissionsEnforced` is what turns a false into a
+// refusal, and it is off by default.
+function holdsPermission(clientId, id) {
+  log.debug("Entering holdsPermission().");
+  const wanted = String(id == null ? '' : id).trim();
+  const who = String(clientId == null ? '' : clientId).trim();
+  if (!wanted || !who) {
+    log.debug("Leaving holdsPermission(). Nothing was asked for.");
+    return false;
+  }
+  const found = forClientId(who) || get(who);
+  if (!found) {
+    log.debug("Leaving holdsPermission(). No such client in the registry.");
+    return false;
+  }
+  const held = valuesOf((found.fields || {}).oauthDelegatedPermission)
+    .indexOf(wanted) >= 0;
+  log.debug("Leaving holdsPermission(). " + (held ? 'held' : 'not held') + ".");
+  return held;
 }
 
 // ---------------------------------------------------------------------------
@@ -3628,6 +4061,30 @@ module.exports = {
   // wstrust.js's delegation act. Its header says why it reads two attributes
   // where the other two read one.
   forAppliesTo: forAppliesTo,
+  // ---------------------------------------------------------------------------
+  // THE DELEGATED PERMISSION HALF. Everything a reader of ONE entry needs; what
+  // needs two entries is common/app_permissions.js, which requires this module
+  // and is where the register, the actions and the picture live.
+  //
+  // `permissionIdOf()` and `permissionBaseOf()` are exported rather than kept
+  // private because base + name is composed in four places — this module's
+  // lookups, that module's register, the console's tables and the token
+  // endpoint — and four spellings of a concatenation is four chances for
+  // `https://example.comwrite`.
+  // ---------------------------------------------------------------------------
+  permissionBaseOf: permissionBaseOf,
+  permissionIdOf: permissionIdOf,
+  parsePermissionValue: parsePermissionValue,
+  permissionValueOf: permissionValueOf,
+  permissionNameProblem: permissionNameProblem,
+  permissionBaseProblem: permissionBaseProblem,
+  permissionsOf: permissionsOf,
+  // The fourth lookup, exported for oauth2.js's audienceScopes(). Its header
+  // says why the match is exact rather than a prefix test on the base.
+  forPermission: forPermission,
+  // And the question the lookup deliberately does not answer: whether the
+  // client asking has been GRANTED what it is naming.
+  holdsPermission: holdsPermission,
   count: count,
   containerDn: containerDn,
   maxApplications: maxApplications

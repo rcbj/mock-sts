@@ -32,7 +32,7 @@ service can be told to be strict, it can.
 | Check which entityID a SAML service provider claims | **Any entityID is accepted**, and the first valid `AuthnRequest` from one creates its application entry. Asking for its metadata does the same — the document is minted for anything asked for |
 | Attest a workload or a node | See SPIFFE, below |
 | Let a group grant anything, bar two | A token now *carries* one; no endpoint reads it. `cn=admin-read` and `cn=admin-write` are the exception and grant the admin console, nothing else |
-| Decide who may delegate to whom, in two of the three families that can | The KDC polices S4U properly, off the same two attributes a real domain uses. WS-Trust `OnBehalfOf`/`ActAs` and RFC 8693 token exchange are unpoliced: anybody may ask for a token about anybody. Every act says which — see below |
+| Decide who may delegate to whom IN THE ACT, in two of the three families that can | The KDC polices S4U properly, off the same two attributes a real domain uses, on every request and whatever anything is set to. WS-Trust `OnBehalfOf`/`ActAs` is unpoliced: anybody may ask for a token about anybody. **RFC 8693 and the OAuth families are the qualified case since 2026-09-01**: a DELEGATED PERMISSION can be configured between two application entries — a resource exposes permissions, a client is granted them, and a client asks for one as an ordinary scope — and `oauth2.delegatedPermissionsEnforced` turns an ungranted ask into `invalid_scope`. It is OFF by default, so an unconfigured service behaves exactly as this row always described. Every act says which — see below |
 
 **Recorded is not the same claim as authenticated, and the two are kept apart
 everywhere.** A verified TLS client certificate, a verified presentation and an

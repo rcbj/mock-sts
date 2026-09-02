@@ -2191,18 +2191,75 @@ function audienceScopes(scope, clientId) {
   const asked = String(scope || '').split(/\s+/).filter(Boolean);
   if (!asked.length) {
     log.debug("Leaving audienceScopes(). Nothing was asked for.");
-    return { scope: String(scope || ''), audiences: [], matched: [] };
+    return { scope: String(scope || ''), audiences: [], matched: [],
+             permissions: [], ungranted: [] };
   }
   const reserved = protocolScopes();
   const mine = String(clientId || '').trim();
   const kept = [];
   const audiences = [];
   const matched = [];
+  // The delegated permissions among them, and the subset of those this client
+  // has not been granted. Both are carried out of here rather than recomputed
+  // by the caller, because recomputing means a second walk of the registry per
+  // token and a second implementation of `base + name`.
+  const permissions = [];
+  const ungranted = [];
   asked.forEach(function (one) {
     if (reserved.indexOf(one) >= 0 || (mine && one === mine)) {
       // A protocol's own word, or this client naming itself. Both stay scopes
       // and neither is looked up — see the third and fourth decisions above.
       kept.push(one);
+      return;
+    }
+    // A DEFINED PERMISSION IS TRIED FIRST, and it is the more specific of the
+    // two matches: a permission identifier is a whole URI with a name on the
+    // end of it and a client_id is a bare word, so the two cannot collide in
+    // practice — but where a registration ever managed to make them, the
+    // permission is the one that carries more information and is the one a
+    // client that wrote a URI meant.
+    const permission = applications.forPermission(one);
+    if (permission) {
+      // THE BASE URI IS THE AUDIENCE AND THE NAME IS THE SCOPE, which is
+      // Microsoft Entra ID's behaviour exactly and is the whole point of the
+      // feature: `scope=https://example.com/write` produces `aud:
+      // https://example.com/` and `scope: write`, so a resource server checks
+      // its audience once and then reads bare permission names.
+      //
+      // This is the ONE place in the block that SUBSTITUTES rather than
+      // carrying the value through, and it is the exception to the second
+      // decision above ("the audience is the scope value verbatim"). The
+      // reason it is right here and wrong there is that a permission is a
+      // COMPOSITE identifier that this service composed: the base and the name
+      // are two facts written on an entry, and taking the whole string as the
+      // audience would address the token to a permission rather than to the
+      // API — nothing would ever be able to check that `aud` against anything,
+      // because no application answers to `https://example.com/write`.
+      if (audiences.indexOf(permission.baseUri) < 0) {
+        audiences.push(permission.baseUri);
+      }
+      // The name, unless a scope of that name is already on the list. Two
+      // permissions on two different resources may legitimately both be called
+      // `read`, and a scope claim carrying `read read` is one this service
+      // wrote badly rather than two grants.
+      if (kept.indexOf(permission.name) < 0) {
+        kept.push(permission.name);
+      }
+      // WHETHER THE CLIENT HOLDS THE GRANT, asked here and REFUSED NOWHERE in
+      // this function. This is a translation, and a translation that also
+      // decided policy would have to be called from the two places that refuse
+      // AND from the six grants that mint — see `permissionRefusal()`, which is
+      // where the decision is, and which asks the same question through the
+      // same lookup.
+      const held = applications.holdsPermission(mine, permission.id);
+      permissions.push({ scope: one, identifier: permission.identifier,
+                         permission: permission.name, audience: permission.baseUri,
+                         granted: held });
+      if (!held) {
+        ungranted.push(one);
+      }
+      matched.push({ scope: one, identifier: permission.identifier,
+                     permission: permission.name });
       return;
     }
     const application = applications.forClientId(one);
@@ -2218,6 +2275,22 @@ function audienceScopes(scope, clientId) {
       matched.push({ scope: one, identifier: application.identifier });
     }
   });
+  if (permissions.length) {
+    logArtifact('scopes naming a delegated permission', 'read as an audience and a scope',
+                permissions);
+    permissions.forEach(function (one) {
+      log.info('The scope "' + one.scope + '" is the permission "' + one.permission +
+               '" exposed by the application "' + one.identifier + '". The access token ' +
+               'for client "' + (mine || '(unnamed)') + '" is being addressed to ' +
+               one.audience + ' and carries "' + one.permission + '" on its scope claim, ' +
+               'which is how Microsoft Entra ID spells the same arrangement. That client ' +
+               (one.granted
+                 ? 'HOLDS this grant (oauthDelegatedPermission on its entry).'
+                 : 'has NOT been granted it. It is honoured anyway and recorded as ' +
+                   'ungranted — set oauth2.delegatedPermissionsEnforced to refuse it ' +
+                   'instead. /admin/delegation is where the grant is made.'));
+    });
+  }
   if (audiences.length) {
     logArtifact('scopes naming an application', 'read as an audience', matched);
     log.info('An access token for client "' + (mine || '(unnamed)') + '" is being ' +
@@ -2231,8 +2304,83 @@ function audienceScopes(scope, clientId) {
              'keeps a refresh from widening the audience.');
   }
   log.debug("Leaving audienceScopes(). " + audiences.length + " audience(s), " +
-            kept.length + " scope(s).");
-  return { scope: kept.join(' '), audiences: audiences, matched: matched };
+            kept.length + " scope(s), " + permissions.length + " permission(s).");
+  return { scope: kept.join(' '), audiences: audiences, matched: matched,
+           permissions: permissions, ungranted: ungranted };
+}
+
+// ---------------------------------------------------------------------------
+// THE ONE REFUSAL DELEGATED PERMISSIONS MAKE, AND WHERE IT IS MADE.
+//
+// `audienceScopes()` above TRANSLATES and refuses nothing: it turns a
+// permission identifier into an audience and a scope whether or not the client
+// holds the grant, and reports which. This function is the policy, and it is
+// separate for the reason that keeps `bcp.js` out of the minting path — a
+// translation called from six grants must not also be the place a request is
+// turned away, or the decision is made six times and one of them will get it
+// wrong.
+//
+// **IT IS OFF UNLESS `oauth2.delegatedPermissionsEnforced` IS SET**, which is
+// off by default. Everything in this service is, for the reason README.md gives
+// on its first page: a mock exists to exercise clients, and a client is
+// exercised by both answers.
+//
+// **IT IS NOT PART OF RFC 9700 MODE and must never be folded into it.** Every
+// check in `oauth2_bcp.js` cites a section of a published Best Current
+// Practice; a delegated permission cites nothing, because no RFC says an
+// authorization server must have one. It is Microsoft Entra ID's model, which
+// is a product's design rather than a standard, and putting it behind
+// `oauth2.rfc9700` would make `GET /oauth2/rfc9700` advertise a requirement no
+// document contains.
+//
+// **IT IS CALLED IN TWO PLACES AND THEY ARE THE TWO PLACES A CLIENT ASKS.** The
+// AUTHORIZATION endpoint, beside the `resource` and `claims` refusals and for
+// their stated reason — it is the last point at which the client is still being
+// talked to. And the TOKEN endpoint, once above the grant switch beside
+// `parseResourceIndicators()`, for the grants that never pass through the
+// authorization endpoint at all: client credentials, the password grant, the
+// token exchange, and a refresh that names a scope explicitly.
+//
+// **A GRANT ALREADY ISSUED IS NEVER RE-JUDGED.** An authorization code
+// redeemed without a `scope` of its own carries what was authorized, and this
+// service does not go back and ask whether that is still allowed — the same
+// rule federation follows about not re-checking a person after the session
+// exists. Turning the setting on therefore refuses the next REQUEST rather than
+// invalidating what is outstanding, which is what makes it safe to turn on
+// while something is running.
+// ---------------------------------------------------------------------------
+function permissionRefusal(scope, clientId) {
+  log.debug("Entering permissionRefusal().");
+  if (!config.value('oauth2.delegatedPermissionsEnforced')) {
+    log.debug("Leaving permissionRefusal(). Not enforced.");
+    return '';
+  }
+  const named = audienceScopes(scope, clientId);
+  if (!named.ungranted.length) {
+    log.debug("Leaving permissionRefusal(). Nothing ungranted.");
+    return '';
+  }
+  const who = String(clientId || '').trim();
+  // The message names the grant that is missing AND where to make it, because
+  // this is the one refusal in this service whose fix is a configuration change
+  // in this service rather than a change to the request. A client developer
+  // reading `invalid_scope` about a scope their own product defines has no way
+  // to guess that.
+  const description = 'oauth2.delegatedPermissionsEnforced is on, and ' +
+    (who ? 'the client "' + who + '"' : 'this client') + ' has not been granted ' +
+    (named.ungranted.length === 1 ? 'the permission ' : 'the permissions ') +
+    named.ungranted.map(function (one) { return '"' + one + '"'; }).join(', ') +
+    '. ' + (named.ungranted.length === 1 ? 'It is' : 'They are') + ' defined by ' +
+    named.permissions.filter(function (one) { return !one.granted; })
+      .map(function (one) { return 'the application "' + one.identifier + '"'; })
+      .join(', ') +
+    ', and a grant is a value of `oauthDelegatedPermission` on the requesting ' +
+    'application\'s own entry in ou=applications — made at /admin/delegation, or ' +
+    'through POST /admin-api/permissions/grant. With the setting OFF this request ' +
+    'is honoured and the token is audienced and scoped exactly as a granted one ' +
+    'would be, which is what this service does by default.';
+  log.debug("Leaving permissionRefusal(). " + named.ungranted.length + " ungranted.");
+  return description;
 }
 
 // The `aud` claim for a list of them: one value where there is one, an array
@@ -2347,6 +2495,23 @@ async function issueAuthorizationResponse(req, res, query, user, authTime,
   const resources = parsedResources.resources;
   if (resources.length) {
     logArtifact('RFC 8707 resource indicators', 'as requested', resources);
+  }
+
+  // DELEGATED PERMISSIONS, refused here for exactly the reason `resource` is
+  // refused in the block above: this is the last point at which the client is
+  // still being talked to. `invalid_scope` is RFC 6749 section 4.1.2.1's own
+  // code for a scope that is invalid or exceeds what this client may have,
+  // which is precisely what an ungranted permission is — so no new code had to
+  // be invented and a client library's existing handling applies.
+  //
+  // A NO-OP UNLESS `oauth2.delegatedPermissionsEnforced` IS ON, which is off by
+  // default. See permissionRefusal().
+  const permissionProblem = permissionRefusal(scope, query.client_id);
+  if (permissionProblem) {
+    log.debug("Leaving issueAuthorizationResponse(). An ungranted permission was asked for.");
+    return redirectBack(res, base, redirectUri, query.state,
+      { error: 'invalid_scope', error_description: permissionProblem },
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
   }
 
   // OpenID Connect Core section 5.5 — the claims request. Refused HERE for the
@@ -4144,8 +4309,24 @@ async function tokenEndpoint(req, res) {
       protocol: 'OAuth 2.0 / OIDC',
       counts: false,
       note: 'presented a Token Request',
-      fields: { oauthClientId: String(client.client_id), oauthGrantType: grant,
-                appAuthorizationServer: profileOf(req) }
+      fields: Object.assign(
+        { oauthClientId: String(client.client_id), oauthGrantType: grant,
+          appAuthorizationServer: profileOf(req) },
+        // THE SCOPE, WHERE THIS REQUEST CARRIES ONE, and it is recorded here
+        // as well as at the authorization endpoint because for three grants
+        // this is the ONLY place it is ever seen: client credentials, the
+        // password grant and the pre-authorized code grant never go near that
+        // endpoint. Without it `oauthScope` on such a client stays empty
+        // however often it asks, which reads on /admin/delegation as a
+        // delegated permission that has never been requested — a quietly
+        // wrong signal about a client that requests it every minute.
+        //
+        // Conditional, because an `authorization_code` redemption carries no
+        // `scope` of its own (the grant does) and writing an empty value would
+        // be recording that this client asked for nothing.
+        String(body.scope || '').trim()
+          ? { oauthScope: String(body.scope).split(/\s+/).filter(Boolean) }
+          : {})
     });
   }
 
@@ -4203,6 +4384,29 @@ async function tokenEndpoint(req, res) {
   const requestedResources = askedResources.resources;
   if (requestedResources.length) {
     logArtifact('RFC 8707 resource indicators', 'on the Token Request', requestedResources);
+  }
+
+  // DELEGATED PERMISSIONS, once above every grant and for the same reason the
+  // block above is once above every grant: the four direct grants, the token
+  // exchange and a refresh that names a scope all ask for scopes HERE, and a
+  // check written into each of them is five that will be right and a sixth
+  // added later that will not.
+  //
+  // IT READS `body.scope` AND NOTHING ELSE, which is what confines it to what
+  // the client is ASKING for now. An authorization code carries what was
+  // already authorized and was judged at the authorization endpoint; a refresh
+  // with no `scope` carries its grant's. Neither is re-judged — see
+  // permissionRefusal()'s header, and the row in CLAUDE.md about not re-checking
+  // a federated person after the session exists, which is the same rule.
+  //
+  // A no-op unless `oauth2.delegatedPermissionsEnforced` is on.
+  if (body.scope !== undefined && body.scope !== null && String(body.scope) !== '') {
+    const permissionProblem = permissionRefusal(String(body.scope),
+      (client && client.client_id) || body.client_id);
+    if (permissionProblem) {
+      log.debug("Leaving the token endpoint. An ungranted permission was asked for.");
+      return oauthError(res, 400, 'invalid_scope', permissionProblem);
+    }
   }
 
   const respond = function (payload) {

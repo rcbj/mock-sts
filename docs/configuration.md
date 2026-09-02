@@ -110,6 +110,39 @@ row, with `enforced` as `yes`, `detected`, `always`, `deployment` or `no` — tw
 requirements are `no` because they are the *client's* and nothing this server
 observes can tell a client that checks from one that does not.
 
+### `oauth2.delegatedPermissionsEnforced` — the OTHER mode, and not part of the first
+
+Off by default, runtime, and settable on a trust realm.
+
+It refuses an authorization or token request that asks for a **delegated
+permission** the client has not been granted. A resource application exposes an
+API — a base URI and a list of permission names, joined into
+`https://example.com/write` — and a client application is granted some of them;
+the shape is Microsoft Entra ID's. `/admin/delegation` is where the RESOURCE
+half is typed — the base URI and the permission names — and the GRANT is typed
+on the client application's own page under *Directory › Applications*, where the
+client half of the pair is the entry you are looking at rather than an option in
+a list of every application in the service.
+
+**It is deliberately NOT part of `oauth2.rfc9700`.** Every check in that mode
+cites a section of a published Best Current Practice. A delegated permission
+cites nothing, because no RFC says an authorization server must have one — it is
+a product's design rather than a standard — so folding it in would make
+`GET /oauth2/rfc9700` advertise a requirement no document contains.
+
+**Off changes nothing about what is issued**, which is what makes the register
+usable before anybody enforces anything: a permission scope still becomes the
+token's audience and its scope claim, and the console still marks which requests
+were not backed by a grant. On, the same request is `invalid_scope` at the
+AUTHORIZATION endpoint — where the client can still be told — and at the token
+endpoint for the grants that never reach it.
+
+**It does not re-judge a grant already issued.** An authorization code redeemed
+without a scope of its own carries what was authorized, and this service does not
+go back and ask whether that is still allowed — so turning it on refuses the next
+REQUEST rather than invalidating what is outstanding, which is what makes it safe
+to turn on while something is running.
+
 ### `global.https` — TLS on the main port
 
 **ON in every appconfig file this repository ships, since 2026-08-30.** That is
@@ -266,7 +299,7 @@ at startup — so nothing in a saved override file can reach `global.https`,
 
 **A failed write is logged and never thrown.** If the database goes away, the
 operation that triggered the write still succeeds, this service keeps answering
-out of memory, and `/admin/persistence` and `GET /ldap` both carry the error.
+out of memory, and `/admin/persistence` and `GET /admin/ldap/service` both carry the error.
 The next change recomputes the same difference and tries again, so a failure
 loses nothing.
 

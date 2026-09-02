@@ -800,3 +800,94 @@ it; this service neither issues nor reads one.
    of the token request with the tokens it already got, and a sign-out that hands
    back a token set is not a sign-out.
 
+---
+
+## A scope may name a PERMISSION, not just an application, and the token says both halves
+
+Added 2026-09-01. `audienceScopes()` already turned a scope value that is
+another application's `client_id` into the access token's `aud` — the rule
+`scope-named-audience` describes, one section up. This is that rule one step
+more precise, and it is the OAuth half of the delegated-permission register in
+`common/app_permissions.js`.
+
+A **resource** application exposes an API: a base URI
+(`oauthPermissionBaseUri`) and a list of permission names (`oauthPermission`),
+joined into an identifier — `https://example.com/` and `write` make
+`https://example.com/write`. A client sends that whole string as an ordinary
+scope, and:
+
+```
+scope=openid https://example.com/write https://example.com/read
+   ->   "aud":   "https://example.com/"
+        "scope": "openid read write"
+```
+
+**THE BASE URI IS THE AUDIENCE AND THE NAME IS THE SCOPE**, which is Microsoft
+Entra ID's behaviour exactly and is what a resource server wants: check `aud`
+once, then read bare permission names.
+
+**IT IS THE ONE EXCEPTION TO "THE AUDIENCE IS THE SCOPE VALUE VERBATIM"**, and
+that rule's own header is where the difference is argued. A permission is a
+COMPOSITE identifier this service composed out of two facts on an entry, so
+taking the whole string as the audience would address the token to a PERMISSION
+rather than to the API — and nothing would ever be able to check that `aud`
+against anything, because no application answers to `https://example.com/write`.
+
+**THE PERMISSION LOOKUP IS TRIED BEFORE THE CLIENT_ID ONE**, because it is the
+more specific of the two: a permission identifier is a whole URI with a name on
+the end and a `client_id` is a bare word, so they cannot collide in practice —
+and where a registration ever managed to make them collide, the permission is
+what a client that wrote a URI meant.
+
+**THE MATCH IS EXACT AGAINST THE COMPOSED IDENTIFIER, NEVER A PREFIX TEST ON
+THE BASE.** A prefix test would match `https://example.com/anything` against a
+registered base whether or not that permission was ever defined — which is
+precisely the case this feature exists to distinguish, and it would let any
+client address a token to anybody's API by inventing a word after their base
+URI. A scope naming no defined permission is an ordinary scope and is granted as
+everything else here is.
+
+### `permissionRefusal()` — the one refusal, and where it is made
+
+**IT IS NOT PART OF RFC 9700 MODE AND MUST NEVER BE FOLDED INTO IT.** Every
+check in `oauth2_bcp.js` cites a section of a published Best Current Practice; a
+delegated permission cites nothing, because no RFC says an authorization server
+must have one. It is a product's design rather than a standard, and putting it
+behind `oauth2.rfc9700` would make `GET /oauth2/rfc9700` advertise a requirement
+no document contains. It has a setting of its own —
+`oauth2.delegatedPermissionsEnforced`, off by default, runtime, and settable on
+a realm.
+
+**IT IS SEPARATE FROM `audienceScopes()` FOR THE REASON THAT KEEPS `bcp.js` OUT
+OF THE MINTING PATH.** That function TRANSLATES and is called from six grants; a
+translation that also decided policy would make the decision six times, and one
+of them would eventually get it wrong.
+
+**IT IS CALLED IN THE TWO PLACES A CLIENT ASKS.** The AUTHORIZATION endpoint,
+beside the `resource` and `claims` refusals and for their stated reason — it is
+the last point at which the client is still being talked to — answering
+`invalid_scope`, which is RFC 6749 section 4.1.2.1's own code for a scope that
+exceeds what this client may have, so no code had to be invented. And the TOKEN
+endpoint, once above the grant switch beside `parseResourceIndicators()`, for
+the grants that never pass through the authorization endpoint: client
+credentials, the password grant, the token exchange, and a refresh naming a
+scope explicitly.
+
+**A GRANT ALREADY ISSUED IS NEVER RE-JUDGED**, which is why the token endpoint
+reads `body.scope` and nothing else. An authorization code carries what was
+authorized and was judged at the authorization endpoint; a refresh with no
+`scope` carries its grant's. That is the same rule federation follows about not
+re-checking a person after the session exists, and it is what makes the setting
+safe to turn on while something is running.
+
+### The token endpoint now records `oauthScope`, and that is not cosmetic
+
+`seen()` at the token endpoint writes the scope the request carried, where it
+carries one. Until 2026-09-01 only the authorization endpoint did — so for the
+three grants that never go near it (client credentials, the password grant, the
+pre-authorized code grant) `oauthScope` on the client's entry stayed empty
+however often it asked. The visible symptom was on `/admin/delegation`, whose
+`asked for` column reads that attribute: a client spending a permission every
+minute was reported as never having asked for it. It is CONDITIONAL on the body
+carrying a scope, because an `authorization_code` redemption does not (the grant
+does) and writing an empty value would record that the client asked for nothing.

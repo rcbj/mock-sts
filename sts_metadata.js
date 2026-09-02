@@ -577,7 +577,7 @@ const SPECS = [
               'REGISTERED class an application entry under ou=applications carries: it brings ' +
               'cn and description, and there is nothing standard anywhere for a client_id, a ' +
               'set of redirect URIs or a service principal name, so the rest of that schema is ' +
-              'invented here and published at /ldap/applications rather than implied.' },
+              'invented here and published at /admin/ldap/applications rather than implied.' },
   { id: 'rfc8446', name: 'TLS 1.3 (RFC 8446), and TLS 1.2 (RFC 5246)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc8446',
@@ -1053,21 +1053,21 @@ const ENDPOINTS = [
   // LDAP surfaces that ARE HTTP, and NEITHER OF THEM IS LDAP — they are this service
   // describing its own directory, which is what lets a reader tell an empty directory
   // from a search filter that matched nothing. Both listeners are described in their text.
-  { path: '/ldap', group: 'LDAP', name: 'What the directory is',
+  { path: '/admin/ldap/service', group: 'LDAP', name: 'What the directory is',
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515'],
     what: 'The embedded LDAPv3 directory: its URLs and ports (TCP 389 for plain LDAP and ' +
           'TCP 636 for LDAPS by default — RAW SOCKETS this page cannot see, so it reports ' +
           'whether each one actually bound), its base DN, the bind policy — every bind ' +
           'succeeds, any DN and any password, except the literal "invalid" — and the fact ' +
           'that it has NO SCHEMA (which is why the application entries under ou=applications ' +
-          'come with a published vocabulary of their own; see /ldap/applications). The two listeners are one directory: the same handlers ' +
+          'come with a published vocabulary of their own; see /admin/ldap/applications). The two listeners are one directory: the same handlers ' +
           'and the same store, so TLS changes what is on the wire and nothing about the ' +
           'answers, and a certificate presented to 636 is not asked for and would not be a ' +
           'login if it were. Also the structural rules it does still enforce and the ' +
           'one it deliberately does not (referential integrity: deleting a user leaves its ' +
           'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
           'the machine-readable half of it. Add ?format=json.' },
-  { path: '/ldap/spiffe', group: 'LDAP', name: 'The SPIFFE registry, and its schema',
+  { path: '/admin/ldap/spiffe', group: 'LDAP', name: 'The SPIFFE registry, and its schema',
     specs: ['rfc4511', 'rfc4519', 'spiffe-id'],
     what: 'THE TWO SPIFFE CONTAINERS AS THE DIRECTORY HOLDS THEM. ' +
           '`ou=entries,ou=spiffe` holds the registration entries — which SPIFFE ID a ' +
@@ -1083,7 +1083,7 @@ const ENDPOINTS = [
           'schemaless and these ~30 attribute names are this service\'s own inventions: ' +
           'no registered LDAP schema has a SPIFFE ID or a selector on it. Add ' +
           '?format=json.' },
-  { path: '/ldap/federations', group: 'LDAP',
+  { path: '/admin/ldap/federations', group: 'LDAP',
     name: 'The federation register, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519'],
     what: 'THE APPLICATION REGISTRY\'S TWIN, and the one container in this ' +
@@ -1096,13 +1096,13 @@ const ENDPOINTS = [
           'all — filing a party that authenticates people TO this service ' +
           'among the parties that consume what it issues would make the one ' +
           'question that container answers unanswerable. It publishes the ' +
-          'schema for the same reason /ldap/applications does, plus a column ' +
+          'schema for the same reason /admin/ldap/applications does, plus a column ' +
           'that page has no need of: which DIRECTION each attribute is for. ' +
           'fedClientSecret is in the clear here, and it is this service\'s ' +
           'own credential at somebody else\'s — a stronger statement than ' +
           'anything else in this directory, made for the reason ' +
           '/krb5/principals prints the Kerberos passwords.' },
-  { path: '/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
+  { path: '/admin/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591'],
     what: 'EVERY APPLICATION THIS SERVICE HAS BEEN ASKED ABOUT — an OAuth client, an OpenID ' +
           'Connect relying party, a SAML 2.0 or 1.1 service provider, a WS-Federation ' +
@@ -1117,7 +1117,7 @@ const ENDPOINTS = [
           'vocabulary, not a constraint, and one nothing would enforce is worth reading ' +
           'rather than inferring. Two attributes hold credentials in the clear, for the ' +
           'reason /krb5/principals prints the Kerberos passwords. Add ?format=json.' },
-  { path: '/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
+  { path: '/admin/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
     specs: ['rfc4511', 'rfc4514'],
     what: 'The whole store, DN by DN, with where each entry came from — seeded, added over ' +
           'LDAP, or created because somebody authenticated. That last column is the point: ' +
@@ -1135,7 +1135,7 @@ const ENDPOINTS = [
   //
   // The fifteenth family, and the only one whose purpose is to WRITE. Every row below
   // provisions into the embedded LDAP directory above — the same entries, the same cap,
-  // no store of its own — so what SCIM created is reported by /ldap/directory,
+  // no store of its own — so what SCIM created is reported by /admin/ldap/directory,
   // /admin/users and /admin/groups rather than by anything here.
   //
   // Unlike Kerberos, LDAP and TLS, this group has NO blind spot: SCIM is HTTP all the
@@ -1825,6 +1825,20 @@ const ENDPOINTS = [
           'store, which is why /admin-api needs no POST beside its GET. ' +
           'The bulk count deliberately does not tally with the rest — one Bulk of five ' +
           'creates is one bulk AND five creates. Add ?format=json.' },
+  { path: '/admin/ssf', group: 'Admin', name: 'Shared Signals',
+    specs: ['ssf', 'rfc8417', 'rfc9493', 'rfc8935', 'rfc8936'],
+    what: 'THE TRANSMITTER: every stream a receiver has agreed, its status, its ' +
+          'configuration, WHO EACH ONE IS ABOUT (the RFC 9493 subjects added to it and ' +
+          'whether each was verified), what is queued for a poll, what a push delivery ' +
+          'was refused with, and what this service has RECEIVED at its own receiver — ' +
+          'which is there so a client can be the transmitter for once. Four controls: ' +
+          'enable, pause or disable a stream; transmit an event; delete a stream; drop ' +
+          'what was received. THE ONE PAGE HERE WHOSE BUTTON MAKES AN OUTBOUND REQUEST — ' +
+          'a push delivery POSTs to a URL the RECEIVER chose — so what it reports is ' +
+          'whether the other end answered, and `ssf.pushDelivery` turns that off while ' +
+          'leaving poll delivery working. Nothing on this page generates an event by ' +
+          'itself: SSF is the pipe and CAEP and RISC are the vocabularies. Add ' +
+          '?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -1913,17 +1927,36 @@ const ENDPOINTS = [
           'carry the KDC\'s own e-text naming both accounts, both attributes ' +
           'and which was missing, and they appear in NO other list here, ' +
           'because nothing was accepted so no authentication was recorded. A ' +
-          'SECOND TABLE is CONFIGURATION rather than history — who MAY ' +
-          'delegate to whom, out of msDS-AllowedToDelegateTo on the front end ' +
-          'and msDS-AllowedToActOnBehalfOfOtherIdentity on the back end, with ' +
-          'the flags that stop delegation (NOT_DELEGATED) or enable protocol ' +
-          'transition (TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION) beside them. ' +
-          'It is KERBEROS ONLY because Kerberos is the only family here that ' +
-          'polices delegation at all: WS-Trust puts no authorization on ' +
-          'either element and this service adds none, and RFC 8693 leaves the ' +
-          'policy to the authorization server, which this one has not got — ' +
-          'so any client may exchange any token for a token about anybody. ' +
-          'Every act says which of the two it was. NO CREDENTIAL IS EVER ON A ' +
+          'SECOND HALF OF THE PAGE IS CONFIGURATION RATHER THAN HISTORY, ' +
+          'and it is TWO registers. DELEGATED PERMISSIONS, in Microsoft Entra ' +
+          'ID\'s shape and the only CONTROLS this page has: a resource ' +
+          'application is given a base URI (oauthPermissionBaseUri) and ' +
+          'permissions on it (oauthPermission), a permission is identified by ' +
+          'the two joined — https://example.com/ + write = ' +
+          'https://example.com/write — and a client application is granted ' +
+          'some of them (oauthDelegatedPermission). A client then asks for one ' +
+          'as an ORDINARY OAUTH SCOPE and the access token comes back ' +
+          'AUDIENCED to the base URI with the permission NAME on its scope ' +
+          'claim. A permission must be DEFINED before it can be GRANTED, which ' +
+          'is checked in applications.js so that this form, the management API ' +
+          'and the attribute editor on /admin/applications cannot disagree. IT ' +
+          'REFUSES NOTHING BY DEFAULT — an ungranted permission is honoured, ' +
+          'logged and marked here, and only oauth2.delegatedPermissionsEnforced ' +
+          'turns it into invalid_scope. A grant naming a permission nobody ' +
+          'defines is shown as DANGLING rather than treated as an error, ' +
+          'because ldapmodify reaches these attributes like every other. And ' +
+          'WHO MAY DELEGATE TO WHOM — out of msDS-AllowedToDelegateTo on the ' +
+          'front end and msDS-AllowedToActOnBehalfOfOtherIdentity on the back ' +
+          'end, with the flags that stop delegation (NOT_DELEGATED) or enable ' +
+          'protocol transition (TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION) beside ' +
+          'them. That one is KERBEROS ONLY because Kerberos is the only family ' +
+          'here that polices delegation IN THE ACT, on every request, whatever ' +
+          'anything is set to: WS-Trust puts no authorization on either ' +
+          'element and this service adds none, and RFC 8693 leaves the policy ' +
+          'to the authorization server — what this one now has is the ' +
+          'permission register, which is policy it was configured with rather ' +
+          'than a check the protocol makes. Every act says which of the two it ' +
+          'was. NO CREDENTIAL IS EVER ON A ' +
           'ROW, only its kind and identifier; a Kerberos ticket genuinely has ' +
           'none. In memory, capped by delegation.maxRecords, gone on restart, ' +
           'with no clear control and no way to add a row by hand. Filtered by ' +
@@ -1967,6 +2000,45 @@ const ENDPOINTS = [
           'untouched and the picture does not pan or zoom. ?format=json is the ' +
           'whole graph (also in the `graph` member of GET /admin-api/delegation) ' +
           'and ?format=svg is the document alone, with no links in it.' },
+  { path: '/admin/delegation/allowed', group: 'Admin',
+    name: 'Delegation — the allowed mappings',
+    // NOT the four the acts pages cite, and that is the entry's whole point.
+    // [MS-SFU], RFC 4120, WS-Trust and RFC 8693 are four mechanisms for
+    // PERFORMING a delegation, and not one line on this picture has been
+    // performed. What it draws is a permission model that no specification
+    // defines — it is Microsoft Entra ID's, which is a product's design — so
+    // the only thing it can honestly cite is the scope parameter a client uses
+    // to ask for one and the audience claim the answer carries.
+    specs: ['rfc6749', 'rfc7519'],
+    what: 'NON-SPEC PAGE, and a DRILL-DOWN of /admin/delegation rather than a ' +
+          'section of its own. THE SECOND PICTURE IN THIS CONSOLE\'S ' +
+          'DELEGATION FAMILY AND THE ONLY ONE THAT DRAWS WHAT HAS NOT ' +
+          'HAPPENED: every line is a configured delegated permission — a ' +
+          'client application granted a permission that a resource application ' +
+          'exposes — and nothing on it has been issued anything. That is why ' +
+          'it is a separate document from /admin/delegation/map rather than a ' +
+          'mode of it: an ACT has three layers and the first is a PERSON, and ' +
+          'a permission has nobody in it at all (it says `this client may ' +
+          'reach that API as whoever is signed in`, and there is no whoever ' +
+          'yet), so one canvas would put what may happen and what did happen ' +
+          'in one frame with no way to tell them apart. EVERY BOX IS AN ' +
+          'APPLICATION, there is no stick figure, and THIS SERVICE IS NOT ON ' +
+          'IT — the hexagon is on the other picture because every line there ' +
+          'exists because this service issued or refused something. ONE LINE ' +
+          'PER PERMISSION rather than per pair, so two grants between the same ' +
+          'two applications are two lines: the permission is what was granted ' +
+          'and the pair is what it joins. A DASHED line is a grant NOBODY HAS ' +
+          'EVER ASKED FOR and a solid one has been used at least once, read ' +
+          'off the client\'s own oauthScope — that one bit is what a ' +
+          'configured picture can say and an acts diagram cannot, since a ' +
+          'grant nobody needed draws no act at all. A DANGLING grant (naming a ' +
+          'permission no application defines) is NOT drawn, because a line to ' +
+          'nowhere would be a drawing of a resource that is there; it is on ' +
+          'the register instead. NO SCRIPT and no controls — the layout is ' +
+          'computed on the server with @dagrejs/dagre, the shapes are shared ' +
+          'with the acts picture, and script-src \'none\' is untouched. ' +
+          '?format=json is the graph (also in the `allowed.graph` member of ' +
+          'GET /admin-api/delegation) and ?format=svg is the document alone.' },
   { path: '/admin/delegation/chain', group: 'Admin',
     name: 'Delegation — one relationship',
     // The same four specifications as the two pages above, and for the reason
@@ -2382,8 +2454,8 @@ const ENDPOINTS = [
           'every realm\'s subtree hangs under, whether a name seen for the ' +
           'first time gets an entry, and the two ceilings that keep a mock ' +
           'from being filled up. What is IN the directory is /admin/users, ' +
-          '/admin/groups and /ldap/directory; whether both sockets came up is ' +
-          '/ldap. No setting here can make a bind be refused — none is ' +
+          '/admin/groups and /admin/ldap/directory; whether both sockets came up is ' +
+          '/admin/ldap/service. No setting here can make a bind be refused — none is ' +
           'missing, there is no such behaviour. Add ?format=json.' },
   { path: '/admin/persistence', group: 'Admin', name: 'Persistence',
     specs: ['rfc2849', 'rfc4511'],
@@ -2705,6 +2777,26 @@ const ENDPOINTS = [
           'holding: the console page carries no control either, because everything about ' +
           'SCIM that can be changed is a configuration row and POST /admin-api/config/set ' +
           'is already the operation for it.' },
+  { path: '/admin-api/ssf', group: 'Management API', name: 'Shared Signals',
+    specs: ['openapi', 'ssf', 'rfc8417'],
+    what: 'GET /admin/ssf over JSON: the streams, their subjects, their queues and ' +
+          'their counters, the event types this transmitter offers, and what its own ' +
+          'receiver has taken in. No Security Event Token in the reply carries a ' +
+          'credential — a SET is signed and its `aud` is the stream, which is the whole ' +
+          'of what makes it safe to publish here.' },
+  { path: '/admin-api/ssf/:action', group: 'Management API',
+    name: 'Change a stream, or transmit an event',
+    specs: ['openapi', 'ssf', 'rfc8935', 'rfc8936'],
+    what: 'status, transmit, delete and clear-received — the same four the console\'s ' +
+          'forms post, through the same action function, with the action taken from the ' +
+          'URL instead of a hidden input. THERE IS DELIBERATELY NO `create`: a stream ' +
+          'carries a delivery endpoint this service will DIAL, and the one place that ' +
+          'URL may come from is a receiver that asked for it at POST /ssf/stream — an ' +
+          'API that could mint one would be a second, ungated door onto the outbound ' +
+          'request. It is also the ONE action handler in this API that awaits: ' +
+          'transmitting signs a JWS, possibly on the worker pool, and then POSTs it, and ' +
+          'answering before either had happened would be reporting "sent" about ' +
+          'nothing.' },
   { path: '/admin-api/spiffe', group: 'Management API', name: 'The SPIFFE trust domain',
     specs: ['openapi', 'spiffe-bundle'],
     what: 'GET /admin/spiffe over JSON: the authorities, the bundle and its sequence, ' +
@@ -2763,6 +2855,53 @@ const ENDPOINTS = [
           'two resources here that is: everything on it is an observation or ' +
           'somebody else\'s configuration, so there is nothing to change. ' +
           'Mirrors GET /admin/delegation.' },
+  { path: '/admin-api/permissions', group: 'Management API',
+    name: 'Delegated permissions',
+    // Not the four the delegation resource cites: those are four ways of
+    // PERFORMING a delegation, and nothing in this register has been
+    // performed. What it can honestly cite is the scope parameter a client
+    // asks with and the audience claim the answer carries.
+    specs: ['openapi', 'rfc6749', 'rfc7519'],
+    what: 'NON-SPEC. The CONFIGURED half of the delegation register, in ' +
+          'Microsoft Entra ID\'s shape and the other side of ' +
+          '/admin-api/delegation: that one is what HAPPENED and this one is ' +
+          'what is ALLOWED. A resource application is given a base URI ' +
+          '(oauthPermissionBaseUri) and permissions on it (oauthPermission); a ' +
+          'permission is identified by the two joined — https://example.com/ ' +
+          '+ write = https://example.com/write — and a client application is ' +
+          'granted some of them (oauthDelegatedPermission). All three are ' +
+          'ordinary attributes on entries in ou=applications, so an ' +
+          'ldapmodify is a configuration change here as it is for a redirect ' +
+          'URI. A client then asks for one as an ORDINARY OAUTH SCOPE and the ' +
+          'access token comes back AUDIENCED to the base URI with the ' +
+          'permission NAME on its scope claim. `dangling` is a grant naming a ' +
+          'permission nobody defines; `asked` is whether the client has ever ' +
+          'requested it, which is the one field here that comes from what ' +
+          'happened. READ ONLY — the five controls are on the resource below. ' +
+          'Mirrors the ALLOWED half of GET /admin/delegation.' },
+  { path: '/admin-api/permissions/:action', group: 'Management API',
+    name: 'Define and grant delegated permissions',
+    specs: ['openapi', 'rfc6749'],
+    what: 'set-permission-base, define-permission, remove-permission, ' +
+          'grant-permission and revoke-permission — the same five the ' +
+          'console\'s forms post to /admin/delegation, through the same ' +
+          'functions, so neither door can enforce a rule the other does not. ' +
+          'The forms are on two pages and the actions are all one handler: ' +
+          'grant-permission is drawn on an application\'s own page under ' +
+          '/admin/applications, where the client half of a grant is the entry ' +
+          'being looked at rather than an option in a list of every ' +
+          'application here, and revoke-permission is drawn on both as a row ' +
+          'button. Moving a form is not moving an action. ' +
+          'A PERMISSION MUST BE DEFINED BEFORE IT CAN BE GRANTED, which is ' +
+          'the one ordering rule here and is checked in ' +
+          'applications.updateApplication() so that these five, the generic ' +
+          'POST /admin-api/applications/update and the console agree about ' +
+          'it. NONE OF IT REFUSES A TOKEN REQUEST unless ' +
+          'oauth2.delegatedPermissionsEnforced is on, which is off by ' +
+          'default: an ungranted permission is honoured, logged and marked ' +
+          'rather than turned away. Removing a permission does not revoke the ' +
+          'grants naming it — they become dangling, because tidying them ' +
+          'would be one call writing to entries it did not name.' },
   { path: '/admin-api/audit', group: 'Management API', name: 'Audit log',
     specs: ['rfc4511'],
     what: 'NON-SPEC. What happened here, in order, as JSON: every ' +
@@ -2874,6 +3013,73 @@ const ENDPOINTS = [
           'ever refused and no setting is missing that would refuse one. What ' +
           'is IN the directory is /admin-api/users and /admin-api/groups. ' +
           'Read-only.' },
+  // ---------------------------------------------------------------------
+  // THE FIVE ADDED ON 2026-09-01, and the reason they are five separate
+  // rows rather than one. They mirror the five DIRECTORY PAGES that moved
+  // into the console that day (`/admin/ldap/*`), one operation per page,
+  // because that is rule 7 — and the operations are what a caller uses when
+  // it does not want to sign a browser in, since the pages are behind the
+  // console's gate and this API is not.
+  // ---------------------------------------------------------------------
+  { path: '/admin-api/ldap/directory', group: 'Management API',
+    name: 'Every entry in the directory',
+    specs: ['rfc4511', 'rfc4514', 'openapi'],
+    what: 'GET /admin/ldap/directory over JSON: the whole store, DN by DN, ' +
+          'with where each entry came from and every attribute with every ' +
+          'value — the operational ones included, because this is not a ' +
+          'search and RFC 4511 section 4.5.1.8 is about searches. Paged, and ' +
+          'the filter matches the DN, any attribute NAME and any attribute ' +
+          'VALUE. This realm\'s subtree and no other. Read-only.' },
+  { path: '/admin-api/ldap/applications', group: 'Management API',
+    name: 'The application registry as the directory holds it',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591', 'openapi'],
+    what: 'GET /admin/ldap/applications over JSON: one entry per identifier ' +
+          'under ou=applications with every attribute on it, AND the ' +
+          'published vocabulary — the object classes and every attribute ' +
+          'name with what sets it. The vocabulary is why this is not GET ' +
+          '/admin-api/applications, which is the same entries as the console ' +
+          'works with them: this directory is schemaless, so an entry ' +
+          'carrying thirty invented attribute names is otherwise guesswork. ' +
+          'Two attributes hold credentials in the clear. Read-only.' },
+  { path: '/admin-api/ldap/federations', group: 'Management API',
+    name: 'The federation register as the directory holds it',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'openapi'],
+    what: 'GET /admin/ldap/federations over JSON: the applications ' +
+          'resource\'s twin, for ou=federations — the one container in this ' +
+          'directory where an ldapmodify is a SECURITY change, since ' +
+          'fedSigningCertificate decides whose assertions this service will ' +
+          'believe. The schema carries a column the applications one has no ' +
+          'need of: which DIRECTION each attribute is for. fedClientSecret ' +
+          'is redacted in the relationship records and present in the ' +
+          'entries\' own attributes, which is the same split the page makes. ' +
+          'Read-only.' },
+  { path: '/admin-api/ldap/spiffe', group: 'Management API',
+    name: 'The SPIFFE containers as the directory holds them',
+    specs: ['rfc4511', 'rfc4519', 'spiffe-id', 'openapi'],
+    what: 'GET /admin/ldap/spiffe over JSON: ou=entries, which is ' +
+          'CONFIGURATION deciding what the next SVID looks like, and ' +
+          'ou=agents, which is a RECORD of what has attested — plus the ' +
+          'schema for both, because roughly thirty of these attribute names ' +
+          'are this service\'s own inventions. The one directory resource ' +
+          'with TWO lists in it, so it pages the way a console drill-down ' +
+          'does: entriesPage and agentsPage move one list each and per is ' +
+          'shared. Read-only; the entries are edited through ' +
+          '/admin-api/spiffe/entries.' },
+  { path: '/admin-api/ldap/service', group: 'Management API',
+    name: 'What the directory IS, right now',
+    specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515', 'openapi'],
+    what: 'GET /admin/ldap/service over JSON: the two RAW SOCKETS as they ' +
+          'actually are rather than as they are configured — whether TCP 389 ' +
+          'and LDAPS 636 bound and the error if either did not, each realm\'s ' +
+          'naming context and what a subtree search from it answers about, ' +
+          'the bind policy, the structural rules this schemaless directory ' +
+          'still enforces, the entry counts and the persistence status. It ' +
+          'is NOT /admin-api/ldap, which is the six settings: that one says ' +
+          'what the sockets are SET to and this one says what happened. On a ' +
+          'host whose own slapd already holds 389 the two disagree, and ' +
+          'nothing else here can report that — this page is built by walking ' +
+          'the express router and a raw TCP listener is not on it. ' +
+          'Read-only.' },
   { path: '/admin-api/persistence', group: 'Management API',
     name: 'Persistence',
     specs: ['rfc2849', 'openapi'],
@@ -2884,8 +3090,9 @@ const ENDPOINTS = [
           'carries a password, so the host, port, database and user are ' +
           'parsed out of it instead. `status.coordinates` is false and says ' +
           'so — several processes on one store do not see each other. The ' +
-          'same object is on GET /ldap, which is not behind the console ' +
-          'gate. Read-only; the settings are written through POST ' +
+          'same status is on GET /admin/ldap/service, which is a console page ' +
+          'and therefore behind the console gate; this operation is not. ' +
+          'Read-only; the settings are written through POST ' +
           '/admin-api/config/set-many like every other.' },
   { path: '/admin-api/wstrust', group: 'Management API', name: 'WS-Trust settings',
     specs: ['ws-trust', 'openapi'],
@@ -4045,8 +4252,11 @@ const PROTOCOLS = [
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515', 'rfc4519'],
     what: 'The embedded directory every other family reads: bind, search, ' +
           'add, modify, modifyDN, delete and compare, over the real ' +
-          'protocol. The two rows on this page are this service describing ' +
-          'its own store and are not LDAP at all.',
+          'protocol. The five rows on this page are this service describing ' +
+          'its own store and are not LDAP at all — and since 2026-09-01 they ' +
+          'are ADMIN CONSOLE PAGES, under /admin/ldap/, behind that ' +
+          'console\'s gate. They are grouped here rather than with the other ' +
+          'console pages because what they describe is this family.',
     sockets: 'BER over TCP 389, and TLS on 636. Neither is on the router.' },
   { name: 'PKI / X.509', groups: ['TLS'],
     specs: ['rfc5280', 'rfc8446'],

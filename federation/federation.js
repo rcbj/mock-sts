@@ -404,7 +404,7 @@ function familyOf(protocolId) {
 // THE SCHEMA.
 //
 // One row per attribute and the row is the whole definition, exactly as
-// `applications.js`'s is: `GET /ldap/federations` publishes this table, the
+// `applications.js`'s is: `GET /admin/ldap/federations` publishes this table, the
 // console builds its forms from it, `ldap_server.js` writes the entry from it,
 // and there is no second list anywhere. An attribute that is not here is not
 // written.
@@ -1622,7 +1622,7 @@ function update(id, change) {
     log.debug('Leaving update(). Unknown field.');
     return { ok: false,
              errors: ['"' + field + '" is not an attribute of a federation relationship. ' +
-                      'GET /ldap/federations publishes the whole schema.'] };
+                      'GET /admin/ldap/federations publishes the whole schema.'] };
   }
   if (!row.editable) {
     log.debug('Leaving update(). Not editable.');

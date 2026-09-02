@@ -183,10 +183,20 @@ function makeServerCertificate() {
     bits: 2048,
     commonName: TLS_HOSTNAMES[0] || 'localhost',
     organizationName: 'mock-sts',
-    // '02' is the signing key's; two years rather than five because this one is
-    // put in somebody's truststore and a shorter life is the honest default for
-    // a certificate a person is told to trust by hand.
-    serialNumber: '03',
+    // The LEADING BYTE of a random serial; '02' is the signing key's. Two
+    // years rather than five because this one is put in somebody's truststore
+    // and a shorter life is the honest default for a certificate a person is
+    // told to trust by hand.
+    //
+    // IT WAS THE WHOLE SERIAL UNTIL 2026-09-01, and this is the certificate
+    // that made that a bug: it is self-signed, it is regenerated at every
+    // start, its subject never varies, and it is the one a PERSON is asked to
+    // trust in a browser. NSS files a certificate under (issuer, serial), so
+    // the second start of this service collided with the first and Firefox
+    // refused the port outright — SEC_ERROR_REUSED_ISSUER_AND_SERIAL, which is
+    // a database conflict rather than a trust warning and cannot be accepted
+    // past. certificateSerial() in common/crypto.js argues the whole of it.
+    serialPrefix: '03',
     years: 2,
     // Passed through to forge untouched rather than modelled: the signing
     // certificate wants none of these and a third caller will want a third set,
@@ -294,7 +304,9 @@ function makeMlDsaServerCertificate(algorithm) {
     algorithm: algorithm,
     commonName: TLS_HOSTNAMES[0] || 'localhost',
     organizationName: 'mock-sts',
-    serialNumber: '04',
+    // The leading byte of a random serial, for the reason above: '04' is this
+    // one, so a capture still says which certificate it is looking at.
+    serialPrefix: '04',
     years: 2,
     dnsNames: TLS_HOSTNAMES,
     ipAddresses: TLS_IPS
@@ -446,6 +458,26 @@ const SERVER_CERTIFICATES = (function buildServerCertificates() {
   (wanted.length ? wanted : ['rsa']).forEach(function (name) {
     if (name === 'rsa') {
       built.push(Object.assign({ algorithm: 'rsa' }, makeServerCertificate()));
+      return;
+    }
+    // THE RUNTIME BEFORE THE SPELLING. An ML-DSA certificate needs node's
+    // OpenSSL 3.5 (node 24; this repository's Dockerfile pins 24.16.0), and
+    // this block runs at MODULE TOP LEVEL — so on node 22 a configured
+    // `ml-dsa-65` used to throw out of a `require` and take the whole service
+    // down before it bound anything, which is the failure the root CLAUDE.md's
+    // rule about listeners exists to prevent. It is warned about and skipped
+    // for the same reason an unknown spelling below is: this is a mock, and a
+    // certificate algorithm the interpreter cannot produce must not stop the
+    // other sixteen protocol families from starting. The fall-back to rsa is
+    // the `if (!built.length)` below, so a service configured for ML-DSA alone
+    // still listens.
+    if (stsCrypto.ML_DSA_OIDS[name] && !stsCrypto.mlDsaAvailable()) {
+      log.warn('tls: "' + name + '" was asked for and this runtime cannot ' +
+               'build an ML-DSA certificate — node ' + process.versions.node +
+               ' is linked against OpenSSL ' + process.versions.openssl +
+               ' and ML-DSA needs 3.5, which is node 24. The listener will ' +
+               'present the certificates it CAN build; /tls and ' +
+               '/admin/crypto-metadata report what it is really serving.');
       return;
     }
     if (!stsCrypto.ML_DSA_OIDS[name]) {
@@ -1043,7 +1075,7 @@ function describeConnection(req, mode) {
       identity: presented && authorized ? subjectDn : null,
       consoleUrl: presented && authorized
         ? '/admin/users?user=' + encodeURIComponent(subjectDn) : null,
-      directoryUrl: presented && authorized ? '/ldap/directory' : null,
+      directoryUrl: presented && authorized ? '/admin/ldap/directory' : null,
       note: 'Nothing here is a login. A verified client certificate means a ' +
         'chain was built to an anchor somebody supplied, and no more: no ' +
         'session is started, no token is issued, no revocation is checked, and ' +
@@ -1184,7 +1216,7 @@ function reportPage(report) {
           // reader was testing that case.
           ['In the directory', 'an entry derived from this subject — ' +
             report.authentication.directoryUrl + ' lists every one, and ' +
-            '/ldap says how the DN is chosen']
+            '/admin/ldap/service says how the DN is chosen']
         ]) + '</table>'
       : '') +
     '<p class="sub"><a href="/tls/whoami">This page as JSON</a></p>';
@@ -1486,7 +1518,7 @@ function description(req) {
         '"TLS") and the embedded LDAP directory seeds an entry for it',
       when: 'once per handshake, not once per request',
       consoleUrl: '/admin/users?protocol=TLS',
-      directoryUrl: '/ldap/directory',
+      directoryUrl: '/admin/ldap/directory',
       note: 'a record of what happened, not a credential. No session, no ' +
         'token, no revocation check, and nothing in this service consults it.'
     }
@@ -1570,7 +1602,8 @@ app.get('/tls', function (req, res) {
     'the embedded LDAP directory seeds an entry for it — a certificate subject ' +
     'is already a DN, so it is the one identity here that does not have to be ' +
     'turned into one, and the subject, issuer, serial and validity go on the ' +
-    'entry beside it. <a href="/ldap">GET /ldap</a> says where. Both are a ' +
+    'entry beside it. <a href="/admin/ldap/service">The directory ' +
+    'service</a> says where. Both are a ' +
     'record of what happened; neither is a credential.</p>' +
     '<p class="sub"><a href="/tls?format=json">This page as JSON</a> ' +
     '&middot; <a href="/admin/sts-metadata">everything this service ' +

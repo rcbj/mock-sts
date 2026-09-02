@@ -17,6 +17,36 @@ in `server.js` (rule 6); the main-port half needs no require order at all, becau
 crosses a module boundary and no network one: it is generated per start, held in
 memory, and `GET /tls/server-certificate` publishes the certificate alone.
 
+## The serial number is random, and a constant one was a browser-only bug
+
+The self-signed certificate this module mints is regenerated at every start,
+its subject never varies (`CN=localhost, O=mock-sts`), and it is the one a
+PERSON is asked to trust in a browser. Its serial was the constant `'03'` until
+2026-09-01 — chosen so that two of this service's certificates could be told
+apart in a packet capture — and NSS files a certificate under **(issuer,
+serial)**. So the second start of this service produced a different key under a
+pair Firefox had already seen, and Firefox refused the port outright:
+
+```
+SEC_ERROR_REUSED_ISSUER_AND_SERIAL
+```
+
+**That is a database conflict and not a trust warning**, which is what made it
+worth writing down: there is no "accept the risk" past it, the message says
+nothing about this service, and it appears only in a browser (curl and Chrome
+keep no such index), only after a restart, and only once an earlier copy has
+been trusted. Two of these processes running at once — a mock beside a test
+stack — collide the same way with no restart at all.
+
+The serial is now 128 bits of randomness with the caller's byte in FRONT of it,
+so `03…` still says which of this service's certificates a capture is looking
+at. `certificateSerial()` in `common/crypto.js` is where that is argued, and it
+is the same 128-bit serial `common/vendored/x509.js` has always minted for a
+SPIFFE SVID. The signing key's certificate (`'02'`, `common/helpers.js`) and
+the ML-DSA one (`'04'`, below) were changed with it — neither is met in a
+browser, so neither showed the failure, and leaving them constant would have
+left the same trap for whichever socket a browser reached next.
+
 ## The certificate can be one somebody else issued
 
 `tls.certificateFile` and `tls.keyFile` (`STS_TLS_CERT_FILE` / `STS_TLS_KEY_FILE`)
@@ -145,6 +175,23 @@ RFC 5280. It is deliberately not vendored from the debugger: this service is
 the far end of that code, and two copies of one reading of a specification
 agree with each other and interoperate with nothing. `common/pq_jose.js` makes
 the same argument at greater length.
+
+**IT NEEDS NODE 24, AND ASKING FOR IT ON AN OLDER ONE NO LONGER STOPS THE
+SERVICE.** ML-DSA reaches node with OpenSSL 3.5, which is node 24 — the version
+the Dockerfile pins (24.16.0). On node 22 `generateKeyPairSync('ml-dsa-65')`
+throws `ERR_INVALID_ARG_VALUE`, and until 2026-09-01 that throw came out of the
+certificate block at this module's TOP LEVEL: a `require` that throws takes the
+whole process down where a route could not, so a developer on node 22 who set
+`tls.certificateAlgorithms` met a mock that would not start — sixteen other
+protocol families stopped by a certificate nobody was going to connect with.
+`common/crypto.js` answers the question instead (`mlDsaAvailable()`, a probe
+that GENERATES a cheap key rather than comparing `process.versions`, because the
+version is a proxy for what the linked OpenSSL has), this module warns and skips
+the algorithm, and the existing fall-back to RSA does the rest. The
+post-quantum JOSE algorithms are untouched by any of it: they come from
+`@noble/post-quantum` and need nothing of OpenSSL. `tests/pq_certificates.js`
+asserts the refusal names the runtime and the requirement, which is the only
+branch of this a node 22 can reach.
 
 Three consequences are worth knowing before turning it on:
 

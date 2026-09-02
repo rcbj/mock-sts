@@ -1379,6 +1379,208 @@ const ROUTES = [
       log.debug("Leaving the management API groups endpoint.");
     } },
 
+  // --- The directory itself, entry by entry --------------------------------
+  //
+  // FIVE OPERATIONS ADDED ON 2026-09-01, ONE PER PAGE, AND THEY EXIST BECAUSE
+  // OF RULE 7 RATHER THAN BECAUSE ANYBODY ASKED FOR THEM.
+  //
+  // `/ldap`, `/ldap/directory`, `/ldap/applications`, `/ldap/federations` and
+  // `/ldap/spiffe` were five HTML pages outside the console until that day.
+  // They are `/admin/ldap/*` now — console pages, in the console's shell,
+  // behind its gate — and the rule this API is written under is that every
+  // page of that console has an operation here that mirrors it. So here they
+  // are, and the parity check in the suite is what would have noticed if they
+  // were not.
+  //
+  // THE GATE IS THE POINT OF THEM AND NOT AN INCIDENTAL DIFFERENCE. Those
+  // pages print `oauthClientSecret` and `fedClientSecret` in the clear, which
+  // is why moving them behind the console's gate was the right half of the
+  // change; this API is deliberately NOT gated, which is what keeps a test
+  // able to read the directory without signing a browser in. Both halves of
+  // that sentence are argued at the top of this file — the short version is
+  // that a port which mints a token for any username asked of it is not made
+  // safe by a password on one of its web pages, and the gate exists so a
+  // client can be driven through 302 / 401 / 403.
+  //
+  // EVERY ONE OF THEM CALLS THE FUNCTION THAT DRAWS THE PAGE, through
+  // `admin.directoryPageJson()` and the slot `ldap/ldap_server.js` fills — see
+  // the block above `setDirectoryPages()` in `admin-ui/admin.js` for why it
+  // cannot be a plain require from here. So a page and its operation cannot
+  // come to disagree about what is in the directory: there is one function and
+  // it is in the module that owns the store.
+  { method: 'GET', path: BASE + '/ldap/directory', tag: 'LDAP',
+    operationId: 'getDirectoryEntries',
+    summary: 'Every entry in this realm\'s directory, paged',
+    description: 'The whole store, DN by DN, with where each entry came from ' +
+                 '— `seed`, an LDAP `add`, or an authentication — and every ' +
+                 'attribute with every value.\n\nIT IS NOT AN LDAP SEARCH. ' +
+                 'This is the service showing its own store, which is how a ' +
+                 'caller tells an empty directory from a filter that matched ' +
+                 'nothing, and it is why the operational attributes are here: ' +
+                 'a search withholds `createTimestamp` and `modifyTimestamp` ' +
+                 'unless they are asked for by name (RFC 4511 §4.5.1.8) and ' +
+                 'this is not a search.\n\n`q` matches the DN, any attribute ' +
+                 'NAME and any attribute VALUE, case-insensitively — values ' +
+                 'because the caller who needs this most often has a ' +
+                 'thumbprint or a secret in hand and no idea which entry ' +
+                 'carries it.\n\nTHE REPLY IS THIS REALM\'S DIRECTORY AND NO ' +
+                 'OTHER. Since 2026-08-25 each trust realm has a subtree of ' +
+                 'its own; reach another realm\'s through its own path prefix.',
+    mirrors: 'GET /admin/ldap/directory',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the DN, of an attribute name, or of an ' +
+                     'attribute value. Case-insensitive.' },
+      { name: 'origin', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Only entries that came from here. The values actually ' +
+                     'present are in `origins`.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of entries, with the filter and the paging.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryEntryList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory entries endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('directory', req));
+      log.debug("Leaving the management API directory entries endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/applications', tag: 'LDAP',
+    operationId: 'getDirectoryApplications',
+    summary: 'The application registry as the directory holds it, and its schema',
+    description: 'One entry per identifier under `ou=applications`, every ' +
+                 'attribute on it, and the published SCHEMA — the object ' +
+                 'classes and every attribute name with what sets ' +
+                 'it.\n\nTHE SCHEMA IS WHY THIS IS NOT `GET ' +
+                 '/admin-api/applications`. That operation is the registry as ' +
+                 'the console works with it: the counters, the drill-down, ' +
+                 'the writes. This is the registry as the DIRECTORY holds it, ' +
+                 'and the vocabulary is the half a client reading an entry ' +
+                 'back over 389 actually needs — this directory is ' +
+                 'schemaless, so an entry carrying thirty invented attribute ' +
+                 'names is otherwise guesswork.\n\nTHESE ENTRIES ARE THE ' +
+                 'REGISTRY rather than a copy of one. Nothing caches them, so ' +
+                 'an `ldapmodify` of `oauthRedirectUri` changes which ' +
+                 'redirect URI RFC 9700 mode accepts on the next ' +
+                 'request.\n\nTwo attributes hold CREDENTIALS in the clear, ' +
+                 'for the reason `/krb5/principals` prints the Kerberos ' +
+                 'passwords. They are never written to the audit log.',
+    mirrors: 'GET /admin/ldap/applications',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the identifier, the name, the DN or any ' +
+                     'attribute value. Case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of entries, the kinds and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryApplicationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory applications endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('applications', req));
+      log.debug("Leaving the management API directory applications endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/federations', tag: 'LDAP',
+    operationId: 'getDirectoryFederations',
+    summary: 'The federation register as the directory holds it, and its schema',
+    description: 'The application registry\'s twin, for `ou=federations` — ' +
+                 'and THE ONE CONTAINER IN THIS DIRECTORY WHERE AN LDAPMODIFY ' +
+                 'IS A SECURITY CHANGE. Everywhere else an edit changes what ' +
+                 'this service HANDS OUT; `fedSigningCertificate` decides ' +
+                 'whose assertions it will BELIEVE and `fedEnabled` turns a ' +
+                 'partner on.\n\nIt is a container of its own rather than a ' +
+                 'corner of `ou=applications` because half its entries are ' +
+                 'FOREIGN IDENTITY PROVIDERS, which ask this service for ' +
+                 'nothing at all.\n\nThe schema carries a column the ' +
+                 'applications one has no need of: which DIRECTION each ' +
+                 'attribute is for.\n\n`fedClientSecret` is REDACTED in ' +
+                 '`relationships` and present in the entry\'s own attributes, ' +
+                 'which is the same split the page makes: what a script reads ' +
+                 'is redacted, and a page claiming to say what the directory ' +
+                 'holds may not hide a value an `ldapsearch` shows.',
+    mirrors: 'GET /admin/ldap/federations',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the relationship id, the DN, the protocol ' +
+                     'or the direction. Case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of relationships, the roles, the protocols ' +
+                         'and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryFederationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory federations endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('federations', req));
+      log.debug("Leaving the management API directory federations endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/spiffe', tag: 'LDAP',
+    operationId: 'getDirectorySpiffe',
+    summary: 'The two SPIFFE containers as the directory holds them, and their schema',
+    description: 'THE TWO CONTAINERS HOLD DIFFERENT KINDS OF THING, which is ' +
+                 'why they are two. `ou=entries` is CONFIGURATION — which ' +
+                 'SPIFFE ID a workload gets, under which parent, matching ' +
+                 'which selectors — and `ou=agents` is a RECORD of what has ' +
+                 'attested, which is why nothing about an agent is editable ' +
+                 'anywhere.\n\nTHE ENTRIES ARE THE REGISTRY: nothing caches ' +
+                 'them, so an `ldapmodify` of `spiffeX509SvidTtl` changes the ' +
+                 'lifetime of the next SVID the Workload API hands ' +
+                 'out.\n\nTHIS IS THE ONE DIRECTORY OPERATION WITH TWO LISTS ' +
+                 'IN IT, so it pages the way the console\'s drill-downs do: ' +
+                 '`entriesPage` and `agentsPage` move one list each and `per` ' +
+                 'is shared, with an `entriesPaging` and an `agentsPaging` ' +
+                 'object in the reply. `entries` and `agents` at the top ' +
+                 'level are the TOTALS and not the page.',
+    mirrors: 'GET /admin/ldap/spiffe',
+    parameters: [
+      { name: 'entryq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of a registration entry\'s SPIFFE ID or DN.' },
+      { name: 'agentq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of an attested agent\'s id or DN.' }
+    ].concat(pagingParameters()).concat(detailPagingParameters([
+      { name: 'entries', description: 'The registration entries.' },
+      { name: 'agents', description: 'The attested agents.' }
+    ])),
+    responseDescription: 'The two pages, the two containers and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectorySpiffe' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory SPIFFE endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('spiffe', req));
+      log.debug("Leaving the management API directory SPIFFE endpoint.");
+    } },
+
+  // LAST OF THE FIVE, and it is the one that answers about the SOCKETS rather
+  // than about what is in the store. It is deliberately not `GET
+  // /admin-api/ldap`, which is the SETTINGS: that one says what the ports and
+  // the base DN are SET to, and this one says what actually happened when the
+  // process tried to bind them. On a host where the system's own slapd already
+  // holds 389 those two replies disagree, and the disagreement is the whole
+  // value of having both.
+  { method: 'GET', path: BASE + '/ldap/service', tag: 'LDAP',
+    operationId: 'getDirectoryService',
+    summary: 'What the embedded directory IS, right now',
+    description: 'The two raw sockets and the store behind them AS THEY ' +
+                 'ACTUALLY ARE: whether TCP 389 and LDAPS 636 really bound ' +
+                 'and the error if either did not, the base DN and each ' +
+                 'realm\'s naming context, what a subtree search from each ' +
+                 'one answers about, the bind policy, the four structural ' +
+                 'rules this directory does still enforce, the entry count ' +
+                 'and the persistence status.\n\nWHY IT IS NOT `GET ' +
+                 '/admin-api/ldap`: that operation is the six `ldap.*` ' +
+                 'SETTINGS — what the sockets are configured to be. This one ' +
+                 'is what happened. A host whose own slapd already holds 389 ' +
+                 'makes the two disagree, and nothing else in this service ' +
+                 'can report that: `/admin/sts-metadata` is built by walking ' +
+                 'the express router and a raw TCP listener is not on ' +
+                 'it.\n\nNO BIND IS EVER REFUSED here, by any setting, except ' +
+                 'the one literal password named in `refusedPassword` — which ' +
+                 'exists so a negative test has something to fail on.',
+    mirrors: 'GET /admin/ldap/service',
+    parameters: [],
+    responseDescription: 'The directory as it is right now.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryService' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory service endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('service', req));
+      log.debug("Leaving the management API directory service endpoint.");
+    } },
+
   // --- The console's own roles ---------------------------------------------
   //
   // TWO OPERATIONS, AND THIS RESOURCE MATTERS MORE THAN THE OTHERS RATHER THAN
@@ -3755,7 +3957,7 @@ const ROUTES = [
                            'a list; it is the same walk of the protocol table ' +
                            'the console\'s form is drawn from, so this document ' +
                            'and that page cannot offer different fields. GET ' +
-                           '/ldap/applications publishes every attribute in the ' +
+                           '/admin/ldap/applications publishes every attribute in the ' +
                            'schema with an `editable` member.\n\n**Only ' +
                            'DECLARED attributes may be given.** A derived one — ' +
                            'a counter, a sighting, `appProtocol`, ' +
@@ -3820,7 +4022,7 @@ const ROUTES = [
                                         'registry holds it.' },
             attribute: { type: 'string',
                          description: 'One of the editable single-valued ' +
-                                      'attributes. GET /ldap/applications ' +
+                                      'attributes. GET /admin/ldap/applications ' +
                                       'publishes the schema with an ' +
                                       '`editable` member on every row.' },
             value: { type: 'string',
@@ -4376,6 +4578,277 @@ const ROUTES = [
       sendJson(res, 200, admin.delegationView(req.query).json);
       log.debug("Leaving the management API delegation endpoint.");
     } },
+
+  // -------------------------------------------------------------------------
+  // DELEGATED PERMISSIONS — the CONFIGURED half of /admin/delegation.
+  //
+  // A RESOURCE OF ITS OWN RATHER THAN MORE ACTIONS ON `/delegation`, and the
+  // reason is the same one the console gives for putting two headings on one
+  // page: the acts and the permissions are two registers, and an API that
+  // answered both under one path would make a caller tell them apart by the
+  // shape of a row.
+  //
+  // THIS COMMENT SAID `GET /admin-api/delegation` CARRIES THE REGISTER IN AN
+  // `allowed` MEMBER, AND IT NEVER HAS (corrected 2026-09-01). Only the
+  // CONSOLE route adds that member; this endpoint answers
+  // `delegationView(query).json`, which is the ACTS view, the one shared with
+  // /admin/delegation/map. The behaviour is right — see that function's
+  // header, where folding a second register into it is refused because every
+  // caller of the acts view would then pay for a walk of ou=applications it
+  // did not ask for — so the sentence went and the code stayed. This resource
+  // is where the register is reachable under its own name.
+  //
+  // THE FIVE ACTION NAMES STUTTER SLIGHTLY UNDER THIS PATH
+  // (`/permissions/define-permission`) AND THAT IS DELIBERATE. They are the
+  // names in the console's hidden `action` inputs, where the page they sit on
+  // is `/admin/delegation` and `define` alone would say nothing about what is
+  // being defined — and `remove` and `revoke` are two different things here
+  // (one removes a permission somebody exposes, the other takes a grant away
+  // from a client). One vocabulary for both doors is worth more than a shorter
+  // URL, and rule 7's parity check reads the console's own list.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/permissions', tag: 'Delegation',
+    operationId: 'getPermissions',
+    summary: 'Which applications may reach which, decided in advance',
+    description: 'The CONFIGURED delegation register, in Microsoft Entra ' +
+                 'ID\'s shape. It is the other half of `GET ' +
+                 '/admin-api/delegation`: that one is what HAPPENED — acts, ' +
+                 'evidence, one row per exchange — and this one is INTENT, ' +
+                 'typed in before anybody asked for anything.\n\n**How it ' +
+                 'works.** A RESOURCE application is given a base URI ' +
+                 '(`oauthPermissionBaseUri`; Entra calls it the Application ID ' +
+                 'URI and spells it `api://<guid>`, and anything absolute ' +
+                 'works here) and permissions on it (`oauthPermission`). A ' +
+                 'permission is identified by the two joined — ' +
+                 '`https://example.com/` + `write` = ' +
+                 '`https://example.com/write` — and a CLIENT application is ' +
+                 'granted some of them (`oauthDelegatedPermission`). All three ' +
+                 'are ordinary attributes on ordinary entries in ' +
+                 '`ou=applications`, so an `ldapmodify` is a configuration ' +
+                 'change here exactly as it is for a redirect ' +
+                 'URI.\n\n**What the token then says.** A client asks for a ' +
+                 'permission as an ordinary OAuth `scope`, and the access ' +
+                 'token comes back AUDIENCED to the base URI with the ' +
+                 'permission NAME on its scope claim: ' +
+                 '`scope=openid https://example.com/write` produces ' +
+                 '`aud: https://example.com/` and `scope: openid write`. Each ' +
+                 'grant row spells that out, because it is two facts a caller ' +
+                 'would otherwise have to compose.\n\n**It refuses nothing ' +
+                 'by default.** An ungranted permission is honoured exactly as ' +
+                 'a granted one is and marked here; only ' +
+                 '`oauth2.delegatedPermissionsEnforced` turns it into ' +
+                 '`invalid_scope`, at the authorization endpoint where the ' +
+                 'client can still be told.\n\n`grants[].dangling` is a ' +
+                 'grant naming a permission no application defines — a deleted ' +
+                 'resource, a permission removed from under it, or an ' +
+                 '`ldapmodify`, since both console doors refuse to create one. ' +
+                 '`grants[].asked` is whether the client has ever requested ' +
+                 'that scope, read off its own `oauthScope`: evidence rather ' +
+                 'than proof, and the one thing here that comes from what ' +
+                 'happened.\n\nThe `graph` member is the same picture ' +
+                 '/admin/delegation/allowed draws, in the shape ' +
+                 '`GET /admin-api/delegation`\'s `graph` uses.',
+    mirrors: 'GET /admin/delegation',
+    responseDescription: 'Every application exposing an API, every permission ' +
+                         'defined, every grant between two applications, and ' +
+                         'the graph of them.',
+    responseSchema: { type: 'object',
+                      description: 'The configured delegated permission ' +
+                                   'register, both directions.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API permissions endpoint.");
+      const view = admin.permissionsView();
+      sendJson(res, 200, Object.assign({}, view.register, { graph: view.graph }));
+      log.debug("Leaving the management API permissions endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/permissions/:action', tag: 'Delegation',
+    mirrors: 'POST /admin/delegation',
+    handler: function (req, res) {
+      log.debug("Entering the management API permissions action endpoint.");
+      const body = parseBody(req);
+      const result = admin.permissionsAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API permissions action endpoint.");
+    },
+    actions: [
+      { action: 'set-permission-base', operationId: 'setPermissionBase',
+        summary: 'Give an application the base URI its permissions hang off',
+        description: 'The first step of exposing an API, and the one that ' +
+                     'makes every permission on the entry NAMEABLE: a ' +
+                     'permission is identified by this value followed by its ' +
+                     'name, so an application with permissions and no base has ' +
+                     'permissions no client can ever ask for.\n\nIt must be ' +
+                     'ABSOLUTE, because it becomes the `aud` of an access ' +
+                     'token and an audience that is not absolute is one ' +
+                     'nothing can compare against. A trailing separator is ' +
+                     'ADDED where there is none — `https://example.com` ' +
+                     'becomes `https://example.com/` — because the identifier ' +
+                     'is a plain concatenation and the two would otherwise ' +
+                     'join into one word. An `ldapmodify` is not normalised ' +
+                     'and means exactly what it says.\n\nSending an empty ' +
+                     'value CLEARS it. The permissions stay on the entry with ' +
+                     'no identifier, which `GET /admin-api/permissions` ' +
+                     'reports, and grants already made become `dangling` on ' +
+                     'the clients holding them. Neither is tidied up: that ' +
+                     'would be this operation writing to entries the caller ' +
+                     'did not name.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that EXPOSES the API, by ' +
+                                     'its identifier exactly as ' +
+                                     '`ou=applications` holds it.' },
+            baseUri: { type: 'string',
+                       description: 'An absolute URI. Empty clears it.' }
+          },
+          required: ['resource'],
+          examples: [{ resource: 'api1', baseUri: 'https://example.com/' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, and what a ' +
+                             'permission on it is now called.' },
+
+      { action: 'define-permission', operationId: 'definePermission',
+        summary: 'Expose one permission on an application',
+        description: 'Entra ID\'s `oauth2PermissionScopes`, one at a ' +
+                     'time.\n\nThe NAME is what ends up on the access ' +
+                     'token\'s `scope` claim, so it must be a legal OAuth ' +
+                     'scope token: any printable ASCII except space, double ' +
+                     'quote and backslash (RFC 6749 section 3.3), and not `|`, ' +
+                     'which separates the name from the description in the ' +
+                     'attribute. The DESCRIPTION is optional and is stored ' +
+                     'after the first `|` in the same value.\n\n**Defining a ' +
+                     'permission grants it to nobody.** That is the ordering ' +
+                     'this feature is built on and the reason this operation ' +
+                     'and `grant-permission` are two: a permission must exist ' +
+                     'before anything can be granted it, and the check is in ' +
+                     '`applications.updateApplication()` so that this ' +
+                     'operation, the console form and the generic ' +
+                     '`POST /admin-api/applications/update` cannot disagree ' +
+                     'about it.\n\nA second permission of the SAME NAME is ' +
+                     'refused rather than merged — a permission has one ' +
+                     'description, and two rows with one name would leave the ' +
+                     'second unreachable. Remove it and define it again to ' +
+                     'change the wording.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that exposes it.' },
+            name: { type: 'string',
+                    description: 'The permission name — the word a client will ' +
+                                 'send inside a `scope`.' },
+            description: { type: 'string',
+                           description: 'Optional prose, shown wherever the ' +
+                                        'permission is.' }
+          },
+          required: ['resource', 'name'],
+          examples: [{ resource: 'api1', name: 'write',
+                       description: 'Change widgets on somebody\'s behalf' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The permission\'s identifier, and what a request ' +
+                             'naming it would be issued.' },
+
+      { action: 'remove-permission', operationId: 'removePermission',
+        summary: 'Stop exposing a permission',
+        description: 'Named by its NAME rather than by the raw attribute ' +
+                     'value, because that value is `name|description` and a ' +
+                     'caller holding a stale description would fail to remove ' +
+                     'anything.\n\n**Grants naming it are NOT revoked.** ' +
+                     'They stay on the clients\' entries and become ' +
+                     '`dangling`, which `GET /admin-api/permissions` reports ' +
+                     'and the reply here counts. Revoking them would be this ' +
+                     'operation writing to entries the caller did not name; ' +
+                     'define the permission again and every one of them ' +
+                     'resolves exactly as before.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            resource: { type: 'string',
+                        description: 'The application that exposes it.' },
+            name: { type: 'string', description: 'The permission name.' }
+          },
+          required: ['resource', 'name'],
+          examples: [{ resource: 'api1', name: 'write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was removed, and how many grants it ' +
+                             'stranded.' },
+
+      { action: 'grant-permission', operationId: 'grantPermission',
+        summary: 'Grant a client application a permission on another one',
+        description: '**THE DELEGATION RELATIONSHIP ITSELF** — Entra ID\'s ' +
+                     '`requiredResourceAccess`, one permission at a ' +
+                     'time.\n\nIt lands on the CLIENT\'s entry, as a value ' +
+                     'of `oauthDelegatedPermission`, because the client is the ' +
+                     'party that will name the permission in a `scope` — so ' +
+                     'the entry that answers *may this request be honoured* is ' +
+                     'the entry the request identifies. One client granted ' +
+                     'three permissions is three calls and three values; three ' +
+                     'clients granted one permission is one value on each of ' +
+                     'three entries. That is how one-to-many and many-to-one ' +
+                     'both work with no store of their own.\n\n**The ' +
+                     'permission must already be DEFINED**, matched EXACTLY ' +
+                     'rather than as a prefix of a registered base — so a ' +
+                     'client cannot address a token to somebody\'s API by ' +
+                     'inventing a word after their base URI. An application ' +
+                     'cannot be granted its own permission: the token would be ' +
+                     'addressed to itself, which is what an ID Token already ' +
+                     'is.\n\n**It changes nothing about what is issued** ' +
+                     'unless `oauth2.delegatedPermissionsEnforced` is on. With ' +
+                     'it off — the default — the request was already producing ' +
+                     'the audience and the scope, and what the grant changes is ' +
+                     'that the console stops marking it ungranted.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string',
+                      description: 'The application that WILL ASK — the one ' +
+                                   'whose `client_id` appears on the token ' +
+                                   'request. Not the one exposing the API.' },
+            permission: { type: 'string',
+                          description: 'The whole permission identifier, base ' +
+                                       'URI and name together.' }
+          },
+          required: ['client', 'permission'],
+          examples: [{ client: 'webapp1', permission: 'https://example.com/write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The grant, and what an access token asking for ' +
+                             'it will carry.' },
+
+      { action: 'revoke-permission', operationId: 'revokePermission',
+        summary: 'Take a permission away from a client application',
+        description: 'The opposite of `grant-permission`, and with the setting ' +
+                     'off it changes nothing about what is issued either: the ' +
+                     'permission still becomes an audience and a scope, and ' +
+                     'those requests are simply reported as UNGRANTED — which ' +
+                     'is the state `oauth2.delegatedPermissionsEnforced` turns ' +
+                     'into a refusal.\n\nIt is also how a DANGLING grant is ' +
+                     'cleared: send the identifier exactly as it appears on ' +
+                     'the entry, and it goes whether or not anything defines ' +
+                     'it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string', description: 'The application holding it.' },
+            permission: { type: 'string',
+                          description: 'The whole permission identifier.' }
+          },
+          required: ['client', 'permission'],
+          examples: [{ client: 'webapp1', permission: 'https://example.com/write' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was revoked.' }
+    ] },
 
   // -------------------------------------------------------------------------
   // SPIFFE. Three resources, mirroring the three console pages one for one, and

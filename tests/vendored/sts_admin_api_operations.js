@@ -1531,6 +1531,270 @@ async function relationship(id) {
 }
 
 // ---------------------------------------------------------------------------
+// DELEGATED PERMISSIONS — the CONFIGURED half of the delegation register, and
+// the one resource here whose two halves live on TWO DIFFERENT ENTRIES.
+//
+// Everything else on this API writes an attribute and reads it back off the
+// same object. A grant does not: `oauthPermission` lands on the RESOURCE
+// application and `oauthDelegatedPermission` lands on the CLIENT, and the thing
+// that joins them is a string composed from a third attribute on the first of
+// them. So the read-backs below deliberately go through `GET /permissions`,
+// which resolves both directions, rather than through `GET /applications` —
+// reading the client's own entry would confirm that a value was written and
+// prove nothing about whether it RESOLVES, which is the only interesting
+// property this feature has.
+//
+// **THE ORDERING RULE IS THE SUBJECT.** A permission must be DEFINED before it
+// can be GRANTED, and a permission needs a base URI before it can be defined.
+// Both refusals are driven, in the order that makes them meaningful: BEFORE the
+// thing they require exists, so that a run in which the rules had been dropped
+// would fail here rather than silently accept both.
+// ---------------------------------------------------------------------------
+async function theDelegatedPermissionsRoundTrip() {
+  log.debug("Entering theDelegatedPermissionsRoundTrip().");
+  log.info("=== Delegated permissions: base, define, remove, grant, revoke ===");
+
+  const resource = "api-" + names.usernameFor("stsapi-resource");
+  const client = "app-" + names.usernameFor("stsapi-client");
+  await ok("/applications/create",
+    { identifier: resource, name: "Widget API", protocols: ["oauth2"] },
+    "created the resource application");
+  await ok("/applications/create",
+    { identifier: client, name: "Portal", protocols: ["oauth2", "oidc"],
+      fields: { oauthClientId: client } },
+    "created the client application");
+
+  const base = "https://" + resource + ".example.com/";
+
+  // BOTH REFUSALS FIRST, while the things they require genuinely do not exist.
+  // Driven in this order on purpose: after the base and the permission are in
+  // place these two calls would succeed, so a run that made them later would
+  // assert nothing about the rules at all.
+  await refused("/permissions/define-permission",
+    { resource: resource, name: "write" },
+    /no `oauthPermissionBaseUri`|base/i,
+    "a permission on an application with no base URI");
+  await refused("/permissions/grant-permission",
+    { client: client, permission: base + "write" },
+    /must be DEFINED before it can be GRANTED/,
+    "a grant naming a permission nobody defines");
+
+  // A base URI has to be absolute, because it becomes an access token's `aud`.
+  await refused("/permissions/set-permission-base",
+    { resource: resource, baseUri: "not-a-uri" },
+    /absolute/i, "a base URI that is not absolute");
+
+  await ok("/permissions/set-permission-base",
+    { resource: resource, baseUri: base }, "set the permission base URI");
+  await ok("/permissions/define-permission",
+    { resource: resource, name: "write", description: "Change widgets" },
+    "defined a permission");
+  await ok("/permissions/define-permission",
+    { resource: resource, name: "read" }, "defined a second permission");
+
+  // A NAME THAT COULD NOT SURVIVE A SCOPE PARAMETER, and a duplicate. Both are
+  // refusals a caller can actually provoke by hand, and both would be invisible
+  // until a token came back wrong.
+  await refused("/permissions/define-permission",
+    { resource: resource, name: "read write" },
+    /scope token|space/i, "a permission name with a space in it");
+  await refused("/permissions/define-permission",
+    { resource: resource, name: "write", description: "again" },
+    /already defines/i, "a second permission with a name already taken");
+
+  const defined = await permissionRegister();
+  const written = defined.permissions.filter(function (one) {
+    return one.resource === resource;
+  });
+  assert.strictEqual(written.length, 2,
+    "the register should report both permissions this run defined; it " +
+    "reported " + written.length + ".");
+  assert.ok(written.some(function (one) { return one.id === base + "write"; }),
+    "and each one's identifier should be the base URI followed by the name — " +
+    "that string is what a client puts in a `scope` and what nothing else in " +
+    "this service composes. It reported: " +
+    written.map(function (one) { return one.id; }).join(", "));
+  assert.ok(written.every(function (one) { return !one.grantedTo.length; }),
+    "and NOTHING should hold either of them yet: defining a permission grants " +
+    "it to nobody, which is the ordering this whole feature is built on and " +
+    "is the assertion a handler that quietly granted on define would fail.");
+
+  // AN APPLICATION CANNOT BE GRANTED ITS OWN PERMISSION — the token would be
+  // addressed to itself, and the picture would draw a line from a box back to
+  // the same box.
+  await refused("/permissions/grant-permission",
+    { client: resource, permission: base + "write" },
+    /DEFINES|itself/i, "an application granting itself its own permission");
+
+  await ok("/permissions/grant-permission",
+    { client: client, permission: base + "write" }, "granted a permission");
+  await ok("/permissions/grant-permission",
+    { client: client, permission: base + "read" },
+    "granted a second permission on the same resource");
+
+  const granted = await permissionRegister();
+  const held = granted.grants.filter(function (one) {
+    return one.client === client;
+  });
+  assert.strictEqual(held.length, 2,
+    "TWO GRANTS BETWEEN TWO APPLICATIONS ARE TWO ROWS, not one row saying " +
+    "`2`: the permission is what was granted and the pair of applications is " +
+    "what it happens to join. The register reported " + held.length + ".");
+  assert.ok(held.every(function (one) { return !one.dangling; }),
+    "and neither should be dangling — both name a permission that resolves.");
+  assert.ok(held.every(function (one) { return one.resource === resource; }),
+    "and both should resolve back to the application that exposes them, " +
+    "which is the whole of what this resource does that reading the client's " +
+    "own entry could not.");
+
+  // -----------------------------------------------------------------------
+  // AND THE TWO HALVES ARE ON TWO DIFFERENT ENTRIES, read through the
+  // APPLICATIONS registry rather than through the one above.
+  //
+  // This is the assertion `GET /permissions` cannot make about itself: that
+  // resource resolves both directions and would report the same register
+  // whichever entry the attributes had actually landed on. The failure it
+  // guards against is a specific one and it is easy to write — a grant put on
+  // the RESOURCE instead of the client, so the entry that answers "may this
+  // request be honoured" is the API rather than its caller, and every lookup
+  // at the token endpoint then finds nothing while this console looks right.
+  // -----------------------------------------------------------------------
+  const resourceEntry = await application(resource);
+  assert.deepStrictEqual(fieldValues(resourceEntry, "oauthPermissionBaseUri"),
+    [base], "the base URI belongs on the application that EXPOSES the API.");
+  assert.deepStrictEqual(
+    fieldValues(resourceEntry, "oauthPermission").slice().sort(),
+    ["read", "write|Change widgets"],
+    "and so do the permissions, one value each, with the description after " +
+    "the first `|` — which is the spelling an ldapmodify has to match.");
+  assert.deepStrictEqual(fieldValues(resourceEntry, "oauthDelegatedPermission"),
+    [], "and the resource holds NO grant: exposing a permission is not being " +
+        "granted one.");
+
+  const clientEntry = await application(client);
+  assert.deepStrictEqual(
+    fieldValues(clientEntry, "oauthDelegatedPermission").slice().sort(),
+    [base + "read", base + "write"],
+    "THE GRANTS BELONG ON THE CLIENT, as whole permission identifiers. That " +
+    "is the entry a token request identifies, so it is the entry that has to " +
+    "answer whether the request may be honoured.");
+  assert.deepStrictEqual(fieldValues(clientEntry, "oauthPermission"), [],
+    "and the client exposes nothing: holding a permission is not defining one.");
+
+  // -----------------------------------------------------------------------
+  // AND THE TOKEN, WHICH IS WHAT ALL OF IT IS FOR.
+  //
+  // Everything above asserts that a register was written. This asserts that
+  // the register is READ, at the one place it changes what a client receives —
+  // and it is the assertion that would still be missing if this file stopped
+  // at the API, because a configuration nothing consults is a configuration
+  // that can be perfectly correct and worth nothing.
+  // -----------------------------------------------------------------------
+  const minted = await mintPermissionToken(client, [base + "write", base + "read"]);
+  assert.strictEqual(audienceOf(minted.access), base,
+    "THE ACCESS TOKEN SHOULD BE AUDIENCED TO THE BASE URI. A client asked " +
+    "for two permission identifiers and this is the resource they hang off, " +
+    "which is what a resource server checks once before reading anything " +
+    "else. It carried: " + JSON.stringify(claimOf(minted.access, "aud")));
+  const scopes = String(claimOf(minted.access, "scope")).split(/\s+/);
+  assert.ok(scopes.indexOf("write") >= 0 && scopes.indexOf("read") >= 0,
+    "AND ITS SCOPE CLAIM SHOULD CARRY THE BARE PERMISSION NAMES, which is " +
+    "what Microsoft Entra ID does and what makes a resource server's check " +
+    "one comparison rather than a URL parse. It carried: " +
+    claimOf(minted.access, "scope"));
+  assert.ok(scopes.indexOf(base + "write") < 0,
+    "and NOT the identifiers it was asked with — a scope value that became " +
+    "the audience must come off the scope claim, or the token says the same " +
+    "thing twice in two vocabularies. It carried: " +
+    claimOf(minted.access, "scope"));
+
+  // Asking for it is what makes `asked` true, and that column is the only
+  // thing on this register that comes from what HAPPENED rather than from what
+  // somebody typed. A run that never checked it would not notice the day it
+  // stopped being recorded, which is exactly what a client_credentials client
+  // did until the token endpoint began writing `oauthScope`.
+  const used = await permissionRegister();
+  assert.ok(used.grants.some(function (one) {
+    return one.client === client && one.permissionName === "write" && one.asked;
+  }), "the grant this client just spent should now read as ASKED FOR. That " +
+      "column is the difference between a configured register and a useful " +
+      "one — it is what makes `granted and never asked for` a question the " +
+      "console can answer.");
+
+  // -----------------------------------------------------------------------
+  // REMOVE AND REVOKE, and the state in between them that nothing else here
+  // produces: a grant whose permission has gone.
+  // -----------------------------------------------------------------------
+  await ok("/permissions/remove-permission",
+    { resource: resource, name: "write" }, "removed a permission");
+  const stranded = await permissionRegister();
+  const orphan = stranded.grants.filter(function (one) {
+    return one.client === client && one.permissionId === base + "write";
+  })[0];
+  assert.ok(orphan && orphan.dangling === true,
+    "REMOVING A PERMISSION DOES NOT REVOKE THE GRANTS NAMING IT. They stay on " +
+    "the clients' entries and are reported as DANGLING, because tidying them " +
+    "would be one call writing to entries it did not name — and a grant that " +
+    "silently vanished would be worse than one that is visibly broken. The " +
+    "register said: " + JSON.stringify(orphan));
+
+  await ok("/permissions/revoke-permission",
+    { client: client, permission: base + "write" },
+    "revoked the dangling grant");
+  await ok("/permissions/revoke-permission",
+    { client: client, permission: base + "read" }, "revoked the live one");
+  const cleared = await permissionRegister();
+  assert.deepStrictEqual(cleared.grants.filter(function (one) {
+    return one.client === client;
+  }), [], "and revoking clears them whether or not anything defines them — " +
+          "which is the only way a dangling grant can ever be got rid of.");
+
+  log.debug("Leaving theDelegatedPermissionsRoundTrip().");
+}
+
+async function permissionRegister() {
+  log.debug("Entering permissionRegister().");
+  const reply = await get("/permissions");
+  assert.strictEqual(reply.status, 200,
+    "GET /permissions should answer 200; it answered " + reply.status);
+  assert.ok(Array.isArray(reply.body.grants) &&
+            Array.isArray(reply.body.permissions),
+    "and it should carry both directions of the register.");
+  log.debug("Leaving permissionRegister(). " + reply.body.grants.length + " grant(s).");
+  return reply.body;
+}
+
+// A token asked for by PERMISSION rather than by scope name. `client_credentials`
+// rather than the password grant `mintTokens()` uses, because what is being
+// asserted is a property of the SCOPE LIST and there is no reason to involve a
+// person in it.
+async function mintPermissionToken(client, wanted) {
+  log.debug("Entering mintPermissionToken(). client=" + client);
+  const body = "grant_type=client_credentials&client_id=" +
+      encodeURIComponent(client) + "&scope=" +
+      encodeURIComponent(wanted.join(" "));
+  const reply = await common.httpJson(base + "/realm/" + REALM + "/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body
+  });
+  assert.strictEqual(reply.status, 200,
+    "the realm's token endpoint should mint a token for a permission scope; " +
+    "it answered " + reply.status + " " + String(reply.raw).slice(0, 300));
+  log.debug("Leaving mintPermissionToken().");
+  return { access: reply.body.access_token, scope: reply.body.scope };
+}
+
+// The `aud` as ONE value. RFC 7519 section 4.1.3 allows a string or an array,
+// and this service sends an array when a token is addressed to more than one
+// party — which an `openid` token asking for a permission is. The permission's
+// base URI is the one being asserted about, so the others are not an error.
+function audienceOf(jwt) {
+  const aud = claimOf(jwt, "aud");
+  return Array.isArray(aud) ? aud[0] : aud;
+}
+
+// ---------------------------------------------------------------------------
 // THE TWO SAML REGISTRIES. They are SEPARATE IMPLEMENTATIONS rather than one
 // with a version flag — SAML 1.1 has no request message, no Single Logout and a
 // different spelling for almost every shared element — which is why /saml2 has
@@ -3074,6 +3338,7 @@ async function test() {
     await everyDocumentedExampleIsAccepted(doc);
     await everyReadAnswersAboutThisRealm(doc);
     await theApplicationsRegistryRoundTrips();
+    await theDelegatedPermissionsRoundTrip();
     await theClaimSetDoorsRoundTrip();
     await theFederationRegisterRoundTrips();
     await theSamlRegistriesRoundTrip();

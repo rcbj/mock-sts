@@ -1523,7 +1523,7 @@ app.post(BASE + '/Bulk', handle(
 // ---------------------------------------------------------------------------
 // GET /scim — what this is, for a person.
 //
-// The same shape /ldap and /tls have: a page that says what the protocol surface
+// The same shape /admin/ldap/service and /tls have: a page that says what the protocol surface
 // is, what it will and will not do, and where to point a client — plus
 // ?format=json so a test can read the same facts. It is NOT a SCIM endpoint and
 // says so; a real SCIM server publishes none of this.
@@ -1855,7 +1855,7 @@ app.get('/scim', function (req, res) {
     '<p class="sub"><a href="/scim?format=json">This page as JSON</a> &middot; ' +
     '<a href="' + xmlEscape(BASE) + '/ServiceProviderConfig">ServiceProviderConfig</a> ' +
     '&middot; <a href="/admin/scim">the console page</a> &middot; ' +
-    '<a href="/ldap">the directory this writes into</a></p>';
+    '<a href="/admin/ldap/service">the directory this writes into</a></p>';
   res.status(200).type('html').set('Cache-Control', 'no-store')
      .send(pageShell('SCIM 2.0', inner));
   log.debug("Leaving GET /scim. HTML.");

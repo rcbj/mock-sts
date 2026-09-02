@@ -1931,6 +1931,65 @@ function decryptJweCompact(compact, opts) {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
+// A CERTIFICATE SERIAL NUMBER, AND WHY IT CANNOT BE THE CONSTANT IT WAS.
+//
+// Every certificate this service mints is self-signed, regenerated on every
+// start, and carries a subject that never varies — `CN=localhost, O=mock-sts`
+// for the listeners' one. The serial was a CONSTANT beside all that: '02' for
+// the signing key, '03' for the TLS server certificate, '04' for the ML-DSA
+// one. So two starts of this service produced two DIFFERENT KEYS under one
+// (issuer, serial) pair, and that pair is the primary key NSS files a
+// certificate under.
+//
+// Firefox therefore refuses the second one outright, before any trust decision
+// is offered and with no way past it:
+//
+//     SEC_ERROR_REUSED_ISSUER_AND_SERIAL
+//
+// — which is not a trust warning a person can accept, it is a database
+// conflict, and it says nothing about this service. Chrome and curl do not
+// keep that index and never showed it, which is why this survived: the failure
+// appears only in the browser, only after a restart, and only once somebody
+// has trusted an earlier copy. Two of these processes running at once (a mock
+// beside a test stack) collide the same way with no restart at all.
+//
+// So the serial is random — 128 bits, the CA/Browser Forum's number, which is
+// also what `common/vendored/x509.js` already mints for every SPIFFE SVID.
+//
+// WHAT THE CONSTANT WAS FOR IS KEPT, because it was a real thing rather than
+// laziness: a person looking at a packet capture, or at two PEM files, could
+// tell this service's certificates apart by their serial alone. The caller's
+// byte is now the leading byte of a random serial rather than the whole of it,
+// so `02…`, `03…` and `04…` still say which certificate this is and the
+// remaining fifteen bytes make it unique. The top bit of that byte is clear
+// for all three, which keeps the DER INTEGER positive without the leading zero
+// byte some parsers then report as a seventeen-byte serial.
+// ---------------------------------------------------------------------------
+function certificateSerial(prefixHex) {
+  log.debug('Entering certificateSerial(). prefix=' + (prefixHex || '(none)'));
+  let prefix = String(prefixHex === undefined || prefixHex === null
+    ? '' : prefixHex).replace(/[^0-9a-fA-F]/g, '');
+  if (prefix.length % 2) {
+    prefix = '0' + prefix;
+  }
+  // A prefix of 0x80 or more would make the INTEGER negative. Rather than
+  // silently rewriting the caller's byte — which would break the one property
+  // the prefix exists for — the top bit is cleared, which is what
+  // x509.js's randomSerialHex() does to its own first byte.
+  let head = prefix
+    ? Buffer.from(prefix, 'hex')
+    : Buffer.from([nodeCrypto.randomBytes(1)[0] || 1]);
+  head[0] = head[0] & 0x7f;
+  if (head[0] === 0) {
+    head[0] = 1;
+  }
+  const tail = nodeCrypto.randomBytes(Math.max(1, 16 - head.length));
+  const serial = Buffer.concat([head, tail]).toString('hex');
+  log.debug('Leaving certificateSerial(). serial=' + serial);
+  return serial;
+}
+
+// ---------------------------------------------------------------------------
 // AN RSA KEY AND A SELF-SIGNED CERTIFICATE OVER IT.
 //
 // Two copies of this existed — `helpers.makeStsKeys()` for the signing key and
@@ -1956,10 +2015,14 @@ function selfSignedRsaCertificate(opts) {
   const pair = forge.pki.rsa.generateKeyPair({ bits: options.bits || 2048, e: 0x10001 });
   const cert = forge.pki.createCertificate();
   cert.publicKey = pair.publicKey;
-  // The serial is the caller's because it is how a person tells two of this
-  // service's certificates apart in a packet capture, and they are otherwise
-  // identical self-signed RSA certificates minted seconds apart.
-  cert.serialNumber = options.serialNumber || '01';
+  // `serialPrefix` is the caller's LEADING BYTE because it is how a person
+  // tells two of this service's certificates apart in a packet capture, and
+  // they are otherwise identical self-signed RSA certificates minted seconds
+  // apart. The rest is random — see certificateSerial() for the browser
+  // failure that a constant serial produced. `serialNumber` is still honoured
+  // verbatim for a caller that means one exact value.
+  cert.serialNumber = options.serialNumber ||
+      certificateSerial(options.serialPrefix || '01');
   cert.validity.notBefore = new Date();
   cert.validity.notAfter = new Date();
   cert.validity.notAfter.setFullYear(
@@ -2027,6 +2090,56 @@ const ML_DSA_OIDS = {
   'ml-dsa-87': '2.16.840.1.101.3.4.3.19'
 };
 
+// ---------------------------------------------------------------------------
+// WHETHER THIS RUNTIME CAN DO ANY OF IT, WHICH IS A QUESTION ABOUT THE
+// INTERPRETER AND NOT ABOUT THIS SERVICE.
+//
+// ML-DSA reaches node with OpenSSL 3.5, which is node 24 — the version this
+// repository's Dockerfile pins (24.16.0). On anything older
+// `generateKeyPairSync('ml-dsa-65')` throws `ERR_INVALID_ARG_VALUE: The
+// argument 'type' must be a supported key type`, a sentence that names neither
+// this service, nor the algorithm's real requirement, nor the way out — and it
+// throws from wherever it was called, which for `tls_server.js` is a MODULE
+// TOP LEVEL. A require that throws takes the whole process down where a route
+// could not, which is the rule the root CLAUDE.md states about listeners and
+// is exactly what a developer on node 22 met: a mock that would not start
+// because of a certificate algorithm nobody was going to connect with.
+//
+// So the capability is a question anybody can ask BEFORE calling, and it is
+// asked by DOING IT rather than by comparing `process.versions` — the version
+// is a proxy for what the linked OpenSSL has, and a node built against a
+// different one would make the proxy lie. ML-DSA-44 is the cheapest of the
+// three parameter sets and a keygen is well under a millisecond; the answer is
+// cached because the interpreter does not acquire the algorithm later.
+// ---------------------------------------------------------------------------
+let mlDsaProbe = null;
+
+function mlDsaAvailable() {
+  log.debug('Entering mlDsaAvailable().');
+  if (mlDsaProbe === null) {
+    try {
+      nodeCrypto.generateKeyPairSync('ml-dsa-44');
+      mlDsaProbe = true;
+    } catch (e) {
+      // EXPECTED on any runtime older than node 24, and it is the whole
+      // purpose of this function to turn that throw into an answer. The reason
+      // is logged once rather than swallowed, because a service that silently
+      // stopped offering a configured algorithm would be the worse failure.
+      mlDsaProbe = false;
+      log.warn('crypto: this runtime cannot generate ML-DSA keys (' +
+               e.message + '). Node ' + process.versions.node +
+               ' is linked against OpenSSL ' + process.versions.openssl +
+               '; ML-DSA needs OpenSSL 3.5, which is node 24 — this ' +
+               'repository pins 24.16.0 in its Dockerfile. Everything else ' +
+               'here is unaffected: the POST-QUANTUM JOSE algorithms come ' +
+               'from @noble/post-quantum and work on every runtime. It is ' +
+               'the CERTIFICATE that needs OpenSSL.');
+    }
+  }
+  log.debug('Leaving mlDsaAvailable(). ' + mlDsaProbe);
+  return mlDsaProbe;
+}
+
 function mlDsaOid(algorithm) {
   log.debug('Entering mlDsaOid(). algorithm=' + algorithm);
   const oid = ML_DSA_OIDS[String(algorithm || '').toLowerCase()];
@@ -2055,6 +2168,20 @@ function selfSignedMlDsaCertificate(opts) {
   log.debug('Entering selfSignedMlDsaCertificate(). algorithm=' + algorithm +
             ' cn=' + (options.commonName || '(none)'));
   const oid = mlDsaOid(algorithm);
+  // CHECKED HERE AS WELL AS BY THE CALLER, because this is the door: a caller
+  // that forgot to ask should still meet a sentence naming the algorithm, the
+  // runtime and the requirement rather than node's `ERR_INVALID_ARG_VALUE`,
+  // which names an argument called `type`.
+  if (!mlDsaAvailable()) {
+    log.debug('Leaving selfSignedMlDsaCertificate(). Unsupported runtime.');
+    throw new Error('This runtime cannot generate an ' + algorithm +
+                    ' key, so no ML-DSA certificate can be built here. Node ' +
+                    process.versions.node + ' is linked against OpenSSL ' +
+                    process.versions.openssl + '; ML-DSA needs OpenSSL 3.5, ' +
+                    'which is node 24 — this repository pins 24.16.0. The ' +
+                    'post-quantum JOSE algorithms are unaffected: they come ' +
+                    'from @noble/post-quantum and need nothing of OpenSSL.');
+  }
   const pair = nodeCrypto.generateKeyPairSync(algorithm);
   const spkiDer = pair.publicKey.export({ type: 'spki', format: 'der' });
 
@@ -2153,7 +2280,11 @@ function selfSignedMlDsaCertificate(opts) {
         new asn1js.Sequence({ value: generalNames })));
   }
 
-  const serialHex = String(options.serialNumber || '04');
+  // Random with the caller's leading byte, for certificateSerial()'s reason:
+  // a constant here made two starts of this service two different keys under
+  // one (issuer, serial) pair, which Firefox refuses outright.
+  const serialHex = String(options.serialNumber ||
+      certificateSerial(options.serialPrefix || '04'));
   const serialBytes = Buffer.from(serialHex.length % 2
     ? '0' + serialHex : serialHex, 'hex');
 
@@ -2301,6 +2432,22 @@ function jwkThumbprint(jwk, opts) {
 //
 // Three formats of one digest was never the duplication. Three functions each
 // computing that digest was.
+//
+// A PEM STRING MAY BE A CHAIN, and taking the first certificate out of it is
+// the one thing this function must not skip. `tls.certificateFile` has been
+// allowed to be a bundle since it started being supplied from outside, and the
+// stack that supplies it hands over a leaf, its issuing CA and the root, in
+// that order. stripPem() removes every `-----…-----` line, so a bundle came
+// out as three DERs joined end to end and the digest was over the join: a
+// value that is not the thumbprint of any certificate, that no tool will ever
+// print — not `openssl x509 -fingerprint -sha256`, not node's
+// `fingerprint256`, not `x5t#S256` at the far end — and that is nonetheless
+// perfectly stable, so it agrees with itself everywhere this service reports
+// it and disagrees only with the handshake. It was published on GET /admin/ldap/service and
+// in /tls's views as the certificate 636, 8443 and 9443 present.
+//
+// The first certificate is the leaf, which is what those sockets present and
+// what every consumer of a chain reads; the rest are the path to it.
 // ---------------------------------------------------------------------------
 function certificateThumbprint(certificate, opts) {
   const options = opts || {};
@@ -2311,7 +2458,11 @@ function certificateThumbprint(certificate, opts) {
     // A node `X509Certificate`, which is what a TLS socket hands over.
     der = certificate.raw;
   } else {
-    der = Buffer.from(stripPem(certificate), 'base64');
+    const first = String(certificate == null ? '' : certificate).match(
+      /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/);
+    // No BEGIN line at all is a bare base64 DER, which several callers pass
+    // (an `x5c` member, most of all), so stripPem() is still the fallback.
+    der = Buffer.from(stripPem(first ? first[0] : certificate), 'base64');
   }
   const format = options.format || 'base64url';
   let out;
@@ -2388,8 +2539,12 @@ module.exports = {
   encryptJweCompact: encryptJweCompact,
   decryptJweCompact: decryptJweCompact,
   // --- keys, certificates, thumbprints ---
+  // Exported for a caller that mints a certificate through neither generator
+  // below, so that the one reason a serial is random is written down once.
+  certificateSerial: certificateSerial,
   selfSignedRsaCertificate: selfSignedRsaCertificate,
   selfSignedMlDsaCertificate: selfSignedMlDsaCertificate,
+  mlDsaAvailable: mlDsaAvailable,
   ML_DSA_OIDS: ML_DSA_OIDS,
   stripPem: stripPem,
   canonicalJwk: canonicalJwk,

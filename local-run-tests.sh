@@ -72,16 +72,45 @@
 #   in-process service and says so in three lines — because there the choice is
 #   between the old suite and no suite. Passing `--docker` makes even that an
 #   error.
+#
+#   AND THE STACK IS LEFT UP WHEN THE RUN FINISHES, SINCE 2026-09-01. That
+#   reverses this script's default and it is the one decision here that is
+#   about a PERSON rather than about what is under test: almost everything a
+#   run tells you that the report does not is read off the service itself —
+#   /admin/delegation/allowed after the delegated permission example built it,
+#   /admin/sts-metadata after a drift failure, an entry on /admin/applications
+#   that a job says is wrong — and a container torn down at the last line of
+#   the run is a container that is gone by the time the report says to look at
+#   it. Re-running the whole suite to see one page is a minute for a question
+#   that is already answered somewhere.
+#
+#   Three things make it affordable and it would not be a good default without
+#   them. startStack() ALREADY brings its project down before bringing it up,
+#   so a leftover container is removed by the next run rather than met by it —
+#   that has been true since this stack was written, for the interrupted-run
+#   case. The project, the container name and the host port are this run's own,
+#   so what is left behind can never be somebody's dev stack. And nothing is
+#   persisted, so a container left up all week holds only what the run put in
+#   it.
+#
+#   What it costs is a container and a network on this machine until the next
+#   run or a `--tear-down`, which the last lines of a run print the command
+#   for. NOTHING IN CI IS AFFECTED: the workflow runs ./docker-run-tests.sh and
+#   ./run-coverage.sh, neither of which goes through this script's stack —
+#   the first tears its own compose project down with `--exit-code-from`, and a
+#   coverage run never brings the `sts` container up at all. `--tear-down` is
+#   there for a person who wants the old behaviour anyway.
 # ---------------------------------------------------------------------------
 #
 # What this adds over `npm test` is a REPORT — tests/report/<timestamp>/ with
 # report.html, JUnit report.xml and one log per test file — and the OTHER half
 # of this service's coverage:
 #
-#   THE PROTOCOL JOBS, AGAINST THIS WORKING TREE. Thirteen jobs that drive a
+#   THE PROTOCOL JOBS, AGAINST THIS WORKING TREE. Fourteen jobs that drive a
 #   RUNNING service over HTTP — the Selenium admin-console job among them.
 #   This builds an image from this tree, brings up one container from
-#   docker-compose.yml, runs them against it, and takes it down again.
+#   docker-compose.yml, runs them against it, and LEAVES IT UP (--tear-down
+#   removes it; see AND THE STACK IS LEFT UP above).
 #
 # THE SUITE IS SELF-CONTAINED AS OF 2026-08-28, AND THAT WAS UNTRUE THE DAY
 # BEFORE.
@@ -156,10 +185,16 @@
 #                    this says out loud every time, because a service that
 #                    answers every request while being a week old is the most
 #                    expensive kind of green there is.
-#   --keep-stack     Leave the container running when the run finishes, and
-#                    print how to reach it and how to stop it. For reading
-#                    /admin, or re-running one job by hand against the same
-#                    service.
+#   --keep-stack     THE DEFAULT SINCE 2026-09-01, and this flag is now the
+#                    way to SPELL it rather than the way to ask for it. The
+#                    container is left running when the run finishes and this
+#                    script prints how to reach it and how to stop it — for
+#                    reading /admin, or re-running one job by hand against the
+#                    same service. See AND THE STACK IS LEFT UP above.
+#   --tear-down      The old default: take the container down when the run
+#   --no-keep-stack  finishes. For a machine where a container left running is
+#                    a container somebody will trip over. CI does not need it —
+#                    it runs ./docker-run-tests.sh, which tears its own down.
 #   --sts-port=N     Publish the container's 8081 on this host port instead of
 #                    a free one chosen at start. Only useful when something
 #                    outside this run has to reach the service at a known
@@ -237,7 +272,9 @@ PASSTHROUGH=()
 SERVICE="docker"
 SERVICE_ASKED=0
 BUILD=1
-KEEP_STACK=0
+# LEFT UP WHEN THE RUN FINISHES, since 2026-09-01. See AND THE STACK IS LEFT UP
+# in the header for the argument; --tear-down is the way back to what this was.
+KEEP_STACK=1
 STS_PORT_ARG=""
 COMPOSE_FILE="docker-compose.yml"
 # Overridable so that two runs on one machine (a CI agent with two workspaces)
@@ -302,6 +339,8 @@ do
     --host-service)    SERVICE="host"; SERVICE_ASKED=1 ;;
     --no-build)        BUILD=0 ;;
     --keep-stack)      KEEP_STACK=1 ;;
+    --tear-down)       KEEP_STACK=0 ;;
+    --no-keep-stack)   KEEP_STACK=0 ;;
     --sts-port=*)      STS_PORT_ARG="${1#--sts-port=}" ;;
     --open)            OPEN=1 ;;
     --verbose)         set -x ;;
@@ -644,7 +683,7 @@ stackTeardown()
   if [ "${KEEP_STACK}" = "1" ];
   then
     echo ""
-    echo "The stack is still up, as asked (--keep-stack):"
+    echo "The stack is still up (the default; --tear-down removes it):"
     echo "  service:  ${STS_URL}    console: ${STS_URL}/admin"
     echo "  logs:     ${COMPOSE_CMD} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} logs -f sts"
     echo "  stop it:  ${COMPOSE_CMD} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} down -v"
@@ -944,7 +983,8 @@ export STS_TEST_CONFIG_FILE
 # ---------------------------------------------------------------------------
 # UNSET first, always. run-report.js reads STS_TEST_SERVICE_URL as the
 # environment fallback for --service-url, so one left exported in this shell —
-# by an interrupted --keep-stack run, most likely — would decide what a
+# by an interrupted run that kept its stack, which is now the default — would
+# decide what a
 # --no-docker run drove, silently and against the flag that was passed. In this
 # script the flags decide; the environment fallback is for somebody calling the
 # runner directly.

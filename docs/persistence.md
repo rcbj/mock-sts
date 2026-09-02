@@ -202,7 +202,7 @@ process per store.** `/admin/persistence` says so on the page, and
 ## Checking on it
 
 `/admin/persistence` in the console, `GET /admin-api/persistence` over JSON, and
-`GET /ldap` — which carries the same object and is not behind the console's
+`GET /admin/ldap/service` — which carries the same object and is not behind the console's
 sign-in — all report which mode is in force, whether it fell back to memory
 because the store could not be opened, where it writes, how much it holds, when
 it last wrote, and what went wrong if that failed.

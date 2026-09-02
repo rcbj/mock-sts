@@ -403,6 +403,20 @@ module.exports = {
     t.equal(crypto.certificateThumbprint(der), crypto.certificateThumbprint(keys.certPem),
             'a DER buffer and a PEM give the same answer');
 
+    // AND A CHAIN IS THE LEAF. `tls.certificateFile` may be a bundle — the
+    // stack that supplies one hands over leaf, issuing CA and root — and a
+    // strip of every `-----…-----` line joins three DERs and hashes the join.
+    // That value is the thumbprint of nothing, no tool prints it, and it is
+    // stable enough to agree with itself in every view this service publishes
+    // while disagreeing with the certificate the socket actually presents.
+    const second = crypto.selfSignedRsaCertificate({
+      commonName: 'sts-test-issuer', serialNumber: '05'
+    });
+    t.equal(crypto.certificateThumbprint(keys.certPem + second.certPem),
+            crypto.certificateThumbprint(keys.certPem),
+            'and a PEM holding a CHAIN is the FIRST certificate in it — the ' +
+            'leaf, which is what a socket presents and what a consumer reads');
+
     // -----------------------------------------------------------------------
     t.log.info('H. the clock allowance is applied by DEFAULT — the drift this closed');
     // -----------------------------------------------------------------------

@@ -32,8 +32,8 @@
 #     protocol  — a throwaway copy of THIS WORKING TREE (of the tests IMAGE
 #                 built from it, in a containerized run — which is the same
 #                 tree one `COPY . ./` later), driven over HTTP by
-#                 the thirteen jobs in tests/vendored/ (nine vendored from the
-#                 parent, four this repository's own). This is where
+#                 the fourteen jobs in tests/vendored/ (nine vendored from the
+#                 parent, five this repository's own). This is where
 #                 the sixteen protocol families are actually exercised, and it
 #                 is ON BY DEFAULT since 2026-08-28. It used to need
 #                 --protocol, on the argument that it wanted the parent
@@ -206,7 +206,8 @@ mkdir -p "${COVERAGE_DIR}" "${CURRENT_DIR}/tests/report"
 
 # UNSET rather than merely not set: run-report.js reads STS_TEST_SERVICE_URL as
 # the environment fallback for --service-url, so one left exported in somebody's
-# shell (by an interrupted --keep-stack run, say) would point this run at a
+# shell (by a run that kept its stack, which local-run-tests.sh now does by
+# default) would point this run at a
 # CONTAINER — and the protocol half of the coverage would come out empty, which
 # reads as "the protocols are untested" rather than as "this run could not
 # look". The runner warns when it happens; this makes it not happen.
