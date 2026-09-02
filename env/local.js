@@ -148,7 +148,7 @@ var config = {
   // --- Applications ------------------------------------------------------
   // The registry of every OAuth client, relying party, service provider and
   // Kerberos service this instance has been asked about. It IS the
-  // ou=applications container in the embedded directory — see /ldap/applications
+  // ou=applications container in the embedded directory — see /admin/ldap/applications
   // — so this is a directory limit: past it a new application is refused rather
   // than an old one evicted.
   applications: {

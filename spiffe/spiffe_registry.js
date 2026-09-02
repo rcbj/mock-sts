@@ -120,7 +120,7 @@ function maxAgents() { return config.value('spiffe.maxAgents'); }
 // `node-ldapjs` has no schema subsystem and it is a submodule this repository
 // does not modify, so — exactly as in `applications.js` — there is nothing to
 // register this with. The table IS the definition: an entry is built by WALKING
-// it, `GET /ldap/spiffe` publishes it, and an attribute not in it is REFUSED
+// it, `GET /admin/ldap/spiffe` publishes it, and an attribute not in it is REFUSED
 // rather than written.
 //
 // `multi` accumulates and `single` is assigned. Getting that backwards on the

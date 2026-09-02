@@ -94,7 +94,7 @@ const config = require('../common/config');
 // this line moves nothing in the router — and it requires only `config.js` and
 // `realms.js`, neither of which reaches back here. Rule 3e's test therefore
 // asks for no slot, both ways round. `/admin/persistence` renders its
-// `status()` and `GET /ldap` publishes the same object.
+// `status()` and `GET /admin/ldap/service` publishes the same object.
 const persistence = require('../persistence/persistence');
 // TRUST REALMS: the registry behind /admin/realms, and the switcher this shell
 // draws on every page. It requires config.js and nothing else here, registers
@@ -386,6 +386,25 @@ const DEFAULT_PER_PAGE = 50;
 // `?per=` still overrides it, for the same reason it overrides everything else: a
 // number somebody typed is a number they meant.
 const DEFAULT_BLOCKS_PER_PAGE = 5;
+
+// Rows per page for EVERY list on /admin/delegation, which is the one page here
+// that carries seven of them at once.
+//
+// It is a tenth of DEFAULT_PER_PAGE and that is the point rather than a tuning
+// choice. The other pages in this console are ONE list under one heading, where
+// fifty rows is a table somebody scrolls; this page is seven — the acts, the
+// chains, the permissions a resource exposes, the grants between two
+// applications, the two Kerberos policy tables and the mechanism catalogue —
+// with several screens of prose between them, so fifty rows apiece is a
+// document tens of thousands of pixels long in which the seventh heading is
+// unreachable by anything but the scrollbar. Ten keeps every section's control
+// within a screen of its heading, which is what makes the page navigable at
+// all; everything above ten is one click away and the control says how much.
+//
+// `?per=` still overrides it for all seven together, exactly as it does on the
+// drill-downs, and perPageOptions() offers this value because it offers
+// whatever is in force. A number somebody typed is a number they meant.
+const DELEGATION_PER_PAGE = 10;
 
 // How many subjects the metrics page names in one "Who" cell before it says how
 // many more there are. A separate cap from MAX_ROWS because it bounds a cell rather
@@ -918,7 +937,95 @@ const SECTIONS = [
                + 'one. What DOES take effect is the configuration underneath: '
                + 'give the entry its redirect URIs and its secret from '
                + '<a href="/admin/applications">Applications</a> and RFC 9700 '
-               + 'mode judges the next request against them.' }
+               + 'mode judges the next request against them.' },
+      // -------------------------------------------------------------------
+      // THE SECOND GROUP IN THIS CONSOLE, AND THE FIRST OUTSIDE PROTOCOLS.
+      //
+      // These five pages were `/ldap`, `/admin/ldap/directory`,
+      // `/admin/ldap/applications`, `/admin/ldap/federations` and `/admin/ldap/spiffe` until
+      // 2026-09-01 — five HTML pages outside the console, in their own shell,
+      // with their own CSS, no sidebar, no breadcrumb, no realm switcher and
+      // no gate. Every one of them shows what is in this service's directory,
+      // which is what the four pages above them show; the only thing that
+      // made them a separate surface was where they happened to have been
+      // written. They are drawn by `ldap/ldap_server.js` still — a page here
+      // is a `path` and a `label` whoever builds it, exactly as
+      // `/admin/sts-metadata` is — and they answer in this shell now.
+      //
+      // THEY ARE A GROUP AND NOT FIVE MORE ITEMS, and the test is the one
+      // stated for SAML above: does the heading name more than the page under
+      // it does? It does. The four pages above are each ONE KIND OF THING
+      // this service has seen, drawn the way the console draws things; these
+      // five are the STORE UNDERNEATH all four, entry by entry and attribute
+      // by attribute, which is a different question and one a reader either
+      // wants or does not. Ungrouped they would have doubled the length of
+      // this section with rows that read as alternatives to Users and
+      // Applications rather than as the layer beneath them.
+      //
+      // WHAT MOVING THEM COST is that they are GATED now: they are `/admin`
+      // pages, so `admin.authRequired` applies and a reader needs a session
+      // and a role. That is a real change and it is the right one — a dump of
+      // every attribute of every entry includes `oauthClientSecret` and
+      // `fedClientSecret` in the clear, and it was the one surface in this
+      // service printing those to anybody who could reach the port while the
+      // console next door asked for a role to show far less. `/admin-api` is
+      // still ungated and mirrors all five, which is what a test drives.
+      { title: 'As the directory holds it',
+        what: 'The store underneath the four pages above: every entry, every ' +
+              'attribute, and the vocabulary each container uses.',
+        items: [
+          { path: '/admin/ldap/directory', label: 'Every entry',
+            blurb: 'The whole store, DN by DN, with where each entry came ' +
+                   'from — seeded, added over LDAP, or created because ' +
+                   'somebody authenticated — and every attribute it holds ' +
+                   'with every value. It is not LDAP: it is this service ' +
+                   'showing its own store, which is how a reader tells an ' +
+                   'empty directory from a search filter that matched ' +
+                   'nothing. A value too long for its column is shortened ' +
+                   'and the whole of it is one hover away.' },
+          { path: '/admin/ldap/applications', label: 'Application entries',
+            blurb: 'The same applications <a href="/admin/applications">' +
+                   'Applications</a> lists, as the DIRECTORY holds them: one ' +
+                   'entry per identifier under <code>ou=applications</code>, ' +
+                   'every attribute on it, and the published SCHEMA — the ' +
+                   'object classes and every attribute name with what sets ' +
+                   'it. That schema is why this page exists rather than ' +
+                   'being a column on the other one: this directory is ' +
+                   'schemaless, so an entry carrying thirty invented ' +
+                   'attribute names needs somewhere to say what they mean or ' +
+                   'a client reading one back is guessing.' },
+          { path: '/admin/ldap/federations', label: 'Federation entries',
+            blurb: 'The application registry\'s twin, for ' +
+                   '<code>ou=federations</code> — and the one container in ' +
+                   'this directory where an <code>ldapmodify</code> is a ' +
+                   'SECURITY change. Everywhere else an edit changes what ' +
+                   'this service hands out; <code>fedSigningCertificate</code> ' +
+                   'decides whose assertions it will BELIEVE and ' +
+                   '<code>fedEnabled</code> turns a partner on. It publishes ' +
+                   'the schema with a column the applications page has no ' +
+                   'need of: which DIRECTION each attribute is for.' },
+          { path: '/admin/ldap/spiffe', label: 'SPIFFE entries',
+            blurb: 'The two SPIFFE containers as the directory holds them. ' +
+                   '<code>ou=entries</code> is CONFIGURATION — which SPIFFE ' +
+                   'ID a workload gets, under which parent, matching which ' +
+                   'selectors — and <code>ou=agents</code> is a RECORD of ' +
+                   'what has attested, which is why nothing about an agent is ' +
+                   'editable anywhere. The entries ARE the registry: nothing ' +
+                   'caches them, so an <code>ldapmodify</code> of ' +
+                   '<code>spiffeX509SvidTtl</code> changes the lifetime of ' +
+                   'the next SVID the Workload API hands out.' },
+          { path: '/admin/ldap/service', label: 'The directory service',
+            blurb: 'The two raw sockets and the store behind them, as they ' +
+                   'actually are right now rather than as they are ' +
+                   'configured: whether TCP 389 and LDAPS 636 really bound ' +
+                   '(this page is HTTP and answers either way, so it is the ' +
+                   'only way to tell a running listener from one whose port ' +
+                   'was taken), how many entries are held, whether any of it ' +
+                   'survives a restart, the bind policy, and the four ' +
+                   'structural rules this directory does still enforce. What ' +
+                   'the sockets are SET to is ' +
+                   '<a href="/admin/ldap">LDAP / LDAPS</a> under Protocols.' }
+        ] }
     ] },
   { title: 'Monitoring',
     what: 'What this service has done: how much of it, what came out, and ' +
@@ -1397,8 +1504,19 @@ const LIST_PARAMS = {
   // the chooser should open holding the search they were in the middle of. It
   // is also what keeps the two searches independent of each other — each names
   // its own pair, so paging one cannot move the other.
+  //
+  // The eight names after those are the SEVEN LISTS' page numbers and the two
+  // section searches (2026-09-01). Every list on that page is paged separately
+  // and they share one `per`, so each needs a parameter of its own — and every
+  // one of them has to survive a drill-down for the reason `page` does: a
+  // reader who paged the grants table to 4, clicked a client and came back
+  // should come back to page 4 of the grants table and not to the top of a
+  // page they have already read three screens of.
   '/admin/delegation': ['type', 'mode', 'outcome', 'protocol', 'q', 'per', 'page',
-                        'appq', 'appfrom', 'userq', 'userfrom'],
+                        'appq', 'appfrom', 'userq', 'userfrom',
+                        'permq', 'grantq',
+                        'chainsPage', 'permissionsPage', 'grantsPage',
+                        'pairsPage', 'flagsPage', 'mechanismsPage'],
   // The tokens page's own three filters and its paging, here since 2026-08-26
   // because that page now HAS a drill-down: every identifier links to
   // /admin/tokens/credential, and without this entry the way back from it landed
@@ -1912,8 +2030,19 @@ function page(title, active, inner, up, gate, req) {
     // option anyway. The sidebar's `flex` is `0 0 auto` with a fixed basis so
     // that a long label wraps inside it instead of widening it and squeezing
     // the tables, which is the failure mode of letting it size to content.
+    // THE CAP WIDENED FROM 92rem TO 104rem ON 2026-09-01, and the reason is
+    // one column on one page rather than a general preference for wide
+    // layouts. `/admin/ldap/directory` draws EVERY ATTRIBUTE OF EVERY ENTRY,
+    // and an attribute value here is routinely an opaque forty-character
+    // identifier — a DN, a certificate thumbprint, a client secret — so that
+    // column is the widest thing in this console by a distance. At 92rem it
+    // spilled past the card on a laptop. The extra twelve are what let the
+    // shortening below (clipped()) keep a value readable instead of cutting
+    // it to a stub, and every other page is unaffected: `.main` is
+    // `flex:1 1 32rem`, so a page whose content is narrower stays the width
+    // its content wants.
     '.shell{display:flex;flex-wrap:wrap;align-items:flex-start;gap:18px;' +
-    'max-width:92rem;margin:0 auto}' +
+    'max-width:104rem;margin:0 auto}' +
     // THE SIDEBAR SCROLLS ITSELF RATHER THAN WITH THE PAGE. `position:sticky`
     // alone was not enough and the reason is easy to miss: a sticky box that
     // is TALLER than the viewport is pinned by its TOP, so the bottom of the
@@ -2050,6 +2179,72 @@ function page(title, active, inner, up, gate, req) {
     // did:jwk widen the whole table past the card it sits in.
     'td.who{overflow-wrap:anywhere;line-height:1.9}' +
     'td.who code{white-space:normal}' +
+    // THE "EVERY ATTRIBUTE" CELL on the four directory pages. One `<div>` per
+    // attribute rather than `<br>`-separated text, so a value that DOES wrap
+    // (a short multi-valued attribute, say) stays visually under its own
+    // name instead of running into the next attribute's line. The cell does
+    // not need `overflow-wrap` the way `td.who` does, because everything long
+    // in it has been through clipped() — which is the point of that helper.
+    'td.attrs>div{margin:.15em 0}' +
+    '.vals{display:inline-block;vertical-align:top}' +
+    // The DN column on the directory dump. Given a share rather than left to
+    // the browser's auto layout, which sizes a column to its widest cell and
+    // therefore handed the longest DN in the store a third of the table while
+    // the attributes — the column with everything in it — got squeezed.
+    'th.dn,td.dn{width:26%}th.from,td.from{width:8%}' +
+    // A cell of short counted facts, one per line. Without the nowrap the
+    // browser breaks "0 session(s)" across two lines in a narrow column and
+    // the number ends up on a line of its own, reading as a value with no
+    // label.
+    'td.counts{white-space:nowrap}' +
+
+    // -------------------------------------------------------------------
+    // A VALUE TOO LONG FOR ITS CELL, AND THE POPUP THAT GIVES IT BACK.
+    //
+    // See clipped() below for what this is for and why the truncation is
+    // done in the markup rather than by CSS. What these rules add is the
+    // half that has to be a HOVER: the full value, in a box the reader can
+    // put the pointer INTO and select out of.
+    //
+    // IT IS NOT A `title` ATTRIBUTE, and that is the whole design. A native
+    // tooltip cannot be selected, so a shortened client secret or DN would
+    // be readable and not copyable — and copying it is the entire reason
+    // somebody hovers a value on these pages. A `title` is still set beside
+    // it, because a native tooltip is what a keyboard user and a screen
+    // reader get; the rule this console holds to is that nothing is ever
+    // said ONLY in a tooltip, and here the full value is in the document
+    // either way.
+    //
+    // THERE IS NO SCRIPT (app.js sets `script-src 'none'`), so the popup is
+    // `:hover` and `:focus-within` and nothing else. `tabindex="0"` on the
+    // wrapper is what makes the second one reachable from a keyboard.
+    //
+    // The box hangs off the BOTTOM EDGE with no gap, so the pointer can
+    // travel from the truncated text into the box without crossing dead
+    // space and dismissing it — a gap here is the classic way a hover popup
+    // becomes unusable. `z-index` puts it over the rows below; `max-width`
+    // is in `ch` because what it holds is monospace and the useful measure
+    // is characters rather than inches.
+    '.trunc{position:relative;border-bottom:1px dotted #9a9ab0;cursor:help}' +
+    '.trunc>.full{display:none;position:absolute;z-index:30;left:0;top:100%;' +
+    'min-width:16rem;max-width:88ch;padding:7px 9px;background:#fffdf3;' +
+    'border:1px solid #d9d2a8;border-radius:6px;' +
+    'box-shadow:0 6px 18px rgba(0,0,0,.18);font-size:1.05em;' +
+    'overflow-wrap:anywhere;white-space:normal;cursor:text}' +
+    // ONE CLICK SELECTS THE WHOLE VALUE. `user-select:all` is on the `code`
+    // and not on the box, so the hint under it stays out of the selection —
+    // a copy that carried "58 characters — select to copy" into somebody's
+    // configuration file would be a helper that breaks the thing it helps.
+    '.trunc>.full code{user-select:all;-webkit-user-select:all;' +
+    'background:transparent;padding:0}' +
+    '.trunc:hover>.full,.trunc:focus>.full,.trunc:focus-within>.full{display:block}' +
+    // The one-line reminder under the value. `user-select:none` so that a
+    // reader who selects the box to copy it does not carry this sentence
+    // into their clipboard with the value — which would be a tooltip that
+    // breaks the thing it exists to help with.
+    '.trunc>.full .hint{display:block;margin-top:5px;font-size:.72em;' +
+    'color:#7a7460;font-family:system-ui,-apple-system,sans-serif;' +
+    'user-select:none;-webkit-user-select:none}' +
     '.state-valid{color:#0b6b4f;font-weight:600}.state-expired{color:#8a6d00}' +
     '.state-revoked{color:#b00020;font-weight:600}.state-none{color:#666}' +
     'form.inline{display:inline;margin:0}' +
@@ -3144,6 +3339,86 @@ function shortened(value, keep) {
 }
 
 // ---------------------------------------------------------------------------
+// THE SAME IDEA FOR A COLUMN OF THEM, AND WHY IT IS NOT shortened().
+//
+// shortened() above is for ONE identifier in a narrow column — a jti, eighteen
+// characters and a native tooltip — and it has been right for the tokens page
+// for as long as that page has existed. This is for the directory dumps, where
+// the shape of the problem is different in three ways that together make a
+// second function cheaper than a mode flag on the first:
+//
+//   * THERE ARE HUNDREDS OF THEM IN ONE CELL. `/admin/ldap/directory` prints
+//     EVERY attribute of every entry, and an entry that has authenticated
+//     over TLS carries a certificate subject, a serial, two thumbprints and a
+//     DN — none under forty characters, several over two hundred. Wrapping
+//     them (which is what the cell did before) made rows four and five lines
+//     deep, so a page of fifty entries was a mile long and unreadable; NOT
+//     wrapping them pushed the table out past the white card, which is the
+//     complaint this was written for. Cutting them is the only answer that
+//     leaves a table shaped like a table.
+//   * THE VALUE IS THE POINT, so it must be recoverable. A shortened DN that
+//     cannot be read in full is a dump that has quietly stopped being a dump.
+//   * IT MUST BE COPYABLE, which a `title` attribute is not. Somebody hovering
+//     `oauthClientSecret` here is going to paste it into a client's
+//     configuration, and a native tooltip cannot be selected. So the full
+//     value is a real element — see `.trunc` in page() — that the pointer can
+//     move into, with `user-select:all` on it so one click takes the whole
+//     thing.
+//
+// The `title` is set as well and is not redundant: it is what a keyboard user
+// and most screen readers get, and it is what a browser with the popup
+// scrolled off the edge of the window still shows. Nothing here is said only
+// in a tooltip — the rule tip() states — because the full value is in the
+// document twice over.
+//
+// `keep` is a CHARACTER count and not a width, deliberately. These cells are
+// monospace and the values are opaque, so characters are the honest measure;
+// a CSS width would cut mid-glyph at whatever the browser's font happened to
+// be and would give the reader no idea how much was missing. The count in the
+// hint is the other half of that: "218 characters" tells somebody at a glance
+// whether they are looking at a thumbprint or a whole certificate.
+// ---------------------------------------------------------------------------
+const CLIP_CHARS = 46;
+
+function clipped(value, keep) {
+  const text = String(value == null ? '' : value);
+  const limit = keep || CLIP_CHARS;
+  if (!text) {
+    return '<code>&mdash;</code>';
+  }
+  if (text.length <= limit) {
+    return '<code>' + esc(text) + '</code>';
+  }
+  return '<span class="trunc" tabindex="0" title="' + esc(text) + '">' +
+    '<code>' + esc(text.slice(0, limit)) + '&hellip;</code>' +
+    '<span class="full"><code>' + esc(text) + '</code>' +
+    '<span class="hint">' + text.length + ' characters &mdash; click the ' +
+    'value to select it all, then copy</span></span></span>';
+}
+
+// One attribute's values, clipped, one per line. Written once because four
+// directory pages draw exactly this cell and a fifth written by hand is the
+// one that goes back to printing the raw value.
+function clippedValues(values, keep) {
+  const list = Array.isArray(values) ? values : [values];
+  if (!list.length) {
+    return '<code>&mdash;</code>';
+  }
+  // ONE VALUE PER LINE, INSIDE AN INLINE BLOCK, and the wrapper is the whole
+  // point of it. Joined with a bare `<br>` the second value of a multi-valued
+  // attribute starts at the cell's left margin — under the attribute NAME
+  // rather than under the first value — so `member` with three DNs on it read
+  // as one attribute followed by two nameless ones. `display:inline-block`
+  // makes the values a column of their own that begins where the first one
+  // does. (They were joined with " | " on one line before 2026-09-01, which
+  // has the opposite failure: five values of forty characters is a line
+  // nothing can align.)
+  return '<span class="vals">' + list.map(function (one) {
+    return clipped(one, keep);
+  }).join('<br>') + '</span>';
+}
+
+// ---------------------------------------------------------------------------
 // One table, three families.
 //
 // The tokens page lists JWTs, SAML assertions and Kerberos tickets together and
@@ -3477,6 +3752,71 @@ function pageParamsOf(query) {
   });
   log.debug("Leaving pageParamsOf(). " + Object.keys(out).length + " parameter(s).");
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// A ONE-BOX SEARCH OVER ONE SECTION OF A PAGE THAT CARRIES SEVERAL.
+//
+// The list views have a filter form each and they can: a page with one table
+// on it can put the filter, the page size and the search in one row above it
+// and every control there is unambiguous. /admin/delegation is seven tables,
+// and a second `q` would have been a box the reader has to guess the scope of.
+// So each searchable section gets its own parameter and its own box, drawn
+// immediately under its own heading, and the box says in its label WHICH table
+// it narrows.
+//
+// It is deliberately NOT chooserPane(). That control is a SEARCH FOR ONE THING
+// — it draws a scrolling pane of candidates and every hit is a link away from
+// this page — and this one narrows a table the reader is going to stay and
+// read. Sharing an implementation would have meant one function with a mode
+// flag deciding whether its results were the answer or the rows, which is two
+// controls wearing one name.
+//
+// THE FRAGMENT IS THE SAME TRICK AND FOR THE SAME REASON chooserPane()'s header
+// argues at length: this is a GET that reloads the page, a reload lands at the
+// top of the document, and this console runs no script (app.js sets
+// `script-src 'none'`) so nothing can restore a scroll offset afterwards.
+// Submitting to `#find-<param>` puts the box back under the reader's eyes.
+// Submitting a GET form replaces the action URL's QUERY and leaves its FRAGMENT
+// alone, which is why the anchor cannot be a hidden input.
+//
+// TWO NAMES COME OUT OF THE CARRIED SET AND EACH FOR ITS OWN REASON. The search
+// term, because the text input re-emits it and a hidden input beside it would
+// submit the old one; and the section's PAGE NUMBER, because a new search
+// starts at its first page — carrying page 4 into a two-page result would be
+// clamped by pagingOf() and read as the box ignoring what was typed.
+//
+// `spec`: { path, query, param, pageParam, label, placeholder, what }
+function sectionSearchForm(spec) {
+  log.debug("Entering sectionSearchForm(). param=" + spec.param);
+  const query = spec.query || {};
+  const wanted = queryOne(query, spec.param).trim();
+  const anchor = 'find-' + spec.param;
+  const carried = pageParamsOf(query);
+  delete carried[spec.param];
+  delete carried[spec.pageParam];
+  const hidden = Object.keys(carried).map(function (name) {
+    return '<input type="hidden" name="' + esc(name) + '" value="' +
+           esc(carried[name]) + '">';
+  }).join('');
+  log.debug("Leaving sectionSearchForm(). wanted=" + (wanted || '(nothing)'));
+  return '<form method="get" id="' + esc(anchor) + '" class="finder" action="' +
+    esc(spec.path) + '#' + esc(anchor) + '">' +
+    '<div class="formrow">' + hidden +
+      '<label for="' + esc(spec.param) + '">' + esc(spec.label) + '</label>' +
+      '<input type="text" id="' + esc(spec.param) + '" name="' + esc(spec.param) +
+        '" size="32" value="' + esc(wanted) + '" placeholder="' +
+        esc(spec.placeholder) + '">' +
+      '<button class="secondary">Search</button>' +
+      (wanted
+        ? ' <a href="' + esc(spec.path + queryWith(carried, {})) + '#' + esc(anchor) +
+          '">clear</a>'
+        : '') +
+    '</div></form>' +
+    // OUTSIDE the form rather than in it. A note() longer than a line is a
+    // `<details>`, and a disclosure widget inside a form is legal but reads as
+    // part of the control — this sentence is about the TABLE under the box.
+    (spec.what ? note(spec.what) : '');
 }
 
 // The per-page select, written once because five surfaces offer it and a sixth
@@ -5993,7 +6333,13 @@ function delegationView(query) {
   // Filter first, then page — the same order the tokens and audit pages use and
   // for the same reason: paging a list and then filtering it gives a page 2
   // whose length depends on what page 1 happened to hold.
-  const paging = pagingOf(query, filtered.length, { noun: 'acts' });
+  // DELEGATION_PER_PAGE rather than the console-wide fifty, and it is passed
+  // HERE rather than at the page, so that `GET /admin-api/delegation` and the
+  // page it mirrors agree about what one page of acts is. A caller walking the
+  // API with `?page=` and a reader clicking `next ›` must not be reading two
+  // different pagings of one list.
+  const paging = pagingOf(query, filtered.length,
+                          { noun: 'acts', defaultPer: DELEGATION_PER_PAGE });
   const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
   const summary = delegation.summary();
   // The chains of what MATCHED rather than of everything held: a reader who has
@@ -6115,6 +6461,27 @@ function delegationView(query) {
 // form, `POST /admin-api/permissions/...` and the generic attribute editor on
 // /admin/applications all go through one implementation of "a permission must
 // be defined before it can be granted". See that module's header.
+//
+// **ONE OF THE FIVE FORMS IS NOT DRAWN ON THIS PAGE ANY MORE (2026-09-01).**
+// `grant-permission` is on the CLIENT application's own page — see
+// applicationPermissionsSection() — because a grant is a value on the client's
+// entry, and there the client is the entry the reader is standing on rather
+// than one option in a select of every application here. What this page keeps
+// is the RESOURCE half, which is what it is about: expose an API, define a
+// permission, remove one.
+//
+// `revoke-permission` IS DRAWN IN BOTH PLACES and that is not a leftover. It
+// is a ROW BUTTON, so its two halves are the row it sits on and neither can be
+// got wrong — which is precisely what was wrong with the grant form's two
+// selects. The register here lists every grant in the service and a reader
+// tidying it should not have to open five application pages; the application's
+// own list is the read-back of the grant they just made, and a table with no
+// way to undo the write above it is half a control.
+//
+// None of it touches anything else in this block: every form posts to the same
+// handler, PERMISSION_ACTIONS is still all five, and the paragraph above about
+// the acts half having no control and the configured half being nothing but
+// controls is unchanged. What moved is where one control is DRAWN.
 // ---------------------------------------------------------------------------
 
 // BUILT FROM THE SWITCH BELOW RATHER THAN TYPED, for the reason
@@ -6250,20 +6617,39 @@ function permissionDefinitionRow(one, listView) {
             ' <span class="state-none" title="Granted and never asked for.">(unused)</span>');
         }).join('<br>')
       : '<span class="state-none">&mdash;</span>') + '</td>' +
-    '<td>' + (one.id
-      ? '<form method="post" action="/admin/delegation"><div class="formrow">' +
-        '<input type="hidden" name="action" value="remove-permission">' +
-        '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
-        '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
-        '<button type="submit" class="danger">Remove</button>' +
-        '</div></form>'
-      : '<form method="post" action="/admin/delegation"><div class="formrow">' +
-        '<input type="hidden" name="action" value="remove-permission">' +
-        '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
-        '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
-        '<button type="submit" class="danger">Remove</button>' +
-        '</div></form>') + '</td>' +
+    // THE TWO BRANCHES DREW THE SAME FORM, and they did before this row
+    // carried a `back` as well — the `one.id` test above decides the
+    // IDENTIFIER cell, not this one, and a permission with no identifier is
+    // removed by exactly the same call. One form, once.
+    '<td><form method="post" action="/admin/delegation">' +
+      permissionsBack(listView) + '<div class="formrow">' +
+      '<input type="hidden" name="action" value="remove-permission">' +
+      '<input type="hidden" name="resource" value="' + esc(one.resource) + '">' +
+      '<input type="hidden" name="name" value="' + esc(one.name) + '">' +
+      '<button type="submit" class="danger">Remove</button>' +
+      '</div></form></td>' +
     '</tr>';
+}
+
+// THE LIST STATE, AS ONE FIELD, FOR THE ROW BUTTONS OF THE CONFIGURED REGISTER.
+//
+// It cost nothing while /admin/delegation drew every row it had: a Revoke
+// answered with a redirect to the top of the register and the row that had gone
+// was on the screen anyway. With seven paged tables and two searches on that
+// page it is the difference between a Revoke that answers where you were
+// standing and one that throws you back to page 1 of an unfiltered list, three
+// screens up, with the search you were reading by cleared.
+//
+// One opaque field rather than the parameters loose in the body, for the reason
+// /admin/applications' `carryBack` gives: an action reads its own body BY NAME,
+// and a `q` or a `permissionsPage` loose in there is a field some action added
+// later could pick up by accident. permissionsReturnTo() rebuilds a query from
+// it through listViewOf()'s whitelist rather than echoing it, which is what
+// keeps a hand-written `back` from becoming a redirect somewhere this file did
+// not write.
+function permissionsBack(listView) {
+  return '<input type="hidden" name="back" value="' +
+         esc(queryWith(listView || {}, {})) + '">';
 }
 
 // One row of the grants table: the RELATIONSHIP itself.
@@ -6309,13 +6695,51 @@ function permissionGrantRow(one, listView) {
       : '<span class="state-none" title="This client has never asked for it. A ' +
         'configured grant nobody has needed is exactly what this register is ' +
         'here to show.">never asked for</span>') + '</td>' +
-    '<td><form method="post" action="/admin/delegation"><div class="formrow">' +
+    '<td><form method="post" action="/admin/delegation">' +
+      permissionsBack(listView) + '<div class="formrow">' +
       '<input type="hidden" name="action" value="revoke-permission">' +
       '<input type="hidden" name="client" value="' + esc(one.client) + '">' +
       '<input type="hidden" name="permission" value="' + esc(one.permissionId) + '">' +
       '<button type="submit" class="danger">Revoke</button>' +
       '</div></form></td>' +
     '</tr>';
+}
+
+// WHICH ROWS OF THE CONFIGURED REGISTER THE BROWSER IS BEING SHOWN — the two
+// searches and the two pagings, worked out in ONE PURE FUNCTION.
+//
+// It is a function rather than four lines inside permissionsSection() because
+// the page's `?format=json` has to report the same answer, and there is no way
+// to read it back out of a string of markup. Two hand-written copies of "filter
+// on the client and the resource, then slice" is the disagreement this file
+// keeps warning about, and it would be invisible: the table and the reply would
+// each look right alone.
+//
+// It takes the QUERY and the register rather than the request, so it can be
+// called twice with the same arguments and cannot answer differently.
+function permissionsListState(query, register) {
+  log.debug("Entering permissionsListState().");
+  const permWanted = queryOne(query, 'permq').trim();
+  const grantWanted = queryOne(query, 'grantq').trim();
+  const permissionsMatched = register.permissions.filter(function (one) {
+    return chooserMatches([one.resourceName, one.resource], permWanted);
+  });
+  // BOTH ENDS OF THE RELATIONSHIP. A dangling grant carries no resource, so it
+  // matches on its client alone — which is the only application named on that
+  // row and therefore the only one it could be found by.
+  const grantsMatched = register.grants.filter(function (one) {
+    return chooserMatches([one.clientName, one.client,
+                           one.resourceName, one.resource], grantWanted);
+  });
+  log.debug("Leaving permissionsListState(). " + permissionsMatched.length +
+            " permission(s) and " + grantsMatched.length + " grant(s) matched.");
+  return {
+    permWanted: permWanted, grantWanted: grantWanted,
+    permPage: pagedRows(query, permissionsMatched,
+      { name: 'permissions', noun: 'permissions', defaultPer: DELEGATION_PER_PAGE }),
+    grantPage: pagedRows(query, grantsMatched,
+      { name: 'grants', noun: 'grants', defaultPer: DELEGATION_PER_PAGE })
+  };
 }
 
 // The whole configured section, as it appears on /admin/delegation. Extracted
@@ -6340,12 +6764,46 @@ function permissionsSection(req, view, listView) {
   // Only the permissions that HAVE an identifier can be granted, so only those
   // are offered. One with no base URI is on the table above with the reason.
   const grantable = register.permissions.filter(function (one) { return !!one.id; });
-  const permissionOptions = grantable.map(function (one) {
-    return '<option value="' + esc(one.id) + '">' + esc(one.id) +
-           ' — exposed by ' + esc(one.resourceName) + '</option>';
-  }).join('');
 
-  log.debug("Leaving permissionsSection(). " + counts.grants + " grant(s).");
+  // -------------------------------------------------------------------------
+  // THE TWO SEARCHES AND THE TWO PAGINGS (2026-09-01).
+  //
+  // Both tables here are unbounded — one row per permission defined and one
+  // row per (client, permission) — and a service driven for an afternoon puts
+  // tens of each on a page that already carries five other tables. Ten rows a
+  // page is what makes the page navigable at all; DELEGATION_PER_PAGE argues
+  // the number.
+  //
+  // THE SEARCH IS OVER THE APPLICATION AND NOT OVER THE WHOLE ROW, and the two
+  // tables answer it differently because a permission has ONE application in it
+  // and a grant has TWO. `permq` searches the application that EXPOSES the
+  // permission; `grantq` searches BOTH ends of the relationship, for the reason
+  // the acts table's own box gives — the fact a reader arrives with names one
+  // of the two and they do not know which column it will be in. Both match on
+  // the display name AND on the identifier, because half the names in this
+  // registry are the identifier and the other half are not, and a reader
+  // pastes whichever one the page showed them last.
+  //
+  // Filter first, then page — pagingOf()'s rule, and for its reason: paging a
+  // list and then filtering it gives a page 2 whose length depends on what
+  // page 1 happened to hold.
+  // -------------------------------------------------------------------------
+  const state = permissionsListState(req.query, register);
+  const permWanted = state.permWanted;
+  const grantWanted = state.grantWanted;
+  const permPage = state.permPage;
+  const grantPage = state.grantPage;
+  // EVERY parameter the reader is already carrying, so that paging one table
+  // moves nothing else on the page — the six other lists, both chooser
+  // searches and the other table's own search all ride along. pageNavPair()
+  // overrides only the one name off the paging object it is handed.
+  const navParams = pageParamsOf(req.query);
+  const permNav = pageNavPair('/admin/delegation', navParams, permPage.paging);
+  const grantNav = pageNavPair('/admin/delegation', navParams, grantPage.paging);
+
+  log.debug("Leaving permissionsSection(). " + counts.grants + " grant(s), " +
+            permPage.shown.length + " permission row(s) and " +
+            grantPage.shown.length + " grant row(s) drawn.");
   return '<h2 id="allowed">What is ALLOWED, decided in advance</h2>' +
 
     note('<strong>Everything above this heading is EVIDENCE and everything ' +
@@ -6358,13 +6816,13 @@ function permissionsSection(req, view, listView) {
     'grants has nobody ever used</em>, and <em>what has been delegated that ' +
     'nobody granted</em>.') +
 
-    note('<strong>The model is Microsoft Entra ID\'s, deliberately and by ' +
-    'name.</strong> A RESOURCE application exposes an API: it is given a base URI ' +
-    '(Entra calls it the Application ID URI and spells it <code>api://&lt;guid&gt;</code>; ' +
-    'anything absolute works here) and a list of permissions. A permission is ' +
-    'identified by the two joined together &mdash; base <code>https://example.com/</code> ' +
-    'and name <code>write</code> make <code>https://example.com/write</code> &mdash; and a ' +
-    'CLIENT application is granted some of them. <strong>A permission must be ' +
+    note('<strong>A RESOURCE application exposes an API and a CLIENT ' +
+    'application is granted permissions on it.</strong> The resource is given a ' +
+    'base URI &mdash; anything absolute works here &mdash; and a list of ' +
+    'permissions. A permission is identified by the two joined together ' +
+    '&mdash; base <code>https://example.com/</code> and name ' +
+    '<code>write</code> make <code>https://example.com/write</code> &mdash; and ' +
+    'a client application is granted some of them. <strong>A permission must be ' +
     'DEFINED before it can be GRANTED</strong>, which is the one ordering rule ' +
     'this feature has; it is checked in <code>applications.js</code> so that this ' +
     'form, the management API and the attribute editor on ' +
@@ -6412,20 +6870,44 @@ function permissionsSection(req, view, listView) {
     'client has actually asked for that permission, which is the reading a ' +
     'configured register exists for and the one an acts diagram can never give.') +
 
-    '<h3>Permissions applications expose</h3>' +
+    '<h3 id="permissions">Permissions applications expose</h3>' +
     note('One row per permission. <strong>Defining one grants it to ' +
     'nobody</strong>, so a row with nothing in the last two columns is the ' +
     'ordinary first step rather than a mistake. Removing a permission does NOT ' +
     'revoke the grants naming it &mdash; they stay on the clients\' entries and ' +
     'become dangling, because tidying them would be this page writing to entries ' +
     'nobody named.') +
+    sectionSearchForm({
+      path: '/admin/delegation', query: req.query,
+      param: 'permq', pageParam: 'permissionsPage',
+      label: 'Narrow to an application',
+      placeholder: 'part of an application name or identifier',
+      what: 'It matches the application that EXPOSES the permission &mdash; ' +
+        'the first column &mdash; on its name and on its identifier both, and ' +
+        'nothing else on the row. A permission belongs to exactly one ' +
+        'application, so there is no second column this box could have meant. ' +
+        'To find every permission some application HOLDS, search the grants ' +
+        'table below instead: that is the relationship, and this table is the ' +
+        'definition.'
+    }) +
+    permNav.head +
     '<table><tr><th>Exposed by</th><th>Permission</th><th>Identifier &mdash; what a ' +
     'client sends</th><th>Held by</th><th>Which applications</th><th></th></tr>' +
-    (register.permissions.map(function (one) {
+    (permPage.shown.map(function (one) {
       return permissionDefinitionRow(one, listView);
-    }).join('') || '<tr><td colspan="6">No application here exposes an API yet. ' +
-      'Give one a base URI below and then define a permission on it.</td></tr>') +
+    }).join('') || '<tr><td colspan="6">' +
+      (permWanted
+        ? 'No application whose name or identifier contains <code>' +
+          esc(permWanted) + '</code> exposes a permission. ' +
+          (register.permissions.length
+            ? register.permissions.length + ' permission(s) are defined here ' +
+              'under other applications.'
+            : 'None is defined here at all yet.')
+        : 'No application here exposes an API yet. Give one a base URI below ' +
+          'and then define a permission on it.') +
+      '</td></tr>') +
     '</table>' +
+    permNav.foot +
 
     '<h4>Expose an API</h4>' +
     note('The base URI is one answer per application and everything it ' +
@@ -6434,7 +6916,8 @@ function permissionsSection(req, view, listView) {
     '<code>https://example.com</code> + <code>write</code> would otherwise read as ' +
     'one word. Clearing it leaves the permissions on the entry with no identifier ' +
     'at all, which the table above reports rather than hides.') +
-    '<form method="post" action="/admin/delegation"><div class="formrow">' +
+    '<form method="post" action="/admin/delegation">' + permissionsBack(listView) +
+      '<div class="formrow">' +
       '<input type="hidden" name="action" value="set-permission-base">' +
       '<label for="base-resource">Application</label>' +
       '<select id="base-resource" name="resource">' + applicationOptions + '</select>' +
@@ -6453,7 +6936,8 @@ function permissionsSection(req, view, listView) {
     'is; changing it means removing the permission and defining it again, because ' +
     'a permission has one description and two rows with one name would leave the ' +
     'second unreachable.') +
-    '<form method="post" action="/admin/delegation"><div class="formrow">' +
+    '<form method="post" action="/admin/delegation">' + permissionsBack(listView) +
+      '<div class="formrow">' +
       '<input type="hidden" name="action" value="define-permission">' +
       '<label for="perm-resource">Exposed by</label>' +
       '<select id="perm-resource" name="resource">' + applicationOptions + '</select>' +
@@ -6465,7 +6949,7 @@ function permissionsSection(req, view, listView) {
       '<button type="submit">Define it</button>' +
     '</div></form>' +
 
-    '<h3>Grants &mdash; the delegation relationships</h3>' +
+    '<h3 id="grants">Grants &mdash; the delegation relationships</h3>' +
     note('<strong>One row per (client, permission), and that IS the ' +
     'relationship.</strong> A client granted three permissions on one resource is ' +
     'three rows rather than one labelled <em>3</em>, because the permission is ' +
@@ -6473,38 +6957,97 @@ function permissionsSection(req, view, listView) {
     'That is also how one-to-many and many-to-one both work here with no store of ' +
     'their own: three clients granted one permission is one value on each of three ' +
     'entries.') +
+    sectionSearchForm({
+      path: '/admin/delegation', query: req.query,
+      param: 'grantq', pageParam: 'grantsPage',
+      label: 'Narrow to an application',
+      placeholder: 'part of an application name or identifier',
+      what: 'It matches EITHER END of the relationship &mdash; the client that ' +
+        'may ask and the resource that is reached &mdash; on the name and on ' +
+        'the identifier both. Both ends deliberately, and it is the same ' +
+        'argument the acts table\'s own text box makes: a reader arrives ' +
+        'holding one application name and the question <em>what is this thing ' +
+        'mixed up in</em>, and they do not know, and should not have to guess, ' +
+        'which of the two columns it will turn up in. Searching one end would ' +
+        'answer half that question while looking as though it had answered all ' +
+        'of it. A DANGLING grant has no resource at all, so it matches only on ' +
+        'its client &mdash; which is right: there is no other application in ' +
+        'that row to find it by.'
+    }) +
+    grantNav.head +
     '<table><tr><th>Client &mdash; who may ask</th><th>Resource &mdash; what is ' +
     'reached</th><th>Permission</th><th>Identifier</th><th>What the access token ' +
     'will say</th><th>Ever asked for?</th><th></th></tr>' +
-    (register.grants.map(function (one) {
+    (grantPage.shown.map(function (one) {
       return permissionGrantRow(one, listView);
-    }).join('') || '<tr><td colspan="7">Nothing is granted yet. Define a ' +
-      'permission above and grant it below &mdash; until then every scope this ' +
-      'service is sent is an ordinary scope.</td></tr>') +
+    }).join('') || '<tr><td colspan="7">' +
+      (grantWanted
+        ? 'No grant names an application whose name or identifier contains ' +
+          '<code>' + esc(grantWanted) + '</code>, at either end. ' +
+          (register.grants.length
+            ? register.grants.length + ' grant(s) are held here between other ' +
+              'applications.'
+            : 'Nothing is granted here at all yet.')
+        : 'Nothing is granted yet. Define a permission above, then grant it on ' +
+          'the client\'s own page &mdash; until then every scope this service ' +
+          'is sent is an ordinary scope.') +
+      '</td></tr>') +
     '</table>' +
+    grantNav.foot +
 
+    // -----------------------------------------------------------------------
+    // THE GRANT FORM IS NOT HERE ANY MORE, AND THIS PARAGRAPH IS WHAT IS LEFT
+    // OF IT (2026-09-01).
+    //
+    // It was a `<select>` of every application beside a `<select>` of every
+    // permission, and it asked the reader to get BOTH right on a page that is
+    // about neither of them in particular. That is the one control in this
+    // register where picking the wrong option still SUCCEEDS: a grant written
+    // to the resource instead of to the client resolves in both directions and
+    // reads correctly on this very table, and the only place it shows as wrong
+    // is at the token endpoint, later, to somebody else.
+    //
+    // On an application's own page there is no first select at all: the client
+    // is the entry the reader is standing on. So the control that could be
+    // half wrong became a control that cannot be. Only this one moved: the
+    // three RESOURCE-half controls stay here, because this page is where the
+    // register is and `Expose an API`, `Define a permission` and each row's
+    // `Remove` all name the resource explicitly. `revoke-permission` is drawn
+    // in BOTH places and that is not a leftover — it is a ROW BUTTON, so its
+    // two halves are the row it sits on and neither can be got wrong, which is
+    // exactly what was wrong with the grant form's two selects. Somebody
+    // tidying up works from the register; the application's own list is the
+    // read-back of the grant just made, and a table with no way to undo the
+    // write above it is half a control.
+    //
+    // WHAT IS DELIBERATELY UNCHANGED IS THE HANDLER. `POST /admin/delegation`
+    // still answers all five actions and PERMISSION_ACTIONS still lists all
+    // five, so rule 7's parity check reads the same sentence it always did and
+    // `POST /admin-api/permissions/grant-permission` still mirrors it. Moving a
+    // FORM is not moving an action, and making it one would have cost this
+    // feature an /admin-api operation for no reason a caller would notice.
+    // -----------------------------------------------------------------------
     '<h4>Grant a permission</h4>' +
     (grantable.length
-      ? note('The grant lands on the CLIENT\'s entry, as a value of ' +
+      ? note('<strong>This one is on the application\'s own page.</strong> A ' +
+        'grant lands on the CLIENT\'s entry, as a value of ' +
         '<code>oauthDelegatedPermission</code>, because the client is the party ' +
         'that will name the permission in a <code>scope</code> — so the entry that ' +
         'answers <em>may this request be honoured</em> is the entry the request ' +
-        'identifies. An application cannot be granted its own permission: the ' +
-        'token would be addressed to itself, which is what an ID Token already ' +
-        'is.') +
-        '<form method="post" action="/admin/delegation"><div class="formrow">' +
-          '<input type="hidden" name="action" value="grant-permission">' +
-          '<label for="grant-client">Client</label>' +
-          '<select id="grant-client" name="client">' + applicationOptions + '</select>' +
-          '<label for="grant-permission">Permission</label>' +
-          '<select id="grant-permission" name="permission">' + permissionOptions +
-            '</select>' +
-          '<button type="submit">Grant it</button>' +
-        '</div></form>'
+        'identifies. That is exactly why the control is drawn where that entry ' +
+        'is: open an application under <a href="/admin/applications">Directory ' +
+        '&rsaquo; Applications</a> and its <em>Delegated permissions</em> ' +
+        'section grants it one, with the client half of the pair already ' +
+        'settled by the page you are on rather than chosen out of a list of ' +
+        'every application here. An application still cannot be granted its own ' +
+        'permission: the token would be addressed to itself, which is what an ID ' +
+        'Token already is, and that page offers it none of them.')
       : note('<strong>There is nothing to grant yet.</strong> A permission ' +
-        'must be defined before it can be granted, so this form appears once an ' +
-        'application exposes one with an identifier. That ordering is the whole ' +
-        'shape of the feature rather than a limitation of this page.')) +
+        'must be defined before it can be granted, so the control appears — on ' +
+        'each application\'s own page under <a href="/admin/applications">' +
+        'Directory &rsaquo; Applications</a> — once an application exposes one ' +
+        'with an identifier. That ordering is the whole shape of the feature ' +
+        'rather than a limitation of either page.')) +
 
     note('<strong>Every one of these is an ordinary attribute on an ' +
     'ordinary directory entry</strong>, and an <code>ldapmodify</code> reaches ' +
@@ -6514,7 +7057,7 @@ function permissionsSection(req, view, listView) {
     'is the ordering check &mdash; this directory enforces nothing anywhere &mdash; ' +
     'which is why a grant naming a permission nobody defines can exist at all, and ' +
     'why it is shown as dangling rather than treated as an error. ' +
-    '<code>GET /ldap/applications</code> publishes all three, and they persist ' +
+    '<code>GET /admin/ldap/applications</code> publishes all three, and they persist ' +
     'wherever the directory does.');
 }
 
@@ -6529,18 +7072,59 @@ app.get('/admin/delegation', function (req, res) {
   // ask for — and would make the two look like one thing in the one place they
   // must not.
   const permissions = permissionsView();
+  // The same searches and slices permissionsSection() draws, computed here for
+  // the reply. One pure function, called twice with the same arguments — see
+  // its header for why it is not four lines inside the section.
+  const allowedState = permissionsListState(req.query, permissions.register);
   const paging = view.paging;
   const summary = view.summary;
   const policy = view.policy;
   const known = knownUserKeys();
-  // What every paging link carries with it. The page number is not in here —
-  // pageNavPair() supplies that per link — for the reason the tokens page gives: a
-  // "next" that dropped the filter would be page 2 of a different list.
-  const filterParams = { type: view.wantedType, mode: view.wantedMode,
-                         outcome: view.wantedOutcome,
-                         protocol: view.wantedProtocol, q: view.wantedText,
-                         per: req.query.per ? paging.perPage : '' };
-  const nav = pageNavPair('/admin/delegation', filterParams, paging);
+  // What every paging link on this page carries with it, for the reason the
+  // tokens page gives: a "next" that dropped the filter would be page 2 of a
+  // different list. Each control then overrides its OWN list's page number and
+  // leaves every other name alone, which pageNavPair() does off the paging
+  // object it is handed rather than off this set.
+  //
+  // IT IS THE WHOLE QUERY SINCE 2026-09-01 AND IT USED TO BE FIVE NAMED KEYS.
+  // Five was right while this page had one paged list; it has SEVEN now, plus
+  // two chooser searches and two section searches, and a hand-written set is
+  // exactly the thing that comes to be short by one — `next ›` on the acts
+  // table would then reset the grants table to page 1 and clear the search
+  // that produced it, silently, three screens further down where nobody is
+  // looking. pageParamsOf() takes everything except `format`, `notice` and
+  // `error`, and pageNavPair() overrides only the one name off the paging
+  // object it is handed, so every control on this page moves its own list and
+  // nothing else.
+  const navParams = pageParamsOf(req.query);
+  const nav = pageNavPair('/admin/delegation', navParams, paging);
+
+  // THE OTHER SIX LISTS. Every one of them is capped at DELEGATION_PER_PAGE
+  // and shares this page's single `per`, which is the arrangement the
+  // drill-downs already have — see perPageForm()'s header. Each carries a page
+  // parameter of its own so that paging one leaves the other six where the
+  // reader left them.
+  //
+  // THE MECHANISM CATALOGUE IS IN HERE AND THAT IS DELIBERATE, though
+  // `delegation.TYPES` holds eight entries today and no control will be drawn
+  // for it until it holds eleven. It is read off that table rather than
+  // written down — a mechanism cannot be recordable and undocumented — so its
+  // length is decided somewhere else, by somebody adding a ninth mechanism who
+  // has no reason to be reading this page's layout. Paging it now costs one
+  // line and makes the cap true by construction instead of true today.
+  const chainPage = pagedRows(req.query, view.chains,
+    { name: 'chains', noun: 'chains', defaultPer: DELEGATION_PER_PAGE });
+  const chainsNav = pageNavPair('/admin/delegation', navParams, chainPage.paging);
+  const pairPage = pagedRows(req.query, policy.pairs,
+    { name: 'pairs', noun: 'pairs', defaultPer: DELEGATION_PER_PAGE });
+  const pairsNav = pageNavPair('/admin/delegation', navParams, pairPage.paging);
+  const flagPage = pagedRows(req.query, policy.accounts,
+    { name: 'flags', noun: 'accounts', defaultPer: DELEGATION_PER_PAGE });
+  const flagsNav = pageNavPair('/admin/delegation', navParams, flagPage.paging);
+  const mechanismPage = pagedRows(req.query, delegation.TYPES,
+    { name: 'mechanisms', noun: 'mechanisms', defaultPer: DELEGATION_PER_PAGE });
+  const mechanismsNav = pageNavPair('/admin/delegation', navParams,
+                                    mechanismPage.paging);
 
   const listView = listViewOf('/admin/delegation', req.query);
   const rows = view.shown.map(function (row) {
@@ -6798,10 +7382,11 @@ app.get('/admin/delegation', function (req, res) {
     'meet. <strong>The last column draws one row alone</strong>, which is the ' +
     'answer to <em>what is this one, exactly</em> on a service that has been ' +
     'driven for an afternoon and whose whole picture is forty boxes.') +
+    chainsNav.head +
     '<table><tr><th>Mechanism</th><th>Kind</th><th>Initial identity</th>' +
     '<th>Intermediary</th><th>Target</th><th>Acts</th><th>Last seen</th>' +
     '<th>Just this one</th></tr>' +
-    (view.chains.map(function (chain) {
+    (chainPage.shown.map(function (chain) {
       return '<tr>' +
         '<td><code>' + esc(chain.type) + '</code></td>' +
         '<td>' + modeCell(chain.mode) + '</td>' +
@@ -6824,6 +7409,7 @@ app.get('/admin/delegation', function (req, res) {
           '">picture &rarr;</a></td>' +
         '</tr>';
     }).join('') || '<tr><td colspan="8">No chains yet.</td></tr>') + '</table>' +
+    chainsNav.foot +
 
     permissionsSection(req, permissions, listView) +
 
@@ -6862,28 +7448,33 @@ app.get('/admin/delegation', function (req, res) {
     'says nothing about padata. Resource-based needs no forwardable evidence ' +
     'and no flag on the front end at all, which is why it is the easier ' +
     'path.') +
+    pairsNav.head +
     '<table><tr><th>Mechanism</th><th>Front end (who acts)</th>' +
     '<th>Target (what is reached)</th><th>Attribute, and where it lives</th>' +
     '<th>Anything missing?</th></tr>' +
-    (policy.pairs.map(policyPairRow).join('') ||
+    (pairPage.shown.map(policyPairRow).join('') ||
       '<tr><td colspan="5">No principal here is configured for constrained ' +
       'delegation of either kind.</td></tr>') + '</table>' +
+    pairsNav.foot +
 
     '<h3>Account flags</h3>' +
     note('Two of these three STOP delegation rather than permit it, ' +
     'and the third is not a control at all. An account appears here whether or ' +
     'not any pair above names it, because an account named in no pair is ' +
     'precisely the one somebody is wondering about.') +
+    flagsNav.head +
     '<table><tr><th>Principal</th><th>Flags</th><th>What each one does</th></tr>' +
-    (policy.accounts.map(policyAccountRow).join('') ||
+    (flagPage.shown.map(policyAccountRow).join('') ||
       '<tr><td colspan="3">No principal here carries one of these flags.</td></tr>') +
     '</table>' +
+    flagsNav.foot +
 
     '<h3>The mechanisms</h3>' +
     note('Read off the same table this page records against, so a ' +
     'mechanism cannot be recordable and undocumented, nor described here and ' +
     'never occur.') +
-    '<ul>' + delegation.TYPES.map(function (entry) {
+    mechanismsNav.head +
+    '<ul>' + mechanismPage.shown.map(function (entry) {
       // The mechanism, its id, its specification and how many have been
       // recorded stay on the row; the paragraph saying what it IS folds under
       // them. Folding the whole item would have put the count — the one figure
@@ -6897,6 +7488,7 @@ app.get('/admin/delegation', function (req, res) {
             : ' <strong>Nothing here checks who may do it.</strong>')) +
         '</li>';
     }).join('') + '</ul>' +
+    mechanismsNav.foot +
 
     note('<strong>It is in memory and dies with the process</strong>, ' +
     'like the counters, the audit log, the sessions and the signing key. It also ' +
@@ -6920,13 +7512,37 @@ app.get('/admin/delegation', function (req, res) {
     // which POST /admin-api/config/set-many already mirrors.
     configFormsFor('/admin/delegation') +
 
-    note('Paging is <code>?page=</code> and <code>?per=</code> (at ' +
-    'most ' + MAX_ROWS + ' rows a page) and both work with ' +
-    '<code>?format=json</code>, whose reply carries <code>page</code>, ' +
-    '<code>pages</code> and <code>matched</code> so a test can walk the whole ' +
-    'list without guessing where it ends — along with <code>chains</code> and ' +
-    'the configured <code>policy</code>, which have no paging because neither ' +
-    'can be longer than the list they are derived from. The same data is at ' +
+    note('<strong>Every table on this page is paged, at ' +
+    DELEGATION_PER_PAGE + ' rows, and they share one size.</strong> There are ' +
+    'seven of them here with several screens of prose between, so fifty rows ' +
+    'apiece — which is what every other page in this console uses — would put ' +
+    'the last heading tens of thousands of pixels down. <code>?per=</code> ' +
+    'changes all seven together (at most ' + MAX_ROWS + ' rows a page) and the ' +
+    'control above the acts table is the one that sets it. Each table then has ' +
+    'a page parameter of ITS OWN, so moving one leaves the other six where you ' +
+    'left them: <code>?page=</code> for the acts, and ' +
+    '<code>?chainsPage=</code>, <code>?permissionsPage=</code>, ' +
+    '<code>?grantsPage=</code>, <code>?pairsPage=</code>, ' +
+    '<code>?flagsPage=</code> and <code>?mechanismsPage=</code> for the rest. ' +
+    'The two searches over the configured register are ' +
+    '<code>?permq=</code> and <code>?grantq=</code>, and a new search starts ' +
+    'that table at its first page.') +
+
+    note('<strong><code>?format=json</code> carries the WHOLE of every ' +
+    'list and not the page you are looking at, and that is deliberate rather ' +
+    'than an oversight.</strong> The acts are the exception and always were: ' +
+    'they are capped at <code>delegation.maxRecords</code> and can be ' +
+    'thousands, so the reply pages them and carries <code>page</code>, ' +
+    '<code>pages</code> and <code>matched</code> for a caller to walk them ' +
+    'with. Everything else — <code>chains</code>, the configured ' +
+    '<code>policy</code> and the whole of <code>allowed</code> — comes back ' +
+    'entire, because each is derived from something already bounded and ' +
+    'because <code>GET /admin-api/permissions</code> answers with that same ' +
+    'register under its own name. A caller that had to walk seven pagings to ' +
+    'read a register a page draws in one screen would be paying for this ' +
+    'page\'s layout. <code>allowed.filter</code> and ' +
+    '<code>allowed.paging</code> report what the BROWSER was shown, so nothing ' +
+    'here is silent about the difference. The acts are also at ' +
     '<code>GET /admin-api/delegation</code> with the same parameters.');
 
   respond(req, res, Object.assign({}, view.json, {
@@ -6941,7 +7557,26 @@ app.get('/admin/delegation', function (req, res) {
               permissions: permissions.register.permissions,
               grants: permissions.register.grants,
               counts: permissions.register.counts,
-              graph: permissions.graph
+              graph: permissions.graph,
+              // WHAT THE BROWSER WAS SHOWN, BESIDE THE WHOLE LISTS RATHER
+              // THAN INSTEAD OF THEM (2026-09-01).
+              //
+              // The two arrays above stay ENTIRE. `GET /admin-api/permissions`
+              // answers with the same register under its own name, and a
+              // caller that had to walk ten-row pages of it would be paying
+              // for this page's layout — the paging here exists because seven
+              // tables share one screen, which is not a fact about the data.
+              //
+              // But a `?permq=` that the markup honours and the reply ignores
+              // is exactly the silent disagreement this console keeps warning
+              // about, so what the page did is REPORTED. A caller reading
+              // `paging.permissions.total` against `permissions.length` can
+              // see the filter that was applied and the slice that was drawn,
+              // and neither of them had to be guessed from the markup.
+              filter: { permissions: allowedState.permWanted || null,
+                        grants: allowedState.grantWanted || null },
+              paging: { permissions: pagingJson(allowedState.permPage.paging),
+                        grants: pagingJson(allowedState.grantPage.paging) }
             },
             settings: configSettingsJson('/admin/delegation')
           }),
@@ -6950,7 +7585,7 @@ app.get('/admin/delegation', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
-// POST /admin/delegation — THE FIVE CONTROLS THE CONFIGURED HALF HAS.
+// POST /admin/delegation — THE FIVE ACTIONS THE CONFIGURED HALF HAS.
 //
 // The acts half has none and never will; see `permissionsSection()`'s header,
 // where the reversal of that route's "NO FORM, AND THAT IS A DECISION" is
@@ -6958,10 +7593,25 @@ app.get('/admin/delegation', function (req, res) {
 // through `common/app_permissions.js` and therefore through
 // `applications.updateApplication()`, which is where the rules are.
 //
-// It lands back on this page's `#allowed` anchor rather than at the top, for
-// `chooserPane()`'s reason: this is the longest page in the console and a
-// reader who has just granted a permission is four screens down. The list state
-// rides on `back` exactly as /admin/applications' forms carry it.
+// IT SAID "CONTROLS" AND IT SAYS "ACTIONS" NOW, and the difference stopped
+// being pedantic on 2026-09-01: the FORMS are on two pages and the ACTIONS are
+// all here. `grant-permission` is drawn on an application's own page under
+// /admin/applications, where the client half of a grant is the entry being
+// looked at rather than an option in a list of every application here;
+// `revoke-permission` is drawn on both, as a row button either way. Moving a
+// form is not moving an action — PERMISSION_ACTIONS is unchanged, and rule 7's
+// parity check reads this handler's refusal sentence exactly as it always did.
+// See applicationPermissionsSection()'s header for the move itself.
+//
+// WHERE IT LANDS AFTERWARDS IS THEREFORE A DECISION AND NOT A CONSTANT.
+// permissionsReturnTo() makes it, off the `from` field the form carries:
+// `#allowed` on this page, and the application's own page at `#permissions`
+// for a form drawn there. A fragment either way, for `chooserPane()`'s reason,
+// because this is the longest page in the console and a reader who has just
+// granted a permission is several screens down whichever page they are on. The
+// list state rides on `back` exactly as /admin/applications' forms carry it,
+// and `from` is a NAME rather than a URL, which is that function's whole
+// subject.
 // ---------------------------------------------------------------------------
 app.post('/admin/delegation', function (req, res) {
   log.debug("Entering the admin delegation action endpoint.");
@@ -6975,11 +7625,50 @@ app.post('/admin/delegation', function (req, res) {
   const state = gateStateFor(req);
   const result = permissionsAction(Object.assign({}, body,
     { actor: (state && state.username) || '' }));
-  const listView = listViewFromBack('/admin/delegation', body.back);
-  respondToAction(req, res, '/admin/delegation' + queryWith(listView, {}) + '#allowed',
-                  result);
+  respondToAction(req, res, permissionsReturnTo(body), result);
   log.debug("Leaving the admin delegation action endpoint.");
 });
+
+// ---------------------------------------------------------------------------
+// WHERE A PERMISSION WRITE SENDS THE READER AFTERWARDS.
+//
+// This handler serves TWO pages since 2026-09-01. Four of its five actions are
+// drawn on /admin/delegation, where the register is; `grant-permission` and the
+// per-row `revoke-permission` beside it are drawn on an APPLICATION's own page,
+// because there the client half of the pair is the entry the reader is standing
+// on rather than an option in a list of everything. See
+// applicationPermissionsSection()'s header for why that move was worth making
+// and why it did not become a sixth action on /admin/applications.
+//
+// `from` IS A NAME AND NOT A URL, and this function is why. configReturnTo()
+// makes the same argument for the settings forms on twenty-one pages: a
+// redirect target taken out of a request body is an open redirect, and one
+// carrying a newline is a header injection. So nothing here is echoed — the
+// name is matched against the two paths this file wrote, and the application
+// page's destination is REBUILT from `client`, which the action has just
+// validated as an identifier in the registry. The worst a hand-written `from`
+// can reach is the delegation page.
+//
+// The FRAGMENT differs between them and that is not decoration. On
+// /admin/delegation the configured half is four screens down, so `#allowed`
+// is the difference between landing on the thing you just did and landing at
+// the top of the longest page in this console; on an application's page the
+// section has its own `#permissions` for exactly the same reason.
+// ---------------------------------------------------------------------------
+function permissionsReturnTo(body) {
+  log.debug("Entering permissionsReturnTo(). from=" + ((body && body.from) || '(none)'));
+  const from = String((body && body.from) || '').trim();
+  const client = String((body && body.client) || '').trim();
+  if (from === '/admin/applications' && client) {
+    const listView = listViewFromBack('/admin/applications', body.back);
+    log.debug("Leaving permissionsReturnTo(). Back to the application page.");
+    return '/admin/applications' +
+           queryWith(listView, { application: client }) + '#permissions';
+  }
+  const listView = listViewFromBack('/admin/delegation', body.back);
+  log.debug("Leaving permissionsReturnTo(). Back to the delegation page.");
+  return '/admin/delegation' + queryWith(listView, {}) + '#allowed';
+}
 
 // ---------------------------------------------------------------------------
 // GET /admin/delegation/allowed — THE CONFIGURED MAPPINGS, AS A PICTURE.
@@ -7704,15 +8393,22 @@ function chooserMatches(names, wanted) {
   });
 }
 
-// THE TWO SEARCHES, AS HIDDEN INPUTS FOR SOMEBODY ELSE'S FORM.
+// THE SECTION SEARCHES, AS HIDDEN INPUTS FOR SOMEBODY ELSE'S FORM.
 //
 // The acts table's own filter is a GET form, and a GET form posts its own
 // fields and NOTHING else — so narrowing the table by mechanism would clear
-// both searches, which is a control undoing a control the reader is still
-// using. Each search re-emits the OTHER one through chooserPane()'s own hidden
-// inputs; this is for the forms on the page that are neither of them.
+// every other search on the page, which is a control undoing a control the
+// reader is still using. Each search re-emits the OTHERS through its own
+// hidden inputs; this is for the forms on the page that are none of them.
+//
+// It was two names until 2026-09-01 and is four now: `permq` and `grantq`,
+// the searches over the two tables of the configured register, joined the two
+// chooser searches the day those tables were paged. The function is still
+// called chooserCarry() because sixteen call sites and one name is cheaper
+// than a rename that says nothing new — what it carries is "every search on
+// this page that is not the form asking".
 function chooserCarry(query) {
-  return ['appq', 'appfrom', 'userq', 'userfrom'].map(function (name) {
+  return ['appq', 'appfrom', 'userq', 'userfrom', 'permq', 'grantq'].map(function (name) {
     const value = queryOne(query, name);
     return value === ''
       ? ''
@@ -10007,6 +10703,73 @@ function setLogoutReader(reader) {
             "live sessions across every protocol family.");
 }
 
+// ---------------------------------------------------------------------------
+// THE NINTH SLOT: THE FIVE DIRECTORY PAGES' OWN VIEWS, FOR THE MANAGEMENT API.
+//
+// It is filled by `ldap/ldap_server.js` at its require time, and rule 3e's test
+// answers yes both ways round.
+//
+//   * A require from THIS file to `ldap_server.js` would CLOSE A CYCLE — that
+//     module requires this one for the shell and the gate — and it would drag
+//     every `/ldap`, `/admin/ldap/*` and (through it) every `/scim` and
+//     `/spiffe` route into the router ahead of this console's own.
+//   * A require from `mgmt-api/admin_api.js` (19) to it would MOVE ROUTES for
+//     the same reason: that module sits two positions above `ldap_server.js`
+//     (21) precisely so that the management API's routes are registered first.
+//
+// WHY THE API NEEDS IT AT ALL is rule 7, the parity: every page of this console
+// has an operation on `/admin-api` that mirrors it, and these five became pages
+// of this console on 2026-09-01. The API answers them by calling exactly the
+// function that draws them, so the page and the operation cannot come to
+// disagree about what is in the directory.
+//
+// IT IS ONE SLOT CARRYING FIVE VIEWS AND IT IS VALIDATED WHOLE, for the reason
+// `setLogoutReader()` gives: a filler that installed four of them would leave
+// one operation answering "no directory is loaded" on a service whose directory
+// is plainly loaded, which is worse than all five saying so. Each view takes
+// the request and returns `{ title, inner, json }` — the same shape every view
+// function in this file returns, so `respond()` and the API read them the same
+// way.
+// ---------------------------------------------------------------------------
+const DIRECTORY_PAGE_NAMES = ['service', 'directory', 'applications',
+                              'federations', 'spiffe'];
+
+let directoryPages = null;
+
+function setDirectoryPages(views) {
+  const complete = views && DIRECTORY_PAGE_NAMES.every(function (name) {
+    return typeof views[name] === 'function';
+  });
+  if (!complete) {
+    // A warning and not a throw, for the reason every other install here gives.
+    log.warn('admin: a set of directory page views was offered that does not ' +
+             'carry all five of ' + DIRECTORY_PAGE_NAMES.join(', ') + '. It is ' +
+             'refused whole — a partial set would leave some of /admin-api\'s ' +
+             'directory operations answering as though no directory were ' +
+             'loaded on a service that plainly has one.');
+    return;
+  }
+  directoryPages = views;
+  log.debug('The five directory page views were installed; /admin-api mirrors ' +
+            'them.');
+}
+
+// What `mgmt-api/admin_api.js` calls. The `?format=json` half of each page,
+// which is the same object the page itself is built from.
+function directoryPageJson(name, req) {
+  log.debug('Entering directoryPageJson(). name=' + name);
+  if (!directoryPages) {
+    log.debug('Leaving directoryPageJson(). No directory is loaded.');
+    return { directory: false,
+             message: 'No LDAP directory is loaded in this process, so there ' +
+                      'is no store to report. ldap/ldap_server.js fills this ' +
+                      'reader when it is required.' };
+  }
+  const view = directoryPages[name](req);
+  log.debug('Leaving directoryPageJson().');
+  return view.json;
+}
+
 let scimReader = null;
 
 function setScimReader(fn) {
@@ -10037,7 +10800,7 @@ function setDirectoryWriter(fn) {
 
 // The whole section, as HTML and as the object that goes into ?format=json. Both
 // come out of one call so that the page and the JSON cannot disagree about what
-// the directory holds, which is the same rule /ldap follows for its own two views.
+// the directory holds, which is the same rule /admin/ldap/* follows for its own five views.
 //
 // `row` is the user record: it is what tells a missing entry apart from an entry
 // that was never going to exist. Four of the five reasons for an absence are facts
@@ -10059,9 +10822,9 @@ function ldapObjectSection(row, key) {
     };
   }
   const info = directoryReader(key);
-  const link = note('<a href="/ldap">What this directory is</a> &middot; ' +
-    '<a href="/ldap/directory">every entry in it</a> &middot; ' +
-    '<a href="/ldap/directory?format=json">the same as JSON</a>.');
+  const link = note('<a href="/admin/ldap/service">What this directory is</a> &middot; ' +
+    '<a href="/admin/ldap/directory">every entry in it</a> &middot; ' +
+    '<a href="/admin/ldap/directory?format=json">the same as JSON</a>.');
   // Said on every branch, including the ones with an entry: the entry can be there
   // and the socket down, and a reader who trusts this page to mean "an LDAP client
   // can fetch this" needs to know which.
@@ -10671,7 +11434,7 @@ function usersListPage(req) {
     'every half-hour, so counting issuances would turn one workload into ' +
     'hundreds of sign-ins. It also gets a directory entry under ' +
     '<code>ou=users</code> carrying the certificate it currently holds &mdash; ' +
-    'see <a href="/ldap/directory">the directory</a> and ' +
+    'see <a href="/admin/ldap/directory">the directory</a> and ' +
     '<a href="/admin/spiffe">SPIFFE</a>.') +
     warn('<strong>One row is one local name, across every protocol.</strong> The same ' +
     'person arrives here as <code>alice</code> at the login screen, ' +
@@ -10766,7 +11529,7 @@ function usersListPage(req) {
 //
 // Everything else on /admin/users is a report: who has authenticated, what they
 // were issued, what the directory holds about them. This creates a person in the
-// directory, and it is here rather than on /admin/groups or /ldap because this is
+// directory, and it is here rather than on /admin/groups or /admin/ldap/directory because this is
 // the page a reader is on when they discover that somebody is missing.
 //
 // IT DECIDES NOTHING. Every rule about what a username may be, and the refusal
@@ -11051,9 +11814,9 @@ function noGroupDirectorySection() {
 }
 
 const GROUPS_LINKS =
-  note('<a href="/ldap">What this directory is</a> &middot; ' +
-  '<a href="/ldap/directory">every entry in it</a> &middot; ' +
-  '<a href="/ldap/directory?format=json">the same as JSON</a> &middot; ' +
+  note('<a href="/admin/ldap/service">What this directory is</a> &middot; ' +
+  '<a href="/admin/ldap/directory">every entry in it</a> &middot; ' +
+  '<a href="/admin/ldap/directory?format=json">the same as JSON</a> &middot; ' +
   '<a href="/admin/users">the people who have authenticated here</a>.');
 
 // The list.
@@ -11206,7 +11969,7 @@ function groupDetailPage(req, wantedDn) {
         'group <code>objectClass</code>. A <code>modifyDN</code> out of the groups container or ' +
         'a <code>modify</code> that deleted the <code>objectClass</code> does exactly this, and ' +
         'neither is refused &mdash; this directory has no schema. ' +
-        '<a href="/ldap/directory">The full dump</a> still shows it.'
+        '<a href="/admin/ldap/directory">The full dump</a> still shows it.'
       : 'Nothing is at <code>' + esc(wantedDn) + '</code>. Either it was <code>delete</code>d or ' +
         '<code>modifyDN</code>&rsquo;d through the protocol since the link was drawn, or the DN ' +
         'was typed. DNs are compared case-folded and with the space after each comma ignored, so ' +
@@ -11446,9 +12209,9 @@ const APPLICATIONS_CAVEAT =
   'audit log.');
 
 const APPLICATIONS_LINKS =
-  '<p class="sub"><a href="/ldap/applications">the same registry as the directory ' +
+  '<p class="sub"><a href="/admin/ldap/applications">the same registry as the directory ' +
   'sees it, with the schema</a> &middot; <a href="/admin/users">the identities on the ' +
-  'other side of these</a> &middot; <a href="/ldap/directory">every entry in the ' +
+  'other side of these</a> &middot; <a href="/admin/ldap/directory">every entry in the ' +
   'directory</a></p>';
 
 // One application's kinds as cells, since a record commonly carries two — an
@@ -11774,7 +12537,7 @@ function editableOptions(mode, selected) {
 // The order is the order of certainty: the registry's own table first, since it
 // is the same table the entry was written from; then the operational ones, which
 // the DIRECTORY sets and no schema of this module's would ever mention; then the
-// object classes, published one heading further down `/ldap/applications`; and
+// object classes, published one heading further down `/admin/ldap/applications`; and
 // only then the honest "somebody wrote this by hand", which is a real state —
 // this directory is schemaless and an ldapmodify can put anything on an entry.
 //
@@ -12087,6 +12850,294 @@ function protocolFamilySection(row) {
     '</table>';
 }
 
+// ---------------------------------------------------------------------------
+// DELEGATED PERMISSIONS, ON THE APPLICATION'S OWN PAGE (2026-09-01).
+//
+// THE GRANT FORM LIVED ON /admin/delegation AND IT IS HERE NOW, and the reason
+// is the shape of the control rather than the length of that page.
+//
+// There it was two `<select>`s: every application in the registry beside every
+// permission anybody exposes, with the reader asked to get BOTH right. That is
+// the one write in this whole register where choosing the wrong option still
+// SUCCEEDS and stays plausible — a grant is a value on the CLIENT's entry, so
+// writing it to the resource instead produces a row that resolves in both
+// directions, reads correctly on the delegation page's own grants table, and
+// is wrong only at the token endpoint, later, to somebody else.
+// `tests/vendored/sts_delegated_permissions_example.js` asserts exactly that
+// pair of halves landing on the right entries, which is how much care the
+// distinction is worth.
+//
+// Here the first select does not exist: the client is the entry the reader is
+// standing on, and this page cannot be reached without having named it. A
+// control that could be half wrong became one that cannot be.
+//
+// **IT POSTS TO /admin/delegation AND THAT IS DELIBERATE.** A `grant-permission`
+// action on this page's own handler would mean a sixth entry in
+// APPLICATION_ACTIONS, and rule 7's parity check reads that list off the
+// handler's refusal sentence — so it would then want a
+// `POST /admin-api/applications/grant-permission` beside the
+// `POST /admin-api/permissions/grant-permission` that already exists, which is
+// two API operations for one write. Moving a FORM is not moving an ACTION.
+// The settings forms on twenty-one pages already do this: they are drawn where
+// the setting belongs and post to /admin/config, which sends the reader back
+// to the page the form was on. `from` is that field here, and
+// permissionsReturnTo() rebuilds the destination rather than echoing it, for
+// configReturnTo()'s reason.
+//
+// WHAT IS NOT OFFERED, and each for its own reason:
+//   * this application's OWN permissions — the token would be audienced to
+//     itself, which is what an ID Token already is, and app_permissions.js
+//     refuses it anyway. Offering an option whose only outcome is a refusal is
+//     a control that can only fail.
+//   * permissions it ALREADY holds — the second grant is a no-op and the
+//     sentence it comes back with says nothing the table above it does not.
+//   * permissions with no identifier — nothing can ever ask for one, so a
+//     grant of it is a value no request will match. The delegation page says
+//     which ones those are and why.
+//
+// The table above the form is the read-back and it is what makes this a
+// section rather than a stray button: a write whose result you cannot see on
+// the page that took it is a write you have to go somewhere else to trust.
+// ---------------------------------------------------------------------------
+// The two halves of ONE application's delegated permissions, and what may still
+// be granted to it — in a pure function for permissionsListState()'s reason:
+// the drill-down's `?format=json` has to report the same answer, and there is
+// no reading it back out of a string of markup.
+function applicationPermissionsState(query, identifier) {
+  log.debug("Entering applicationPermissionsState(). identifier=" + identifier);
+  const register = appPermissions.register();
+  // WHAT THIS APPLICATION HOLDS, off the same register the delegation page
+  // draws rather than off the entry's attribute — the attribute is the raw
+  // identifier and nothing else, and everything a reader needs beside it
+  // (which application exposes it, what the token will say, whether it has
+  // ever been asked for) is the resolution that module does.
+  const held = register.grants.filter(function (one) {
+    return one.client === identifier;
+  });
+  // AND WHAT IT EXPOSES, which is the other half of the same question and is
+  // read-only on that page: `Expose an API` and `Define a permission` stay on
+  // /admin/delegation, where the resource half of this feature is configured.
+  const exposes = register.permissions.filter(function (one) {
+    return one.resource === identifier;
+  });
+  const heldIds = held.map(function (one) { return one.permissionId; });
+  log.debug("Leaving applicationPermissionsState(). " + held.length +
+            " held, " + exposes.length + " exposed.");
+  return {
+    register: register,
+    held: held,
+    exposes: exposes,
+    // WHAT MAY STILL BE GRANTED. See the section's header for why each of the
+    // three exclusions is an exclusion rather than an option that refuses.
+    offerable: register.permissions.filter(function (one) {
+      return !!one.id && one.resource !== identifier && heldIds.indexOf(one.id) < 0;
+    }),
+    // BOTH TABLES ARE PAGED, at the same ten rows /admin/delegation uses and
+    // for the same reason: neither is bounded by anything — one client can be
+    // granted every permission in the registry, and one resource can expose any
+    // number — and that drill-down already carries the attribute table above
+    // them. They take page parameters of their own (`heldPage`, `exposedPage`)
+    // so that moving one moves neither the other nor the attributes, and they
+    // share the page's single `per` with the attribute table, which is the
+    // arrangement perPageForm()'s header describes.
+    //
+    // NEITHER IS IN LIST_PARAMS AND THAT IS DELIBERATE — `attributesPage` is
+    // not either. Those names are a DRILL-DOWN's own leaves; what LIST_PARAMS
+    // carries is the state of the LIST the page hangs under, and a page number
+    // from in here would be spent by /admin/applications, which has no such
+    // table.
+    heldPage: pagedRows(query, held,
+      { name: 'held', noun: 'permissions', defaultPer: DELEGATION_PER_PAGE }),
+    exposedPage: pagedRows(query, exposes,
+      { name: 'exposed', noun: 'permissions', defaultPer: DELEGATION_PER_PAGE })
+  };
+}
+
+function applicationPermissionsSection(req, row, carryBack) {
+  log.debug("Entering applicationPermissionsSection(). identifier=" + row.identifier);
+  const identifier = row.identifier;
+  const state = applicationPermissionsState(req.query, identifier);
+  const register = state.register;
+  const held = state.held;
+  const exposes = state.exposes;
+  const offerable = state.offerable;
+  const heldPage = state.heldPage;
+  const exposedPage = state.exposedPage;
+  const navParams = pageParamsOf(req.query);
+  const heldNav = pageNavPair('/admin/applications', navParams, heldPage.paging);
+  const exposedNav = pageNavPair('/admin/applications', navParams,
+                                 exposedPage.paging);
+  const options = offerable.map(function (one) {
+    return '<option value="' + esc(one.id) + '">' + esc(one.id) +
+           ' — exposed by ' + esc(one.resourceName) + '</option>';
+  }).join('');
+
+  const heldRows = heldPage.shown.map(function (one) {
+    return '<tr>' +
+      '<td>' + (one.resource
+        ? '<a href="' + esc('/admin/applications' +
+            queryWith(listViewOf('/admin/applications', req.query),
+                      { application: one.resource })) + '">' +
+          esc(one.resourceName) + '</a>'
+        : '<span class="state-revoked" title="No application in this registry ' +
+          'defines this permission — a deleted resource, a permission removed ' +
+          'from under the grant, or an ldapmodify. Both console doors refuse ' +
+          'to create one.">dangling</span>') + '</td>' +
+      '<td>' + (one.permissionName
+        ? '<code>' + esc(one.permissionName) + '</code>' +
+          (one.description
+            ? '<br><span class="state-none">' + esc(one.description) + '</span>'
+            : '')
+        : '<span class="state-none">&mdash;</span>') + '</td>' +
+      '<td><code>' + esc(one.permissionId) + '</code></td>' +
+      '<td>' + (one.baseUri
+        ? '<code>aud: ' + esc(one.baseUri) + '</code><br>' +
+          '<code>scope: ' + esc(one.permissionName) + '</code>'
+        : '<span class="state-none">nothing &mdash; the permission does not ' +
+          'resolve, so this scope is treated as an ordinary one</span>') + '</td>' +
+      '<td>' + (one.asked
+        ? '<span class="state-valid" title="This entry\'s oauthScope records ' +
+          'having asked for this scope. Evidence rather than proof: it records ' +
+          'what was requested, not what was issued.">asked for</span>'
+        : '<span class="state-none" title="It has never asked for this one. A ' +
+          'configured grant nobody has needed is exactly what this register is ' +
+          'here to show.">never asked for</span>') + '</td>' +
+      // THE ROW BUTTON POSTS TO /admin/delegation TOO, for the reason the
+      // header gives — and it needs no `client` select either, because the
+      // row IS the pair.
+      '<td><form method="post" action="/admin/delegation">' + carryBack +
+        '<div class="formrow">' +
+        '<input type="hidden" name="action" value="revoke-permission">' +
+        '<input type="hidden" name="from" value="/admin/applications">' +
+        '<input type="hidden" name="client" value="' + esc(identifier) + '">' +
+        '<input type="hidden" name="permission" value="' +
+          esc(one.permissionId) + '">' +
+        '<button type="submit" class="danger">Revoke</button>' +
+        '</div></form></td>' +
+      '</tr>';
+  }).join('');
+
+  const exposedRows = exposedPage.shown.map(function (one) {
+    return '<tr><td><code>' + esc(one.name) + '</code>' +
+      (one.description
+        ? '<br><span class="state-none">' + esc(one.description) + '</span>' : '') +
+      '</td><td>' + (one.id
+        ? '<code>' + esc(one.id) + '</code>'
+        : '<span class="state-revoked" title="This application has no ' +
+          'oauthPermissionBaseUri, and a permission is named by its base URI ' +
+          'followed by its name — so no client can ever ask for this one. Set ' +
+          'the base on the Delegation page and it resolves.">no identifier ' +
+          '&mdash; this application has no base URI</span>') + '</td>' +
+      '<td class="num">' + (one.grantedTo.length
+        ? '<span class="state-valid">' + one.grantedTo.length + '</span>'
+        : '<span class="state-none" title="Nothing holds it. That is the ' +
+          'ordinary state of a permission that has just been defined — ' +
+          'defining one grants it to nobody.">0</span>') + '</td>' +
+      '<td class="who">' + (one.grantedTo.length
+        ? one.grantedTo.map(function (who) {
+            return esc(who.name) + (who.asked ? '' :
+              ' <span class="state-none" title="Granted and never asked ' +
+              'for.">(unused)</span>');
+          }).join('<br>')
+        : '<span class="state-none">&mdash;</span>') + '</td></tr>';
+  }).join('');
+
+  log.debug("Leaving applicationPermissionsSection(). " + held.length +
+            " held (" + heldPage.shown.length + " drawn), " + exposes.length +
+            " exposed (" + exposedPage.shown.length + " drawn), " +
+            offerable.length + " offerable.");
+  return '<h2 id="permissions">Delegated permissions</h2>' +
+
+    note('<strong>Which OTHER applications\' APIs this one may reach, on ' +
+    'behalf of whoever is signed in.</strong> The model is Microsoft Entra ' +
+    'ID\'s: a RESOURCE application is given a base URI and exposes named ' +
+    'permissions on it, and a CLIENT application is granted some of them. The ' +
+    'grant lands on the CLIENT\'s entry — this one — as a value of ' +
+    '<code>oauthDelegatedPermission</code>, because the client is the party ' +
+    'that will name the permission in a <code>scope</code>. ' +
+    '<a href="/admin/delegation#allowed">The Delegation page</a> is the whole ' +
+    'register across every application, with the picture of it; this is the ' +
+    'one entry\'s half of it, where the client is settled by the page rather ' +
+    'than chosen out of a list.') +
+
+    note('<strong>Then it asks for one as an ordinary OAuth scope.</strong> ' +
+    '<code>scope=openid https://example.com/write</code> produces an access ' +
+    'token audienced to <code>https://example.com/</code> carrying ' +
+    '<code>scope: openid write</code> — the base becomes the <code>aud</code> ' +
+    'and the name becomes the scope, which is what a resource server wants: ' +
+    'check the audience once, then read bare permission names. <strong>It ' +
+    'REFUSES nothing by default.</strong> With ' +
+    '<code>oauth2.delegatedPermissionsEnforced</code> off — which it is unless ' +
+    'somebody turned it on, at the foot of the Delegation page — an ungranted ' +
+    'permission is honoured exactly as a granted one is and merely recorded as ' +
+    'ungranted.') +
+
+    '<h3>What it holds</h3>' +
+    heldNav.head +
+    '<table><tr><th>Resource &mdash; what is reached</th><th>Permission</th>' +
+    '<th>Identifier</th><th>What the access token will say</th>' +
+    '<th>Ever asked for?</th><th></th></tr>' +
+    (heldRows || '<tr><td colspan="6">It holds none. That is the ordinary ' +
+      'state of an application nobody has granted anything to, and it changes ' +
+      'nothing about what this service will issue it &mdash; until ' +
+      '<code>oauth2.delegatedPermissionsEnforced</code> is set, an ungranted ' +
+      'scope is honoured exactly as a granted one is.</td></tr>') +
+    '</table>' +
+    heldNav.foot +
+
+    '<h3>Grant it a permission</h3>' +
+    (options
+      ? note('The select offers every permission this service knows about ' +
+        'EXCEPT the ones this application exposes itself and the ones it ' +
+        'already holds. Its own are left out because a token audienced to the ' +
+        'application that asked for it is what an ID Token already is, and ' +
+        '<code>app_permissions.js</code> refuses that grant however it ' +
+        'arrives; the ones it holds are left out because granting a value an ' +
+        'entry already carries writes nothing.') +
+        '<form method="post" action="/admin/delegation">' + carryBack +
+        '<div class="formrow">' +
+          '<input type="hidden" name="action" value="grant-permission">' +
+          // WHERE TO GO AFTERWARDS. Not a URL — a NAME, checked against a
+          // table in permissionsReturnTo() and spent by rebuilding the path
+          // from `client`. A redirect target taken out of a request body is an
+          // open redirect, and one carrying a newline is a header injection.
+          '<input type="hidden" name="from" value="/admin/applications">' +
+          '<input type="hidden" name="client" value="' + esc(identifier) + '">' +
+          '<label for="grant-permission">Permission</label>' +
+          '<select id="grant-permission" name="permission">' + options +
+            '</select>' +
+          '<button type="submit">Grant it</button>' +
+        '</div></form>'
+      : note('<strong>There is nothing to offer it.</strong> ' +
+        (register.permissions.length
+          ? 'Every permission defined here is either one this application ' +
+            'exposes itself, one it already holds, or one with no identifier ' +
+            'for a client to ask for.'
+          : 'No application in this registry exposes an API yet. A permission ' +
+            'must be DEFINED before it can be GRANTED, which is the one ' +
+            'ordering rule this feature has.') +
+        ' <a href="/admin/delegation#allowed">Expose an API and define a ' +
+        'permission on the Delegation page</a>, and it appears here.')) +
+
+    '<h3>What it exposes</h3>' +
+    note('The other half of the same question, and it is READ-ONLY here on ' +
+    'purpose. Giving this application a base URI and defining permissions on ' +
+    'it are configuration of the RESOURCE, which is one form each on ' +
+    '<a href="/admin/delegation#allowed">the Delegation page</a> — where the ' +
+    'reader is looking at the register rather than at one entry. Everything ' +
+    'below is <code>oauthPermissionBaseUri</code> and ' +
+    '<code>oauthPermission</code> on this entry, and the attribute table above ' +
+    'shows both raw.') +
+    exposedNav.head +
+    '<table><tr><th>Permission</th><th>Identifier &mdash; what a client ' +
+    'sends</th><th>Held by</th><th>Which applications</th></tr>' +
+    (exposedRows || '<tr><td colspan="4">It exposes none. An application ' +
+      'exposes an API by being given a base URI and then having permissions ' +
+      'defined on it, both on the Delegation page.</td></tr>') +
+    '</table>' +
+    exposedNav.foot;
+}
+
 // The drill-down. Its one list is the ATTRIBUTE table, which is paged under a
 // name of its own (`attributesPage`) rather than the bare `page` — the
 // convention pagingOf()'s header describes for a view that holds more than the
@@ -12256,6 +13307,18 @@ function applicationDetailPage(req, identifier) {
     'preventing it. <code>appRegistrationJson</code> is not offered either &mdash; edit the ' +
     'attributes beside it instead, which is what the registration is rebuilt from.') +
 
+    // AFTER the generic attribute editor and before the metadata refresh. The
+    // editor can already write `oauthDelegatedPermission` by hand — it is an
+    // ordinary multi-valued attribute in the EDITABLE table — so this section
+    // is a second DOOR onto it and not a second place it lives, which is the
+    // one-store rule /admin/token-lifetimes' header argues. What it adds is
+    // the resolution: the raw attribute is a bare identifier, and every column
+    // beside it here (which application exposes it, what the token will say,
+    // whether it has ever been asked for) is something only the register can
+    // answer.
+    applicationPermissionsSection(req, row, carryBack) +
+
+
     // THE METADATA REFRESH, and the only control on this page that reaches off
     // this machine. It is a button rather than something issuing does, for the
     // reason sp_metadata.js argues at length: an assertion that had to wait on
@@ -12309,14 +13372,37 @@ function applicationDetailPage(req, identifier) {
     '<p class="sub"><a href="' +
     esc('/admin/applications' + queryWith(listViewOf('/admin/applications', req.query), {})) +
     '">back to the list</a> &middot; ' +
-    '<a href="/ldap/applications">the registry as the directory sees it</a></p>';
+    '<a href="/admin/ldap/applications">the registry as the directory sees it</a></p>';
 
-  log.debug("Leaving applicationDetailPage(). " + paged.shown.length + " attribute row(s).");
+  // The same two lists the section above drew, for the reply. One pure
+  // function, called twice with the same arguments — see its header.
+  const permissionState = applicationPermissionsState(req.query, row.identifier);
+  log.debug("Leaving applicationDetailPage(). " + paged.shown.length +
+            " attribute row(s), " + permissionState.held.length +
+            " delegated permission(s) held.");
   return {
     inner: inner,
     json: Object.assign({ found: true }, row, {
       attributesShown: paged.shown,
-      attributesPaging: pagingJson(paging)
+      attributesPaging: pagingJson(paging),
+      // THE RESOLVED DELEGATED PERMISSIONS, because the page draws a section
+      // of them and a reply that carried only the raw attribute would leave a
+      // caller to compose `baseUri + name` for itself — which is the one
+      // string in this feature that must not be worked out in two places.
+      // WHOLE, with the paging beside it rather than applied to it, for the
+      // reason /admin/delegation's own `allowed` member gives: the slicing is
+      // this page's layout and not a fact about the entry, and
+      // `GET /admin-api/permissions` answers with the same register under its
+      // own name.
+      delegatedPermissions: {
+        held: permissionState.held,
+        exposes: permissionState.exposes,
+        offerable: permissionState.offerable.map(function (one) {
+          return one.id;
+        }),
+        paging: { held: pagingJson(permissionState.heldPage.paging),
+                  exposes: pagingJson(permissionState.exposedPage.paging) }
+      }
     })
   };
 }
@@ -19252,7 +20338,7 @@ app.get('/admin/scim', function (req, res) {
     note('<a href="/scim">What this is, for a person</a> &middot; ' +
     '<a href="/admin/scim?format=json">this page as JSON</a> &middot; ' +
     '<a href="/admin-api/scim">the same over the management API</a> &middot; ' +
-    '<a href="/ldap">the directory it writes into</a>');
+    '<a href="/admin/ldap/service">the directory it writes into</a>');
 
   respond(req, res, json, 'SCIM 2.0', '/admin/scim', inner);
   log.debug("Leaving the admin SCIM page.");
@@ -19774,7 +20860,7 @@ app.get('/admin/config', function (req, res) {
 //
 // **IT COMPUTES NOTHING.** Every number and every sentence comes out of
 // `persistence.status()`, which is that module's own account of itself and is
-// the same object `GET /ldap` publishes. This function chooses what to SHOW and
+// the same object `GET /admin/ldap/service` publishes. This function chooses what to SHOW and
 // how to phrase it; it does not decide anything, so there is no second opinion
 // here to go stale.
 // ---------------------------------------------------------------------------
@@ -20082,8 +21168,8 @@ const PROTOCOL_SETTINGS_PAGES = [
            'families that do not need a database is the one failure mode a ' +
            'mock must not have.'],
     status: persistenceStatusBlock,
-    links: [['/ldap', 'the directory, and this same status'],
-            ['/ldap/directory', 'every entry in it'],
+    links: [['/admin/ldap/service', 'the directory, and this same status'],
+            ['/admin/ldap/directory', 'every entry in it'],
             ['/admin/realms', 'the realms that are written down with it'],
             ['/admin/config', 'the whole settings table'],
             ['/admin/users', 'the people, restored and otherwise']] },
@@ -20107,8 +21193,8 @@ const PROTOCOL_SETTINGS_PAGES = [
            'only; <code>-b "dc=acme,dc=example,dc=com"</code> answers from ' +
            'acme\'s. The realm is in the DN because a socket has no path to ' +
            'put a segment in — see <a href="/admin/realms">Trust realms</a>.'],
-    links: [['/ldap', 'the directory, and whether both sockets came up'],
-            ['/ldap/directory', 'every entry, as a tree'],
+    links: [['/admin/ldap/service', 'the directory, and whether both sockets came up'],
+            ['/admin/ldap/directory', 'every entry, as a tree'],
             ['/admin/users', 'the people in it'],
             ['/admin/groups', 'the groups in it']] },
 
@@ -20645,7 +21731,7 @@ function spiffePage(req) {
     esc(json.counts.agents) + ' of at most ' + esc(json.counts.maxAgents) +
     '</li>' +
     '<li><a href="/spiffe">What this is, and what it does not check</a></li>' +
-    '<li><a href="/ldap/spiffe">The containers and their schema</a></li>' +
+    '<li><a href="/admin/ldap/spiffe">The containers and their schema</a></li>' +
     '<li><a href="/admin-api/spiffe">The same, over JSON</a></li>' +
     '</ul>' +
     // The twenty-eight spiffe.* rows, on the page about the trust domain
@@ -21440,7 +22526,7 @@ const FEDERATION_LINKS =
   '<a href="' + federation.PATHS.base + '">the federation index</a> &middot; ' +
   '<a href="/admin/applications">the applications registry</a> &middot; ' +
   '<a href="/admin/users">who has signed in</a> &middot; ' +
-  '<a href="/ldap/federations">the register as the directory sees it</a></p>';
+  '<a href="/admin/ldap/federations">the register as the directory sees it</a></p>';
 
 // One row's summary, shared by the list and the JSON. It is a function rather
 // than being built inline twice because the READINESS is computed here — the
@@ -22617,6 +23703,39 @@ module.exports = {
   tip: tip,
   // Filled by ldap_server.js at its require time; see the note above it.
   setDirectoryReader: setDirectoryReader,
+  // THE NINTH SLOT, filled by the same module, and the views behind it. See
+  // the block above setDirectoryPages().
+  setDirectoryPages: setDirectoryPages,
+  directoryPageJson: directoryPageJson,
+  // ---------------------------------------------------------------------
+  // THE LIST-PAGE FURNITURE, FOR THE ONE MODULE OUTSIDE THIS DIRECTORY THAT
+  // DRAWS LIST PAGES IN THIS SHELL.
+  //
+  // `ldap/ldap_server.js` draws five of them since 2026-09-01, and they are
+  // real list pages: the directory dump is one row per entry over a store
+  // with a cap in the hundreds, so it pages exactly the way
+  // /admin/applications and /admin/tokens page. Exported for the same reason
+  // page(), note() and tip() are exported to sts_metadata.js — a page drawn
+  // in this console's shell with a paging control of its own invention would
+  // be the one control here that behaves differently, and the reader would
+  // have no way to know which one it was.
+  //
+  // What crosses is the FURNITURE and never the data: nothing in this list
+  // decides what a page contains. `esc` goes with them because every one of
+  // them returns markup and a caller building a cell beside them needs the
+  // same escaping — ldap_server.js's own xmlEscape() is the same function,
+  // and passing this one keeps a single answer to "what is escaped how" on
+  // pages that mix the two.
+  // ---------------------------------------------------------------------
+  esc: esc,
+  tile: tile,
+  clipped: clipped,
+  clippedValues: clippedValues,
+  pagedRows: pagedRows,
+  pageNavPair: pageNavPair,
+  perPageOptions: perPageOptions,
+  queryWith: queryWith,
+  pagingJson: pagingJson,
   // Filled by spiffe_server.js at its require time, for the reason beside the
   // requires at the top: this file must not require that module.
   setSpiffeReader: setSpiffeReader,

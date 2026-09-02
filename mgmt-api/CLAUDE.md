@@ -488,10 +488,20 @@ Added 2026-09-01, six operations: a `GET` and five actions
 **IT IS A RESOURCE OF ITS OWN RATHER THAN MORE ACTIONS ON `/delegation`**, and
 the reason is the same one the console gives for putting two headings on one
 page: the acts and the permissions are two registers, and an API answering both
-under one path would make a caller tell them apart by the shape of a row. `GET
-/admin-api/delegation` still carries the register in its `allowed` member —
-because the page it mirrors carries both — and that is the same data reachable
-under its own name rather than a second computation of it.
+under one path would make a caller tell them apart by the shape of a row.
+
+**AND `GET /admin-api/delegation` DOES NOT CARRY IT, which this paragraph said
+it did until 2026-09-01.** The claim was that the API reply carried the register
+in an `allowed` member *because the page it mirrors carries both*. Only the
+second half was ever true: `GET /admin/delegation?format=json` adds `allowed` in
+the console route, and the API handler answers `delegationView(query).json`,
+which is the ACTS view — the one shared with `/admin/delegation/map` — and has
+never had an `allowed` member in it. The behaviour is right and the sentence was
+wrong, so the sentence went rather than the behaviour: folding the configured
+register into `delegationView()` would make every caller of the acts view pay
+for a walk of `ou=applications` it did not ask for, which is the reason that
+function does not build it, and this resource is where the register is reachable
+under its own name.
 
 **IT IS THE FIRST TIME ONE CONSOLE PAGE HAS BEEN MIRRORED BY TWO RESOURCES**,
 and rule 7 is satisfied by that rather than strained by it: the rule asks that
@@ -499,6 +509,19 @@ every page and every ACTION have an operation, not that the mapping be one to
 one. `/admin/delegation` was already mirrored read-only by `GET
 /admin-api/delegation`; what it grew is five controls, and those five needed
 somewhere to be.
+
+**And since 2026-09-01 the FORMS are on two console pages while the ACTIONS are
+still one handler.** `grant-permission` is drawn on the client application's own
+page under `/admin/applications`, where the client half of a grant is the entry
+being looked at rather than an option in a list; `revoke-permission` is drawn on
+both, as a row button either way. That changes nothing here, and the reason it
+changes nothing is the rule: every one of those forms still POSTs to
+`/admin/delegation`, `PERMISSION_ACTIONS` is still all five, and the parity
+check still reads that one handler's refusal sentence. **Moving a form is not
+moving an action** — making it one would have wanted a
+`POST /admin-api/applications/grant-permission` beside the
+`/permissions/grant-permission` that already exists, which is two operations for
+one write. `admin-ui/CLAUDE.md` argues the move itself.
 
 **THE FIVE ACTION NAMES STUTTER UNDER THIS PATH AND THAT IS DELIBERATE.**
 `/admin-api/permissions/define-permission` reads badly and `/permissions/define`
@@ -508,3 +531,42 @@ nothing about what is being defined. And `remove` and `revoke` are two different
 things here: one stops a resource exposing a permission, the other takes a grant
 away from a client. One vocabulary for both doors is worth more than a shorter
 URL, and the parity check reads the console's own list either way.
+
+
+## The five directory operations, and the slot they go through (2026-09-01)
+
+`GET /admin-api/ldap/directory`, `/ldap/applications`, `/ldap/federations`,
+`/ldap/spiffe` and `/ldap/service` mirror the five console pages that moved into
+`/admin/ldap/` that day. They exist because of rule 7 and for no other reason —
+a page of that console gets an operation here in the same change — and the
+parity check in `tests/vendored/admin_api.js` is what would have noticed if they
+had not.
+
+**They reach their views through `admin.directoryPageJson()`, which is
+`admin.js`'s NINTH SLOT filled by `ldap/ldap_server.js`.** This module is
+required at #19 and that one at #21, so a plain require would drag every route
+registered there ahead of this API's own; and `admin.js` cannot require it
+either, because that module requires `admin.js` back. The slot carries all five
+views and is validated whole. Each operation calls exactly the function that
+DRAWS the page, so an operation and its page cannot come to disagree about what
+is in the directory.
+
+**`GET /admin-api/ldap` and `GET /admin-api/ldap/service` are not the same
+question and neither is redundant.** The first is the six `ldap.*` SETTINGS —
+what the sockets are configured to be. The second is what actually happened when
+the process tried to bind them. On a host whose own slapd already holds 389 the
+two disagree, and nothing else in this service can report that: the metadata
+page is built by walking the express router and a raw TCP listener is not on it.
+
+**THE GATE IS THE POINT OF THEM.** Those pages print `oauthClientSecret` and
+`fedClientSecret` in the clear, which is why moving them behind the console's
+gate was right; this API is deliberately not gated, which is what keeps a test
+able to read the directory without signing a browser in. Both halves of that
+sentence are the argument at the top of this file, not an exception to it.
+
+**Their response schemas are deliberately shallow**, and `admin_api_spec.js`
+says why beside them: what they return is DIRECTORY ENTRIES, and this directory
+is schemaless on purpose, so an `attributes` member written out property by
+property would be a document making a promise the store does not keep. The names
+are published in the one place that can keep them right — each reply carries the
+container's own `schema`, read out of the module that owns it.

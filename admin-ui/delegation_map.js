@@ -973,11 +973,34 @@ function renderUnguarded(graph, options) {
     return (isSts(one.from) || isSts(one.to)) && one.from !== one.to;
   });
 
-  // `multigraph` because two chains between the same pair of boxes are two
-  // lines: `alice -> frontend` by classic constrained delegation and the same
-  // pair by RBCD are two arrangements, and dagre without this would keep one.
-  // `compound` is off — there are no nested boxes here.
-  const g = new dagre.graphlib.Graph({ multigraph: true });
+  // NOT a multigraph, and it stopped being one on 2026-09-01 for a reason worth
+  // reading before it is put back. It was one because two chains between the
+  // same pair of boxes are two lines — `alice -> frontend` by classic
+  // constrained delegation and the same pair by RBCD are two arrangements — and
+  // that is still true of the PICTURE. It was never true of what dagre is asked
+  // for: everything it computes about an edge is thrown away below (its routes
+  // described the staircase this file flattens, and its label positions
+  // described a gap this file measures for itself), and the only thing kept out
+  // of this whole layout is the ORDER of the boxes. Two lines between one pair
+  // cannot change an order.
+  //
+  // Keeping them cost the picture outright. A dense graph — the delegated
+  // permission register drawn at `/admin/delegation/allowed`, where five
+  // applications each granting the other four two permissions is five boxes and
+  // FORTY lines — has both a pair in each direction AND parallel lines within a
+  // pair, and dagre 1.x positions a dummy node at NaN when it meets the two
+  // together. `assignNodeIntersects()` then subtracts that NaN, finds neither a
+  // dx nor a dy, and throws `Not possible to find intersection inside of the
+  // rectangle` out of the whole render — so the page said the picture could not
+  // be drawn, of a graph that draws perfectly. Neither ingredient does it alone:
+  // parallel lines in one direction are fine, and a pair in both directions is
+  // fine. Collapsing is what removes the one this file does not need.
+  //
+  // So the lines are collapsed to ONE per ordered pair on the way in, with their
+  // weights SUMMED — which is what dagre's own `simplify()` does before ranking,
+  // for the same reason — and `partyEdges` is untouched, so every one of the
+  // forty is still drawn. `compound` is off — there are no nested boxes here.
+  const g = new dagre.graphlib.Graph();
   g.setGraph({
     rankdir: 'LR', nodesep: NODE_SEP, edgesep: EDGE_SEP, ranksep: RANK_SEP,
     marginx: MARGIN, marginy: MARGIN
@@ -1003,7 +1026,8 @@ function renderUnguarded(graph, options) {
     edgeLabels[edge.id] = edgeLabelLines(edge, nameOf);
   });
 
-  partyEdges.forEach(function (edge, index) {
+  const pairs = new Map();
+  partyEdges.forEach(function (edge) {
     // An edge to or from a box that is not in the picture cannot be drawn and
     // must not be silently dropped into dagre either — it would invent the
     // missing node as a zero-sized one and the line would run to a point.
@@ -1015,20 +1039,41 @@ function renderUnguarded(graph, options) {
     lines.forEach(function (one) {
       width = Math.max(width, textWidth(one, EDGE_SIZE));
     });
-    g.setEdge(edge.from, edge.to, {
-      width: Math.ceil(width) + 10,
-      height: lines.length * (LINE_HEIGHT - 2) + 6,
+    // The key is the ORDERED pair: `a -> b` and `b -> a` are two lines to dagre
+    // and always were, and collapsing those two would be collapsing a cycle into
+    // an edge — which is the one thing that WOULD change the order it answers.
+    const key = edge.from + ' ' + edge.to;
+    let pair = pairs.get(key);
+    if (!pair) {
+      pair = { from: edge.from, to: edge.to, width: 0, height: 0, weight: 0 };
+      pairs.set(key, pair);
+    }
+    // The widest and the tallest of the labels collapsed here. dagre reserves a
+    // rank for a label and this is what it reserves; the gap the picture
+    // actually leaves is measured again by `labelWidthOf()` below, off the
+    // individual lines, so this figure has only to be honest rather than exact.
+    pair.width = Math.max(pair.width, Math.ceil(width) + 10);
+    pair.height = Math.max(pair.height, lines.length * (LINE_HEIGHT - 2) + 6);
+    // Every line dagre sees now is a relationship — the issuer's are drawn by
+    // hand below — so there is no longer a class of them to give less weight
+    // to. The `issued` case this used to name is the whole of what was taken
+    // out of the layout. SUMMING is what keeps a pair joined by four lines
+    // pulled together four times as hard as a pair joined by one, which is the
+    // whole of what the parallel lines were saying to the ordering pass.
+    pair.weight += 3;
+  });
+
+  pairs.forEach(function (pair) {
+    g.setEdge(pair.from, pair.to, {
+      width: pair.width,
+      height: pair.height,
       labelpos: 'c',
-      // Every line dagre sees now is a relationship — the issuer's are drawn by
-      // hand below — so there is no longer a class of them to give less weight
-      // to. The `issued` case this used to name is the whole of what was taken
-      // out of the layout.
-      weight: 3,
+      weight: pair.weight,
       // A minimum length of 1 everywhere: the picture's ranks are the three
       // LAYERS of the model, and a longer minlen on any one of them would open a
       // gap that says something the model does not.
       minlen: 1
-    }, edge.id || ('e' + index));
+    });
   });
 
   dagre.layout(g);
@@ -1528,7 +1573,29 @@ function renderUnguarded(graph, options) {
   // across its label. SVG has no z-index; document order is the whole of the
   // stacking, which is the sort of thing that is obvious once and surprising
   // every other time.
-  const edgeMarkup = edges.map(function (edge) {
+  //
+  // AND EVERY LINE BEFORE EVERY LABEL, WHICH IS THE SAME RULE APPLIED WITHIN
+  // THE EDGES AND WAS NOT UNTIL 2026-09-01. Each edge used to emit its own line
+  // and then its own label in one group, so document order interleaved them:
+  // the label of the FIRST line was painted before the fortieth line was drawn,
+  // and the fortieth line then went straight across the words. On the
+  // delegated permission example — five applications each granting the other
+  // four two permissions — 27 of the 40 labels were crossed by another line and
+  // 25 of them were crossed by a line painted ON TOP, which is what the picture
+  // looked unreadable BECAUSE OF. The lane assignment was not the problem and
+  // is not touched: no two label panels overlapped there, then or now.
+  //
+  // The panel is semi-transparent on purpose — a label sits on its own line and
+  // that line should read through it — so a crossing line is not hidden, it is
+  // knocked back behind the words rather than drawn over them. Which is the
+  // honest answer for a diagram this dense: the crossing is real and the
+  // picture should show it; it must not be shown by writing it through a word.
+  //
+  // Each pass keeps its OWN `<title>`, so hovering a label still gives the
+  // sentence — a label that had dropped out of the line's group would be the
+  // one part of an edge with no tooltip on it, which is where the whole
+  // identifier is (`edgeTitle()` says why the label cannot carry it).
+  const edgeParts = edges.map(function (edge) {
     if (!drawn[edge.from] || !drawn[edge.to]) {
       return '';
     }
@@ -1566,12 +1633,17 @@ function renderUnguarded(graph, options) {
             (i === 0 ? ' font-weight="600"' : '') + '>' + esc(one) + '</text>';
         }).join('') + '</g>'
       : '';
-    return '<g><title>' + esc(title) + '</title>' +
-      '<path d="' + d + '" fill="none" stroke="' + look.colour + '" stroke-width="' +
-      look.weight + '"' + (look.dash ? ' stroke-dasharray="' + look.dash + '"' : '') +
-      ' marker-end="url(#' + prefix + '-' + markerId(look.colour) + ')"/>' +
-      label + '</g>';
-  }).join('');
+    return {
+      line: '<g><title>' + esc(title) + '</title>' +
+        '<path d="' + d + '" fill="none" stroke="' + look.colour + '" stroke-width="' +
+        look.weight + '"' + (look.dash ? ' stroke-dasharray="' + look.dash + '"' : '') +
+        ' marker-end="url(#' + prefix + '-' + markerId(look.colour) + ')"/></g>',
+      label: label ? '<g><title>' + esc(title) + '</title>' + label + '</g>' : ''
+    };
+  }).filter(function (one) { return !!one; });
+
+  const edgeMarkup = edgeParts.map(function (one) { return one.line; }).join('') +
+                     edgeParts.map(function (one) { return one.label; }).join('');
 
   const nodeMarkup = nodes.map(function (node) {
     const at = placed[node.id];
@@ -1667,6 +1739,21 @@ function edgeTitle(edge) {
   if ((edge.skipped || []).length) {
     parts.push('The ' + edge.skipped.join(' and ') + ' is NOT NAMED on these ' +
                'acts, so this line jumps it.');
+  }
+  if (edge.relation === 'may-reach') {
+    // NOTHING, AND THAT IS THE POINT. A configured permission has no acts to
+    // count and no credentials in the issued register to report, so every
+    // branch below is a sentence about the wrong picture. It fell through to
+    // the last of them until 2026-09-01 and every line on
+    // `/admin/delegation/allowed` said `undefined credential(s) from the
+    // issued register, and no delegation act: nothing was exchanged to get
+    // them` — the `undefined` because `app_permissions.graph()` publishes no
+    // `credentials` member, correctly, and the rest because "nothing was
+    // exchanged" is an observation about acts on a line that describes no act.
+    // What such a line has to say is whether the client has ever ASKED, and
+    // the `may-reach` branch above has already said it.
+    log.debug("Leaving edgeTitle(). may-reach; no act or credential count belongs on it.");
+    return parts.join('\n');
   }
   if (edge.relation === 'issued-for') {
     parts.push(edge.credentials + ' credential(s).');

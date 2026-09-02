@@ -2064,7 +2064,7 @@ const SETTINGS = [
     restartReason: 'the socket is bound when the process starts',
     description: 'The plain LDAP listener. 389 is privileged, so a host run ' +
                  'that is not root fails to bind it — recorded rather than ' +
-                 'thrown, and reported by GET /ldap.' },
+                 'thrown, and reported by GET /admin/ldap/service.' },
 
   { key: 'ldap.tlsPort', group: 'LDAP', label: 'LDAPS port',
     env: 'LDAPS_PORT', type: 'port', dflt: 636, runtime: false,

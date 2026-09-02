@@ -112,8 +112,8 @@
 
 const nodeCrypto = require('crypto');
 const app = require('../common/app');
-const { log, xmlEscape, baseUrlOf, iso, nowSec, allSigningKeys, STS } =
-  require('../common/helpers');
+const { log, xmlEscape, baseUrlOf, iso, nowSec, allSigningKeys, numberWord,
+        STS } = require('../common/helpers');
 const stsCrypto = require('../common/crypto');
 const config = require('../common/config');
 const realms = require('../common/realms');
@@ -1644,10 +1644,27 @@ function consoleAction(name, body, req) {
     return Promise.resolve({ ok: true, errors: [],
       message: gone + ' received event(s) dropped.' });
   }
+  // THE REFUSAL IS SPELLED THE WAY EVERY OTHER ACTION HANDLER HERE SPELLS IT,
+  // AND IT WAS NOT UNTIL 2026-09-01. It said `"x" is not an action on this
+  // resource. The ones that are: …`, which reads perfectly well and is
+  // INVISIBLE to the two checks that actually depend on this sentence:
+  // `tests/vendored/admin_api.js` requires /unknown action/i before it will
+  // parse the list — that is the console/API parity check, so /ssf's four
+  // actions were being compared against nothing — and
+  // `tests/vendored/sts_admin_api_operations.js` matches `Unknown action "x".
+  // <count phrase>: <list>.` across every documented resource, which is what
+  // caught it. The lesson is the one `helpers.numberWord()`'s header already
+  // states: this sentence is not prose, it is READ, and a handler that writes
+  // it its own way turns a check off with nothing failing.
+  //
+  // The count comes from the LIST rather than from a word typed beside it, for
+  // the same reason: `applicationsAction()` said "The six are" over seven for
+  // a fortnight.
   log.debug('Leaving consoleAction(). Unknown action.');
   return Promise.resolve({ ok: false,
-    errors: ['"' + String(name) + '" is not an action on this resource. The ' +
-      'ones that are: ' + CONSOLE_ACTIONS.join(', ') + '.'] });
+    errors: ['Unknown action "' + String(name) + '". The ' +
+      numberWord(CONSOLE_ACTIONS.length) + ' are: ' +
+      CONSOLE_ACTIONS.join(', ') + '.'] });
 }
 
 const CONSOLE_ACTIONS = ['status', 'delete', 'transmit', 'clear-received'];

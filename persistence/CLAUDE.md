@@ -157,7 +157,7 @@ postgres mode.
 
 ## A failed write is logged and never thrown
 
-The service keeps answering out of memory, `GET /ldap` and `/admin/persistence`
+The service keeps answering out of memory, `GET /admin/ldap/service` and `/admin/persistence`
 both carry the error, and the next flush recomputes the same diff — **the shadow
 is only advanced on success**, so nothing is lost by a failure and the retry
 needs no queue.
@@ -167,7 +167,7 @@ considered and rejected: it would make a database outage take down sixteen
 protocol families that do not need a database, and no other refusal in this
 service is that expensive. This was verified by stopping the database under a
 running service: the `POST /admin-api/users/create` succeeded, `/healthcheck`
-answered 200, `/ldap` reported `healthy: false` with the connection error, and
+answered 200, `/admin/ldap/service` reported `healthy: false` with the connection error, and
 when the database came back the next change wrote the entry made during the
 outage along with the new one.
 
@@ -228,7 +228,7 @@ and neither is an analogy.
   say, and it already makes that decision for its own purposes.
 * **`persistence.setDirectory()`**, offered here and filled by
   `ldap/ldap_server.js`. This one is about ROUTE ORDER rather than a cycle: that
-  module registers `/ldap` and `/ldap/directory` at its require time, and this
+  module registers `/ldap` and `/admin/ldap/directory` at its require time, and this
   module is required at #4a — far above `admin.js`. A require from here would
   drag both routes to the front of the express router, which is the exact
   failure rule 1 exists to prevent. It carries two functions, validated WHOLE
@@ -281,7 +281,7 @@ been renamed, retyped, its enum narrowed or turned restart-only since.
 ## The bug the restore found, and it was not in this directory
 
 A restored directory came back with twenty entries — `ldapsearch` and
-`/ldap/directory` showed all of them — and **`/admin/users` reported
+`/admin/ldap/directory` showed all of them — and **`/admin/users` reported
 `known: 0`**. It reads as a failed restore and is a page reading a different
 store: `/admin/users`, `/admin-api/users` and the user drill-down are driven by
 `admin_stats.js`'s identity register, not by the directory.

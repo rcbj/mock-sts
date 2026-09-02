@@ -83,13 +83,23 @@ them can drift from what the service does:
 | `GET /admin-api/openapi.json` | The management API, generated from its operation table |
 | `GET /admin-api/docs` | The same, in a small explorer that also shows the `curl` line |
 | `GET /spiffe` | The trust domain, the four sockets, and all 42 SPIRE methods with a reason for each of the six that are unimplemented |
-| `GET /ldap` | The directory's state, both listeners separately, and the fact that it is schemaless |
+| `GET /admin/ldap/service` | The directory's state, both listeners separately, and the fact that it is schemaless |
 | `GET /federation` | Every configured federation relationship in both directions, and the URL to give each partner |
-| `GET /ldap/federations` | The federation register as the directory holds it, with its schema — and the one container here where an `ldapmodify` is a security change |
+| `GET /admin/ldap/federations` | The federation register as the directory holds it, with its schema — and the one container here where an `ldapmodify` is a security change |
 | `GET /tls` | Both TLS listeners, and what a verified client certificate does and does not mean |
 | `GET /scim` | The SCIM authentication schemes that are switched on |
 | `GET /krb5/principals` | The principal database, passwords included, for the reason that page gives |
 | `GET /admin-api/status` | Which console pages exist — what the parity test reads |
+
+**Two rows in that table are behind the console's gate, and their `/admin-api`
+twins are not.** `GET /admin/ldap/service` and `GET /admin/ldap/federations`
+became admin console pages on 2026-09-01 — they were `/ldap` and
+`/ldap/federations` — along with `/admin/ldap/directory`,
+`/admin/ldap/applications` and `/admin/ldap/spiffe`. They need a sign-on session
+and a console role, because a dump of every attribute of every entry prints
+`oauthClientSecret` and `fedClientSecret` in the clear. Every one of them is
+mirrored by an operation under `GET /admin-api/ldap/…`, which is not gated: that
+is the door a script uses, and the one to reach for when nobody holds a role.
 
 ## Named authorization servers
 

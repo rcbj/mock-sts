@@ -118,8 +118,11 @@ It refuses an authorization or token request that asks for a **delegated
 permission** the client has not been granted. A resource application exposes an
 API — a base URI and a list of permission names, joined into
 `https://example.com/write` — and a client application is granted some of them;
-`/admin/delegation` is where both are typed, and the shape is Microsoft Entra
-ID's.
+the shape is Microsoft Entra ID's. `/admin/delegation` is where the RESOURCE
+half is typed — the base URI and the permission names — and the GRANT is typed
+on the client application's own page under *Directory › Applications*, where the
+client half of the pair is the entry you are looking at rather than an option in
+a list of every application in the service.
 
 **It is deliberately NOT part of `oauth2.rfc9700`.** Every check in that mode
 cites a section of a published Best Current Practice. A delegated permission
@@ -296,7 +299,7 @@ at startup — so nothing in a saved override file can reach `global.https`,
 
 **A failed write is logged and never thrown.** If the database goes away, the
 operation that triggered the write still succeeds, this service keeps answering
-out of memory, and `/admin/persistence` and `GET /ldap` both carry the error.
+out of memory, and `/admin/persistence` and `GET /admin/ldap/service` both carry the error.
 The next change recomputes the same difference and tries again, so a failure
 loses nothing.
 

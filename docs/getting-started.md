@@ -72,7 +72,9 @@ thrown — a `require` that throws would take the whole service down where a rou
 cannot — and each listener publishes its own result, because "389 is up and 636
 is not" is the ordinary outcome and one flag could only report one of them:
 
-- `GET /ldap` — `listening` / `listenError`, and a `tls` object with its own pair
+- `GET /admin/ldap/service` — `listening` / `listenError`, and a `tls` object with its own pair
+  (an admin console page since 2026-09-01, so it needs a session; `GET
+  /admin-api/ldap/service` is the same object and is not gated)
 - `GET /tls` — the same for 8443 and 9443
 - `GET /spiffe` — all four SPIFFE sockets, separately
 - `GET /krb5/principals` — the KDC

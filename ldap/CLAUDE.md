@@ -155,7 +155,7 @@ ldapjs implements none, and this repository does not patch that submodule.
    `ou=applications` is `applications.js`'s store (rule 3g) and this module is
    what makes it one — `readApplication`, `writeApplication`, `allApplications`
    and `countApplications`, filled into that module's `setDirectory()` slot at
-   require time, plus `GET /ldap/applications`. The division is exact and worth
+   require time, plus `GET /admin/ldap/applications`. The division is exact and worth
    keeping: THAT module owns the schema and both conversions, THIS one owns
    where the container is, how an entry is created and what the cap is.
 
@@ -217,7 +217,7 @@ ldapjs implements none, and this repository does not patch that submodule.
    `/admin/users?user=<name>` shows that user's directory object — every attribute,
    operational ones included — and `admin.js` must NOT require this module to get
    it: `server.js` requires `admin.js` FIRST, so a require from there would pull
-   `/ldap` and `/ldap/directory` into the router ahead of the console's routes, and
+   every route this module registers into the router ahead of the console's routes, and
    `GET /admin/sts-metadata` is built by walking that router. So `admin.js` exports
    `setDirectoryReader()` and this module fills it with `objectFor()` at require
    time. `objectFor()` is given the identity key the console files a person under,
@@ -560,7 +560,7 @@ edit changes what this service HANDS OUT. `fedSigningCertificate` decides whose
 assertions it will BELIEVE, and `fedEnabled` turns a partner on. Every bind to
 this directory succeeds, so this container is exactly as protected as the rest of
 it, which is to say not at all — that is the honest state of a mock, it is said
-out loud on `GET /ldap/federations`, and it is part of why federation refuses by
+out loud on `GET /admin/ldap/federations`, and it is part of why federation refuses by
 default rather than accepting.
 
 `fedClientSecret` is on these entries in the clear, and it is a stronger claim
@@ -664,7 +664,7 @@ In the default `memory` mode the added call returns immediately on a boolean.
 module's require time. It is a slot rather than a require in the other direction
 for a ROUTE-ORDER reason rather than a cycle one: `persistence.js` is required at
 #4a, far above `admin.js`, and a require from there to here would drag `/ldap`
-and `/ldap/directory` into the express router at that point — the exact failure
+and `/admin/ldap/directory` into the express router at that point — the exact failure
 rule 1 exists to prevent. The require in THIS direction is a plain one and closes
 nothing.
 
@@ -694,7 +694,7 @@ would find it back.
 
 **It also refills `admin_stats.js`'s identity register, and that was a real
 bug.** A restored directory came back with twenty entries — `ldapsearch` and
-`/ldap/directory` showed all of them — and `/admin/users` reported `known: 0`,
+`/admin/ldap/directory` showed all of them — and `/admin/users` reported `known: 0`,
 because that page has never read this directory. It reads the identity register,
 which until 2026-08-27 could only be filled by somebody AUTHENTICATING; a
 restored directory is the first thing that ever put an entry under `ou=users`
@@ -762,7 +762,7 @@ because they are facts about the package root rather than about this module.
   `invalid`, which is refused with `LDAP_INVALID_CREDENTIALS` (49). That exception
   is not a softening; it is what keeps result code 49 reachable, and 49 is the code
   an LDAP client's error handling is built around. The directory is also
-  SCHEMALESS on purpose, and `GET /ldap` says so rather than leaving a reader to
+  SCHEMALESS on purpose, and `GET /admin/ldap/service` says so rather than leaving a reader to
   infer a schema that is not there. Four structural rules are still enforced (an
   add needs its parent, a delete needs a leaf, a modify `delete` of an absent
   attribute is 16, and an attribute's last value takes the attribute with it),
@@ -827,7 +827,7 @@ of them. `common/app_permissions.js` is what reads the two halves together and
 `common/CLAUDE.md` argues the model.
 
 **Nothing about this directory changed to take them.** They are rows in
-`applications.js`'s `SCHEMA` like every other, so `GET /ldap/applications`
+`applications.js`'s `SCHEMA` like every other, so `GET /admin/ldap/applications`
 publishes them, `attributesFor()` writes them and `recordFromAttributes()` reads
 them back, and they persist wherever the directory does. That is the property
 that arrangement was built for, and this is the first feature to lean on it in
@@ -839,3 +839,77 @@ grant — one naming a permission no application defines — as a state rather t
 an error: both console doors refuse to create one, so a dangling grant is always
 something that happened outside them, and this directory enforces nothing
 anywhere.
+
+
+---
+
+## The five HTML views are ADMIN CONSOLE PAGES since 2026-09-01
+
+They were `/ldap`, `/ldap/directory`, `/ldap/applications`, `/ldap/federations`
+and `/ldap/spiffe`: five pages in a shell written in this file, with their own
+stylesheet, no sidebar, no breadcrumb, no realm switcher and no gate. They are
+`/admin/ldap/service`, `/admin/ldap/directory`, `/admin/ldap/applications`,
+`/admin/ldap/federations` and `/admin/ldap/spiffe` now, drawn in the console's
+own shell through `admin.respond()`. **The old paths answer nothing** —
+deliberately, rather than redirecting: `/admin/sts-metadata` is built by reading
+the router, and a service that keeps a path alive forever is a service whose
+endpoint list stops meaning anything.
+
+**The move was about WHERE THEY BELONG and the gate came with it.** Every one
+of these pages answers a question about what is in this service's directory,
+which is the question the four pages under the console's *Directory* heading
+already answer; the only thing that made them a separate surface was that they
+happened to have been written here. Four things follow, and each is worth
+knowing before touching any of it.
+
+* **THEY ARE STILL BUILT HERE, and that is not a leftover.** A console page is
+  a `path` and a `label` in `admin-ui/admin.js`'s `SECTIONS` whoever builds the
+  body — `/admin/sts-metadata` is built by `../sts_metadata.js` and has been
+  since 2026-08-24. Moving these bodies into that file would mean moving
+  `description()`, `eachEntryInRealm()` and `entryObject()` with them, or
+  exporting all three: the directory's own store belongs to the directory's own
+  module.
+* **THEY ARE GATED NOW, and that is the half of the change with a security
+  argument behind it.** `admin.js` registers its gate as one
+  `app.use('/admin', …)` above its own routes, and this module is required at
+  #21, so a route registered here under `/admin` is behind it. A dump of every
+  attribute of every entry prints `oauthClientSecret` and `fedClientSecret` in
+  the clear, and these were the ONE surface in this service handing those to
+  anybody who could reach the port while the console next door asked for a role
+  to show far less. `/admin-api` mirrors all five and is still ungated, which is
+  what a test drives and what somebody locked out of the console reaches for.
+* **THE PAGING AND THE SHORTENING ARE THE CONSOLE'S, NOT THIS FILE'S.**
+  `admin.pagedRows()`, `admin.pageNavPair()`, `admin.perPageOptions()`,
+  `admin.clipped()` and `admin.tile()` are the same functions `/admin/tokens`
+  and `/admin/applications` use, exported for the reason `page()`, `note()` and
+  `tip()` are exported to `sts_metadata.js`. A control on one of these pages
+  that behaved differently from the identical-looking control on the page next
+  door would be the worst possible outcome of moving them here. **Do not write
+  a paging control in this file.**
+* **`/admin/ldap/service` IS DELIBERATELY NOT `/admin/ldap`.** That path is the
+  LDAP / LDAPS SETTINGS page under *Protocols*, and the two answer different
+  questions: that one says what the sockets are SET to and lets somebody change
+  it, this one says what actually happened when the process tried to bind them.
+  On a host whose own slapd already holds 389 the two disagree, and the
+  disagreement is the whole value of having both. Each links to the other rather
+  than restating it.
+
+**The paging on `/admin/ldap/directory` is not a convenience.** That page prints
+one row per entry with EVERY attribute of that entry in the last column, and
+`ldap.maxEntries` is in the hundreds — so a service driven by a test suite for an
+hour answered the old path with a document several megabytes long. Its filter is
+over the WHOLE ENTRY and not only the DN, which is the one thing about it worth
+stating: somebody looking for the entry that carries a particular thumbprint or
+secret has the VALUE and not the name.
+
+**A value too long for its column is SHORTENED and the whole of it is one hover
+away** (`admin.clipped()`). The full value is a real element rather than a
+`title` attribute, because a native tooltip cannot be SELECTED and copying a
+client secret or a DN is the entire reason somebody hovers one — `admin.js`'s
+comment above that function carries the argument, including why the `title` is
+set as well and is not redundant.
+
+**Rule 3e's NINTH SLOT is `admin.setDirectoryPages()` and this file fills it**,
+with the five view functions, so that `mgmt-api/admin_api.js` (19) can mirror
+these pages without requiring this module (21) and dragging every route
+registered here ahead of its own. See the root `CLAUDE.md`.

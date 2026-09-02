@@ -42,7 +42,7 @@ const path = require('path');
 // `./local-run-tests.sh --vendor-sync` does the copy and
 // `--vendor-check` reports what differs.
 //
-// THE EXCEPTION IS THE FOUR JOBS MARKED `local: true` BELOW — this service's
+// THE EXCEPTION IS THE FIVE JOBS MARKED `local: true` BELOW — this service's
 // own `/admin` console and `/admin-api`. Those are NOT copies of anything: the
 // parent deleted its own on 2026-08-28 and they are edited here and only here.
 // The rule above applies to every other file in this directory.
@@ -50,7 +50,7 @@ const path = require('path');
 // What vendoring buys is that this repository's suite RUNS with no parent
 // checkout beside it. Before 2026-08-28 a machine with only this repository on
 // it ran ten in-process files and reported the other thirteen jobs as absent;
-// now it runs all twenty-three. The drift check is the part that needs both
+// now it runs all twenty-seven. The drift check is the part that needs both
 // checkouts, and it is therefore a TOOL rather than a job — see
 // `tools/vendor-check.js` for why that distinction is deliberate.
 // ===========================================================================
@@ -58,10 +58,10 @@ const path = require('path');
 // ---------------------------------------------------------------------------
 // TWO SOURCE DIRECTORIES, AND THE SECOND ONE IS THE SURPRISE.
 //
-// `tests/` is the obvious half: the thirteen jobs and the helpers they share.
+// `tests/` is the obvious half: the jobs and the helpers they share.
 //
 // `client/src/` is the DEBUGGER'S OWN WALLET AND CRYPTO CODE, and five of the
-// thirteen jobs load it deliberately. That is not an accident of layout — it
+// fourteen jobs load it deliberately. That is not an accident of layout — it
 // is the POINT of those tests. `vc_did.js` checks that a credential this
 // service issued verifies under the wallet's DID resolver;
 // `sts_jws_verification.js` checks a signature against the debugger's PQC
@@ -92,10 +92,14 @@ const CLIENT_SOURCE_DIR = path.join('client', 'src');
 // ---------------------------------------------------------------------------
 //
 // `local: true` means THIS REPOSITORY OWNS THE FILE and there is no copy of it
-// over there to compare against. Four jobs are marked so, and they are the
-// four that drive this service's OWN `/admin` console and its `/admin-api`:
-// `sts_metadata.js`, `admin_api.js`, `sts_admin_api_operations.js` and
-// `sts_admin_console.js`. They ran from the parent project's `tests/` until
+// over there to compare against. FIVE jobs are marked so, and they are the
+// five that drive this service's OWN `/admin` console and its `/admin-api`:
+// `sts_metadata.js`, `admin_api.js`, `sts_admin_api_operations.js`,
+// `sts_admin_console.js` and `sts_delegated_permissions_example.js` — the
+// last of which is newer than the argument below and is covered by it for
+// the same reason: it builds an example THROUGH `/admin-api` for somebody to
+// read on `/admin`, so the tree that changes those doors is the tree that
+// should go red when it stops working. They ran from the parent project's `tests/` until
 // 2026-08-28 and were removed there on that date, on the argument that a test
 // asserting something about this console belongs in the tree where a control
 // is added to that console — the tree that should go red when the control
@@ -119,6 +123,7 @@ const JOBS = [
   { file: 'oauth2_sts_endpoints.js',     browser: false },
   { file: 'sts_admin_api_operations.js', browser: false, local: true },
   { file: 'sts_admin_console.js',        browser: true,  local: true },
+  { file: 'sts_delegated_permissions_example.js', browser: false, local: true },
   { file: 'sts_dpop.js',                 browser: false },
   { file: 'sts_jws_verification.js',     browser: false },
   { file: 'sts_metadata.js',             browser: false, local: true },
@@ -132,7 +137,7 @@ const JOBS = [
 // THE HELPERS, and `env/local.js`. None of these is a job; every one of them is
 // reached by a `require` from at least one job above, which is the whole reason
 // it is here. The set was computed as the transitive local-require closure of
-// the thirteen jobs, not chosen — so a job that grows a new `require('./x.js')`
+// the fourteen jobs, not chosen — so a job that grows a new `require('./x.js')`
 // over there arrives here as a MISSING MODULE at load time, which is a failed
 // job with a name in it rather than a silent gap.
 // ---------------------------------------------------------------------------

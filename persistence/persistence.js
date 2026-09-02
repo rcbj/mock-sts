@@ -124,7 +124,7 @@
 // `writeDelay` milliseconds of writes.
 //
 // A FAILED WRITE IS LOGGED AND REPORTED AND NEVER THROWN. The service keeps
-// answering out of memory, `GET /ldap` and `/admin/persistence` both carry the
+// answering out of memory, `GET /admin/ldap/service` and `/admin/persistence` both carry the
 // error, and the next flush tries again with the same diff (the shadow is only
 // advanced on success, so nothing is lost by a failure). The alternative —
 // refusing the LDAP operation whose write failed — was considered and rejected:
@@ -147,7 +147,7 @@
 //     Save.
 //   * `persistence.setDirectory()`, offered below and filled by
 //     `ldap/ldap_server.js`. This one is about ROUTE ORDER rather than a cycle:
-//     `ldap_server.js` registers `/ldap` and `/ldap/directory` at its require
+//     `ldap_server.js` registers `/ldap` and `/admin/ldap/directory` at its require
 //     time, and this module is required at #4a — far above `admin.js`. A
 //     require from here would drag both of those routes to the front of the
 //     express router, which is the exact failure rule 1 exists to prevent.
@@ -269,7 +269,7 @@ let restoring = false;
 // closed would log an error about a closed client on every shutdown.
 let stopped = false;
 
-// What /admin/persistence, GET /ldap and GET /admin-api/persistence report.
+// What /admin/persistence, GET /admin/ldap/service and GET /admin-api/persistence report.
 let lastWriteAt = null;
 let lastError = '';
 let writes = 0;
@@ -962,7 +962,7 @@ function stop() {
 }
 
 // ---------------------------------------------------------------------------
-// WHAT THIS MODULE SAYS ABOUT ITSELF. One shape, read by GET /ldap, by
+// WHAT THIS MODULE SAYS ABOUT ITSELF. One shape, read by GET /admin/ldap/service, by
 // /admin/persistence and by GET /admin-api/persistence — for the reason
 // config.js's describe() is one shape: a console and an API that compute the
 // same answer twice are a console and an API that will disagree about it.

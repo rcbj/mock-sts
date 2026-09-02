@@ -9,7 +9,7 @@ first or the rest of this file will read as though it contradicts itself:
 | | What it is | Where it is authored |
 |---|---|---|
 | `tests/*.js` | the IN-PROCESS half — this repository's own module contracts, no port, no container, under a second | here |
-| `tests/vendored/` | the PROTOCOL half — thirteen jobs driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent's mock-only jobs; **FOUR are this repository's own** | the nine: **the parent project**, not edited here. the four: **here**, and only here |
+| `tests/vendored/` | the PROTOCOL half — fourteen jobs driven over HTTP against a CONTAINER built from this tree, plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent's mock-only jobs; **FIVE are this repository's own** | the nine: **the parent project**, not edited here. the five: **here**, and only here |
 
 Everything this file says about what belongs HERE is about the first row. MOST
 of the second row is copies, `tests/vendored/MANIFEST.js` argues them, and the
@@ -18,17 +18,34 @@ rule that governs them is `common/vendored/`'s: **edit the parent's copy, then
 overwritten by the next sync and never reaches the stack that gates that
 project.
 
-**THE FOUR JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
+**THE FIVE JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
 RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
-`sts_admin_api_operations.js` and `sts_admin_console.js` drive this service's OWN
-`/admin` console and its `/admin-api`. They ran from the parent's suite until
-2026-08-28 and were deleted there that day, on the argument that a test
-asserting something about this console belongs in the tree where a control is
-ADDED to that console — the tree that should go red when the control loses its
-operation. **There is no copy of them over there to sync from**, which is what
-the flag is for: `allFiles()` leaves them out, so `--vendor-check` cannot report
-them GONE UPSTREAM and `--vendor-sync` cannot overwrite them. They are edited
-HERE, and only here.
+`sts_admin_api_operations.js`, `sts_admin_console.js` and
+`sts_delegated_permissions_example.js` drive this service's OWN
+`/admin` console and its `/admin-api`. The first four ran from the parent's
+suite until 2026-08-28 and were deleted there that day, on the argument that a
+test asserting something about this console belongs in the tree where a control
+is ADDED to that console — the tree that should go red when the control loses
+its operation. **There is no copy of them over there to sync from**, which is
+what the flag is for: `allFiles()` leaves them out, so `--vendor-check` cannot
+report them GONE UPSTREAM and `--vendor-sync` cannot overwrite them. They are
+edited HERE, and only here.
+
+**THE FIFTH WAS NEVER OVER THERE AND IT BREAKS ONE RULE ON PURPOSE.**
+`sts_delegated_permissions_example.js` (2026-09-01) builds
+`abcapp1`–`abcapp5` in the DEFAULT realm — five applications that each expose
+`read` and `write` and each hold both on all four of the others — and it does
+NOT clean up after itself, where every other job that writes anything works in
+a throwaway realm and removes it in a `finally`. That is not an oversight and
+it is not a precedent: what the job produces IS the deliverable, an example
+meant to be read at `/admin/delegation/allowed` and drawn at
+`/admin/delegation/allowed/map`, and a realm deleted on the way out is an
+example nobody can open. What pays for it is that the job is IDEMPOTENT — the
+identifiers are fixed, so it forgets every previous `abcapp*` before creating
+anything — that nothing else in the suite asserts an application COUNT, and
+that it runs after `sts_admin_console.js` so the console's own coverage walks
+the console it has always walked. **A second job wanting the same exemption
+needs the same three sentences**, not a reference to this one.
 
 They still SIT in `tests/vendored/` rather than beside this file, and the reason
 is how they RUN rather than where they belong: `tools/run-report.js` spawns them

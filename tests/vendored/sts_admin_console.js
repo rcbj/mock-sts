@@ -500,6 +500,7 @@ async function fillAndPress(driver, formIndex, values, options) {
     const values = arguments[1];
     if (!f) { return { error: 'no form at index ' + arguments[0] }; }
     let firstText = null;
+    let firstTextIndex = -1;
     const set = [];
     Object.keys(values).forEach(function (name) {
       const control = f.elements[name];
@@ -517,10 +518,11 @@ async function fillAndPress(driver, formIndex, values, options) {
         set.push(name);
       });
     });
-    Array.from(f.elements).forEach(function (e) {
+    Array.from(f.elements).forEach(function (e, i) {
       if (firstText === null && !e.disabled &&
           (e.type === 'text' || e.type === 'number' || e.type === 'search')) {
         firstText = e.name || '';
+        firstTextIndex = i;
       }
     });
     // THE FORM'S OWN METHOD, so that settleAfterSubmit() below can wait for
@@ -530,16 +532,42 @@ async function fillAndPress(driver, formIndex, values, options) {
     // (No backticks in this comment: it is inside a template literal, and one
     // would end the script string here rather than at the intended line.)
     return { set: set, firstText: firstText,
+             firstTextIndex: firstTextIndex,
              method: String(f.method || 'get').toUpperCase() };
   `, formIndex, values || {});
   assert.ok(!typed.error, "fillAndPress: " + typed.error);
 
   // The one control that goes through real key events.
+  //
+  // IT IS FETCHED BY ITS INDEX IN `f.elements` AND NOT BY A CSS SELECTOR, and
+  // that is a FIX rather than a preference (2026-09-01). It was
+  // `form:nth-of-type(N + 1) [name='…']`, which is two different things at
+  // once and neither of them is "the form this call is about":
+  //
+  //   * `document.forms[N]` — what everything else in this function uses — is
+  //     the Nth form IN THE DOCUMENT. `form:nth-of-type(N + 1)` is a form that
+  //     is the (N+1)th form CHILD OF ITS OWN PARENT. Those agree only while
+  //     every form on the page shares one parent, and this console's shell
+  //     puts the realm switcher in the `<aside>` while the page's own forms
+  //     are in the card — so they have disagreed by one on every page with a
+  //     realm defined since the switcher was added.
+  //   * The name lookup then ran against the WRONG form, and picked up
+  //     whatever control there happened to carry that name. Where that was a
+  //     HIDDEN input carrying the same name — which is exactly how a page with
+  //     several GET forms keeps the others' parameters, and what
+  //     `/admin/ldap/spiffe` does with `entryq` and `agentq` — `sendKeys()`
+  //     answered `ElementNotInteractableError` and the run died on a page that
+  //     was working perfectly.
+  //
+  // The index comes back from the same script that found the control, so the
+  // element typed into is the one that was chosen, by construction. It is the
+  // device `submitButtonOf()` below already uses for the same reason.
   if (typed.firstText && values && values[typed.firstText] !== undefined &&
-      !opts.noTyping) {
-    const field = await driver.findElement(
-        By.css("form:nth-of-type(" + (formIndex + 1) + ") [name='" +
-               typed.firstText + "']")).catch(function () { return null; });
+      !opts.noTyping && typed.firstTextIndex >= 0) {
+    const field = await driver.executeScript(`
+      const f = document.forms[arguments[0]];
+      return f ? Array.from(f.elements)[arguments[1]] : null;
+    `, formIndex, typed.firstTextIndex).catch(function () { return null; });
     if (field) {
       await field.clear().catch(function () { return null; });
       await field.sendKeys(String(values[typed.firstText]));
@@ -2160,28 +2188,47 @@ async function theDelegationPageDefinesAndGrants(driver) {
 
   // 3. THE GRANT — the relationship itself, and the control this whole
   //    feature exists for.
+  //
+  //    IT IS ON THE CLIENT'S OWN PAGE SINCE 2026-09-01 AND NOT ON
+  //    /admin/delegation, and that move is exactly the kind of thing this file
+  //    exists to hold still. There the form was two selects and the reader had
+  //    to get BOTH right; here the client is the entry the page is about, so
+  //    the half that could be silently wrong is settled by the URL. The
+  //    delegation page keeps the other four controls and a paragraph saying
+  //    where this one went.
+  //
+  //    The form still POSTs to /admin/delegation — `grant-permission` is that
+  //    handler's action and moving a form is not moving an action — which is
+  //    why the read-back below is the assertion that matters: a redirect that
+  //    landed anywhere else, or a write that landed on the resource, both
+  //    answer 303 with the same cheerful notice.
+  await open(driver, realm("/admin/applications?application=" +
+                           encodeURIComponent(client)));
   const grantForm = await formIndexPosting(driver, "grant-permission");
-  check("/admin/delegation draws the Grant a permission form", function () {
+  check("the client's own page draws the Grant a permission form", function () {
     assert.ok(grantForm >= 0,
-      "/admin/delegation should draw a form taking a `client` and a " +
-      "`permission` once something is defined. Before that it deliberately " +
-      "draws a paragraph instead, because a select with nothing in it is a " +
-      "control that can only fail.");
+      "/admin/applications?application=<client> should draw a form taking a " +
+      "`permission` once something is defined — with no `client` select at " +
+      "all, because the client is the entry the page is about. Before " +
+      "anything is defined it deliberately draws a paragraph instead, because " +
+      "a select with nothing in it is a control that can only fail.");
   });
-  await fillAndPress(driver, grantForm,
-                     { client: client, permission: baseUri + "write" });
+  await fillAndPress(driver, grantForm, { permission: baseUri + "write" });
 
   const granted = await survey(driver);
-  check("the grant names BOTH applications on the page", function () {
-    assert.ok(granted.text.indexOf(client) >= 0 &&
-              granted.text.indexOf(resource) >= 0,
-      "A GRANT IS BETWEEN TWO APPLICATIONS AND THE PAGE HAS TO SAY WHICH IS " +
-      "WHICH. The grant lands on the CLIENT's entry and resolves back to the " +
-      "resource through the permission's base URI, so a row naming only one " +
-      "of them is a row that resolved wrongly — which is the failure a read " +
-      "through the API could not distinguish, since that resource resolves " +
-      "both directions whichever entry the value landed on. The page says " +
-      granted.text.slice(0, 500));
+  check("the grant is read back on the client's own page", function () {
+    assert.ok(granted.text.indexOf(baseUri + "write") >= 0,
+      "AND THE READ-BACK IS OFF THE PAGE THAT DREW THE CONTROL. The grant " +
+      "lands on the CLIENT's entry as a value of oauthDelegatedPermission, so " +
+      "a form that wrote it to the RESOURCE instead would still answer 303 " +
+      "with the same notice and would still read correctly on the delegation " +
+      "page's register — which resolves both directions whichever entry the " +
+      "value landed on. This page can only show it if it landed here. The " +
+      "page says " + granted.text.slice(0, 500));
+    assert.ok(granted.text.indexOf(resource) >= 0,
+      "and it must name the RESOURCE the permission belongs to beside it, " +
+      "because a grant is between two applications and the page has to say " +
+      "which is which. The page says " + granted.text.slice(0, 500));
   });
   check("and it is marked as never asked for", function () {
     assert.ok(/never asked for/i.test(granted.text),
@@ -2190,14 +2237,35 @@ async function theDelegationPageDefinesAndGrants(driver) {
       "was typed, and it is what makes `granted and never asked for` a " +
       "question the console can answer at all.");
   });
+  // OPENED OUTSIDE check(), because check() is SYNCHRONOUS: an async body
+  // would hand it a promise, it would count the check as passed and any
+  // failure inside would surface as an unhandled rejection long after the
+  // ledger said the run was green.
+  const register = await open(driver, realm("/admin/delegation"));
+  check("the delegation page's register agrees with it", function () {
+    assert.ok(register.text.indexOf(baseUri + "write") >= 0,
+      "ONE WRITE, TWO PAGES. The grant was typed on the application's page " +
+      "and the register that draws every grant in the service must show the " +
+      "same one — the two are the same directory attribute read through the " +
+      "same module, and a disagreement here would mean the form had written " +
+      "somewhere of its own. /admin/delegation says " +
+      register.text.slice(0, 500));
+  });
 
   // 4 and 5. REVOKE, then REMOVE — in that order, because removing the
   //    permission first would leave the grant DANGLING and the revoke would
   //    then be pressing a button on a row in a state this run did not set up.
+  //
+  //    Revoke is pressed on the CLIENT's page, where the row button now is
+  //    beside the grant it revokes; Remove stays on /admin/delegation, which
+  //    is where a permission is defined and undefined.
+  await open(driver, realm("/admin/applications?application=" +
+                           encodeURIComponent(client)));
   const revokeForm = await formIndexPosting(driver, "revoke-permission");
   if (revokeForm >= 0) {
     await fillAndPress(driver, revokeForm, {});
   }
+  const revoked = await survey(driver);
   await open(driver, realm("/admin/delegation"));
   const removeForm = await formIndexPosting(driver, "remove-permission");
   if (removeForm >= 0) {
@@ -2205,18 +2273,26 @@ async function theDelegationPageDefinesAndGrants(driver) {
   }
   const cleared = await survey(driver);
   check("revoke and remove take both of them off the page", function () {
-    assert.ok(revokeForm >= 0 && removeForm >= 0,
-      "each row should draw its own Revoke and Remove button; the page drew " +
-      "revoke=" + revokeForm + " remove=" + removeForm);
+    assert.ok(revokeForm >= 0,
+      "the client's page should draw a Revoke button on the row of every " +
+      "permission it holds; it drew revoke=" + revokeForm);
+    assert.ok(removeForm >= 0,
+      "and /admin/delegation should draw a Remove button on the row of every " +
+      "permission defined; it drew remove=" + removeForm);
+    assert.ok(revoked.text.indexOf(baseUri + "write") < 0 ||
+              /It holds none/i.test(revoked.text),
+      "after the revoke the client should no longer hold it. Its page still " +
+      "says: " + revoked.text.slice(0, 400));
     assert.ok(cleared.text.indexOf(baseUri + "write") < 0,
-      "and afterwards the permission should be gone from the page. It still " +
-      "says: " + cleared.text.slice(0, 400));
+      "and afterwards the permission should be gone from the register too. " +
+      "It still says: " + cleared.text.slice(0, 400));
   });
 
-  log.info("[permissions] OK — a base URI, a permission and a grant were " +
-           "typed on /admin/delegation, the composed identifier and both " +
-           "applications were read back off the page that drew the controls, " +
-           "and revoke and remove took them away again.");
+  log.info("[permissions] OK — a base URI and a permission were typed on " +
+           "/admin/delegation, the grant was typed on the CLIENT's own page, " +
+           "the composed identifier and both applications were read back off " +
+           "the pages that drew the controls, the register agreed, and revoke " +
+           "and remove took them away again.");
   log.debug("Leaving theDelegationPageDefinesAndGrants().");
 }
 
@@ -2821,9 +2897,41 @@ async function theTwoDrawingsAreServerSide(driver) {
       svg.forEach(function (one) { nodes += one.querySelectorAll('*').length; });
       return { count: svg.length, nodes: nodes,
                images: document.querySelectorAll('img, image').length,
-               scripts: document.scripts.length };
+               scripts: document.scripts.length,
+               // The sentence render() puts where the drawing goes when the
+               // LAYOUT threw. It is a 200 with everything else on the page
+               // intact, which is why it has to be looked for by name.
+               undrawn: document.body.innerText
+                 .indexOf('The picture could not be drawn') >= 0 };
     `);
     check(path + " is inline server-rendered SVG", function () {
+      // THE PICTURE FAILING IS A 200 WITH A SENTENCE IN IT, which is why it is
+      // asserted at all and why it is asserted by name. `render()` cannot
+      // throw — a drawing on a console page must not be able to take the page
+      // down — so a layout that fails comes back as `The picture could not be
+      // drawn: <reason>` with every table below it correct. On 2026-09-01
+      // `/admin/delegation/allowed` said exactly that, for a graph that draws
+      // perfectly: see tests/delegation_map_bands.js, which holds the renderer
+      // to that shape.
+      //
+      // **THIS IS NOT THE GUARD FOR THAT BUG AND MUST NOT BE READ AS ONE.** It
+      // was written as one and then mutation-tested, which is the only reason
+      // anybody found out: with the defect put back, this whole section still
+      // passed. Every page here is opened in the throwaway REALM this job
+      // creates, and a realm holds no dense register — the failure needs a pair
+      // of applications joined in both directions with more than one permission
+      // in each, which is a shape nothing in this file builds. What the
+      // assertion does cover is any picture on these three pages failing in
+      // whatever the realm does hold, and it says so by name rather than
+      // leaving it to the `svg.count > 0` below, which would report the same
+      // failure as a missing drawing. The guard for the dense case is in
+      // process, where the graph can be chosen.
+      assert.ok(!drawn.undrawn,
+        path + " reported that the picture could not be drawn. That is a 200 " +
+        "with every table under it correct, so nothing but this notice says " +
+        "the drawing failed — read the service's log for the layout error it " +
+        "recorded, and see tests/delegation_map_bands.js for the graph shapes " +
+        "the renderer is held to.");
       assert.ok(drawn.count > 0,
         path + " should draw an inline <svg> in the document. It is laid out " +
         "on the server with dagre precisely so that this console needs no " +

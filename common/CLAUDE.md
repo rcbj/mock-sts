@@ -1204,7 +1204,7 @@ with `Cannot find module` naming a file the operator never mentioned.
    has no schema subsystem (its whole `lib/` mentions objectClass three times: a
    default filter and two result-code names) and it is a submodule this repo does
    not modify, so there was nothing to register with. `SCHEMA.attributes` is the
-   definition: the entry is built by WALKING it, `/ldap/applications` publishes
+   definition: the entry is built by WALKING it, `/admin/ldap/applications` publishes
    it, and an attribute not in it is REFUSED rather than written. `multi`
    accumulates and `single` is assigned — get that backwards on a counter and the
    entry grows a value per sign-in, which is `applyVcAttributes()`'s second rule.

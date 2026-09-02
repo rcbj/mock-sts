@@ -182,10 +182,14 @@ function makeStsKeys() {
   const keys = stsCrypto.selfSignedRsaCertificate({
     bits: 2048,
     commonName: 'ws-trust-mock-sts',
-    // Unchanged from when this was written out here, and not arbitrary: the TLS
+    // The LEADING BYTE of a random serial, and not arbitrary: the TLS
     // listener's certificate is '03', so a person looking at two of this
-    // service's certificates in a packet capture can tell which is which.
-    serialNumber: '02',
+    // service's certificates in a packet capture can tell which is which. It
+    // was the WHOLE serial until 2026-09-01, and a constant serial over a key
+    // regenerated at every start is what Firefox reports as
+    // SEC_ERROR_REUSED_ISSUER_AND_SERIAL — see certificateSerial() in
+    // common/crypto.js.
+    serialPrefix: '02',
     years: 5
   });
   // -------------------------------------------------------------------------

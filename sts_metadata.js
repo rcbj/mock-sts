@@ -577,7 +577,7 @@ const SPECS = [
               'REGISTERED class an application entry under ou=applications carries: it brings ' +
               'cn and description, and there is nothing standard anywhere for a client_id, a ' +
               'set of redirect URIs or a service principal name, so the rest of that schema is ' +
-              'invented here and published at /ldap/applications rather than implied.' },
+              'invented here and published at /admin/ldap/applications rather than implied.' },
   { id: 'rfc8446', name: 'TLS 1.3 (RFC 8446), and TLS 1.2 (RFC 5246)',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc8446',
@@ -1053,21 +1053,21 @@ const ENDPOINTS = [
   // LDAP surfaces that ARE HTTP, and NEITHER OF THEM IS LDAP — they are this service
   // describing its own directory, which is what lets a reader tell an empty directory
   // from a search filter that matched nothing. Both listeners are described in their text.
-  { path: '/ldap', group: 'LDAP', name: 'What the directory is',
+  { path: '/admin/ldap/service', group: 'LDAP', name: 'What the directory is',
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515'],
     what: 'The embedded LDAPv3 directory: its URLs and ports (TCP 389 for plain LDAP and ' +
           'TCP 636 for LDAPS by default — RAW SOCKETS this page cannot see, so it reports ' +
           'whether each one actually bound), its base DN, the bind policy — every bind ' +
           'succeeds, any DN and any password, except the literal "invalid" — and the fact ' +
           'that it has NO SCHEMA (which is why the application entries under ou=applications ' +
-          'come with a published vocabulary of their own; see /ldap/applications). The two listeners are one directory: the same handlers ' +
+          'come with a published vocabulary of their own; see /admin/ldap/applications). The two listeners are one directory: the same handlers ' +
           'and the same store, so TLS changes what is on the wire and nothing about the ' +
           'answers, and a certificate presented to 636 is not asked for and would not be a ' +
           'login if it were. Also the structural rules it does still enforce and the ' +
           'one it deliberately does not (referential integrity: deleting a user leaves its ' +
           'DN in every group that lists it). Not an LDAP operation; the root DSE carries ' +
           'the machine-readable half of it. Add ?format=json.' },
-  { path: '/ldap/spiffe', group: 'LDAP', name: 'The SPIFFE registry, and its schema',
+  { path: '/admin/ldap/spiffe', group: 'LDAP', name: 'The SPIFFE registry, and its schema',
     specs: ['rfc4511', 'rfc4519', 'spiffe-id'],
     what: 'THE TWO SPIFFE CONTAINERS AS THE DIRECTORY HOLDS THEM. ' +
           '`ou=entries,ou=spiffe` holds the registration entries — which SPIFFE ID a ' +
@@ -1083,7 +1083,7 @@ const ENDPOINTS = [
           'schemaless and these ~30 attribute names are this service\'s own inventions: ' +
           'no registered LDAP schema has a SPIFFE ID or a selector on it. Add ' +
           '?format=json.' },
-  { path: '/ldap/federations', group: 'LDAP',
+  { path: '/admin/ldap/federations', group: 'LDAP',
     name: 'The federation register, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519'],
     what: 'THE APPLICATION REGISTRY\'S TWIN, and the one container in this ' +
@@ -1096,13 +1096,13 @@ const ENDPOINTS = [
           'all — filing a party that authenticates people TO this service ' +
           'among the parties that consume what it issues would make the one ' +
           'question that container answers unanswerable. It publishes the ' +
-          'schema for the same reason /ldap/applications does, plus a column ' +
+          'schema for the same reason /admin/ldap/applications does, plus a column ' +
           'that page has no need of: which DIRECTION each attribute is for. ' +
           'fedClientSecret is in the clear here, and it is this service\'s ' +
           'own credential at somebody else\'s — a stronger statement than ' +
           'anything else in this directory, made for the reason ' +
           '/krb5/principals prints the Kerberos passwords.' },
-  { path: '/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
+  { path: '/admin/ldap/applications', group: 'LDAP', name: 'The application registry, and its schema',
     specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591'],
     what: 'EVERY APPLICATION THIS SERVICE HAS BEEN ASKED ABOUT — an OAuth client, an OpenID ' +
           'Connect relying party, a SAML 2.0 or 1.1 service provider, a WS-Federation ' +
@@ -1117,7 +1117,7 @@ const ENDPOINTS = [
           'vocabulary, not a constraint, and one nothing would enforce is worth reading ' +
           'rather than inferring. Two attributes hold credentials in the clear, for the ' +
           'reason /krb5/principals prints the Kerberos passwords. Add ?format=json.' },
-  { path: '/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
+  { path: '/admin/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
     specs: ['rfc4511', 'rfc4514'],
     what: 'The whole store, DN by DN, with where each entry came from — seeded, added over ' +
           'LDAP, or created because somebody authenticated. That last column is the point: ' +
@@ -1135,7 +1135,7 @@ const ENDPOINTS = [
   //
   // The fifteenth family, and the only one whose purpose is to WRITE. Every row below
   // provisions into the embedded LDAP directory above — the same entries, the same cap,
-  // no store of its own — so what SCIM created is reported by /ldap/directory,
+  // no store of its own — so what SCIM created is reported by /admin/ldap/directory,
   // /admin/users and /admin/groups rather than by anything here.
   //
   // Unlike Kerberos, LDAP and TLS, this group has NO blind spot: SCIM is HTTP all the
@@ -1825,6 +1825,20 @@ const ENDPOINTS = [
           'store, which is why /admin-api needs no POST beside its GET. ' +
           'The bulk count deliberately does not tally with the rest — one Bulk of five ' +
           'creates is one bulk AND five creates. Add ?format=json.' },
+  { path: '/admin/ssf', group: 'Admin', name: 'Shared Signals',
+    specs: ['ssf', 'rfc8417', 'rfc9493', 'rfc8935', 'rfc8936'],
+    what: 'THE TRANSMITTER: every stream a receiver has agreed, its status, its ' +
+          'configuration, WHO EACH ONE IS ABOUT (the RFC 9493 subjects added to it and ' +
+          'whether each was verified), what is queued for a poll, what a push delivery ' +
+          'was refused with, and what this service has RECEIVED at its own receiver — ' +
+          'which is there so a client can be the transmitter for once. Four controls: ' +
+          'enable, pause or disable a stream; transmit an event; delete a stream; drop ' +
+          'what was received. THE ONE PAGE HERE WHOSE BUTTON MAKES AN OUTBOUND REQUEST — ' +
+          'a push delivery POSTs to a URL the RECEIVER chose — so what it reports is ' +
+          'whether the other end answered, and `ssf.pushDelivery` turns that off while ' +
+          'leaving poll delivery working. Nothing on this page generates an event by ' +
+          'itself: SSF is the pipe and CAEP and RISC are the vocabularies. Add ' +
+          '?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -2440,8 +2454,8 @@ const ENDPOINTS = [
           'every realm\'s subtree hangs under, whether a name seen for the ' +
           'first time gets an entry, and the two ceilings that keep a mock ' +
           'from being filled up. What is IN the directory is /admin/users, ' +
-          '/admin/groups and /ldap/directory; whether both sockets came up is ' +
-          '/ldap. No setting here can make a bind be refused — none is ' +
+          '/admin/groups and /admin/ldap/directory; whether both sockets came up is ' +
+          '/admin/ldap/service. No setting here can make a bind be refused — none is ' +
           'missing, there is no such behaviour. Add ?format=json.' },
   { path: '/admin/persistence', group: 'Admin', name: 'Persistence',
     specs: ['rfc2849', 'rfc4511'],
@@ -2763,6 +2777,26 @@ const ENDPOINTS = [
           'holding: the console page carries no control either, because everything about ' +
           'SCIM that can be changed is a configuration row and POST /admin-api/config/set ' +
           'is already the operation for it.' },
+  { path: '/admin-api/ssf', group: 'Management API', name: 'Shared Signals',
+    specs: ['openapi', 'ssf', 'rfc8417'],
+    what: 'GET /admin/ssf over JSON: the streams, their subjects, their queues and ' +
+          'their counters, the event types this transmitter offers, and what its own ' +
+          'receiver has taken in. No Security Event Token in the reply carries a ' +
+          'credential — a SET is signed and its `aud` is the stream, which is the whole ' +
+          'of what makes it safe to publish here.' },
+  { path: '/admin-api/ssf/:action', group: 'Management API',
+    name: 'Change a stream, or transmit an event',
+    specs: ['openapi', 'ssf', 'rfc8935', 'rfc8936'],
+    what: 'status, transmit, delete and clear-received — the same four the console\'s ' +
+          'forms post, through the same action function, with the action taken from the ' +
+          'URL instead of a hidden input. THERE IS DELIBERATELY NO `create`: a stream ' +
+          'carries a delivery endpoint this service will DIAL, and the one place that ' +
+          'URL may come from is a receiver that asked for it at POST /ssf/stream — an ' +
+          'API that could mint one would be a second, ungated door onto the outbound ' +
+          'request. It is also the ONE action handler in this API that awaits: ' +
+          'transmitting signs a JWS, possibly on the worker pool, and then POSTs it, and ' +
+          'answering before either had happened would be reporting "sent" about ' +
+          'nothing.' },
   { path: '/admin-api/spiffe', group: 'Management API', name: 'The SPIFFE trust domain',
     specs: ['openapi', 'spiffe-bundle'],
     what: 'GET /admin/spiffe over JSON: the authorities, the bundle and its sequence, ' +
@@ -2852,6 +2886,12 @@ const ENDPOINTS = [
           'grant-permission and revoke-permission — the same five the ' +
           'console\'s forms post to /admin/delegation, through the same ' +
           'functions, so neither door can enforce a rule the other does not. ' +
+          'The forms are on two pages and the actions are all one handler: ' +
+          'grant-permission is drawn on an application\'s own page under ' +
+          '/admin/applications, where the client half of a grant is the entry ' +
+          'being looked at rather than an option in a list of every ' +
+          'application here, and revoke-permission is drawn on both as a row ' +
+          'button. Moving a form is not moving an action. ' +
           'A PERMISSION MUST BE DEFINED BEFORE IT CAN BE GRANTED, which is ' +
           'the one ordering rule here and is checked in ' +
           'applications.updateApplication() so that these five, the generic ' +
@@ -2973,6 +3013,73 @@ const ENDPOINTS = [
           'ever refused and no setting is missing that would refuse one. What ' +
           'is IN the directory is /admin-api/users and /admin-api/groups. ' +
           'Read-only.' },
+  // ---------------------------------------------------------------------
+  // THE FIVE ADDED ON 2026-09-01, and the reason they are five separate
+  // rows rather than one. They mirror the five DIRECTORY PAGES that moved
+  // into the console that day (`/admin/ldap/*`), one operation per page,
+  // because that is rule 7 — and the operations are what a caller uses when
+  // it does not want to sign a browser in, since the pages are behind the
+  // console's gate and this API is not.
+  // ---------------------------------------------------------------------
+  { path: '/admin-api/ldap/directory', group: 'Management API',
+    name: 'Every entry in the directory',
+    specs: ['rfc4511', 'rfc4514', 'openapi'],
+    what: 'GET /admin/ldap/directory over JSON: the whole store, DN by DN, ' +
+          'with where each entry came from and every attribute with every ' +
+          'value — the operational ones included, because this is not a ' +
+          'search and RFC 4511 section 4.5.1.8 is about searches. Paged, and ' +
+          'the filter matches the DN, any attribute NAME and any attribute ' +
+          'VALUE. This realm\'s subtree and no other. Read-only.' },
+  { path: '/admin-api/ldap/applications', group: 'Management API',
+    name: 'The application registry as the directory holds it',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'rfc7591', 'openapi'],
+    what: 'GET /admin/ldap/applications over JSON: one entry per identifier ' +
+          'under ou=applications with every attribute on it, AND the ' +
+          'published vocabulary — the object classes and every attribute ' +
+          'name with what sets it. The vocabulary is why this is not GET ' +
+          '/admin-api/applications, which is the same entries as the console ' +
+          'works with them: this directory is schemaless, so an entry ' +
+          'carrying thirty invented attribute names is otherwise guesswork. ' +
+          'Two attributes hold credentials in the clear. Read-only.' },
+  { path: '/admin-api/ldap/federations', group: 'Management API',
+    name: 'The federation register as the directory holds it',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'openapi'],
+    what: 'GET /admin/ldap/federations over JSON: the applications ' +
+          'resource\'s twin, for ou=federations — the one container in this ' +
+          'directory where an ldapmodify is a SECURITY change, since ' +
+          'fedSigningCertificate decides whose assertions this service will ' +
+          'believe. The schema carries a column the applications one has no ' +
+          'need of: which DIRECTION each attribute is for. fedClientSecret ' +
+          'is redacted in the relationship records and present in the ' +
+          'entries\' own attributes, which is the same split the page makes. ' +
+          'Read-only.' },
+  { path: '/admin-api/ldap/spiffe', group: 'Management API',
+    name: 'The SPIFFE containers as the directory holds them',
+    specs: ['rfc4511', 'rfc4519', 'spiffe-id', 'openapi'],
+    what: 'GET /admin/ldap/spiffe over JSON: ou=entries, which is ' +
+          'CONFIGURATION deciding what the next SVID looks like, and ' +
+          'ou=agents, which is a RECORD of what has attested — plus the ' +
+          'schema for both, because roughly thirty of these attribute names ' +
+          'are this service\'s own inventions. The one directory resource ' +
+          'with TWO lists in it, so it pages the way a console drill-down ' +
+          'does: entriesPage and agentsPage move one list each and per is ' +
+          'shared. Read-only; the entries are edited through ' +
+          '/admin-api/spiffe/entries.' },
+  { path: '/admin-api/ldap/service', group: 'Management API',
+    name: 'What the directory IS, right now',
+    specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515', 'openapi'],
+    what: 'GET /admin/ldap/service over JSON: the two RAW SOCKETS as they ' +
+          'actually are rather than as they are configured — whether TCP 389 ' +
+          'and LDAPS 636 bound and the error if either did not, each realm\'s ' +
+          'naming context and what a subtree search from it answers about, ' +
+          'the bind policy, the structural rules this schemaless directory ' +
+          'still enforces, the entry counts and the persistence status. It ' +
+          'is NOT /admin-api/ldap, which is the six settings: that one says ' +
+          'what the sockets are SET to and this one says what happened. On a ' +
+          'host whose own slapd already holds 389 the two disagree, and ' +
+          'nothing else here can report that — this page is built by walking ' +
+          'the express router and a raw TCP listener is not on it. ' +
+          'Read-only.' },
   { path: '/admin-api/persistence', group: 'Management API',
     name: 'Persistence',
     specs: ['rfc2849', 'openapi'],
@@ -2983,8 +3090,9 @@ const ENDPOINTS = [
           'carries a password, so the host, port, database and user are ' +
           'parsed out of it instead. `status.coordinates` is false and says ' +
           'so — several processes on one store do not see each other. The ' +
-          'same object is on GET /ldap, which is not behind the console ' +
-          'gate. Read-only; the settings are written through POST ' +
+          'same status is on GET /admin/ldap/service, which is a console page ' +
+          'and therefore behind the console gate; this operation is not. ' +
+          'Read-only; the settings are written through POST ' +
           '/admin-api/config/set-many like every other.' },
   { path: '/admin-api/wstrust', group: 'Management API', name: 'WS-Trust settings',
     specs: ['ws-trust', 'openapi'],
@@ -4144,8 +4252,11 @@ const PROTOCOLS = [
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515', 'rfc4519'],
     what: 'The embedded directory every other family reads: bind, search, ' +
           'add, modify, modifyDN, delete and compare, over the real ' +
-          'protocol. The two rows on this page are this service describing ' +
-          'its own store and are not LDAP at all.',
+          'protocol. The five rows on this page are this service describing ' +
+          'its own store and are not LDAP at all — and since 2026-09-01 they ' +
+          'are ADMIN CONSOLE PAGES, under /admin/ldap/, behind that ' +
+          'console\'s gate. They are grouped here rather than with the other ' +
+          'console pages because what they describe is this family.',
     sockets: 'BER over TCP 389, and TLS on 636. Neither is on the router.' },
   { name: 'PKI / X.509', groups: ['TLS'],
     specs: ['rfc5280', 'rfc8446'],

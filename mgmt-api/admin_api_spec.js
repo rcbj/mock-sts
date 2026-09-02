@@ -1523,6 +1523,193 @@ const SCHEMAS = {
       groups: { type: 'array', items: openObject('One group.', {}) }
     }, PAGING_PROPERTIES)),
 
+  // -------------------------------------------------------------------------
+  // THE FIVE DIRECTORY PAGES, 2026-09-01.
+  //
+  // `/admin/ldap/directory`, `/admin/ldap/applications`,
+  // `/admin/ldap/federations`, `/admin/ldap/spiffe` and
+  // `/admin/ldap/service` were HTML pages outside the console until that day
+  // and are console pages now; rule 7 gave each of them an operation, and
+  // these are what those operations answer with.
+  //
+  // EVERY ONE OF THEM IS DELIBERATELY SHALLOW, and it is worth saying why
+  // rather than leaving it to look like an omission. What these resources
+  // return is DIRECTORY ENTRIES, and this directory is SCHEMALESS on purpose
+  // — an entry may carry whatever attributes a client sent it. So an
+  // `attributes` member written out property by property would be a document
+  // making a promise the store does not keep, and the first `ldapadd` of an
+  // unknown attribute would make it false. The names ARE published, and in
+  // the one place that can keep them right: each of these replies carries the
+  // container's own `schema`, read out of the module that owns it. That is
+  // the same argument the pages themselves make for printing a schema at all.
+  // -------------------------------------------------------------------------
+  DirectoryEntryList: openObject(
+    'Every entry in THIS REALM\'s directory, paged: the DN, where the entry ' +
+    'came from, and every attribute with every value. It is not an LDAP ' +
+    'search — a search withholds the operational attributes unless they are ' +
+    'asked for by name (RFC 4511 §4.5.1.8) and this is the service showing ' +
+    'its own store, so they are here.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      count: { type: 'integer',
+               description: 'Every entry in this realm, before the filter. ' +
+                            'The name is kept from before this was a console ' +
+                            'page, because callers read it.' },
+      matched: { type: 'integer', description: 'What the filter left.' },
+      shown: { type: 'integer', description: 'Rows on this page.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      origins: { type: 'array', items: { type: 'string' },
+                 description: 'Every value of `origin` present in this ' +
+                              'realm, which is what the `origin` parameter ' +
+                              'may be set to.' },
+      entries: { type: 'array',
+                 items: openObject('One entry: `dn`, `origin` and ' +
+                                   '`attributes`.', {}) }
+    }, PAGING_PROPERTIES)),
+
+  DirectoryApplicationList: openObject(
+    'The application registry as the directory holds it: one entry per ' +
+    'identifier under ou=applications, with every attribute on it, plus the ' +
+    'published vocabulary. THESE ENTRIES ARE THE REGISTRY and nothing caches ' +
+    'them.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=applications DN.' },
+      count: { type: 'integer' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      max: { type: 'integer', description: 'The cap, ldap.maxApplications.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      sourceOfTruth: { type: 'string',
+                       description: 'The sentence a caller most needs about ' +
+                                    'this container, in the reply rather ' +
+                                    'than only on the page.' },
+      kinds: { type: 'array',
+               items: openObject('One kind an application can be.', {}) },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'common/applications.js.', {}),
+      applications: { type: 'array',
+                      items: openObject('One entry, whole.', {}) }
+    }, PAGING_PROPERTIES)),
+
+  DirectoryFederationList: openObject(
+    'The federation register as the directory holds it — the one container ' +
+    'here where an ldapmodify is a SECURITY change. `fedClientSecret` is ' +
+    'redacted in `relationships` and present in each entry\'s own ' +
+    'attributes, which is the split the page makes: what a script reads is ' +
+    'redacted, and a document claiming to say what the directory holds may ' +
+    'not hide a value an ldapsearch shows.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=federations DN.' },
+      count: { type: 'integer' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      max: { type: 'integer', description: 'The cap, federation.maxRelationships.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      sourceOfTruth: { type: 'string' },
+      roles: { type: 'array', items: openObject('One direction.', {}) },
+      protocols: { type: 'array',
+                   items: openObject('One protocol a relationship can ' +
+                                     'speak, and what it needs.', {}) },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'federation/federation.js. Each attribute names the ' +
+                         'DIRECTION it is for.', {}),
+      relationships: { type: 'array',
+                       items: openObject('One relationship, with `ready` and ' +
+                                         '`missing` on it.', {}) }
+    }, PAGING_PROPERTIES)),
+
+  DirectorySpiffe: openObject(
+    'The two SPIFFE containers as the directory holds them. ou=entries is ' +
+    'CONFIGURATION and ou=agents is a RECORD, which is why they are two ' +
+    'containers and why nothing about an agent is editable. THE ONE ' +
+    'DIRECTORY RESOURCE WITH TWO LISTS IN IT, so it pages the way a console ' +
+    'drill-down does: `entries` and `agents` at the top level are the TOTALS ' +
+    'and the two `*Paging` objects say which page the arrays are.',
+    {
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=spiffe DN.' },
+      entriesContainer: { type: 'string' },
+      agentsContainer: { type: 'string' },
+      entries: { type: 'integer',
+                 description: 'HOW MANY registration entries there are, not ' +
+                              'the entries themselves — those are ' +
+                              '`registrationEntries`.' },
+      agents: { type: 'integer', description: 'How many agents have attested.' },
+      maxEntries: { type: 'integer' },
+      maxAgents: { type: 'integer' },
+      sourceOfTruth: { type: 'string' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      editable: { type: 'array', items: { type: 'string' },
+                  description: 'Which attributes the console will change. An ' +
+                               'ldapmodify reaches everything either way.' },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'spiffe/spiffe_registry.js.', {}),
+      entriesPaging: pagingObject('the registration entries'),
+      agentsPaging: pagingObject('the attested agents'),
+      registrationEntries: { type: 'array',
+                             items: openObject('One registration entry.', {}) },
+      attestedAgents: { type: 'array',
+                        items: openObject('One attested agent.', {}) }
+    }),
+
+  DirectoryService: openObject(
+    'What the embedded directory IS right now, as opposed to what it is SET ' +
+    'to be — which is GET /admin-api/ldap. The two disagree on a host whose ' +
+    'own slapd already holds 389, and that disagreement is the whole reason ' +
+    'both exist.',
+    {
+      url: { type: 'string' },
+      port: { type: 'integer' },
+      listening: {
+        type: 'boolean',
+        description: 'Whether the plain listener actually bound. Reported ' +
+                     'separately from LDAPS because they bind independently ' +
+                     'and "389 is up and 636 is not" is the ordinary outcome ' +
+                     'of a host run that is not root.'
+      },
+      listenError: { type: 'string' },
+      tls: openObject('The LDAPS socket, its certificate and what a client ' +
+                      'certificate presented to it does — which is nothing.', {}),
+      baseDn: { type: 'string' },
+      usersDn: { type: 'string' },
+      groupsDn: { type: 'string' },
+      namingContexts: { type: 'array', items: { type: 'string' },
+                        description: 'One per trust realm.' },
+      searchScope: { type: 'string',
+                     description: 'What a subtree search from each of those ' +
+                                  'answers about.' },
+      ldapVersion: { type: 'integer' },
+      bindPolicy: { type: 'string',
+                    description: 'Every bind succeeds. This says so in the ' +
+                                 'reply rather than only on the page.' },
+      refusedPassword: { type: 'string',
+                         description: 'The ONE literal password answered ' +
+                                      'LDAP_INVALID_CREDENTIALS (49), so ' +
+                                      'that a negative test has something ' +
+                                      'to fail on.' },
+      schema: { type: 'string',
+                description: 'A SENTENCE and not an object: this directory ' +
+                             'has no schema, and saying so is the answer.' },
+      referentialIntegrity: { type: 'boolean' },
+      autoCreateUsers: { type: 'boolean' },
+      autoCreateRule: { type: 'string' },
+      authenticationFacts: { type: 'string' },
+      enforcedRules: { type: 'array', items: { type: 'string' },
+                       description: 'What this directory does still refuse, ' +
+                                    'schemaless as it is.' },
+      persistence: openObject('Whether any of it survives a restart, where ' +
+                              'it is written, and whether the last write ' +
+                              'worked.', {}),
+      limits: openObject('The caps and the counts. `currentEntries` is this ' +
+                         'realm\'s and `currentEntriesEverywhere` is the ' +
+                         'process\'s, because the cap is on the process.', {}),
+      operations: { type: 'array', items: { type: 'string' } },
+      specifications: { type: 'array', items: { type: 'string' } },
+      implementation: { type: 'string' }
+    }),
+
   GroupDetail: openObject(
     'One group, under `group`, with the same directory facts the list carries ' +
     'around it — which is deliberate rather than untidy: a drill-down that ' +

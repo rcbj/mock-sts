@@ -1379,6 +1379,208 @@ const ROUTES = [
       log.debug("Leaving the management API groups endpoint.");
     } },
 
+  // --- The directory itself, entry by entry --------------------------------
+  //
+  // FIVE OPERATIONS ADDED ON 2026-09-01, ONE PER PAGE, AND THEY EXIST BECAUSE
+  // OF RULE 7 RATHER THAN BECAUSE ANYBODY ASKED FOR THEM.
+  //
+  // `/ldap`, `/ldap/directory`, `/ldap/applications`, `/ldap/federations` and
+  // `/ldap/spiffe` were five HTML pages outside the console until that day.
+  // They are `/admin/ldap/*` now — console pages, in the console's shell,
+  // behind its gate — and the rule this API is written under is that every
+  // page of that console has an operation here that mirrors it. So here they
+  // are, and the parity check in the suite is what would have noticed if they
+  // were not.
+  //
+  // THE GATE IS THE POINT OF THEM AND NOT AN INCIDENTAL DIFFERENCE. Those
+  // pages print `oauthClientSecret` and `fedClientSecret` in the clear, which
+  // is why moving them behind the console's gate was the right half of the
+  // change; this API is deliberately NOT gated, which is what keeps a test
+  // able to read the directory without signing a browser in. Both halves of
+  // that sentence are argued at the top of this file — the short version is
+  // that a port which mints a token for any username asked of it is not made
+  // safe by a password on one of its web pages, and the gate exists so a
+  // client can be driven through 302 / 401 / 403.
+  //
+  // EVERY ONE OF THEM CALLS THE FUNCTION THAT DRAWS THE PAGE, through
+  // `admin.directoryPageJson()` and the slot `ldap/ldap_server.js` fills — see
+  // the block above `setDirectoryPages()` in `admin-ui/admin.js` for why it
+  // cannot be a plain require from here. So a page and its operation cannot
+  // come to disagree about what is in the directory: there is one function and
+  // it is in the module that owns the store.
+  { method: 'GET', path: BASE + '/ldap/directory', tag: 'LDAP',
+    operationId: 'getDirectoryEntries',
+    summary: 'Every entry in this realm\'s directory, paged',
+    description: 'The whole store, DN by DN, with where each entry came from ' +
+                 '— `seed`, an LDAP `add`, or an authentication — and every ' +
+                 'attribute with every value.\n\nIT IS NOT AN LDAP SEARCH. ' +
+                 'This is the service showing its own store, which is how a ' +
+                 'caller tells an empty directory from a filter that matched ' +
+                 'nothing, and it is why the operational attributes are here: ' +
+                 'a search withholds `createTimestamp` and `modifyTimestamp` ' +
+                 'unless they are asked for by name (RFC 4511 §4.5.1.8) and ' +
+                 'this is not a search.\n\n`q` matches the DN, any attribute ' +
+                 'NAME and any attribute VALUE, case-insensitively — values ' +
+                 'because the caller who needs this most often has a ' +
+                 'thumbprint or a secret in hand and no idea which entry ' +
+                 'carries it.\n\nTHE REPLY IS THIS REALM\'S DIRECTORY AND NO ' +
+                 'OTHER. Since 2026-08-25 each trust realm has a subtree of ' +
+                 'its own; reach another realm\'s through its own path prefix.',
+    mirrors: 'GET /admin/ldap/directory',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the DN, of an attribute name, or of an ' +
+                     'attribute value. Case-insensitive.' },
+      { name: 'origin', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Only entries that came from here. The values actually ' +
+                     'present are in `origins`.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of entries, with the filter and the paging.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryEntryList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory entries endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('directory', req));
+      log.debug("Leaving the management API directory entries endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/applications', tag: 'LDAP',
+    operationId: 'getDirectoryApplications',
+    summary: 'The application registry as the directory holds it, and its schema',
+    description: 'One entry per identifier under `ou=applications`, every ' +
+                 'attribute on it, and the published SCHEMA — the object ' +
+                 'classes and every attribute name with what sets ' +
+                 'it.\n\nTHE SCHEMA IS WHY THIS IS NOT `GET ' +
+                 '/admin-api/applications`. That operation is the registry as ' +
+                 'the console works with it: the counters, the drill-down, ' +
+                 'the writes. This is the registry as the DIRECTORY holds it, ' +
+                 'and the vocabulary is the half a client reading an entry ' +
+                 'back over 389 actually needs — this directory is ' +
+                 'schemaless, so an entry carrying thirty invented attribute ' +
+                 'names is otherwise guesswork.\n\nTHESE ENTRIES ARE THE ' +
+                 'REGISTRY rather than a copy of one. Nothing caches them, so ' +
+                 'an `ldapmodify` of `oauthRedirectUri` changes which ' +
+                 'redirect URI RFC 9700 mode accepts on the next ' +
+                 'request.\n\nTwo attributes hold CREDENTIALS in the clear, ' +
+                 'for the reason `/krb5/principals` prints the Kerberos ' +
+                 'passwords. They are never written to the audit log.',
+    mirrors: 'GET /admin/ldap/applications',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the identifier, the name, the DN or any ' +
+                     'attribute value. Case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of entries, the kinds and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryApplicationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory applications endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('applications', req));
+      log.debug("Leaving the management API directory applications endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/federations', tag: 'LDAP',
+    operationId: 'getDirectoryFederations',
+    summary: 'The federation register as the directory holds it, and its schema',
+    description: 'The application registry\'s twin, for `ou=federations` — ' +
+                 'and THE ONE CONTAINER IN THIS DIRECTORY WHERE AN LDAPMODIFY ' +
+                 'IS A SECURITY CHANGE. Everywhere else an edit changes what ' +
+                 'this service HANDS OUT; `fedSigningCertificate` decides ' +
+                 'whose assertions it will BELIEVE and `fedEnabled` turns a ' +
+                 'partner on.\n\nIt is a container of its own rather than a ' +
+                 'corner of `ou=applications` because half its entries are ' +
+                 'FOREIGN IDENTITY PROVIDERS, which ask this service for ' +
+                 'nothing at all.\n\nThe schema carries a column the ' +
+                 'applications one has no need of: which DIRECTION each ' +
+                 'attribute is for.\n\n`fedClientSecret` is REDACTED in ' +
+                 '`relationships` and present in the entry\'s own attributes, ' +
+                 'which is the same split the page makes: what a script reads ' +
+                 'is redacted, and a page claiming to say what the directory ' +
+                 'holds may not hide a value an `ldapsearch` shows.',
+    mirrors: 'GET /admin/ldap/federations',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of the relationship id, the DN, the protocol ' +
+                     'or the direction. Case-insensitive.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The page of relationships, the roles, the protocols ' +
+                         'and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryFederationList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory federations endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('federations', req));
+      log.debug("Leaving the management API directory federations endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/ldap/spiffe', tag: 'LDAP',
+    operationId: 'getDirectorySpiffe',
+    summary: 'The two SPIFFE containers as the directory holds them, and their schema',
+    description: 'THE TWO CONTAINERS HOLD DIFFERENT KINDS OF THING, which is ' +
+                 'why they are two. `ou=entries` is CONFIGURATION — which ' +
+                 'SPIFFE ID a workload gets, under which parent, matching ' +
+                 'which selectors — and `ou=agents` is a RECORD of what has ' +
+                 'attested, which is why nothing about an agent is editable ' +
+                 'anywhere.\n\nTHE ENTRIES ARE THE REGISTRY: nothing caches ' +
+                 'them, so an `ldapmodify` of `spiffeX509SvidTtl` changes the ' +
+                 'lifetime of the next SVID the Workload API hands ' +
+                 'out.\n\nTHIS IS THE ONE DIRECTORY OPERATION WITH TWO LISTS ' +
+                 'IN IT, so it pages the way the console\'s drill-downs do: ' +
+                 '`entriesPage` and `agentsPage` move one list each and `per` ' +
+                 'is shared, with an `entriesPaging` and an `agentsPaging` ' +
+                 'object in the reply. `entries` and `agents` at the top ' +
+                 'level are the TOTALS and not the page.',
+    mirrors: 'GET /admin/ldap/spiffe',
+    parameters: [
+      { name: 'entryq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of a registration entry\'s SPIFFE ID or DN.' },
+      { name: 'agentq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Substring of an attested agent\'s id or DN.' }
+    ].concat(pagingParameters()).concat(detailPagingParameters([
+      { name: 'entries', description: 'The registration entries.' },
+      { name: 'agents', description: 'The attested agents.' }
+    ])),
+    responseDescription: 'The two pages, the two containers and the schema.',
+    responseSchema: { $ref: '#/components/schemas/DirectorySpiffe' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory SPIFFE endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('spiffe', req));
+      log.debug("Leaving the management API directory SPIFFE endpoint.");
+    } },
+
+  // LAST OF THE FIVE, and it is the one that answers about the SOCKETS rather
+  // than about what is in the store. It is deliberately not `GET
+  // /admin-api/ldap`, which is the SETTINGS: that one says what the ports and
+  // the base DN are SET to, and this one says what actually happened when the
+  // process tried to bind them. On a host where the system's own slapd already
+  // holds 389 those two replies disagree, and the disagreement is the whole
+  // value of having both.
+  { method: 'GET', path: BASE + '/ldap/service', tag: 'LDAP',
+    operationId: 'getDirectoryService',
+    summary: 'What the embedded directory IS, right now',
+    description: 'The two raw sockets and the store behind them AS THEY ' +
+                 'ACTUALLY ARE: whether TCP 389 and LDAPS 636 really bound ' +
+                 'and the error if either did not, the base DN and each ' +
+                 'realm\'s naming context, what a subtree search from each ' +
+                 'one answers about, the bind policy, the four structural ' +
+                 'rules this directory does still enforce, the entry count ' +
+                 'and the persistence status.\n\nWHY IT IS NOT `GET ' +
+                 '/admin-api/ldap`: that operation is the six `ldap.*` ' +
+                 'SETTINGS — what the sockets are configured to be. This one ' +
+                 'is what happened. A host whose own slapd already holds 389 ' +
+                 'makes the two disagree, and nothing else in this service ' +
+                 'can report that: `/admin/sts-metadata` is built by walking ' +
+                 'the express router and a raw TCP listener is not on ' +
+                 'it.\n\nNO BIND IS EVER REFUSED here, by any setting, except ' +
+                 'the one literal password named in `refusedPassword` — which ' +
+                 'exists so a negative test has something to fail on.',
+    mirrors: 'GET /admin/ldap/service',
+    parameters: [],
+    responseDescription: 'The directory as it is right now.',
+    responseSchema: { $ref: '#/components/schemas/DirectoryService' },
+    handler: function (req, res) {
+      log.debug("Entering the management API directory service endpoint.");
+      sendJson(res, 200, admin.directoryPageJson('service', req));
+      log.debug("Leaving the management API directory service endpoint.");
+    } },
+
   // --- The console's own roles ---------------------------------------------
   //
   // TWO OPERATIONS, AND THIS RESOURCE MATTERS MORE THAN THE OTHERS RATHER THAN
@@ -3755,7 +3957,7 @@ const ROUTES = [
                            'a list; it is the same walk of the protocol table ' +
                            'the console\'s form is drawn from, so this document ' +
                            'and that page cannot offer different fields. GET ' +
-                           '/ldap/applications publishes every attribute in the ' +
+                           '/admin/ldap/applications publishes every attribute in the ' +
                            'schema with an `editable` member.\n\n**Only ' +
                            'DECLARED attributes may be given.** A derived one — ' +
                            'a counter, a sighting, `appProtocol`, ' +
@@ -3820,7 +4022,7 @@ const ROUTES = [
                                         'registry holds it.' },
             attribute: { type: 'string',
                          description: 'One of the editable single-valued ' +
-                                      'attributes. GET /ldap/applications ' +
+                                      'attributes. GET /admin/ldap/applications ' +
                                       'publishes the schema with an ' +
                                       '`editable` member on every row.' },
             value: { type: 'string',
@@ -4384,9 +4586,17 @@ const ROUTES = [
   // reason is the same one the console gives for putting two headings on one
   // page: the acts and the permissions are two registers, and an API that
   // answered both under one path would make a caller tell them apart by the
-  // shape of a row. `GET /admin-api/delegation` still carries the register in
-  // its `allowed` member, because the page it mirrors carries both — this is
-  // the same data reachable under its own name, not a second computation of it.
+  // shape of a row.
+  //
+  // THIS COMMENT SAID `GET /admin-api/delegation` CARRIES THE REGISTER IN AN
+  // `allowed` MEMBER, AND IT NEVER HAS (corrected 2026-09-01). Only the
+  // CONSOLE route adds that member; this endpoint answers
+  // `delegationView(query).json`, which is the ACTS view, the one shared with
+  // /admin/delegation/map. The behaviour is right — see that function's
+  // header, where folding a second register into it is refused because every
+  // caller of the acts view would then pay for a walk of ou=applications it
+  // did not ask for — so the sentence went and the code stayed. This resource
+  // is where the register is reachable under its own name.
   //
   // THE FIVE ACTION NAMES STUTTER SLIGHTLY UNDER THIS PATH
   // (`/permissions/define-permission`) AND THAT IS DELIBERATE. They are the

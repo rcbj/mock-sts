@@ -34,7 +34,7 @@ first and least likely to be re-read. `docs/endpoints.md` makes the same
 argument for the documentation site. Link to the thing that generates the list.
 
 The same goes for anything else this service already publishes about itself:
-`GET /oauth2/rfc9700`, `GET /spiffe`, `GET /ldap`, `GET /tls`. A summary of one
+`GET /oauth2/rfc9700`, `GET /spiffe`, `GET /admin/ldap/service`, `GET /tls`. A summary of one
 of those on the front page is a summary that will disagree with it.
 
 ## The four links

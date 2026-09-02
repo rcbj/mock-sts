@@ -2292,6 +2292,144 @@ ACT**, on every request, whatever anything is set to. The permissions above are
 policy this service was configured with and refuse only when
 `oauth2.delegatedPermissionsEnforced` is set.
 
+## EVERY LIST ON `/admin/delegation` IS PAGED AT TEN, AND THAT IS A NUMBER ABOUT THE PAGE
+
+Changed 2026-09-01, when the configured register made it seven tables. Before
+that this page had ONE paged list — the acts, at `DEFAULT_PER_PAGE`, fifty —
+and six that drew every row they had.
+
+`DELEGATION_PER_PAGE` is ten and it is deliberately a tenth of the
+console-wide default. **The number is a property of the PAGE and not of the
+data.** Every other page in this console is one list under one heading, where
+fifty rows is a table somebody scrolls; this one is seven — the acts, the
+chains, the permissions applications expose, the grants, the two Kerberos
+policy tables and the mechanism catalogue — with several screens of folded
+prose between them. Fifty rows apiece is a document tens of thousands of pixels
+long in which the seventh heading is reachable only by dragging the scrollbar.
+Ten keeps each section's control within a screen of its heading.
+
+**Four things about it are decisions rather than mechanics.**
+
+* **They share one `per` and each has a page parameter of its own** —
+  `?page=`, `?chainsPage=`, `?permissionsPage=`, `?grantsPage=`, `?pairsPage=`,
+  `?flagsPage=`, `?mechanismsPage=`. That is the arrangement the drill-downs
+  already have and `perPageForm()` argues; what is new is that seven controls
+  now share one page, so every one of them takes `pageParamsOf(req.query)` and
+  overrides only its own name. **The acts nav used to carry five NAMED keys and
+  now carries the whole query**, because a hand-written set is the thing that
+  comes to be short by one — and short by one here means `next ›` on the acts
+  table silently resetting the grants table and clearing the search that
+  produced it, three screens further down where nobody is looking.
+* **The mechanism catalogue is paged although it holds eight rows and will draw
+  no control until it holds eleven.** It is read off `delegation.TYPES` rather
+  than written down, so its length is decided by somebody adding a ninth
+  mechanism who has no reason to be reading this page's layout. One line makes
+  the cap true by construction instead of true today.
+* **The two chooser panes were left at twenty and that is not an oversight.**
+  `CHOOSER_HITS` is a scrolling pane with `max-height:13.5em`, so it does not
+  lengthen the page at all, and it already pages. The rule this section applies
+  is about tables that grow the document.
+* **`?format=json` still carries every list WHOLE**, and the acts are the
+  exception they always were. Everything else — `chains`, `policy` and the
+  whole of `allowed` — is derived from something already bounded, and
+  `GET /admin-api/permissions` answers with that same register under its own
+  name; a caller made to walk seven pagings would be paying for this page's
+  layout. What the reply gained is `allowed.filter` and `allowed.paging`, so
+  the difference between what the browser was shown and what the caller gets is
+  REPORTED rather than silent. `permissionsListState()` is one pure function
+  called by the section and by the reply, for exactly that reason.
+
+**AND THE TWO TABLES OF THE CONFIGURED REGISTER HAVE A SEARCH EACH**, `permq`
+and `grantq`, through `sectionSearchForm()`. It is deliberately NOT
+`chooserPane()`: that control searches for ONE THING and every hit is a link
+away from the page, and this one narrows a table the reader is going to stay and
+read — one function with a mode flag deciding which it was would be two controls
+wearing one name. The fragment trick is the same and for the same reason
+(`script-src 'none'`, so nothing can restore a scroll offset after a GET form's
+reload).
+
+**The two boxes answer differently and that is the interesting half.** A
+permission has ONE application in it, so `permq` searches the application that
+EXPOSES it and there is no second column it could have meant. A grant has TWO,
+so `grantq` searches BOTH ENDS — the acts table's own text box makes the same
+argument: a reader arrives holding one application name and does not know, and
+should not have to guess, which column it will turn up in. Both match on the
+display NAME and on the IDENTIFIER, because half the entries in this registry
+have a name that is not their identifier and a reader pastes whichever one the
+page showed them last.
+
+## THE `Grant a permission` FORM MOVED TO THE APPLICATION'S OWN PAGE
+
+Moved 2026-09-01, and **the reason is the shape of the control rather than the
+length of the page it was on.**
+
+On `/admin/delegation` it was two `<select>`s — every application beside every
+permission — and the reader had to get BOTH right. That is the one write in this
+whole register where choosing the wrong option still SUCCEEDS and stays
+plausible: a grant is a value on the CLIENT's entry, so writing it to the
+resource instead produces a row that resolves in both directions, reads
+correctly on the delegation page's own grants table, and is wrong only at the
+token endpoint, later, to somebody else.
+`tests/vendored/sts_delegated_permissions_example.js` asserts exactly that pair
+of halves landing on the right entries, which is how much care the distinction
+is worth.
+
+On `/admin/applications?application=…` the first select does not exist: the
+client is the entry the reader is standing on, and the page cannot be reached
+without having named it. **A control that could be half wrong became one that
+cannot be.**
+
+**`revoke-permission` IS DRAWN IN BOTH PLACES and that is not a leftover.** It
+is a ROW BUTTON, so its two halves are the row it sits on and neither can be got
+wrong — which is exactly what was wrong with the grant form's two selects. The
+register lists every grant in the service and somebody tidying it up should not
+have to open five application pages; the application's own list is the read-back
+of the grant just made, and a table with no way to undo the write above it is
+half a control.
+
+**IT POSTS TO `/admin/delegation` AND THAT IS THE WHOLE TRICK.** A
+`grant-permission` on the applications handler would mean a sixth entry in
+`APPLICATION_ACTIONS`, and rule 7's parity check reads that list off the
+handler's refusal sentence — so it would then want a
+`POST /admin-api/applications/grant-permission` beside the
+`POST /admin-api/permissions/grant-permission` that already exists, which is two
+API operations for one write. **Moving a FORM is not moving an ACTION.**
+`PERMISSION_ACTIONS` is unchanged, all five, and every mirror with it. The
+settings forms on twenty-one pages already do this: drawn where the setting
+belongs, posted to `/admin/config`, returned to the page the form was on.
+
+`permissionsReturnTo()` is that return and it is `configReturnTo()`'s argument
+made a second time. **`from` is a NAME and not a URL**: it is matched against the
+two paths this file wrote, and the application page's destination is REBUILT
+from `client` — which the action has just validated as an identifier in the
+registry — rather than echoed. A redirect target taken out of a request body is
+an open redirect, and one carrying a newline is a header injection. The worst a
+hand-written `from` can reach is the delegation page.
+
+**What is drawn beside it is what makes it a section rather than a stray
+button.** `applicationPermissionsSection()` shows what the application HOLDS
+(with a Revoke on each row, posting the same way) and what it EXPOSES, both
+paged at ten. A write whose result you cannot see on the page that took it is a
+write you have to go somewhere else to trust. **The exposing half is read-only
+here on purpose**: giving an application a base URI and defining permissions on
+it is configuration of the RESOURCE, and those two forms stay on
+`/admin/delegation`, where the reader is looking at the register rather than at
+one entry.
+
+**Three things are left OUT of the select rather than refused by it**, because
+an option whose only outcome is a refusal is a control that can only fail: this
+application's own permissions (the token would be audienced to itself, which is
+what an ID Token already is, and `app_permissions.js` refuses it however it
+arrives), the ones it already holds (granting a value an entry carries writes
+nothing), and any with no identifier (nothing can ever ask for one).
+
+**And the row buttons of the register grew a `back`.** It cost nothing while
+`/admin/delegation` drew every row it had; with seven paged tables and two
+searches it is the difference between a Revoke that answers where you were
+standing and one that throws you to page 1 of an unfiltered list three screens
+up. One opaque field, rebuilt through `listViewOf()`'s whitelist, for
+`carryBack`'s reason on `/admin/applications`.
+
 ## `/admin/delegation/allowed` — THE THIRD PICTURE, AND WHY IT IS NOT A MODE OF THE FIRST
 
 A drill-down of `/admin/delegation` exactly as `/admin/delegation/map` is: no
@@ -2352,3 +2490,54 @@ has just granted a permission should land on it. Appended the naive way the
 message the action came back with was never shown, which reads exactly like the
 form having done nothing. Every target without a `#` is unaffected, which is
 every other target in this console.
+
+
+---
+
+## Five pages this file does not draw, and the furniture it lends them
+
+`/admin/sts-metadata` has been built by `../sts_metadata.js` since 2026-08-24,
+and since 2026-09-01 five more pages are built somewhere else:
+`/admin/ldap/service`, `/admin/ldap/directory`, `/admin/ldap/applications`,
+`/admin/ldap/federations` and `/admin/ldap/spiffe`, all drawn by
+`ldap/ldap_server.js`. They were `/ldap*` — outside this console, in a shell of
+their own, and outside the gate. `ldap/CLAUDE.md` argues the move; three things
+about it are this file's.
+
+**THEY ARE A GROUP INSIDE `Directory`, AND THE SECOND GROUP IN THIS CONSOLE.**
+Until now only `Protocols` had a third level. The test is the one stated beside
+SAML in `SECTIONS` — *does the heading name more than the page under it does?* —
+and it does: the four pages above them are each ONE KIND OF THING this service
+has seen, drawn the way this console draws things, and these five are the STORE
+UNDERNEATH all four, entry by entry and attribute by attribute. Ungrouped they
+would have doubled that section with rows reading as alternatives to Users and
+Applications rather than as the layer beneath them.
+
+**THE LIST FURNITURE IS EXPORTED, AND WHAT CROSSES IS FURNITURE AND NEVER
+DATA.** `pagedRows`, `pageNavPair`, `perPageOptions`, `queryWith`, `pagingJson`,
+`esc`, `tile`, `clipped` and `clippedValues` go over the boundary for the reason
+`page()`, `note()`, `warn()`, `bullet()` and `tip()` already do: a page drawn in
+this shell with a paging control of its own invention would be the one control
+here that behaves differently, and a reader would have no way to know which one
+it was. Nothing in that list decides what a page CONTAINS.
+
+**`clipped()` IS A SECOND TRUNCATION HELPER BESIDE `shortened()` AND THAT IS
+DELIBERATE.** `shortened()` is one identifier in a narrow column with a native
+tooltip, and it has been right for `/admin/tokens` for as long as that page has
+existed. `clipped()` is for a cell holding tens of values at once, where three
+things are different at the same time: wrapping made rows five lines deep and
+not wrapping pushed the table past the white card; the value is the point, so it
+must be recoverable; and it must be COPYABLE, which a `title` attribute is not.
+So the full value is a real element — `.trunc > .full`, shown on `:hover` and
+`:focus-within`, with `user-select:all` on the `code` inside it — that the
+pointer can travel into. The `title` is set as well and is not redundant: it is
+what a keyboard user and most screen readers get, which keeps the rule that
+**nothing is ever said only in a tooltip**. There is no script in any of it;
+`script-src 'none'` is untouched, and a hover popup was available where a
+collapse-all switch was not.
+
+**THE SHELL IS 104rem WIDE RATHER THAN 92rem** since the same day, and the
+reason is one column on one page rather than a taste for wide layouts:
+`/admin/ldap/directory` draws every attribute of every entry, which is the
+widest thing in this console by a distance. `.main` is `flex:1 1 32rem`, so a
+page whose content is narrower is unaffected.

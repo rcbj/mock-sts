@@ -6,7 +6,7 @@
 # It builds and brings up docker-compose-run-tests.yml: the `sts` service from
 # this repository's own Dockerfile, and a `tests` container with node, a Chrome
 # and this working tree in it. The tests container runs
-# tests/run-tests-in-container.sh — all twenty-three jobs, the Selenium
+# tests/run-tests-in-container.sh — all twenty-seven jobs, the Selenium
 # admin-console one included — against the service by its compose DNS name, and
 # compose exits when it does. This script's exit code is that container's
 # (`--exit-code-from tests`), and the stack is always torn down.
@@ -34,7 +34,7 @@
 #                          it the thing to reach for when a run passes locally
 #                          and somebody else cannot reproduce it.
 #
-# They run the SAME twenty-three jobs through the same runner, so a difference
+# They run the SAME twenty-seven jobs through the same runner, so a difference
 # between them is a difference in the environment and nothing else, which is
 # the whole point of having both.
 #

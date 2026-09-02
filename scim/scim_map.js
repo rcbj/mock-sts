@@ -132,7 +132,7 @@ const ENTERPRISE_SCHEMA = 'urn:ietf:params:scim:schemas:extension:enterprise:2.0
 // THE ATTRIBUTES THIS SERVICE INVENTED FOR SCIM.
 //
 // Merged into ldap_server.js's canonical-name table through learnName(), which
-// is the ONE door into it, so that /admin/users and /ldap/directory show
+// is the ONE door into it, so that /admin/users and /admin/ldap/directory show
 // `scimActive` rather than the `scimactive` the store lower-cases it to. Both
 // are `stsApplication`-style inventions: nothing standard carries them, and
 // saying so beside them is cheaper than leaving a reader to search RFC 4519 for

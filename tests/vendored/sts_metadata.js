@@ -253,18 +253,23 @@ function theConsoleChromeIsThere(page) {
 // without a card looks like.
 //
 // The list itself moves on the MOCK's schedule rather than on this file's, the
-// way the sts/ COPY closure in tests/Dockerfile does. **Federation** is the
+// way the sts/ COPY closure in tests/Dockerfile does. **Federation** was the
 // fourteenth and arrived with the submodule bump of 2026-08-25: both ends of a
 // federation relationship, in five protocols, and it sits SECOND because that
-// is where the mock's own PROTOCOLS table puts it. Adding a name here is the
-// whole of the fix — the assertion is deepStrictEqual and so covers the order
-// too, which is deliberate: the page draws the cards in this order and a list
-// that only checked membership would let them be shuffled silently.
+// is where the mock's own PROTOCOLS table puts it. **Shared Signals** is the
+// FIFTEENTH and sits THIRD for the same reason — it arrived with the SSF
+// transmitter and this list was one release behind it, which is exactly the
+// drift this assertion is for and is the reason it is written as a list here
+// rather than read off the page. Adding a name is the whole of the fix — the
+// assertion is deepStrictEqual and so covers the order too, which is
+// deliberate: the page draws the cards in this order and a list that only
+// checked membership would let them be shuffled silently.
 // ---------------------------------------------------------------------------
 function theProtocolListIsHonest(doc, page) {
   log.debug("Entering theProtocolListIsHonest().");
   log.info("=== The protocol list ===");
-  const expected = ["OAuth2 / OIDC", "Federation", "SAML 2.0", "SAML 1.1",
+  const expected = ["OAuth2 / OIDC", "Federation", "Shared Signals",
+                    "SAML 2.0", "SAML 1.1",
                     "WS-Federation", "WS-Trust", "Kerberos", "SPNEGO", "SPIFFE",
                     "SCIM", "LDAP", "PKI / X.509", "WebAuthn / CTAP",
                     "Verifiable Credentials (OID4VCI / OID4VP)"];

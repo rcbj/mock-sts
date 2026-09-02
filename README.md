@@ -95,7 +95,7 @@ is written down in
 | **W3C DID Core 1.0** | its own `did:web` document, and the DIF Well Known DID Configuration that links it to its origin |
 | **TLS / mutual TLS (RFC 8446)** | two **HTTPS listeners of its own** — 8443 asks for a client certificate and never refuses one, 9443 *requires* it — whose entire content is what the **server** saw: the request as it arrived, what TLS negotiated underneath it, and the client certificate exactly as presented, chain and all. It is the half of a handshake a client cannot report. It already knows what it sent; what it cannot know is which chain the server built out of that, which anchor it verified against, or whether the certificate was accepted at all — which, under TLS 1.3, it has not learned by the time its own handshake completes. The client truststore starts **empty** and is filled at runtime through `POST /tls/trust`, because the CA it has to verify is usually generated in a *browser* minutes before the connection and exists nowhere a file could hold it. `GET /tls` describes it; `GET /tls/whoami` over either listener is the report |
 | **SPIFFE, and the SPIRE Server API** | a **SPIFFE issuing authority** for one trust domain, in all three of its server-side shapes. The **bundle endpoint** is plain HTTPS at `/spiffe/bundle` — a JWK Set with `spiffe_sequence` and `spiffe_refresh_hint`, every key carrying the `use` a consumer must have to consider it at all. The **Workload API** is the gRPC service `SpiffeWorkloadAPI` on a **Unix socket** (SPIRE's own `/tmp/spire-agent/public/api.sock`, which is what `SPIFFE_ENDPOINT_SOCKET` means to every real client) and on TCP: X509-SVIDs with their private keys and the trust bundle, JWT-SVIDs for an audience, both bundle streams, and a `ValidateJWTSVID` that really verifies. The streams are held open and re-sent at half the SVID lifetime, so a client's **rotation** path runs without anybody waiting an hour. The **SPIRE Server API** is six gRPC services and 42 methods from the vendored `spire-api-sdk` protos — Entry, Agent, Bundle, SVID, TrustDomain, Debug — of which 36 are implemented and the other six each answer with a reason. **Its TCP port is mutual TLS**: a caller presents an X509-SVID from this trust domain and every method is authorized against SPIRE's own per-method table, with the Unix socket trusted as `local` the way a real `spire-server` trusts its private one (`spiffe.authRequired`). **Nothing is attested** either way — a Workload API caller is identified only by its transport, the endpoint it reached and its peer address, because node cannot read a socket's peer credentials, and an agent's attestation payload is taken on trust. `GET /spiffe` is all of that at length |
-| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false — plus one of its own, that an add under `ou=users` whose username is already there is `LDAP_ENTRY_ALREADY_EXISTS` (68), because one person is one entry however they got in — and it deliberately does not do referential integrity. `GET /ldap` describes it and `GET /ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
+| **LDAP v3 (RFC 4511)** | an embedded **directory on two raw sockets — TCP 389 in the clear and TCP 636 over TLS (LDAPS)**, one set of handlers and one store behind both: simple bind, unbind, add, delete, modify, modifyDN, compare and search with RFC 4515 filters and all three scopes, a root DSE, and result codes 0, 2, 4, 11, 16, 32, 49, 66 and 68 all reachable. Built on the [`ldapjs`](https://github.com/rcbj/node-ldapjs) submodule and used unmodified. It is **schemaless on purpose** and says so, it enforces the four structural rules whose absence would teach a client something false — plus one of its own, that an add under `ou=users` whose username is already there is `LDAP_ENTRY_ALREADY_EXISTS` (68), because one person is one entry however they got in — and it deliberately does not do referential integrity. `GET /admin/ldap/service` describes it and `GET /admin/ldap/directory` lists every entry. **`LDAP_AUTOCREATE_USERS`, on by default, grows an entry under `ou=users` for anybody who authenticates through any of the other twelve families** — and `ou=applications` grows one for the CLIENT, relying party, service provider or Kerberos service on the other side of that authentication, which is a **registry rather than a record**: the RFC 7591 registrations live there, nothing caches them, and an `ldapmodify` of `oauthRedirectUri` changes which redirect URI RFC 9700 mode accepts — one hook on the single funnel they all already pass |
 | **Shared Signals (OpenID SSF 1.0)** | a **transmitter**, and the one family here that TALKS BACK: every other answers a request, and this one agrees a **stream** with a receiver and then delivers a **Security Event Token** (RFC 8417) at the moment something happens. The stream management API at `/ssf/stream` — one path, five methods — with the status, subject and verification endpoints beside it, every one of them DISCOVERED from `/.well-known/ssf-configuration` because SSF fixes no paths. Subjects in all eight **RFC 9493** formats plus SSF's **complex subject**, whose `user`/`device`/`session` members are what make *"this session was revoked"* expressible at all; each format's member set is CLOSED and a subject carrying an extra member is REFUSED BY NAME, because a conforming receiver must reject one and it looks perfectly fine in a log. Delivery by **RFC 8935 push** or **RFC 8936 poll**, and a **receiver of its own** at `/ssf/receive` so that a client can be the transmitter. **SSF is the pipe and not the vocabulary**: it defines two event types, both about the pipe, and CAEP and RISC are separate specifications not implemented here. Every SET is signed through the same signer everything else here uses, so `ssf.signingAlgorithm` reaches the whole table including ML-DSA and SLH-DSA — which matters more for this document than for any other, because RFC 8417 forbids a SET to expire and it is therefore read long after it was written |
 | **SCIM 2.0 (RFC 7642, 7643, 7644)** | a provisioning endpoint at `/scim/v2`, and **the only family here whose purpose is to write**: create, read, list, replace, PATCH (section 3.5.2 in full, `emails[type eq "work"].value` paths included), delete, both shapes of `.search`, bulk, filtering, sorting, pagination, attribute projection, and the three discovery documents. **What it provisions into is the LDAP directory above — the same entries, no second store and no cache** — so a `POST /scim/v2/Users` and an `ldapadd` create the same entry, and somebody provisioned over SCIM turns up on `/admin/users`, in an `ldapsearch`, in whatever group a client puts them in, and in the attributes their next access token carries. The SCIM `id` **is** the entry's DN, because that already is the opaque server-assigned identifier RFC 7643 asks for. **It is the one family here that requires a credential** — all six schemes RFC 7644 section 2 names are offered (OAuth 2.0 bearer and DPoP tokens with `scim:read` / `scim:write`, HTTP Basic, HTTP Digest, HOBA, the session cookie and a TLS client certificate), and every one of them is permissive, so it is a turnstile rather than a lock. `active: false` **deactivates nobody**: it is stored as `scimActive` and read by nothing, which is worth reading twice, because deprovisioning is the commonest thing a SCIM client is built to do |
 
@@ -177,7 +177,7 @@ unaffected. Set `LDAP_PORT` and `LDAPS_PORT` to something unprivileged for a hos
 and remember that the parent project's api has to allow the new ports in
 `ldapAllowedPorts` (its default list carries `1389` and `1636` for exactly this). The
 two sockets bind **independently**: 389 up and 636 down is the ordinary outcome of a
-host run, and `GET /ldap` reports each of them separately rather than through one flag
+host run, and `GET /admin/ldap/service` reports each of them separately rather than through one flag
 that would have to lie about one.
 
 ### Configuration
@@ -533,7 +533,7 @@ Four things about these settings do not fit in a cell and have cost real time:
   `KRB_ERR_RESPONSE_TOO_BIG` retries at the address it already had.
 * **`LDAPS_PORT` is bound by a second server object**, not by an option on the
   first — ldapjs decides between a `net.Server` and a `tls.Server` at
-  construction — so 389 and 636 fail independently and `GET /ldap` reports each
+  construction — so 389 and 636 fail independently and `GET /admin/ldap/service` reports each
   separately. There is no StartTLS to turn on instead: it is an extended
   operation, ldapjs implements none, and this repository does not patch that
   submodule. And `LDAP_BASE_DN` is the only naming context there is —
@@ -748,7 +748,7 @@ ordinary case, and one `entityId` between them would make that unexpressible.
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
-| `ldap.port` | `LDAP_PORT` | `389` | **restart** — the socket is bound when the process starts | The plain LDAP listener. 389 is privileged, so a host run that is not root fails to bind it — recorded rather than thrown, and reported by GET /ldap. |
+| `ldap.port` | `LDAP_PORT` | `389` | **restart** — the socket is bound when the process starts | The plain LDAP listener. 389 is privileged, so a host run that is not root fails to bind it — recorded rather than thrown, and reported by GET /admin/ldap/service. |
 | `ldap.tlsPort` | `LDAPS_PORT` | `636` | **restart** — the socket is bound when the process starts | The LDAPS listener, which serves the certificate the TLS module generated. It binds independently of 389, so "389 is up and 636 is not" is an ordinary outcome and each reports itself separately. |
 | `ldap.baseDn` | `LDAP_BASE_DN` | `dc=example,dc=com` | **restart** — the directory tree is built under it at startup | The root of the embedded directory. ou=users and ou=groups hang off it. |
 | `ldap.autocreateUsers` | `LDAP_AUTOCREATE_USERS` | `true` | yes | When on, an entry appears at uid=<name>,ou=users,<base> the first time anybody authenticates to this service through ANY protocol. On by default: a directory that fills up as you use the other protocols is the thing this one is here to show. |
@@ -1194,7 +1194,7 @@ Postgres container beside this service, with a named volume under each and the
 
 **A failed write is logged and never thrown.** If the database goes away, the
 operation that triggered the write still succeeds, this service keeps answering
-out of memory, and `/admin/persistence` and `GET /ldap` both carry the error. The
+out of memory, and `/admin/persistence` and `GET /admin/ldap/service` both carry the error. The
 next change recomputes the same difference and tries again, so nothing is lost by
 a failure. A database outage taking down seventeen protocol families that do not
 need a database is the one failure mode a mock must not have.
@@ -1233,7 +1233,7 @@ as something it is not — see *Persistence* below — so `mode` and
 `configuredMode` disagreeing is a state a running process cannot be in. What
 those pages still report is a store that broke afterwards, which is recorded
 and is not fatal.
-`GET /ldap` carries the same object and is not behind the console gate.
+`GET /admin/ldap/service` carries the same object and is not behind the console gate.
 
 ### The JSON-LD contexts are not optional
 
@@ -3467,7 +3467,7 @@ dc=example,dc=com
                       relying parties, the OpenID4VP verifier, Kerberos services
 ```
 
-`GET /ldap/applications` lists them and publishes the schema; `?format=json` is
+`GET /admin/ldap/applications` lists them and publishes the schema; `?format=json` is
 the machine-readable form.
 
 #### One entry per identifier
@@ -3587,7 +3587,7 @@ rather than in a directory. So `stsApplication` is invented, and its attributes 
 this service's own names in the way `x509subject`, `didSubject` and `authnMethod`
 already are on the user entries next door.
 
-The table is the definition: `GET /ldap/applications` publishes it, the entry is
+The table is the definition: `GET /admin/ldap/applications` publishes it, the entry is
 built by walking it, and an attribute that is not in it is refused rather than
 written. `multi` accumulates a repeat and `single` is assigned — which is what stops
 a counter growing a value per sign-in, the trap `applyVcAttributes()` writes its
@@ -3669,7 +3669,7 @@ rather than stored**. A stored copy would be a second definition of the same fac
 and the one that goes stale: `applicationEntry()` exists precisely because somebody
 can rename one of these entries, and it finds it again by `appIdentifier`
 afterwards. It appears at the top of the drill-down, on every row of the list, on
-`/ldap/applications`, and as `dn` on every application in the API's reply — because
+`/admin/ldap/applications`, and as `dn` on every application in the API's reply — because
 these entries *are* the registry, so the DN is the address an `ldapsearch` or an
 `ldapmodify` is aimed at, and a console that showed only the `cn` left an operator
 reconstructing it from a naming rule published nowhere.
@@ -3843,7 +3843,7 @@ and the reason an application accumulates kinds instead of being filed twice.
 
 **Putting a token under a session needed one thing that is not on the wire, and it is deliberately not a claim.** No token this service issues carries a session identifier — OIDC's `sid` is for front-channel logout, and inventing one for every token to make an admin page easier to draw would change what every client receives. So `signJwt()` takes an optional third argument, a `context` that is signed into nothing and sent nowhere, and the recorder stores its `sessionId` and `grant` on the token record. The link is threaded where it genuinely exists: the session id rides on the authorization code (the only route to a back-channel token request, which arrives with no cookie behind it), the token endpoint passes it on, and a **refresh** looks it up by the refresh token's own `jti` — without which the second generation of every token would show as sessionless and a session's list would quietly stop growing the moment a client refreshed. A grant that never had a session says so: `password`, `client_credentials`, the pre-authorized code and token exchange are shown as issued with no browser session at all, which is a fact about them rather than a gap in the recording. Tokens naming a session this service no longer holds get their own heading, since that is the ordinary end state rather than an error — the session expired and the tokens it produced outlived it.
 
-**A user's page also shows that user's LDAP object, and the dependency that puts it there runs the opposite way from the call.** Every person who authenticates anywhere here already grows an entry at `uid=<name>,ou=users,<base>` (see the directory's own section below), so by the time somebody has a page in this console they usually have a directory object too — and the two are the same authentication seen from two sides, which is the reason for showing them together rather than making a reader find the object again on `/ldap/directory`. What is shown is the entry itself and not a copy: its DN, where it came from (`seed` or `authentication`), its two generalized-time stamps kept in the directory's own punctuation rather than converted to the ISO 8601 the rest of the console uses, and **every attribute with every value, the operational ones included** — a search returns `createTimestamp` and `modifyTimestamp` only when they are asked for by name (RFC 4511 section 4.5.1.8, which `toSearchEntry()` honours), but this is not a search, and a dump that silently dropped two of an entry's attributes would be the one thing a dump must not do. `?format=json` carries the same object under `ldap`.
+**A user's page also shows that user's LDAP object, and the dependency that puts it there runs the opposite way from the call.** Every person who authenticates anywhere here already grows an entry at `uid=<name>,ou=users,<base>` (see the directory's own section below), so by the time somebody has a page in this console they usually have a directory object too — and the two are the same authentication seen from two sides, which is the reason for showing them together rather than making a reader find the object again on `/admin/ldap/directory`. What is shown is the entry itself and not a copy: its DN, where it came from (`seed` or `authentication`), its two generalized-time stamps kept in the directory's own punctuation rather than converted to the ISO 8601 the rest of the console uses, and **every attribute with every value, the operational ones included** — a search returns `createTimestamp` and `modifyTimestamp` only when they are asked for by name (RFC 4511 section 4.5.1.8, which `toSearchEntry()` honours), but this is not a search, and a dump that silently dropped two of an entry's attributes would be the one thing a dump must not do. `?format=json` carries the same object under `ldap`.
 
 Where there is no entry the section says **which** of the five reasons it is, because four of them are facts about the user rather than about the directory and "not found" alone would send a reader looking for a bug: auto-creation is switched off, the identity is a *client* and not a person, it has never authenticated here at all (it is known only as the subject of something that was issued), everything it has ever done here is an *LDAP bind* — which presents a DN and not a user name — or the entry was there and has since been `delete`d or `modifyDN`'d through the protocol. It also lists any **other** entry whose `uid` names the same person — which is now a report about entries *outside* `ou=users`, since inside it one person is one entry and every door enforces that — and it says so loudly when the directory's listener is down: the entry can be in this process's store while no client can connect to read it, and only one of those two facts is visible from an HTTP page. The dependency is the thing to be careful with. `admin.js` does **not** require `ldap_server.js` — `server.js` requires the console first (rule 6: the directory needs `admin_stats`' identity normalisation, and the console reads `oauth2`'s sessions), so a require from the console would drag the directory's routes into the router *ahead* of its own, and `/admin/sts-metadata` is built by walking that router. So the direction is inverted the same way the user observer is: `admin.js` offers `setDirectoryReader()`, `ldap_server.js` fills it at its own require time with a function that takes the identity key the console files a person under — the same normalised local name the entry's DN was built from, so the two cannot drift — and a build of this service without the directory renders the section as "no directory is loaded", which is a different answer from an entry that is not there.
 
@@ -3913,6 +3913,10 @@ A second table is **configuration rather than history**: who MAY delegate to who
 A **resource** application exposes an API: it is given a base URI (`oauthPermissionBaseUri` — Entra calls it the Application ID URI and spells it `api://<guid>`; anything absolute works here) and a list of permissions (`oauthPermission`). A permission is identified by the two joined together — `https://example.com/` and `write` make `https://example.com/write` — and a **client** application is granted some of them (`oauthDelegatedPermission`). All three are ordinary attributes on ordinary entries in `ou=applications`, so an `ldapmodify` is a configuration change here exactly as it is for a redirect URI.
 
 **A permission must be DEFINED before it can be GRANTED.** That is the one ordering rule, and it is checked in `applications.updateApplication()` so that the console form, `POST /admin-api/permissions/…` and the generic attribute editor on `/admin/applications` cannot disagree about it.
+
+**FIVE ACTIONS, ON TWO PAGES, POSTING TO ONE HANDLER.** *Expose an API*, *Define a permission* and each row's *Remove* are on `/admin/delegation`, where the resource half is configured and the reader is looking at the register. **Granting is on the client application's own page** — open one under *Directory › Applications* and its *Delegated permissions* section shows what it holds, what it exposes and a form that grants it another. *Revoke* is drawn in both places, because it is a row button either way and its two halves are the row it sits on: the register is where somebody tidying up works, and the application's own list is the read-back of the grant they have just made. The reason is the shape of the control rather than the length of the page: on the register the form was two selects and the reader had to get both right, and a grant written to the resource instead of to the client still succeeds, still resolves in both directions, and is wrong only at the token endpoint, later, to somebody else. On the application's page the client half is the entry being looked at, so the half that could be silently wrong is settled by the URL. The select there offers neither the application's own permissions (a token audienced to its own asker is what an ID Token already is) nor the ones it already holds. Both forms still POST to `/admin/delegation` and both are still `POST /admin-api/permissions/{action}`: moving a form is not moving an action.
+
+**Every table on `/admin/delegation` is paged at ten rows and they share one `?per=`.** There are seven of them — the acts, the chains, the permissions applications expose, the grants, the two Kerberos policy tables and the mechanism catalogue — so fifty rows apiece, which is what every other page in this console uses, would put the last heading tens of thousands of pixels down. Each table has a page parameter of its own (`?page=`, `?chainsPage=`, `?permissionsPage=`, `?grantsPage=`, `?pairsPage=`, `?flagsPage=`, `?mechanismsPage=`), so moving one leaves the other six where you left them. The two tables of this register also have a **search over the application name**, `?permq=` and `?grantq=`: the first matches the application that EXPOSES a permission, which is the only one a permission has, and the second matches BOTH ENDS of a grant, because a reader arrives holding one application name and does not know which of the two columns it will turn up in. Both match on the display name and on the identifier. `?format=json` still carries every list whole — the acts are the exception they always were — with `allowed.filter` and `allowed.paging` reporting what the browser was shown.
 
 **Then a client asks for one as an ordinary OAuth scope, and the access token says both halves:**
 
@@ -4259,14 +4263,16 @@ its endpoints at require time, and for a route that is harmless; binding a privi
 port is not, because it can fail and a require that throws takes the whole service down.
 So `server.js` calls an exported `listen()` and reports its failure, and the service
 still starts without a directory rather than not starting at all. A failure to bind is
-also **published** — `listening` and `listenError` on `GET /ldap` — because that page is
+also **published** — `listening` and `listenError` on `GET /admin/ldap/service` — because that page is
 HTTP and answers 200 either way, so without those fields there is no way to tell a
 running directory from one whose listener lost a race with the host's own `slapd`.
 
-**`GET /admin/sts-metadata` cannot see a raw socket**, and there are two of them here. The two
-LDAP rows it does carry, `/ldap`
-and `/ldap/directory`, are this service describing its own store; neither is LDAP. The
-second is the more useful of the two: it lists every entry with **where it came from** —
+**`GET /admin/sts-metadata` cannot see a raw socket**, and there are two of them here. The five
+LDAP rows it does carry — `/admin/ldap/service`, `/admin/ldap/directory` and the three
+container pages beside them — are this service describing its own store; none of them is LDAP.
+They are admin console pages since 2026-09-01, and grouped under LDAP on that index rather than
+with the other console pages because what they describe is this family. The second is the most
+useful of the five: it lists every entry with **where it came from** —
 seeded, added over LDAP, or created because somebody authenticated — which is what lets a
 reader tell an empty directory from a search filter that matched nothing.
 
@@ -4342,7 +4348,7 @@ hide the one thing on this listener worth checking.
 **No client certificate is ever asked for on 636.** This listener proves the *server* to
 the client and nothing more; a certificate offered to it is not requested and would not be
 a login if it were. The HTTPS listeners next door are where client certificates are the
-whole subject — and even there, a verified one is explicitly not a login. `GET /ldap` says
+whole subject — and even there, a verified one is explicitly not a login. `GET /admin/ldap/service` says
 this rather than leaving somebody to work out why the certificate they configured was
 never sent.
 
@@ -4353,7 +4359,7 @@ order**, the line there was moved to match: `./tls_server` before `./ldap_server
 changes no output, because `/admin/sts-metadata` sorts its rows by path within a group; it keeps
 that file honest for the next reader.
 
-Finally, the two listeners are **published separately** on `GET /ldap` — `listening` /
+Finally, the two listeners are **published separately** on `GET /admin/ldap/service` — `listening` /
 `listenError` for 389, and a `tls` object carrying `ldaps`, `port`, `listening` and `error`
 for 636 — because that page is HTTP and answers 200 whichever of them is up. "389 is up and
 636 is not" is the ordinary outcome of a host run, and a single flag could only report one
@@ -4364,7 +4370,7 @@ answering costs them an afternoon.
 #### What it enforces, and the one thing it deliberately does not
 
 It is **schemaless on purpose** — no objectClass is enforced, no attribute is checked
-against a syntax, no `must`/`may` is consulted — and `GET /ldap` says so rather than
+against a syntax, no `must`/`may` is consulted — and `GET /admin/ldap/service` says so rather than
 leaving a reader to infer a schema that is not there. A real directory would refuse most
 of what this one accepts, and where that matters it is a difference somebody should be
 told about rather than one a mock should hide by inventing a schema of its own.
@@ -5399,7 +5405,7 @@ about this service's own behaviour, indistinguishably from the recording being
 broken. `ldapmodify` still reaches everything: refusing it *there* is the
 difference between offering an operation and merely not preventing it.
 
-`GET /ldap/spiffe` publishes the whole schema, because this directory is
+`GET /admin/ldap/spiffe` publishes the whole schema, because this directory is
 schemaless and roughly thirty of these attribute names are this service's own
 inventions — no registered LDAP schema has a SPIFFE ID or a selector on it.
 
@@ -5724,11 +5730,13 @@ this existed is reported in full by it.
 The tests that drive this service over HTTP are authored in the parent project,
 and that suite drives the `sts/` gitlink over there — which is pinned, so a
 change made in this working tree is not covered by it until somebody bumps the
-pin. The thirteen of those jobs that a lone mock can satisfy live in
-`tests/vendored/` — nine of them byte-identical copies, and FOUR this
-repository's own since 2026-08-28, the ones that drive `/admin` and
-`/admin-api` — and every `./local-run-tests.sh` runs them: the metadata drift checks, the management API and every one of its
-operations, the whole admin console in a real browser, DPoP, the authorization
+pin. FOURTEEN jobs live in `tests/vendored/` — nine of them byte-identical
+copies of the parent's, and FIVE this repository's own: the four that drive
+`/admin` and `/admin-api`, ours since 2026-08-28, and the delegated permission
+example added 2026-09-01, which was never over there at all. Every
+`./local-run-tests.sh` runs the lot: the metadata drift checks, the management
+API and every one of its operations, the whole admin console in a real browser,
+the five-application delegated permission example, DPoP, the authorization
 server's endpoints, the DID-named issuer, SAML 1.1, SAML encryption, the
 UserInfo endpoint and the Linked-Data credential jobs. About a minute, most of
 it the browser job. `--no-protocol` is the way back to the in-process suite
@@ -5739,8 +5747,9 @@ surface.
 repository's own `docker-compose.yml`.** The launcher builds the image, brings
 up one container — its own compose project, its own container name, a free host
 port, `persistence.mode=memory`, no database — hands the runner its URL, and
-takes it down again; the tests themselves are ordinary node scripts on this
-machine. What that buys is that the thing under test is the IMAGE: the same
+LEAVES IT RUNNING when the suite finishes, printing how to reach it and how to
+stop it (`--tear-down` is the way back); the tests themselves are ordinary node
+scripts on this machine. What that buys is that the thing under test is the IMAGE: the same
 `npm install --omit=dev` against the committed lock, the same node, the same
 `COPY . ./` with `.dockerignore` deciding what is in it — so a module missing
 from the build context or a submodule that was never initialised fails HERE

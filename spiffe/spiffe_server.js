@@ -164,7 +164,7 @@ app.get('/spiffe/federated/:trustDomain', function (req, res) {
 // ---------------------------------------------------------------------------
 // WHAT THIS IS, FOR A PERSON — and, with ?format=json, for a program.
 //
-// The same shape `GET /ldap` and `GET /tls` have, and it carries the same kind
+// The same shape `GET /admin/ldap/service` and `GET /tls` have, and it carries the same kind
 // of thing: what the surfaces are, where they are, whether the sockets actually
 // bound, and — at length — what is NOT checked. That last part is most of the
 // page on purpose. A mock that quietly issued identities to anybody would teach
@@ -373,7 +373,7 @@ function description(req) {
       entries: base + '/admin/spiffe/entries',
       agents: base + '/admin/spiffe/agents',
       api: base + '/admin-api/spiffe',
-      directory: base + '/ldap/spiffe',
+      directory: base + '/admin/ldap/spiffe',
       metadata: base + '/admin/sts-metadata'
     }
   };

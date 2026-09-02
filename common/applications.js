@@ -66,7 +66,7 @@
 // to extend and nothing to register with: the schema below is DEFINED HERE, and
 // it is a VOCABULARY rather than a constraint. Nothing rejects an entry for
 // disobeying it, exactly as nothing rejects one anywhere else in this
-// deliberately schemaless directory — `GET /ldap` says so at length.
+// deliberately schemaless directory — `GET /admin/ldap/service` says so at length.
 //
 // Where a standard name exists it is used. `applicationProcess` (RFC 4519
 // section 3.3) is the one registered object class that fits an application at
@@ -123,7 +123,7 @@
 //
 // `oauthClientSecret` holds the secret this service minted at registration, on
 // an entry in a directory where every bind succeeds and which `GET
-// /ldap/directory` prints on an unprotected page. The same objection applies to
+// /admin/ldap/directory` prints on an unprotected page. The same objection applies to
 // `GET /krb5/principals`, which prints every Kerberos password, and the answer
 // is the one written there: a debugger whose accounts are unusable without
 // reading the source is worse than one that says what they are. The secret is
@@ -496,7 +496,7 @@ function normaliseProtocols(value) {
 // THE SCHEMA.
 //
 // One row per attribute, and the row is the whole definition: `GET
-// /ldap/applications` publishes this table, `ldap_server.js` builds the entry
+// /admin/ldap/applications` publishes this table, `ldap_server.js` builds the entry
 // from it, and there is no second list anywhere to update. An attribute that is
 // not here is not written, which is what makes the published schema worth
 // reading — the lesson `vc_claims.js` learned about an issuer advertising five
@@ -1808,7 +1808,7 @@ function normaliseFields(value) {
     }
     const row = ATTRIBUTE_BY_NAME[name];
     if (!row) {
-      errors.push('"' + name + '" is not in the published schema. GET /ldap/applications ' +
+      errors.push('"' + name + '" is not in the published schema. GET /admin/ldap/applications ' +
                   'lists every attribute an entry may carry; adding one that is not there ' +
                   'means adding a row to SCHEMA.attributes, not writing it through this.');
       return;
@@ -2866,7 +2866,7 @@ function updateApplication(identifier, change) {
     log.debug("Leaving updateApplication(). Not in the schema.");
     log.debug("Leaving updateApplication().");
     return { ok: false, errors: ['"' + attribute + '" is not in the published schema. ' +
-                                 'GET /ldap/applications lists every attribute an entry may ' +
+                                 'GET /admin/ldap/applications lists every attribute an entry may ' +
                                  'carry; adding one that is not there means adding a row to ' +
                                  'SCHEMA.attributes, not writing it through this.'] };
   }
