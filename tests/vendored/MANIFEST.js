@@ -42,7 +42,7 @@ const path = require('path');
 // `./local-run-tests.sh --vendor-sync` does the copy and
 // `--vendor-check` reports what differs.
 //
-// THE EXCEPTION IS THE FIVE JOBS MARKED `local: true` BELOW — this service's
+// THE EXCEPTION IS THE SIX JOBS MARKED `local: true` BELOW — this service's
 // own `/admin` console and `/admin-api`. Those are NOT copies of anything: the
 // parent deleted its own on 2026-08-28 and they are edited here and only here.
 // The rule above applies to every other file in this directory.
@@ -61,7 +61,7 @@ const path = require('path');
 // `tests/` is the obvious half: the jobs and the helpers they share.
 //
 // `client/src/` is the DEBUGGER'S OWN WALLET AND CRYPTO CODE, and five of the
-// fourteen jobs load it deliberately. That is not an accident of layout — it
+// fifteen jobs load it deliberately. That is not an accident of layout — it
 // is the POINT of those tests. `vc_did.js` checks that a credential this
 // service issued verifies under the wallet's DID resolver;
 // `sts_jws_verification.js` checks a signature against the debugger's PQC
@@ -92,12 +92,18 @@ const CLIENT_SOURCE_DIR = path.join('client', 'src');
 // ---------------------------------------------------------------------------
 //
 // `local: true` means THIS REPOSITORY OWNS THE FILE and there is no copy of it
-// over there to compare against. FIVE jobs are marked so, and they are the
-// five that drive this service's OWN `/admin` console and its `/admin-api`:
+// over there to compare against. SIX jobs are marked so, and they are the
+// six that drive this service's OWN `/admin` console and its `/admin-api`:
 // `sts_metadata.js`, `admin_api.js`, `sts_admin_api_operations.js`,
-// `sts_admin_console.js` and `sts_delegated_permissions_example.js` — the
-// last of which is newer than the argument below and is covered by it for
-// the same reason: it builds an example THROUGH `/admin-api` for somebody to
+// `sts_admin_console.js`, `sts_delegated_permissions_example.js` and
+// `sts_consent.js` — the last two of which are newer than the argument below
+// and are covered by it for the same reason: one builds an example THROUGH
+// `/admin-api` for somebody to read on `/admin`, and the other grants a GLOBAL
+// CONSENT through `/admin-api/consent` and then watches a sign-in stop being
+// asked, which is a console control with a protocol consequence and could not
+// be asserted at all from a repository holding only one half of it. Read the
+// paragraph below as though it said both: it builds an example THROUGH
+// `/admin-api` for somebody to
 // read on `/admin`, so the tree that changes those doors is the tree that
 // should go red when it stops working. They ran from the parent project's `tests/` until
 // 2026-08-28 and were removed there on that date, on the argument that a test
@@ -123,6 +129,7 @@ const JOBS = [
   { file: 'oauth2_sts_endpoints.js',     browser: false },
   { file: 'sts_admin_api_operations.js', browser: false, local: true },
   { file: 'sts_admin_console.js',        browser: true,  local: true },
+  { file: 'sts_consent.js',              browser: false, local: true },
   { file: 'sts_delegated_permissions_example.js', browser: false, local: true },
   { file: 'sts_dpop.js',                 browser: false },
   { file: 'sts_jws_verification.js',     browser: false },
@@ -137,12 +144,14 @@ const JOBS = [
 // THE HELPERS, and `env/local.js`. None of these is a job; every one of them is
 // reached by a `require` from at least one job above, which is the whole reason
 // it is here. The set was computed as the transitive local-require closure of
-// the fourteen jobs, not chosen — so a job that grows a new `require('./x.js')`
+// the fifteen jobs, not chosen — so a job that grows a new `require('./x.js')`
 // over there arrives here as a MISSING MODULE at load time, which is a failed
 // job with a name in it rather than a silent gap.
 // ---------------------------------------------------------------------------
 const HELPERS = [
   'browser_flags.js',
+  'consent_screen.js',
+  'expectation.js',
   'jwt_vc_json_common.js',
   'module_paths.js',
   'random_username.js',

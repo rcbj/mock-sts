@@ -761,6 +761,38 @@ const SCHEMA = {
             'deleted, or the permission removed from under it; `/admin/delegation` shows ' +
             'such a grant as DANGLING, which is the same three-state honesty the rest of ' +
             'this console applies to a name it cannot resolve.' },
+
+    // --- consent: the OVERRIDE half ------------------------------------------
+    //
+    // THE SECOND ATTRIBUTE HERE WHOSE VALUE IS ABOUT SOMEBODY ELSE, and it is
+    // about a different somebody else from the three above. A delegated
+    // permission is a relationship between two APPLICATIONS; this is a
+    // statement about every PERSON who will ever sign in to this one. That is
+    // why it is a separate attribute from `oauthDelegatedPermission` rather
+    // than a flag on it: a client may hold a permission nobody has consented
+    // to, and a person may consent a scope the client was never granted, and
+    // /admin/consent exists to show the difference.
+    { name: 'oauthGlobalConsent', kind: 'multi',
+      from: 'the console, the management API, or by hand',
+      what: 'A SCOPE NOBODY IS ASKED ABOUT WHEN THEY SIGN IN TO THIS APPLICATION. ' +
+            'One value per scope, written exactly as a client puts it in a `scope` ' +
+            'parameter — `openid`, `profile`, or a whole delegated permission ' +
+            'identifier such as `https://example.com/write`.\n\n**It is an OVERRIDE ' +
+            'and not a record.** With `oauth2.consentRequired` on (which is the ' +
+            'default), the authorization endpoint draws /oauth2/consent for any scope ' +
+            'this person has not agreed to for this application; a scope named here ' +
+            'is skipped for EVERYBODY, and nothing is written to anybody\'s entry. So ' +
+            'removing a value asks everybody again — including the people who would ' +
+            'have said yes — where removing a person\'s own `oauthConsent` asks only ' +
+            'them.\n\n**It is keyed on the pair and not on the scope alone.** ' +
+            'Consenting `read` here consents it for THIS application; an application ' +
+            'registered five minutes later that spells the same word is still ' +
+            'asked.\n\nA value that names no permission any application defines is ' +
+            'not an error and is not hidden — most scopes are not permissions. It ' +
+            'must be a legal RFC 6749 section 3.3 scope token, because a value with a ' +
+            'space in it could never match one scope; an `ldapmodify` reaches this ' +
+            'attribute like every other and is not checked, and /admin/consent shows ' +
+            'what it put there.' },
     { name: 'oauthTokenEndpointAuthMethod', kind: 'single', from: 'POST /oauth2/register',
       what: 'How it authenticates. RFC 7591 section 2 makes client_secret_basic the ' +
             'default when a registration omits it, which is why an omission means ' +
@@ -1590,6 +1622,7 @@ const EDITABLE = {
   oauthPermissionBaseUri: 'set',
   oauthPermission: 'multi',
   oauthDelegatedPermission: 'multi',
+  oauthGlobalConsent: 'multi',
   samlAssertionConsumerService: 'multi',
   // WS-Federation's return address, which used to be recorded in the attribute
   // above. Its own row says why the two were split.
@@ -3015,6 +3048,24 @@ function updateApplication(identifier, change) {
                                    'grant is between two applications.'] };
     }
   }
+  // A GLOBAL CONSENT MUST BE A LEGAL SCOPE TOKEN, and that is the whole of the
+  // rule — there is no ordering rule here and deliberately not. A grant has to
+  // name a permission that EXISTS because the identifier is composed from two
+  // attributes and a value that resolves to nothing can never be asked for; a
+  // consent names whatever a client will put in its `scope`, and most scopes
+  // are not permissions this registry has heard of. Refusing an unrecognised
+  // one would make it impossible to consent `openid`.
+  //
+  // ONLY AN ADD IS CHECKED, the same asymmetry the two rules above have and for
+  // their reason: a remove names a value already on the entry, and an
+  // `ldapmodify` reaches this attribute like every other.
+  if (attribute === 'oauthGlobalConsent' && mode === 'add') {
+    const problem = scopeTokenProblem(value);
+    if (problem) {
+      log.debug("Leaving updateApplication(). The consented scope is not a scope token.");
+      return { ok: false, errors: [problem] };
+    }
+  }
   const record = loaded.record;
   let changed = false;
   let what = '';
@@ -3433,6 +3484,42 @@ function permissionNameProblem(name) {
            'any printable ASCII except space, double quote and backslash, because a scope ' +
            'list is space-delimited — a name outside that set cannot survive the round ' +
            'trip through a `scope` parameter.';
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// RFC 6749 SECTION 3.3'S `scope-token`, ON ITS OWN, BECAUSE TWO ATTRIBUTES NOW
+// NEED IT AND THEY NEED DIFFERENT THINGS AROUND IT.
+//
+// `permissionNameProblem()` above is this rule PLUS a refusal of `|`, because a
+// permission name shares an attribute value with its description. A globally
+// consented scope has no delimiter to protect and may legitimately be a whole
+// permission identifier, so it gets the RFC's rule and nothing more.
+//
+// It lives HERE rather than in `common/consent.js` for the reason the ordering
+// rule lives in updateApplication(): this module owns the SCHEMA, so it owns
+// what a value of one of its attributes may be, and a second copy of the
+// grammar over there would be the thing that eventually disagreed. That module
+// calls this one; the dependency already runs in that direction.
+// ---------------------------------------------------------------------------
+function scopeTokenProblem(value) {
+  const text = String(value == null ? '' : value);
+  if (!text.trim()) {
+    return 'Which scope? It is the word a client puts in its `scope` parameter — ' +
+           '`openid`, `profile`, or a whole delegated permission identifier such as ' +
+           '`https://example.com/write`.';
+  }
+  if (text !== text.trim()) {
+    return 'A scope may not begin or end with whitespace: a `scope` parameter is ' +
+           'space-delimited, so the value would arrive at the authorization endpoint ' +
+           'as a different word from the one written here and would never match.';
+  }
+  if (!/^[\x21\x23-\x5B\x5D-\x7E]+$/.test(text)) {
+    return '"' + text + '" is not a legal OAuth scope token. RFC 6749 section 3.3 allows ' +
+           'any printable ASCII except space, double quote and backslash, because a scope ' +
+           'list is space-delimited. A value outside that set can never match a scope a ' +
+           'client asked for, so consenting it would consent nothing.';
   }
   return '';
 }
@@ -4144,6 +4231,9 @@ module.exports = {
   parsePermissionValue: parsePermissionValue,
   permissionValueOf: permissionValueOf,
   permissionNameProblem: permissionNameProblem,
+  // The RFC 6749 section 3.3 grammar on its own, for common/consent.js — see
+  // the block above it for why the schema owner owns this rule.
+  scopeTokenProblem: scopeTokenProblem,
   permissionBaseProblem: permissionBaseProblem,
   permissionsOf: permissionsOf,
   // The fourth lookup, exported for oauth2.js's audienceScopes(). Its header

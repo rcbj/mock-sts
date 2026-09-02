@@ -570,3 +570,33 @@ is schemaless on purpose, so an `attributes` member written out property by
 property would be a document making a promise the store does not keep. The names
 are published in the one place that can keep them right — each reply carries the
 container's own `schema`, read out of the module that owns it.
+
+## `/admin-api/consent`: a resource of its own, and why the action names stutter
+
+The THIRD register in this family — `/admin-api/delegation` is what HAPPENED,
+`/admin-api/permissions` is what is ALLOWED between two applications, and this is
+what a PERSON said yes to. A resource of its own for the reason that one is a
+resource of its own rather than more actions on `/delegation`: a caller that had
+to tell an act from an intent from a consent by the shape of a row would be told
+nothing by any of them.
+
+`GET` carries both halves. `globals` is the OVERRIDE —
+`oauthGlobalConsent` on an application's entry, which skips the prompt for
+everybody and writes nothing about anybody — and `users` is the RECORD, one row
+per (person, application, scope). `globals[].resource` says which application
+exposes the permission where the scope resolves to one and `globals[].granted`
+whether that client also HOLDS it, which are independent questions and the one
+place both are visible at once. `users[].unreadable` is a value an `ldapmodify`
+put on an entry that is not in the shape this service writes: it consents nothing
+and is reported rather than dropped, exactly as a dangling grant is.
+`storable: false` means no directory is installed behind the register, so an
+answer is honoured once and forgotten.
+
+**THE FOUR ACTION NAMES STUTTER UNDER THIS PATH**
+(`/consent/grant-global-consent`) and that is deliberate exactly as
+`/permissions/define-permission`'s is. They are the names in the console's hidden
+`action` inputs, where the page is `/admin/consent` and `grant` alone would not
+say whether it meant the override or somebody's answer — and those two are the
+pair a caller most needs kept apart, because removing the wrong one asks the
+wrong people again. One vocabulary for both doors is worth more than a shorter
+URL, and rule 7's parity check reads the console's own list.

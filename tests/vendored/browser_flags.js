@@ -21,6 +21,39 @@
 //    passing locally, where an http page talking to http localhost raises none
 //    of this.
 //
+//    **--allow-running-insecure-content IS IGNORED BY THE OLD HEADLESS
+//    IMPLEMENTATION, so a test carrying it is not necessarily covered by it.**
+//    A test that asks for bare `--headless` rather than `--headless=new` gets
+//    headless_shell, and in the Chrome 121 this image pins that binary blocks
+//    the mixed-content fetch anyway: the XHR completes with `readyState 4,
+//    status 0` and no console entry naming mixed content. Measured directly on
+//    121.0.6167.85 through this suite's own chromedriver — an https page
+//    fetching an http origin, both flags identical, the ONLY difference being
+//    the headless mode: `--headless` fails, `--headless=new` returns 200.
+//    --unsafely-treat-insecure-origin-as-secure on the target origin does NOT
+//    rescue it, so section 2's flag is no substitute.
+//
+//    THAT COST THE CONTAINERIZED RUN OF 2026-08-31 — thirteen of its fourteen
+//    failures. Once the api and the client moved to https
+//    (common/tls_listener.js), every page in the suite became an https origin
+//    while Keycloak stayed on http://keycloak:8080, so the discovery XHR the
+//    OAuth2/OIDC page makes became mixed content for the first time. The
+//    eleven scripts that still asked for bare `--headless` all failed at the
+//    same line — `Waiting for element to be located By(css selector,
+//    .btn_oidc_populate_meta_data)` — because that button is only rendered
+//    when the discovery document arrives, so what the log named was a missing
+//    button on a page that was fine. The jobs that populate the same metadata
+//    from the same Keycloak under `--headless=new` (oidc_flows.js) passed in
+//    half a second on the same run, which is the shape to look for: a failure
+//    that splits along the headless mode and nothing else.
+//
+//    It does NOT reproduce on ./local-run-tests.sh, and that is the second
+//    half of why it went unseen: there Keycloak is http://localhost:8080,
+//    which Chrome already counts as potentially trustworthy, so nothing about
+//    the request is mixed content and the old implementation has nothing to
+//    block. Only the containerized stack gives Keycloak a name that is not
+//    loopback.
+//
 // 2. SECURE CONTEXT — needed when the page is served over plain HTTP from a
 //    name that is not localhost, which is the containerized stack
 //    (http://client:3000). `window.crypto.subtle` exists only in a secure
@@ -243,15 +276,41 @@ function addBrowserAccessFlags(options, baseUrl, extraOrigins) {
 // identity provider never showed its sign-in screen (no #username field)" —
 // four jobs naming a login form, on a page titled `Privacy error`. Adding the
 // call is one line; finding out that it was the missing line is not.
+//
+// TWO PINS NOW, AND THE FLAG TAKES A LIST. Since the api and the client serve
+// TLS as well (common/tls_listener.js), a browser here meets TWO self-signed
+// certificates: the mock's, regenerated on its every start, and the stack's
+// own, generated per run by common/common.sh's generateStackTlsCertificate().
+// `--ignore-certificate-errors-spki-list` is comma-separated, and — this is
+// the part that bites — CHROME KEEPS ONLY THE LAST OCCURRENCE OF A SWITCH, so
+// adding the flag twice silently discards the first pin rather than merging
+// them. The same trap is documented above for
+// --unsafely-treat-insecure-origin-as-secure, and it is the same fix: build
+// the list, add the flag once.
+//
+// Either pin may be absent — a run against a plain-http mock, a stack with TLS
+// off — and an absent one contributes nothing rather than an empty list entry,
+// which Chrome would read as a pin that matches no key.
 function addStsTrustFlags(options) {
   log.debug("Entering addStsTrustFlags().");
-  var pin = String(process.env.STS_SPKI_PIN || "").trim();
-  if (!pin) {
-    log.debug("Leaving addStsTrustFlags(). No STS_SPKI_PIN; nothing added.");
+  var pins = [process.env.STS_SPKI_PIN, process.env.STACK_TLS_SPKI_PIN]
+    .map(function (one) {
+      return String(one || "").trim();
+    })
+    .filter(function (one) {
+      return one;
+    })
+    .filter(function (one, at, all) {
+      return all.indexOf(one) === at;
+    });
+  if (!pins.length) {
+    log.debug("Leaving addStsTrustFlags(). No pins; nothing added.");
     return options;
   }
-  options.addArguments("--ignore-certificate-errors-spki-list=" + pin);
-  log.info("Trusting the mock STS's public key by SPKI pin.");
+  options.addArguments("--ignore-certificate-errors-spki-list=" +
+                       pins.join(","));
+  log.info("Trusting " + pins.length + " public key(s) by SPKI pin (the " +
+           "mock STS, and this stack's own api and client where TLS is on).");
   log.debug("Leaving addStsTrustFlags().");
   return options;
 }

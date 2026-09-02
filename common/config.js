@@ -704,6 +704,57 @@ const SETTINGS = [
                  'are only detected, and which are true of the deployment ' +
                  'rather than of a request.' },
 
+  // ---------------------------------------------------------------------------
+  // THE ONE SETTING IN THIS FILE THAT DEFAULTS TO ON, AND THE ARGUMENT IS NOT
+  // THE USUAL ONE.
+  //
+  // Every other policy here is off by default because this service exists to
+  // exercise clients and a refusal that cannot be turned off removes a test
+  // case rather than adding one. Consent is not a refusal. It is the SCREEN
+  // every real authorization server draws the first time somebody signs in to
+  // an application, and a client that has never met one has never run the code
+  // that survives it — the extra redirect, the second visit to the
+  // authorization endpoint, the `access_denied` when somebody says no. Off by
+  // default would have meant the interesting behaviour was the one nobody saw.
+  //
+  // OFF MEANS EXACTLY WHAT THIS SERVICE DID BEFORE THE FEATURE EXISTED: no
+  // screen, nothing recorded, and `prompt=consent` honoured no differently from
+  // any other prompt value. It is NOT "consent to everything" — no agreement is
+  // written to anybody's entry, so turning it back on asks again.
+  //
+  // `runtime: true` and settable on a realm, for `delegatedPermissionsEnforced`'s
+  // reason: there is no listener and no key involved, so nothing here is
+  // decided when a socket is bound.
+  { key: 'oauth2.consentRequired', group: 'OAuth 2.0 / OIDC',
+    label: 'Ask for consent',
+    env: 'STS_OAUTH2_CONSENT_REQUIRED', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'ASK THE PERSON before the authorization endpoint issues ' +
+                 'anything for a scope they have not already agreed to for ' +
+                 'that application. The first time a given username signs in ' +
+                 'to a given client_id for a given scope, /oauth2/consent is ' +
+                 'drawn listing the scopes that are new; nothing is issued ' +
+                 'until they press Allow, and Deny returns `access_denied` to ' +
+                 'the client. The answer is written to `oauthConsent` on that ' +
+                 'person\'s own entry under ou=users — one value per (person, ' +
+                 'application, scope) — so the second sign-in is silent and an ' +
+                 '`ldapsearch` can read what somebody agreed to. A delegated ' +
+                 'permission is recorded by its WHOLE identifier ' +
+                 '(`https://example.com/write`), never by the bare permission ' +
+                 'name, because two resources may both expose `read`. ' +
+                 '`oauthGlobalConsent` on an APPLICATION\'s entry consents a ' +
+                 'scope for everybody who signs in to it and writes nothing ' +
+                 'about anybody — an override rather than a record, so ' +
+                 'removing it asks everybody again. `prompt=consent` asks ' +
+                 'again whatever is on the entry; `prompt=none` with something ' +
+                 'outstanding is `consent_required`, which is what OIDC Core ' +
+                 'section 3.1.2.6 defines it for. With this OFF nothing is ' +
+                 'asked and nothing is recorded, which is what this service ' +
+                 'did before the screen existed. It does not re-judge a grant ' +
+                 'already issued: the token endpoint asks nobody anything, so ' +
+                 'a refresh of a code obtained before this was turned on still ' +
+                 'works. /admin/consent is the register.' },
+
   // THE SECOND MODE IN THIS FILE, AND IT IS DELIBERATELY NOT PART OF THE FIRST.
   // RFC 9700 mode enforces a published Best Current Practice and every one of
   // its checks cites a section; a delegated permission is nothing of the kind —

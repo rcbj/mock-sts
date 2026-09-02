@@ -257,6 +257,28 @@ const ACTIONS = [
     label: 'An application recorded something new' },
   // Only ever from the console or the management API: no protocol path deletes
   // an application, because a protocol only ever learns that one EXISTS.
+  // ---------------------------------------------------------------------------
+  // CONSENT, filed under Applications rather than under a category of its own.
+  //
+  // A row here is about what one PERSON allowed one APPLICATION to ask for, and
+  // the three rows above it are the only other place in this log where an
+  // application is the subject rather than the channel. A tenth category would
+  // have been one more filter to read and would have separated "webapp1 was
+  // created" from "alice let webapp1 read her profile", which are the two
+  // halves of the same question somebody arrives at this page with.
+  //
+  // The GLOBAL half — `oauthGlobalConsent` on an application's entry — writes
+  // no row of its own: it goes through `applications.updateApplication()` like
+  // every other attribute and is recorded as `application.update`, naming the
+  // attribute. That is deliberate rather than an omission; a second row for one
+  // write would make the count on /admin/metrics wrong.
+  { action: 'consent.grant', category: 'application',
+    label: 'A person consented an application\'s scopes' },
+  { action: 'consent.deny', category: 'application',
+    label: 'A person refused an application\'s scopes' },
+  { action: 'consent.revoke', category: 'application',
+    label: 'A recorded consent was taken back' },
+
   { action: 'application.delete', category: 'application',
     label: 'An application was deleted from the registry' },
 

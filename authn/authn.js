@@ -2441,6 +2441,13 @@ module.exports = {
   endSessionById: endSessionById,
   clearSessionCookie: clearSessionCookie,
   beginAuthentication: beginAuthentication,
+  // THE SIGN-IN SCREEN'S STYLESHEET, for oauth-oidc/consent_screen.js. A
+  // person meets that screen and this one seconds apart in one flow, so two
+  // hand-maintained copies would drift into looking like two services. It is
+  // exported rather than copied for that reason and for no other — nothing here
+  // treats CSS as a contract, and a page wanting a different look should say so
+  // in rules of its own appended after this, which is what that file does.
+  CARD_CSS: CARD_CSS,
   // ---------------------------------------------------------------------
   // THE THREE THE SPNEGO SIGN-IN DOOR NEEDS, and the reason each is here
   // rather than reimplemented in `kerberos/spnego_authn.js`.

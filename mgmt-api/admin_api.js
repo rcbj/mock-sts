@@ -4851,6 +4851,220 @@ const ROUTES = [
     ] },
 
   // -------------------------------------------------------------------------
+  // CONSENT — the THIRD register in this family and the first whose rows have a
+  // PERSON in them.
+  //
+  // A resource of its own rather than more actions on `/permissions`, for the
+  // reason that one is a resource of its own rather than more actions on
+  // `/delegation`: a caller that had to tell an act from an intent from a
+  // consent by the shape of a row would be told nothing by any of them. The
+  // console draws it on a page of its own for the same reason and rule 7's
+  // parity check is what keeps the two in step.
+  //
+  // THE FOUR ACTION NAMES SAY WHICH HALF THEY TOUCH, and the stutter under this
+  // path (`/consent/grant-global-consent`) is deliberate exactly as
+  // `/permissions/define-permission`'s is. They are the names in the console's
+  // hidden `action` inputs, where the page is `/admin/consent` and `grant`
+  // alone would not say whether it meant the override or somebody's answer —
+  // and those two are the pair a caller most needs kept apart, because removing
+  // the wrong one asks the wrong people again.
+  // -------------------------------------------------------------------------
+  { method: 'GET', path: BASE + '/consent', tag: 'Delegation',
+    operationId: 'getConsent',
+    summary: 'What people agreed applications may ask for on their behalf',
+    description: 'Both halves of the consent register.\n\n**How it works.** ' +
+                 'With `oauth2.consentRequired` on — it is ON by default, and ' +
+                 'it is the one policy in this service that is — the ' +
+                 'authorization endpoint draws `/oauth2/consent` the first ' +
+                 'time a given username signs in to a given `client_id` for a ' +
+                 'given scope, and issues nothing until they answer. Allow ' +
+                 'writes one `oauthConsent` value per scope onto that ' +
+                 'person\'s own entry under `ou=users`; Deny returns ' +
+                 '`access_denied` to the client and records nothing.\n\n' +
+                 '**`globals` is CONFIGURATION and `users` is a RECORD**, and ' +
+                 'the difference decides what removing a row does. A global ' +
+                 'consent is `oauthGlobalConsent` on an APPLICATION\'s entry, ' +
+                 'one value per scope: everybody who signs in to that ' +
+                 'application skips the prompt for it and nothing is written ' +
+                 'about anybody — so revoking it asks EVERYBODY again, ' +
+                 'including the people who would have said yes. A recorded ' +
+                 'consent is one person\'s answer, and revoking it asks that ' +
+                 'one person.\n\n**A delegated permission is recorded by its ' +
+                 'WHOLE identifier** — `https://example.com/write`, never the ' +
+                 'bare `write` — because two resources may both expose a ' +
+                 'permission of that name and a consent to one must not cover ' +
+                 'the other. `globals[].resource` says which application ' +
+                 'exposes it where the scope resolves to one, and ' +
+                 '`globals[].granted` whether that client has also been ' +
+                 'GRANTED it: the two are independent, and a consented ' +
+                 'permission the client does not hold is still refused when ' +
+                 '`oauth2.delegatedPermissionsEnforced` is on.\n\n' +
+                 '`users[].unreadable` is a value on somebody\'s entry that is ' +
+                 'not in the shape this service writes — an `ldapmodify` put ' +
+                 'it there. It consents nothing and is reported rather than ' +
+                 'dropped.\n\n`storable: false` means no directory is ' +
+                 'installed behind the register, so an answer is honoured for ' +
+                 'one request and forgotten and the screen is drawn every ' +
+                 'time. That is deliberate: an agreement that cannot be ' +
+                 'remembered is one nobody gave.',
+    mirrors: 'GET /admin/consent',
+    responseDescription: 'Every scope consented for everybody on an ' +
+                         'application, every answer a person has given, and ' +
+                         'whether the screen is being drawn at all.',
+    responseSchema: { type: 'object',
+                      description: 'The consent register, both halves.' },
+    handler: function (req, res) {
+      log.debug("Entering the management API consent endpoint.");
+      sendJson(res, 200, admin.consentView());
+      log.debug("Leaving the management API consent endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/consent/:action', tag: 'Delegation',
+    mirrors: 'POST /admin/consent',
+    handler: function (req, res) {
+      log.debug("Entering the management API consent action endpoint.");
+      const body = parseBody(req);
+      const result = admin.consentAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API consent action endpoint.");
+    },
+    actions: [
+      { action: 'grant-global-consent', operationId: 'grantGlobalConsent',
+        summary: 'Consent a scope for everybody who signs in to an application',
+        description: 'Adds one value to `oauthGlobalConsent` on the ' +
+                     'application\'s own entry. Nobody is asked about that ' +
+                     'scope on that application again, and **nothing is ' +
+                     'written about anybody** — this is an OVERRIDE and not a ' +
+                     'record.\n\nThat is the whole difference from a person ' +
+                     'pressing Allow, and it decides what removing it does: ' +
+                     '`revoke-global-consent` asks everybody again, because ' +
+                     'there is no record of who would have agreed. Somebody ' +
+                     'who consented the same scope personally — before or ' +
+                     'after — still has that on their entry and is still not ' +
+                     'asked.\n\n**It is keyed on the pair, not on the scope.** ' +
+                     'Consenting `read` here consents it for THIS application; ' +
+                     'an application registered five minutes later that spells ' +
+                     'the same word is still asked. There is no service-wide ' +
+                     'list of scopes nobody is ever asked about, deliberately: ' +
+                     'it would mean an application nobody has reviewed ' +
+                     'inheriting a decision made about a different one.\n\n' +
+                     'The scope must be a legal RFC 6749 section 3.3 scope ' +
+                     'token, because a value with a space in it is two scopes ' +
+                     'and could never match one. It need NOT name a permission ' +
+                     'any application defines — most scopes are not ' +
+                     'permissions, and refusing an unrecognised one would make ' +
+                     'it impossible to consent `openid`.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string',
+                      description: 'The application people sign in to, by its ' +
+                                   'identifier exactly as `ou=applications` ' +
+                                   'holds it. This is the CLIENT — the party ' +
+                                   'that will name the scope in a request — ' +
+                                   'and not the resource that exposes it.' },
+            scope: { type: 'string',
+                     description: 'The scope, exactly as a client puts it in a ' +
+                                  '`scope` parameter. A delegated permission ' +
+                                  'is its WHOLE identifier.' }
+          },
+          required: ['client', 'scope'],
+          examples: [{ client: 'webapp1', scope: 'openid' }],
+          additionalProperties: false
+        },
+        responseDescription: 'The application as it now stands, and what ' +
+                             'skipping the prompt for that scope now means.' },
+
+      { action: 'revoke-global-consent', operationId: 'revokeGlobalConsent',
+        summary: 'Stop consenting a scope for everybody',
+        description: 'Removes one value from `oauthGlobalConsent`. **The next ' +
+                     'person to sign in asking for that scope is PROMPTED**, ' +
+                     'including everybody the override was covering, because ' +
+                     'an override records nothing about the people it covers. ' +
+                     'Somebody who agreed to it personally is unaffected — ' +
+                     'their answer is on their own entry and `revoke-consent` ' +
+                     'is what takes that away.\n\nNothing already ISSUED is ' +
+                     'touched. An access token minted while the override stood ' +
+                     'is still valid, exactly as revoking a delegated ' +
+                     'permission does not re-judge a grant already made.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            client: { type: 'string', description: 'The application holding it.' },
+            scope: { type: 'string', description: 'The scope to stop consenting.' }
+          },
+          required: ['client', 'scope'],
+          examples: [{ client: 'webapp1', scope: 'openid' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was removed, and who is asked again.' },
+
+      { action: 'revoke-consent', operationId: 'revokeConsent',
+        summary: 'Take back one answer one person gave',
+        description: 'Removes the `oauthConsent` value naming this person, ' +
+                     'this application and this scope. They are asked again ' +
+                     'the next time that application requests that scope; ' +
+                     'nobody else is affected.\n\n**All three are required and ' +
+                     'that is not pedantry.** One person may consent the same ' +
+                     'scope to several applications, and revoking the wrong ' +
+                     'pair is invisible until somebody is asked again — which ' +
+                     'is a week later and looks like a bug in the screen.\n\n' +
+                     'A scope covered by GLOBAL consent is not on anybody\'s ' +
+                     'entry, so there is nothing here to remove and this ' +
+                     'refuses rather than pretending: ' +
+                     '`revoke-global-consent` is the operation for that, and ' +
+                     'the refusal says so. Nothing already issued is touched.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            username: { type: 'string',
+                        description: 'The person, exactly as /admin/users ' +
+                                     'names them. It is normalised the same ' +
+                                     'way every identity here is, so `alice` ' +
+                                     'and `urn:sts-mock:user:alice` are one ' +
+                                     'person.' },
+            client: { type: 'string',
+                      description: 'The application they consented it to.' },
+            scope: { type: 'string', description: 'The scope they consented.' }
+          },
+          required: ['username', 'client', 'scope'],
+          examples: [{ username: 'alice', client: 'webapp1', scope: 'openid' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was removed, and what is asked again.' },
+
+      { action: 'forget-user-consent', operationId: 'forgetUserConsent',
+        summary: 'Forget everything one person agreed to',
+        description: 'Every `oauthConsent` value on one person\'s entry, in ' +
+                     'one call, so that every application asks them again. A ' +
+                     'separate operation rather than a loop over ' +
+                     '`revoke-consent` because being asked again is the one ' +
+                     'thing somebody wants after testing this screen, and ' +
+                     'doing it a row at a time for a person with thirty ' +
+                     'consents is a chore rather than a control.\n\nIt reaches ' +
+                     'nothing under GLOBAL consent, because there is nothing ' +
+                     'on their entry to reach — a scope they were never asked ' +
+                     'about leaves no record, which is what lets the register ' +
+                     'tell the two apart at all. Nothing already issued is ' +
+                     'touched.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            username: { type: 'string',
+                        description: 'The person whose answers are forgotten.' }
+          },
+          required: ['username'],
+          examples: [{ username: 'alice' }],
+          additionalProperties: false
+        },
+        responseDescription: 'How many answers were forgotten.' }
+    ] },
+
+  // -------------------------------------------------------------------------
   // SPIFFE. Three resources, mirroring the three console pages one for one, and
   // each POST calls the SAME action function the console's form posts to — with
   // `action` taken from the URL instead of from a hidden input. Rule 7.

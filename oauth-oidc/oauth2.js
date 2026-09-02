@@ -139,6 +139,18 @@ const applications = require('../common/applications');
 // other grant here delegates anything. A library like the one above: it
 // registers no route, so it can neither create a cycle nor move one.
 const delegation = require('../common/delegation');
+// CONSENT: the register, and the screen that fills it.
+//
+// `common/consent.js` is a LIBRARY (rule 3) — it registers no route and
+// requires helpers.js, config.js, applications.js and admin_stats.js — so
+// requiring it here can neither create a cycle nor move a route.
+// `./consent_screen.js` DOES register two routes, and this require does not
+// move them: server.js requires it BEFORE this module, exactly as it requires
+// `authn/authn.js` before this module, and for the identical reason — the
+// authorization endpoint hands a browser to a screen somebody else owns and
+// takes it back afterwards.
+const consent = require('../common/consent');
+const consentScreen = require('./consent_screen');
 // The LDAP-attribute half of a claim set, read here for ONE thing this module
 // could not do without it: OpenID Connect Core section 5.5 lets a client name
 // individual claims it wants back from the UserInfo endpoint, and answering
@@ -3102,12 +3114,146 @@ function authorizeEndpoint(req, res) {
                 String(q.authn_error_description || 'Authentication did not complete.'));
   }
 
+  // ---------------------------------------------------------------------
+  // AND THE SAME QUESTION FOR THE CONSENT SCREEN, one line below the sign-in
+  // screen's for one reason and a different one.
+  //
+  // The shared reason: `consent_screen.js` names the OUTCOME and this endpoint
+  // decides what OAuth does about it, because `redirectBack()` knows about
+  // `response_mode` and in `form_post` the answer is not a redirect at all.
+  //
+  // The reason it must be HERE rather than below the session check is the
+  // opposite of the sign-in screen's. A refused sign-in leaves no session, so
+  // the branch below would draw the login screen again — a loop with a form in
+  // it. A refused CONSENT leaves the session standing, so the branch below
+  // would find it, ask `consent.outstanding()` again, and send the person
+  // straight back to the screen they just said no on. Same loop, one door
+  // along, and the only way out would be closing the tab.
+  // ---------------------------------------------------------------------
+  if (q.consent_error) {
+    log.debug("Leaving the authorization endpoint. The consent screen reported " +
+              q.consent_error + ".");
+    return fail(String(q.consent_error),
+                String(q.consent_error_description || 'Consent was not given.'));
+  }
+
   // Already signed in? Then this is the second pass — back from the
   // authentication service, or a later request on the same session — and the
   // response goes out now.
   const session = sessionOf(req);
   const forcePrompt = String(q.prompt || '').split(/\s+/).indexOf('login') >= 0;
   if (session && !forcePrompt) {
+    // -------------------------------------------------------------------
+    // CONSENT, AND IT IS THE LAST THING BETWEEN A SIGNED-IN PERSON AND AN
+    // ISSUED CREDENTIAL.
+    //
+    // It sits HERE — inside the branch that has a session, above
+    // issueAuthorizationResponse() — because the question is about a PERSON and
+    // there is no person until there is a session. Everything above this line
+    // is about the request; this is the only check in this endpoint that is
+    // about who is answering it.
+    //
+    // WHAT IS ASKED is `common/consent.js`'s to decide and not this endpoint's:
+    // which scopes this username has already agreed to for this client_id,
+    // which the application's `oauthGlobalConsent` covers for everybody, and
+    // therefore which are outstanding. A copy of that rule here would be the
+    // second place it was decided — `permissionRefusal()` one screen up carries
+    // the same argument for the same reason.
+    //
+    // `prompt=consent` (OIDC Core section 3.1.2.1) makes every requested scope
+    // outstanding whatever is on the entry. It does NOT delete what was agreed:
+    // re-consenting adds nothing new, and somebody who denies keeps what they
+    // had.
+    // -------------------------------------------------------------------
+    const wantsConsent = String(q.prompt || '').split(/\s+/).indexOf('consent') >= 0;
+    const decision = consent.required()
+      ? consent.outstanding({ username: (session.user || {}).username,
+                              clientId: q.client_id,
+                              scope: q.scope, all: wantsConsent })
+      : { outstanding: [], scopes: [] };
+    if (decision.outstanding.length) {
+      // prompt=none FORBIDS ANY UI, and OIDC Core section 3.1.2.6 gives this
+      // exact case its own error code. Answering `interaction_required` — the
+      // general one — would be true and less useful: a client that gets
+      // `consent_required` knows to retry WITHOUT prompt=none, and one that
+      // gets `interaction_required` cannot tell a missing session from a
+      // missing consent.
+      if (String(q.prompt || '').split(/\s+/).indexOf('none') >= 0) {
+        log.debug("Leaving the authorization endpoint. Consent is outstanding and " +
+                  "prompt=none forbids showing the screen.");
+        return fail('consent_required',
+          '"' + ((session.user || {}).username || '') + '" has not consented ' +
+          decision.names.map(function (one) { return '"' + one + '"'; }).join(', ') +
+          ' for the client "' + (q.client_id || '') + '", and prompt=none forbids ' +
+          'showing the consent screen. Retry without prompt=none, or consent the ' +
+          'scope for every user of this application at /admin/consent — which is ' +
+          'what an application that must never interrupt anybody is configured ' +
+          'with. oauth2.consentRequired turns the screen off entirely.');
+      }
+      // THE SAME `returnTo` THE SIGN-IN HOP USES, built the same way and with
+      // `prompt` dropped for the same reason: it has been honoured by the time
+      // they come back, and leaving `prompt=consent` on would ask again for
+      // ever. Everything else goes back untouched, because the second pass has
+      // to be the request the client actually made.
+      const consentReturnTo = asPathOf(req) + '/oauth2/authorize?' + queryString(q, ['prompt']);
+      // -----------------------------------------------------------------
+      // THE APPLICATION IS RECORDED HERE AS WELL, AND IT HAS TO BE.
+      //
+      // `issueAuthorizationResponse()` is where a client_id is normally
+      // written into `ou=applications`, and it is not reached on this path:
+      // nothing is issued until the person answers. Without this, an
+      // application whose very first request meets the consent screen has NO
+      // ENTRY — so the screen shows a bare client_id where a name belongs, and
+      // (much worse) `/admin/consent` cannot offer it in the list of
+      // applications a scope can be consented for. An operator who wanted to
+      // pre-consent a new client would have had to sign in to it first, agree
+      // to everything by hand, and then configure the thing that was supposed
+      // to stop them being asked.
+      //
+      // `counts: false`, and that is the whole of what makes it honest. Being
+      // ASKED for consent is not an authentication — nothing has been issued
+      // and the person may be about to say no — so this records the SIGHTING
+      // and leaves `appAuthentications` alone. The call below in
+      // `issueAuthorizationResponse()` is the one that counts, and it counts
+      // once whether or not this ran.
+      // -----------------------------------------------------------------
+      applications.seen({
+        identifier: String(q.client_id),
+        kind: hasScope(q.scope, 'openid') ? 'oidc-relying-party' : 'oauth2-client',
+        protocol: 'OAuth 2.0 / OIDC',
+        user: (session.user || {}).username || '',
+        counts: false,
+        note: 'asked a person for consent',
+        fields: {
+          oauthClientId: String(q.client_id),
+          appAuthorizationServer: profileOf(req),
+          oauthScope: String(q.scope || '').split(/\s+/).filter(Boolean)
+        }
+      });
+      const entry = applications.get(String(q.client_id || ''));
+      log.debug("Leaving the authorization endpoint. " + decision.outstanding.length +
+                " scope(s) need consent first.");
+      return res.redirect(302, consentScreen.beginConsent({
+        returnTo: consentReturnTo,
+        // THE TYPED NAME AND NOT THE CLAIMS OBJECT. `session.user` is what
+        // `helpers.userFor()` built — `sub`, `email`, `name` and the rest — and
+        // handing that to the screen put `[object Object]` where a person's
+        // name belongs and filed their consent under nobody.
+        username: (session.user || {}).username || '',
+        clientId: String(q.client_id || ''),
+        clientName: (entry && entry.name) || String(q.client_id || ''),
+        scopes: decision.outstanding,
+        already: decision.scopes.filter(function (one) {
+          return decision.outstanding.indexOf(one) < 0;
+        }),
+        protocol: 'OAuth 2.0 / OIDC',
+        details: [
+          { label: 'client_id', value: q.client_id || '' },
+          { label: 'scope', value: q.scope || '(none requested)' },
+          { label: 'redirect_uri', value: q.redirect_uri || '' }
+        ]
+      }));
+    }
     log.debug("Leaving the authorization endpoint. The session stands, so the response goes out now.");
     // A CATCH RATHER THAN AN `async` HANDLER. That function became
     // asynchronous when the ID Token's signature moved to the worker pool, and

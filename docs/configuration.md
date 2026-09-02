@@ -143,6 +143,84 @@ go back and ask whether that is still allowed — so turning it on refuses the n
 REQUEST rather than invalidating what is outstanding, which is what makes it safe
 to turn on while something is running.
 
+### `oauth2.consentRequired` — the one setting here that is ON by default
+
+Runtime, settable on a trust realm, and **on unless you turn it off**, which no
+other policy in this service is.
+
+The first time a given username signs in to a given `client_id` for a given
+scope, `/oauth2/consent` is drawn listing the scopes that are new. Nothing is
+issued until they press **Allow**; **Deny** returns `access_denied` to the client
+and records nothing at all.
+
+**Why on, when everything else here is off.** Every other refusal is off by
+default because this service exists to exercise clients and a refusal that
+cannot be turned off removes a test case rather than adding one. Consent is not
+a refusal — it is the screen every real authorization server draws on a first
+sign-in, and a client that has never met one has never run the code that
+survives it: the extra redirect, the second visit to the authorization endpoint,
+the `access_denied` when somebody says no. Off by default would have meant the
+interesting behaviour was the one nobody saw.
+
+**OFF means what this service did before the screen existed** — nothing asked,
+nothing recorded. It is *not* "everybody consented": no agreement is written
+down, so turning it back on asks again.
+
+#### Where the answer goes
+
+`oauthConsent` on the person's own entry under `ou=users`, one value per
+(person, application, scope):
+
+```
+oauthConsent: 20260901143000Z openid webapp1
+oauthConsent: 20260901143000Z https://example.com/write webapp1
+```
+
+When it was agreed, the scope, and the application — **the `client_id` last,
+because it is the only field with no rule about what it may contain**, so it
+takes the remainder of the value. A delegated permission is recorded by its
+WHOLE identifier and never by the bare permission name, because two resources
+may each expose a `read`.
+
+One value per triple and never one per request: a consent recorded against the
+whole `scope` string would make `openid profile` and `profile openid` two
+different agreements, and adding one scope would throw away the agreement to the
+other four. A second visit asks about the *difference*, with what was already
+agreed under a fold.
+
+#### Consenting a scope for everybody
+
+`oauthGlobalConsent` on the **client application's** entry, one value per scope,
+typed at `/admin/consent` or through `POST /admin-api/consent/grant-global-consent`.
+A scope named there is never asked about and **nothing is written about
+anybody**.
+
+Two things follow, and both are the difference between an *override* and a
+*record*:
+
+* **Removing one asks everybody again**, including the people who would have
+  said yes. Removing a person's own answer asks one person.
+* **It is keyed on the pair, not on the scope.** Consenting `read` consents it
+  for *that* application; one registered five minutes later that spells the same
+  word is still asked.
+
+Both are ordinary attributes on ordinary directory entries, so an `ldapmodify`
+is a configuration change here exactly as it is for a redirect URI, and they
+persist wherever the directory does.
+
+#### The two prompt values, and what is never re-judged
+
+`prompt=consent` asks again whatever is on the entry and takes nothing away.
+`prompt=none` with something outstanding is **`consent_required`** — OpenID
+Connect Core section 3.1.2.6's own code rather than the general
+`interaction_required`, because a client that gets the general one cannot tell a
+missing session from a missing consent.
+
+**Nothing already issued is touched, ever.** The token endpoint asks nobody
+anything, so a refresh of a code obtained before this was turned on still works,
+and revoking a consent leaves a token already minted valid. `/admin/tokens` is
+where an issued credential is revoked.
+
 ### `global.https` — TLS on the main port
 
 **ON in every appconfig file this repository ships, since 2026-08-30.** That is

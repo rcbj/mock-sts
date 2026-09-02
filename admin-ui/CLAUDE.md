@@ -2581,3 +2581,61 @@ reason is one column on one page rather than a taste for wide layouts:
 `/admin/ldap/directory` draws every attribute of every entry, which is the
 widest thing in this console by a distance. `.main` is `flex:1 1 32rem`, so a
 page whose content is narrower is unaffected.
+
+## `/admin/consent`: the third register, and the first with a person in it
+
+A page of its own rather than a fourth heading on `/admin/delegation`, and the
+first reason is enough: **every row there is about two APPLICATIONS and every
+row here has a PERSON in it.** The whole argument for keeping the acts picture
+and the permissions picture on separate canvases is that a drawing with a person
+in it and a drawing without one must not share a frame; this is the same
+argument one layer up. The second reason is arithmetic — that page already
+carries seven tables.
+
+**TWO SECTIONS, AND THEY ARE NOT THE SAME KIND OF THING**, which both headings
+say out loud because a reader who confused them would draw exactly the wrong
+conclusion from an empty second table (which is what a service with everything
+under global consent correctly looks like):
+
+* **Global consent is CONFIGURATION.** One row per (application, scope), held as
+  `oauthGlobalConsent` on the application's entry. Nobody is asked about a scope
+  named there and nothing is written about anybody — so removing a row asks
+  EVERYBODY again, including the people who would have said yes.
+* **Recorded consent is a RECORD.** One row per (person, application, scope),
+  held as `oauthConsent` on the person's entry. Removing a row asks that person
+  and nobody else.
+
+**FOUR ACTIONS, and `CONSENT_ACTIONS` is built from the switch rather than
+typed**, for `PERMISSION_ACTIONS`' reason: `tests/vendored/admin_api.js` reads
+the refusal sentence to check that every console action has an `/admin-api`
+operation, so a list short by one turns the parity check off for that action.
+Two of the four go through `applications.updateApplication()` like every other
+attribute write in this console, so the schema rules, the `application.update`
+audit row and the `ldapmodify` equivalence all come for free.
+
+**THE TWO REVOKES ARE NAMED APART ON PURPOSE.** `revoke-global-consent` and
+`revoke-consent` are one word apart and do very different things — one asks
+everybody again and the other asks one person — which is exactly the pair a
+caller most needs kept distinct, because pressing the wrong one is invisible
+until somebody is asked again a week later. `revoke-consent` requires all three
+of `username`, `client` and `scope` for the same reason.
+
+**THE AUDIT ROWS ARE WRITTEN HERE AND NOT IN `common/consent.js`**, which is the
+division `rbacAction()` already has: the actor is the person whose session got
+them through the gate, and the module underneath has no request to read one
+from. `oauth-oidc/consent_screen.js` writes its own rows from the other side,
+where the actor is the person consenting. Both use `consent.grant` /
+`consent.deny` / `consent.revoke` under the **Applications** category rather than
+a category of its own — a tenth category would have separated *webapp1 was
+created* from *alice let webapp1 read her profile*, which are the two halves of
+one question. The GLOBAL half writes no row of its own: it goes through
+`updateApplication()` and is recorded as `application.update` naming the
+attribute, and a second row for one write would make the count on
+`/admin/metrics` wrong.
+
+**THE SEARCH IS OVER THE RECORDED HALF ONLY.** The overrides table is one row
+per thing somebody typed and is short by construction; the recorded table grows
+by one row for every scope every person agrees to. It matches the person, the
+application OR the scope, because a reader arrives holding exactly one of the
+three and does not know which column it is in. Both tables page separately and
+share one `per`, which is `/admin/delegation`'s arrangement.

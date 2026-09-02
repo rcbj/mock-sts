@@ -913,3 +913,43 @@ set as well and is not redundant.
 with the five view functions, so that `mgmt-api/admin_api.js` (19) can mirror
 these pages without requiring this module (21) and dragging every route
 registered here ahead of its own. See the root `CLAUDE.md`.
+
+## `oauthConsent`: the seventh slot, and the one attribute here that records an answer
+
+`common/consent.js` owns the MODEL — the value's grammar, what "outstanding"
+means, the global override, the register both console halves read. This module
+owns the STORE, which is `oauthConsent` on an entry under `ou=users`. That
+division is `group_claims.js`'s and `applications.js`'s: neither file knows the
+other's half.
+
+It is the SEVENTH `setDirectory()`-shaped slot this module fills at require
+time and the second that hands over a WRITER as well as readers. Four functions,
+validated whole, for `setLogoutReader()`'s reason: a filler that installed the
+two reads and neither write would leave a service that draws the consent screen,
+records nothing, and draws it again on the next request — a loop with a button
+in it, every part of it working.
+
+**NOTHING HERE CREATES AN ENTRY.** A consent is written for somebody who has
+just authenticated, so `observeIdentity()` made their entry on the way past.
+Where it did not — `ldap.autoCreateUsers` off, or an entry deleted between the
+sign-in and the button — the write is REFUSED and says why, and `consent.js`
+turns that into *they will be asked again* rather than into a failed
+authorization. Creating a person here in order to file their consent would put
+somebody in the directory that `autoCreateUsers` had just been set to keep out.
+
+**THE IDENTITY ARRIVES NORMALISED.** `consent.js` runs it through
+`admin_stats.js`'s `identityKeyOf()` first, which is the same normalisation
+`autoCreateUser()` used to place the entry — so `alice`, `alice@EXAMPLE.COM` and
+`urn:sts-mock:user:alice` reach `locateEntry()` as one key and find one entry. A
+second normalisation here would be a second opinion about who somebody is.
+
+**A REMOVE THAT EMPTIES THE ATTRIBUTE DELETES IT.** LDAP has no empty attribute
+— RFC 4511's modify with no values IS a delete — so leaving `oauthconsent: []`
+behind would put a value on the wire no client can read as anything and would
+show on `/admin/ldap/directory` as an attribute with nothing in it.
+
+**IT IS NOT A CREDENTIAL AND IT GRANTS NOTHING.** It is a record of an answer,
+read only by the authorization endpoint deciding whether to draw a screen. The
+other half of the feature — `oauthGlobalConsent` — is on an APPLICATION's entry
+and belongs to the applications schema rather than to this module's list of its
+own invented names.

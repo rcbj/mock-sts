@@ -802,3 +802,42 @@ a caller that already refuses is a guard that has not been tested.**
 reference for the whole process and every later file in the run reads through it,
 so a fake left installed would answer every subsequent question about
 applications with this file's four entries.
+
+## `consent.js` (2026-09-01) — and the half of that feature that IS over HTTP
+
+The line this directory is on is *can it be asserted by driving the running
+service over HTTP?*, and most of the consent feature can: that the screen is
+drawn, that Allow issues a code and Deny returns `access_denied`, that
+`prompt=none` answers `consent_required`, that a global consent suppresses the
+prompt for a real sign-in. All of that is `tests/vendored/sts_consent.js` and is
+not here.
+
+What is here is the three things that CANNOT be:
+
+* **THE VALUE GRAMMAR.** `<when> <scope> <client_id>` is a string rule whose
+  whole justification is an edge case no request can produce on demand: a
+  client_id containing a SPACE or a `|`. The rule is that the client_id is LAST
+  and takes the remainder, and the only way to show it holds is to write such a
+  value and read it back.
+* **THE PRECEDENCE.** Which of three answers covers a scope — the person's own,
+  the application's override, or neither — is a pure function of two attribute
+  sets. Producing all six combinations over HTTP would mean six sign-ins, six
+  directory writes and a race against the clock in the timestamp; here it is a
+  stub and six assertions.
+* **THE STATE ONLY AN `ldapmodify` CAN WRITE.** A value on somebody's entry that
+  is not in the shape this service writes. Both console doors and the management
+  API produce well-formed values by construction, so reaching it over HTTP would
+  mean driving the LDAP socket to create a state the API exists to prevent.
+
+**IT FILLS TWO SLOTS AND IS THE FIRST FILE HERE TO FILL `consent.setDirectory()`.**
+`applications.setDirectory()` needs `readApplication` as well as
+`allApplications` — this feature reads ONE entry by identifier where
+`user_graph_permissions.js` only ever walks the container, and a stub short by
+that member throws inside `load()` rather than answering "no such application",
+which is a failure that names `applications.js` and has nothing to do with it.
+
+**THE ONE ASSERTION TO READ FIRST** is the BOTH-WAYS case: a scope covered by
+the override AND by the person's own answer must report as the person's,
+because that is the fact that survives the override being taken away. Reporting
+it the other way round would make `revoke-global-consent` look as though it had
+started asking people who had already agreed.

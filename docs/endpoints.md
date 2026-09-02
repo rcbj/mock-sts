@@ -6,8 +6,9 @@ nav_order: 4
 # Endpoints
 
 **There is no list of endpoints in this documentation, and that is deliberate.**
-There are 144 of them, they change, and a list written here would be wrong within
-a month with nothing to say so.
+There are 264 of them, they change, and a list written here would be wrong within
+a month with nothing to say so — this number was 144 when the sentence was
+written, which is the point it is making.
 
 Ask the service instead:
 

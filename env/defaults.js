@@ -66,6 +66,7 @@ var config = {
   oauth2: {
     issuer: "",                          // Issuer identifier
     rfc9700: false,                      // RFC 9700 mode; restart to apply
+    consentRequired: true,               // Ask for consent
     delegatedPermissionsEnforced: false, // Enforce delegated permissions
     breakIdTokenNonce: false,            // Break the ID Token nonce
     refreshIdleSeconds: 86400,           // Refresh token idle timeout (s)
