@@ -1617,7 +1617,17 @@ const LIST_PARAMS = {
   // `options.name` exists for. `q` searches the recorded half only; the
   // overrides table is one row per (application, scope) and is short by
   // construction, because somebody typed every one of them.
-  '/admin/consent': ['q', 'per', 'page', 'globalsPage', 'consentsPage']
+  '/admin/consent': ['q', 'per', 'page', 'globalsPage', 'consentsPage'],
+  // The CAEP page's SESSION CHOOSER (2026-09-03), which replaced a
+  // `<select name="session_id">` for the reason chooserPane() gives about the
+  // application one: a control here must be the same size whatever the
+  // register holds, and this register grows by one row per sign-in for the
+  // life of the process. `sessq` is the search, `sessfrom` its offset, and
+  // `session` the one the reader picked — all three carried, because every
+  // control on this page is a GET that reloads it and a reader who searched
+  // for a username, paged to the second twenty and picked a session must not
+  // lose any of that to pressing Emit.
+  '/admin/caep': ['sessq', 'sessfrom', 'session']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -9505,6 +9515,77 @@ function chooserPane(spec) {
     (count || more.length
       ? '<p class="note">' + count + more.join(' &middot; ') + '</p>'
       : '');
+}
+
+// ---------------------------------------------------------------------------
+// THE CAEP SESSION CHOOSER — search by PERSON, pick one of their live
+// sessions.
+//
+// **IT WAS A `<select name="session_id">` UNTIL 2026-09-03**, and the argument
+// for replacing it is chooserPane()'s own, one register further on: a control
+// on this page must be the same size whatever is behind it, and this register
+// grows BY ONE ROW PER SIGN-IN for the life of the process and never shrinks —
+// `caep.js` keeps a row after the session has been signed out, deliberately,
+// because the row is the evidence that it existed and was revoked. So a
+// console left running for an afternoon of testing had a dropdown of several
+// hundred options, sorted by nothing a reader knows, each labelled with a
+// 24-character random identifier.
+//
+// **THE SEARCH IS OVER THE PERSON AND THE RESULTS ARE SESSIONS**, which is the
+// asymmetry worth stating because it is what makes the control useful. Nobody
+// knows a session identifier by heart — it is random and it is the thing they
+// came here to find — but everybody knows who they signed in as. So `names`
+// holds the username and the subject, and the LABEL holds the session, with
+// the protocol that minted it and the state beside it.
+//
+// **ONLY LIVE SESSIONS ARE OFFERED, and that is a deliberate narrowing.** A
+// revoked row stays in the register and stays on /admin/caep-sessions, where
+// it is evidence; it is not offered HERE because this form emits an event
+// ABOUT a session, and the model's one hard refusal is a `session-presented`
+// about a session already revoked. Offering rows that the very next click
+// would be refused for is a control that invites a mistake. The note under the
+// pane says so and points at the page that still lists them.
+//
+// Paging is CHOOSER_HITS — the same twenty every other chooser here uses, and
+// the same clamping of a stale offset, because it is the same function.
+// ---------------------------------------------------------------------------
+function caepSessionChooser(here, sessions, selectedId) {
+  log.debug("Entering caepSessionChooser().");
+  const query = (here && here.query) || {};
+  const carry = pageParamsOf(query);
+  delete carry.session;
+  const live = (sessions || []).filter(function (row) {
+    return String(row.state || '') !== 'revoked';
+  });
+  const entries = live.map(function (row) {
+    const who = String(row.username || row.sub || '(unnamed)');
+    const id = String(row.sessionId || '');
+    return {
+      key: id,
+      // SEARCHED BY PERSON. The session identifier is in here too so that a
+      // reader who has one — from a log, from an event they are chasing — can
+      // paste it, which is the other half of how this control gets used.
+      names: [who, String(row.sub || ''), id],
+      label: who + ' — ' + id,
+      detail: (row.protocol ? row.protocol + ', ' : '') +
+        String(row.state || 'established') +
+        (row.total ? ', ' + row.total + ' event(s) sent' : ', nothing sent'),
+      href: '/admin/caep' + queryWith(carry, { session: id }) + '#find-sessq'
+    };
+  });
+  log.debug("Leaving caepSessionChooser(). " + entries.length +
+            " live session(s) of " + (sessions || []).length + ".");
+  return chooserPane({
+    here: here, param: 'sessq', fromParam: 'sessfrom',
+    label: 'Find a person',
+    placeholder: 'part of a username, a subject or a session id',
+    entries: entries, selectedKey: selectedId,
+    nothing: 'No live session belongs to anybody matching that. This list ' +
+      'holds the sessions this service still considers OPEN — a revoked one ' +
+      'stays on <a href="/admin/caep-sessions">the sessions page</a> as ' +
+      'evidence and is deliberately not offered here, because the state ' +
+      'machine refuses a session-presented about a session that has ended.'
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -22312,11 +22393,24 @@ app.get('/admin/caep', function (req, res) {
       '</th></tr>' + members + '</table></div>';
   }).join('');
 
-  const sessionOptions = (json.sessions || []).map(function (row) {
-    return '<option value="' + esc(row.sessionId) + '">' +
-      esc((row.username || row.sub) + ' — ' + row.sessionId +
-          ' (' + row.state + ')') + '</option>';
-  }).join('');
+  // WHICH SESSION THE FORM WILL EMIT ABOUT, and it comes off the query string
+  // now rather than out of a `<select>`. See caepSessionChooser(). A `?session=`
+  // naming a row that is gone — a stale link, a session revoked since the
+  // reader searched — resolves to nothing and the form says so rather than
+  // posting an identifier the register will not recognise.
+  const here = { path: '/admin/caep', query: req.query };
+  const wantedSession = queryOne(here.query, 'session').trim();
+  const liveSessions = (json.sessions || []).filter(function (row) {
+    return String(row.state || '') !== 'revoked';
+  });
+  let picked = null;
+  liveSessions.forEach(function (row) {
+    if (String(row.sessionId || '') === wantedSession) {
+      picked = row;
+    }
+  });
+  const sessionChooser = caepSessionChooser(here, json.sessions || [],
+      picked ? picked.sessionId : '');
 
   const typeOptions = (json.catalogue || []).map(function (row) {
     return '<option value="' + esc(row.short) + '">' + esc(row.name) +
@@ -22381,10 +22475,30 @@ app.get('/admin/caep', function (req, res) {
         'session, because the person is not revoked and one session of ' +
         'theirs is. Leave the payload empty for a conforming specimen of ' +
         'the type.') +
-        '<form method="post" action="/admin/caep"><div class="formrow">' +
+        sessionChooser +
+        (picked
+          ? '<p class="note">Emitting about <strong>' +
+            esc(String(picked.username || picked.sub || '(unnamed)')) +
+            '</strong>&rsquo;s session <code>' + esc(picked.sessionId) +
+            '</code>' +
+            (picked.protocol
+              ? ', established over ' + esc(picked.protocol) : '') +
+            '. The subject below is composed from it.</p>'
+          : (wantedSession
+              ? warn('No live session has the id <code>' +
+                esc(wantedSession) + '</code>. It may have been signed out ' +
+                'since this link was made &mdash; a revoked row stays on ' +
+                '<a href="/admin/caep-sessions">the sessions page</a> and is ' +
+                'not offered here. Search again above.')
+              : note('Pick a session above and the form below will emit ' +
+                'about it. Until one is picked there is nothing to be ' +
+                'about: a CAEP event names a SESSION, and this form will ' +
+                'not compose a subject out of an identifier nobody chose.'))) +
+        (picked
+          ? '<form method="post" action="/admin/caep"><div class="formrow">' +
         '<input type="hidden" name="action" value="emit">' +
-        '<label>Session <select name="session_id">' + sessionOptions +
-        '</select></label> ' +
+        '<input type="hidden" name="session_id" value="' +
+        esc(picked.sessionId) + '">' +
         '<label>Event <select name="type">' + typeOptions +
         '</select></label> ' +
         '<label>Initiated by <select name="initiating_entity">' +
@@ -22403,13 +22517,17 @@ app.get('/admin/caep', function (req, res) {
         'size="40"></label> ' +
         '<label>reason_user <input type="text" name="reason_user" ' +
         'size="40"></label>' +
-        '</div><div class="formrow"><button>Emit</button></div></form>' +
-        (json.sessions && json.sessions.length
+        '</div><div class="formrow"><button>Emit</button></div></form>'
+          : '') +
+        (liveSessions.length
           ? ''
-          : warn('There are no sessions to emit about. A CAEP event is ' +
+          : warn('There are no LIVE sessions to emit about. A CAEP event is ' +
             'ABOUT a session &mdash; the subject names one &mdash; so sign ' +
-            'somebody in first. Anything that starts a session will do: an ' +
-            'OIDC flow, a SAML 2.0 sign-in, WS-Federation.'))
+            'somebody in first. Anything that starts a session will do, and ' +
+            'that is the point rather than a convenience: CAEP is a ' +
+            'vocabulary about SESSIONS and not about OAuth, so an OIDC ' +
+            'flow, a SAML 2.0 or SAML 1.1 sign-in, WS-Federation and SPNEGO ' +
+            'all reach the same funnel here and all produce a row.'))
       : '') +
 
     (json.installed

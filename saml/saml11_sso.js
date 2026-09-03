@@ -191,7 +191,8 @@ const { slugOf } = require('./saml2_sso');
 // authn.js's screen and back, exactly as the 2.0 profile does. See the note
 // above interSiteTransfer() for why that works here without the POST-to-GET
 // dance that module needs.
-const { sessionOf, beginAuthentication } = require('../authn/authn');
+const { sessionOf, beginAuthentication, notePresented } =
+  require('../authn/authn');
 // The application registry, which lives under ou=applications in the embedded
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
@@ -1246,7 +1247,26 @@ function interSiteTransfer(req, res) {
   }
 
   // --- step 4: the answer ---------------------------------------------------
+  //
+  // SINGLE SIGN-ON JUST HAPPENED, IF THE SESSION WAS NOT MADE FOR THIS
+  // REQUEST. CAEP is a vocabulary about SESSIONS and not about the protocol
+  // that minted one, so a `session-presented` is as due here as it is at the
+  // authorization endpoint — and until this call existed a receiver watching a
+  // stream saw a SAML 1.1 session start and end while every single sign-on
+  // between the two was silent. `authn.notePresented()` drops the FIRST
+  // presentation of a brand-new session, because that one is the sign-in's own
+  // return trip through this endpoint and not single sign-on; its header
+  // argues it, and the flag it spends is set by `startSession()` whichever
+  // protocol called it, so a sign-in HERE and a later OIDC authorization
+  // request report exactly one presentation between them.
+  //
+  // This profile has no ForceAuthn and no RequestedAuthnContext — decision 1,
+  // as step 3 says — so it has no branch that re-authenticates somebody who is
+  // already signed in. Every arrival with a session is therefore either single
+  // sign-on or that session's own sign-in coming back, which is exactly the
+  // pair `notePresented()` tells apart.
   pendingFlows.delete(String(params.fid || ''));
+  notePresented(session, 'SAML 1.1', req);
   issueSignIn(res, req, {
     session: session, rpId: rpId, providerId: providerId, acsUrl: acsUrl,
     profile: wanted.profile, target: String(carried.TARGET || ''),

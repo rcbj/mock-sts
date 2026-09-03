@@ -103,8 +103,8 @@ const { buildSaml11Assertion } = require('../saml/saml11');
 // through another endpoint without losing the wresult), but the SESSION it
 // lands in has to be the same one — single sign-on between the two protocols
 // is the interesting behaviour, and two stores would each look right alone.
-const { sessionOf, startSession, endSession, beginAuthentication } =
-  require('../authn/authn');
+const { sessionOf, startSession, endSession, beginAuthentication,
+        notePresented } = require('../authn/authn');
 // The application registry, which lives under ou=applications in the embedded
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
@@ -744,7 +744,27 @@ function signIn(req, res, params) {
         '<a href="' + PASSIVE_PATH + '?' + xmlEscape(requeryString(params, ['wauth'])) + '">the same ' +
         'request without wauth</a>.</li></ul>');
     }
+    // SINGLE SIGN-ON JUST HAPPENED, IF THE SESSION WAS NOT MADE FOR THIS
+    // REQUEST. CAEP is a vocabulary about SESSIONS and not about the protocol
+    // that minted one, so a `session-presented` is as due here as it is at the
+    // authorization endpoint — and until this call existed a receiver watching
+    // a stream saw a WS-Federation session start and end while every single
+    // sign-on between the two was silent. `authn.notePresented()` drops the
+    // FIRST presentation of a brand-new session, because that one is the
+    // sign-in's own return trip through this endpoint and not single sign-on;
+    // its header argues it, and the flag it spends is set by `startSession()`
+    // whichever protocol called it, so a sign-in HERE and a later OIDC
+    // authorization request report exactly one presentation between them.
+    //
+    // Last in this branch, below the two wauth refusals, because those end in
+    // a 400 and nothing was honoured: this profile answers a demand it cannot
+    // meet by refusing rather than by stepping up, so a presentation reported
+    // above them would name a session this request went on to turn away. A
+    // `wfresh` too old never reaches here at all — `fresh.ok` is false and the
+    // request goes to the screen, which is a re-authentication and produces a
+    // `session-established` of its own.
     log.debug("The session stands, so the sign-in response goes out now.");
+    notePresented(session, 'WS-Federation', req);
     return issueSignInResponse(req, res, params, session, realm, wreply, asked.tokenType);
   }
 
