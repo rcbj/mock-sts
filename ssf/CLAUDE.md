@@ -12,9 +12,10 @@ family here and the first one that TALKS BACK.
 | `ssf_streams.js` | The streams, their subjects and their queues, per trust realm. A LIBRARY. |
 | `ssf_http.js` | **THE SECOND OUTBOUND REQUEST IN THIS REPOSITORY.** RFC 8935 push delivery. A LIBRARY. |
 | `ssf_auth.js` | Who may drive a stream: two schemes and two scopes. A LIBRARY. |
+| `caep.js` | **CAEP's session register**: what state CAEP believes each session is in, and how many events of which type have been sent about it. A LIBRARY, and the one file here that is not vocabulary. |
 
-Five of the six register nothing (rule 3), so their position in the route order
-is not a position. `ssf.js` is required at **23b in `server.js`** — after
+Six of the seven register nothing (rule 3), so their position in the route
+order is not a position. `ssf.js` is required at **23b in `server.js`** — after
 `admin-ui/admin.js`, whose eighth slot it fills, and before `sts_metadata.js`,
 which is last for everybody.
 
@@ -39,18 +40,40 @@ about a person:
   nothing has happened lately.
 
 The vocabularies are **CAEP** (what happened to a SESSION) and **RISC** (what
-happened to an ACCOUNT), and neither is implemented here yet. **Everything in
-this directory is written so that adding one is rows in `ssf_events.js`'s table
-and nothing else** — the envelope, the subject grammar, the delivery, the
-queues, the stream management, the console page and the management API are all
-vocabulary-independent. If a function anywhere in this directory grows a branch
-that names one of SSF's own two event types, that is the design going wrong and
-it will have to be undone twice.
+happened to an ACCOUNT). **CAEP has been here since 2026-09-03 and RISC has
+not.**
 
-The two prefixes the next parts will use are written down in `ssf_events.js`
-already, because they are the thing most likely to be typed from memory and got
-subtly wrong — there is no "unknown event type" error in this protocol, so a
-receiver silently ignores what it does not recognise.
+**THE PROMISE THIS FILE MADE WAS KEPT, AND IT IS WORTH SAYING WHAT THAT COST.**
+The claim was that adding a vocabulary would be rows in `ssf_events.js`'s table
+and nothing else, because the envelope, the subject grammar, the delivery, the
+queues, the stream management, the console page and the management API are all
+vocabulary-independent. Eight event types later, the things outside that table
+that had to change are:
+
+* **`caep.js`**, which is not vocabulary. A row says what an event MEANS; that
+  file holds what the events are ABOUT — a session, the state CAEP believes it
+  is in, and what has been said concerning it. None of that is a property of
+  any event type or derivable from the catalogue.
+* **one refusal in `transmit()`**, and it is written against the ROW rather
+  than against a vocabulary: an event whose row says `subject: 'required'` and
+  that carries none is refused. RISC's rows will be `required` too and that
+  line will not change.
+* **one rule in `streamCoversSubject()`**, without which CAEP would deliver
+  nothing at all: a stream that names a PERSON covers a complex subject naming
+  a session of theirs. That is SSF section 4's own intent rather than CAEP's,
+  and it was simply unreachable while no event carried a complex subject.
+* **`checkMember()` in `ssf_events.js`**, which grew four value types —
+  number, array-of-strings, object and language map. That is the catalogue's
+  own machinery and not a branch naming an event type.
+
+Nothing else. If a function anywhere in this directory grows a branch that
+names one of SSF's own two event types, or one of CAEP's eight, that is the
+design going wrong and it will have to be undone again for RISC.
+
+RISC's prefix is written down in `ssf_events.js` already, because it is the
+thing most likely to be typed from memory and got subtly wrong — there is no
+"unknown event type" error in this protocol, so a receiver silently ignores
+what it does not recognise.
 
 ---
 
@@ -256,12 +279,19 @@ a client could send to get past it.
 Each of these is on `GET /ssf` in the same words, because a mock's omissions are
 the half a reader cannot discover from a protocol trace.
 
-* **It generates no event on its own.** Nothing here watches a session and emits
-  when it changes — every SET this service transmits was asked for, at
-  `/ssf/verify`, on `/admin/ssf` or through the management API. That is honest
-  rather than unfinished: **SSF defines no event about a session**, so a
-  transmitter that invented one would be inventing a vocabulary. It changes with
-  CAEP.
+* **~~It generates no event on its own.~~ IT DOES NOW, AND CAEP IS WHY.** That
+  sentence led this list until 2026-09-03 and the reason it could is exactly
+  the reason it no longer can: SSF defines no event about a session, so a
+  transmitter that emitted one would have been inventing a vocabulary — and
+  CAEP *is* that vocabulary. A sign-in emits `session-established`, an
+  authorization request answered from a session that already existed emits
+  `session-presented`, and a sign-out emits `session-revoked`, on every stream
+  that asked for the type and whose subjects cover that session, with nobody
+  having typed anything. `caep.autoEmit` puts the old behaviour back rather
+  than leaving it only in the history of this file. The other five CAEP events
+  describe things nothing here does — no device reports compliance to this
+  service and no risk engine talks to it — so those are still emitted only
+  when asked for.
 * **It never retries a failed push.** See above.
 * **It verifies nothing about a subject.** A stream may name somebody who has
   never been here, which is what a receiver's "I do not know this subject" path
@@ -405,6 +435,102 @@ For the next person adding one, this family's full list:
   nowhere;
 * `oauth-oidc/oauth2.js` — the two scopes in `scopes_supported`;
 * `server.js` — the require, at 23b.
+
+---
+
+## AND WHAT ADDING A VOCABULARY OVER IT COST, WHICH IS THE MORE USEFUL LIST
+
+CAEP is the first, RISC is the second, and the two lists are different sizes on
+purpose — the point of the section above is that this one is short.
+
+* `ssf/ssf_events.js` — eight rows, the four common claims written once, and
+  four value types in `checkMember()`;
+* `ssf/caep.js` — the register, the state machine and the report. NEW, and a
+  LIBRARY;
+* `ssf/ssf.js` — the require, the subject refusal in `transmit()`, the
+  `caep.noteTransmitted()` call, `caepAutoEmit()`, the observer installation
+  and the ninth admin slot's filler;
+* `ssf/ssf_streams.js` — the complex-subject coverage rule;
+* `authn/authn.js` — **`setSessionObserver()`, an INVERTED HOOK**, because
+  `authn` is 8 in the require order and this directory is 23b. Plus
+  `notePresented()`, spent once from `oauth-oidc/oauth2.js`;
+* `common/config.js` — a `CAEP` group of ten, and `env/defaults.js`
+  regenerated;
+* `common/audit.js` — four actions in the EXISTING `signals` category, because
+  a CAEP event travelling is an `ssf.event.transmit` and a second category
+  would have split one delivery across two filters;
+* `admin-ui/admin.js` — the ninth slot, `/admin/caep` and
+  `/admin/caep-sessions` with their action routes, two `SECTIONS` rows with
+  their blurbs, and a `SETTING_HOMES` row;
+* `mgmt-api/admin_api.js` — a GET and a POST with three actions;
+  `mgmt-api/admin_api_spec.js` — the `Caep` schema;
+* `sts_metadata.js` — one `SPECS` entry and **four** `ENDPOINTS` rows, of
+  which the two that are easy to forget are again the CONSOLE and MANAGEMENT
+  API ones rather than the protocol's own;
+* `tests/caep_register.js` — the state machine and the register in process.
+
+**THE ONE THING THAT IS NOT A FILE**, and it is the same one the eighth slot's
+section warns about: the refusal sentence is `Unknown action "x". The three
+are: …`, with the count from `helpers.numberWord(CAEP_CONSOLE_ACTIONS.length)`.
+It is READ by `tests/vendored/admin_api.js` and
+`tests/vendored/sts_admin_api_operations.js`, and a handler that writes it its
+own way turns both checks off with nothing failing.
+
+---
+
+## THE THREE ACTS THIS SERVICE CAN OBSERVE, AND THE FIVE IT CANNOT
+
+`caep.autoEmitTypes` names the first three and drops anything else with a
+warning, and the division is not arbitrary:
+
+| Act | Event | Where it is noticed |
+|---|---|---|
+| a session is created | `session-established` | `authn.startSession()` |
+| a session is presented and honoured | `session-presented` | `oauth-oidc/oauth2.js`'s authorization endpoint, through `authn.notePresented()` |
+| a session ends | `session-revoked` | `authn.dropSession()`, which every sign-out door reaches |
+
+The other five — token claims change, credential change, assurance level
+change, device compliance change, risk level change — have **no act here that
+could cause them**. No device reports compliance to this service and no risk
+engine talks to it, so an automatic emission of one would be this service
+inventing a fact. They are emitted by hand from `/admin/caep` or
+`POST /admin-api/caep/emit`, and a row in `caep.autoEmitTypes` naming one is
+dropped rather than honoured: honouring it would leave a setting that reads as
+configured and does nothing.
+
+**THE FIRST PRESENTATION OF A NEW SESSION IS NOT REPORTED**, and without that
+rule the feature would be noise. Every sign-in here ends with the browser
+coming back to the authorization endpoint, which *is* a presentation — so a
+`session-established` and a `session-presented` would arrive milliseconds
+apart, every time, and the event that is supposed to mean *single sign-on
+happened* would mean nothing. `startSession()` sets a flag and
+`notePresented()` spends it, which is exact rather than a time window.
+
+---
+
+## THE REGISTER OUTLIVES THE SESSION, ON PURPOSE
+
+`authn.js` forgets a session the moment it is signed out. `caep.js` does not: a
+row whose state is `revoked` is the **only remaining evidence** that the
+session existed and was revoked, and *"did anything go out when I signed that
+person out?"* is the entire question `/admin/caep-sessions` answers.
+`caep.maxSessionsTracked` caps it and the oldest goes first.
+
+The two can also disagree the other way — a session this service still holds
+whose row says `revoked` means somebody emitted a revocation by hand — and the
+page says so rather than reconciling, because which of the two is wrong is
+exactly the question.
+
+---
+
+## THE COUNTS ARE NOT THE LIST
+
+Each row carries `counts` (per event type, never forgotten) and `events` (a
+ring of the last twenty-five). They answer different questions — *how many
+session-revoked have gone out about this person* and *what were the last few
+jtis* — and a page that answered the first out of the second would say
+twenty-five where there were thirty. `tests/caep_register.js` sends thirty and
+asserts both.
 
 **AND ONE THING THAT IS NOT A FILE: THE REFUSAL SENTENCE HAS TO BE SPELLED THE
 WAY EVERY OTHER ACTION HANDLER SPELLS IT.** `consoleAction()` answered an

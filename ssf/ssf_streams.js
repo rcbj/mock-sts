@@ -602,8 +602,42 @@ function streamCoversSubject(record, subject) {
     const covered = record.subjects.some(function (one) {
       return one.key === key;
     });
-    log.debug('Leaving streamCoversSubject(). ' + covered);
-    return covered;
+    if (covered) {
+      log.debug('Leaving streamCoversSubject(). Named exactly.');
+      return true;
+    }
+    // -------------------------------------------------------------------
+    // A COMPLEX SUBJECT IS COVERED BY A STREAM THAT NAMES ANY ONE OF ITS
+    // MEMBERS, AND WITHOUT THIS RULE CAEP WOULD DELIVER NOTHING.
+    //
+    // A receiver adds the PERSON to a stream — that is the subject it has,
+    // and the only one it can name in advance. A CAEP event about that
+    // person names a SESSION of theirs, which SSF 1.0 section 4 expresses as
+    // a complex subject whose `user` member is exactly the identifier the
+    // receiver added. Those two are different `subjectKey()`s, so an
+    // exact-match test refuses every session event to the receiver that
+    // asked for the person — silently, because a transmitter's refusal to
+    // send is not a message anybody receives.
+    //
+    // It is deliberately ONE LEVEL and not recursive: a complex subject may
+    // not nest another (SSF section 4), so a member is always a plain
+    // identifier and there is nothing below it to walk.
+    // -------------------------------------------------------------------
+    if (!subject.format) {
+      const members = subjects.COMPLEX_MEMBER_NAMES.filter(function (name) {
+        return subject[name] && typeof subject[name] === 'object';
+      });
+      const viaMember = members.some(function (name) {
+        const memberKey = subjects.subjectKey(subject[name]);
+        return record.subjects.some(function (one) {
+          return one.key === memberKey;
+        });
+      });
+      log.debug('Leaving streamCoversSubject(). By member: ' + viaMember);
+      return viaMember;
+    }
+    log.debug('Leaving streamCoversSubject(). false');
+    return false;
   }
   const all = String(config.value('ssf.defaultSubjects') || 'ALL')
     .toUpperCase() === 'ALL';

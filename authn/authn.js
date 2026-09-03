@@ -413,6 +413,103 @@ function methodPhraseFor(amr) {
 // one of them. A caller passing nothing behaves exactly as every existing
 // caller did.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE SESSION OBSERVER — AN INVERTED HOOK, AND THE ONLY ONE THIS MODULE
+// OFFERS.
+//
+// `ssf/caep.js` needs to know when a session starts, is presented and ends,
+// because that is what a CAEP event is ABOUT. It cannot be required from here:
+// this module is 8 in `server.js`'s require order and `ssf/ssf.js` is 23b, so
+// a require the other way would REGISTER EVERY `/ssf` ROUTE HERE — ahead of
+// `oauth2.js`, ahead of the admin console, ahead of ldap, scim and spiffe —
+// which is rule 1, and it would close a cycle besides. So this module holds a
+// function and `ssf/ssf.js` fills it at its own require time, exactly as
+// `admin.setSignalsReporter()` works one layer up.
+//
+// **IT IS ONE FUNCTION AND IT IS ADVISORY.** `notifySession()` swallows
+// everything the observer throws, and the reason is the one `audit.js` gives
+// about its actor resolver: the observer is a nicety and the sign-in it
+// decorates is real work. A Shared Signals transmitter that cannot build an
+// event MUST NOT be able to turn a working sign-in into a 500 — and it is
+// reachable, because building one signs a JWS and pushing one dials out.
+//
+// **IT IS ALSO SYNCHRONOUS AND FIRE-AND-FORGET.** The observer may start
+// something that finishes later — a push delivery takes as long as somebody
+// else's endpoint does — and nothing here waits for it. A sign-out that
+// blocked on a receiver's TCP timeout would be a sign-out that hangs, and the
+// person signing out has nothing to do with whether a receiver is up.
+// ---------------------------------------------------------------------------
+let sessionObserver = null;
+
+function setSessionObserver(fn) {
+  log.debug("Entering setSessionObserver().");
+  if (typeof fn !== 'function') {
+    log.error('authn: setSessionObserver() was given something that is not a ' +
+              'function, and was ignored. Nothing will be told when a ' +
+              'session starts or ends.');
+    log.debug("Leaving setSessionObserver(). Refused.");
+    return;
+  }
+  sessionObserver = fn;
+  log.info('authn: a session observer was installed; the Shared Signals ' +
+           'transmitter will be told when a session is created, presented ' +
+           'or ended.');
+  log.debug("Leaving setSessionObserver(). Installed.");
+}
+
+function notifySession(kind, session, extra) {
+  log.debug("Entering notifySession(). " + kind);
+  if (!sessionObserver || !session) {
+    log.debug("Leaving notifySession(). Nobody is listening.");
+    return;
+  }
+  try {
+    sessionObserver(Object.assign({ kind: kind, session: session },
+                                  extra || {}));
+  } catch (e) {
+    // Swallowed, and the reason is in the header: a transmitter that cannot
+    // build an event must not turn a sign-in into a 500.
+    log.error('authn: the session observer threw on a "' + kind + '" and was ' +
+              'ignored: ' + e.message);
+  }
+  log.debug("Leaving notifySession(). " + kind);
+}
+
+// ---------------------------------------------------------------------------
+// A SESSION THAT ALREADY EXISTED WAS PRESENTED AND HONOURED — which is single
+// sign-on, and is CAEP's `session-presented`.
+//
+// `oauth-oidc/oauth2.js` calls this from the one branch that answers an
+// authorization request out of a session rather than by asking anybody who
+// they are. It is not called from `sessionOf()`, which looks like the obvious
+// place and is not: that function is called several times per request, so an
+// event there would be several events for one act.
+//
+// **THE FIRST PRESENTATION OF A BRAND-NEW SESSION IS THE SIGN-IN ITSELF AND IS
+// NOT REPORTED.** Every sign-in here ends with the browser coming back to the
+// authorization endpoint, which is a presentation — so without this the
+// simplest possible flow would emit `session-established` and
+// `session-presented` a few milliseconds apart, every time, and the event that
+// is supposed to mean "single sign-on happened" would mean nothing. The flag
+// is set by startSession() and spent here, so it is exact rather than a time
+// window: a session created by this service is presented once for free.
+// ---------------------------------------------------------------------------
+function notePresented(session, via) {
+  log.debug("Entering notePresented().");
+  if (!session) {
+    log.debug("Leaving notePresented(). No session.");
+    return false;
+  }
+  if (session.firstPresentationIsTheSignIn) {
+    session.firstPresentationIsTheSignIn = false;
+    log.debug("Leaving notePresented(). The sign-in's own return trip.");
+    return false;
+  }
+  notifySession('presented', session, { via: via || 'OAuth 2.0 / OIDC' });
+  log.debug("Leaving notePresented(). Reported.");
+  return true;
+}
+
 function startSession(res, username, amr, acr, via, detail) {
   log.debug("Entering startSession(). username=" + username + ", acr=" + acr);
   const extra = detail || {};
@@ -489,6 +586,14 @@ function startSession(res, username, amr, acr, via, detail) {
       note: extra.note || 'No password was checked; the name typed is the identity.'
     }
   });
+  // THE ONE ACT IN THIS SERVICE THAT MAKES SOMETHING GO OUT WITHOUT ANYBODY
+  // ASKING. See setSessionObserver() above, and `ssf/caep.js` for what is
+  // built. It is last in this function on purpose: the audit row and the
+  // cookie are this service's own record of the sign-in and must not depend on
+  // a transmitter, and the observer is handed a session that is already
+  // complete.
+  session.firstPresentationIsTheSignIn = true;
+  notifySession('established', session, { via: via || 'OAuth 2.0 / OIDC' });
   log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
   return session;
 }
@@ -564,6 +669,13 @@ function dropSession(id, via, cookiePresented) {
   // expired an hour ago looks identical, from every other page in this console,
   // to one that is working — and the row that says "there was no session to
   // drop" is the only place that shows up.
+  // BEFORE the audit row and after the delete, which is the only order that
+  // works: the observer is handed the session as it WAS — it needs the user
+  // and the id to name the subject — and a sign-out that emitted while the
+  // session was still in the store would be a transmitter telling a receiver
+  // to stop trusting something this service still honoured.
+  notifySession('revoked', session, { via: via || 'a sign-out endpoint',
+    byAdmin: /admin|console/i.test(String(via || '')) });
   audit.audit({
     action: 'session.end',
     outcome: session ? 'success' : 'refused',
@@ -2429,6 +2541,11 @@ module.exports = {
   consoleSession: consoleSession,
   startSession: startSession,
   endSession: endSession,
+  // The inverted hook `ssf/ssf.js` fills, and the one call site that spends
+  // it from outside this module. See setSessionObserver()'s header for why a
+  // require the other way would move every /ssf route.
+  setSessionObserver: setSessionObserver,
+  notePresented: notePresented,
   // The three the protocol-independent logout needs, and the reason each is
   // here rather than reimplemented over there: /logout ends sessions it was not
   // handed a cookie for, so it names them by id — and every one of them still
