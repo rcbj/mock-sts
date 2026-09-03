@@ -814,9 +814,38 @@ const SECTIONS = [
                'something happens. <strong>SSF is the pipe and not the ' +
                'vocabulary</strong>: it defines two events of its own, both ' +
                'about the pipe, and the vocabularies are CAEP and RISC. ' +
-               'Nothing here generates an event on its own &mdash; every ' +
-               'SET was asked for, at the verification endpoint, on this ' +
-               'page or through the management API.' },
+               'Since 2026-09-03 one thing here DOES generate an event ' +
+               'on its own: the CAEP profile, where a session starting, ' +
+               'being presented or ending sends a Security Event Token with ' +
+               'nobody having asked. See <a href="/admin/caep">CAEP</a>.' },
+
+      // BESIDE Shared Signals rather than a section of it, and the argument
+      // is the same one that made CAEP rows in `ssf_events.js` rather than a
+      // family of its own: SSF is the PIPE and CAEP is a VOCABULARY over it.
+      // They are two specifications answering two questions, and a reader
+      // looking for "what has this service said about that session" is not
+      // looking for "what streams exist", which is the whole of that page.
+      //
+      // Not a GROUP of two, because a heading saying "Shared Signals" over
+      // pages called "Shared Signals" and "CAEP" would say the label twice —
+      // which is the test this console already applied to the SSF page.
+      { path: '/admin/caep', label: 'CAEP',
+        blurb: 'The <strong>Continuous Access Evaluation Profile</strong> ' +
+               '(OpenID CAEP 1.0, final 2 September 2025): the enterprise ' +
+               'SESSION vocabulary spoken over ' +
+               '<a href="/admin/ssf">Shared Signals</a>. Eight event types ' +
+               '&mdash; session revoked, established and presented, token ' +
+               'claims change, credential change, assurance level change, ' +
+               'device compliance change, risk level change &mdash; each ' +
+               'with the members the specification gives it and the four it ' +
+               'gives them all. <strong>It is the one page here that ' +
+               'configures this service to act without being asked</strong>: ' +
+               'with <code>caep.autoEmit</code> on, a sign-in, a single ' +
+               'sign-on and a sign-out each send an event to whoever agreed ' +
+               'to be told. Five of the eight describe things nothing here ' +
+               'does &mdash; no device reports compliance to this service ' +
+               'and no risk engine talks to it &mdash; so this page carries ' +
+               'the form that emits one by hand.' },
 
       // UNGROUPED, beside SCIM, and the placement needed the same argument the
       // delegation page needed. Federation spans FIVE protocol families, so
@@ -1084,6 +1113,26 @@ const SECTIONS = [
                '<a href="/admin/delegation/map">The picture</a> draws the ' +
                'same acts as a graph, laid out on the SERVER because this ' +
                'console runs no script.' },
+      // Beside Delegation and for the reason Delegation is beside the tokens
+      // it points at: this is an OBSERVATION and not a configuration. The
+      // CAEP settings are at /admin/caep under Protocols, and putting the
+      // table there with them would have buried the one thing on it no other
+      // page in this console can show — a session this service NO LONGER
+      // HOLDS, and what was said about it on its way out.
+      { path: '/admin/caep-sessions', label: 'CAEP sessions',
+        blurb: 'One row per session this service has held, ' +
+               '<strong>including the ones it no longer holds</strong>, with ' +
+               'the CAEP state it is in &mdash; established, presented, ' +
+               'revoked &mdash; its assurance level, its device compliance, ' +
+               'its risk level, and a count of every CAEP event type sent ' +
+               'about it. The register outliving the session is the point: ' +
+               'the session store forgets one the moment it is signed out, ' +
+               'so a row saying <code>revoked</code> is the only remaining ' +
+               'evidence that it existed and was revoked. Beside it, which ' +
+               'streams would take a CAEP event at all &mdash; because a ' +
+               'count of zero almost always means nobody asked for that ' +
+               'type, and SSF gives a receiver no other notice of that.' },
+
       // Beside Delegation and not inside it, and the argument is the one both
       // of that page's pictures rest on: every row there is about two
       // APPLICATIONS, and every row here has a PERSON in it. Merging them would
@@ -1391,6 +1440,11 @@ const SETTING_HOMES = [
   // delivering an event to somebody who agreed to be told. A group of one
   // would be a heading that said the label twice.
   { group: 'SSF', pages: ['/admin/ssf'] },
+  // CAEP. Its own group and its own page, for the reason the sidebar entry
+  // gives: a vocabulary over SSF is a second specification and not a corner
+  // of the first. The MONITORING page beneath it edits nothing, so it is not
+  // named here — this table is about where a setting is EDITED.
+  { group: 'CAEP', pages: ['/admin/caep'] },
   // The claim itself is an OAuth2/OIDC and SAML concern, but what it NAMES is a
   // directory group and what decides whether somebody is in one is the Groups
   // page. Somebody asking "why is this group not in my token" is looking at
@@ -21961,10 +22015,16 @@ app.get('/admin/ssf', function (req, res) {
     'push, RFC 8936 poll) &mdash; and exactly TWO events of its own, both ' +
     'about the pipe. The vocabularies are <strong>CAEP</strong> (what ' +
     'happened to a session) and <strong>RISC</strong> (what happened to an ' +
-    'account), and neither is implemented here yet. <strong>Nothing ' +
-    'generates an event on its own</strong>: every Security Event Token ' +
-    'this service transmits was asked for &mdash; at the verification ' +
-    'endpoint, on this page, or through the management API.') +
+    'account). <strong>CAEP is implemented</strong> &mdash; its eight ' +
+    'session event types travel on the streams below, and ' +
+    '<a href="/admin/caep">its own page</a> carries the settings, the ' +
+    'catalogue and the by-hand emit form while ' +
+    '<a href="/admin/caep-sessions">CAEP sessions</a> counts what has been ' +
+    'said about whom. RISC is the third part and is not here yet. What ' +
+    'changed with CAEP is the sentence this page used to carry next: this ' +
+    'service DOES now generate an event on its own, when a session starts, ' +
+    'is presented or ends. <code>caep.autoEmit</code> puts the old ' +
+    'behaviour back.') +
 
     tiles +
 
@@ -22047,6 +22107,512 @@ app.post('/admin/ssf', function (req, res) {
     respondToAction(req, res, '/admin/ssf',
       { ok: false, errors: ['The action failed: ' + e.message] });
     log.debug("Leaving the admin Shared Signals action endpoint. Threw.");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// THE NINTH SLOT, filled by `../ssf/caep.js`'s host `../ssf/ssf.js` at its own
+// require time, for exactly the reasons the eighth exists and with the same
+// test answering yes in both directions:
+//
+//   * a require from THIS file to `../ssf/ssf.js` would CLOSE A CYCLE — that
+//     module requires this one for the page shell and the gate;
+//   * a require from `mgmt-api/admin_api.js` would MOVE ROUTES, putting every
+//     `/ssf` endpoint and the well-known document ahead of the management
+//     API's own and of ldap, scim and spiffe.
+//
+// **A SECOND SLOT RATHER THAN MORE MEMBERS ON THE EIGHTH**, and that is a
+// decision rather than a habit. The signals reporter answers "what streams
+// exist and what is on them"; this one answers "what has been said about which
+// SESSION". They are two questions with two pages, and one object carrying
+// both would mean `/admin/ssf` failing whole when the CAEP half was not
+// installed — which is precisely the half-working state `setSignalsReporter()`
+// refuses a partial filler in order to avoid.
+//
+// `action` RETURNS A PROMISE, like the eighth's: emitting a CAEP event signs a
+// JWS — possibly on the worker pool — and then POSTs it to somebody else's
+// endpoint.
+// ---------------------------------------------------------------------------
+let caepReporter = null;
+
+function setCaepReporter(reporter) {
+  log.debug("Entering setCaepReporter().");
+  const needed = ['report', 'action', 'actions', 'eventTypes'];
+  const missing = needed.filter(function (name) {
+    return !reporter || reporter[name] === undefined;
+  });
+  if (missing.length) {
+    log.error('admin: setCaepReporter() was given something without ' +
+              missing.join(', ') + ', and was ignored whole. /admin/caep and ' +
+              '/admin/caep-sessions will say the reporter is not installed ' +
+              'rather than half working.');
+    log.debug("Leaving setCaepReporter(). Refused.");
+    return;
+  }
+  caepReporter = reporter;
+  log.debug("Leaving setCaepReporter(). Installed.");
+}
+
+// The whole report, for both pages and for `GET /admin-api/caep`. ONE
+// function, so the two pages and the API cannot come to disagree about what
+// this transmitter has said — rule 7's entire subject.
+function caepJson(req) {
+  log.debug("Entering caepJson().");
+  if (!caepReporter) {
+    log.debug("Leaving caepJson(). Not installed.");
+    return { installed: false, enabled: false, sessions: [], eventTypes: [],
+             streams: [], totals: {}, tracked: 0,
+             settings: configSettingsJson('/admin/caep'),
+             note: 'ssf/ssf.js is not loaded in this process, so nothing ' +
+                   'here can report on the Continuous Access Evaluation ' +
+                   'Profile.' };
+  }
+  const report = caepReporter.report(req);
+  report.installed = true;
+  report.catalogue = caepReporter.eventTypes();
+  report.settings = configSettingsJson('/admin/caep');
+  log.debug("Leaving caepJson(). " + report.tracked + " session(s).");
+  return report;
+}
+
+function caepAction(body) {
+  log.debug("Entering caepAction().");
+  const asked = body || {};
+  if (!caepReporter) {
+    log.debug("Leaving caepAction(). Not installed.");
+    return Promise.resolve({ ok: false, errors: [
+      'ssf/ssf.js is not loaded in this process, so there is nothing to ' +
+      'act on.'] });
+  }
+  const name = String(asked.action || '');
+  log.debug("Leaving caepAction(). " + name);
+  return caepReporter.action(name, asked, null);
+}
+
+// The short name of every CAEP event type, in catalogue order, so that the
+// count columns on the monitoring table are in the same order as the emit
+// form's menu. Derived from the reporter rather than written out, because a
+// list typed here would be the one place RISC's arrival is forgotten.
+function caepShortNames(json) {
+  log.debug("Entering caepShortNames().");
+  const out = (json.eventTypes || []).map(function (row) {
+    return row.short;
+  });
+  log.debug("Leaving caepShortNames(). " + out.length + ".");
+  return out;
+}
+
+// What a session's CAEP state is called on the screen, with the class that
+// colours it. `revoked` is the one that must not read as ordinary: it is the
+// whole point of the profile.
+function caepStateCell(state) {
+  log.debug("Entering caepStateCell(). " + state);
+  const cls = state === 'revoked' ? 'state-invalid'
+    : (state === 'presented' ? 'state-valid' : 'sub');
+  const out = '<td class="' + cls + '">' + esc(state) + '</td>';
+  log.debug("Leaving caepStateCell().");
+  return out;
+}
+
+function caepSessionRow(row, shorts, prefix) {
+  log.debug("Entering caepSessionRow().");
+  const counts = shorts.map(function (short) {
+    const n = row.counts[prefix + short] || 0;
+    return '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td>';
+  }).join('');
+  const out = '<tr>' +
+    '<td><code>' + esc(row.sessionId) + '</code>' +
+    '<div class="sub">' + esc(row.protocol || '') + '</div></td>' +
+    '<td>' + esc(row.username || row.sub || '(unknown)') +
+    '<div class="sub"><code>' + esc(row.sub) + '</code></div></td>' +
+    caepStateCell(row.state) +
+    '<td class="sub">' + esc(row.assurance.level
+      ? (row.assurance.namespace + ' ' + row.assurance.level) : '—') +
+    '</td>' +
+    '<td class="' + (row.compliance === 'not-compliant'
+      ? 'state-invalid' : 'sub') + '">' +
+    esc(row.compliance || '—') + '</td>' +
+    '<td class="' + (row.risk.level === 'HIGH' ? 'state-invalid' : 'sub') +
+    '">' + esc(row.risk.level || '—') + '</td>' +
+    counts +
+    '<td><strong>' + esc(String(row.total)) + '</strong></td>' +
+    '<td><form method="post" action="/admin/caep-sessions">' +
+    '<input type="hidden" name="action" value="reset-session">' +
+    '<input type="hidden" name="session_id" value="' +
+    esc(row.sessionId) + '">' +
+    '<button class="secondary">Reset</button></form></td>' +
+    '</tr>';
+  log.debug("Leaving caepSessionRow().");
+  return out;
+}
+
+// One session, opened out: what has actually been sent about it, in order,
+// with the findings the register made as each one was applied. The counts on
+// the table above say HOW MANY and this says WHICH, and the two are different
+// questions — see caep.js on why the ring and the counters are separate.
+function caepSessionCard(row) {
+  log.debug("Entering caepSessionCard().");
+  const events = row.events.length
+    ? row.events.map(function (one) {
+        return '<tr><td class="sub">' + esc(one.at) + '</td>' +
+          '<td>' + esc(one.name) + '</td>' +
+          '<td><code>' + esc(one.jti) + '</code></td>' +
+          '<td><code>' + esc(one.streamId || '(none)') + '</code></td>' +
+          '<td class="sub">' + esc((one.warnings || []).join(' ') || '—') +
+          '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5">Nothing has been said about this session. That ' +
+      'is the ordinary case when no stream asked for the type, and it is ' +
+      'the answer to &ldquo;why did nothing arrive&rdquo; nine times out of ' +
+      'ten.</td></tr>';
+  const claims = Object.keys(row.claims).length
+    ? '<div class="sub">Claims changed: <code>' +
+      esc(JSON.stringify(row.claims)) + '</code></div>'
+    : '';
+  const notes = row.notes.length
+    ? '<div class="sub">' + esc(row.notes.join(' ')) + '</div>'
+    : '';
+  const out = '<div class="card"><h3><code>' + esc(row.sessionId) +
+    '</code> &mdash; ' + esc(row.username || row.sub) + '</h3>' +
+    '<div class="sub">' + esc(row.subject) + '</div>' +
+    '<div class="sub">Established ' + esc(row.establishedAt) +
+    ', last changed ' + esc(row.updatedAt) + '. State <strong>' +
+    esc(row.state) + '</strong>.</div>' +
+    claims + notes +
+    '<table><tr><th>When</th><th>Event</th><th>jti</th><th>Stream</th>' +
+    '<th>What the register noticed</th></tr>' + events + '</table></div>';
+  log.debug("Leaving caepSessionCard().");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// PROTOCOLS -> CAEP. The settings, the catalogue, and the one control this
+// profile needs that nothing else can produce.
+// ---------------------------------------------------------------------------
+app.get('/admin/caep', function (req, res) {
+  log.debug("Entering the admin CAEP page.");
+  const json = caepJson(req);
+
+  const catalogue = (json.catalogue || []).map(function (row) {
+    const members = row.members.map(function (member) {
+      return '<tr><td><code>' + esc(member.name) + '</code></td>' +
+        '<td class="' + (member.required ? '' : 'sub') + '">' +
+        (member.required ? 'required' : 'optional') + '</td>' +
+        '<td class="sub"><code>' + esc(member.type) + '</code>' +
+        (member.values.length
+          ? ' ' + esc(member.values.join(' | ')) : '') + '</td>' +
+        '<td class="sub">' + esc(member.what) + '</td></tr>';
+    }).join('');
+    return '<div class="card"><h3>' + esc(row.name) + ' &mdash; <code>' +
+      esc(row.short) + '</code>' +
+      (row.offered ? '' : ' <span class="state-invalid">not offered</span>') +
+      '</h3><div class="sub">' + esc(row.what) + '</div>' +
+      '<table><tr><th>Member</th><th></th><th>Type</th><th>What it is' +
+      '</th></tr>' + members + '</table></div>';
+  }).join('');
+
+  const sessionOptions = (json.sessions || []).map(function (row) {
+    return '<option value="' + esc(row.sessionId) + '">' +
+      esc((row.username || row.sub) + ' — ' + row.sessionId +
+          ' (' + row.state + ')') + '</option>';
+  }).join('');
+
+  const typeOptions = (json.catalogue || []).map(function (row) {
+    return '<option value="' + esc(row.short) + '">' + esc(row.name) +
+      '</option>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>Shared Signals is not loaded in this ' +
+        'process</strong>, so CAEP has nothing to run on. CAEP is a ' +
+        'VOCABULARY over SSF rather than a family of its own: its events ' +
+        'travel on SSF streams, are signed by the SSF signer and are ' +
+        'delivered by the two SSF deliveries.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? warn('<strong>CAEP is turned off</strong> ' +
+        '(<code>caep.enabled</code>). The eight event types are dropped ' +
+        'from <code>events_supported</code>, so a stream asking for one ' +
+        'gets it back missing from <code>events_delivered</code> &mdash; ' +
+        'which is the only notice SSF gives, and is exactly the case a ' +
+        'receiver ought to be tested against. SSF itself is unaffected.')
+      : '') +
+
+    note('<strong>CAEP</strong> (OpenID Continuous Access Evaluation ' +
+    'Profile 1.0, final 2 September 2025) is the enterprise <strong>session' +
+    '</strong> vocabulary spoken over ' +
+    '<a href="/admin/ssf">Shared Signals</a>. SSF is the PIPE and defines ' +
+    'two events of its own, both about the pipe; these eight are about a ' +
+    'session, and the sentence they carry is <em>this session is no longer ' +
+    'trustworthy</em>. RISC says <em>this account is no longer ' +
+    'trustworthy</em>, which is a different sentence and the whole reason ' +
+    'there are two profiles.') +
+
+    warn('<strong>This is the one place in this service where an endpoint ' +
+    'is not what starts the work.</strong> With ' +
+    '<code>caep.autoEmit</code> on, a sign-in emits ' +
+    '<code>session-established</code>, an authorization request answered ' +
+    'from a session that already existed emits ' +
+    '<code>session-presented</code>, and a sign-out emits ' +
+    '<code>session-revoked</code> &mdash; on every stream that asked for ' +
+    'the type and whose subjects cover that session, with nobody having ' +
+    'typed anything. Every other family here answers a request. Turning it ' +
+    'off restores the older and equally honest behaviour: every Security ' +
+    'Event Token this service sends was asked for.') +
+
+    '<div class="tiles">' +
+    tile(json.tracked || 0, 'sessions tracked') +
+    tile((json.eventTypes || []).length, 'event types') +
+    tile(Object.keys(json.totals || {}).reduce(function (n, uri) {
+      return n + json.totals[uri];
+    }, 0), 'events sent') +
+    tile((json.autoEmitActs || []).length, 'acts emit on their own') +
+    '</div>' +
+
+    (json.installed
+      ? '<h2>Emit one by hand</h2>' +
+        note('Five of the eight describe things nothing here does &mdash; ' +
+        'no device reports compliance to this service and no risk engine ' +
+        'talks to it &mdash; so this form is the only way they are ever ' +
+        'produced. The subject is composed from the session you pick: ' +
+        'SSF\'s <strong>complex</strong> subject, naming the person AND the ' +
+        'session, because the person is not revoked and one session of ' +
+        'theirs is. Leave the payload empty for a conforming specimen of ' +
+        'the type.') +
+        '<form method="post" action="/admin/caep"><div class="formrow">' +
+        '<input type="hidden" name="action" value="emit">' +
+        '<label>Session <select name="session_id">' + sessionOptions +
+        '</select></label> ' +
+        '<label>Event <select name="type">' + typeOptions +
+        '</select></label> ' +
+        '<label>Initiated by <select name="initiating_entity">' +
+        '<option value="admin">admin</option>' +
+        '<option value="user">user</option>' +
+        '<option value="policy">policy</option>' +
+        '<option value="system">system</option></select></label>' +
+        '</div><div class="formrow">' +
+        '<label>Payload (JSON, optional) ' +
+        '<input type="text" name="payload" size="60" ' +
+        'placeholder="{&quot;current_status&quot;:' +
+        '&quot;not-compliant&quot;}">' +
+        '</label>' +
+        '</div><div class="formrow">' +
+        '<label>reason_admin <input type="text" name="reason_admin" ' +
+        'size="40"></label> ' +
+        '<label>reason_user <input type="text" name="reason_user" ' +
+        'size="40"></label>' +
+        '</div><div class="formrow"><button>Emit</button></div></form>' +
+        (json.sessions && json.sessions.length
+          ? ''
+          : warn('There are no sessions to emit about. A CAEP event is ' +
+            'ABOUT a session &mdash; the subject names one &mdash; so sign ' +
+            'somebody in first. Anything that starts a session will do: an ' +
+            'OIDC flow, a SAML 2.0 sign-in, WS-Federation.'))
+      : '') +
+
+    (json.installed
+      ? '<h2>The eight event types</h2>' +
+        note('Each row\'s members are the specification\'s own, with the ' +
+        'four CAEP section 2 gives EVERY event beneath them: ' +
+        '<code>event_timestamp</code>, <code>initiating_entity</code>, ' +
+        '<code>reason_admin</code> and <code>reason_user</code>. All four ' +
+        'are OPTIONAL, which surprises people about the first &mdash; a ' +
+        'receiver deciding whether to end a session wants it more than ' +
+        'anything else in the payload, and a conforming transmitter need ' +
+        'not send one. <code>caep.omitEventTimestamp</code> produces that ' +
+        'event on purpose.') +
+        catalogue
+      : '') +
+
+    configFormsFor('/admin/caep') +
+
+    note('<a href="/admin/caep-sessions">The sessions and what has been ' +
+    'said about them</a> &middot; ' +
+    '<a href="/admin/ssf">the streams it all goes out on</a> &middot; ' +
+    '<a href="/admin/caep?format=json">this page as JSON</a> &middot; ' +
+    '<a href="/admin-api/caep">the same over the management API</a>');
+
+  respond(req, res, json, 'CAEP', '/admin/caep', inner);
+  log.debug("Leaving the admin CAEP page.");
+});
+
+app.post('/admin/caep', function (req, res) {
+  log.debug("Entering the admin CAEP action endpoint.");
+  const body = parseBody(req);
+  caepAction(body).then(function (result) {
+    respondToAction(req, res, '/admin/caep', result);
+    log.debug("Leaving the admin CAEP action endpoint.");
+  }).catch(function (e) {
+    log.error('admin: the CAEP action threw: ' + e.message);
+    respondToAction(req, res, '/admin/caep',
+      { ok: false, errors: ['The action failed: ' + e.message] });
+    log.debug("Leaving the admin CAEP action endpoint. Threw.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MONITORING -> CAEP SESSIONS.
+//
+// **THE REGISTER OUTLIVES THE SESSION AND THAT IS THE POINT.** `authn.js`
+// forgets a session the moment it is signed out; a row here whose state is
+// `revoked` is the only remaining evidence that the session existed and was
+// revoked, and "did anything go out when I signed that person out?" is the
+// question this page is for.
+//
+// It is under Monitoring rather than beside the settings for the reason
+// /admin/delegation is: that section's heading says *what this service has
+// done*, and this is an OBSERVATION. The settings are a configuration and live
+// at /admin/caep.
+// ---------------------------------------------------------------------------
+app.get('/admin/caep-sessions', function (req, res) {
+  log.debug("Entering the admin CAEP sessions page.");
+  const json = caepJson(req);
+  const shorts = caepShortNames(json);
+  const prefix = 'https://schemas.openid.net/secevent/caep/event-type/';
+
+  const headers = shorts.map(function (short) {
+    return '<th title="' + esc(prefix + short) + '">' +
+      esc(short.replace('session-', '').replace('-change', '')) + '</th>';
+  }).join('');
+
+  const rows = (json.sessions || []).length
+    ? json.sessions.map(function (row) {
+        return caepSessionRow(row, shorts, prefix);
+      }).join('')
+    : '<tr><td colspan="' + (shorts.length + 8) + '">No sessions are ' +
+      'tracked. Sign somebody in &mdash; an OIDC flow, a SAML 2.0 sign-in, ' +
+      'WS-Federation &mdash; and a row appears here whether or not any ' +
+      'stream is agreed, which is what makes &ldquo;nothing arrived&rdquo; ' +
+      'traceable to &ldquo;nobody asked&rdquo;.</td></tr>';
+
+  const streamRows = (json.streams || []).length
+    ? json.streams.map(function (row) {
+        return '<tr><td><code>' + esc(row.stream_id) + '</code></td>' +
+          '<td class="sub">' + esc(row.aud) + '</td>' +
+          '<td class="' + (row.status === 'enabled' ? 'state-valid' : 'sub') +
+          '">' + esc(row.status) + '</td>' +
+          '<td class="sub">' + esc(row.delivery) + '</td>' +
+          '<td class="sub">' + esc(String(row.subjects)) + '</td>' +
+          '<td class="' + (row.takes.length ? '' : 'state-invalid') + '">' +
+          esc(row.takes.length ? row.takes.join(', ')
+            : 'none of CAEP\'s eight') + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="6">No streams. Nothing this service says about a ' +
+      'session has anywhere to go, and every row above will show a count of ' +
+      'zero however many people sign in.</td></tr>';
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>Shared Signals is not loaded in this ' +
+        'process</strong>, so no session state is tracked.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? warn('<strong>CAEP is turned off</strong> ' +
+        '(<code>caep.enabled</code>), so nothing new is being recorded ' +
+        'here. What is below is what was recorded before it was turned ' +
+        'off.')
+      : '') +
+    (json.installed && json.enabled && !json.autoEmit
+      ? warn('<strong>Automatic emission is off</strong> ' +
+        '(<code>caep.autoEmit</code>). Sessions still appear here and their ' +
+        'state still follows what really happens, and nothing goes out ' +
+        'unless somebody emits it from ' +
+        '<a href="/admin/caep">the CAEP page</a>. That is this service\'s ' +
+        'older behaviour: every Security Event Token it sends was asked ' +
+        'for.')
+      : '') +
+
+    note('One row per session this service has held, <strong>including ' +
+    'sessions it no longer holds</strong>. That is deliberate and it is the ' +
+    'whole reason this page exists: the session store forgets a session the ' +
+    'moment it is signed out, so a row whose state is <code>revoked</code> ' +
+    'is the only remaining evidence that it existed and was revoked. The ' +
+    'counts are per event type and they never forget; the events listed ' +
+    'under each session are the last few, which is a different question.') +
+
+    (json.installed && json.omitEventTimestamp
+      ? warn('<code>caep.omitEventTimestamp</code> is on, so every event ' +
+        'leaving here carries NO <code>event_timestamp</code>. That is ' +
+        'perfectly conforming &mdash; CAEP section 2 makes it optional ' +
+        '&mdash; and it is what a receiver that assumes one falls over on.')
+      : '') +
+
+    '<div class="tiles">' +
+    tile(json.tracked || 0, 'sessions') +
+    tile((json.sessions || []).filter(function (row) {
+      return row.state === 'revoked';
+    }).length, 'revoked') +
+    tile((json.sessions || []).filter(function (row) {
+      return row.state === 'presented';
+    }).length, 'presented (SSO)') +
+    tile(Object.keys(json.totals || {}).reduce(function (n, uri) {
+      return n + json.totals[uri];
+    }, 0), 'events sent') +
+    tile((json.streams || []).filter(function (row) {
+      return row.takes.length;
+    }).length, 'streams taking CAEP') +
+    '</div>' +
+
+    '<h2>Sessions</h2>' +
+    '<table><tr><th>Session</th><th>Who</th><th>State</th>' +
+    '<th>Assurance</th><th>Device</th><th>Risk</th>' + headers +
+    '<th>Total</th><th></th></tr>' + rows + '</table>' +
+
+    '<h2>Where a CAEP event could go</h2>' +
+    note('A session with a count of zero almost always means <strong>no ' +
+    'stream asked for that type</strong> rather than anything being wrong. ' +
+    'SSF has no refusal for an event type a transmitter will not deliver ' +
+    '&mdash; its absence from <code>events_delivered</code> is the only ' +
+    'notice a receiver gets &mdash; so this table is where that shows up.') +
+    '<table><tr><th>Stream</th><th>aud</th><th>Status</th><th>Delivery</th>' +
+    '<th>Subjects</th><th>CAEP types it takes</th></tr>' + streamRows +
+    '</table>' +
+
+    (json.installed && (json.sessions || []).length
+      ? '<h2>What has been said about each session</h2>' +
+        json.sessions.map(caepSessionCard).join('')
+      : '') +
+
+    (json.installed
+      ? '<form method="post" action="/admin/caep-sessions">' +
+        '<div class="formrow">' +
+        '<input type="hidden" name="action" value="clear">' +
+        '<button class="secondary">Clear the register</button>' +
+        '</div></form>' +
+        note('Clearing forgets the RECORD. Nobody is signed out and no ' +
+        'stream is touched &mdash; this page is what has been SAID about ' +
+        'these sessions, and a control here that ended one would be a ' +
+        'monitoring page with a weapon on it.')
+      : '') +
+
+    note('<a href="/admin/caep">The settings, the catalogue and the ' +
+    'by-hand emit form</a> &middot; ' +
+    '<a href="/admin/ssf">the streams</a> &middot; ' +
+    '<a href="/admin/metrics">the sessions this service still holds</a> ' +
+    '&middot; <a href="/admin/caep-sessions?format=json">this page as ' +
+    'JSON</a>');
+
+  respond(req, res, json, 'CAEP sessions', '/admin/caep-sessions', inner);
+  log.debug("Leaving the admin CAEP sessions page.");
+});
+
+app.post('/admin/caep-sessions', function (req, res) {
+  log.debug("Entering the admin CAEP sessions action endpoint.");
+  const body = parseBody(req);
+  // THE SAME ACTION FUNCTION AS /admin/caep, and that is the point: a reset
+  // button beside the row it resets is worth having, and a second
+  // implementation of what a reset does would be two doors that could come to
+  // disagree. Only the page it answers back to differs.
+  caepAction(body).then(function (result) {
+    respondToAction(req, res, '/admin/caep-sessions', result);
+    log.debug("Leaving the admin CAEP sessions action endpoint.");
+  }).catch(function (e) {
+    log.error('admin: the CAEP sessions action threw: ' + e.message);
+    respondToAction(req, res, '/admin/caep-sessions',
+      { ok: false, errors: ['The action failed: ' + e.message] });
+    log.debug("Leaving the admin CAEP sessions action endpoint. Threw.");
   });
 });
 
@@ -25128,6 +25694,21 @@ module.exports = {
   ssfAction: ssfAction,
   ssfActionNames: function () {
     return signalsReporter ? signalsReporter.actions.slice() : [];
+  },
+  // Filled by ../ssf/ssf.js at ITS require time — the ninth, and the fifth to
+  // pass rule 3e's test both ways round. A SECOND slot rather than more
+  // members on the eighth, because "what streams exist" and "what has been
+  // said about which session" are two questions with two pages, and one
+  // object carrying both would make /admin/ssf fail whole when the CAEP half
+  // was not installed. See the block above setCaepReporter().
+  setCaepReporter: setCaepReporter,
+  // The CAEP view and its three actions, for admin_api.js. Rule 7: the API
+  // calls exactly these. `caepAction` RESOLVES, like `ssfAction` and for the
+  // same reason — emitting a CAEP event signs a JWS and POSTs it.
+  caepView: caepJson,
+  caepAction: caepAction,
+  caepActionNames: function () {
+    return caepReporter ? caepReporter.actions.slice() : [];
   },
   // The crypto report, for admin_api.js. One function, so the page and the API
   // cannot disagree about what this service's cryptography is.

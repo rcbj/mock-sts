@@ -2607,15 +2607,19 @@ const SETTINGS = [
     dflt: 'https://schemas.openid.net/secevent/ssf/event-type/verification,' +
           'https://schemas.openid.net/secevent/ssf/event-type/stream-updated',
     runtime: true,
-    description: 'Which event types this transmitter will agree to deliver, ' +
-                 'published on every stream as events_supported and ' +
-                 'intersected with a receiver\'s events_requested to ' +
-                 'produce events_delivered. SSF 1.0 itself defines only the ' +
-                 'two above — it is a PIPE, and the vocabularies are CAEP ' +
-                 'and RISC. Narrowing this list is how a receiver\'s "you ' +
-                 'did not agree to the type I asked for" path is reached; ' +
-                 'an entry naming a type this service does not implement is ' +
-                 'dropped with a warning rather than advertised.' },
+    description: 'Which of SSF\'S OWN TWO event types this transmitter will ' +
+                 'agree to deliver. It is not the whole offered list any ' +
+                 'more: SSF is a PIPE and the vocabularies over it have ' +
+                 'settings of their own, so CAEP\'s eight are governed by ' +
+                 'caep.eventsSupported and the two lists are unioned into ' +
+                 'the events_supported a receiver discovers and into the ' +
+                 'intersection with events_requested that becomes ' +
+                 'events_delivered. Narrowing this is how a receiver\'s ' +
+                 '"you did not agree to the type I asked for" path is ' +
+                 'reached for the pipe\'s own events; an entry naming a ' +
+                 'type this service does not implement is dropped with a ' +
+                 'warning rather than advertised, and a short name works as ' +
+                 'well as a whole URI.' },
 
   { key: 'ssf.pushDelivery', group: 'SSF', label: 'Make outbound push requests',
     env: 'STS_SSF_PUSH_DELIVERY', type: 'bool', dflt: true, runtime: true,
@@ -2797,6 +2801,154 @@ const SETTINGS = [
                  'truncated signature fails the base64url decode and is ' +
                  'reported as a MALFORMED token, which is a different bug ' +
                  'from a bad signature for whoever is being tested.' },
+
+  // --- CAEP ----------------------------------------------------------------
+  //
+  // The Continuous Access Evaluation Profile (OpenID CAEP 1.0, final 2
+  // September 2025), which is a VOCABULARY over the SSF group above rather
+  // than a family of its own. Its events go out on SSF streams, are signed by
+  // the SSF signer, are queued by the SSF queues and are delivered by the two
+  // SSF deliveries — so nothing here duplicates a setting up there, and
+  // ssf.enabled turning off takes CAEP with it.
+  //
+  // WHAT IS ACTUALLY NEW, AND IT IS ONE THING: this service now GENERATES AN
+  // EVENT ON ITS OWN. Every other protocol family here answers a request, and
+  // SSF's own list of what it deliberately does not do led with "it generates
+  // no event on its own — every SET was asked for". That was honest while the
+  // only vocabulary was the pipe's own, because SSF defines no event about a
+  // session and a transmitter that invented one would be inventing a
+  // vocabulary. CAEP is that vocabulary, so the sentence changes, and
+  // `caep.autoEmit` is the switch that puts the old behaviour back rather than
+  // leaving it only in the history of this file.
+  { key: 'caep.enabled', group: 'CAEP', label: 'CAEP enabled',
+    env: 'STS_CAEP_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, this transmitter offers CAEP\'s eight session ' +
+                 'event types, tracks the CAEP state of every session it ' +
+                 'holds, and reports both on /admin/caep-sessions. Turning ' +
+                 'it off leaves SSF entirely alone — the pipe, its own two ' +
+                 'events and every stream go on working — and drops the ' +
+                 'eight types from what a stream may request, so a ' +
+                 'receiver\'s "this transmitter will not deliver the type I ' +
+                 'asked for" path becomes reachable without narrowing ' +
+                 'ssf.eventsSupported by hand.' },
+
+  { key: 'caep.autoEmit', group: 'CAEP',
+    label: 'Emit events when something really happens',
+    env: 'STS_CAEP_AUTO_EMIT', type: 'bool', dflt: true, runtime: true,
+    description: 'THE SETTING THAT CHANGES WHAT THIS SERVICE IS. With it on, ' +
+                 'a sign-in emits session-established, an authorization ' +
+                 'request answered from a session that already existed ' +
+                 'emits session-presented, and a sign-out emits ' +
+                 'session-revoked — on every stream that asked for the type ' +
+                 'and whose subjects cover that session, with nobody having ' +
+                 'typed anything. That is what CAEP is FOR, and it is the ' +
+                 'only place in this service where an endpoint is not what ' +
+                 'starts the work. Off restores the older and equally ' +
+                 'honest behaviour: every SET this service sends was asked ' +
+                 'for, at /ssf/verify, on /admin/ssf, on /admin/caep or ' +
+                 'through the management API.' },
+
+  { key: 'caep.autoEmitTypes', group: 'CAEP',
+    label: 'Which acts emit automatically',
+    env: 'STS_CAEP_AUTO_EMIT_TYPES', type: 'csv',
+    dflt: 'session-established,session-presented,session-revoked',
+    runtime: true,
+    description: 'The SHORT NAMES of the CAEP events this service emits by ' +
+                 'itself, out of the three acts it can actually observe: a ' +
+                 'session starting, a session being presented, and a ' +
+                 'session ending. The other five are things nothing here ' +
+                 'does — no device reports compliance to this service and no ' +
+                 'risk engine talks to it — so they are emitted BY HAND ' +
+                 'from /admin/caep or POST /admin-api/caep/emit, and a row ' +
+                 'naming one of them here is dropped with a warning rather ' +
+                 'than producing an event nothing can cause.' },
+
+  { key: 'caep.eventsSupported', group: 'CAEP',
+    label: 'CAEP event types offered', env: 'STS_CAEP_EVENTS_SUPPORTED',
+    type: 'csv',
+    dflt: 'session-revoked,session-established,session-presented,' +
+          'token-claims-change,credential-change,assurance-level-change,' +
+          'device-compliance-change,risk-level-change',
+    runtime: true,
+    description: 'Which of CAEP\'s eight this transmitter will agree to ' +
+                 'deliver, unioned with ssf.eventsSupported into the ' +
+                 'events_supported a receiver discovers. SHORT NAMES are ' +
+                 'accepted as well as whole URIs, because these URIs are ' +
+                 'sixty characters long and a setting nobody can type is a ' +
+                 'setting nobody narrows. Narrowing it is how a receiver ' +
+                 'meets the case that matters most in this profile: SSF has ' +
+                 'NO REFUSAL for an event type a transmitter will not send, ' +
+                 'so the type\'s absence from events_delivered is the only ' +
+                 'notice there is, and a receiver that reads back what it ' +
+                 'asked for instead waits for ever.' },
+
+  { key: 'caep.assuranceNamespace', group: 'CAEP',
+    label: 'Assurance namespace', env: 'STS_CAEP_ASSURANCE_NAMESPACE',
+    type: 'string', dflt: 'NIST-AAL', runtime: true,
+    description: 'Which scale an assurance-level-change event\'s levels are ' +
+                 'on, when the caller does not say. CAEP makes `namespace` ' +
+                 'REQUIRED on that event and the reason is that the event ' +
+                 'is useless without it: "aal2" means nothing until you ' +
+                 'know it is NIST\'s. RFC8176, RFC6711, ISO-IEC-29115, ' +
+                 'NIST-IAL, NIST-AAL and NIST-FAL are the values CAEP ' +
+                 'lists, and the list is OPEN — an alias two parties agreed ' +
+                 'is carried with a warning rather than refused.' },
+
+  { key: 'caep.defaultRiskLevel', group: 'CAEP',
+    label: 'Default risk level', env: 'STS_CAEP_DEFAULT_RISK_LEVEL',
+    type: 'string', dflt: 'MEDIUM', runtime: true,
+    description: 'What a risk-level-change event says when the caller does ' +
+                 'not. LOW, MEDIUM or HIGH, UPPER CASE — which is CAEP\'s ' +
+                 'own spelling and is the opposite of the complex ' +
+                 'subject\'s lower-case member names, a difference that ' +
+                 'catches everybody once.' },
+
+  { key: 'caep.reasonLanguage', group: 'CAEP',
+    label: 'Language tag on reason_admin / reason_user',
+    env: 'STS_CAEP_REASON_LANGUAGE', type: 'string', dflt: 'en',
+    runtime: true,
+    description: 'The BCP 47 tag this service keys its reason messages ' +
+                 'under. Those two members are OBJECTS keyed by a language ' +
+                 'tag rather than strings, which is the commonest mistake ' +
+                 'in the whole profile — a receiver indexing by language ' +
+                 'reads nothing from a string and reports no error — so ' +
+                 'this service always sends the object shape and this is ' +
+                 'the key it uses.' },
+
+  { key: 'caep.includeReasons', group: 'CAEP',
+    label: 'Send reason_admin and reason_user',
+    env: 'STS_CAEP_INCLUDE_REASONS', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether an automatically emitted event carries the two ' +
+                 'reason members saying why. Both are optional in CAEP, so ' +
+                 'turning this off is how a receiver that assumes a reason ' +
+                 'is always there gets to fail in a test rather than in ' +
+                 'production. It does not touch an event emitted by hand ' +
+                 'with reasons filled in.' },
+
+  { key: 'caep.maxSessionsTracked', group: 'CAEP',
+    label: 'Sessions tracked', env: 'STS_CAEP_MAX_SESSIONS_TRACKED',
+    type: 'int', dflt: 200, runtime: true,
+    description: 'How many sessions the CAEP register holds before the ' +
+                 'oldest is dropped. The register is what /admin/caep-' +
+                 'sessions draws and it outlives the SESSION it describes ' +
+                 'on purpose — a revoked session is gone from the session ' +
+                 'store and its row is the only remaining evidence that it ' +
+                 'was revoked at all, which is the question that page ' +
+                 'exists to answer.' },
+
+  { key: 'caep.omitEventTimestamp', group: 'CAEP',
+    label: 'Leave event_timestamp out',
+    env: 'STS_CAEP_OMIT_EVENT_TIMESTAMP', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'THE DELIBERATE DEFECT FOR THIS PROFILE, and the one that ' +
+                 'is not a defect at all — which is what makes it worth ' +
+                 'having. `event_timestamp` is OPTIONAL in CAEP 1.0 section ' +
+                 '2, so an event without one is perfectly conforming, and ' +
+                 'every receiver that assumes it is there breaks on a ' +
+                 'transmitter that omits it. Turning this on produces those ' +
+                 'events, so a receiver under test meets the case here ' +
+                 'rather than the first time it is pointed at somebody ' +
+                 'else\'s transmitter.' },
 
   // --- The group claim -----------------------------------------------------
   //

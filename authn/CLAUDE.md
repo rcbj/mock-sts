@@ -240,6 +240,56 @@ Four things about that are load-bearing:
 
 ---
 
+## `setSessionObserver()` — the one INVERTED HOOK this module offers
+
+Added 2026-09-03 for the CAEP profile. `ssf/caep.js` needs to know when a
+session starts, is presented and ends, because that is what a CAEP event is
+*about* — and it cannot be required from here: this module is **8** in
+`server.js`'s require order and `ssf/ssf.js` is **23b**, so a require the other
+way would register every `/ssf` route here, ahead of `oauth2.js`, ahead of the
+admin console, ahead of ldap, scim and spiffe. That is rule 1, and it would
+close a cycle besides. So this module holds a function and `ssf/ssf.js` fills
+it at its own require time, exactly as `admin.setSignalsReporter()` works one
+layer up.
+
+**It is advisory, and `notifySession()` swallows everything the observer
+throws.** The reason is the one `audit.js` gives about its actor resolver: the
+observer is a nicety and the sign-in it decorates is real work. A Shared
+Signals transmitter that cannot build an event must not be able to turn a
+working sign-in into a 500 — and that is reachable, because building one signs
+a JWS and pushing one dials out to somebody else's endpoint.
+
+**It is also fire-and-forget.** Nothing waits for it. A sign-out that blocked
+on a receiver's TCP timeout would be a sign-out that hangs, and the person
+signing out has nothing to do with whether a receiver is up.
+
+### Three call sites, and the flag that keeps the third honest
+
+| Where | Kind |
+|---|---|
+| `startSession()`, last, after the cookie and the audit row | `established` |
+| `oauth-oidc/oauth2.js`'s authorization endpoint, through `notePresented()` | `presented` |
+| `dropSession()`, after the delete and before the audit row | `revoked` |
+
+`revoked` fires **after** the session is out of the store and **before** the
+audit row, which is the only order that works: the observer needs the session
+as it *was* in order to name the subject, and emitting while the session was
+still in the store would be a transmitter telling a receiver to stop trusting
+something this service still honoured.
+
+**`notePresented()` drops the FIRST presentation of a brand-new session**, and
+without that the feature would be noise. Every sign-in here ends with the
+browser coming back to the authorization endpoint, which *is* a presentation —
+so the simplest possible flow would report `established` and `presented` a few
+milliseconds apart, every time, and the event that is supposed to mean *single
+sign-on happened* would mean nothing. `startSession()` sets
+`firstPresentationIsTheSignIn` on the session and `notePresented()` spends it,
+which is exact rather than a time window.
+
+It is **not** called from `sessionOf()`, which looks like the obvious place and
+is not: that function is called several times per request, so an event there
+would be several events for one act.
+
 ## It checks no password
 
 * **It checks no password.** The username typed at `/authn/login` becomes the

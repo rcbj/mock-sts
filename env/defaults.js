@@ -272,6 +272,20 @@ var config = {
     breakSetSignature: false                                                                                                                              // Sign every SET badly
   },
 
+  // --- CAEP ------------------------------------------------------------
+  caep: {
+    enabled: true,                                                                                                                                                                    // CAEP enabled
+    autoEmit: true,                                                                                                                                                                   // Emit events when something really happens
+    autoEmitTypes: "session-established,session-presented,session-revoked",                                                                                                           // Which acts emit automatically
+    eventsSupported: "session-revoked,session-established,session-presented,token-claims-change,credential-change,assurance-level-change,device-compliance-change,risk-level-change", // CAEP event types offered
+    assuranceNamespace: "NIST-AAL",                                                                                                                                                   // Assurance namespace
+    defaultRiskLevel: "MEDIUM",                                                                                                                                                       // Default risk level
+    reasonLanguage: "en",                                                                                                                                                             // Language tag on reason_admin / reason_user
+    includeReasons: true,                                                                                                                                                             // Send reason_admin and reason_user
+    maxSessionsTracked: 200,                                                                                                                                                          // Sessions tracked
+    omitEventTimestamp: false                                                                                                                                                         // Leave event_timestamp out
+  },
+
   // --- Group claim -----------------------------------------------------
   groups: {
     claim: true,             // Carry a groups claim
