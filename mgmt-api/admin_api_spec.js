@@ -2333,7 +2333,8 @@ const SCHEMAS = {
     'is about, what is queued for it, what a receiver refused, and what has ' +
     'been pushed AT this service. SSF is the PIPE and not the vocabulary — ' +
     'it defines two events of its own, both about the pipe, and CAEP and ' +
-    'RISC are the vocabularies spoken over it.',
+    'RISC are the vocabularies spoken over it. CAEP is implemented and has ' +
+    'a register of its own at GET /admin-api/caep; RISC is not here yet.',
     {
       installed: {
         type: 'boolean',
@@ -2392,6 +2393,105 @@ const SCHEMAS = {
                      'runtime. Change one through POST ' +
                      '/admin-api/config/set-many, which is why there is no ' +
                      'settings operation of this resource\'s own.'
+      }
+    }),
+
+  Caep: openObject(
+    'The Continuous Access Evaluation Profile: what state each session is in ' +
+    'and how many events of which type have been sent about it. CAEP is a ' +
+    'VOCABULARY over Shared Signals rather than a family of its own — its ' +
+    'events travel on SSF streams, are signed by the SSF signer and are ' +
+    'delivered by the two SSF deliveries — so the streams themselves are at ' +
+    'GET /admin-api/ssf and only their CAEP-relevant half is repeated here.',
+    {
+      installed: {
+        type: 'boolean',
+        description: 'Whether ssf/ssf.js is loaded in this process at all. A ' +
+                     'DIFFERENT question from `enabled`, and CAEP cannot be ' +
+                     'installed without SSF: it has no transport of its own.'
+      },
+      enabled: {
+        type: 'boolean',
+        description: 'The `caep.enabled` setting. When false the eight event ' +
+                     'types are dropped from `events_supported`, so a stream ' +
+                     'asking for one gets it back MISSING from ' +
+                     '`events_delivered` — which is the only notice SSF ' +
+                     'gives, and is exactly the case a receiver ought to be ' +
+                     'tested against. SSF itself is unaffected.'
+      },
+      autoEmit: {
+        type: 'boolean',
+        description: 'The `caep.autoEmit` setting, and the one that changes ' +
+                     'what this service IS. With it on, a sign-in, a single ' +
+                     'sign-on and a sign-out each send a Security Event ' +
+                     'Token with nobody having asked — the only place here ' +
+                     'where an endpoint is not what starts the work.'
+      },
+      autoEmitActs: {
+        type: 'array',
+        description: 'Which of the three observable acts emit on their own. ' +
+                     'The other five event types describe things nothing ' +
+                     'here does, so they are only ever emitted by hand.',
+        items: { type: 'string' }
+      },
+      omitEventTimestamp: {
+        type: 'boolean',
+        description: 'The deliberate defect that is not one. ' +
+                     '`event_timestamp` is OPTIONAL in CAEP section 2, so an ' +
+                     'event without it is perfectly conforming — and every ' +
+                     'receiver that assumes it is there breaks on a ' +
+                     'transmitter that omits it.'
+      },
+      tracked: {
+        type: 'integer',
+        description: 'How many sessions the register holds, capped by ' +
+                     '`caep.maxSessionsTracked` with the oldest going first.'
+      },
+      totals: {
+        type: 'object',
+        description: 'How many of each event type have been sent, across ' +
+                     'every session.'
+      },
+      eventTypes: {
+        type: 'array',
+        description: 'The eight, with their short names — which is what the ' +
+                     '`emit` action and `caep.eventsSupported` both take, ' +
+                     'because these URIs are sixty characters long.',
+        items: { type: 'object' }
+      },
+      catalogue: {
+        type: 'array',
+        description: 'The same eight opened out: every member the ' +
+                     'specification gives each event, whether it is ' +
+                     'required, its type and its permitted values, and the ' +
+                     'four claims CAEP gives them all.',
+        items: { type: 'object' }
+      },
+      sessions: {
+        type: 'array',
+        description: 'One entry per session this service has held, ' +
+                     'INCLUDING ONES IT NO LONGER HOLDS — a row saying ' +
+                     '`revoked` is the only remaining evidence that the ' +
+                     'session existed and was revoked, and nothing else in ' +
+                     'this service records it. Each carries the CAEP state, ' +
+                     'the assurance level, the device compliance, the risk ' +
+                     'level, the claims that have changed, a count per event ' +
+                     'type, and the last few events with their jtis.',
+        items: { type: 'object' }
+      },
+      streams: {
+        type: 'array',
+        description: 'Which streams would take a CAEP event at all. It is ' +
+                     'here rather than only on the Ssf resource because a ' +
+                     'session with a count of zero almost always means ' +
+                     'nobody asked for that type, and SSF gives a receiver ' +
+                     'no other notice of that.',
+        items: { type: 'object' }
+      },
+      settings: {
+        type: 'object',
+        description: 'The `CAEP` setting group as /admin/caep draws it. ' +
+                     'Change one through POST /admin-api/config/set-many.'
       }
     }),
 

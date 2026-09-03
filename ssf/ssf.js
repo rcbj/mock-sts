@@ -121,8 +121,14 @@ const stats = require('../common/admin_stats');
 const audit = require('../common/audit');
 const applications = require('../common/applications');
 const adminConsole = require('../admin-ui/admin');
+const authn = require('../authn/authn');
 const subjects = require('./ssf_subjects');
 const events = require('./ssf_events');
+// The CAEP session register. A LIBRARY, and the require goes THIS WAY ONLY:
+// that module holds the register and answers what an event WOULD be, and this
+// one holds transmit(), the streams and the deliveries and therefore decides
+// where it goes. A require the other way would be a cycle. See its header.
+const caep = require('./caep');
 const streams = require('./ssf_streams');
 const transport = require('./ssf_http');
 const ssfAuth = require('./ssf_auth');
@@ -291,6 +297,32 @@ function transmit(record, options) {
     return Promise.resolve({ ok: false, delivered: false, jti: '',
       why: verdict.errors.join(' ') });
   }
+  // ---------------------------------------------------------------------
+  // AN EVENT WHOSE ROW SAYS IT MUST NAME SOMEBODY, THAT NAMES NOBODY.
+  //
+  // Every CAEP event is `subject: 'required'` and SSF's own two are
+  // `subject: 'none'` — they are about the STREAM, and a receiver that
+  // insisted on a subject could not be verified. So this is a check on the
+  // ROW rather than a branch naming a vocabulary, which is what keeps
+  // `ssf_events.js`'s promise: RISC's rows will be `required` too and this
+  // line will not change.
+  //
+  // It is refused rather than carried because of what the omission MEANS. A
+  // session-revoked with no `sub_id` says a session was revoked and does not
+  // say whose; a receiver cannot act on it and cannot report anything useful
+  // about it, so it is dropped at the far end with no error anybody sees —
+  // which is the failure this whole family exists to make visible.
+  // ---------------------------------------------------------------------
+  const row = events.EVENT_BY_URI[uri];
+  if (row && row.subject === 'required' && !asked.subject) {
+    log.debug('Leaving transmit(). No subject on an event that needs one.');
+    return Promise.resolve({ ok: false, delivered: false, jti: '',
+      why: '"' + uri + '" must carry a subject and this one carries none. ' +
+           'A ' + row.name + ' with no sub_id says something happened and ' +
+           'does not say to whom, so a receiver drops it with no error ' +
+           'anybody sees. CAEP\'s subject is normally SSF\'s COMPLEX one — ' +
+           'the person is not revoked, one session of theirs is.' });
+  }
   if (asked.subject && !streams.streamCoversSubject(record, asked.subject)) {
     log.debug('Leaving transmit(). Not a subject on this stream.');
     return Promise.resolve({ ok: false, delivered: false, jti: '',
@@ -312,6 +344,13 @@ function transmit(record, options) {
   });
 
   return events.signSet(claims).then(function (token) {
+    // COUNTED HERE, which is after the SET exists and before anybody knows
+    // whether it will be delivered — because what /admin/caep-sessions
+    // reports is what this transmitter SAID about a session, and a queued
+    // event on a poll stream has been said. Whether it arrived is the
+    // stream's own counters, three lines down, and conflating the two would
+    // make a poll stream look like a transmitter that never says anything.
+    caep.noteTransmitted(record, claims);
     const entry = { jti: claims.jti, token: token, claims: claims,
       queuedAt: iso(), deliveredAt: '', counted: false };
     const queued = streams.enqueue(record, entry);
@@ -1683,6 +1722,297 @@ adminConsole.setSignalsReporter({
   subjectFormats: subjects.FORMATS
 });
 
+// ---------------------------------------------------------------------------
+// AUTOMATIC EMISSION — THE ONE PLACE IN THIS SERVICE WHERE AN ENDPOINT IS NOT
+// WHAT STARTS THE WORK.
+//
+// Every other protocol family here answers a request. This function is called
+// because somebody signed in, presented a session or signed out, and it makes
+// a Security Event Token go out to whoever agreed to be told. That is what
+// CAEP is FOR, and it is the sentence on `GET /ssf`'s *what it deliberately
+// does not do* list that had to change: while the only vocabulary was the
+// pipe's own, "this service generates no event on its own" was honest, because
+// SSF defines no event about a session and a transmitter that invented one
+// would have been inventing a vocabulary. CAEP is that vocabulary.
+//
+// `caep.autoEmit` puts the old behaviour back rather than leaving it only in
+// the history of this file, and `GET /ssf` reads the setting rather than
+// asserting either sentence.
+//
+// **THE DIVISION OF LABOUR.** `caep.js` decides WHAT the event would be and
+// updates the register whether or not anything is sent; this decides WHERE it
+// goes. That is why the register shows a session with a count of zero — which
+// is the answer to "why did nothing arrive?" nine times out of ten, and the
+// answer is *nobody asked for that type*.
+//
+// **IT RETURNS A PROMISE AND NOBODY AWAITS IT.** `authn.js` calls this from
+// inside a sign-out and does not wait, deliberately: a push delivery takes as
+// long as somebody else's endpoint does, and a sign-out that blocked on a
+// receiver's TCP timeout would be a sign-out that hangs. Every outcome is
+// logged and recorded on the stream, which is where a person looks anyway.
+// ---------------------------------------------------------------------------
+function caepAutoEmit(notice) {
+  log.debug('Entering caepAutoEmit().');
+  if (!enabled()) {
+    log.debug('Leaving caepAutoEmit(). SSF is off.');
+    return Promise.resolve({ sent: 0, streams: 0 });
+  }
+  // THE ISSUER IS ADDED HERE AND NOT IN `authn.js`, because it is an SSF fact
+  // and that module has no business knowing one. It matters more than it
+  // looks: the subject names the person by ISSUER and subject, and a receiver
+  // matches that `iss` against the issuer it discovered — so an event built
+  // with the wrong one names somebody the receiver has never heard of and is
+  // refused, which reads at the far end as a bad subject rather than as a
+  // misconfigured transmitter.
+  const due = caep.observe(Object.assign({}, notice || {},
+      { issuer: issuerFor((notice || {}).req || null) }));
+  if (!due) {
+    log.debug('Leaving caepAutoEmit(). Nothing is due.');
+    return Promise.resolve({ sent: 0, streams: 0 });
+  }
+  const candidates = streams.listStreams().filter(function (record) {
+    return record.events_delivered.indexOf(due.uri) >= 0 &&
+           streams.streamCoversSubject(record, due.subject);
+  });
+  if (!candidates.length) {
+    // SAID ONCE, AT INFO, AND IT IS THE MOST USEFUL LINE THIS FEATURE
+    // PRODUCES. "Nothing arrived" is the commonest report about any Shared
+    // Signals deployment and its commonest cause is this: the event happened,
+    // the transmitter built it, and no stream had asked for that type or
+    // covered that subject. The register carries the same fact for the page.
+    log.info('caep: a ' + due.uri.slice(events.CAEP_PREFIX.length) + ' is ' +
+             'due for session ' + due.row.sessionId + ' and NO STREAM ' +
+             'takes it — ' + streams.listStreams().length + ' stream(s) ' +
+             'exist, and none both delivers that type and covers ' +
+             subjects.describeSubject(due.subject) + '. The event is ' +
+             'recorded on /admin/caep-sessions with nothing sent.');
+    due.row.notes.push('A ' + due.uri.slice(events.CAEP_PREFIX.length) +
+        ' was due and no stream takes it.');
+    due.row.notes = due.row.notes.slice(-5);
+    log.debug('Leaving caepAutoEmit(). No stream takes it.');
+    return Promise.resolve({ sent: 0, streams: 0 });
+  }
+  return Promise.all(candidates.map(function (record) {
+    return transmit(record, { uri: due.uri, payload: due.payload,
+      subject: due.subject, toe: due.payload.event_timestamp });
+  })).then(function (reports) {
+    const sent = reports.filter(function (one) {
+      return one.ok;
+    }).length;
+    log.info('caep: ' + due.uri.slice(events.CAEP_PREFIX.length) + ' for ' +
+             'session ' + due.row.sessionId + ' went to ' + sent + ' of ' +
+             candidates.length + ' stream(s).');
+    log.debug('Leaving caepAutoEmit(). ' + sent + ' sent.');
+    return { sent: sent, streams: candidates.length, reports: reports };
+  }).catch(function (e) {
+    // Swallowed HERE as well as in authn.js, and not redundantly: that catch
+    // covers this function throwing synchronously and this one covers a
+    // rejected promise nobody is waiting on, which node reports as an
+    // unhandled rejection and — depending on the flags — ends the process.
+    log.error('caep: automatic emission failed: ' + e.message);
+    log.debug('Leaving caepAutoEmit(). Failed.');
+    return { sent: 0, streams: candidates.length, why: e.message };
+  });
+}
+
+// The inverted hook, filled at require time. `authn.js` is 8 in the require
+// order and this module is 23b, so this is the only direction that works —
+// see setSessionObserver()'s header over there.
+authn.setSessionObserver(caepAutoEmit);
+
+// ---------------------------------------------------------------------------
+// THE CAEP CONSOLE AND MANAGEMENT API.
+//
+// `/admin/caep`, `/admin/caep-sessions` and `/admin-api/caep` reach this
+// directory through `admin.setCaepReporter()`, the NINTH slot, for exactly the
+// reasons the eighth exists: a require from `admin.js` to this file would
+// close a cycle, and one from `mgmt-api/admin_api.js` would move every `/ssf`
+// route ahead of the management API's own.
+//
+// `action` returns a PROMISE, like the signals slot's and for the same reason:
+// emitting an event signs a JWS — possibly on the worker pool — and then POSTs
+// it to somebody else's endpoint.
+// ---------------------------------------------------------------------------
+function caepReport(req) {
+  log.debug('Entering caepReport().');
+  const report = caep.report();
+  report.issuer = issuerFor(req);
+  report.ssfEnabled = enabled();
+  // WHICH STREAMS WOULD TAKE A CAEP EVENT AT ALL, computed rather than
+  // configured, because it is the question the page exists to answer second:
+  // a reader who has seen a session with a count of zero wants to know
+  // whether ANY stream would have taken one.
+  report.streams = streams.listStreams().map(function (record) {
+    const takes = events.CAEP_EVENT_URIS.filter(function (uri) {
+      return record.events_delivered.indexOf(uri) >= 0;
+    });
+    return { stream_id: record.stream_id, aud: record.aud,
+      status: record.status, delivery: record.delivery.method,
+      subjects: record.subjects.length,
+      takes: takes.map(function (uri) {
+        return uri.slice(events.CAEP_PREFIX.length);
+      }) };
+  });
+  log.debug('Leaving caepReport(). ' + report.tracked + ' session(s).');
+  return report;
+}
+
+// Emit one CAEP event BY HAND. Five of the eight describe things nothing here
+// does — no device reports compliance to this service and no risk engine talks
+// to it — so this is the only way they are ever produced, and it is why the
+// action exists rather than the page being read-only.
+function caepEmit(asked) {
+  log.debug('Entering caepEmit().');
+  const uri = String(asked.type || '').indexOf(events.CAEP_PREFIX) === 0
+    ? String(asked.type)
+    : events.CAEP_PREFIX + String(asked.type || '');
+  const row = events.EVENT_BY_URI[uri];
+  if (!row || row.family !== 'caep') {
+    log.debug('Leaving caepEmit(). Not a CAEP event type.');
+    return Promise.resolve({ ok: false, errors: [
+      '"' + String(asked.type || '') + '" is not one of CAEP\'s eight event ' +
+      'types. They are: ' + events.CAEP_EVENT_URIS.map(function (one) {
+        return one.slice(events.CAEP_PREFIX.length);
+      }).join(', ') + '.'] });
+  }
+  const sessionId = String(asked.session_id || '');
+  const known = caep.get(sessionId);
+  if (!known) {
+    log.debug('Leaving caepEmit(). No such session.');
+    return Promise.resolve({ ok: false, errors: [
+      'No session "' + sessionId + '" is tracked here. A CAEP event is ' +
+      'ABOUT a session — the subject names one — so there is nothing to ' +
+      'compose a subject from. Sign somebody in, or pick a row from ' +
+      '/admin/caep-sessions.'] });
+  }
+  let values = asked.payload;
+  if (typeof values === 'string' && values.trim()) {
+    try {
+      values = JSON.parse(values);
+    } catch (e) {
+      log.debug('Leaving caepEmit(). The payload is not JSON.');
+      return Promise.resolve({ ok: false,
+        errors: ['The event payload is not JSON: ' + e.message] });
+    }
+  }
+  const payload = caep.buildPayload(uri, values || {}, {
+    initiatingEntity: String(asked.initiating_entity || 'admin'),
+    reasonAdmin: String(asked.reason_admin || '') ||
+      'Emitted by hand from the console.',
+    reasonUser: String(asked.reason_user || '')
+  });
+  const verdict = events.validateEvent(uri, payload);
+  if (!verdict.ok) {
+    log.debug('Leaving caepEmit(). The payload is invalid.');
+    return Promise.resolve({ ok: false, errors: verdict.errors });
+  }
+  const subject = caep.subjectFor(known);
+  const candidates = streams.listStreams().filter(function (record) {
+    return record.events_delivered.indexOf(uri) >= 0 &&
+           streams.streamCoversSubject(record, subject);
+  });
+  audit.audit({ action: 'caep.event.emit', category: 'signals',
+    protocol: 'CAEP', channel: 'http', target: sessionId,
+    summary: 'A CAEP ' + row.name + ' was emitted by hand for session ' +
+      sessionId,
+    detail: { type: uri, streams: candidates.length } });
+  if (!candidates.length) {
+    // The register is still told, so the page shows the state change even
+    // though nothing was sent — which is the honest report and is what makes
+    // "nothing arrived" traceable to "nobody asked" rather than to a bug.
+    const applied = caep.applyToState(known, uri, payload);
+    log.debug('Leaving caepEmit(). No stream takes it.');
+    return Promise.resolve({ ok: applied.ok, errors: applied.errors,
+      warnings: applied.warnings,
+      message: applied.ok
+        ? 'Nothing was sent: no stream both delivers "' +
+          uri.slice(events.CAEP_PREFIX.length) + '" and covers ' +
+          subjects.describeSubject(subject) + '. The session\'s state was ' +
+          'still updated, so the change is on this page.'
+        : applied.errors.join(' ') });
+  }
+  return Promise.all(candidates.map(function (record) {
+    return transmit(record, { uri: uri, payload: payload, subject: subject,
+      toe: payload.event_timestamp });
+  })).then(function (reports) {
+    const sent = reports.filter(function (one) {
+      return one.ok;
+    }).length;
+    log.debug('Leaving caepEmit(). ' + sent + ' of ' + reports.length + '.');
+    return { ok: sent > 0,
+      errors: sent > 0 ? [] : reports.map(function (one) {
+        return one.why;
+      }),
+      message: sent + ' of ' + reports.length + ' stream(s) took the ' +
+        row.name + '.',
+      reports: reports };
+  });
+}
+
+function caepAction(name, body) {
+  log.debug('Entering caepAction(). ' + name);
+  const asked = body || {};
+  if (name === 'emit') {
+    return caepEmit(asked);
+  }
+  if (name === 'reset-session') {
+    const row = caep.reset(String(asked.session_id || ''));
+    if (!row) {
+      log.debug('Leaving caepAction(). No such session.');
+      return Promise.resolve({ ok: false,
+        errors: ['No session "' + String(asked.session_id || '') + '" is ' +
+                 'tracked here.'] });
+    }
+    log.debug('Leaving caepAction(). Reset.');
+    return Promise.resolve({ ok: true, errors: [],
+      message: 'The CAEP state of session ' + row.sessionId + ' was reset. ' +
+        'The sign-in itself is untouched — this page is about what has been ' +
+        'SAID about that session, and nobody has been signed out.' });
+  }
+  if (name === 'clear') {
+    const gone = caep.clear();
+    log.debug('Leaving caepAction(). Cleared.');
+    return Promise.resolve({ ok: true, errors: [],
+      message: gone + ' session row(s) dropped. Nothing was signed out: ' +
+        'this register is a record of what was said, and clearing it ' +
+        'forgets the record rather than ending anything.' });
+  }
+  // Spelled the way every other action handler here spells it, with the count
+  // from the list rather than from a word typed beside it. That sentence is
+  // READ — `tests/vendored/admin_api.js` requires /unknown action/i before it
+  // will parse the list, and `sts_admin_api_operations.js` matches the whole
+  // shape — so a handler that writes it its own way turns two checks off with
+  // nothing failing.
+  log.debug('Leaving caepAction(). Unknown action.');
+  return Promise.resolve({ ok: false,
+    errors: ['Unknown action "' + String(name) + '". The ' +
+      numberWord(CAEP_CONSOLE_ACTIONS.length) + ' are: ' +
+      CAEP_CONSOLE_ACTIONS.join(', ') + '.'] });
+}
+
+const CAEP_CONSOLE_ACTIONS = ['emit', 'reset-session', 'clear'];
+
+adminConsole.setCaepReporter({
+  report: caepReport,
+  action: caepAction,
+  actions: CAEP_CONSOLE_ACTIONS,
+  eventTypes: function () {
+    return events.CAEP_EVENTS.map(function (row) {
+      return { uri: row.uri, name: row.name,
+        short: row.uri.slice(events.CAEP_PREFIX.length),
+        subject: row.subject,
+        offered: events.supportedEventUris().indexOf(row.uri) >= 0,
+        members: row.members.map(function (member) {
+          return { name: member.name, required: !!member.required,
+            type: member.type, values: member.values || [],
+            what: member.what };
+        }),
+        required: row.required.slice(),
+        what: row.what };
+    });
+  }
+});
+
 module.exports = {
   WELL_KNOWN: WELL_KNOWN,
   metadata: metadata,
@@ -1690,5 +2020,9 @@ module.exports = {
   transmit: transmit,
   consoleReport: consoleReport,
   consoleAction: consoleAction,
-  CONSOLE_ACTIONS: CONSOLE_ACTIONS
+  CONSOLE_ACTIONS: CONSOLE_ACTIONS,
+  caepAutoEmit: caepAutoEmit,
+  caepReport: caepReport,
+  caepAction: caepAction,
+  CAEP_CONSOLE_ACTIONS: CAEP_CONSOLE_ACTIONS
 };

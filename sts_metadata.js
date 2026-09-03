@@ -309,10 +309,11 @@ const SPECS = [
   // the protocol. A client author who has read only one of them has usually read 7644
   // and is looking for the attribute characteristics, which are in 7643.
   // --- The Shared Signals Framework and the four IETF documents it is
-  //     assembled from. SSF is the PIPE; CAEP and RISC are the vocabularies
-  //     spoken over it and neither is here yet, which is why neither is in
-  //     this list — a specification named here and not implemented is an IDLE
-  //     CLAIM, and tests/vendored/sts_metadata.js fails the page for one.
+  //     assembled from, plus CAEP. SSF is the PIPE; CAEP and RISC are the
+  //     vocabularies spoken over it, CAEP has been here since 2026-09-03 and
+  //     RISC is not, which is why RISC is not in this list — a specification
+  //     named here and not implemented is an IDLE CLAIM, and
+  //     tests/vendored/sts_metadata.js fails the page for one.
   { id: 'ssf', name: 'OpenID Shared Signals Framework 1.0',
     where: 'OpenID Foundation',
     url: 'https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html',
@@ -325,8 +326,7 @@ const SPECS = [
               'implemented. Section 8 authorization is two schemes rather than an open ' +
               'list — an OAuth 2.0 access token with ssf:read or ssf:write, and HTTP ' +
               'Basic — published in authorization_schemes. NOT covered, each ' +
-              'deliberately and each on /ssf: nothing here GENERATES an event on its own, ' +
-              'so every SET was asked for; a failed push is never retried, because a ' +
+              'deliberately and each on /ssf: a failed push is never retried, because a ' +
               'client that answers 500 then 202 would look from its own logs like a ' +
               'client that works; streams are in memory and die with the process; and ' +
               'nothing is verified about a subject, so a stream may name somebody who has ' +
@@ -362,6 +362,30 @@ const SPECS = [
               'RECEIVES on that profile at POST /ssf/receive, the roles reversed, so a ' +
               'client can be the transmitter. NOT covered: retries, deliberately — see ' +
               'ssf/ssf_http.js.' },
+  { id: 'caep', name: 'OpenID Continuous Access Evaluation Profile 1.0',
+    where: 'OpenID Foundation',
+    url: 'https://openid.net/specs/openid-caep-1_0-final.html',
+    coverage: 'full for the transmitter half: all eight event types — session revoked, ' +
+              'session established, session presented, token claims change, credential ' +
+              'change, assurance level change, device compliance change and risk level ' +
+              'change — each with the members section 3 gives it, its required ones ' +
+              'enforced, its closed enumerations refused and its OPEN ones (credential ' +
+              'type, assurance namespace, risk principal) carried with a warning because ' +
+              'the specification lets two parties agree their own. The four section 2 ' +
+              'claims are on every event: event_timestamp, initiating_entity, and ' +
+              'reason_admin / reason_user AS LANGUAGE MAPS rather than strings, which is ' +
+              'the commonest mistake in the profile and the one with no symptom. Every ' +
+              'event carries SSF\'s COMPLEX subject naming the person AND the session, ' +
+              'because the person is not revoked and one session of theirs is, and an ' +
+              'event that arrives without a subject is refused rather than sent. THREE OF ' +
+              'THE EIGHT FIRE ON THEIR OWN — a sign-in, a single sign-on and a sign-out — ' +
+              'which is the one place in this service where an endpoint is not what ' +
+              'starts the work, and caep.autoEmit turns it off. NOT covered: the other ' +
+              'five have no act here that could cause them (no device reports compliance ' +
+              'to this service and no risk engine talks to it), so they are emitted by ' +
+              'hand from /admin/caep or POST /admin-api/caep/emit; and the CAEP ' +
+              'Interoperability Profile is a draft and nothing here claims it.' },
+
   { id: 'rfc8936', name: 'RFC 8936 — Poll-Based Delivery of Security Event Tokens',
     where: 'IETF',
     url: 'https://www.rfc-editor.org/rfc/rfc8936',
@@ -1837,8 +1861,35 @@ const ENDPOINTS = [
           'a push delivery POSTs to a URL the RECEIVER chose — so what it reports is ' +
           'whether the other end answered, and `ssf.pushDelivery` turns that off while ' +
           'leaving poll delivery working. Nothing on this page generates an event by ' +
-          'itself: SSF is the pipe and CAEP and RISC are the vocabularies. Add ' +
-          '?format=json.' },
+          'itself: SSF is the pipe and CAEP and RISC are the vocabularies, and CAEP — ' +
+          'which DOES generate events by itself, at /admin/caep — is the one place in ' +
+          'this service that does. Add ?format=json.' },
+  { path: '/admin/caep', group: 'Admin', name: 'CAEP',
+    specs: ['caep', 'ssf', 'rfc8417', 'rfc9493'],
+    what: 'THE VOCABULARY: CAEP\'s eight session event types with every member the ' +
+          'specification gives each one, whether it is required, its permitted values ' +
+          'and what it is for — plus the four claims CAEP gives them all, of which ' +
+          'reason_admin and reason_user are LANGUAGE MAPS rather than strings. Its ONE ' +
+          'control is the form that emits an event by hand, and it exists because FIVE ' +
+          'OF THE EIGHT describe things nothing here does: no device reports compliance ' +
+          'to this service and no risk engine talks to it. The other three fire on their ' +
+          'own when a session starts, is presented or ends, which makes this THE ONLY ' +
+          'PAGE IN THIS CONSOLE THAT CONFIGURES THIS SERVICE TO ACT WITHOUT BEING ASKED ' +
+          '— caep.autoEmit, and turning it off restores the behaviour every other family ' +
+          'here has. The nine caep.* settings post back to it. Add ?format=json.' },
+  { path: '/admin/caep-sessions', group: 'Admin', name: 'CAEP sessions',
+    specs: ['caep', 'ssf'],
+    what: 'THE MONITORING HALF: one row per session this service has held, INCLUDING ' +
+          'THE ONES IT NO LONGER HOLDS, with the CAEP state it is in — established, ' +
+          'presented, revoked — its assurance level, its device compliance, its risk ' +
+          'level, and a count of every CAEP event type sent about it. The register ' +
+          'outliving the session is the point rather than a leak: the session store ' +
+          'forgets one the moment it is signed out, so a row saying `revoked` is the ' +
+          'only remaining evidence that it existed and was revoked. Beside it, which ' +
+          'streams would take a CAEP event at all — because a count of zero almost ' +
+          'always means nobody asked for that type, and SSF gives a receiver no other ' +
+          'notice of that. Two controls, and neither ends anything: reset one session\'s ' +
+          'CAEP state, and clear the register. Add ?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -2873,6 +2924,27 @@ const ENDPOINTS = [
           'receiver has taken in. No Security Event Token in the reply carries a ' +
           'credential — a SET is signed and its `aud` is the stream, which is the whole ' +
           'of what makes it safe to publish here.' },
+  { path: '/admin-api/caep', group: 'Management API', name: 'CAEP',
+    specs: ['openapi', 'caep', 'ssf'],
+    what: 'GET /admin/caep and /admin/caep-sessions over JSON: the eight event types ' +
+          'opened out member by member, every session this service has held with the ' +
+          'CAEP state it is in and a count per event type, and which streams would take ' +
+          'a CAEP event at all. The register outlives the session it describes, which is ' +
+          'what makes this the only place a REVOKED session is still visible.' },
+  { path: '/admin-api/caep/:action', group: 'Management API',
+    name: 'Emit a CAEP event, or reset a session\'s CAEP state',
+    specs: ['openapi', 'caep', 'rfc8417', 'rfc9493'],
+    what: 'emit, reset-session and clear — the same three the console\'s forms post, ' +
+          'through the same action function, with the action taken from the URL instead ' +
+          'of a hidden input. `emit` composes SSF\'s COMPLEX subject from the session ' +
+          'named and sends on every stream that both delivers the type and covers that ' +
+          'subject; a type no stream takes is NOT an error, because "the event happened ' +
+          'and nobody had asked to hear about it" is a different fact from a failure and ' +
+          'is the one that is usually true. THERE IS DELIBERATELY NO WAY TO END A ' +
+          'SESSION FROM HERE: emitting a session-revoked SAYS a session was revoked and ' +
+          'does not revoke one, and an API that did both would merge the two acts CAEP ' +
+          'exists to separate. It awaits, like the Shared Signals action beside it, ' +
+          'because emitting signs a JWS and then POSTs it.' },
   { path: '/admin-api/ssf/:action', group: 'Management API',
     name: 'Change a stream, or transmit an event',
     specs: ['openapi', 'ssf', 'rfc8935', 'rfc8936'],

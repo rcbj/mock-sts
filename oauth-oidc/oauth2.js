@@ -3144,6 +3144,23 @@ function authorizeEndpoint(req, res) {
   const forcePrompt = String(q.prompt || '').split(/\s+/).indexOf('login') >= 0;
   if (session && !forcePrompt) {
     // -------------------------------------------------------------------
+    // SINGLE SIGN-ON JUST HAPPENED, AND THIS IS THE ONLY PLACE THAT KNOWS IT.
+    //
+    // An authorization request answered out of a session that already existed
+    // is CAEP's `session-presented` — the one CAEP event about something
+    // entirely ordinary, and the one a receiver needs in order to see a live
+    // session it is not itself being asked about. `authn.notePresented()`
+    // drops the FIRST presentation of a brand-new session, because that one
+    // is the sign-in's own return trip and not single sign-on; its header
+    // argues it.
+    //
+    // Here rather than in `sessionOf()`, which is called several times per
+    // request — an event there would be several events for one act — and
+    // before the consent check on purpose: the session WAS presented and
+    // honoured whatever the person then answers about scopes.
+    // -------------------------------------------------------------------
+    authn.notePresented(session, 'OAuth 2.0 / OIDC', req);
+    // -------------------------------------------------------------------
     // CONSENT, AND IT IS THE LAST THING BETWEEN A SIGNED-IN PERSON AND AN
     // ISSUED CREDENTIAL.
     //

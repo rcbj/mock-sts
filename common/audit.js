@@ -392,7 +392,26 @@ const ACTIONS = [
   { action: 'ssf.event.refused', category: 'signals',
     label: 'A receiver refused a Security Event Token' },
   { action: 'ssf.event.receive', category: 'signals',
-    label: 'A Security Event Token was pushed AT this service' }
+    label: 'A Security Event Token was pushed AT this service' },
+
+  // THE CAEP ROWS, in the same category on purpose: CAEP is a VOCABULARY
+  // over Shared Signals rather than a family of its own, its events travel on
+  // SSF streams and are recorded by `ssf.event.transmit` when they move, and a
+  // second category would have split one delivery across two filters.
+  //
+  // What these three add is the half SSF's rows cannot say. `caep.event.auto`
+  // is the one row in this whole log that records something THIS SERVICE
+  // DECIDED TO DO — every other action here answers a request — so it is
+  // written when the event becomes due rather than when it is sent, and the
+  // `ssf.event.transmit` beside it is what says it went.
+  { action: 'caep.event.auto', category: 'signals',
+    label: 'A CAEP event became due because a session changed' },
+  { action: 'caep.event.emit', category: 'signals',
+    label: 'A CAEP event was emitted by hand' },
+  { action: 'caep.session.reset', category: 'signals',
+    label: 'One session\'s CAEP state was reset' },
+  { action: 'caep.session.clear', category: 'signals',
+    label: 'The CAEP session register was cleared' }
 ];
 
 const CATEGORY_OF_ACTION = {};

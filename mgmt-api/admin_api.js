@@ -4259,7 +4259,8 @@ const ROUTES = [
                  'travel in (RFC 8417) and how they get there (RFC 8935 ' +
                  'push, RFC 8936 poll) — and two events of its own, both ' +
                  'about the pipe. CAEP and RISC are the vocabularies spoken ' +
-                 'over it and neither is implemented here yet.\n\nTHE ' +
+                 'over it; CAEP is implemented and its own register is at ' +
+                 'GET /admin-api/caep, and RISC is not here yet.\n\nTHE ' +
                  'RECEIVER\'S `authorization_header` IS NOT IN THIS REPLY. ' +
                  'It is a credential belonging to somebody else\'s endpoint ' +
                  'and it goes back only to the receiver that set it, at ' +
@@ -4431,6 +4432,173 @@ const ROUTES = [
           additionalProperties: false
         },
         responseDescription: 'How many were dropped.' }
+    ] },
+
+  // ---------------------------------------------------------------------
+  // CAEP. A GET and a POST, and the POST is not optional: /admin/caep and
+  // /admin/caep-sessions carry THREE controls between them — emit an event by
+  // hand, reset one session's CAEP state, clear the register — and rule 7 is
+  // about controls. All three call the same function the console's forms post
+  // to, with `action` taken from the URL instead of from a hidden input.
+  //
+  // **THERE IS DELIBERATELY NO WAY TO END A SESSION FROM HERE**, and that is
+  // the same reading of rule 7 that leaves SSF without a `create`. Emitting a
+  // `session-revoked` says a session was revoked; it does not revoke one, and
+  // a management API that did both would make "tell the receivers" and "sign
+  // this person out" one act — which is exactly the conflation CAEP exists to
+  // separate. /logout, /admin/logout and POST /admin-api/logout end sessions,
+  // and a sign-out through any of them emits the event on its own.
+  { method: 'GET', path: BASE + '/caep', tag: 'CAEP',
+    operationId: 'getCaep',
+    summary: 'The CAEP session register: what state each session is in and ' +
+             'how many events of which type have been sent about it',
+    description: 'Everything /admin/caep and /admin/caep-sessions draw, as ' +
+                 'JSON. Per session: who it belongs to, when it was ' +
+                 'established, the CAEP state it is in — established, ' +
+                 'presented, revoked — its assurance level, its device ' +
+                 'compliance, its risk level, the claims that have changed, ' +
+                 'and a count per event type.\n\nTHE REGISTER OUTLIVES THE ' +
+                 'SESSION AND THAT IS THE POINT. The session store forgets ' +
+                 'one the moment it is signed out, so a row saying `revoked` ' +
+                 'is the only remaining evidence that it existed and was ' +
+                 'revoked.\n\nCAEP IS A VOCABULARY AND NOT A FAMILY. Its ' +
+                 'events travel on SSF streams, are signed by the SSF signer ' +
+                 'and are delivered by the two SSF deliveries, so ' +
+                 'GET /admin-api/ssf is where the streams themselves are. ' +
+                 '`streams` here says only which of them would take a CAEP ' +
+                 'event at all, because a session with a count of zero ' +
+                 'almost always means nobody asked for that type — and SSF ' +
+                 'gives a receiver no other notice of that.',
+    mirrors: 'GET /admin/caep',
+    responseDescription: 'The register, the catalogue and the settings.',
+    responseSchema: { $ref: '#/components/schemas/Caep' },
+    handler: function (req, res) {
+      log.debug("Entering the management API CAEP endpoint.");
+      sendJson(res, 200, admin.caepView(req));
+      log.debug("Leaving the management API CAEP endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/caep/:action', tag: 'CAEP',
+    mirrors: 'POST /admin/caep',
+    handler: function (req, res) {
+      log.debug("Entering the management API CAEP action endpoint.");
+      const body = parseBody(req);
+      // AWAITS, like the Shared Signals handler above and for the same
+      // reason: emitting a CAEP event signs a JWS — possibly ML-DSA or
+      // SLH-DSA on the worker pool — and then POSTs it to somebody else's
+      // endpoint.
+      admin.caepAction(withAction(req, body)).then(function (result) {
+        sendJson(res, result.ok ? 200 : 400, result);
+        log.debug("Leaving the management API CAEP action endpoint.");
+      }).catch(function (e) {
+        log.error('admin-api: the CAEP action threw: ' + e.message);
+        sendJson(res, 500, { ok: false,
+          errors: ['The action failed: ' + e.message] });
+        log.debug("Leaving the management API CAEP action endpoint. Threw.");
+      });
+    },
+    actions: [
+      { action: 'emit', operationId: 'emitCaepEvent',
+        summary: 'Send one CAEP event about one session',
+        description: 'Builds the payload, adds the four claims CAEP gives ' +
+                     'every event, composes the SUBJECT from the session — ' +
+                     'SSF\'s complex subject, naming the person AND the ' +
+                     'session, because the person is not revoked and one ' +
+                     'session of theirs is — and transmits it on every ' +
+                     'stream that both delivers the type and covers that ' +
+                     'subject.\n\nFIVE OF THE EIGHT ARE ONLY EVER PRODUCED ' +
+                     'THIS WAY. No device reports compliance to this service ' +
+                     'and no risk engine talks to it, so `credential-' +
+                     'change`, `assurance-level-change`, `device-compliance-' +
+                     'change`, `risk-level-change` and `token-claims-change` ' +
+                     'have no act here that could cause them. The other ' +
+                     'three fire on their own when `caep.autoEmit` is ' +
+                     'on.\n\nA TYPE NO STREAM TAKES IS NOT AN ERROR. The ' +
+                     'session\'s state is still updated and the reply says ' +
+                     'nothing was sent, because "the event happened and ' +
+                     'nobody had asked to hear about it" is a different fact ' +
+                     'from a failure and is the one that is usually true.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            session_id: { type: 'string',
+              description: 'The session it is about, from GET ' +
+                           '/admin-api/caep.' },
+            type: { type: 'string',
+              description: 'The event type: a short name such as ' +
+                           '`session-revoked`, or the whole URI.' },
+            initiating_entity: { type: 'string',
+              description: 'admin | user | policy | system. It is the ' +
+                           'member that lets a receiver tell "an ' +
+                           'administrator revoked this" from "a risk engine ' +
+                           'did".' },
+            payload: { type: 'string',
+              description: 'The event-specific members, as JSON. Empty for ' +
+                           'a conforming specimen of the type.' },
+            reason_admin: { type: 'string',
+              description: 'Why, for a log. Sent as an object keyed by ' +
+                           '`caep.reasonLanguage` — CAEP makes it a language ' +
+                           'map and a string there is the commonest mistake ' +
+                           'in the profile.' },
+            reason_user: { type: 'string',
+              description: 'The same, in words meant for the person.' }
+          },
+          required: ['session_id', 'type'],
+          examples: [{ session_id: 'abcdef0123456789abcdef01',
+            type: 'session-revoked', initiating_entity: 'admin',
+            reason_admin: 'Policy 4.2 was violated' },
+          { session_id: 'abcdef0123456789abcdef01',
+            type: 'device-compliance-change',
+            payload: '{"previous_status":"compliant",' +
+                     '"current_status":"not-compliant"}' }],
+          additionalProperties: false
+        },
+        responseDescription: 'How many streams took it, or why none did.' },
+
+      { action: 'reset-session', operationId: 'resetCaepSession',
+        summary: 'Put one session\'s CAEP state back to where it started',
+        description: 'Clears the state, the assurance level, the device ' +
+                     'compliance, the risk level, the changed claims and ' +
+                     'every counter on one row, keeping the row.\n\nIT SIGNS ' +
+                     'NOBODY OUT. This register is a record of what has been ' +
+                     'SAID about a session; resetting it forgets the record. ' +
+                     'The session itself is untouched and every token issued ' +
+                     'on it is still good, which is the distinction this ' +
+                     'whole page rests on.\n\nIt is a reset and not a delete ' +
+                     'because the identity and the sign-in instant are still ' +
+                     'true — a delete would take the row off the page, which ' +
+                     'reads as the session having gone.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            session_id: { type: 'string', description: 'The session.' }
+          },
+          required: ['session_id'],
+          examples: [{ session_id: 'abcdef0123456789abcdef01' }],
+          additionalProperties: false
+        },
+        responseDescription: 'Confirmation, or a refusal naming the id.' },
+
+      { action: 'clear', operationId: 'clearCaepSessions',
+        summary: 'Drop every row in the CAEP session register',
+        description: 'Forgets what has been said about every session. ' +
+                     'Nobody is signed out, no stream is touched and no ' +
+                     'queued event is dropped — those are the SSF half, at ' +
+                     'POST /admin-api/ssf/delete and /clear-received.\n\nIt ' +
+                     'is worth knowing what this throws away: rows for ' +
+                     'sessions this service NO LONGER HOLDS are the only ' +
+                     'evidence that those sessions existed and were revoked, ' +
+                     'and nothing else in this service records it.',
+        requestBodyRequired: false,
+        requestBody: {
+          type: 'object',
+          properties: {},
+          examples: [{}],
+          additionalProperties: false
+        },
+        responseDescription: 'How many rows were dropped.' }
     ] },
 
   { method: 'GET', path: BASE + '/scim', tag: 'SCIM',
