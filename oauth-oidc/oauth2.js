@@ -3159,7 +3159,7 @@ function authorizeEndpoint(req, res) {
     // before the consent check on purpose: the session WAS presented and
     // honoured whatever the person then answers about scopes.
     // -------------------------------------------------------------------
-    authn.notePresented(session, 'OAuth 2.0 / OIDC');
+    authn.notePresented(session, 'OAuth 2.0 / OIDC', req);
     // -------------------------------------------------------------------
     // CONSENT, AND IT IS THE LAST THING BETWEEN A SIGNED-IN PERSON AND AN
     // ISSUED CREDENTIAL.

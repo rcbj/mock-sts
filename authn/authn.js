@@ -494,7 +494,7 @@ function notifySession(kind, session, extra) {
 // is set by startSession() and spent here, so it is exact rather than a time
 // window: a session created by this service is presented once for free.
 // ---------------------------------------------------------------------------
-function notePresented(session, via) {
+function notePresented(session, via, req) {
   log.debug("Entering notePresented().");
   if (!session) {
     log.debug("Leaving notePresented(). No session.");
@@ -505,7 +505,8 @@ function notePresented(session, via) {
     log.debug("Leaving notePresented(). The sign-in's own return trip.");
     return false;
   }
-  notifySession('presented', session, { via: via || 'OAuth 2.0 / OIDC' });
+  notifySession('presented', session, { via: via || 'OAuth 2.0 / OIDC',
+    req: req || null });
   log.debug("Leaving notePresented(). Reported.");
   return true;
 }
@@ -593,7 +594,11 @@ function startSession(res, username, amr, acr, via, detail) {
   // a transmitter, and the observer is handed a session that is already
   // complete.
   session.firstPresentationIsTheSignIn = true;
-  notifySession('established', session, { via: via || 'OAuth 2.0 / OIDC' });
+  notifySession('established', session, { via: via || 'OAuth 2.0 / OIDC',
+    // `res.req` is express's own back-reference and is the only request this
+    // function is given. See the note in dropSession() for why the observer
+    // needs one at all.
+    req: (res && res.req) || null });
   log.debug("Leaving startSession(). " + username + " is signed in (amr " + (amr || []).join(',') + ").");
   return session;
 }
@@ -621,7 +626,7 @@ function startSession(res, username, amr, acr, via, detail) {
 // merely that it is gone, because the lists of relying parties and service
 // providers a federated sign-out has to fan out to live on the object being
 // discarded.
-function dropSession(id, via, cookiePresented) {
+function dropSession(id, via, cookiePresented, req) {
   log.debug("Entering dropSession(). id=" + (id || '(none)'));
   const session = id ? sessions.get(id) : null;
   if (id) sessions.delete(id);
@@ -675,7 +680,16 @@ function dropSession(id, via, cookiePresented) {
   // session was still in the store would be a transmitter telling a receiver
   // to stop trusting something this service still honoured.
   notifySession('revoked', session, { via: via || 'a sign-out endpoint',
-    byAdmin: /admin|console/i.test(String(via || '')) });
+    byAdmin: /admin|console/i.test(String(via || '')),
+    // THE REQUEST, WHERE THERE IS ONE, AND IT IS NOT A CONVENIENCE. The
+    // observer builds a subject naming the person by ISSUER and subject, and
+    // this service's issuer is derived from the request — a sign-out reached
+    // through a proxy under a different name would otherwise emit an event
+    // whose `iss` no receiver recognises, which is refused at the far end
+    // and reads as a bad signature. `endSessionById()` genuinely has none:
+    // /logout ends sessions that are not the caller's, and the fallback is
+    // the configured `ssf.issuer`.
+    req: req || null });
   audit.audit({
     action: 'session.end',
     outcome: session ? 'success' : 'refused',
@@ -764,7 +778,8 @@ function clearSessionCookie(res) {
 function endSession(req, res) {
   log.debug("Entering endSession().");
   const id = cookiesOf(req)[SESSION_COOKIE];
-  const session = dropSession(id, 'the sign-out endpoint for this browser', !!id);
+  const session = dropSession(id, 'the sign-out endpoint for this browser',
+                              !!id, req);
   clearSessionCookie(res);
   log.debug("Leaving endSession(). " + (session ? 'Dropped the session for ' + session.user.username + '.'
                                                 : 'There was no session to drop.'));

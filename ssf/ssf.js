@@ -1757,7 +1757,15 @@ function caepAutoEmit(notice) {
     log.debug('Leaving caepAutoEmit(). SSF is off.');
     return Promise.resolve({ sent: 0, streams: 0 });
   }
-  const due = caep.observe(notice);
+  // THE ISSUER IS ADDED HERE AND NOT IN `authn.js`, because it is an SSF fact
+  // and that module has no business knowing one. It matters more than it
+  // looks: the subject names the person by ISSUER and subject, and a receiver
+  // matches that `iss` against the issuer it discovered — so an event built
+  // with the wrong one names somebody the receiver has never heard of and is
+  // refused, which reads at the far end as a bad subject rather than as a
+  // misconfigured transmitter.
+  const due = caep.observe(Object.assign({}, notice || {},
+      { issuer: issuerFor((notice || {}).req || null) }));
   if (!due) {
     log.debug('Leaving caepAutoEmit(). Nothing is due.');
     return Promise.resolve({ sent: 0, streams: 0 });
