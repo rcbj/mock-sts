@@ -137,7 +137,8 @@ const { buildSamlAssertion, encryptElement, decryptElement,
 const spMetadata = require('./sp_metadata');
 // The session, from the service that owns it. This profile starts none of its
 // own: `beginAuthentication()` sends the browser to authn.js's screen and back.
-const { sessionOf, endSession, beginAuthentication } = require('../authn/authn');
+const { sessionOf, endSession, beginAuthentication, notePresented } =
+  require('../authn/authn');
 // The application registry, which lives under ou=applications in the embedded
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
@@ -1380,7 +1381,25 @@ function singleSignOn(req, res) {
   }
 
   // --- step 5: the answer ---------------------------------------------------
+  //
+  // SINGLE SIGN-ON JUST HAPPENED, IF THE SESSION WAS NOT MADE FOR THIS
+  // REQUEST. CAEP is a vocabulary about SESSIONS and not about the protocol
+  // that minted one, so a `session-presented` is as due here as it is at the
+  // authorization endpoint — and until this call existed a receiver watching a
+  // stream saw a SAML 2.0 session start and end while every single sign-on
+  // between the two was silent. `authn.notePresented()` drops the FIRST
+  // presentation of a brand-new session, because that one is the sign-in's own
+  // return trip through this endpoint and not single sign-on; its header
+  // argues it, and the flag it spends is set by `startSession()` whichever
+  // protocol called it, so a sign-in HERE and a later OIDC authorization
+  // request report exactly one presentation between them.
+  //
+  // Here rather than beside `sessionOf()` at step 4, for the reason that call
+  // site gives: this is the branch that HONOURS the session, and the two
+  // above it — IsPassive with nothing usable, and a sign-in that came back
+  // carrying `authn_error` — end in a Response carrying a status instead.
   pendingRequests.delete(String(params.rid || ''));
+  notePresented(session, 'SAML 2.0', req);
   issueSignInResponse(res, {
     request: request, session: session, spEntityId: spEntityId, idpEntityId: idpEntityId,
     acsUrl: acsUrl, binding: wanted.binding, relayState: relayState

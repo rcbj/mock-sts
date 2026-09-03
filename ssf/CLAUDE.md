@@ -283,11 +283,29 @@ the half a reader cannot discover from a protocol trace.
   sentence led this list until 2026-09-03 and the reason it could is exactly
   the reason it no longer can: SSF defines no event about a session, so a
   transmitter that emitted one would have been inventing a vocabulary — and
-  CAEP *is* that vocabulary. A sign-in emits `session-established`, an
-  authorization request answered from a session that already existed emits
-  `session-presented`, and a sign-out emits `session-revoked`, on every stream
-  that asked for the type and whose subjects cover that session, with nobody
-  having typed anything. `caep.autoEmit` puts the old behaviour back rather
+  CAEP *is* that vocabulary. A sign-in emits `session-established`, a session
+  presented again and honoured emits `session-presented`, and a sign-out emits
+  `session-revoked`, on every stream that asked for the type and whose subjects
+  cover that session, with nobody having typed anything.
+
+  **THE MIDDLE ONE WAS OIDC-ONLY UNTIL 2026-09-03, and it was the one real gap
+  in this feature.** The other two go through a FUNNEL — `startSession()` and
+  `dropSession()`, which every browser SSO profile here reaches — so both were
+  protocol-independent from the day CAEP landed. A presentation has no funnel:
+  it is a thing each protocol endpoint decides it is doing, and only
+  `oauth-oidc/oauth2.js` called `authn.notePresented()`. `saml2_sso.js`,
+  `saml11_sso.js` and `wsfed.js` each read `sessionOf(req)` to answer a request
+  out of an existing session — which *is* single sign-on — and reported
+  nothing. So a receiver watching a SAML or WS-Federation session saw it start
+  and end with every single sign-on between the two **missing**, and the
+  evidence was a count of zero, which in this protocol is also exactly what
+  *nobody asked for that type* looks like. All four call it now, each from the
+  branch that HONOURS the session rather than from `sessionOf()` (which runs
+  several times per request, so an event there would be several events for one
+  act) and below the branches that refuse — a `wauth` this session cannot
+  satisfy, an `authn_error`, an IsPassive with nothing usable — since those end
+  in a refusal and nothing was honoured. `tests/caep_presented_every_protocol.js`
+  holds all four to it. `caep.autoEmit` puts the old behaviour back rather
   than leaving it only in the history of this file. The other five CAEP events
   describe things nothing here does — no device reports compliance to this
   service and no risk engine talks to it — so those are still emitted only
@@ -545,3 +563,40 @@ it. It is `Unknown action "x". The four are: …` now, with the count coming fro
 `CONSOLE_ACTIONS.length` through `helpers.numberWord()` rather than from a word
 typed beside it. **This sentence is not prose — it is READ**, and that is the
 whole reason it is worth a paragraph in this file.
+
+---
+
+## The CAEP page's session picker is a SEARCH, not a `<select>` (2026-09-03)
+
+`/admin/caep`'s *Emit one by hand* form chose its session from a dropdown built
+out of the whole register. That register **grows by one row per sign-in for the
+life of the process and never shrinks** — `caep.js` keeps a row after the
+session is signed out, deliberately, because the row is the evidence it existed
+and was revoked — so a console left running for an afternoon of testing had a
+dropdown of several hundred options, each labelled with a 24-character random
+identifier and sorted by nothing a reader knows.
+
+It is `chooserPane()` now, the same control `/admin/delegation` uses for its
+application and user searches, with the same twenty-a-page and the same
+clamping of a stale offset. Three things about it are decisions rather than
+mechanics:
+
+* **The search is over the PERSON and the results are SESSIONS.** Nobody knows
+  a session identifier by heart — it is random, and it is the thing they came
+  here to find — but everybody knows who they signed in as. So the searchable
+  names are the username and the subject (and the session id, for a reader who
+  has one from a log), and the result line carries the session with the
+  **protocol that minted it** and its state beside it.
+* **Only LIVE sessions are offered.** A revoked row stays in the register and
+  stays on `/admin/caep-sessions`, where it is evidence; it is not offered here
+  because the model's one hard refusal is a `session-presented` about a session
+  already revoked, and a control that lists rows the very next click would be
+  refused for is one that invites the mistake.
+* **The form does not draw at all until a session is picked.** A CAEP event
+  names a session; there is nothing for the form to be *about* until one is
+  chosen, and a `?session=` naming a row that is gone says so rather than
+  posting an identifier the register will not recognise.
+
+`sessq`, `sessfrom` and `session` are in `LIST_PARAMS` for `/admin/caep`, so a
+reader who searched a username, paged to the second twenty and picked a session
+keeps all three across the reload that pressing **Emit** causes.
