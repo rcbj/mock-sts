@@ -286,6 +286,21 @@ var config = {
     omitEventTimestamp: false                                                                                                                                                         // Leave event_timestamp out
   },
 
+  // --- RISC ------------------------------------------------------------
+  risc: {
+    enabled: true,                                                                                                                                                                                                                                                                                    // RISC enabled
+    autoEmit: true,                                                                                                                                                                                                                                                                                   // Emit events when the directory really changes
+    autoEmitTypes: "account-purged,account-disabled,account-enabled,identifier-changed",                                                                                                                                                                                                              // Which acts emit automatically
+    eventsSupported: "account-credential-change-required,account-purged,account-disabled,account-enabled,identifier-changed,identifier-recycled,credential-compromise,opt-in,opt-out-initiated,opt-out-cancelled,opt-out-effective,recovery-activated,recovery-information-changed,sessions-revoked", // RISC event types offered
+    subjectFormat: "iss_sub",                                                                                                                                                                                                                                                                         // How an account subject is named
+    honourOptOut: true,                                                                                                                                                                                                                                                                               // Stop sending about an account that opted out
+    googleSubjectType: false,                                                                                                                                                                                                                                                                         // Write subject_type instead of format
+    reasonLanguage: "en",                                                                                                                                                                                                                                                                             // Language tag on reason_admin / reason_user
+    includeReasons: true,                                                                                                                                                                                                                                                                             // Send reason_admin and reason_user
+    omitEventTimestamp: false,                                                                                                                                                                                                                                                                        // Leave event_timestamp out
+    maxAccountsTracked: 200                                                                                                                                                                                                                                                                           // Accounts tracked
+  },
+
   // --- Group claim -----------------------------------------------------
   groups: {
     claim: true,             // Carry a groups claim

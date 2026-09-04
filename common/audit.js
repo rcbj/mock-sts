@@ -411,7 +411,24 @@ const ACTIONS = [
   { action: 'caep.session.reset', category: 'signals',
     label: 'One session\'s CAEP state was reset' },
   { action: 'caep.session.clear', category: 'signals',
-    label: 'The CAEP session register was cleared' }
+    label: 'The CAEP session register was cleared' },
+
+  // THE RISC ROWS, in the same category and for the same reason. What they add
+  // beside CAEP's is the answer to a question CAEP's cannot be asked: CAEP
+  // reports what happened to a SESSION and these report what happened to an
+  // ACCOUNT, and `risc.event.auto` is the row that records this service
+  // deciding to speak because its own DIRECTORY changed rather than because a
+  // session did — which is a different act reaching a different observer, and
+  // reading the two under one action would make "why did a receiver hear about
+  // alice" unanswerable.
+  { action: 'risc.event.auto', category: 'signals',
+    label: 'A RISC event became due because the directory changed' },
+  { action: 'risc.event.emit', category: 'signals',
+    label: 'A RISC event was emitted by hand' },
+  { action: 'risc.account.reset', category: 'signals',
+    label: 'One account\'s RISC state was reset' },
+  { action: 'risc.account.clear', category: 'signals',
+    label: 'The RISC account register was cleared' }
 ];
 
 const CATEGORY_OF_ACTION = {};

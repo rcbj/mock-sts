@@ -2950,6 +2950,188 @@ const SETTINGS = [
                  'rather than the first time it is pointed at somebody ' +
                  'else\'s transmitter.' },
 
+  // --- RISC ----------------------------------------------------------------
+  //
+  // The Risk Incident Sharing and Coordination profile (OpenID RISC Profile
+  // Specification 1.0, published 29 August 2025 and final on 2 September
+  // 2025), which is the SECOND vocabulary over the SSF group above and is a
+  // group of its own for the reason CAEP is: its events go out on SSF
+  // streams, are signed by the SSF signer, are queued by the SSF queues and
+  // are delivered by the two SSF deliveries, so nothing here duplicates a
+  // setting up there and ssf.enabled turning off takes RISC with it.
+  //
+  // WHAT IS NEW HERE THAT CAEP DID NOT BRING. CAEP made this service emit
+  // without being asked; RISC makes it emit about something it does not
+  // otherwise act on. Setting `active` to false over SCIM has always
+  // DEACTIVATED NOBODY here — no endpoint reads the attribute, no bind is
+  // refused, no token is withheld, and /admin/scim says so on purpose,
+  // because a mock that silently pretended would teach a provisioning client
+  // that its deprovisioning path works. That is unchanged. What changes is
+  // that the service now SAYS SO, over RISC, which is exactly the division
+  // the profile draws: a transmitter reports and a receiver decides.
+  { key: 'risc.enabled', group: 'RISC', label: 'RISC enabled',
+    env: 'STS_RISC_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, this transmitter offers RISC\'s fourteen account ' +
+                 'event types, tracks the RISC state of every account it ' +
+                 'has been told anything about, and reports both on ' +
+                 '/admin/risc-accounts. Turning it off leaves SSF and CAEP ' +
+                 'entirely alone and drops the fourteen types from what a ' +
+                 'stream may request, so a receiver\'s "this transmitter ' +
+                 'will not deliver the type I asked for" path becomes ' +
+                 'reachable for this vocabulary without narrowing ' +
+                 'ssf.eventsSupported by hand.' },
+
+  { key: 'risc.autoEmit', group: 'RISC',
+    label: 'Emit events when the directory really changes',
+    env: 'STS_RISC_AUTO_EMIT', type: 'bool', dflt: true, runtime: true,
+    description: 'With it on, a person deleted from the directory emits ' +
+                 'account-purged, `active` going false or true emits ' +
+                 'account-disabled or account-enabled, and a changed mail ' +
+                 'or telephone number emits identifier-changed — on every ' +
+                 'stream that asked for the type and covers that account, ' +
+                 'with nobody having typed anything. Those four acts reach ' +
+                 'the directory through SCIM, through LDAP and through the ' +
+                 'console alike, because the observer sits on the WRITE ' +
+                 'rather than on any one door. Off restores the behaviour ' +
+                 'in which every RISC event was asked for, at /admin/risc ' +
+                 'or through the management API.' },
+
+  { key: 'risc.autoEmitTypes', group: 'RISC',
+    label: 'Which acts emit automatically',
+    env: 'STS_RISC_AUTO_EMIT_TYPES', type: 'csv',
+    dflt: 'account-purged,account-disabled,account-enabled,' +
+          'identifier-changed',
+    runtime: true,
+    description: 'The SHORT NAMES of the RISC events this service emits by ' +
+                 'itself, out of the four acts it can actually observe in ' +
+                 'its own directory. Four of the remaining ten — the ' +
+                 'opt-out set — are emitted by hand and CHANGE REAL STATE ' +
+                 'here when they are, because RISC defines each of them as ' +
+                 '"the account is in this state" rather than as a report ' +
+                 'that it moved. The other six describe things nothing here ' +
+                 'does: no breach corpus is searched by this service and no ' +
+                 'recovery flow runs in it. A row naming one of the ten is ' +
+                 'dropped with a warning rather than producing an event ' +
+                 'nothing can cause.' },
+
+  { key: 'risc.eventsSupported', group: 'RISC',
+    label: 'RISC event types offered', env: 'STS_RISC_EVENTS_SUPPORTED',
+    type: 'csv',
+    dflt: 'account-credential-change-required,account-purged,' +
+          'account-disabled,account-enabled,identifier-changed,' +
+          'identifier-recycled,credential-compromise,opt-in,' +
+          'opt-out-initiated,opt-out-cancelled,opt-out-effective,' +
+          'recovery-activated,recovery-information-changed,sessions-revoked',
+    runtime: true,
+    description: 'Which of RISC\'s fourteen this transmitter will agree to ' +
+                 'deliver, unioned with ssf.eventsSupported and ' +
+                 'caep.eventsSupported into the events_supported a receiver ' +
+                 'discovers. SHORT NAMES are accepted as well as whole ' +
+                 'URIs. The default OFFERS sessions-revoked even though ' +
+                 'RISC 1.0 section 2.11 deprecates it in favour of CAEP\'s ' +
+                 'session-revoked, deliberately: a transmitter that could ' +
+                 'not produce a deprecated event could not be used to find ' +
+                 'out what a receiver does with one, and receivers in the ' +
+                 'field still send and expect it. Drop it from this list to ' +
+                 'be the conforming-and-strict transmitter instead.' },
+
+  { key: 'risc.subjectFormat', group: 'RISC',
+    label: 'How an account subject is named',
+    env: 'STS_RISC_SUBJECT_FORMAT', type: 'string', dflt: 'iss_sub',
+    runtime: true,
+    description: 'WHICH RFC 9493 FORMAT this service composes an account ' +
+                 'subject in — iss_sub, email or opaque — and it is the ' +
+                 'most consequential setting in this group. A RISC event ' +
+                 'about an account carries almost nothing but its type and ' +
+                 'its subject, so the subject IS the message. iss_sub is ' +
+                 'the identifier a receiver already holds (an ID Token\'s ' +
+                 'iss and sub said it) and is what this service defaults ' +
+                 'to; email is what a receiver keying on an address ' +
+                 'expects, and identifier-recycled exists precisely because ' +
+                 'that key is unsafe. RISC\'s two identifier events ignore ' +
+                 'this and use email regardless, because their subject ' +
+                 'carries the identifier that changed.' },
+
+  { key: 'risc.honourOptOut', group: 'RISC',
+    label: 'Stop sending about an account that opted out',
+    env: 'STS_RISC_HONOUR_OPT_OUT', type: 'bool', dflt: true, runtime: true,
+    description: 'RISC section 2.8 gives an account three opt-out states, ' +
+                 'and the middle one exists to stop a hijacker silencing ' +
+                 'the events that would report them: opt-out-initiated ' +
+                 'KEEPS EXCHANGING for a while. With this on, an account ' +
+                 'in the final opt-out state has its events suppressed and ' +
+                 'the suppression is recorded on /admin/risc-accounts — ' +
+                 'except for the four opt-out events themselves, which are ' +
+                 'never suppressed, because opt-out-effective is an event ' +
+                 'announcing that there will be no more events and opt-in ' +
+                 'is the only way a receiver learns the account came back. ' +
+                 'Off carries everything, which is how a receiver that ' +
+                 'ignores an opt-out gets to be shown doing it.' },
+
+  { key: 'risc.googleSubjectType', group: 'RISC',
+    label: 'Write subject_type instead of format',
+    env: 'STS_RISC_GOOGLE_SUBJECT_TYPE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'THE DELIBERATE DEFECT FOR THIS PROFILE, and it is the one ' +
+                 'the specification itself names. RISC 1.0 section 3.1 ' +
+                 'records that Google\'s production RISC transmitter spells ' +
+                 'the subject identifier\'s discriminator `subject_type` ' +
+                 'rather than `format`, says the usage is deprecated and ' +
+                 'that new services MUST NOT use it — and then tells ' +
+                 'relying parties they need code to work around it anyway, ' +
+                 'because that is the transmitter their users\' accounts ' +
+                 'live behind. Turning this on renames the member on every ' +
+                 'RISC subject this service sends, which is how a receiver ' +
+                 'finds out whether it has that code before it is pointed ' +
+                 'at Google. It does not touch CAEP or SSF events, whose ' +
+                 'specifications never had the problem.' },
+
+  { key: 'risc.reasonLanguage', group: 'RISC',
+    label: 'Language tag on reason_admin / reason_user',
+    env: 'STS_RISC_REASON_LANGUAGE', type: 'string', dflt: 'en',
+    runtime: true,
+    description: 'The BCP 47 tag this service keys the two reason members ' +
+                 'under on a credential-compromise event, which is the only ' +
+                 'one of the fourteen that has them. RISC 1.0 does not ' +
+                 'repeat CAEP\'s requirement that they be language maps ' +
+                 'rather than strings, which makes a bare string arguably ' +
+                 'conforming to RISC and certainly unreadable to a receiver ' +
+                 'built against CAEP; this service sends the map, because ' +
+                 'that is the reading that is right under both.' },
+
+  { key: 'risc.includeReasons', group: 'RISC',
+    label: 'Send reason_admin and reason_user',
+    env: 'STS_RISC_INCLUDE_REASONS', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether a credential-compromise event carries the two ' +
+                 'reason members. Both are optional, so turning this off is ' +
+                 'how a receiver that assumes a reason is always there gets ' +
+                 'to fail in a test rather than in production. It reaches ' +
+                 'ONE of the fourteen event types, unlike its CAEP ' +
+                 'namesake, which reaches all eight — RISC gives those ' +
+                 'members to credential-compromise alone.' },
+
+  { key: 'risc.omitEventTimestamp', group: 'RISC',
+    label: 'Leave event_timestamp out',
+    env: 'STS_RISC_OMIT_EVENT_TIMESTAMP', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'The same deliberate-and-conforming omission ' +
+                 'caep.omitEventTimestamp produces, on the one RISC event ' +
+                 'that defines the member. It matters differently here: ' +
+                 'RISC words event_timestamp as when the transmitter ' +
+                 'DISCOVERED the compromise rather than when it happened, ' +
+                 'so a receiver reading it as an occurrence time dates the ' +
+                 'incident from the wrong end whether or not it is sent.' },
+
+  { key: 'risc.maxAccountsTracked', group: 'RISC',
+    label: 'Accounts tracked', env: 'STS_RISC_MAX_ACCOUNTS_TRACKED',
+    type: 'int', dflt: 200, runtime: true,
+    description: 'How many accounts the RISC register holds before the ' +
+                 'oldest is dropped. It outlives the ACCOUNT it describes ' +
+                 'on purpose and more starkly than CAEP\'s register does: a ' +
+                 'purged account is gone from the directory entirely, and ' +
+                 'its row is the only remaining evidence that this service ' +
+                 'ever told anybody it was purged.' },
+
   // --- The group claim -----------------------------------------------------
   //
   // The one feature in this service that reads the directory's GROUPS back out

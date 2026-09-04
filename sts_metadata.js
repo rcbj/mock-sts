@@ -310,10 +310,11 @@ const SPECS = [
   // and is looking for the attribute characteristics, which are in 7643.
   // --- The Shared Signals Framework and the four IETF documents it is
   //     assembled from, plus CAEP. SSF is the PIPE; CAEP and RISC are the
-  //     vocabularies spoken over it, CAEP has been here since 2026-09-03 and
-  //     RISC is not, which is why RISC is not in this list — a specification
-  //     named here and not implemented is an IDLE CLAIM, and
-  //     tests/vendored/sts_metadata.js fails the page for one.
+  //     vocabularies spoken over it. CAEP has been here since 2026-09-03 and
+  //     RISC since 2026-09-04, so both are in this list now — and neither was
+  //     until it was real, because a specification named here and not
+  //     implemented is an IDLE CLAIM and tests/vendored/sts_metadata.js fails
+  //     the page for one.
   { id: 'ssf', name: 'OpenID Shared Signals Framework 1.0',
     where: 'OpenID Foundation',
     url: 'https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html',
@@ -385,6 +386,40 @@ const SPECS = [
               'to this service and no risk engine talks to it), so they are emitted by ' +
               'hand from /admin/caep or POST /admin-api/caep/emit; and the CAEP ' +
               'Interoperability Profile is a draft and nothing here claims it.' },
+
+  { id: 'risc', name: 'OpenID RISC Profile Specification 1.0',
+    where: 'OpenID Foundation',
+    url: 'https://openid.net/specs/openid-risc-1_0-final.html',
+    coverage: 'full for the transmitter half: all fourteen event types — account ' +
+              'credential change required, account purged, disabled and enabled, ' +
+              'identifier changed and recycled, credential compromise, the four opt-out ' +
+              'events, recovery activated, recovery information changed, and the ' +
+              'deprecated sessions-revoked — each with the members section 2 gives it. ' +
+              'ELEVEN OF THEM HAVE NO MEMBERS AT ALL and only credential-compromise has ' +
+              'a required one, so for most of this vocabulary the SUBJECT IS THE ENTIRE ' +
+              'MESSAGE, which is what makes risc.subjectFormat the consequential ' +
+              'setting. The three claims section 2.7 gives credential-compromise are on ' +
+              'that event and on NO OTHER — RISC gives three where CAEP gives four to ' +
+              'all eight of its own, and there is no initiating_entity — and ' +
+              'credential_type is defined by reference to CAEP\'s credential-change, so ' +
+              'the two lists are one list here rather than two alike ones. The two ' +
+              'identifier events carry an email or phone_number subject holding the OLD ' +
+              'value, which is the reverse of every other event in all three ' +
+              'vocabularies; a subject in another format is SENT with a warning rather ' +
+              'than refused, because it is perfectly deliverable and merely wrong. ' +
+              'FOUR OF THE FOURTEEN FIRE ON THEIR OWN when the DIRECTORY changes — a ' +
+              'person deleted, active going false or true, an identifier moving — which ' +
+              'is a different observer from CAEP\'s, watching provisioning rather than ' +
+              'authentication, and risc.autoEmit turns it off. Section 2.8\'s opt-out ' +
+              'state machine is enforced: an account in the final state has its events ' +
+              'SUPPRESSED (risc.honourOptOut) except for the four opt-out events ' +
+              'themselves, without which exception opt-out-effective could never be ' +
+              'delivered and opt-in could never bring an account back. Section 3.1\'s ' +
+              'Google compatibility note is reproducible at risc.googleSubjectType. NOT ' +
+              'covered: the other ten event types have no act here that could cause them ' +
+              '— no breach corpus is searched by this service and no recovery flow runs ' +
+              'in it — so they are emitted by hand from /admin/risc or POST ' +
+              '/admin-api/risc/emit.' },
 
   { id: 'rfc8936', name: 'RFC 8936 — Poll-Based Delivery of Security Event Tokens',
     where: 'IETF',
@@ -1913,6 +1948,57 @@ const ENDPOINTS = [
           'caep.maxSessionsTracked and the clear button empties it, so a link coming back ' +
           'empty is an ordinary outcome and the page says which state it is in. One ' +
           'control, the same reset the table has, and it ends nothing. Add ?format=json.' },
+  { path: '/admin/risc', group: 'Admin', name: 'RISC',
+    specs: ['risc', 'ssf', 'rfc8417', 'rfc9493'],
+    what: 'THE SECOND VOCABULARY: RISC\'s fourteen ACCOUNT event types with every ' +
+          'member the specification gives each one — of which there are very few, ' +
+          'because ELEVEN OF THE FOURTEEN HAVE NO PAYLOAD MEMBERS AT ALL and the ' +
+          'subject carries the entire message. Only credential-compromise has a ' +
+          'required member and it is defined by reference to CAEP\'s credential-change. ' +
+          'Its ONE control is the form that emits an event by hand, and it exists ' +
+          'because TEN OF THE FOURTEEN describe things nothing here does: no breach ' +
+          'corpus is searched by this service and no recovery flow runs in it. Four of ' +
+          'those ten CHANGE REAL STATE when they go — RISC section 2.8 defines each ' +
+          'opt-out event as "the account is in this state" rather than as a report that ' +
+          'it moved. The other four fire on their own when the DIRECTORY changes, which ' +
+          'is a different observer from CAEP\'s: risc.autoEmit watches provisioning ' +
+          'where caep.autoEmit watches authentication. The eleven risc.* settings post ' +
+          'back to it, including risc.googleSubjectType — the only deliberate defect in ' +
+          'this service that a specification asks for by name (RISC section 3.1). Add ' +
+          '?format=json.' },
+  { path: '/admin/risc-accounts', group: 'Admin', name: 'RISC accounts',
+    specs: ['risc', 'ssf'],
+    what: 'THE MONITORING HALF: one row per account this service has been told anything ' +
+          'about, INCLUDING ACCOUNTS THAT NO LONGER EXIST, with THREE states rather ' +
+          'than one — the lifecycle (active, disabled, purged), RISC section 2.8\'s ' +
+          'opt-out state, and whether a credential has been reported compromised. They ' +
+          'move independently: an account can be opted out and perfectly healthy, or ' +
+          'compromised and still enabled, which is why they are three columns and not ' +
+          'one word. The register outliving the account is starker than the CAEP one ' +
+          'outliving a session: a purged account is gone from the directory entirely, ' +
+          'so the row is the only remaining evidence anywhere that receivers were told. ' +
+          'A SUPPRESSED column counts events built and deliberately NOT sent because ' +
+          'the account had opted out — the one number in this console that says a ' +
+          'receiver heard nothing on purpose. Beside it, which streams would take a ' +
+          'RISC event at all, and a per-APPLICATION table. Two controls and neither ' +
+          'disables or deletes anybody: reset one account\'s RISC state, and clear the ' +
+          'register. Searched and paged (?acctq=, ?accountsPage=, ?per=, ?rappq=), and ' +
+          'the search reaches identifiers the account NO LONGER HAS, because ' +
+          'identifier-changed is an event about the key itself. Add ?format=json.' },
+  { path: '/admin/risc-accounts/account', group: 'Admin',
+    name: 'RISC accounts — one account',
+    specs: ['risc', 'ssf', 'rfc8417'],
+    what: 'A DRILL-DOWN of /admin/risc-accounts, reached from every identifier in its ' +
+          'first column: everything this transmitter has said about ONE account, in ' +
+          'order, with the jti and the stream each event went out on and what the ' +
+          'register noticed as it was applied — beside the account\'s own facts (the ' +
+          'three states, the addresses it is and was known by, the identifier changes, ' +
+          'the compromised credentials) and its count per event type, which flags the ' +
+          'one type RISC itself deprecates. The event list is paged (?eventsPage=, ' +
+          '?per=). AN ACCOUNT THIS REGISTER NO LONGER HOLDS IS NOT A 404: the register ' +
+          'is capped at risc.maxAccountsTracked and the clear button empties it. One ' +
+          'control, the same reset the table has, and it changes nothing in the ' +
+          'directory. Add ?format=json.' },
   { path: '/admin/sessions', group: 'Admin', name: 'Live sessions',
     // rfc4120 and rfc4511 are what the other two kinds of session ARE — a TGT
     // and a bound connection — and oidc is cited for the browser one because
@@ -2976,6 +3062,42 @@ const ENDPOINTS = [
           '`remove` and `reset` are not the same operation: reset undoes an override, remove ' +
           'publishes an ABSENCE, and a client that cannot find a member learns nothing rather ' +
           'than learning the capability is missing. Mirrors POST /admin/authorization-servers.' },
+  { path: '/admin-api/risc', group: 'Management API', name: 'RISC',
+    specs: ['openapi', 'risc', 'ssf'],
+    what: 'GET /admin/risc and /admin/risc-accounts over JSON: the fourteen event ' +
+          'types opened out member by member, every account this service has been told ' +
+          'anything about with the THREE states RISC tracks and a count per event type, ' +
+          'and which streams would take a RISC event at all. The register outlives the ' +
+          'account it describes, which makes this the only place a PURGED account is ' +
+          'still visible — the directory cannot supply it, because the entry is gone.' },
+  { path: '/admin-api/risc/accounts', group: 'Management API',
+    name: 'RISC accounts', specs: ['openapi', 'risc', 'ssf'],
+    what: 'What /admin/risc-accounts draws, as JSON: the register searched with ?acctq= ' +
+          'and paged with ?accountsPage=, the per-RECEIVER statistics beside it ' +
+          '(?rappq=), or ONE account with ?account= — the events actually sent about it, ' +
+          'in order, with the jti and the stream each went out on. It exists because ' +
+          'that page is a page of the console and one operation cannot mirror two ' +
+          'pages; the GET above mirrors /admin/risc. The search reaches identifiers the ' +
+          'account NO LONGER HAS, because identifier-changed is an event about the key ' +
+          'itself and the address a caller is holding is routinely the superseded one. ' +
+          'Mirrors GET /admin/risc-accounts.' },
+  { path: '/admin-api/risc/:action', group: 'Management API',
+    name: 'Emit a RISC event, or reset an account\'s RISC state',
+    specs: ['openapi', 'risc', 'rfc8417', 'rfc9493'],
+    what: 'emit, reset-account and clear — the same three the console\'s forms post, ' +
+          'through the same action function, with the action taken from the URL instead ' +
+          'of a hidden input. `emit` composes the account subject in the format ' +
+          'risc.subjectFormat names and sends on every stream that both delivers the ' +
+          'type and covers it; a type no stream takes is NOT an error. AN ACCOUNT THIS ' +
+          'SERVICE HAS NEVER HELD IS ACCEPTED, which is the opposite of what the CAEP ' +
+          'emit does with an unknown session — a session identifier this service never ' +
+          'minted is one it can compose no subject from, and an account is a person, ' +
+          'and RISC is aimed ACROSS providers so the account a receiver is warned about ' +
+          'is usually one it has never seen. THERE IS DELIBERATELY NO WAY TO DISABLE OR ' +
+          'DELETE AN ACCOUNT FROM HERE: emitting an account-disabled SAYS an account ' +
+          'was disabled and does not disable one, and an API that did both would merge ' +
+          'the two acts RISC exists to separate. It awaits, because emitting signs a ' +
+          'JWS and then POSTs it.' },
   { path: '/admin-api/scim', group: 'Management API', name: 'SCIM',
     specs: ['rfc7643', 'rfc7644', 'openapi'],
     what: 'Everything /admin/scim shows, over JSON: the counters, the endpoint list, what ' +
