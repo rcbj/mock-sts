@@ -314,6 +314,32 @@ const SPECS = [
   //     RISC is not, which is why RISC is not in this list — a specification
   //     named here and not implemented is an IDLE CLAIM, and
   //     tests/vendored/sts_metadata.js fails the page for one.
+  { id: 'xacml30', name: 'OASIS XACML 3.0 (core)',
+    where: 'OASIS',
+    url: 'https://docs.oasis-open.org/xacml/3.0/xacml-3.0-core-spec-os-en.html',
+    coverage: 'full for the mandatory feature set: the policy language, the ' +
+              'seven decision values including the three extended ' +
+              'Indeterminates, target matching, conditions, variables, the ' +
+              'twelve combining algorithms, obligations and advice, policy ' +
+              'references, and the standard function library over all ' +
+              'seventeen datatypes. Held to the OASIS conformance suite — ' +
+              '454 of the 455 mandatory cases pass, and the one exception is ' +
+              'recorded with its argument in xacml/conformance/MANIFEST.js. ' +
+              'NOT covered: AttributeSelector and the XPath functions (a ' +
+              'policy using one is Indeterminate rather than silently empty), ' +
+              'the Multiple Decision and Hierarchical Resource profiles, and ' +
+              'administrative delegation.' },
+  { id: 'xacmljson', name: 'JSON Profile of XACML 3.0 v1.1',
+    where: 'OASIS',
+    url: 'https://docs.oasis-open.org/xacml/xacml-json-http/v1.1/os/' +
+         'xacml-json-http-v1.1-os.html',
+    coverage: 'full for the request and response: the shorthand category ' +
+              'names, the short datatype names, datatype inference from the ' +
+              'JSON type (including the integer/double distinction, which is ' +
+              'read from the source text because JSON.parse has already ' +
+              'thrown it away), arrays as bags, obligations, advice and the ' +
+              'PolicyIdentifierList. The profile defines no policy syntax, so ' +
+              'policies stay XML.' },
   { id: 'ssf', name: 'OpenID Shared Signals Framework 1.0',
     where: 'OpenID Foundation',
     url: 'https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html',
@@ -1173,6 +1199,39 @@ const ENDPOINTS = [
   // so a conforming receiver discovers them and none of these names is
   // normative. They are here because this page walks the live router, and a
   // route that answers and is undescribed fails the drift check.
+  { path: '/xacml', group: 'XACML', name: 'What the XACML surface is',
+    specs: ['xacml30', 'xacmljson'],
+    what: 'The PDP, the repository and the embedded PEP, described. ' +
+          '?format=json for the same thing as data. Answers while ' +
+          'xacml.enabled is OFF, so a client can discover that this service ' +
+          'speaks XACML and is not currently doing it.' },
+  { path: '/xacml/pdp', group: 'XACML', name: 'A decision',
+    specs: ['xacml30', 'xacmljson'],
+    what: 'POST a JSON Profile request, get a JSON Profile response. THIS ' +
+          'ENDPOINT AUTHENTICATES NOBODY and that is not only the house ' +
+          'rule: a PDP is not an authorization boundary, it answers a ' +
+          'question about somebody else\'s. The identity that matters is IN ' +
+          'the request. A malformed request is a 400 rather than an ' +
+          'Indeterminate — an Indeterminate is an answer ABOUT a request and ' +
+          'a 400 says there was no request to answer about.' },
+  { path: '/xacml/policies', group: 'XACML', name: 'The policy repository',
+    specs: ['xacml30'],
+    what: 'Every policy as the PDP sees it, DOCUMENTS INCLUDED, with the ' +
+          'static type-check problems of each. The documents are shown ' +
+          'deliberately, unlike the secrets /admin/ldap/* hides: a policy is ' +
+          'a rule rather than a credential, and a rule nobody can read is a ' +
+          'rule nobody can check. The store is ou=policies in the embedded ' +
+          'directory — that container IS the repository.' },
+  { path: '/xacml/protected', group: 'XACML', name: 'The embedded PEP',
+    specs: ['xacml30'],
+    what: 'A resource this service guards with its own PDP. Takes subject, ' +
+          'resource and action as query parameters, asks the PDP, and ' +
+          'ENFORCES the answer — 200 or 403. It is where xacml.pepBias is ' +
+          'visible: deny-biased and permit-biased agree on every Permit and ' +
+          'every Deny and differ on Indeterminate and NotApplicable, which ' +
+          'is the case nobody tests. An obligation it cannot discharge turns ' +
+          'a Permit into a refusal (section 7.2), which is the part ' +
+          'implementations skip.' },
   { path: '/.well-known/ssf-configuration', group: 'Shared Signals',
     name: 'Transmitter configuration metadata',
     specs: ['ssf'],
@@ -4476,6 +4535,17 @@ const PROTOCOLS = [
           'UserInfo and RP-initiated logout, with as many named ' +
           'authorization servers as have been asked for. RFC 9700 mode ' +
           'turns the BCP\'s refusals on.' },
+  { name: 'XACML', groups: ['XACML'],
+    specs: ['xacml30', 'xacmljson'],
+    what: 'A Policy Decision Point, a policy repository that IS ' +
+          'ou=policies in the embedded directory, a Policy Information ' +
+          'Point that reads attributes off the subject\'s own entry, and an ' +
+          'embedded Policy Enforcement Point. THE ONLY FAMILY HERE THAT ' +
+          'ANSWERS A QUESTION ABOUT SOMEBODY ELSE\'S BOUNDARY: every other ' +
+          'protocol on this service authenticates or provisions somebody, ' +
+          'and this one is handed a subject that has already been ' +
+          'authenticated elsewhere and asked whether they may. Held to the ' +
+          'OASIS conformance suite rather than to a test written here.' },
   { name: 'Federation', groups: ['Federation'],
     specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
     what: 'BOTH ENDS OF A FEDERATION RELATIONSHIP, in five protocols: SAML ' +

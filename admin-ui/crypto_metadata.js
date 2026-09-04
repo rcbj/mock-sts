@@ -196,6 +196,28 @@ const ssfAuth = require('../ssf/ssf_auth');
 // them as "—" and the `whatItDoesNot` line beside them says which.
 // ---------------------------------------------------------------------------
 const FAMILIES = [
+  // XACML IS THE ONE FAMILY HERE THAT PERFORMS NO CRYPTOGRAPHY AT ALL, and
+  // saying so is the point of the row rather than an admission. A PDP reads a
+  // policy and a request and returns a decision; nothing is signed, nothing is
+  // verified, nothing is encrypted, and no key is involved anywhere in the
+  // decision path. A reader who does not find XACML on this page would
+  // reasonably wonder whether the page is incomplete — which is exactly what
+  // the drift check between this table and sts_metadata.js's PROTOCOLS exists
+  // to prevent, in both directions.
+  //
+  // What that costs, and it is worth knowing: a decision travels over whatever
+  // the transport gives it and carries no integrity of its own. Phase five's
+  // remote PEP is where that matters — the policies pushed to it and the
+  // decisions it asks for both go over mutual TLS, which is the tls/ family's
+  // cryptography and not this one's.
+  { name: 'XACML',
+    signs: 'Nothing. A decision is not a token and carries no signature.',
+    verifies: 'Nothing in the decision path. The remote PEP\'s client ' +
+              'certificate is verified by the TLS layer (see TLS / mutual ' +
+              'TLS), not here.',
+    encrypts: 'Nothing.',
+    decrypts: 'Nothing.',
+    keys: 'None. No key of any kind takes part in reaching a decision.' },
   { name: 'OAuth2 / OIDC',
     signs: 'Every access token and refresh token, and the ID Token, with the ' +
            'realm\'s RSA key as RS256. A client that registers ' +

@@ -444,6 +444,22 @@ require('./ssf/ssf');
 // It is NOT last. `sts_metadata.js` is, for everybody, because it reads the
 // router to list what everything else registered — and a logout endpoint
 // missing from that list would be the exact drift that page exists to catch.
+// ---------------------------------------------------------------------------
+// 23c. XACML 3.0 — the PDP, the policy repository and the embedded PEP.
+//
+// AFTER `ldap/ldap_server` (21), which fills two slots it owns: the policy
+// repository's directory functions and the PIP's entry lookup. The store IS
+// ou=policies, so this module has nothing to load and nothing to hold.
+//
+// It does NOT go through a slot on admin.js, because it has no console page
+// yet — that is phase three, and when it lands the require stays here and a
+// slot appears, for the reason SSF's does at 23b: a require from
+// mgmt-api/admin_api.js (19) to this module would drag every /xacml route
+// ahead of the management API's own.
+//
+// It starts nothing and holds no socket.
+require('./xacml/xacml');
+
 require('./logout/logout');
 require('./sts_metadata');
 

@@ -2485,6 +2485,69 @@ const SETTINGS = [
   // argument is actually about. `ssf.signingAlgorithm` is the one setting here
   // that reaches the whole post-quantum table, because the signature goes
   // through `helpers.signJwtAs()` like every other JWT this service mints.
+  // ---------------------------------------------------------------------
+  // XACML 3.0.
+  //
+  // The engine is `xacml/`, the store is ou=policies in the embedded
+  // directory, and the decision endpoint is POST /xacml/pdp. Two things about
+  // this group are worth knowing before adding a row to it.
+  //
+  // FIRST, `xacml.enabled` LEAVES THE ROUTES REGISTERED and makes them answer
+  // 501, exactly as `ssf.enabled` does — the feature is off, the URL is not
+  // wrong, and those are different sentences to a client that is trying to
+  // work out whether this service speaks XACML at all.
+  //
+  // SECOND, THERE IS NO SETTING THAT MAKES THE PDP MORE PERMISSIVE, and that
+  // is deliberate in a service whose every other surface is a turnstile. A
+  // PDP's whole output is a decision; a flag that made it answer Permit when
+  // it could not decide would not be a mock of anything, it would be a broken
+  // PDP. What IS configurable is what happens at the PEP — see
+  // `xacml.pepBias`, which is the PEP's decision and not the PDP's.
+  { key: 'xacml.enabled', group: 'XACML', label: 'XACML enabled',
+    env: 'STS_XACML_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the XACML 3.0 endpoints under /xacml answer. ' +
+                 'Turning it off leaves the routes REGISTERED and makes ' +
+                 'them answer 501 rather than 404 — the feature is off, the ' +
+                 'URL is not wrong. The policy repository in ou=policies is ' +
+                 'untouched either way, so turning this back on decides ' +
+                 'against the same policies it did before.' },
+
+  { key: 'xacml.maxPolicies', group: 'XACML',
+    label: 'Policies the repository may hold',
+    env: 'STS_XACML_MAX_POLICIES', type: 'int', dflt: 200, runtime: true,
+    description: 'How many entries may live under ou=policies. The same ' +
+                 'kind of limit ou=federations and ou=applications carry, ' +
+                 'and for the same reason: this directory is in memory in ' +
+                 'the default persistence mode, and a caller that can create ' +
+                 'entries without bound can exhaust it. Reaching the limit ' +
+                 'refuses the CREATE and logs; it never evicts.' },
+
+  { key: 'xacml.pepBias', group: 'XACML',
+    label: 'What the embedded PEP does with a non-Permit',
+    env: 'STS_XACML_PEP_BIAS', type: 'enum',
+    values: ['deny-biased', 'permit-biased'], dflt: 'deny-biased',
+    runtime: true,
+    description: 'THIS IS THE PEP\'S DECISION AND NOT THE PDP\'S, which is ' +
+                 'the whole reason it is a setting. XACML section 7.2 lets a ' +
+                 'PEP be deny-biased (anything that is not Permit is a ' +
+                 'refusal) or permit-biased (anything that is not Deny is ' +
+                 'allowed), and real deployments differ. Deny-biased is the ' +
+                 'default because it is what a PEP protecting anything ' +
+                 'should be; permit-biased exists so that a client can see ' +
+                 'what the other choice does to an Indeterminate, which is ' +
+                 'the case the two disagree about and the one nobody tests.' },
+
+  { key: 'xacml.returnPolicyIdList', group: 'XACML',
+    label: 'Always return the applicable policy identifiers',
+    env: 'STS_XACML_RETURN_POLICY_ID_LIST', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'A request asks for the list of policies that applied by ' +
+                 'setting ReturnPolicyIdList; turning this on returns it ' +
+                 'whether or not the request asked. Off by default because ' +
+                 'it is what the specification says, and on is what makes a ' +
+                 'debugger useful — a decision you cannot trace to a policy ' +
+                 'is a decision you cannot argue with.' },
+
   { key: 'ssf.enabled', group: 'SSF', label: 'SSF enabled',
     env: 'STS_SSF_ENABLED', type: 'bool', dflt: true, runtime: true,
     description: 'When on, the Shared Signals Framework endpoints under ' +

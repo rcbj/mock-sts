@@ -241,6 +241,14 @@ var config = {
     authClientCert: true         // Offer TLS client certificates
   },
 
+  // --- XACML -----------------------------------------------------------
+  xacml: {
+    enabled: true,             // XACML enabled
+    maxPolicies: 200,          // Policies the repository may hold
+    pepBias: "deny-biased",    // What the embedded PEP does with a non-Permit
+    returnPolicyIdList: false  // Always return the applicable policy identifiers
+  },
+
   // --- SSF -------------------------------------------------------------
   ssf: {
     enabled: true,                                                                                                                                        // SSF enabled

@@ -187,7 +187,24 @@ const CATEGORIES = [
           'Security Event Token this service TRANSMITTED or RECEIVED — ' +
           'including the ones a receiver refused, which is the row that ' +
           'matters most, because a refused push is invisible from the ' +
-          'receiving end by definition.' }
+          'receiving end by definition.' },
+
+  // AUTHORIZATION IS NOT AUTHENTICATION AND THIS IS THE ONE CATEGORY THAT
+  // RECORDS A REFUSAL AS ITS ORDINARY OUTPUT. Every other category here logs
+  // that something was accepted or issued; a Deny is not an error and is not
+  // an exception — it is the answer. Filing these under `authentication`
+  // would put "who are you" and "may you" in one filter, which is exactly the
+  // conflation XACML exists to undo.
+  { category: 'authorization', label: 'XACML',
+    what: 'Authorization decisions: what the PDP was asked, what it ' +
+          'answered, and — separately — what the embedded PEP DID with that ' +
+          'answer. The two are separate rows on purpose: a PDP that says ' +
+          'Indeterminate and a deny-biased PEP that refuses are one event ' +
+          'to a user and two decisions by two components, and when they ' +
+          'disagree with somebody\'s expectation it is always because only ' +
+          'one of them was being looked at. Policy changes are LDAP rows ' +
+          'against ou=policies, not rows here, because the repository is ' +
+          'the directory.' }
 ];
 
 const ACTIONS = [
@@ -377,6 +394,11 @@ const ACTIONS = [
   // has: `ssf.event.transmit` and `ssf.event.refused` are the same push seen
   // from the two ends, and a receiver's refusal is a fact only the
   // transmitter can record.
+  { action: 'xacml.decision', category: 'authorization',
+    label: 'The PDP reached a decision' },
+  { action: 'xacml.enforcement', category: 'authorization',
+    label: 'The embedded PEP enforced a decision' },
+
   { action: 'ssf.stream.create', category: 'signals',
     label: 'A Shared Signals stream was created' },
   { action: 'ssf.stream.update', category: 'signals',

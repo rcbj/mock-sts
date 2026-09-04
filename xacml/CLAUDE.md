@@ -1,11 +1,13 @@
 # xacml/ — the XACML 3.0 engine
 
-**This directory is currently the ENGINE and nothing else.** There is no route
-here, no console page, no store, no PIP and no `/admin-api` operation, and
-`server.js` does not require anything in it. That is phase one of a five-phase
-piece of work and is deliberate: the engine is where all the risk is, and it is
-checkable against somebody else's reading of the specification before a single
-line of it is wired to a port. See *What is not here yet*.
+**Phases one and two are here: the ENGINE, the STORE, the PIP and a service
+surface.** `server.js` requires `xacml.js` at 23c, four routes answer under
+`/xacml`, policies live in `ou=policies` in the embedded directory, and an
+embedded PEP enforces a decision at `/xacml/protected`.
+
+**What is NOT here is the PAP** — no console page, no `/admin-api` operation,
+and therefore no way to author a policy through this service. A seeded policy
+makes the surface demonstrable in the meantime. See *What is not here yet*.
 
 ## What is here
 
@@ -17,10 +19,52 @@ line of it is wired to a port. See *What is not here yet*.
 | `xacml_validate.js` | Static type checking. What a policy is REFUSED for at load, before any request. **No I/O.** |
 | `xacml_xml.js` | XACML 3.0 core XML → the model, and a response back. The first of three readers. |
 | `xacml_pdp.js` | Evaluation: targets, rules, conditions, the twelve combining algorithms, obligations. **No I/O.** |
+| `xacml_json.js` | The JSON Profile 1.1 request and response — what anybody actually sends. The second reader. **No I/O.** |
+| `xacml_store.js` | The repository. Owns the policy schema; `ou=policies` IS the store. |
+| `xacml_pip.js` | Attribute resolution off the subject's own directory entry. |
+| `xacml.js` | **The only file here that registers a route.** Four of them, plus the embedded PEP. |
 | `conformance/` | The vendored OASIS suite. `PROVENANCE.md` is the argument, `MANIFEST.js` the drift check. **Not edited here, ever.** |
 
-The test is `tests/xacml_conformance.js` — in-process, no port, no container,
-about a second.
+Two tests, both in-process, no port, no container:
+`tests/xacml_conformance.js` (the engine, against 455 cases somebody else
+wrote) and `tests/xacml_service.js` (the store, the PIP, the JSON Profile and
+the PEP — the half that is not XACML but is how this service wires it up).
+
+## The surface
+
+```
+GET  /xacml            what this is; ?format=json for the same as data
+POST /xacml/pdp        a decision. JSON Profile in, JSON Profile out
+GET  /xacml/policies   the repository as the PDP sees it, documents included
+GET  /xacml/protected  the embedded PEP — 200 or 403
+```
+
+`POST /xacml/pdp` **authenticates nobody**, and for once that is not only the
+house rule. A PDP is not an authorization boundary — it answers a question
+about somebody else's. The identity that matters is IN the request, not on the
+connection. Phase five's mutual TLS authenticates WHICH PEP is asking, which is
+a different question from who the decision is about, and conflating the two is
+how a PDP ends up deciding about whoever holds the client certificate.
+
+## Where a policy lives
+
+`ou=policies` in the embedded directory **is** the repository, the way
+`ou=federations` is the federation register. That buys three things and none of
+them is tidiness: persistence in all three modes with no driver change,
+per-realm isolation for free, and `ldapsearch` and `/admin/ldap/directory` as
+inspection tools that already exist.
+
+The entry holds the **document as authored** and everything else on it is
+derived at write time — so where the two disagree, the document wins. A write
+goes through static validation, so a policy that does not typecheck is refused
+while somebody is still looking at it rather than going Indeterminate on every
+request for ever.
+
+**One policy is seeded**, role-based, and the seeded directory was given
+`employeeType` to match it — alice and bob are staff, carol is admin. The two
+seeds have to agree or neither demonstrates anything: a policy granting on an
+attribute nobody has answers Deny for everybody, which looks exactly like a
+broken PDP.
 
 ## The one rule this directory is built on
 
@@ -57,7 +101,33 @@ between those two numbers records is worth more than the final one: every
 defect below was found by the suite and none of them would have been found by a
 test written here.
 
-## The seven defects the suite caught, because each will be made again
+## Four more defects, from phase two, and all four were silent
+
+The engine's seven are below; these are from wiring it up. Every one of them
+left a service that started, answered every request, logged nothing unusual,
+and decided incorrectly. `tests/xacml_service.js` asserts each.
+
+1. **LDAP ATTRIBUTE NAMES COME BACK LOWER-CASED.** RFC 4512 makes them
+   case-insensitive and this directory normalises them, so a store that asks
+   for the `xacmlPolicyDocument` it wrote gets `undefined`. Every field of
+   every policy read back empty, `root()` found nothing, and the PDP answered
+   NotApplicable to everything with a policy plainly sitting in `ou=policies`.
+   `federation.js` reads `stored.attributes.fedid` in lower case for exactly
+   this reason.
+2. **THE SAME BUG IN THE PIP IS QUIETER AND WORSE.** A missing attribute is a
+   *legitimate* answer, so there was nothing to report: the PDP simply decided
+   as though the person held no roles.
+3. **THE SEED RAN BEFORE THE STORE HAD ITS DIRECTORY.** `ldap_server.js` seeds
+   at require time and fills the store's slot further down the same file. It is
+   seeded at the slot-fill site now, guarded on the repository being EMPTY
+   rather than on the container being new — those are different facts once
+   persistence is in play, and the second would re-seed a policy an operator
+   deleted on purpose.
+4. **JSON HAS ONE NUMBER TYPE.** `5` and `5.0` both parse to `5`, so the
+   integer/double distinction survives only in the source text.
+   `xacml_json.js` re-scans the raw body for it.
+
+## The seven defects the conformance suite caught, because each will be made again
 
 Each of these produced an engine that looked correct, ran without error, and
 was wrong. They are written up beside the code that fixes them; this is the
@@ -127,13 +197,14 @@ where somebody has to remember to wrap one.
 
 ## What is not here yet
 
-Phases two to five, in order. Each is a separate piece of work and none of it
-is started.
+Phases three to five. None is started.
 
-* **The store and the PIP.** Policies as directory entries under `ou=policies`
-  — the shape `ou=federations` already has, which is what gets Postgres, LDIF
-  and per-realm isolation for free. `xacml_pip.js` resolves a designator out of
-  the embedded directory.
+**The first thing phase three must do** is a `SETTING_HOMES` row in
+`admin-ui/admin.js`. The XACML settings group has no console page, so the
+service warns at every boot that those four settings are *editable nowhere* —
+which is true. They can be set by environment variable and in the appconfig
+file; they cannot be changed while running. The warning names the fix.
+
 * **The PAP.** A `Protocols → XACML` group in `admin-ui/admin.js`'s `SECTIONS`,
   with a guided policy editor. **It will have no JavaScript**: this console is
   `script-src 'none'` and `admin-ui/CLAUDE.md` refuses a script nine times over,
