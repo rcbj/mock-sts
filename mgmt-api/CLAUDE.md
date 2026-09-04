@@ -632,3 +632,50 @@ say whether it meant the override or somebody's answer — and those two are the
 pair a caller most needs kept apart, because removing the wrong one asks the
 wrong people again. One vocabulary for both doors is worth more than a shorter
 URL, and rule 7's parity check reads the console's own list.
+
+## `/admin-api/sessions` IS NOT A SHAPE OF `/admin-api/logout` (2026-09-04)
+
+Both read `logout/logout.js`, and they answer two different questions:
+
+* `GET /admin-api/logout?user=` is *what is alice still signed into* — keyed on
+  one identity, reaching all ten families, including the seven whose rows are
+  things this service HANDED OUT and cannot recall.
+* `GET /admin-api/sessions` is *who is signed in at all* — across everybody, in
+  the three families that have a session. **A `user` parameter on the first
+  could not have answered it, because the answer has no user in it.**
+
+It exists because `/admin/sessions` does, which is rule 7, and it was written in
+the same change as the page. `POST /admin-api/sessions/revoke` is
+`terminate(key, [id])` — the SAME function `POST /admin-api/logout/selective`
+calls — so two operations sit over one termination, which is what the parity
+asks for when the console grows a button rather than a second implementation.
+The row carries both fields the write needs (`key` and `id`), so a caller never
+has to construct one.
+
+Three things a caller has to be told and the description does tell:
+`expiresAt: 0` means NO EXPIRY and not the epoch; `expiryRule` says which of
+three arithmetics produced the number; and on a Kerberos row the revoke does
+MORE than the row names, because that protocol has no per-ticket revocation.
+
+**`GET /admin-api/tokens` grew a `session` parameter beside it**, which is the
+join between the two resources: every browser-session row carries the
+`sessionId` a token issued under it records.
+
+## `/admin-api/caep/sessions`, AND THE GAP THE PARITY CHECK FOUND
+
+`/admin/caep-sessions` is a page of the console and had no operation naming it:
+the CAEP GET beside it mirrors `/admin/caep`, and **one operation cannot mirror
+two pages**. Nothing noticed until `tests/vendored/admin_api.js` was run against
+a tree where that page had a drill-down worth mirroring — the gap pre-dated the
+change that exposed it, which is the argument for the check rather than against
+it.
+
+ONE OPERATION ANSWERS BOTH SHAPES, `?session=` deciding which, for the reason
+`/admin-api/permissions/groups` gives: the register and one session's history are
+the same question at two scales, drawn by one function, so two operations would
+be two places to disagree.
+
+**The console's three CAEP forms all POST to `/admin/caep` now**, wherever they
+are drawn — the applications page's arrangement with `/admin/delegation`, and
+for its reason: moving a form is not moving an action, and a route per page
+would have wanted an operation per page over one function.

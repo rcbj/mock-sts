@@ -4727,6 +4727,11 @@ function boundConnections() {
       key: bound ? consoleKeyFor(bound, getEntry(bound)) : '',
       secure: !!socket.encrypted,
       port: socket.encrypted ? boundTlsPort : boundPort,
+      // When the bind that made this connection somebody's session happened.
+      // Zero on a connection bound before this service recorded it, or by a
+      // path that is not the bind handler — reported as "not recorded" rather
+      // than as the epoch.
+      boundAt: socket.stsBoundAt || 0,
       socket: socket
     });
   });
@@ -4936,6 +4941,21 @@ server.bind('', function (req, res, next) {
     method: dn ? 'simple bind' : 'anonymous simple bind',
     note: 'no password was checked'
   });
+  // WHEN THIS CONNECTION BECAME THIS PERSON'S SESSION (2026-09-04). In LDAP the
+  // connection IS the session (RFC 4511 section 4.2), and until this line there
+  // was no record anywhere of when one started — so /admin/sessions could say a
+  // directory connection was live and not since when, which is the one fact a
+  // reader of that page wants about a session with no expiry. It is stamped on
+  // the SOCKET rather than kept in a map here, because the socket is the thing
+  // that dies: a Map would be a second answer to "is this still live", which is
+  // the rule logout.js keeps.
+  //
+  // It is set on every successful bind, including a re-bind on a connection
+  // that was already bound as somebody else — that is a new session on the same
+  // socket, and dating it from the first bind would age it wrongly.
+  if (req.connection) {
+    req.connection.stsBoundAt = Date.now();
+  }
   res.end();
   log.debug('Leaving the LDAP bind handler. The bind succeeded.');
   return next();

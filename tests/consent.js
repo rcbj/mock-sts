@@ -143,6 +143,24 @@ function names(result) {
 }
 
 function run(t) {
+  // WHAT WAS THERE BEFORE, PUT BACK AT THE END. `applications.js`'s directory
+  // slot is ONE reference for the whole process and every later file in a run
+  // reads through it, so a stub left installed answers every later question
+  // about the registry with these four entries — which is the rule
+  // `user_graph_permissions.js` states and this file did not follow.
+  //
+  // It went unnoticed because of the ORDER things happen to be required in:
+  // `federation_map_bands.js` and `realm_directory_lookups.js` need a real
+  // backing, and they were the first files to require `ldap/ldap_server.js`,
+  // whose require-time `setDirectory()` repaired the damage on its way past.
+  // The moment any earlier file required that module — which
+  // `caep_initiating_entity.js` does, through `logout/logout.js` — node's
+  // module cache meant it was not required again, the repair never happened,
+  // and two tests failed inside `applications.js` naming a function this stub
+  // does not have. **A test that leaves process-wide state behind is a test
+  // whose failure lands on somebody else's file.**
+  const beforeDirectory = applications.directoryInstalled();
+
   // `readApplication` as well as `allApplications`, because this feature reads
   // ONE entry by identifier — `applications.get(clientId)` — where
   // `user_graph_permissions.js` only ever walks the container. A stub short by
@@ -393,6 +411,11 @@ function run(t) {
           'profile',
           'and the very next request asks again, which is what "not written ' +
           'down" has to mean if it means anything');
+
+  // CLEAN UP THE PROCESS-WIDE STATE — see the top of this function. Both slots:
+  // the consent store this file installed is `consent.setDirectory(null)`
+  // above, and this is the registry's.
+  applications.setDirectory(beforeDirectory);
 }
 
 module.exports = {

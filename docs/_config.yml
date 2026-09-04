@@ -37,6 +37,8 @@ header_pages:
   - endpoints.md
   - trust-realms.md
   - signing-out.md
+  - sessions.md
+  - caep-events.md
   - persistence.md
   - what-is-not-checked.md
   - layout.md

@@ -2765,3 +2765,120 @@ by one row for every scope every person agrees to. It matches the person, the
 application OR the scope, because a reader arrives holding exactly one of the
 three and does not know which column it is in. Both tables page separately and
 share one `per`, which is `/admin/delegation`'s arrangement.
+
+---
+
+## `/admin/sessions` — WHAT IS LIVE, BESIDE THE PAGE THAT SAYS WHAT WAS ISSUED (2026-09-04)
+
+Monitoring gained a page that lists every session this service is HOLDING,
+across the three protocols that have one. It sits above `/admin/tokens` in that
+section and the order is the argument: a session is what is live now and a token
+is what came out of one, so a reader working out what is going on reads them in
+that direction.
+
+**IT DRAWS NOTHING OF ITS OWN.** Every row comes from
+`logout/logout.js`'s `liveSessions()` through the SIXTH SLOT, which grew that
+function and `SESSION_EXPIRY_RULES` in the same change; the slot is still
+validated whole, so a reader carrying the inventory and not this is refused
+rather than half installed. `logout/CLAUDE.md` argues why the enumeration lives
+there and not here, and it is the same reason the Revoke button calls
+`terminate()` rather than ending anything itself.
+
+**THE EXPIRES COLUMN CARRIES A RULE AS WELL AS A TIME**, and that is the one
+thing about the page worth defending. The three kinds work their expiry out
+differently — absolute and not extended by use, sealed into a Kerberos ticket,
+and *none at all* for an LDAP connection — so a column of timestamps would be
+read as one rule with three values. The sentence is a `title` on the cell AND
+the three are written out in the prose above the table, which is this console's
+standing rule that nothing is ever said only in a tooltip.
+
+**THE REVOKE BUTTON IS NOT ONE ACT AND THE PAGE SAYS SO BEFORE IT IS PRESSED.**
+On a browser session it ends the session and everything hanging off it; on an
+LDAP row it closes a socket; on a Kerberos row it stamps an instant on the
+PRINCIPAL and refuses every ticket that principal authenticated before now,
+which is more than the row it is on. Each row's `why` is the button's `title`.
+
+**IT HAS NO ROLE CHECK OF ITS OWN**, and that is deliberate rather than an
+omission: the gate is MIDDLEWARE and refuses every non-GET without Admin Write
+with a 403 and a page naming the group. A second check in the handler would have
+been a second refusal in a different shape — a 303 carrying a message — for one
+act, and `tests/vendored/sts_admin_console.js` asserts the 403.
+
+`GET /admin-api/sessions` and `POST /admin-api/sessions/revoke` mirror it, in
+the same change, which is rule 7; `mgmt-api/CLAUDE.md` argues why it is a
+separate resource from `/admin-api/logout` rather than a shape of it.
+
+**`/admin/tokens` GREW A `session` FILTER IN THE SAME CHANGE**, because every
+row here links to the credentials issued on it and there was no way to ask for
+them. It matches the session id EXACTLY, so everything issued with no session
+behind it — both direct grants, a pre-authorized code, a token exchange, every
+assertion and every ticket — is absent by construction rather than missing, and
+the page says so where the filter is in force.
+
+---
+
+## `/admin/caep-sessions` GAVE ITS DETAIL A PAGE OF ITS OWN (2026-09-04)
+
+That page drew a card per tracked session under its table, each with an event
+table inside it. `caep.maxSessionsTracked` is 200 by default and settable
+higher, so a service driven for an afternoon answered with a couple of hundred
+nested tables under the one table anybody had come to read — and the sessions
+table was off the top of the screen for the whole of it.
+
+The detail is `/admin/caep-sessions/session?id=…` now, a drill-down of the same
+shape `/admin/tokens/credential` has: no `NAV` row, `active` is the list's path,
+`up` carries the search and the page the reader left. The list gained the
+console's ordinary furniture — `sectionSearchForm` over `sessq`, `pagedRows`
+named `sessions`, `pageNavPair` head and foot, `perPageForm` — and the JSON
+reports `filter` and `paging` beside the WHOLE list, which is the arrangement
+`/admin/delegation`'s configured half already has.
+
+**A SESSION THIS REGISTER NO LONGER HOLDS IS NOT A 404.** The register is capped
+and the clear button empties it, so an old link coming back empty is an ordinary
+outcome; the page says which of the two states it is in.
+
+**THE THREE CAEP FORMS NOW POST TO `/admin/caep` FROM WHEREVER THEY ARE DRAWN**,
+and that is the applications page's arrangement with `/admin/delegation`: a form
+may live on one page and post to another's handler, and MOVING A FORM IS NOT
+MOVING AN ACTION. There is one CAEP action handler and one operation over it; a
+route per page would have wanted an operation per page over the same function.
+`from` (an ENUM, never a path) and `back` are what send the reader back to the
+page the button was on, through `caepSessionsBackTo()`.
+
+`GET /admin-api/caep/sessions` mirrors the page — the list, or one session with
+`?session=`. It exists because rule 7's parity check found `/admin/caep-sessions`
+mirrored by nothing: the GET beside it names `/admin/caep`, and one operation
+cannot mirror two pages. **That gap pre-dated this change and was invisible until
+the check named it**, which is the whole argument for the check.
+
+**The catalogue on `/admin/caep` is a collapsed `<details>`**, and it is the one
+place in this console where a SECTION rather than a paragraph is behind a
+disclosure. Eight cards of member tables sat between the settings above them and
+the links below, so the controls somebody came for were off the bottom of the
+page on every visit. `details.fold.section` styles the summary as the `<h2>` it
+replaces, so the heading is still in its place; native `<details>`, so
+`script-src 'none'` is untouched — the same answer `note()` gives one level up.
+
+## `/admin/caep-sessions` HAS A THIRD TABLE, AND IT IS A THIRD QUESTION (2026-09-04)
+
+Per SESSION, per STREAM, and now per APPLICATION. The third is the one an
+operator actually arrives with once more than one receiver exists — *is the
+application I am testing getting anything, and what* — and neither of the other
+two could answer it: the register counts per session and the streams table says
+only what a stream WOULD take.
+
+**It is computed in `ssf/ssf.js` and not here**, on the report the slot already
+carries, for rule 7's reason: `/admin/caep` and `GET /admin-api/caep` answer
+with that same report, so a second aggregation in this file would be a second
+answer to "what has been said to whom". `caepApplicationsState()` here is the
+SEARCH and the SLICE only, the same shape `caepSessionsState()` has.
+
+**The eight count columns are the sessions table's own, off the same
+`caepShortNames()`.** A reader moving between the two tables is reading one
+vocabulary, and a column that moved between them would be worse than a column
+too many.
+
+**The `aud` column is `shortened()` and that is not cosmetic.** An `aud` is
+routinely a URL, `code` is `word-break: break-all`, and a fifteen-column table
+gives it about three characters of width — so the untruncated value wrapped to
+six lines and made every row that tall.

@@ -2028,6 +2028,25 @@ function setDirectory(fns) {
             (directory ? "is now backed by the directory." : "has no store."));
 }
 
+// WHAT IS INSTALLED, so that something which replaces it can put it back.
+//
+// It exists for the in-process tests and says so rather than pretending to be
+// general: several of them stub this slot to answer without a directory, a
+// socket or a realm, and the slot is ONE REFERENCE FOR THE WHOLE PROCESS —
+// `tests/run.js` runs every file in one — so a stub left installed answers
+// every later question about the registry with that file's fixtures. Two of
+// them "restored" it by setting `null`, which is only right in a process where
+// `ldap_server.js` was never required, and node's module cache means whether
+// that is true depends on which test file happened to require it first. A test
+// cannot re-run the fill (a cached module does not re-execute), so the only
+// honest restore is putting back what was there.
+//
+// Nothing in the SERVICE calls this: `ldap_server.js` fills the slot once at
+// its require time and no code path replaces it.
+function directoryInstalled() {
+  return directory;
+}
+
 // Every read and every write goes through here, so the "there is no store"
 // case is answered in one place and complained about once rather than per call.
 function store() {
@@ -4357,6 +4376,9 @@ module.exports = {
   clientConfigOf: clientConfigOf,
   recordAuthentication: recordAuthentication,
   setDirectory: setDirectory,
+  // For a test that stubs the slot and has to put back what was there. See
+  // directoryInstalled().
+  directoryInstalled: directoryInstalled,
   // The two conversions, exported because ldap_server.js seeds and reads
   // entries with them and this module owns the schema they encode.
   attributesFor: attributesFor,

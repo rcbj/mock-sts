@@ -153,6 +153,39 @@ metadata says so.
 All three call one pair of functions, which is what stops them coming to
 disagree about what a live session is.
 
+**What a session IS, in each of the three senses this service uses the word,
+is [Sessions](sessions.md).** This page is about ending one.
+
+## And a fourth, asking it across everybody
+
+The three above are keyed on ONE identity. `/admin/sessions` — with
+`GET /admin-api/sessions` and `POST /admin-api/sessions/revoke` beside it — is
+the same model asked across the whole service: every session it is holding right
+now, in the three protocols that have one, with a Revoke on each row that calls
+the same termination.
+
+| Kind | Why it is a session | When it expires |
+|---|---|---|
+| Browser sign-on session | the cookie from `/authn/login`, which OAuth 2.0 / OIDC, WS-Federation, both SAML profiles and the console all read | at an **absolute** instant fixed when it was created — **using it does not extend it**, because there is no idle timeout here |
+| Kerberos ticket-granting ticket | a TGT *is* the Kerberos session; a service ticket is one use of it | at the `endtime` the KDC sealed into the ticket, which nothing here can move |
+| LDAP connection | RFC 4511 section 4.2 makes a Bind the authorization state of a *connection* | **never** — it lasts until the next Bind, an Unbind, or the socket closing |
+
+Revoking is not one act across the three, and each row says which it is before
+the button is pressed: a browser session ends with its relying parties notified
+and its refresh tokens revoked; an LDAP row closes a socket; a Kerberos row
+stamps a sign-out instant on the **principal**, refusing every ticket that
+principal authenticated before now, and still reaches no service ticket already
+in a cache.
+
+## A session that simply runs out
+
+It ends the same way, and says so the same way. Since 2026-09-04 an expiry
+writes the `session.end` audit row and emits CAEP's `session-revoked` like any
+other ending — with `initiating_entity: policy`, because nobody signed out: a
+lifetime ran out. A sweep runs every 30 seconds so that this happens whether or
+not anybody comes back to look, which is the difference between telling a
+receiver and telling it only if somebody happens to return.
+
 ## Turning parts of it off
 
 Two of these mechanisms take something away that used to keep working, and every

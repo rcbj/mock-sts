@@ -194,6 +194,22 @@ function createStream(asked, context) {
     log: [],
     counters: { queued: 0, delivered: 0, failed: 0, acknowledged: 0,
       pollCalls: 0, pushCalls: 0, receiverErrors: 0 },
+    // HOW MANY OF EACH TYPE THIS STREAM HAS BEEN SAID TO, uri -> count.
+    //
+    // The counters above are about the PIPE — how many went on the queue, how
+    // many were delivered, how many the receiver refused — and none of them
+    // can answer "how many session-revoked has this receiver been sent", which
+    // is the question /admin/caep-sessions' per-application section exists to
+    // answer. It cannot be derived either: the CAEP register counts per
+    // SESSION and keeps only the last twenty-five events per row, so summing
+    // its rings would be right until a busy session and wrong afterwards.
+    //
+    // It never forgets and it is not a ring, for the same reason `counts` on a
+    // register row is not: "how many have there been" and "which were the last
+    // few" are two questions, and one store answering both gets the first one
+    // wrong. It dies with the stream, which is the correct lifetime — a
+    // receiver that deletes its stream and agrees another has started again.
+    eventCounts: {},
     lastPushError: '',
     lastPushAt: '',
     lastVerificationAt: 0
@@ -677,6 +693,31 @@ function enqueue(record, entry) {
   return { ok: true, reason: '' };
 }
 
+// ONE MORE OF A TYPE HAS BEEN SAID TO THIS STREAM.
+//
+// Called from `transmit()` beside `caep.noteTransmitted()`, and at the same
+// moment for the same reason that function gives: the count is of what this
+// transmitter SAID, so it moves when the SET exists and goes on the queue,
+// before anybody knows whether it will be delivered. A queued event on a poll
+// stream has been said, and counting at delivery would make a poll stream look
+// like a transmitter that never says anything.
+//
+// It counts EVERY type rather than only CAEP's eight — the record belongs to
+// this module and SSF's own two travel on the same streams — and the CAEP
+// report picks out the ones it is about.
+function countEvent(record, uri) {
+  log.debug('Entering countEvent(). ' + uri);
+  if (!record || !uri) {
+    log.debug('Leaving countEvent(). Nothing to count.');
+    return;
+  }
+  if (!record.eventCounts) {
+    record.eventCounts = {};
+  }
+  record.eventCounts[uri] = (record.eventCounts[uri] || 0) + 1;
+  log.debug('Leaving countEvent(). ' + record.eventCounts[uri] + ' of that type.');
+}
+
 // RFC 8936's poll. `ack` names what the receiver has now stored, so those come
 // off the queue; `setErrs` names what it REFUSED, and those come off too — a
 // receiver that cannot process an event will not process it next time either,
@@ -839,6 +880,7 @@ module.exports = {
   removeSubject: removeSubject,
   streamCoversSubject: streamCoversSubject,
   enqueue: enqueue,
+  countEvent: countEvent,
   poll: poll,
   note: note,
   recordReceived: recordReceived,

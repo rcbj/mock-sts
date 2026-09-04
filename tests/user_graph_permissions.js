@@ -188,7 +188,13 @@ function labels(svg) {
 }
 
 function run(t) {
-  const before = null;
+  // WHAT WAS THERE, rather than `null`. It was `null` until 2026-09-04, which
+  // is right only in a process where `ldap/ldap_server.js` was never required
+  // — and whether that is true depends on which test file happened to require
+  // it first, because node's module cache means the fill runs once. Restoring
+  // `null` in a run where it HAD been filled leaves every later file reading a
+  // registry with no store.
+  const before = applications.directoryInstalled();
   applications.setDirectory({
     allApplications: function () { return REGISTRY; }
   });

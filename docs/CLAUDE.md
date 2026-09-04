@@ -27,3 +27,25 @@ a script in this repository, and adding one would be a build step to maintain.
 Adding a page: write the markdown, add it to `header_pages` in `_config.yml` if it
 should appear in the top navigation, and link it from `index.md`. There is no
 index to regenerate.
+
+## The two pages added on 2026-09-04, and the line between them
+
+`sessions.md` and `caep-events.md` are close enough together that the split
+needs stating, or the next person to add to either will add to the wrong one:
+
+* **`sessions.md` defines the NOUN.** What a session IS in each of the three
+  senses this service uses the word, what the record holds, how one is created
+  and ended, and the six places one is visible. It is the page every other one
+  can point at instead of re-explaining.
+* **`caep-events.md` is about what goes OUT.** Which activity fires each of the
+  eight CAEP events, what each carries, and the three gates one passes on its
+  way to a receiver.
+
+Both were written against a rule this directory already had and which they
+strain: *do not restate what the service publishes about itself.* The catalogue
+of CAEP members IS published live, at `/admin/caep` and `/admin-api/caep`, so
+that page links to it and documents the TRIGGERS instead — which no endpoint
+can report, because a trigger is a fact about the code. The same test decided
+`sessions.md`: the session RECORD's fields are published nowhere, so they are
+written out; the row shape of `/admin-api/sessions` is in the OpenAPI document,
+so it is not.

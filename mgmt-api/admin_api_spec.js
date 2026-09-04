@@ -951,6 +951,115 @@ const SCHEMAS = {
         }) }
     }),
 
+  SessionList: openObject(
+    'Every session this service is holding right now, across the three ' +
+    'protocols that have one, filtered and paged.',
+    Object.assign({
+      installed: { type: 'boolean',
+                   description: 'FALSE when `logout/logout.js` is not loaded ' +
+                                'in this process, which is the module that ' +
+                                'holds the one model of what a live session ' +
+                                'is. Nothing else in the reply is then ' +
+                                'meaningful.' },
+      held: { type: 'integer', description: 'Live sessions in total.' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      heldByKind: openObject(
+        'How many of each kind are live, keyed by the same `family` value ' +
+        'every row carries: `session`, `krb5`, `ldap`.', {}),
+      filter: openObject(
+        'What was asked for, with null where nothing was — so a reply can be ' +
+        'read on its own without the request beside it.', {}),
+      at: { type: 'integer',
+            description: 'When this answer was computed, epoch ms. It matters ' +
+                         'here more than on most resources: every row is a ' +
+                         'countdown, and `expiresAt` minus this is the ' +
+                         'remaining life at the moment it was read.' },
+      expiryRules: openObject(
+        'The sentence saying how each kind\'s expiry is worked out, keyed by ' +
+        '`family`. It is here once rather than on every row because it is a ' +
+        'property of the KIND: a browser session\'s expiry is absolute and ' +
+        'is not extended by use, a Kerberos TGT\'s was sealed into the ' +
+        'ticket by the KDC and cannot be moved, and an LDAP connection has ' +
+        'no expiry at all.', {}),
+      sessions: { type: 'array',
+                  items: { $ref: '#/components/schemas/SessionRow' } }
+    }, PAGING_PROPERTIES)),
+
+  SessionRow: openObject(
+    'One live session. The three kinds share this shape and the members that ' +
+    'do not apply to a kind are empty rather than absent.',
+    {
+      id: { type: 'string',
+            description: 'What `POST /admin-api/sessions/revoke` takes as ' +
+                         '`select`: the family and the handle, as ' +
+                         '`session:…`, `ldap:…` or `krb5:…@REALM`. It is the ' +
+                         'same identifier `POST /admin-api/logout/selective` ' +
+                         'takes, because both go through one termination.' },
+      family: { type: 'string', enum: ['session', 'krb5', 'ldap'],
+                description: 'Which kind of session this is.' },
+      kind: { type: 'string', description: 'That kind, for a person to read.' },
+      key: { type: 'string',
+             description: 'The normalised identity this is filed under, and ' +
+                          'the `key` the revoke operation needs beside `id`.' },
+      username: { type: 'string',
+                  description: 'Who is signed in, as they are named in this ' +
+                               'kind of session: a username, a principal, or ' +
+                               'the bind DN.' },
+      sub: { type: 'string',
+             description: 'The subject a token would carry. Empty on the two ' +
+                          'kinds that issue no token.' },
+      protocol: { type: 'string',
+                  description: 'The protocol the sign-in came THROUGH, which ' +
+                               'is not the only one the session serves: every ' +
+                               'browser family here reads the same session. ' +
+                               '`carries` is what has actually signed in on ' +
+                               'it.' },
+      handle: { type: 'string',
+                description: 'The thing itself — a session id, a connection ' +
+                             'id, a principal name.' },
+      sessionId: { type: 'string',
+                   description: 'The browser sign-on session id, which is ' +
+                                'what a token issued under it records — so it ' +
+                                'is the join to `GET /admin-api/tokens?' +
+                                'session=`. Empty on the other two kinds, ' +
+                                'which issue nothing that records one.' },
+      startedAt: { type: 'integer',
+                   description: 'Epoch ms, or 0 when nothing recorded it.' },
+      expiresAt: { type: 'integer',
+                   description: '**Epoch ms, or 0 for NO EXPIRY — which is ' +
+                                'not an expiry of the epoch.** An LDAP ' +
+                                'connection has none: it lasts until the next ' +
+                                'Bind, an Unbind, or the socket closing. ' +
+                                '`expiryRule` says which arithmetic produced ' +
+                                'this number.' },
+      expiryRule: { type: 'string',
+                    description: 'How this kind\'s expiry is worked out, in a ' +
+                                 'sentence. The same string as the matching ' +
+                                 'member of `expiryRules`.' },
+      amr: { type: 'array', items: { type: 'string' } },
+      acr: { type: 'string' },
+      carries: { type: 'array', items: { type: 'string' },
+                 description: 'What has signed in ON this session — OIDC ' +
+                              'relying parties, WS-Federation realms, SAML ' +
+                              '2.0 service providers — which is what makes ' +
+                              'ending one reach further than it looks.' },
+      detail: { type: 'string' },
+      terminable: { type: 'boolean',
+                    description: 'Whether this service can end it. FALSE ' +
+                                 'where a setting says otherwise ' +
+                                 '(`logout.kerberosSignOut`, ' +
+                                 '`logout.ldapDisconnect`), with `why` ' +
+                                 'saying so.' },
+      why: { type: 'string',
+             description: 'What ending this actually does, or why it cannot ' +
+                          'be done. It is present on rows that CAN be ended ' +
+                          'too, and on a Kerberos row it is the important ' +
+                          'half: ending one stamps an instant on the ' +
+                          'PRINCIPAL and refuses every ticket it ' +
+                          'authenticated before now, not just this one.' }
+    }),
+
   LogoutInventory: openObject(
     'What this service is still holding for one identity, across every ' +
     'protocol family — or, with no `user`, the list of families a logout ' +
@@ -2396,6 +2505,52 @@ const SCHEMAS = {
       }
     }),
 
+  CaepApplication: openObject(
+    'One receiver, and everything this transmitter has said to it.',
+    {
+      identifier: { type: 'string',
+                    description: 'What it authenticated as when it created ' +
+                                 'the stream, which is the `ssfReceiverId` on ' +
+                                 'its application entry.' },
+      name: { type: 'string' },
+      registered: { type: 'boolean',
+                    description: 'FALSE only on the collected row for streams ' +
+                                 'that belong to no application entry.' },
+      declared: { type: 'boolean',
+                  description: 'Whether an operator ticked Shared Signals on ' +
+                               'the entry, as opposed to the entry appearing ' +
+                               'because a stream was created.' },
+      dn: { type: 'string' },
+      endpoints: { type: 'array', items: { type: 'string' },
+                   description: 'The `ssfDeliveryEndpoint` values on the ' +
+                                'entry — what an operator wrote down that a ' +
+                                'receiver is EXPECTED to be. A stream carries ' +
+                                'its own delivery endpoint and this is not ' +
+                                'read as one.' },
+      streams: { type: 'array', items: { type: 'string' } },
+      streamCount: { type: 'integer' },
+      enabled: { type: 'integer',
+                 description: 'How many of those streams are enabled.' },
+      deliveries: { type: 'array', items: { type: 'string' } },
+      audiences: { type: 'array', items: { type: 'string' } },
+      takes: { type: 'array', items: { type: 'string' },
+               description: 'The CAEP types its streams deliver, as short ' +
+                            'names. EMPTY is the answer to half the "nothing ' +
+                            'arrived" reports there are.' },
+      counts: { type: 'object',
+                description: 'Event type URI -> how many have been said to ' +
+                             'this receiver, across every session.' },
+      total: { type: 'integer' },
+      sessions: { type: 'integer' },
+      queued: { type: 'integer' },
+      delivered: { type: 'integer' },
+      failed: { type: 'integer' },
+      acknowledged: { type: 'integer' },
+      receiverErrors: { type: 'integer' },
+      lastPushAt: { type: 'string' },
+      lastPushError: { type: 'string' }
+    }),
+
   Caep: openObject(
     'The Continuous Access Evaluation Profile: what state each session is in ' +
     'and how many events of which type have been sent about it. CAEP is a ' +
@@ -2451,6 +2606,35 @@ const SCHEMAS = {
         type: 'object',
         description: 'How many of each event type have been sent, across ' +
                      'every session.'
+      },
+      applications: {
+        type: 'array',
+        description: 'WHAT THIS TRANSMITTER HAS SAID TO EACH RECEIVER, ' +
+                     'across every session — one row per application that ' +
+                     'supports CAEP, which is the Shared Signals family in ' +
+                     'the registry: declared with the `ssf` checkbox, seen ' +
+                     'when a stream was created, or holding an ' +
+                     '`ssfReceiverId`.\n\n**An application with NO STREAM is ' +
+                     'a row rather than an omission** — it is the commonest ' +
+                     'state a receiver under test is in, and a list that ' +
+                     'showed only receivers with streams would answer "where ' +
+                     'is my application" with silence. A row named `(no ' +
+                     'application …)` is the collected total for streams ' +
+                     'agreed while `ssf.authRequired` was off: there was no ' +
+                     'principal to record and the events are real.\n\n`counts` ' +
+                     'is per event type and never forgets; it is counted when ' +
+                     'the Security Event Token is built and QUEUED, so a poll ' +
+                     'stream nobody has polled yet still shows what is ' +
+                     'waiting. `delivered` and `failed` are the pipe, and are ' +
+                     'a different number from `total` for exactly that ' +
+                     'reason. `sessions` is the DISTINCT sessions the ' +
+                     'receiver has been told about across all of its streams ' +
+                     'together.\n\n`identifier` is what the receiver ' +
+                     'authenticated as; `audiences` is what it asked its SETs ' +
+                     'to be addressed to. They are different fields — `aud` ' +
+                     'is required on a stream and is never defaulted to the ' +
+                     'caller — and this is the only place both are reported.',
+        items: { $ref: '#/components/schemas/CaepApplication' }
       },
       eventTypes: {
         type: 'array',

@@ -1889,7 +1889,51 @@ const ENDPOINTS = [
           'streams would take a CAEP event at all — because a count of zero almost ' +
           'always means nobody asked for that type, and SSF gives a receiver no other ' +
           'notice of that. Two controls, and neither ends anything: reset one session\'s ' +
-          'CAEP state, and clear the register. Add ?format=json.' },
+          'CAEP state, and clear the register. The sessions table is SEARCHED AND PAGED ' +
+          '(?sessq=, ?sessionsPage=, ?per=) and every identifier in it opens ' +
+          '/admin/caep-sessions/session — what has been said about ONE session used to be ' +
+          'drawn under this table for every session at once, which put the table anybody ' +
+          'came for off the top of the screen. THIRD TABLE, PER APPLICATION (2026-09-04, ' +
+          'searched and paged with ?appq= and ?applicationsPage=): what this transmitter has ' +
+          'said to each RECEIVER across every session — one row per application that supports ' +
+          'CAEP, with a count per event type, the distinct sessions it has been told about and ' +
+          'the pipe counters beside them. An application with NO STREAM is a row rather than an ' +
+          'omission, because that is the commonest state a receiver under test is in. Add ' +
+          '?format=json.' },
+  { path: '/admin/caep-sessions/session', group: 'Admin',
+    name: 'CAEP sessions — one session',
+    specs: ['caep', 'ssf', 'rfc8417'],
+    what: 'A DRILL-DOWN of /admin/caep-sessions, reached from every identifier in its ' +
+          'first column: everything this transmitter has said about ONE session, in ' +
+          'order, with the jti and the stream each event went out on and what the ' +
+          'register noticed as it was applied — beside the session\'s own facts (state, ' +
+          'assurance, device compliance, risk, acr/amr, the claims that changed) and its ' +
+          'count per event type. The event list is paged (?eventsPage=, ?per=). A ' +
+          'SESSION THIS REGISTER NO LONGER HOLDS IS NOT A 404: the register is capped at ' +
+          'caep.maxSessionsTracked and the clear button empties it, so a link coming back ' +
+          'empty is an ordinary outcome and the page says which state it is in. One ' +
+          'control, the same reset the table has, and it ends nothing. Add ?format=json.' },
+  { path: '/admin/sessions', group: 'Admin', name: 'Live sessions',
+    // rfc4120 and rfc4511 are what the other two kinds of session ARE — a TGT
+    // and a bound connection — and oidc is cited for the browser one because
+    // that session is what the authorization endpoint reads. No SAML or
+    // WS-Federation row beside it, deliberately: those families READ this same
+    // session and none of them defines one.
+    specs: ['oidc', 'rfc4120', 'rfc4511'],
+    what: 'NON-SPEC PAGE OVER THREE SPECIFICATIONS: every session this service is HOLDING, ' +
+          'as opposed to /admin/tokens, which is what it has HANDED OUT — everything in that ' +
+          'list outlives everything in this one. Three protocols here have a session and the ' +
+          'other seven do not: the browser sign-on session every browser family shares, the ' +
+          'Kerberos ticket-granting ticket (a TGT IS the session; a service ticket is one use ' +
+          'of it), and the LDAP connection (RFC 4511 section 4.2 makes a Bind a state of the ' +
+          'CONNECTION). Per row: the protocol it was started THROUGH, who is signed in, what ' +
+          'has signed in ON it, when it expires AND HOW THAT IS WORKED OUT — absolute and not ' +
+          'extended by use for a browser session, sealed into the ticket by the KDC for a TGT, ' +
+          'and NO EXPIRY AT ALL for a connection — a link to the credentials issued on it, and ' +
+          'a Revoke button. Revoke goes through the same terminate() /logout uses, so it writes ' +
+          'the same audit row; on a Kerberos row it does MORE than the row names, stamping an ' +
+          'instant on the PRINCIPAL, which the row says before it is pressed. Searched, filtered ' +
+          'by protocol and paged. Add ?format=json.' },
   { path: '/admin/tokens', group: 'Admin', name: 'Issued tokens, assertions and tickets',
     // rfc7009 is linked because this IS that revocation: one set of revoked jtis serves
     // both this page and /oauth2/revoke. rfc7662 and oidc-core because they are what then
@@ -2822,6 +2866,30 @@ const ENDPOINTS = [
           'they do not, answers 200 with changed:false. A person who does not exist CAN be ' +
           'granted a role: the membership dangles until they first sign in. Mirrors ' +
           'POST /admin/rbac.' },
+  { path: '/admin-api/sessions', group: 'Management API', name: 'Live sessions',
+    specs: ['openapi', 'oidc', 'rfc4120', 'rfc4511'],
+    what: 'NON-SPEC. Every session this service is holding right now, across the three ' +
+          'protocols that have one, filtered by ?q= and ?protocol= and paged with ?page= and ' +
+          '?per=. It is a SEPARATE resource from /admin-api/logout rather than a shape of it: ' +
+          'that one answers "what is alice still signed into", keyed on one identity across ten ' +
+          'families, and this one answers "who is signed in at all", which has no user in it. ' +
+          'Both read logout/logout.js, the one model of what a live session is. Every row ' +
+          'carries the key and id the revoke takes, the sessionId that GET /admin-api/tokens' +
+          '?session= takes, and an expiryRule saying which of the three arithmetics produced ' +
+          'its expiresAt — where 0 means NO EXPIRY and not the epoch. Mirrors ' +
+          'GET /admin/sessions.' },
+  { path: '/admin-api/sessions/:action', group: 'Management API',
+    name: 'Live sessions: end one',
+    specs: ['openapi', 'rfc4120', 'rfc4511'],
+    effect: 'ends one live session — and on a Kerberos row, every ticket-granting ticket that ' +
+            'principal authenticated before now',
+    what: 'NON-SPEC path. One action, revoke, and it is terminate() with a selection of one — ' +
+          'the SAME function a global logout goes through, so it writes the same audit row and ' +
+          'honours logout.kerberosSignOut and logout.ldapDisconnect. It is not one act across ' +
+          'the three kinds: a browser session ends with its relying parties notified and its ' +
+          'refresh tokens revoked, an LDAP row closes a socket, and a Kerberos row stamps an ' +
+          'instant on the PRINCIPAL and still reaches no service ticket already in a cache. ' +
+          'Mirrors POST /admin/sessions.' },
   { path: '/admin-api/tokens', group: 'Management API',
     name: 'Issued tokens, assertions and tickets',
     specs: ['rfc7009', 'rfc7662', 'oidc', 'saml2', 'saml11', 'rfc4120'],
@@ -2931,6 +2999,16 @@ const ENDPOINTS = [
           'CAEP state it is in and a count per event type, and which streams would take ' +
           'a CAEP event at all. The register outlives the session it describes, which is ' +
           'what makes this the only place a REVOKED session is still visible.' },
+  { path: '/admin-api/caep/sessions', group: 'Management API',
+    name: 'CAEP sessions', specs: ['openapi', 'caep', 'ssf'],
+    what: 'What /admin/caep-sessions draws, as JSON: the register searched with ?sessq= and ' +
+          'paged with ?sessionsPage=, the per-RECEIVER statistics beside it (?appq=, ' +
+          '?applicationsPage=), or ONE session with ?session= — the events actually sent ' +
+          'about it, in order, with the jti and the stream each went out on. It exists because ' +
+          'that page is a page of the console and one operation cannot mirror two pages; the ' +
+          'GET above mirrors /admin/caep. NOT the same list as GET /admin-api/sessions, which is ' +
+          'what is LIVE: this register outlives the session, which is the whole point of it. ' +
+          'Mirrors GET /admin/caep-sessions.' },
   { path: '/admin-api/caep/:action', group: 'Management API',
     name: 'Emit a CAEP event, or reset a session\'s CAEP state',
     specs: ['openapi', 'caep', 'rfc8417', 'rfc9493'],
